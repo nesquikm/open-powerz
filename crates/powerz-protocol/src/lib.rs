@@ -7,6 +7,7 @@
 
 pub mod decode;
 pub mod frame;
+pub mod transport;
 
 /// USB vendor ID shared by all POWER-Z meters.
 pub const VID: u16 = 0x5FC9;

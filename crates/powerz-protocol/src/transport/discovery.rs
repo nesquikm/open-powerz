@@ -1,0 +1,162 @@
+//! Device discovery: list attached POWER-Z meters without opening them.
+
+use super::Error;
+
+/// USB product ID of the KM003C.
+pub const PID_KM003C: u16 = 0x0063;
+/// USB product ID of the KM002C.
+pub const PID_KM002C: u16 = 0x0061;
+
+/// Meter model, from the USB product ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Model {
+    /// POWER-Z KM003C (PID 0x0063).
+    Km003c,
+    /// POWER-Z KM002C (PID 0x0061).
+    Km002c,
+    /// Any other product ID under the POWER-Z vendor ID.
+    Unknown(u16),
+}
+
+impl Model {
+    /// Map a product ID to a model.
+    pub fn from_pid(pid: u16) -> Model {
+        match pid {
+            PID_KM003C => Model::Km003c,
+            PID_KM002C => Model::Km002c,
+            other => Model::Unknown(other),
+        }
+    }
+}
+
+/// Descriptor-level facts about one attached USB device (no handle held).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbDeviceInfo {
+    /// idVendor.
+    pub vid: u16,
+    /// idProduct.
+    pub pid: u16,
+    /// iSerialNumber string, if the OS reported one.
+    pub serial: Option<String>,
+    /// Bus identifier as reported by the OS.
+    pub bus: String,
+    /// Device address on the bus.
+    pub address: u8,
+}
+
+/// One discovered POWER-Z meter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceEntry {
+    /// Model from the product ID.
+    pub model: Model,
+    /// Raw product ID.
+    pub pid: u16,
+    /// Serial string.
+    pub serial: Option<String>,
+    /// Bus identifier.
+    pub bus: String,
+    /// Device address on the bus.
+    pub address: u8,
+}
+
+/// Keep every device with the POWER-Z vendor ID, in input order.
+pub fn filter_devices(devices: &[UsbDeviceInfo]) -> Vec<DeviceEntry> {
+    devices
+        .iter()
+        .filter(|d| d.vid == crate::VID)
+        .map(|d| DeviceEntry {
+            model: Model::from_pid(d.pid),
+            pid: d.pid,
+            serial: d.serial.clone(),
+            bus: d.bus.clone(),
+            address: d.address,
+        })
+        .collect()
+}
+
+/// List attached meters from the OS device list (never opens or claims).
+pub fn list_devices() -> Result<Vec<DeviceEntry>, Error> {
+    use nusb::MaybeFuture;
+    let infos: Vec<UsbDeviceInfo> = nusb::list_devices()
+        .wait()
+        .map_err(|e| Error::Io(e.to_string()))?
+        .map(|d| UsbDeviceInfo {
+            vid: d.vendor_id(),
+            pid: d.product_id(),
+            serial: d.serial_number().map(str::to_owned),
+            bus: d.bus_id().to_owned(),
+            address: d.device_address(),
+        })
+        .collect();
+    Ok(filter_devices(&infos))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PLACEHOLDER_SERIAL: &str = "SERIAL-0001";
+
+    fn dev(vid: u16, pid: u16, serial: Option<&str>, bus: &str, address: u8) -> UsbDeviceInfo {
+        UsbDeviceInfo {
+            vid,
+            pid,
+            serial: serial.map(str::to_owned),
+            bus: bus.to_owned(),
+            address,
+        }
+    }
+
+    // ---- AC-SJGK7E.1: discovery over injected descriptors ----
+
+    #[test]
+    fn model_from_pid_maps_known_and_unknown() {
+        assert_eq!(Model::from_pid(0x0063), Model::Km003c);
+        assert_eq!(Model::from_pid(0x0061), Model::Km002c);
+        assert_eq!(Model::from_pid(0x0042), Model::Unknown(0x0042));
+    }
+
+    #[test]
+    fn filter_devices_keeps_every_power_z_device_with_serial_and_bus_address() {
+        let devices = [
+            dev(0x05AC, 0x8262, Some("other"), "1", 2),
+            dev(0x5FC9, 0x0063, Some(PLACEHOLDER_SERIAL), "1", 7),
+            dev(0x5FC9, 0x0061, Some("SERIAL-0002"), "2", 3),
+            dev(0x1234, 0x0063, None, "2", 4),
+            dev(0x5FC9, 0x00AA, None, "3", 9),
+        ];
+        let found = filter_devices(&devices);
+        assert_eq!(
+            found,
+            vec![
+                DeviceEntry {
+                    model: Model::Km003c,
+                    pid: 0x0063,
+                    serial: Some(PLACEHOLDER_SERIAL.to_owned()),
+                    bus: "1".to_owned(),
+                    address: 7,
+                },
+                DeviceEntry {
+                    model: Model::Km002c,
+                    pid: 0x0061,
+                    serial: Some("SERIAL-0002".to_owned()),
+                    bus: "2".to_owned(),
+                    address: 3,
+                },
+                DeviceEntry {
+                    model: Model::Unknown(0x00AA),
+                    pid: 0x00AA,
+                    serial: None,
+                    bus: "3".to_owned(),
+                    address: 9,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_devices_with_no_power_z_device_is_empty() {
+        let devices = [dev(0x05AC, 0x8262, None, "1", 2)];
+        assert_eq!(filter_devices(&devices), Vec::new());
+    }
+}

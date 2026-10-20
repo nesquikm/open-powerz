@@ -10,8 +10,15 @@ authors.workspace = true
 keywords = ["usb-c", "usb-pd", "power-meter", "km003c", "power-z"]
 categories = ["hardware-support"]
 
+[features]
+default = ["hid"]
+hid = ["dep:hidapi"]
+
 [dependencies]
 crc32fast = "1.5.3"
+hidapi = { version = "2.6.7", optional = true }
+nusb = "0.2.8"
+serialport = "4.10.1"
 thiserror = "2"
 
 [lints]

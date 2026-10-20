@@ -9,7 +9,7 @@
 use std::ops::BitOr;
 
 /// Message type codes (bits 0..6 of the main header).
-mod msg {
+pub(crate) mod msg {
     pub const CONNECT: u8 = 0x02;
     pub const DISCONNECT: u8 = 0x03;
     pub const ACCEPT: u8 = 0x05;
@@ -24,7 +24,17 @@ mod msg {
 }
 
 /// Size in bytes of every main and section header.
-const HEADER_LEN: usize = 4;
+pub(crate) const HEADER_LEN: usize = 4;
+
+/// Mask for the message type in byte 0 of a frame (bits 0..6; bit 7 is the
+/// extend flag).
+const TYPE_MASK: u8 = 0x7F;
+
+/// Message type of `frame` from its first byte, extend bit masked off;
+/// `None` for an empty frame. Needs only one byte, unlike [`MainHeader`].
+pub(crate) fn frame_type(frame: &[u8]) -> Option<u8> {
+    frame.first().map(|b| b & TYPE_MASK)
+}
 
 /// Read `width` bits of `word` starting at bit `shift`.
 const fn get_bits(word: u32, shift: u32, width: u32) -> u32 {
@@ -257,9 +267,10 @@ impl SectionHeader {
         .to_le_bytes()
     }
 
-    /// Payload bytes this section declares for attribute `att`.
-    fn payload_len(self, att: Attribute) -> usize {
-        if att == Attribute::ADC_QUEUE {
+    /// Payload bytes this section declares: `chunk * size` for the ADC queue,
+    /// `size` for every other attribute.
+    fn payload_len(self) -> usize {
+        if Attribute(self.att) == Attribute::ADC_QUEUE {
             usize::from(self.chunk) * usize::from(self.size)
         } else {
             usize::from(self.size)
@@ -334,7 +345,7 @@ pub fn parse_put_data(frame: &[u8]) -> Result<Vec<Section<'_>>, FrameError> {
             });
             return Ok(sections);
         }
-        let needed = header.payload_len(att);
+        let needed = header.payload_len();
         let available = frame.len() - start;
         if needed > available {
             return Err(FrameError::SectionOverrun {
@@ -354,6 +365,44 @@ pub fn parse_put_data(frame: &[u8]) -> Result<Vec<Section<'_>>, FrameError> {
         }
         if end == frame.len() {
             return Err(FrameError::MissingNextSection { offset: end });
+        }
+        offset = end;
+    }
+}
+
+/// Where the section chain of a PUT_DATA frame ends according to its
+/// headers alone, without checking that the payloads have arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeclaredEnd {
+    /// The last section (`next = 0`) ends at this offset.
+    Complete(usize),
+    /// A section header should start at this offset, but the buffer ends
+    /// before its 4 bytes.
+    MissingHeader(usize),
+    /// A `PD_STATUS` section, whose size field is unusable, ends the chain;
+    /// `size_end` is where its size field would put the end.
+    PdStatus {
+        /// End offset implied by the PD_STATUS section's size field.
+        size_end: usize,
+    },
+}
+
+/// Follow the section headers of the PUT_DATA frame in `buf` (main header
+/// included) by their declared payload lengths. Payload bytes are never
+/// read, so `buf` may hold only part of the frame.
+pub(crate) fn declared_end(buf: &[u8]) -> DeclaredEnd {
+    let mut offset = HEADER_LEN;
+    loop {
+        let Ok(word) = read_word(buf, offset) else {
+            return DeclaredEnd::MissingHeader(offset);
+        };
+        let header = SectionHeader::from_word(word);
+        let end = offset + HEADER_LEN + header.payload_len();
+        if Attribute(header.att) == Attribute::PD_STATUS {
+            return DeclaredEnd::PdStatus { size_end: end };
+        }
+        if !header.next {
+            return DeclaredEnd::Complete(end);
         }
         offset = end;
     }
