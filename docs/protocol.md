@@ -295,7 +295,7 @@ first 96 bytes; device overrides its "96 bytes" reading.
 | off | type | field | tag |
 |---|---|---|---|
 | 0x00..0x5F | bytes | block A (96 bytes) | [static] [device] (firmware 2.0.6) |
-| 0x10 | u32 | run-time overlay, not covered by the CRC: 0xFFFFFFFF at first, later a Unix time near the last reboot | [device]; meaning [inferred] |
+| 0x10 | u32 | run-time overlay: 0xFFFFFFFF at first, later a Unix time near the last reboot; the stored block-A CRC was computed with 0xFFFFFFFF here, so decoders check the CRC with these 4 bytes restored | [device]; meaning [inferred] |
 | 0x1C | 5 x i32 | an array (5 equal values seen), not a single 1e6-scaled gain as static notes said; device overrides | [device] [inferred] |
 | 0x30 | 10 x i32 | an array of values near 1 000 000 (likely gains, 1e6 = 1.0) | [static] [device] [inferred] |
 | 0x5C | u32 | CRC-32 of bytes 0x00..0x5B | [static] [device] (firmware 2.0.6) |
