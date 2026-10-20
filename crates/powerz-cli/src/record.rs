@@ -42,17 +42,16 @@ impl Integrator {
     }
 }
 
-/// `x` with at most 8 significant digits, trailing zeros trimmed, in
-/// exponent form below 1e-5 (like the vendor recorder's precision 8).
+/// `x` with at most 8 significant digits as a plain decimal, trailing zeros
+/// trimmed; never exponent form (spreadsheets and the vendor recorder expect
+/// plain decimals).
 pub fn sig8(x: f64) -> String {
     if x == 0.0 || !x.is_finite() {
         return if x == 0.0 { "0".into() } else { x.to_string() };
     }
     let mag = x.abs().log10().floor() as i32;
-    if !(-5..8).contains(&mag) {
-        let text = format!("{x:.7e}");
-        let (mantissa, exp) = text.split_once('e').unwrap_or((&text, "0"));
-        return format!("{}e{exp}", trim_zeros(mantissa));
+    if mag >= 8 {
+        return format!("{x:.0}");
     }
     let decimals = usize::try_from(7 - mag).unwrap_or(0);
     trim_zeros(&format!("{x:.decimals$}")).to_string()
@@ -133,12 +132,21 @@ mod tests {
 
     #[test]
     fn sig8_keeps_eight_significant_digits_without_float_noise() {
-        assert_eq!(sig8(-0.00000038183600000000003), "-3.81836e-7");
         assert_eq!(sig8(0.0), "0");
         assert_eq!(sig8(5.0), "5");
         assert_eq!(sig8(12.345678912), "12.345679");
         assert_eq!(sig8(-0.000012085555555555555), "-0.000012085556");
-        assert_eq!(sig8(2.5e-12), "2.5e-12");
+    }
+
+    #[test]
+    fn sig8_never_uses_exponent_form() {
+        assert_eq!(sig8(-0.00000038183600000000003), "-0.000000381836");
+        assert_eq!(sig8(-0.000000124), "-0.000000124");
+        assert_eq!(sig8(2.5e-12), "0.0000000000025");
+        assert_eq!(sig8(123_456_789.4), "123456789");
+        for x in [1e-7, -3.3e-9, 4.2e-15, 1.5e9] {
+            assert!(!sig8(x).contains('e'), "{x} -> {}", sig8(x));
+        }
     }
 
     #[test]

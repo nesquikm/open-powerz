@@ -1,23 +1,81 @@
 //! Output formatting shared by the subcommands: pretty JSON and the ADC
 //! snapshot views used by `read` and `watch`.
 
-use std::io::Write;
+use std::io::{self, Write};
 
 use powerz_protocol::decode::AdcSnapshot;
+use serde::Serialize;
+use serde_json::ser::{Formatter, PrettyFormatter};
 
 use crate::error::CliError;
 
-/// Write `value` as pretty-printed JSON followed by a newline.
+/// Write `value` as pretty-printed JSON followed by a newline. Floats are
+/// written as plain decimals, never in exponent form.
 pub(crate) fn write_json(out: &mut dyn Write, value: &serde_json::Value) -> Result<(), CliError> {
-    let text = serde_json::to_string_pretty(value)
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, PlainFloats::default());
+    value
+        .serialize(&mut ser)
         .map_err(|e| CliError::Device(format!("JSON encoding failed: {e}")))?;
-    writeln!(out, "{text}")?;
+    out.write_all(&buf)?;
+    writeln!(out)?;
     Ok(())
 }
 
-/// Temperature with 3 decimals, or `-` when the meter reports it invalid.
+/// Pretty JSON whose floats use Rust's `Display`, the shortest round-trip
+/// digits without an exponent (`-0.000001`, not `-1e-6`); whole numbers keep
+/// a `.0`.
+#[derive(Default)]
+struct PlainFloats(PrettyFormatter<'static>);
+
+impl Formatter for PlainFloats {
+    fn write_f64<W: ?Sized + io::Write>(&mut self, w: &mut W, value: f64) -> io::Result<()> {
+        let text = value.to_string();
+        // Keep whole numbers float-shaped (`5.0`), as serde_json does.
+        let suffix = if text.contains('.') { "" } else { ".0" };
+        write!(w, "{text}{suffix}")
+    }
+    fn begin_array<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.begin_array(w)
+    }
+    fn end_array<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.end_array(w)
+    }
+    fn begin_array_value<W: ?Sized + io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> io::Result<()> {
+        self.0.begin_array_value(w, first)
+    }
+    fn end_array_value<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.end_array_value(w)
+    }
+    fn begin_object<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.begin_object(w)
+    }
+    fn end_object<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.end_object(w)
+    }
+    fn begin_object_key<W: ?Sized + io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> io::Result<()> {
+        self.0.begin_object_key(w, first)
+    }
+    fn begin_object_value<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.begin_object_value(w)
+    }
+    fn end_object_value<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.end_object_value(w)
+    }
+}
+
+/// Temperature with 1 decimal, or `-` when the meter reports it invalid.
 fn temp_text(a: &AdcSnapshot) -> String {
-    a.temp_c().map_or_else(|| "-".to_string(), fixed3)
+    a.temp_c()
+        .map_or_else(|| "-".to_string(), |t| format!("{t:.1}"))
 }
 
 /// The snapshot as JSON: `vbus_v`, `ibus_a`, `power_w`, `temp_c` (null when
@@ -35,7 +93,8 @@ pub(crate) fn adc_json(a: &AdcSnapshot) -> serde_json::Value {
     })
 }
 
-/// The snapshot as labelled lines, one value per line, 3 decimals.
+/// The snapshot as labelled lines, one value per line, 3 decimals
+/// (temperature 1).
 pub(crate) fn write_adc_lines(out: &mut dyn Write, a: &AdcSnapshot) -> Result<(), CliError> {
     let temp = temp_text(a);
     writeln!(out, "VBUS:   {} V", fixed3(a.vbus_v()))?;

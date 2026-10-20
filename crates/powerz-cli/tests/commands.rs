@@ -193,6 +193,42 @@ fn read_json_temp_is_null_when_invalid() {
     assert!(approx(v["vbus_v"].as_f64().unwrap(), 5.123));
 }
 
+#[test]
+fn read_shows_temperature_with_one_decimal() {
+    // 3910 / 128 = 30.546875 °C.
+    let adc = Adc {
+        temp_raw: 3910,
+        ..ADC_A
+    };
+    let mut s = session(MockTransport::new(vec![adc_step(1, adc)]));
+    let mut out = Vec::new();
+    read(&mut s, false, &mut out).unwrap();
+    let out = text(&out);
+    let line = out.lines().find(|l| l.contains("Temp")).unwrap();
+    assert_eq!(line.trim_end(), "Temp:   30.5 °C", "in:\n{out}");
+}
+
+#[test]
+fn read_json_numbers_are_plain_decimals() {
+    // 1 µA: a float serializer would print -1e-6.
+    let adc = Adc {
+        ibus_ua: -1,
+        ..ADC_A
+    };
+    let mut s = session(MockTransport::new(vec![adc_step(1, adc)]));
+    let mut out = Vec::new();
+    read(&mut s, true, &mut out).unwrap();
+    let raw = text(&out);
+    assert!(
+        !["e-", "e+", "E-", "E+"].iter().any(|x| raw.contains(x)),
+        "exponent in:\n{raw}"
+    );
+    assert!(raw.contains("\"ibus_a\": -0.000001"), "{raw}");
+    assert!(raw.contains("\"temp_c\": 25.0"), "{raw}");
+    let v: Value = serde_json::from_str(&raw).expect("valid JSON");
+    assert!(approx(v["ibus_a"].as_f64().unwrap(), -0.000001), "{v}");
+}
+
 // ---- AC-STQEA1.4: watch ----
 
 /// Run `watch` with three scripted snapshots; `sleep` sets the stop flag on
