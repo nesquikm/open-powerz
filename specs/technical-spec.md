@@ -43,7 +43,8 @@ specs/                           # SDD specs (this file)
 |----------|--------|-----------|
 | Build new vs. fork | Build new; laPower, km003c-rs and other prior art are references only | Full control and a strict clean room |
 | GUI stack | Tauri 2 + Svelte 5 + TS + uPlot | Rich tables/trees, i18n, CJK text and a larger contributor pool; shares the Rust core with the CLI |
-| USB stack | `nusb` (bulk), `hidapi` (HID; required on macOS), `serialport` (CDC) | Pure Rust bulk with hotplug and no libusb DLL; native HID on every OS |
+| USB stack | `nusb` (bulk, primary), `serialport` (CDC, second pipe), `hidapi` (HID, read-only ADC fallback) | Pure Rust bulk with hotplug and no libusb DLL; HID limited because multi-report replies reboot the meter (device session 1) |
+| MSRV | Current stable (1.96) | New project; an older MSRV only holds dependencies back |
 | AES keys | Shipped in the repository | User decision: authenticated features work out of the box |
 | JS tooling | Bun (package manager + script runner), Vite 8, Vitest 5 | Fast installs; Vite is Tauri's reference bundler |
 | License | MIT | User decision |
@@ -85,6 +86,8 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | serialport | 4.10.x (planned) | CDC transport |
 | aes, crc32fast | 0.9.x, 1.5.x (planned) | Auth / memory read crypto, CRC-32 |
 | thiserror / clap | 2.x / 4.6.x (planned) | Errors / CLI args |
+| csv, ctrlc | latest (planned) | CLI stream export, Ctrl-C handling |
+| proptest, assert_cmd | latest (planned, dev) | No-panic parser properties, CLI tests |
 | svelte | ^5.57.2 | UI framework |
 | vite / @sveltejs/vite-plugin-svelte | ^8.3.4 / ^7.3.1 | Bundler |
 | @tauri-apps/api / @tauri-apps/cli | ^2.12.4 / ^2.12.3 | Tauri JS bindings / CLI |
@@ -99,7 +102,11 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
   ship a udev rule (`uaccess`, `ID_MM_DEVICE_IGNORE=1`).
 - **macOS HID:** only through IOHIDManager (`hidapi`); libusb/nusb cannot claim it.
 - **Firmware drift:** most protocol facts come from V2.5.2 binaries and FW 1.9.9 prior art; our
-  device runs FW 2.0.7. Every unconfirmed fact stays `[inferred]` until a device test confirms it.
+  device runs FW 2.0.6 (device session 1 confirmed the core protocol on it). Every unconfirmed
+  fact stays `[inferred]` until a device test confirms it; KM002C is untested.
+- **Device safety:** a wrong command can hang, reboot or brick the meter. A single guard in the
+  transport layer refuses the never-send set before any byte is written, and HID only carries
+  single-report GET_DATA.
 - **WebKitGTK** on Linux is slower; chart decimation must happen in Rust.
 - **Tauri build order:** `apps/desktop/dist` must exist before the Tauri crate compiles.
 

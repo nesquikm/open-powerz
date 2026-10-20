@@ -53,14 +53,19 @@ Feature scope (from the research notes): **MVP** = discovery + live meter + reco
 UFCS analyzer, vendor `.db`/`.sqlite` import/export. Each lands as its own FR in
 `specs/frs/`.
 
+Roadmap (one plan per milestone in `specs/plan/`): M_34BAXK Protocol Core and CLI →
+M_R4WG4Q Desktop Meter → M_NE3C7K PD Analyzer → M_X4VEQ3 Triggers and Extras. Firmware
+update and signed release packaging are not planned.
+
 ## 2. Functional Requirements (cross-cutting only)
 
 - **Platforms:** every user-facing feature works on macOS (Apple silicon + Intel), Linux
   (x86_64; udev rule documented) and Windows 10/11 with no vendor driver installed.
 - **Device identification:** devices are matched by USB VID `0x5FC9`; interfaces are chosen by
   class (vendor bulk 0xFF, HID 0x03, CDC 0x02/0x0A), never by interface number.
-- **Transport fallback:** vendor bulk is the primary pipe; HID and CDC are alternatives where
-  bulk is unavailable (for example, a Linux kernel driver holding the bulk interface).
+- **Transport fallback:** vendor bulk is the primary pipe; CDC (binary protocol on the virtual
+  serial port) is the second pipe; HID is only a read-only fallback for single-report readings,
+  because multi-report HID replies hang and reboot the meter (device session 1, FW 2.0.6).
 - **Authentication:** authenticated features (ADC queue streaming, memory read / device
   info, offline records) work out of the box with the AES keys shipped in the repository.
 - **Device safety:** the app never sends firmware-update, DFU jump, flash-write, calibration
@@ -95,7 +100,12 @@ UFCS analyzer, vendor `.db`/`.sqlite` import/export. Each lands as its own FR in
 
 ## 4. Edge Cases
 
-- Firmware variants: ADC section length 40 or 44 bytes; parse by section size.
+- Firmware variants: ADC section length 40 or 44 bytes (44 on FW 2.0.6); parse by section size.
+- A stale DISCONNECT frame is often queued on the bulk IN endpoint at open: drain it.
+- Auth level is lost on every close/reopen: authenticate again after each open.
+- At 1000 SPS a reply holds at most 63 queue records: poll at least every ~30–60 ms.
+- On CDC, frame types 0x01/0x02/0x03 start or stop the ADCNEW push stream, so CONNECT must
+  never be sent there.
 - Linux `powerz` hwmon kernel driver bound to the bulk interface: detach it or fall back to HID.
 - Open PDM serial session holding the PD engine: PD capture over bulk may be rejected until
   `pdm close`.
