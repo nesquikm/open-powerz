@@ -7,6 +7,7 @@ kickoff_branch: null
 frozen_at: null
 migration: none
 codename: Wire Whisperer
+shipped_in: v0.1.0
 ---
 
 # Implementation Plan
