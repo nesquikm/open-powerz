@@ -46,8 +46,17 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
   snapshot-tested with `insta`.
 - **HIL (opt-in):** the same flows against a real meter run only with `POWERZ_HIL=1`, using
   only the safe command set in `docs/protocol.md`; CI never sets it.
-- **Future (desktop, M_R4WG4Q):** Playwright e2e against the Tauri app wired to the demo
-  device (connect, live values, chart, record, export), plus visual-check screenshots.
+- **Desktop real-app e2e:** WebdriverIO + `tauri-driver` drives the built app (with the `e2e`
+  Cargo feature: test hooks, no save dialog) against the demo device — connect, live values,
+  chart, record, export, CSV checks. Runs in CI on Linux (xvfb, WebKitGTK WebDriver) and
+  Windows (Edge WebDriver). **Not on macOS:** `tauri-driver` has no macOS support, because
+  WKWebView offers no WebDriver.
+- **Desktop UI e2e:** Playwright runs the web build (`VITE_BACKEND=mock`, a scripted backend)
+  in Chromium and WebKit on all three OSes: UI flows, shortcuts, focus order, and an axe scan
+  (no serious or critical violations) in both themes at 900 and 1600 px.
+- **Visual checks (blocking):** `/dev-process-toolkit:visual-check` screenshots for every UI
+  FR — light and dark, ~900 and ~1600 px wide, demo device streaming and no device — read
+  and fixed before the FR is done.
 - **Future (Linux CI):** expose the simulator as a real USB device (dummy_hcd + FunctionFS
   gadget, or USB/IP) so the nusb bulk path is tested end to end.
 
@@ -55,6 +64,7 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
 | Layer   | Target | Minimum |
 |---------|--------|---------|
 | `powerz-protocol` decode/framing | >=90%  | 80%     |
+| Desktop backend (batch, history, stats, recording) | >=85% | 75% |
 | Overall | >=75%  | 65%     |
 
 ## 5. Test Data

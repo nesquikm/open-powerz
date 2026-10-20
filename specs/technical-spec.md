@@ -14,9 +14,15 @@ A Rust cargo workspace with three crates and one web UI:
   functions are separated from I/O so they are testable with byte vectors.
 - `powerz-cli` (`powerz` binary): device listing, live readout, CSV streaming, raw frame
   dumps for protocol work and device tests.
-- `open-powerz-desktop` (Tauri 2 backend, `apps/desktop/src-tauri`): owns device sessions on a
-  worker thread, exposes Tauri commands, and streams batched measurement frames to the UI
-  over `tauri::ipc::Channel`.
+- `open-powerz-desktop` (Tauri 2 backend, `apps/desktop/src-tauri`): a device manager (listing
+  plus hotplug polling, real meters and demo-device scenarios) and one session worker thread
+  per connected meter. The worker owns the `Session`, interleaves queue polls with ADC
+  snapshots (the queue carries no temperature), keeps the per-session history with a min/max
+  decimation pyramid and running statistics, feeds the CSV recorder, and streams batched
+  events (20–60 Hz) to the UI over `tauri::ipc::Channel`.
+- `powerz-record` (library): the vendor-compatible CSV recorder shared by the CLI and the
+  desktop app (header, plain-decimal formatting, time origin, signed charge/energy
+  integration).
 - `powerz-sim` (library): a stateful simulated KM003C behind the same `Transport` trait, with
   bulk, CDC and HID personas, named scenarios and fault injection. It is both the e2e test
   device and a shipped "demo device" (`powerz --transport sim`, and the desktop picker in
@@ -34,8 +40,12 @@ Cargo.toml                       # workspace: resolver 3, edition 2024, MSRV 1.9
 package.json / bun.lock          # Bun workspace root (apps/desktop)
 crates/powerz-protocol/src/      # lib.rs (+ transport/, frame/, decode/, auth/ as they land)
 crates/powerz-cli/src/main.rs    # `powerz` binary
+crates/powerz-record/src/        # shared CSV recorder + charge/energy integrator
+crates/powerz-sim/src/           # simulated KM003C (demo device, e2e double)
 apps/desktop/src/                # App.svelte, main.ts, lib/*.ts (+ co-located *.test.ts)
-apps/desktop/src-tauri/          # Tauri crate: lib.rs (commands), tauri.conf.json, capabilities, icons
+apps/desktop/src-tauri/          # Tauri crate: commands, devices, worker, batch, history, stats, recording
+apps/desktop/e2e/app/            # WebdriverIO + tauri-driver suite (real app, Linux + Windows)
+apps/desktop/e2e/ui/             # Playwright + axe suite (web build, mocked backend, all OSes)
 docs/                            # user docs + protocol.md
 .github/workflows/ci.yml         # gate matrix: ubuntu-24.04, macos-latest, windows-latest
 specs/                           # SDD specs (this file)
@@ -63,7 +73,11 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
 
 - Library: a `Device` handle (open by transport, `request(&Request) -> Result<Reply>`), plus
   pure `parse_*` / `build_*` functions. Public API documented with rustdoc (packages docs).
-- Tauri commands: `app_info` (today); device list/open/close and stream start/stop as FRs land.
+- Tauri commands: `app_info`, `list_devices`, `connect`, `disconnect`, `set_rate`,
+  `history_range`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
+  `stop_recording`, `export_session`; backend events `Batch`, `Gap`, `Status`, `Error`,
+  `Progress` over one channel. The UI reaches them only through `src/lib/backend.ts`, the
+  seam the Playwright mock replaces.
 - CLI: `powerz <subcommand>` with `clap` once the first command lands.
 
 ## 4. Key Patterns
@@ -96,6 +110,9 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | vite / @sveltejs/vite-plugin-svelte | ^8.3.4 / ^7.3.1 | Bundler |
 | @tauri-apps/api / @tauri-apps/cli | ^2.12.4 / ^2.12.3 | Tauri JS bindings / CLI |
 | uplot | ^1.6.32 | Charts |
+| tauri-plugin-dialog | 2.x (planned) | Save dialog for recording and export |
+| @wdio/cli + tauri-driver | latest (planned, dev) | Real-app e2e (Linux, Windows) |
+| @playwright/test + @axe-core/playwright | latest (planned, dev) | UI e2e and accessibility scan |
 | typescript | ~6.0.3 | Types (svelte-check and typescript-eslint do not support TS 7 yet) |
 | vitest | ^5.0.5 | TS unit tests |
 | eslint / typescript-eslint / eslint-plugin-svelte / prettier | ^10.13 / ^8.72 / ^3.23 / ^3.9 | Lint + format |
