@@ -64,8 +64,8 @@ update and signed release packaging are not planned.
 - **Device identification:** devices are matched by USB VID `0x5FC9`; interfaces are chosen by
   class (vendor bulk 0xFF, HID 0x03, CDC 0x02/0x0A), never by interface number.
 - **Transport fallback:** vendor bulk is the primary pipe; CDC (binary protocol on the virtual
-  serial port) is the second pipe; HID is only a read-only fallback for single-report readings,
-  because multi-report HID replies hang and reboot the meter (device session 1, FW 2.0.6).
+  serial port) is the second pipe; HID is only a read-only fallback for the ADC snapshot, because any HID reply
+  longer than 64 bytes hangs and reboots the meter (device session 1, FW 2.0.6).
 - **Authentication:** authenticated features (ADC queue streaming, memory read / device
   info, offline records) work out of the box with the AES keys shipped in the repository.
 - **Device safety:** the app never sends firmware-update, DFU jump, flash-write, calibration
@@ -106,7 +106,7 @@ update and signed release packaging are not planned.
 - At 1000 SPS a reply holds at most 63 queue records: poll at least every ~30–60 ms.
 - On CDC, frame types 0x01/0x02/0x03 start or stop the ADCNEW push stream, so CONNECT must
   never be sent there.
-- Linux `powerz` hwmon kernel driver bound to the bulk interface: detach it or fall back to HID.
+- Linux `powerz` hwmon kernel driver bound to the bulk interface: detach it, or fall back to CDC (or HID for ADC snapshots only).
 - Open PDM serial session holding the PD engine: PD capture over bulk may be rejected until
   `pdm close`.
 

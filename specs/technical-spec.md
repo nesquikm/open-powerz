@@ -106,7 +106,7 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
   fact stays `[inferred]` until a device test confirms it; KM002C is untested.
 - **Device safety:** a wrong command can hang, reboot or brick the meter. A single guard in the
   transport layer refuses the never-send set before any byte is written, and HID only carries
-  single-report GET_DATA.
+  the ADC snapshot (GET_DATA mask 0x001).
 - **WebKitGTK** on Linux is slower; chart decimation must happen in Rust.
 - **Tauri build order:** `apps/desktop/dist` must exist before the Tauri crate compiles.
 
