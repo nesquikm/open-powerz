@@ -1,0 +1,12 @@
+---
+source: crates/powerz-cli/tests/e2e_sim.rs
+expression: out
+---
+VBUS:   5.000 V
+IBUS:   1.000 A
+Power:  5.000 W
+Temp:   30.000 °C
+D+:     0.600 V
+D−:     0.600 V
+CC1:    1.680 V
+CC2:    0.000 V

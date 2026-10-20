@@ -1,0 +1,9 @@
+---
+source: crates/powerz-cli/tests/e2e_sim.rs
+expression: out
+---
+Model:     KM003C
+Firmware:  2.0.6
+Hardware:  2.5
+Serial:    123456
+UID:       5a17c30d9e426bf108a43ce5

@@ -1,7 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/powerz-protocol", "crates/powerz-cli", "apps/desktop/src-tauri"]
-default-members = ["crates/powerz-protocol", "crates/powerz-cli"]
+members = [
+    "crates/powerz-protocol",
+    "crates/powerz-sim",
+    "crates/powerz-cli",
+    "apps/desktop/src-tauri",
+]
+default-members = ["crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +18,7 @@ authors = ["Mikhail Drapoliuk"]
 
 [workspace.dependencies]
 powerz-protocol = { path = "crates/powerz-protocol", version = "0.1.0" }
+powerz-sim = { path = "crates/powerz-sim", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

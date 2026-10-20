@@ -3,8 +3,10 @@
 
 use std::path::PathBuf;
 
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Parser, Subcommand, ValueEnum};
 use powerz_protocol::decode::Rate;
+use powerz_sim::Scenario;
 
 use crate::error::CliError;
 
@@ -17,6 +19,8 @@ pub enum TransportKind {
     Cdc,
     /// HID interface: no driver needed, `read` and `watch` only.
     Hid,
+    /// Simulated KM003C demo device (no hardware); pick its data with --scenario.
+    Sim,
 }
 
 /// Help heading of the flags accepted by every subcommand.
@@ -46,6 +50,16 @@ pub struct Cli {
         help_heading = GLOBAL
     )]
     pub transport: TransportKind,
+    /// Scenario the demo device (`--transport sim`) plays.
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME",
+        default_value = "idle",
+        value_parser = scenario_parser(),
+        help_heading = GLOBAL
+    )]
+    pub scenario: Scenario,
     /// Log every frame sent (`>`) and received (`<`) to stderr as hex.
     #[arg(long, global = true, help_heading = GLOBAL)]
     pub trace: bool,
@@ -62,6 +76,9 @@ pub enum Command {
         /// Print a JSON array instead of one line per meter.
         #[arg(long)]
         json: bool,
+        /// Also list the simulated demo device (`--transport sim`).
+        #[arg(long)]
+        include_demo: bool,
     },
     /// Show model, firmware and hardware versions, serial and UID.
     Info {
@@ -118,6 +135,12 @@ pub(crate) fn rate_from_sps(sps: u32) -> Option<Rate> {
     Rate::ALL.into_iter().find(|r| r.sps() == sps)
 }
 
+/// Parse `--scenario`: one of the demo device's scenario names.
+fn scenario_parser() -> impl TypedValueParser<Value = Scenario> {
+    PossibleValuesParser::new(Scenario::ALL.map(Scenario::name))
+        .map(|name| Scenario::from_name(&name).unwrap_or(Scenario::Idle))
+}
+
 /// Parse `--rate`: one of the queue rates 2, 10, 50, 1000.
 fn parse_rate(s: &str) -> Result<u32, String> {
     s.parse::<u32>()
@@ -143,9 +166,9 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
 ///
 /// FW 2.0.6 REJECTs memory reads (and so `info` and auth) until CONNECT. On
 /// CDC the byte 0x02 starts the ADCNEW push stream instead, and HID never
-/// answers CONNECT, so only bulk sends it.
+/// answers CONNECT, so only bulk (and the simulator's bulk persona) sends it.
 pub fn needs_connect(kind: TransportKind) -> bool {
-    matches!(kind, TransportKind::Bulk)
+    matches!(kind, TransportKind::Bulk | TransportKind::Sim)
 }
 
 #[cfg(test)]

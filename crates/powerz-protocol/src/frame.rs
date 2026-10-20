@@ -36,6 +36,22 @@ pub(crate) fn frame_type(frame: &[u8]) -> Option<u8> {
     frame.first().map(|b| b & TYPE_MASK)
 }
 
+/// Whether `request` is a GET_DATA request (message type 0x0C, extend bit
+/// ignored).
+pub fn is_get_data(request: &[u8]) -> bool {
+    frame_type(request) == Some(msg::GET_DATA)
+}
+
+/// Attribute mask of a GET_DATA request (`mask << 1` in bytes 2..3, LE);
+/// `None` when `request` is not a GET_DATA. Missing mask bytes read as 0.
+pub fn get_data_mask(request: &[u8]) -> Option<Attribute> {
+    if !is_get_data(request) {
+        return None;
+    }
+    let byte = |i: usize| request.get(i).copied().unwrap_or(0);
+    Some(Attribute(u16::from_le_bytes([byte(2), byte(3)]) >> 1))
+}
+
 /// Read `width` bits of `word` starting at bit `shift`.
 const fn get_bits(word: u32, shift: u32, width: u32) -> u32 {
     (word >> shift) & ((1 << width) - 1)
