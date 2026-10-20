@@ -1,0 +1,16 @@
+[package]
+name = "powerz-protocol"
+description = "Unofficial protocol library for the ChargerLAB POWER-Z KM003C / KM002C USB-C power meter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["usb-c", "usb-pd", "power-meter", "km003c", "power-z"]
+categories = ["hardware-support"]
+
+[dependencies]
+
+[lints]
+workspace = true

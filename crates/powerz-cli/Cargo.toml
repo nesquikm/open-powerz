@@ -1,0 +1,19 @@
+[package]
+name = "powerz-cli"
+description = "Command-line tool for the ChargerLAB POWER-Z KM003C / KM002C (unofficial)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "powerz"
+path = "src/main.rs"
+
+[dependencies]
+powerz-protocol.workspace = true
+
+[lints]
+workspace = true

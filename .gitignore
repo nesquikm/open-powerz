@@ -1,0 +1,30 @@
+# Rust
+/target/
+
+# JS / Vite
+node_modules/
+apps/desktop/dist/
+*.tsbuildinfo
+
+# Tauri generated files
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/target/
+
+# Local captures and logs from real devices (may contain serial numbers)
+/captures/
+*.pcapng
+
+# Vendor material must never enter the repo (see README)
+/downloaded/
+*.mencrypt
+*.rar
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Claude Code local settings
+.claude/settings.local.json
