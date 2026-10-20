@@ -423,9 +423,11 @@ Windows HID are untested. [inferred]
 
 - [device] The ADC snapshot (GET_DATA mask 0x001, `0C id 02 00`) is the only
   request that is safe over HID: its 52-byte reply fits one report.
-- [device] PD_PACKET and QC_PACKET replies (20 and 28 bytes) fit in 64 bytes
-  only while nothing is attached (idle status); with a charger attached they
-  carry PD / UFCS records and grow past 64 bytes, so they are not safe.
+- PD_PACKET and QC_PACKET replies (20 and 28 bytes) fit in 64 bytes while
+  nothing is attached (idle status). [device] With a charger attached they
+  should carry PD / UFCS records and grow past 64 bytes, so they are not
+  safe; not yet tested with a charger, reasoned from the 68-byte reply that
+  rebooted the meter. [inferred]
 - [device] Control commands get no reply over HID: CONNECT, 0x0E, 0x0F, 0x44
   and 0x4C all timed out, and a 0x0E sent over HID did not change the queue
   rate (not executed).
