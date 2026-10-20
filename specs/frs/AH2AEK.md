@@ -31,6 +31,7 @@ Build the desktop UI shell in Svelte 5: layout, device picker, live readout, err
 - AC-AH2AEK.6: Shortcuts: Space starts/stops recording, C connects/disconnects, R resets stats, 1–4 select 2/10/50/1000 SPS, L returns the chart to live, T cycles the theme, ? opens a shortcut overlay; shortcuts are ignored while a text input has focus; Tab order runs top bar → readout → chart → stats, with a visible focus ring on every control.
 - AC-AH2AEK.7: With reduced motion requested by the system, transitions are disabled and the chart jumps to new data instead of scrolling smoothly.
 - AC-AH2AEK.8: An About dialog shows the app and protocol-library versions and states that open-powerz is unofficial and not affiliated with ChargerLAB.
+- AC-AH2AEK.9: When the meter reports no temperature (raw 0x8000; firmware 2.0.6 sends it while the queue runs at 1000 SPS), the readout shows "—" with the tooltip "Not reported by the meter at 1000 SPS" (or "Not reported by the meter" at other rates), and never a stale or zero value; a unit test covers the formatter and a visual check covers the 1000 SPS view.
 
 ## Technical Design
 

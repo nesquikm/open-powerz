@@ -16,6 +16,7 @@ Automated tests drive the real desktop app against the demo device, from connect
 They run on Linux and Windows, where the WebDriver tooling for Tauri is available.
 A second suite runs the interface in a browser against a fake backend on all three systems.
 That suite also checks keyboard use and accessibility in both themes.
+With a meter attached, an opt-in run checks the same flow on real hardware.
 
 ## Requirement
 
@@ -30,6 +31,10 @@ Add two end-to-end suites for the desktop app — WebdriverIO with tauri-driver 
 - AC-AH2AEN.5: The UI suite runs the production web build in Chromium and WebKit against a scripted mock backend and covers the picker, connect, live values, the error banner with the Linux permission hint, the rate-locked notice, every shortcut and the theme toggle.
 - AC-AH2AEN.6: The UI suite runs an axe accessibility scan on the main view disconnected and streaming, in both themes, at 900 px and 1600 px wide, and fails on any serious or critical violation.
 - AC-AH2AEN.7: The UI suite runs in CI on ubuntu-24.04, macos-latest and windows-latest; both suites run in a separate CI job that must pass for a pull request to be green.
+- AC-AH2AEN.8: A hardware-in-the-loop backend test, run only with `POWERZ_HIL=1` and never in CI, drives the same session worker the app uses (FR VHY378) against the attached KM003C over bulk: it connects, checks that the first batch is sane with nothing plugged into the meter (VBUS below 0.5 V; D+, D−, CC1 and CC2 between 0 and 5 V), then streams 30 s at 50 SPS and 30 s at 1000 SPS with zero gaps and a record count within 2% of rate × duration.
+- AC-AH2AEN.9: In the same hardware run, a 10 s recording and a session export are written to a temporary directory; both start with the vendor header, and re-rendering their parsed records through the `powerz-record` writer that `powerz stream` uses reproduces each file byte for byte.
+- AC-AH2AEN.10: Unplug and replug on the real meter are a manual check in the pull-request checklist: unplugging mid-stream shows `disconnected` within 2 s with the samples kept, and after replugging the meter is listed again within 2 s and reconnecting appends to the session with a gap event.
+- AC-AH2AEN.11: On macOS, where tauri-driver is unavailable, the real app connected to the real KM003C is run by hand for the blocking visual-check screenshots (light and dark, ~900 and ~1600 px wide) next to the demo-device ones; testing-spec records that the real-device app e2e is manual on macOS.
 
 ## Technical Design
 
@@ -37,8 +42,8 @@ Add two end-to-end suites for the desktop app — WebdriverIO with tauri-driver 
 
 ## Testing
 
-The suites are the tests. CI runs them in a new `e2e` job matrix beside the existing gate job.
+The suites are the tests. CI runs them in a new `e2e` job matrix beside the existing gate job. The hardware test lives in the desktop crate's `tests/hil.rs`, gated like the CLI's.
 
 ## Notes
 
-tauri-driver does not support macOS, so the real app is not driven there; the mocked UI suite still runs on macOS.
+tauri-driver does not support macOS, so the real app is not driven there by automation; the mocked UI suite runs on macOS, and the real-device app run on macOS is manual.

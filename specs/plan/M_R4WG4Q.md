@@ -44,8 +44,10 @@ codename: Live Wire
   verify: Vitest passes; visual-check screenshots of live and zoomed views reviewed
 - [ ] WebdriverIO + tauri-driver real-app suite, Playwright + axe UI suite, CI `e2e` job — AH2AEN
   verify: `bun run e2e:ui` passes locally; CI `e2e` job green on its matrix
-- [ ] Real-device run of the desktop app against the KM003C (safe command set only)
-  verify: screenshots and a recorded CSV from the real meter attached to the PR
+- [ ] Desktop HIL backend test (`POWERZ_HIL=1`) against the KM003C — AH2AEN
+  verify: `POWERZ_HIL=1 cargo test -p open-powerz-desktop --test hil` passes on the attached meter
+- [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
+  verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. 1000 SPS "—" temperature) and a recorded CSV listed in the report
 
 **Tests:**
 - Rust unit and property tests for batching, decimation, stats and recording; worker integration tests against `powerz-sim`; Vitest for UI logic; WebdriverIO real-app e2e (Linux, Windows); Playwright UI e2e with axe (Linux, macOS, Windows).

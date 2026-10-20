@@ -54,6 +54,11 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
 - **Desktop UI e2e:** Playwright runs the web build (`VITE_BACKEND=mock`, a scripted backend)
   in Chromium and WebKit on all three OSes: UI flows, shortcuts, focus order, and an axe scan
   (no serious or critical violations) in both themes at 900 and 1600 px.
+- **Desktop HIL:** with `POWERZ_HIL=1`, a backend test drives the app's session worker against
+  a real meter (connect, sane values, 50 and 1000 SPS with zero gaps, record, export, CSV byte
+  parity with `powerz stream`); never in CI. Unplug/replug on hardware is a manual checklist
+  item. On macOS the real-device app run is manual (no `tauri-driver`), with visual-check
+  screenshots beside the demo-device ones.
 - **Visual checks (blocking):** `/dev-process-toolkit:visual-check` screenshots for every UI
   FR — light and dark, ~900 and ~1600 px wide, demo device streaming and no device — read
   and fixed before the FR is done.
