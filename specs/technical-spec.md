@@ -73,7 +73,7 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
 
 - Library: a `Device` handle (open by transport, `request(&Request) -> Result<Reply>`), plus
   pure `parse_*` / `build_*` functions. Public API documented with rustdoc (packages docs).
-- Tauri commands: `app_info`, `list_devices`, `connect`, `disconnect`, `set_rate`,
+- Tauri commands: `app_info`, `list_devices`, `watch_devices`, `connect`, `disconnect`, `set_rate`,
   `history_range`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
   `stop_recording`, `export_session`; backend events `Batch`, `Gap`, `Status`, `Error`,
   `Progress` over one channel. The UI reaches them only through `src/lib/backend.ts`, the

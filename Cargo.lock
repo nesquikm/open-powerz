@@ -2587,6 +2587,7 @@ name = "open-powerz-desktop"
 version = "0.1.0"
 dependencies = [
  "powerz-protocol",
+ "powerz-sim",
  "serde",
  "serde_json",
  "tauri",

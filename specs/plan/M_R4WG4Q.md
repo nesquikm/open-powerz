@@ -30,7 +30,7 @@ codename: Live Wire
 **Tasks:**
 - [ ] Extract `crates/powerz-record` from the CLI; fix the empty `--include-demo` help text (first commit) — 0P7HSJ
   verify: `cargo test -p powerz-cli -p powerz-record --locked` passes with the CLI snapshots unchanged
-- [ ] Device manager, session worker, batcher and error mapping in the desktop crate — VHY378
+- [x] Device manager, session worker, batcher and error mapping in the desktop crate — VHY378
   verify: worker integration tests against the simulator pass (batch count, ordering, fallback, disconnect, safe frames)
 - [ ] Session history with min/max pyramid and statistics — AH2AEJ
   verify: property tests and the release-mode 10M-sample timing test pass

@@ -1,3 +1,19 @@
+pub mod batch;
+pub mod devices;
+pub mod ui_error;
+pub mod worker;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use powerz_protocol::session::SystemClock;
+use powerz_protocol::transport::discovery;
+use tauri::ipc::Channel;
+
+use crate::devices::{AppOpener, DeviceListing, DeviceManager, WatchHandle};
+use crate::ui_error::UiError;
+use crate::worker::BackendEvent;
+
 /// Returns the app and protocol-library version for the About screen.
 #[tauri::command]
 fn app_info() -> String {
@@ -8,10 +24,156 @@ fn app_info() -> String {
     )
 }
 
+type AppManager = DeviceManager<AppOpener, SystemClock>;
+
+/// The app's device manager and hotplug watcher, shared by the commands.
+/// Commands hold the locks only to take what they need; every blocking wait
+/// (a worker thread joining, a rate change answer, USB enumeration) runs on
+/// a blocking thread, never on the async runtime.
+struct AppState {
+    manager: Mutex<AppManager>,
+    watch: Mutex<Option<WatchHandle>>,
+}
+
+impl AppState {
+    fn new() -> AppState {
+        AppState {
+            manager: Mutex::new(DeviceManager::new(
+                discovery::list_devices,
+                AppOpener,
+                SystemClock,
+            )),
+            watch: Mutex::new(None),
+        }
+    }
+
+    fn manager(&self) -> MutexGuard<'_, AppManager> {
+        self.manager.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+type Shared<'a> = tauri::State<'a, Arc<AppState>>;
+
+/// Run `work` on a blocking thread and hand back its result.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, UiError> + Send + 'static,
+) -> Result<T, UiError> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|_| UiError::internal())?
+}
+
+/// Every attached meter plus the demo device entries; never opens a device.
+#[tauri::command]
+async fn list_devices(state: Shared<'_>) -> Result<Vec<DeviceListing>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(state.manager().list_devices())).await
+}
+
+/// Send the device list over `on_change` now and on every plug or unplug.
+#[tauri::command]
+async fn watch_devices(
+    state: Shared<'_>,
+    on_change: Channel<Vec<DeviceListing>>,
+) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let stop = Arc::new(AtomicBool::new(false));
+        let gone = Arc::clone(&stop);
+        let handle = state.manager().watch_devices_with_stop(
+            move |list| {
+                if on_change.send(list).is_err() {
+                    gone.store(true, Ordering::SeqCst);
+                }
+            },
+            stop,
+        );
+        let old = state
+            .watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(handle);
+        if let Some(old) = old {
+            old.stop();
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Connect to the picked device; every session event goes over `on_event`.
+/// The session ends by itself once that channel is gone (window closed or
+/// reloaded).
+#[tauri::command]
+async fn connect(
+    state: Shared<'_>,
+    device_id: String,
+    rate_sps: u32,
+    on_event: Channel<BackendEvent>,
+) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sink = channel_sink(on_event, Arc::clone(&stop));
+        state
+            .manager()
+            .connect_with_stop(&device_id, rate_sps, sink, stop)
+    })
+    .await
+}
+
+/// Stop the queue and close the open session.
+#[tauri::command]
+async fn disconnect(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        // Take the session under the lock; wait for the worker without it.
+        let session = state.manager().take_session()?;
+        session.disconnect();
+        Ok(())
+    })
+    .await
+}
+
+/// Restart the open session's queue at `rate_sps`.
+#[tauri::command]
+async fn set_rate(state: Shared<'_>, rate_sps: u32) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        // Take the control under the lock; wait for the answer without it.
+        let (control, rate) = state.manager().rate_control(rate_sps)?;
+        control.set_rate(rate)
+    })
+    .await
+}
+
+/// The worker's event sink over one `tauri::ipc::Channel`: batches, gaps,
+/// status and errors all reach the UI through it. A failed send means the
+/// window is gone: the event is dropped and `stop` is raised so the worker
+/// closes the meter instead of polling it for nobody.
+pub fn channel_sink(
+    channel: Channel<BackendEvent>,
+    stop: Arc<AtomicBool>,
+) -> impl worker::EventSink {
+    move |event: BackendEvent| {
+        if channel.send(event).is_err() {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_info])
+        .manage(Arc::new(AppState::new()))
+        .invoke_handler(tauri::generate_handler![
+            app_info,
+            list_devices,
+            watch_devices,
+            connect,
+            disconnect,
+            set_rate
+        ])
         .run(tauri::generate_context!())
         .expect("error while running the open-powerz desktop app");
 }
@@ -23,5 +185,27 @@ mod tests {
     #[test]
     fn app_info_names_the_vendor_id() {
         assert!(app_info().contains("0x5FC9"));
+    }
+
+    #[test]
+    fn a_closed_window_channel_raises_the_stop_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let channel: Channel<BackendEvent> = Channel::new(|_| Err(tauri::Error::WebviewNotFound));
+        let mut sink = channel_sink(channel, std::sync::Arc::clone(&stop));
+        sink(BackendEvent::Status(worker::Status::Disconnected {
+            error: None,
+        }));
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "a dead channel left the worker running"
+        );
+    }
+
+    #[test]
+    fn app_state_lists_the_demo_device_without_opening_anything() {
+        let state = AppState::new();
+        let list = state.manager().list_devices();
+        assert!(list.iter().any(|d| d.id == "demo:idle"), "{list:?}");
     }
 }
