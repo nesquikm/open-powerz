@@ -107,12 +107,40 @@ export interface Gap {
   to_ms: number;
 }
 
+/** What a finished recording wrote. */
+export interface RecordingSummary {
+  rows: number;
+  gaps: Gap[];
+  /** The recording ended because the meter went away. */
+  disconnected: boolean;
+}
+
+/** Recording state changes (mirrors `src-tauri/src/recording.rs`). */
+export type RecordingEvent =
+  | { state: "started" }
+  | { state: "progress"; rows: number; elapsed_ms: number }
+  | ({ state: "stopped" } & RecordingSummary)
+  | { state: "failed"; rows: number; error: UiError };
+
+/** How far an export has got. */
+export interface ExportProgress {
+  done: number;
+  total: number;
+}
+
+/** Where an export went and how many rows it wrote. */
+export interface ExportResult {
+  path: string;
+  rows: number;
+}
+
 /** Every event the backend sends over the session channel. */
 export type BackendEvent =
   | { type: "batch"; data: Batch }
   | { type: "gap"; data: Gap }
   | { type: "status"; data: Status }
-  | { type: "error"; data: UiError };
+  | { type: "error"; data: UiError }
+  | { type: "recording"; data: RecordingEvent };
 
 /** Lists the meters and demo devices available right now. */
 export function listDevices(): Promise<DeviceListing[]> {
@@ -158,6 +186,31 @@ export async function disconnect(): Promise<void> {
 export async function setRate(rateSps: number): Promise<void> {
   if (mock) return mock.setRate(rateSps);
   await invoke("set_rate", { rateSps });
+}
+
+/** Opens the save dialog proposing `suggestedName` and starts recording to the chosen
+ * file. Resolves to the path, or `null` when the dialog was cancelled. */
+export async function startRecording(suggestedName: string): Promise<string | null> {
+  if (mock) return mock.startRecording(suggestedName);
+  return invoke<string | null>("start_recording", { suggestedName });
+}
+
+/** Stops the recording; resolves to its row count and gaps. */
+export async function stopRecording(): Promise<RecordingSummary> {
+  if (mock) return mock.stopRecording();
+  return invoke<RecordingSummary>("stop_recording");
+}
+
+/** Opens the save dialog proposing `suggestedName` and exports the session so far,
+ * reporting progress to `onProgress`. Resolves to `null` when the dialog was cancelled. */
+export async function exportSession(
+  suggestedName: string,
+  onProgress: (progress: ExportProgress) => void,
+): Promise<ExportResult | null> {
+  if (mock) return mock.exportSession(suggestedName, onProgress);
+  const channel = new Channel<ExportProgress>();
+  channel.onmessage = onProgress;
+  return invoke<ExportResult | null>("export_session", { suggestedName, onProgress: channel });
 }
 
 /** App and protocol-library versions for the About dialog. */

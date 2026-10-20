@@ -1,5 +1,6 @@
 <script lang="ts">
   import { badgeLabel } from "../format";
+  import { RATE_OPTIONS, ratePicker, type ExportJob, type Recording } from "../recording.svelte";
   import type { Session } from "../session.svelte";
   import type { ThemeChoice } from "../theme";
   import DevicePicker from "./DevicePicker.svelte";
@@ -10,15 +11,31 @@
     onCycleTheme,
     onToggleConnect,
     onAbout,
+    onSelectRate,
     rateSps,
+    recording,
+    canRecord,
+    onToggleRecording,
+    exportJob,
+    canExport,
+    onExport,
   }: {
     session: Session;
     themeChoice: ThemeChoice;
     onCycleTheme: () => void;
     onToggleConnect: () => void;
     onAbout: () => void;
+    onSelectRate: (sps: number) => void;
     /** The rate the next connect asks for, or the session's current rate. */
     rateSps: number;
+    recording: Recording;
+    /** A stream is running that can be recorded. */
+    canRecord: boolean;
+    onToggleRecording: () => void;
+    exportJob: ExportJob;
+    /** The session holds samples that can be exported. */
+    canExport: boolean;
+    onExport: () => void;
   } = $props();
 
   const THEME_LABELS: Record<ThemeChoice, string> = {
@@ -26,6 +43,13 @@
     light: "Light",
     dark: "Dark",
   };
+
+  const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
+  const recordDisabled = $derived(
+    recording.phase === "starting" ||
+      recording.phase === "stopping" ||
+      (recording.phase === "idle" && !canRecord),
+  );
 </script>
 
 <header class="top-bar" aria-label="Device controls">
@@ -46,15 +70,56 @@
   </div>
   <div class="group end">
     <span class="rate">
-      <!-- Shows the rate; picking it here arrives with recording (FR 0P7HSJ).
-           Keys 1–4 already change it. -->
-      <select disabled aria-label="Sample rate" value={rateSps}>
-        {#each [2, 10, 50, 1000] as sps (sps)}
+      <select
+        aria-label="Sample rate"
+        disabled={picker.disabled}
+        value={rateSps}
+        onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
+      >
+        {#each RATE_OPTIONS as sps (sps)}
           <option value={sps}>{sps} SPS</option>
         {/each}
       </select>
+      {#if picker.label !== null}
+        <span class="rate-note">{picker.label}</span>
+      {/if}
     </span>
-    <button type="button" disabled>Record</button>
+    {#if recording.indicator !== null}
+      <span class="rec-indicator" role="timer" title="Recording to CSV"
+        ><span class="rec-dot" aria-hidden="true"></span><span class="visually-hidden"
+          >Recording:
+        </span>{recording.indicator}</span
+      >
+    {/if}
+    <button
+      type="button"
+      title="Record to CSV (Space)"
+      aria-pressed={recording.phase === "recording"}
+      disabled={recordDisabled}
+      onclick={onToggleRecording}
+    >
+      {recording.phase === "recording" || recording.phase === "stopping" ? "Stop" : "Record"}
+    </button>
+    {#if exportJob.running}
+      <span class="export-progress" role="status">
+        <progress
+          aria-label="Export progress"
+          max={exportJob.total || 1}
+          value={exportJob.total > 0 ? exportJob.done : undefined}
+        ></progress>
+        Exporting {exportJob.done.toLocaleString("en-US")} / {exportJob.total.toLocaleString(
+          "en-US",
+        )}
+      </span>
+    {/if}
+    <button
+      type="button"
+      title="Export the session so far to CSV"
+      disabled={exportJob.running || !canExport}
+      onclick={onExport}
+    >
+      Export
+    </button>
     <button
       type="button"
       class="theme-toggle"
@@ -78,6 +143,10 @@
     padding: 0.625rem 1rem;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+    /* Stays in view on scroll, so the recording indicator is always visible. */
+    position: sticky;
+    top: 0;
+    z-index: 1;
   }
   /* Each group wraps as a whole, so a narrow window gets two tidy rows. */
   .group {
@@ -86,6 +155,41 @@
     align-items: center;
     gap: 0.5rem;
     min-width: 0;
+  }
+  .rate {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+  .rate-note {
+    font-size: 0.8125rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .rec-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--danger);
+  }
+  /* --danger reaches 4.5:1 on --bg and --surface in both themes (theme.test.ts). */
+  .rec-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--danger);
+  }
+  .export-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
   }
   .brand {
     font-weight: 700;

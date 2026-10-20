@@ -28,13 +28,13 @@ codename: Live Wire
 | [AH2AEN](../frs/AH2AEN.md) | Desktop end-to-end tests | n/a |
 
 **Tasks:**
-- [ ] Extract `crates/powerz-record` from the CLI; fix the empty `--include-demo` help text (first commit) — 0P7HSJ
+- [x] Extract `crates/powerz-record` from the CLI — 0P7HSJ (the `--include-demo` help text needed no fix)
   verify: `cargo test -p powerz-cli -p powerz-record --locked` passes with the CLI snapshots unchanged
 - [x] Device manager, session worker, batcher and error mapping in the desktop crate — VHY378
   verify: worker integration tests against the simulator pass (batch count, ordering, fallback, disconnect, safe frames)
 - [ ] Session history with min/max pyramid and statistics — AH2AEJ
   verify: property tests and the release-mode 10M-sample timing test pass
-- [ ] Recording to file, session export, rate picker backend — 0P7HSJ
+- [x] Recording to file, session export, rate picker backend — 0P7HSJ
   verify: golden-file test matches `powerz stream` output for the same records
 - [x] UI shell: layout, picker, readout, error banner, themes, shortcuts, About — AH2AEK
   verify: Vitest passes; visual-check screenshots reviewed (light/dark × ~900/~1600 px × demo streaming/no device)

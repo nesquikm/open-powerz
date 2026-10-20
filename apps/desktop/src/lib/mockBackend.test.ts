@@ -71,3 +71,57 @@ describe("MockBackend (scripted demo backend for the browser build)", () => {
     expect(events.length).toBe(count);
   });
 });
+
+// ---- FR 0P7HSJ: the mock backend keeps in step with the recording commands ----
+
+describe("MockBackend recording and export (AC-0P7HSJ.3, AC-0P7HSJ.5, AC-0P7HSJ.7)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("records the samples streamed between start and stop", async () => {
+    const backend = new MockBackend();
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
+    vi.advanceTimersByTime(500);
+    const before = batches(events).flatMap((b) => b.samples).length;
+    await expect(backend.startRecording("powerz-20261021-090507.csv")).resolves.toBe(
+      "powerz-20261021-090507.csv",
+    );
+    vi.advanceTimersByTime(2000);
+    const summary = await backend.stopRecording();
+    const after = batches(events).flatMap((b) => b.samples).length;
+    await backend.disconnect();
+
+    expect(summary.rows).toBe(after - before);
+    expect(summary.gaps).toEqual([]);
+    expect(summary.disconnected).toBe(false);
+    const progress = events.flatMap((e) =>
+      e.type === "recording" && e.data.state === "progress" ? [e.data] : [],
+    );
+    expect(progress.length).toBeGreaterThanOrEqual(2);
+    expect(progress.at(-1)?.rows).toBeLessThanOrEqual(summary.rows);
+  });
+
+  it("refuses to record without a session", async () => {
+    await expect(new MockBackend().startRecording("x.csv")).rejects.toMatchObject({
+      kind: "usage",
+    });
+    await expect(new MockBackend().stopRecording()).rejects.toMatchObject({ kind: "usage" });
+  });
+
+  it("exports the session with progress up to every sample", async () => {
+    const backend = new MockBackend();
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:idle", 50, (e) => events.push(e));
+    vi.advanceTimersByTime(1000);
+    const total = batches(events).flatMap((b) => b.samples).length;
+    const progress: { done: number; total: number }[] = [];
+    const result = backend.exportSession("powerz-x.csv", (p) => progress.push(p));
+    await vi.runOnlyPendingTimersAsync();
+    const done = await result;
+    await backend.disconnect();
+    expect(done?.path).toBe("powerz-x.csv");
+    expect(done?.rows).toBeGreaterThanOrEqual(total);
+    expect(progress.at(-1)).toEqual({ done: done?.rows, total: done?.rows });
+  });
+});

@@ -67,6 +67,14 @@ async function main(): Promise<void> {
       await page.keyboard.press("4");
       await page.waitForTimeout(600);
       await shot("demo-1000sps");
+      // Space on a focused button presses it; record from the page instead.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.keyboard.press(" ");
+      await page.waitForTimeout(1600);
+      await shot("demo-recording");
+      await page.keyboard.press(" ");
+      await page.waitForTimeout(400);
+      await shot("demo-recording-stopped");
       await page.close();
     }
   }

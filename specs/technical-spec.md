@@ -75,8 +75,9 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
   pure `parse_*` / `build_*` functions. Public API documented with rustdoc (packages docs).
 - Tauri commands: `app_info`, `list_devices`, `watch_devices`, `connect`, `disconnect`, `set_rate`,
   `history_range`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
-  `stop_recording`, `export_session`; backend events `Batch`, `Gap`, `Status`, `Error`,
-  `Progress` over one channel. The UI reaches them only through `src/lib/backend.ts`, the
+  `stop_recording`, `export_session`; backend events `Batch`, `Gap`, `Status`, `Error` and
+  `Recording` (started / progress / stopped / failed) over one session channel, with export
+  progress on its own channel. The UI reaches them only through `src/lib/backend.ts`, the
   seam the Playwright mock replaces.
 - CLI: `powerz <subcommand>` with `clap` once the first command lands.
 
@@ -110,7 +111,7 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | vite / @sveltejs/vite-plugin-svelte | ^8.3.4 / ^7.3.1 | Bundler |
 | @tauri-apps/api / @tauri-apps/cli | ^2.12.4 / ^2.12.3 | Tauri JS bindings / CLI |
 | uplot | ^1.6.32 | Charts |
-| tauri-plugin-dialog | 2.x (planned) | Save dialog for recording and export |
+| tauri-plugin-dialog | 2.8.x | Save dialog for recording and export |
 | @wdio/cli + tauri-driver | latest (planned, dev) | Real-app e2e (Linux, Windows) |
 | @playwright/test + @axe-core/playwright | latest (planned, dev) | UI e2e and accessibility scan |
 | typescript | ~6.0.3 | Types (svelte-check and typescript-eslint do not support TS 7 yet) |

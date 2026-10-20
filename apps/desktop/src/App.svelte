@@ -1,12 +1,22 @@
 <script lang="ts">
-  import { connect, disconnect, setRate, toUiError } from "./lib/backend";
+  import {
+    connect,
+    disconnect,
+    exportSession,
+    setRate,
+    startRecording,
+    stopRecording,
+    toUiError,
+  } from "./lib/backend";
   import About from "./lib/components/About.svelte";
   import ErrorBanner from "./lib/components/ErrorBanner.svelte";
+  import Notice from "./lib/components/Notice.svelte";
   import Readout from "./lib/components/Readout.svelte";
   import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
   import StatsPanel from "./lib/components/StatsPanel.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
   import { setContext } from "svelte";
+  import { ExportJob, Recording } from "./lib/recording.svelte";
   import { Session } from "./lib/session.svelte";
   import { shortcutFor, type ShortcutAction } from "./lib/shortcuts";
   import {
@@ -27,6 +37,12 @@
   } from "./lib/theme";
 
   const session = new Session();
+  const recording = new Recording();
+  /** A stream is running that can be recorded. */
+  const canRecord = $derived(session.state === "streaming" || session.state === "rate_locked");
+  const exportJob = new ExportJob();
+  /** The open session holds samples to export. */
+  const canExport = $derived(canRecord && session.latest !== null);
 
   const storage = browserStorage();
   let themeChoice: ThemeChoice = $state(loadTheme(storage));
@@ -73,7 +89,13 @@
     if (id === null) return;
     session.beginConnect();
     try {
-      await connect(id, requestedRateSps, (event) => session.handleEvent(event));
+      await connect(id, requestedRateSps, (event) => {
+        session.handleEvent(event);
+        if (event.type === "recording") recording.handleEvent(event.data);
+        if (event.type === "status" && event.data.state === "disconnected") {
+          recording.sessionEnded();
+        }
+      });
     } catch (err) {
       session.failConnect(toUiError(err));
     }
@@ -86,8 +108,18 @@
     await setRate(sps).catch((err: unknown) => session.reportError(toUiError(err)));
   }
 
-  // Hooks filled in by later FRs (recording, stats, chart).
-  function toggleRecording(): void {}
+  /** Export button: save dialog, then the session history so far, off the UI thread. */
+  function exportHistory(): void {
+    if (!canExport) return;
+    void exportJob.run({ exportSession, now: () => new Date() });
+  }
+
+  /** Record button / Space: start (save dialog first) or stop the CSV recording. */
+  function toggleRecording(): void {
+    void recording.toggle({ canRecord, startRecording, stopRecording, now: () => new Date() });
+  }
+
+  // Hooks filled in by later FRs (stats, chart).
   function resetStats(): void {}
   function returnChartToLive(): void {}
 
@@ -153,9 +185,32 @@
     onCycleTheme={cycleTheme}
     onToggleConnect={() => void toggleConnection()}
     onAbout={() => (aboutOpen = true)}
+    onSelectRate={(sps) => void selectRate(sps)}
+    {recording}
+    {canRecord}
+    onToggleRecording={toggleRecording}
+    {exportJob}
+    {canExport}
+    onExport={exportHistory}
     rateSps={session.rateSps ?? requestedRateSps}
   />
   <ErrorBanner {session} />
+  {#if recording.notice !== null || recording.error !== null}
+    <Notice
+      tone={recording.error ? "error" : "info"}
+      message={recording.error?.message ?? null}
+      onDismiss={() => recording.dismiss()}
+    >
+      {#if recording.notice}<p>{recording.notice}</p>{/if}
+    </Notice>
+  {/if}
+  {#if exportJob.error !== null}
+    <Notice
+      tone="error"
+      message={exportJob.error.message}
+      onDismiss={() => (exportJob.error = null)}
+    />
+  {/if}
   <main class="content">
     <div class="main-area">
       <Readout {session} />

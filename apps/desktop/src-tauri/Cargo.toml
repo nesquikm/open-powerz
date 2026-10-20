@@ -18,10 +18,16 @@ tauri-build = { version = "2.7.3", features = [] }
 
 [dependencies]
 powerz-protocol.workspace = true
+powerz-record.workspace = true
 powerz-sim.workspace = true
 tauri = { version = "2.12.4", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tauri-plugin-dialog = "2.8.3"
+
+[dev-dependencies]
+# The golden-file tests compare desktop recordings with `powerz stream`.
+powerz-cli = { path = "../../../crates/powerz-cli" }
 
 [lints]
 workspace = true

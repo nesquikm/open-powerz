@@ -1,7 +1,9 @@
 //! Session worker: one thread per connected meter, streaming backend events
 //! to the UI (FR VHY378).
 
+use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -14,6 +16,7 @@ use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
 use serde::Serialize;
 
 use crate::batch::{Batch, Batcher, Sample};
+use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
 use crate::ui_error::{self, UiError};
 
 /// Worker start-up settings.
@@ -95,6 +98,8 @@ pub enum BackendEvent {
     Status(Status),
     /// An error.
     Error(UiError),
+    /// Recording state.
+    Recording(RecordingEvent),
 }
 
 /// Where the worker sends its events.
@@ -217,6 +222,14 @@ pub struct Worker<T: Transport, C: Clock> {
     batcher: Batcher,
     /// Wall-clock time the next queue poll is due, ms.
     next_poll_ms: u64,
+    /// Every record of this session, for export.
+    history: Vec<QueueRecord>,
+    /// Wall-clock time at the session's first record, ms.
+    history_unix_ms: Option<u64>,
+    /// The open recording, if any.
+    recording: Option<Recorder>,
+    /// The file the open recording writes, when it was opened by path.
+    recording_path: Option<PathBuf>,
     sink: Sink,
 }
 
@@ -271,6 +284,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             temp_c: None,
             batcher: Batcher::new(now),
             next_poll_ms: now,
+            history: Vec::new(),
+            history_unix_ms: None,
+            recording: None,
+            recording_path: None,
             sink,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
@@ -310,19 +327,162 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
 
     /// Hand the records of `poll` to the batcher; a stream gap flushes the
     /// samples before it and goes out as its own event.
+    /// Every record also goes to the session history and the open
+    /// recording; a failed write ends the recording.
     fn queue_records(&mut self, poll: &session::StreamPoll) {
+        let now = self.clock.now_ms();
         let mut gaps = poll.gaps.iter().peekable();
+        let mut write_err = None;
         for r in &poll.records {
             while let Some(gap) = gaps.next_if(|g| g.to_ms <= r.time_ms()) {
                 self.flush_batch();
-                self.emit(BackendEvent::Gap(Gap {
+                let gap = Gap {
                     kind: GapKind::Stream,
                     from_ms: u64::from(gap.from_ms),
                     to_ms: u64::from(gap.to_ms),
-                }));
+                };
+                if let Some(rec) = self.recording.as_mut() {
+                    rec.gap(gap.clone());
+                }
+                self.emit(BackendEvent::Gap(gap));
             }
             self.batcher.push(sample(r));
+            self.history_unix_ms.get_or_insert(now);
+            self.history.push(*r);
+            if write_err.is_none()
+                && let Some(rec) = self.recording.as_mut()
+                && let Err(e) = rec.push(r, now)
+            {
+                write_err = Some(e);
+            }
         }
+        if let Some(e) = write_err {
+            self.fail_recording(recording::io_error(&e));
+        }
+    }
+
+    /// End the open recording after a write error, keeping its rows.
+    fn fail_recording(&mut self, error: UiError) {
+        if let Some(rec) = self.recording.take() {
+            // Rows still waiting in the buffer never reached the file.
+            let rows = rec.kept_rows();
+            // Closing the file is all that is left to do; the error is the news.
+            drop(rec);
+            self.emit(BackendEvent::Recording(RecordingEvent::Failed {
+                rows,
+                error,
+            }));
+        }
+    }
+
+    /// Flush the open recording and report its progress when due.
+    fn tick_recording(&mut self) {
+        let now = self.clock.now_ms();
+        let Some(rec) = self.recording.as_mut() else {
+            return;
+        };
+        match rec.tick(now) {
+            Ok(Some(event)) => self.emit(BackendEvent::Recording(event)),
+            Ok(None) => {}
+            Err(e) => self.fail_recording(recording::io_error(&e)),
+        }
+    }
+
+    /// Close the open recording because the session ended; `unplugged` when
+    /// the meter went away rather than being disconnected on request.
+    fn end_recording(&mut self, unplugged: bool) {
+        if let Some(rec) = self.recording.take() {
+            let event = match rec.finish(unplugged) {
+                Ok(summary) => RecordingEvent::Stopped(summary),
+                Err((rows, error)) => RecordingEvent::Failed { rows, error },
+            };
+            self.emit(BackendEvent::Recording(event));
+        }
+    }
+
+    /// The stream is being recorded.
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// Start recording every following record to `out`: the header is
+    /// written and flushed now, rows as they arrive.
+    pub fn start_recording(&mut self, out: Box<dyn Write + Send>) -> Result<(), UiError> {
+        if self.session.is_none() {
+            return Err(not_connected());
+        }
+        if self.recording.is_some() {
+            return Err(UiError::usage("A recording is already running."));
+        }
+        let now = self.clock.now_ms();
+        let rec = Recorder::start(out, now).map_err(|e| recording::io_error(&e))?;
+        self.recording = Some(rec);
+        self.emit(BackendEvent::Recording(RecordingEvent::Started));
+        Ok(())
+    }
+
+    /// Create the file at `path` and record to it. The checks run first, so a
+    /// refused start never touches the path; a file this call created is
+    /// removed again if the header cannot be written.
+    pub fn record_to(&mut self, path: &Path) -> Result<(), UiError> {
+        if self.session.is_none() {
+            return Err(not_connected());
+        }
+        if self.recording.is_some() {
+            return Err(UiError::usage("A recording is already running."));
+        }
+        let existed = path.exists();
+        let file = recording::create_file(path)?;
+        match self.start_recording(Box::new(file)) {
+            Ok(()) => {
+                // Canonical, so the export guard sees through symlinks.
+                self.recording_path =
+                    Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
+                Ok(())
+            }
+            Err(e) => {
+                if !existed {
+                    let _ = std::fs::remove_file(path);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Create the file at `path` and export the session to it, unless it is
+    /// the file being recorded to.
+    pub fn export_to(&mut self, path: &Path, progress: ProgressFn) -> Result<ExportJob, UiError> {
+        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        if self.recording.is_some() && self.recording_path.as_deref() == Some(target.as_path()) {
+            return Err(UiError::usage(
+                "That file is being recorded to; pick another name for the export.",
+            ));
+        }
+        let file = recording::create_file(path)?;
+        Ok(self.export(Box::new(file), progress))
+    }
+
+    /// Stop the recording: flush and close the file.
+    pub fn stop_recording(&mut self) -> Result<RecordingSummary, UiError> {
+        let rec = self
+            .recording
+            .take()
+            .ok_or_else(|| UiError::usage("Nothing is being recorded."))?;
+        rec.finish(false).map_err(|(_, error)| error)
+    }
+
+    /// Export every record of this session to `out` on a thread of its own,
+    /// while the stream goes on; `progress` is called on that thread.
+    pub fn export(
+        &mut self,
+        out: Box<dyn Write + Send>,
+        progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> JoinHandle<Result<u64, UiError>> {
+        let records = self.history.clone();
+        let start_unix_ms = self.history_unix_ms.unwrap_or_else(|| self.clock.now_ms());
+        std::thread::spawn(move || {
+            recording::export_records(&records, out, start_unix_ms, progress)
+        })
     }
 
     /// Run one cycle: poll the queue when due, send a batch when due, then
@@ -336,6 +496,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             if let Step::Ended = self.poll_queue() {
                 return Step::Ended;
             }
+            self.tick_recording();
             self.next_poll_ms = now.saturating_add(
                 u64::try_from(Streamer::poll_period(self.rate).as_millis()).unwrap_or(u64::MAX),
             );
@@ -388,6 +549,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             }
             Err(e) => {
                 self.session = None;
+                self.end_recording(true);
                 self.flush_batch();
                 self.emit(disconnected(Some(session_error(&e))));
                 Step::Ended
@@ -402,8 +564,13 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 "Changing the rate needs authentication, which the meter refused.",
             ));
         }
+        // A queue restart can restart the device clock, which a recording
+        // cannot follow; the file keeps one rate.
+        if self.recording.is_some() {
+            return Err(UiError::usage("Stop the recording to change the rate."));
+        }
         let Some(session) = self.session.as_mut() else {
-            return Err(UiError::usage("The meter is not connected."));
+            return Err(not_connected());
         };
         session.start_stream(rate).map_err(|e| session_error(&e))?;
         self.rate = rate;
@@ -420,8 +587,34 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             // Best effort: the pipe closes either way.
             let _ = session.stop_stream();
             drop(session);
+            self.end_recording(false);
             self.flush_batch();
             self.emit(disconnected(None));
+        }
+    }
+
+    /// Carry out one request from the UI and send back the answer.
+    fn apply(&mut self, command: Command) {
+        // A requester that gave up waiting has dropped its receiver.
+        match command {
+            Command::SetRate(rate, reply) => {
+                let _ = reply.send(self.set_rate(rate));
+            }
+            Command::StartRecording(out, reply) => {
+                let _ = reply.send(self.start_recording(out));
+            }
+            Command::RecordTo(path, reply) => {
+                let _ = reply.send(self.record_to(&path));
+            }
+            Command::ExportTo(path, progress, reply) => {
+                let _ = reply.send(self.export_to(&path, progress));
+            }
+            Command::StopRecording(reply) => {
+                let _ = reply.send(self.stop_recording());
+            }
+            Command::Export(out, progress, reply) => {
+                let _ = reply.send(self.export(out, progress));
+            }
         }
     }
 }
@@ -429,26 +622,107 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
 /// Requests the UI sends to a running worker, applied between steps.
 enum Command {
     SetRate(Rate, mpsc::Sender<Result<(), UiError>>),
+    StartRecording(Box<dyn Write + Send>, mpsc::Sender<Result<(), UiError>>),
+    RecordTo(PathBuf, mpsc::Sender<Result<(), UiError>>),
+    ExportTo(
+        PathBuf,
+        ProgressFn,
+        mpsc::Sender<Result<ExportJob, UiError>>,
+    ),
+    StopRecording(mpsc::Sender<Result<RecordingSummary, UiError>>),
+    Export(Box<dyn Write + Send>, ProgressFn, mpsc::Sender<ExportJob>),
 }
+
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Command::SetRate(rate, _) => f.debug_tuple("SetRate").field(rate).finish(),
+            Command::StartRecording(..) => f.write_str("StartRecording"),
+            Command::RecordTo(path, _) => f.debug_tuple("RecordTo").field(path).finish(),
+            Command::ExportTo(path, ..) => f.debug_tuple("ExportTo").field(path).finish(),
+            Command::StopRecording(_) => f.write_str("StopRecording"),
+            Command::Export(..) => f.write_str("Export"),
+        }
+    }
+}
+
+type ProgressFn = Box<dyn FnMut(ExportProgress) + Send>;
+
+/// A running export: joins to the rows written.
+pub type ExportJob = JoinHandle<Result<u64, UiError>>;
 
 /// How long a request to the worker may take before the UI gives up.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Sends rate changes to a running worker.
+/// Sends rate, recording and export requests to a running worker. It works
+/// without the [`WorkerHandle`], so a caller can wait for the answer without
+/// holding the lock that guards the handle.
 #[derive(Debug, Clone)]
-pub struct RateControl {
+pub struct WorkerControl {
     commands: mpsc::Sender<Command>,
 }
 
-impl RateControl {
+/// The answer when the worker is gone or does not reply in time.
+fn not_connected() -> UiError {
+    UiError::usage("The meter is not connected.")
+}
+
+impl WorkerControl {
+    /// Send `command` and wait (up to [`COMMAND_TIMEOUT`]) for its answer.
+    fn ask<R>(&self, command: Command, answer: &mpsc::Receiver<R>) -> Result<R, UiError> {
+        self.commands.send(command).map_err(|_| not_connected())?;
+        answer
+            .recv_timeout(COMMAND_TIMEOUT)
+            .map_err(|_| not_connected())
+    }
+
     /// Restart the running queue at `rate` and wait for the worker's answer.
     pub fn set_rate(&self, rate: Rate) -> Result<(), UiError> {
-        let gone = || UiError::usage("The meter is not connected.");
         let (reply, answer) = mpsc::channel();
-        self.commands
-            .send(Command::SetRate(rate, reply))
-            .map_err(|_| gone())?;
-        answer.recv_timeout(COMMAND_TIMEOUT).map_err(|_| gone())?
+        self.ask(Command::SetRate(rate, reply), &answer)?
+    }
+
+    /// Start recording to `out` and wait for the worker's answer.
+    pub fn start_recording(&self, out: Box<dyn Write + Send>) -> Result<(), UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::StartRecording(out, reply), &answer)?
+    }
+
+    /// Record to a new file at `path`. The worker checks first and creates
+    /// the file only when it is going to record, so a refused start (or a
+    /// timed-out answer) never truncates or deletes anything.
+    pub fn record_to(&self, path: &Path) -> Result<(), UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::RecordTo(path.to_owned(), reply), &answer)?
+    }
+
+    /// Stop the recording and return what it wrote.
+    pub fn stop_recording(&self) -> Result<RecordingSummary, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::StopRecording(reply), &answer)?
+    }
+
+    /// Export the session so far to `out` on a thread of its own.
+    pub fn export(
+        &self,
+        out: Box<dyn Write + Send>,
+        progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> Result<ExportJob, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::Export(out, Box::new(progress), reply), &answer)
+    }
+
+    /// Create the file at `path` and export the session to it.
+    pub fn export_to(
+        &self,
+        path: &Path,
+        progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> Result<ExportJob, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(
+            Command::ExportTo(path.to_owned(), Box::new(progress), reply),
+            &answer,
+        )?
     }
 }
 
@@ -461,14 +735,6 @@ pub struct WorkerHandle {
     thread: Option<JoinHandle<()>>,
 }
 
-impl std::fmt::Debug for Command {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Command::SetRate(rate, _) => f.debug_tuple("SetRate").field(rate).finish(),
-        }
-    }
-}
-
 impl WorkerHandle {
     /// The worker thread has ended (session closed or failed).
     pub fn is_finished(&self) -> bool {
@@ -477,13 +743,12 @@ impl WorkerHandle {
 
     /// Restart the running queue at `rate`.
     pub fn set_rate(&self, rate: Rate) -> Result<(), UiError> {
-        self.rate_control().set_rate(rate)
+        self.control().set_rate(rate)
     }
 
-    /// A rate changer that works without this handle, so a caller can wait
-    /// for the answer without holding the lock that guards the handle.
-    pub fn rate_control(&self) -> RateControl {
-        RateControl {
+    /// A rate, recording and export control that works without this handle.
+    pub fn control(&self) -> WorkerControl {
+        WorkerControl {
             commands: self.commands.clone(),
         }
     }
@@ -579,9 +844,7 @@ fn run_worker<T, C, O>(
     'run: while !stop.load(Ordering::SeqCst) {
         loop {
             match inbox.try_recv() {
-                Ok(Command::SetRate(rate, reply)) => {
-                    let _ = reply.send(worker.set_rate(rate));
-                }
+                Ok(command) => worker.apply(command),
                 Err(mpsc::TryRecvError::Empty) => break,
                 // Every handle is gone: nobody can stop or steer this session.
                 Err(mpsc::TryRecvError::Disconnected) => break 'run,

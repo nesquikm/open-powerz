@@ -1,18 +1,22 @@
 pub mod batch;
 pub mod devices;
+pub mod recording;
 pub mod ui_error;
 pub mod worker;
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use powerz_protocol::session::SystemClock;
 use powerz_protocol::transport::discovery;
 use tauri::ipc::Channel;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::devices::{AppOpener, DeviceListing, DeviceManager, WatchHandle};
+use crate::recording::{ExportProgress, RecordingSummary};
 use crate::ui_error::UiError;
-use crate::worker::BackendEvent;
+use crate::worker::{BackendEvent, WorkerControl};
 
 /// The app and protocol-library versions shown in the About dialog.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -153,6 +157,114 @@ async fn set_rate(state: Shared<'_>, rate_sps: u32) -> Result<(), UiError> {
     .await
 }
 
+/// Ask where to save a CSV file, proposing `suggested_name`; `None` when
+/// the dialog is cancelled. Blocks: call it on a blocking thread.
+fn ask_save_path(
+    app: &tauri::AppHandle,
+    suggested_name: &str,
+) -> Option<tauri_plugin_dialog::FilePath> {
+    app.dialog()
+        .file()
+        .set_file_name(suggested_name)
+        .add_filter("CSV", &["csv"])
+        .blocking_save_file()
+}
+
+/// Refuse before the dialog when no meter is connected, ask where to save,
+/// then run `then` with the open session's control and the chosen path;
+/// `None` when the dialog was cancelled (nothing runs). The control is taken
+/// again after the dialog, since the session may have ended meanwhile.
+fn with_save_path<R>(
+    state: &AppState,
+    app: &tauri::AppHandle,
+    suggested_name: &str,
+    then: impl FnOnce(WorkerControl, &Path) -> Result<R, UiError>,
+) -> Result<Option<R>, UiError> {
+    state.manager().control()?;
+    let Some(choice) = ask_save_path(app, suggested_name) else {
+        return Ok(None);
+    };
+    // A save dialog that answers with something other than a file path is a
+    // fault, not a cancel.
+    let path = choice.into_path().map_err(|_| {
+        UiError::usage(
+            "The save dialog did not return a file on disk; pick a folder on this computer.",
+        )
+    })?;
+    let control = state.manager().control()?;
+    then(control, &path).map(Some)
+}
+
+/// Open the save dialog with `suggested_name` and record the stream to the
+/// chosen file. Resolves to the path, or `null` when the dialog was
+/// cancelled (nothing starts).
+#[tauri::command]
+async fn start_recording(
+    app: tauri::AppHandle,
+    state: Shared<'_>,
+    suggested_name: String,
+) -> Result<Option<String>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        with_save_path(&state, &app, &suggested_name, |control, path| {
+            control.record_to(path)?;
+            Ok(path.to_string_lossy().into_owned())
+        })
+    })
+    .await
+}
+
+/// Stop the recording and return its row count and gaps.
+#[tauri::command]
+async fn stop_recording(state: Shared<'_>) -> Result<RecordingSummary, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().control()?;
+        control.stop_recording()
+    })
+    .await
+}
+
+/// Where an export went and how many rows it wrote.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExportResult {
+    pub path: String,
+    pub rows: u64,
+}
+
+/// Open the save dialog with `suggested_name` and export the session so far
+/// to the chosen file, with progress over `on_progress`. Resolves to `null`
+/// when the dialog was cancelled.
+#[tauri::command]
+async fn export_session(
+    app: tauri::AppHandle,
+    state: Shared<'_>,
+    suggested_name: String,
+    on_progress: Channel<ExportProgress>,
+) -> Result<Option<ExportResult>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        with_save_path(&state, &app, &suggested_name, |control, path| {
+            let job = control.export_to(path, move |p| {
+                let _ = on_progress.send(p);
+            })?;
+            let rows = job
+                .join()
+                .map_err(|_| UiError::internal())
+                .and_then(|done| done)
+                .inspect_err(|_| {
+                    // A half-written export is worse than none.
+                    let _ = std::fs::remove_file(path);
+                })?;
+            Ok(ExportResult {
+                path: path.to_string_lossy().into_owned(),
+                rows,
+            })
+        })
+    })
+    .await
+}
+
 /// The worker's event sink over one `tauri::ipc::Channel`: batches, gaps,
 /// status and errors all reach the UI through it. A failed send means the
 /// window is gone: the event is dropped and `stop` is raised so the worker
@@ -171,6 +283,7 @@ pub fn channel_sink(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(AppState::new()))
         .invoke_handler(tauri::generate_handler![
             app_info,
@@ -178,7 +291,10 @@ pub fn run() {
             watch_devices,
             connect,
             disconnect,
-            set_rate
+            set_rate,
+            start_recording,
+            stop_recording,
+            export_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running the open-powerz desktop app");

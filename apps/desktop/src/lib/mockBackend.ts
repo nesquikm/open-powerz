@@ -6,13 +6,25 @@
  * while the queue runs at 1000 SPS.
  */
 
-import type { AppInfo, BackendEvent, DeviceListing, Sample, UiError } from "./backend";
+import type {
+  AppInfo,
+  BackendEvent,
+  DeviceListing,
+  ExportProgress,
+  ExportResult,
+  RecordingSummary,
+  Sample,
+  UiError,
+} from "./backend";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
 
 /** Batches go out every 25 ms: 40 Hz, inside the backend's 20–60 Hz band. */
 const BATCH_MS = 25;
+
+/** Recording progress goes out every 500 ms, like the backend's. */
+const PROGRESS_MS = 500;
 
 function usage(message: string): UiError {
   return { kind: "usage", message, hint: null };
@@ -64,6 +76,17 @@ interface Running {
   carry: number;
   timer: ReturnType<typeof setInterval>;
   onEvent: (event: BackendEvent) => void;
+  /** Samples streamed so far (what an export writes). */
+  streamed: number;
+  /** The open recording, if any. */
+  recording: MockRecording | null;
+}
+
+interface MockRecording {
+  path: string;
+  rows: number;
+  elapsedMs: number;
+  sinceProgressMs: number;
 }
 
 /** One page-lifetime instance; a running session's timer stops on `disconnect()` or
@@ -115,6 +138,8 @@ export class MockBackend {
       nextMs: 0,
       carry: 0,
       onEvent,
+      streamed: 0,
+      recording: null,
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
     this.#session = session;
@@ -132,6 +157,20 @@ export class MockBackend {
     }
     const tempC = s.rateSps === 1000 ? null : 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
     s.onEvent({ type: "batch", data: { samples, temp_c: tempC } });
+    s.streamed += n;
+    const rec = s.recording;
+    if (rec) {
+      rec.rows += n;
+      rec.elapsedMs += BATCH_MS;
+      rec.sinceProgressMs += BATCH_MS;
+      if (rec.sinceProgressMs >= PROGRESS_MS) {
+        rec.sinceProgressMs = 0;
+        s.onEvent({
+          type: "recording",
+          data: { state: "progress", rows: rec.rows, elapsed_ms: rec.elapsedMs },
+        });
+      }
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -139,6 +178,14 @@ export class MockBackend {
     if (!s) throw usage("No meter is connected.");
     clearInterval(s.timer);
     this.#session = null;
+    if (s.recording) {
+      const rows = s.recording.rows;
+      s.recording = null;
+      s.onEvent({
+        type: "recording",
+        data: { state: "stopped", rows, gaps: [], disconnected: true },
+      });
+    }
     s.onEvent({ type: "status", data: { state: "disconnected", error: null } });
   }
 
@@ -148,6 +195,41 @@ export class MockBackend {
     s.rateSps = rateSps;
     s.carry = 0;
     s.onEvent({ type: "status", data: { state: "rate", rate_sps: rateSps, rate_locked: false } });
+  }
+
+  /** There is no save dialog in the browser: the proposed name is the "path". */
+  async startRecording(suggestedName: string): Promise<string | null> {
+    const s = this.#session;
+    if (!s) throw usage("No meter is connected.");
+    if (s.recording) throw usage("A recording is already running.");
+    s.recording = { path: suggestedName, rows: 0, elapsedMs: 0, sinceProgressMs: 0 };
+    s.onEvent({ type: "recording", data: { state: "started" } });
+    return suggestedName;
+  }
+
+  async stopRecording(): Promise<RecordingSummary> {
+    const s = this.#session;
+    if (!s) throw usage("No meter is connected.");
+    const rec = s.recording;
+    if (!rec) throw usage("Nothing is being recorded.");
+    s.recording = null;
+    return { rows: rec.rows, gaps: [], disconnected: false };
+  }
+
+  /** Exports every sample streamed so far, finishing on the next timer tick. */
+  async exportSession(
+    suggestedName: string,
+    onProgress: (progress: ExportProgress) => void,
+  ): Promise<ExportResult | null> {
+    const s = this.#session;
+    if (!s) throw usage("No meter is connected.");
+    const rows = s.streamed;
+    return new Promise((resolve) =>
+      setTimeout(() => {
+        onProgress({ done: rows, total: rows });
+        resolve({ path: suggestedName, rows });
+      }, 0),
+    );
   }
 
   async appInfo(): Promise<AppInfo> {

@@ -131,3 +131,58 @@ describe("appInfo (AC-AH2AEK.8)", () => {
     expect(invoke).toHaveBeenCalledWith("app_info");
   });
 });
+
+// ---- FR 0P7HSJ: recording and export commands ----
+
+describe("recording commands (AC-0P7HSJ.3, AC-0P7HSJ.5)", () => {
+  it("starts a recording with the proposed name and returns the chosen path", async () => {
+    const { startRecording } = await import("./backend");
+    invoke.mockResolvedValue("/home/u/powerz-20261021-090507.csv");
+    await expect(startRecording("powerz-20261021-090507.csv")).resolves.toBe(
+      "/home/u/powerz-20261021-090507.csv",
+    );
+    expect(invoke).toHaveBeenCalledWith("start_recording", {
+      suggestedName: "powerz-20261021-090507.csv",
+    });
+  });
+
+  it("resolves to null when the save dialog is cancelled", async () => {
+    const { startRecording } = await import("./backend");
+    invoke.mockResolvedValue(null);
+    await expect(startRecording("powerz.csv")).resolves.toBeNull();
+  });
+
+  it("stops a recording and returns its summary", async () => {
+    const { stopRecording } = await import("./backend");
+    const summary = { rows: 12, gaps: [], disconnected: false };
+    invoke.mockResolvedValue(summary);
+    await expect(stopRecording()).resolves.toEqual(summary);
+    expect(invoke).toHaveBeenCalledWith("stop_recording");
+  });
+
+  it("exports the session with a progress channel", async () => {
+    const { exportSession } = await import("./backend");
+    invoke.mockResolvedValue({ path: "/tmp/x.csv", rows: 3 });
+    const seen: unknown[] = [];
+    const result = exportSession("powerz-x.csv", (p) => seen.push(p));
+    expect(invoke).toHaveBeenCalledWith("export_session", {
+      suggestedName: "powerz-x.csv",
+      onProgress: channels.at(-1),
+    });
+    channels.at(-1)?.onmessage({ done: 1, total: 3 });
+    await expect(result).resolves.toEqual({ path: "/tmp/x.csv", rows: 3 });
+    expect(seen).toEqual([{ done: 1, total: 3 }]);
+  });
+
+  it("forwards recording events from the session channel", async () => {
+    invoke.mockResolvedValue(undefined);
+    const events: BackendEvent[] = [];
+    await connect("demo:idle", 50, (ev) => events.push(ev));
+    const ev: BackendEvent = {
+      type: "recording",
+      data: { state: "progress", rows: 4, elapsed_ms: 1000 },
+    };
+    channels.at(-1)?.onmessage(ev);
+    expect(events).toEqual([ev]);
+  });
+});

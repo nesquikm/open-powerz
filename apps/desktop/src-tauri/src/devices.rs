@@ -4,6 +4,7 @@
 //! device adds one entry per simulator scenario.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -18,6 +19,7 @@ use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{Persona, Scenario, SimDevice};
 use serde::Serialize;
 
+use crate::recording::{ExportProgress, RecordingSummary};
 use crate::ui_error::UiError;
 use crate::worker::{
     self, BackendEvent, EventSink, Gap, GapKind, Status, WorkerConfig, WorkerHandle,
@@ -342,12 +344,38 @@ where
 
     /// What [`DeviceManager::set_rate`] needs, so a caller can wait for the
     /// worker's answer after releasing its lock on the manager.
-    pub fn rate_control(&self, rate_sps: u32) -> Result<(worker::RateControl, Rate), UiError> {
+    pub fn rate_control(&self, rate_sps: u32) -> Result<(worker::WorkerControl, Rate), UiError> {
         let rate = supported_rate(rate_sps)?;
+        Ok((self.control()?, rate))
+    }
+
+    /// Recording and export control of the open session, so a caller can
+    /// wait for the worker's answer after releasing its lock on the manager.
+    pub fn control(&self) -> Result<worker::WorkerControl, UiError> {
         match &self.worker {
-            Some(worker) if !worker.is_finished() => Ok((worker.rate_control(), rate)),
+            Some(worker) if !worker.is_finished() => Ok(worker.control()),
             _ => Err(UiError::usage("No meter is connected.")),
         }
+    }
+
+    /// Record the open session's stream to a new file at `path`.
+    pub fn start_recording(&self, path: &Path) -> Result<(), UiError> {
+        self.control()?.record_to(path)
+    }
+
+    /// Stop the recording and return what it wrote.
+    pub fn stop_recording(&self) -> Result<RecordingSummary, UiError> {
+        self.control()?.stop_recording()
+    }
+
+    /// Export the open session so far to a new file at `path` on a thread
+    /// of its own; `progress` is called on that thread.
+    pub fn export_session(
+        &self,
+        path: &Path,
+        progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> Result<worker::ExportJob, UiError> {
+        self.control()?.export_to(path, progress)
     }
 
     /// Take the open session out of the manager, so a caller can close it

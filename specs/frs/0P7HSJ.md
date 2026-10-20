@@ -41,4 +41,4 @@ The CLI suite proves the extraction is behaviour-neutral. Golden-file tests comp
 
 ## Notes
 
-The `powerz list --include-demo` empty help text is fixed in the first commit of this milestone, alongside the crate extraction.
+The rate cannot change while a recording is open: a queue restart can restart the device clock, and one file keeps one rate. A user disconnect ends a recording as stopped, an unplug as unplugged.
