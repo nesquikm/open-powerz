@@ -11,6 +11,7 @@ keywords = ["usb-c", "usb-pd", "power-meter", "km003c", "power-z"]
 categories = ["hardware-support"]
 
 [dependencies]
+crc32fast = "1.5.3"
 thiserror = "2"
 
 [lints]

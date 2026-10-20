@@ -2436,6 +2436,7 @@ dependencies = [
 name = "powerz-protocol"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "proptest",
  "sha2 0.11.1",
  "thiserror 2.0.21",
