@@ -315,7 +315,9 @@ four known addresses were read at auth level 0. [device] It does need CONNECT
 first on firmware 2.0.6: without a prior CONNECT on the bulk pipe the meter
 answers the memory read with REJECT (`06 id 00 00`); after CONNECT the same
 request succeeds (checked 2026-10-20 with the `powerz` CLI). Auth reads the UID
-or OTP by memory read, so it needs CONNECT too.
+or OTP by memory read, so it needs CONNECT too. [device] Over CDC the meter gives no
+reply at all to a memory read (FW 2.0.6, 2026-10-20), and CONNECT cannot be sent there
+(0x02 starts ADCNEW), so device info, auth and choosing the queue rate need the bulk pipe.
 
 Request: header `44 id 01 01`, then 32 bytes, the AES-128-ECB encryption
 (key slot 0, see `crypto::keys`) of this plaintext: [static] [device]

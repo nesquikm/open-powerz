@@ -15,7 +15,7 @@ use crate::error::CliError;
 pub enum TransportKind {
     /// Vendor bulk interface: fastest, supports every command.
     Bulk,
-    /// CDC virtual serial port.
+    /// CDC virtual serial port: `read` and `watch` only
     Cdc,
     /// HID interface: no driver needed, `read` and `watch` only.
     Hid,
@@ -156,6 +156,14 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
     if cli.transport == TransportKind::Hid && !hid_ok {
         return Err(CliError::Usage(format!(
             "--transport hid supports only `read` and `watch`, not `{}`",
+            cli.command.name()
+        )));
+    }
+    // FW 2.0.6 answers no memory read over CDC (it needs CONNECT, whose byte
+    // starts the ADCNEW stream there), so device info and auth need bulk.
+    if cli.transport == TransportKind::Cdc && !hid_ok {
+        return Err(CliError::Usage(format!(
+            "--transport cdc supports only `read` and `watch`, not `{}`; use --transport bulk",
             cli.command.name()
         )));
     }

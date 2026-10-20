@@ -553,6 +553,14 @@ fn hid_is_accepted_only_for_read_and_watch() {
         &["powerz", "--transport", "hid", "read"][..],
         &["powerz", "--transport", "hid", "watch"],
         &["powerz", "--transport", "bulk", "info"],
+        // CDC carries read/watch only (FW 2.0.6: no memory read over CDC).
+        &["powerz", "--transport", "cdc", "read"],
+        &["powerz", "info"],
+    ] {
+        assert_eq!(validate(&parse(args)), Ok(()), "{args:?}");
+    }
+    for args in [
+        &["powerz", "--transport", "hid", "info"][..],
         &[
             "powerz",
             "--transport",
@@ -563,12 +571,6 @@ fn hid_is_accepted_only_for_read_and_watch() {
             "--csv",
             "o.csv",
         ],
-        &["powerz", "info"],
-    ] {
-        assert_eq!(validate(&parse(args)), Ok(()), "{args:?}");
-    }
-    for args in [
-        &["powerz", "--transport", "hid", "info"][..],
         &[
             "powerz",
             "--transport",
@@ -582,7 +584,8 @@ fn hid_is_accepted_only_for_read_and_watch() {
     ] {
         let e = validate(&parse(args)).unwrap_err();
         assert_eq!(e.exit_code(), 2, "{args:?}: {e:?}");
-        assert!(e.to_string().to_lowercase().contains("hid"), "{e}");
+        // The message names the transport that was refused.
+        assert!(e.to_string().to_lowercase().contains(args[2]), "{e}");
     }
 }
 

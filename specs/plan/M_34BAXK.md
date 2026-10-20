@@ -49,7 +49,7 @@ codename: Wire Whisperer
   verify: `cargo test -p powerz-protocol --test session_stream`
 - [x] powerz command-line tool — STQEA1
   verify: `cargo test -p powerz-cli`
-- [ ] Device simulator and end-to-end tests — G0W08Z
+- [x] Device simulator and end-to-end tests — G0W08Z
   verify: `cargo test -p powerz-sim -p powerz-cli`
 - [ ] Real-device smoke run of every `powerz` subcommand on the KM003C over bulk and CDC (manual)
   verify: transcript of `powerz list/info/read/stream --rate 1000` attached to the PR

@@ -122,3 +122,28 @@ fn hid_with_stream_is_usage_error_and_writes_no_file() {
     assert!(!csv.exists(), "no CSV may be created on a usage error");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// FW 2.0.6 answers no memory read over CDC (CONNECT, which memory read
+/// needs, is the ADCNEW start byte there), so `info` and `stream` (auth reads
+/// the UID) are refused up front instead of timing out.
+#[test]
+fn cdc_with_info_or_stream_is_usage_error() {
+    powerz()
+        .args(["--transport", "cdc", "info"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cdc"))
+        .stderr(predicate::str::contains("bulk"));
+    powerz()
+        .args([
+            "--transport",
+            "cdc",
+            "stream",
+            "--rate",
+            "50",
+            "--csv",
+            "x.csv",
+        ])
+        .assert()
+        .code(2);
+}
