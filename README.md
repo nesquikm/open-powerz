@@ -29,6 +29,8 @@ modern UI.
 | `apps/desktop` | Tauri 2 desktop app (Svelte 5 + TypeScript + Vite, uPlot charts) |
 | `specs/` | requirements, technical spec, plans |
 
+The USB protocol the meter speaks is documented in [docs/protocol.md](docs/protocol.md).
+
 ## Building
 
 Requirements: Rust (stable, 1.96 or newer), [Bun](https://bun.sh), and the

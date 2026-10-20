@@ -14,3 +14,6 @@ categories = ["hardware-support"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+sha2 = "0.11.1"
