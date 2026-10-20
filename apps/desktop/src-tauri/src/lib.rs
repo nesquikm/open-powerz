@@ -14,14 +14,20 @@ use crate::devices::{AppOpener, DeviceListing, DeviceManager, WatchHandle};
 use crate::ui_error::UiError;
 use crate::worker::BackendEvent;
 
+/// The app and protocol-library versions shown in the About dialog.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppInfo {
+    pub app_version: String,
+    pub protocol_version: String,
+}
+
 /// Returns the app and protocol-library version for the About screen.
 #[tauri::command]
-fn app_info() -> String {
-    format!(
-        "open-powerz {} (VID 0x{:04X})",
-        env!("CARGO_PKG_VERSION"),
-        powerz_protocol::VID
-    )
+fn app_info() -> AppInfo {
+    AppInfo {
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        protocol_version: powerz_protocol::VERSION.to_owned(),
+    }
 }
 
 type AppManager = DeviceManager<AppOpener, SystemClock>;
@@ -183,8 +189,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_info_names_the_vendor_id() {
-        assert!(app_info().contains("0x5FC9"));
+    fn app_info_reports_the_protocol_library_version() {
+        // The About info reports the protocol library's own version.
+        assert_eq!(app_info().protocol_version, powerz_protocol::VERSION);
+    }
+
+    fn is_semver(v: &str) -> bool {
+        let parts: Vec<&str> = v.split('.').collect();
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    }
+
+    #[test]
+    fn app_info_reports_both_versions_as_semver() {
+        let info = app_info();
+        assert!(is_semver(&info.app_version), "{info:?}");
+        assert!(is_semver(&info.protocol_version), "{info:?}");
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(json.get("app_version").is_some() && json.get("protocol_version").is_some());
     }
 
     #[test]

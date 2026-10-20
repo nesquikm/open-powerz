@@ -1,42 +1,216 @@
 <script lang="ts">
-  import { invoke, isTauri } from "@tauri-apps/api/core";
-  import { formatVolts } from "./lib/units";
+  import { connect, disconnect, setRate, toUiError } from "./lib/backend";
+  import About from "./lib/components/About.svelte";
+  import ErrorBanner from "./lib/components/ErrorBanner.svelte";
+  import Readout from "./lib/components/Readout.svelte";
+  import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
+  import StatsPanel from "./lib/components/StatsPanel.svelte";
+  import TopBar from "./lib/components/TopBar.svelte";
+  import { setContext } from "svelte";
+  import { Session } from "./lib/session.svelte";
+  import { shortcutFor, type ShortcutAction } from "./lib/shortcuts";
+  import {
+    applyTheme,
+    browserStorage,
+    DARK_QUERY,
+    loadTheme,
+    motionSettings,
+    nextTheme,
+    prefersReducedMotion,
+    REDUCED_MOTION_QUERY,
+    resolveTheme,
+    saveTheme,
+    systemPrefersDark,
+    watchMediaQuery,
+    type MotionSettings,
+    type ThemeChoice,
+  } from "./lib/theme";
 
-  let info = $state("loading…");
+  const session = new Session();
+
+  const storage = browserStorage();
+  let themeChoice: ThemeChoice = $state(loadTheme(storage));
+  const matchMedia = window.matchMedia?.bind(window);
+  let systemDark = $state(systemPrefersDark(matchMedia));
+  // Follow OS light/dark changes (only visible while the choice is System).
+  $effect(() => watchMediaQuery(DARK_QUERY, (dark) => (systemDark = dark)));
 
   $effect(() => {
-    if (!isTauri()) {
-      info = "running in a browser (no device access)";
+    applyTheme(resolveTheme(themeChoice, systemDark), document.documentElement);
+  });
+
+  // Reduced motion (AC-AH2AEK.7): follow the OS setting live; the chart reads
+  // `getContext<() => MotionSettings>("motion")().chartScroll`.
+  let reducedMotion = $state(prefersReducedMotion(matchMedia));
+  const motion: MotionSettings = $derived(motionSettings(reducedMotion));
+  setContext("motion", () => motion);
+  $effect(() => watchMediaQuery(REDUCED_MOTION_QUERY, (reduced) => (reducedMotion = reduced)));
+
+  function cycleTheme(): void {
+    themeChoice = nextTheme(themeChoice);
+    saveTheme(themeChoice, storage);
+  }
+
+  /** Rate requested on connect (and changed by the 1–4 shortcuts). */
+  let requestedRateSps = $state(50);
+
+  /** A disconnect is on its way; a second press must not send another. */
+  let disconnecting = false;
+
+  async function toggleConnection(): Promise<void> {
+    // A second press while a connect is still pending would race it.
+    if (!session.canToggleConnect) return;
+    if (session.active) {
+      if (disconnecting) return;
+      disconnecting = true;
+      // A refused disconnect leaves the stream running: show the error, keep the state.
+      await disconnect()
+        .catch((err: unknown) => session.reportError(toUiError(err)))
+        .finally(() => (disconnecting = false));
       return;
     }
-    invoke<string>("app_info").then(
-      (text) => (info = text),
-      (err: unknown) => (info = `error: ${String(err)}`),
-    );
-  });
+    const id = session.selectedId;
+    if (id === null) return;
+    session.beginConnect();
+    try {
+      await connect(id, requestedRateSps, (event) => session.handleEvent(event));
+    } catch (err) {
+      session.failConnect(toUiError(err));
+    }
+  }
+
+  async function selectRate(sps: number): Promise<void> {
+    requestedRateSps = sps;
+    if (session.state !== "streaming" && session.state !== "rate_locked") return;
+    // A failed rate change leaves the stream running; just surface the error.
+    await setRate(sps).catch((err: unknown) => session.reportError(toUiError(err)));
+  }
+
+  // Hooks filled in by later FRs (recording, stats, chart).
+  function toggleRecording(): void {}
+  function resetStats(): void {}
+  function returnChartToLive(): void {}
+
+  let helpOpen = $state(false);
+  let aboutOpen = $state(false);
+
+  function dispatchShortcut(action: ShortcutAction): void {
+    switch (action.kind) {
+      case "record":
+        toggleRecording();
+        break;
+      case "connect":
+        void toggleConnection();
+        break;
+      case "reset_stats":
+        resetStats();
+        break;
+      case "rate":
+        void selectRate(action.sps);
+        break;
+      case "live":
+        returnChartToLive();
+        break;
+      case "theme":
+        cycleTheme();
+        break;
+      case "help":
+        helpOpen = true;
+        break;
+    }
+  }
+
+  function onWindowKeydown(e: KeyboardEvent): void {
+    if (e.repeat) return;
+    const target = e.target instanceof HTMLElement ? e.target : null;
+    const action = shortcutFor({
+      key: e.key,
+      ctrlKey: e.ctrlKey,
+      metaKey: e.metaKey,
+      altKey: e.altKey,
+      shiftKey: e.shiftKey,
+      target:
+        target === null
+          ? null
+          : {
+              tagName: target.tagName,
+              type: target instanceof HTMLInputElement ? target.type : undefined,
+              isContentEditable: target.isContentEditable,
+            },
+    });
+    if (action === null) return;
+    e.preventDefault();
+    dispatchShortcut(action);
+  }
 </script>
 
-<main>
-  <h1>open-powerz</h1>
-  <p class="tagline">
-    Unofficial desktop app for the POWER-Z KM003C / KM002C. No device support yet.
-  </p>
-  <p class="reading" aria-label="VBUS">{formatVolts(0)}</p>
-  <p class="info">{info}</p>
-</main>
+<svelte:window onkeydown={onWindowKeydown} />
+
+<div class="shell">
+  <TopBar
+    {session}
+    {themeChoice}
+    onCycleTheme={cycleTheme}
+    onToggleConnect={() => void toggleConnection()}
+    onAbout={() => (aboutOpen = true)}
+    rateSps={session.rateSps ?? requestedRateSps}
+  />
+  <ErrorBanner {session} />
+  <main class="content">
+    <div class="main-area">
+      <Readout {session} />
+      <section class="chart panel" aria-label="Chart"></section>
+    </div>
+    <div class="side-panel">
+      <StatsPanel />
+    </div>
+  </main>
+  {#if helpOpen}
+    <ShortcutHelp onClose={() => (helpOpen = false)} />
+  {/if}
+  {#if aboutOpen}
+    <About onClose={() => (aboutOpen = false)} />
+  {/if}
+</div>
 
 <style>
-  main {
-    max-width: 48rem;
-    margin: 4rem auto;
-    padding: 0 1rem;
+  .shell {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    min-width: 0;
   }
-  .reading {
-    font-size: 3rem;
-    font-variant-numeric: tabular-nums;
+  /* Wide (>= 1200 px, LAYOUT_BREAKPOINT_PX in lib/layout.ts): stats beside the chart. */
+  .content {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 18rem;
+    grid-template-areas: "main side";
+    gap: 1rem;
+    padding: 1rem;
+    min-width: 0;
   }
-  .tagline,
-  .info {
-    color: var(--muted);
+  .main-area {
+    grid-area: main;
+    display: grid;
+    grid-template-rows: auto minmax(16rem, 1fr);
+    gap: 1rem;
+    min-width: 0;
+  }
+  .side-panel {
+    grid-area: side;
+    min-width: 0;
+  }
+  .chart {
+    min-width: 0;
+  }
+  /* Stacked (< 1200 px): stats panel moves under the chart. */
+  @media (max-width: 1199.98px) {
+    .content {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-areas:
+        "main"
+        "side";
+    }
   }
 </style>

@@ -14,6 +14,9 @@ pub mod transport;
 /// USB vendor ID shared by all POWER-Z meters.
 pub const VID: u16 = 0x5FC9;
 
+/// Version of this protocol library (its `Cargo.toml` version).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[cfg(test)]
 mod tests {
     use super::*;

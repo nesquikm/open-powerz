@@ -1,0 +1,55 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { backendAvailable, listDevices, toUiError, watchDevices } from "../backend";
+  import { deviceOptionLabel } from "../format";
+  import type { Session } from "../session.svelte";
+
+  let { session }: { session: Session } = $props();
+
+  onMount(() => {
+    if (!backendAvailable()) return;
+    // A listing failure is shown but does not touch the connection state.
+    const fail = (err: unknown) => session.reportError(toUiError(err));
+    // Hotplug: the backend pushes the full list on every change.
+    let unsubscribe: (() => void) | null = null;
+    let destroyed = false;
+    watchDevices((devices) => session.setDevices(devices))
+      .then((stop) => (destroyed ? stop() : (unsubscribe = stop)))
+      .catch(fail);
+    listDevices()
+      .then((devices) => session.setDevices(devices))
+      .catch(fail);
+    return () => {
+      destroyed = true;
+      unsubscribe?.();
+    };
+  });
+</script>
+
+<span class="device-picker">
+  <select
+    aria-label="Device"
+    disabled={session.active || session.devices.length === 0}
+    value={session.selectedId ?? ""}
+    onchange={(e) => session.select(e.currentTarget.value)}
+  >
+    {#each session.devices as device (device.id)}
+      <option value={device.id}>{deviceOptionLabel(device)}</option>
+    {:else}
+      <option value="">No device</option>
+    {/each}
+  </select>
+</span>
+
+<style>
+  .device-picker {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    min-width: 0;
+  }
+  select {
+    max-width: 16rem;
+    min-width: 0;
+  }
+</style>

@@ -36,7 +36,7 @@ codename: Live Wire
   verify: property tests and the release-mode 10M-sample timing test pass
 - [ ] Recording to file, session export, rate picker backend — 0P7HSJ
   verify: golden-file test matches `powerz stream` output for the same records
-- [ ] UI shell: layout, picker, readout, error banner, themes, shortcuts, About — AH2AEK
+- [x] UI shell: layout, picker, readout, error banner, themes, shortcuts, About — AH2AEK
   verify: Vitest passes; visual-check screenshots reviewed (light/dark × ~900/~1600 px × demo streaming/no device)
 - [ ] Stats panel and recording controls in the UI — AH2AEJ, 0P7HSJ
   verify: Vitest passes; visual-check screenshots of the panel reviewed in both themes

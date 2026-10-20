@@ -35,7 +35,7 @@ Build the desktop UI shell in Svelte 5: layout, device picker, live readout, err
 
 ## Technical Design
 
-Svelte 5 runes components: `TopBar`, `DevicePicker`, `Readout`, `StatsPanel`, `ErrorBanner`, `ShortcutHelp`, `About`. Logic lives in `src/lib/`: `backend.ts` (a typed wrapper over `invoke` and the event channel, and the single seam the Playwright mock replaces), `session.svelte.ts` (session state built from backend events), `format.ts`, `shortcuts.ts` and `theme.ts`. Theme colours are CSS custom properties per theme with `color-scheme` set; the choice persists in `localStorage`. Numbers use the system font stack with `font-variant-numeric: tabular-nums`. Layout uses CSS grid with one breakpoint at 1200 px.
+Svelte 5 runes components: `TopBar`, `DevicePicker`, `Readout`, `StatsPanel`, `ErrorBanner`, `ShortcutHelp`, `About` (the last two share a non-modal `Panel`). Logic lives in `src/lib/`: `backend.ts` (a typed wrapper over `invoke` and the event channel, and the single seam the Playwright mock replaces), `session.svelte.ts` (session state built from backend events), `format.ts`, `shortcuts.ts` and `theme.ts`. Theme colours are CSS custom properties per theme with `color-scheme` set; the choice persists in `localStorage`. Numbers use the system font stack with `font-variant-numeric: tabular-nums`. Layout uses CSS grid with one breakpoint at 1200 px.
 
 ## Testing
 

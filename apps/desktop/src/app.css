@@ -1,21 +1,89 @@
+/*
+ * Theme colors are CSS custom properties set on <html> at runtime by
+ * applyTheme() in lib/theme.ts, generated from THEME_COLORS (the palette the
+ * WCAG contrast tests check), so this file holds no color literals.
+ * <html data-theme="light|dark"> carries the resolved theme.
+ */
 :root {
-  --bg: #ffffff;
-  --fg: #16181d;
-  --muted: #5b6270;
   color-scheme: light dark;
   font-family: system-ui, sans-serif;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #111317;
-    --fg: #e8eaee;
-    --muted: #9aa1ad;
-  }
 }
 
 body {
   margin: 0;
   background: var(--bg);
-  color: var(--fg);
+  color: var(--text);
+}
+
+button,
+select {
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--control-border);
+  border-radius: 0.375rem;
+  padding: 0.3rem 0.7rem;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+button:not(:disabled):hover,
+select:not(:disabled):hover {
+  border-color: var(--text);
+}
+
+button:disabled,
+select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* The one main action in a group (Connect): filled with the accent. */
+button.primary {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+button.primary:not(:disabled):hover {
+  border-color: var(--text);
+}
+
+/* A card: readout, chart and stats sit on these. */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Reduced motion (AC-AH2AEK.7): no transitions or animations anywhere. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -17,8 +17,8 @@
 crates/powerz-protocol/src/
 └── lib.rs              # + #[cfg(test)] mod tests (one per module as modules land)
 apps/desktop/src/lib/
-├── units.ts
-└── units.test.ts
+├── backend.ts, mockBackend.ts, session.svelte.ts, format.ts, theme.ts, shortcuts.ts, … (+ *.test.ts)
+└── components/          # Svelte components (covered by the Playwright UI suite)
 ```
 
 Planned: a `tests` directory inside the protocol crate holding integration tests and a
