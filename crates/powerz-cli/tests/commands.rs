@@ -1,0 +1,929 @@
+//! Command-function tests for `powerz` (FR STQEA1, AC .1–.8) against
+//! scripted `MockTransport` sessions and in-memory sinks.
+
+mod common;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use clap::Parser;
+use common::*;
+use powerz_cli::record::CSV_HEADER;
+use powerz_cli::trace::TraceTransport;
+use powerz_cli::{
+    Cli, CliError, Command, StreamOptions, TransportKind, WatchOptions, info, list, read,
+    select_device, stream, validate, watch,
+};
+use powerz_protocol::decode::Rate;
+use powerz_protocol::session::{self, Gap, Streamer};
+use powerz_protocol::transport::discovery::Model;
+use powerz_protocol::transport::mock::{MockTransport, Step};
+use powerz_protocol::transport::{self, Transport, permission_error};
+use serde_json::Value;
+
+fn two_devices() -> Vec<powerz_protocol::transport::discovery::DeviceEntry> {
+    vec![
+        entry(Model::Km003c, 0x0063, Some(SYNTH_SERIAL), "3", 42),
+        entry(Model::Km002c, 0x0061, Some("654321"), "5", 17),
+    ]
+}
+
+fn parse(args: &[&str]) -> Cli {
+    Cli::try_parse_from(args).unwrap_or_else(|e| panic!("{args:?}: {e}"))
+}
+
+// ---- AC-STQEA1.1: list ----
+
+#[test]
+fn list_prints_one_line_per_meter_with_model_serial_bus_address() {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    list(&two_devices(), false, &mut out, &mut err).unwrap();
+    let out = text(&out);
+    let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "output:\n{out}");
+    assert!(lines[0].contains("KM003C"), "{}", lines[0]);
+    assert!(lines[0].contains(SYNTH_SERIAL), "{}", lines[0]);
+    assert!(
+        lines[0].contains('3') && lines[0].contains("42"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[1].contains("KM002C"), "{}", lines[1]);
+    assert!(lines[1].contains("654321"), "{}", lines[1]);
+    assert!(
+        lines[1].contains('5') && lines[1].contains("17"),
+        "{}",
+        lines[1]
+    );
+    assert!(text(&err).is_empty(), "stderr: {}", text(&err));
+}
+
+#[test]
+fn list_with_no_meter_reports_on_stderr_and_succeeds() {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let r = list(&[], false, &mut out, &mut err);
+    assert_eq!(r, Ok(()));
+    assert!(
+        text(&err).contains("no POWER-Z devices found"),
+        "stderr: {}",
+        text(&err)
+    );
+    assert!(text(&out).trim().is_empty(), "stdout: {}", text(&out));
+}
+
+#[test]
+fn list_json_is_array_of_model_serial_bus_address() {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    list(&two_devices(), true, &mut out, &mut err).unwrap();
+    let v: Value = serde_json::from_slice(&out).expect("valid JSON");
+    let arr = v.as_array().expect("JSON array");
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["model"], "KM003C");
+    assert_eq!(arr[0]["serial"], SYNTH_SERIAL);
+    assert_eq!(arr[0]["bus"], "3");
+    assert_eq!(arr[0]["address"], 42);
+    assert_eq!(arr[1]["model"], "KM002C");
+    assert_eq!(arr[1]["serial"], "654321");
+    assert_eq!(arr[1]["bus"], "5");
+    assert_eq!(arr[1]["address"], 17);
+}
+
+#[test]
+fn list_json_with_no_meter_is_empty_array() {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    list(&[], true, &mut out, &mut err).unwrap();
+    let v: Value = serde_json::from_slice(&out).expect("valid JSON");
+    assert_eq!(v, Value::Array(vec![]));
+}
+
+// ---- AC-STQEA1.2: info ----
+
+#[test]
+fn info_prints_model_versions_serial_and_uid() {
+    let mut s = session(MockTransport::new(device_info_steps(1)));
+    let mut out = Vec::new();
+    info(&mut s, false, &mut out).unwrap();
+    let out = text(&out);
+    for want in [SYNTH_MODEL, SYNTH_FW, SYNTH_HW, SYNTH_SERIAL, SYNTH_UID_HEX] {
+        assert!(out.contains(want), "missing {want} in:\n{out}");
+    }
+    assert_eq!(s.transport().remaining(), 0);
+}
+
+#[test]
+fn info_json_is_one_object() {
+    let mut s = session(MockTransport::new(device_info_steps(1)));
+    let mut out = Vec::new();
+    info(&mut s, true, &mut out).unwrap();
+    let v: Value = serde_json::from_slice(&out).expect("valid JSON");
+    assert!(v.is_object(), "{v}");
+    assert_eq!(v["model"], SYNTH_MODEL);
+    assert_eq!(v["firmware_version"], SYNTH_FW);
+    assert_eq!(v["hardware_version"], SYNTH_HW);
+    assert_eq!(v["serial"], SYNTH_SERIAL);
+    assert_eq!(v["uid"], SYNTH_UID_HEX);
+}
+
+// ---- AC-STQEA1.3: read ----
+
+/// The line of `out` holding `label` (any of the spellings) contains `value`.
+fn assert_labelled(out: &str, labels: &[&str], value: &str) {
+    let line = out
+        .lines()
+        .find(|l| labels.iter().any(|lab| l.contains(lab)))
+        .unwrap_or_else(|| panic!("no line with {labels:?} in:\n{out}"));
+    assert!(
+        line.contains(value),
+        "{labels:?}: expected {value} in {line:?}"
+    );
+}
+
+#[test]
+fn read_prints_every_value_with_units() {
+    let mut s = session(MockTransport::new(vec![adc_step(1, ADC_A)]));
+    let mut out = Vec::new();
+    read(&mut s, false, &mut out).unwrap();
+    let out = text(&out);
+    assert_labelled(&out, &["VBUS"], "5.123");
+    assert_labelled(&out, &["IBUS"], "-2.000");
+    assert_labelled(&out, &["ower"], "-10.246");
+    assert_labelled(&out, &["emp"], "25.0");
+    assert_labelled(&out, &["D+"], "0.600");
+    assert_labelled(&out, &["D-", "D−"], "0.400");
+    assert_labelled(&out, &["CC1"], "1.650");
+    assert_labelled(&out, &["CC2"], "0.123");
+    for unit in ["V", "A", "W", "°C"] {
+        assert!(out.contains(unit), "missing unit {unit} in:\n{out}");
+    }
+    assert_eq!(s.transport().remaining(), 0);
+}
+
+#[test]
+fn read_json_has_si_number_fields() {
+    let mut s = session(MockTransport::new(vec![adc_step(1, ADC_A)]));
+    let mut out = Vec::new();
+    read(&mut s, true, &mut out).unwrap();
+    let v: Value = serde_json::from_slice(&out).expect("valid JSON");
+    let num = |k: &str| {
+        v[k].as_f64()
+            .unwrap_or_else(|| panic!("{k} not a number: {v}"))
+    };
+    assert!(approx(num("vbus_v"), 5.123), "{v}");
+    assert!(approx(num("ibus_a"), -2.0), "{v}");
+    assert!(approx(num("power_w"), -10.246), "{v}");
+    assert!(approx(num("temp_c"), 25.0), "{v}");
+    assert!(approx(num("dp_v"), 0.6), "{v}");
+    assert!(approx(num("dm_v"), 0.4), "{v}");
+    assert!(approx(num("cc1_v"), 1.65), "{v}");
+    assert!(approx(num("cc2_v"), 0.1234), "{v}");
+}
+
+#[test]
+fn read_json_temp_is_null_when_invalid() {
+    let adc = Adc {
+        temp_raw: i16::MIN,
+        ..ADC_A
+    };
+    let mut s = session(MockTransport::new(vec![adc_step(1, adc)]));
+    let mut out = Vec::new();
+    read(&mut s, true, &mut out).unwrap();
+    let v: Value = serde_json::from_slice(&out).expect("valid JSON");
+    assert!(v.get("temp_c").is_some(), "temp_c must be present: {v}");
+    assert!(v["temp_c"].is_null(), "{v}");
+    assert!(approx(v["vbus_v"].as_f64().unwrap(), 5.123));
+}
+
+#[test]
+fn read_shows_temperature_with_one_decimal() {
+    // 3910 / 128 = 30.546875 °C.
+    let adc = Adc {
+        temp_raw: 3910,
+        ..ADC_A
+    };
+    let mut s = session(MockTransport::new(vec![adc_step(1, adc)]));
+    let mut out = Vec::new();
+    read(&mut s, false, &mut out).unwrap();
+    let out = text(&out);
+    let line = out.lines().find(|l| l.contains("Temp")).unwrap();
+    assert_eq!(line.trim_end(), "Temp:   30.5 °C", "in:\n{out}");
+}
+
+#[test]
+fn read_json_numbers_are_plain_decimals() {
+    // 1 µA: a float serializer would print -1e-6.
+    let adc = Adc {
+        ibus_ua: -1,
+        ..ADC_A
+    };
+    let mut s = session(MockTransport::new(vec![adc_step(1, adc)]));
+    let mut out = Vec::new();
+    read(&mut s, true, &mut out).unwrap();
+    let raw = text(&out);
+    assert!(
+        !["e-", "e+", "E-", "E+"].iter().any(|x| raw.contains(x)),
+        "exponent in:\n{raw}"
+    );
+    assert!(raw.contains("\"ibus_a\": -0.000001"), "{raw}");
+    assert!(raw.contains("\"temp_c\": 25.0"), "{raw}");
+    let v: Value = serde_json::from_str(&raw).expect("valid JSON");
+    assert!(approx(v["ibus_a"].as_f64().unwrap(), -0.000001), "{v}");
+}
+
+// ---- AC-STQEA1.4: watch ----
+
+/// Run `watch` with three scripted snapshots; `sleep` sets the stop flag on
+/// its third call (Ctrl-C). Returns (result, output, sleeps).
+fn run_watch(tty: bool) -> (Result<(), CliError>, String, Vec<Duration>, usize) {
+    let snaps = [
+        ADC_A,
+        Adc {
+            vbus_uv: 9_001_000,
+            ..ADC_A
+        },
+        Adc {
+            vbus_uv: 12_002_000,
+            ..ADC_A
+        },
+    ];
+    let script = snaps
+        .iter()
+        .enumerate()
+        .map(|(i, a)| adc_step(i as u8 + 1, *a))
+        .collect();
+    let mut s = session(MockTransport::new(script));
+    let stop = AtomicBool::new(false);
+    let mut sleeps = Vec::new();
+    let mut out = Vec::new();
+    let opts = WatchOptions {
+        interval: Duration::from_millis(250),
+        tty,
+    };
+    let r = watch(
+        &mut s,
+        &opts,
+        &stop,
+        &mut |d| {
+            sleeps.push(d);
+            if sleeps.len() == 3 {
+                stop.store(true, Ordering::SeqCst);
+            }
+        },
+        &mut out,
+    );
+    let remaining = s.transport().remaining();
+    (r, text(&out), sleeps, remaining)
+}
+
+#[test]
+fn watch_refreshes_every_interval_until_stopped() {
+    let (r, out, sleeps, remaining) = run_watch(false);
+    assert_eq!(r, Ok(()), "Ctrl-C must end watch successfully");
+    assert_eq!(remaining, 0, "all three snapshots must be read");
+    assert_eq!(sleeps, vec![Duration::from_millis(250); 3]);
+    let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        3,
+        "one line per refresh when not a tty:\n{out}"
+    );
+    assert!(lines[0].contains("5.123"), "{}", lines[0]);
+    assert!(lines[1].contains("9.001"), "{}", lines[1]);
+    assert!(lines[2].contains("12.002"), "{}", lines[2]);
+    assert!(!out.contains('\x1b'), "no ANSI escapes off a tty: {out:?}");
+}
+
+#[test]
+fn watch_on_a_tty_redraws_in_place_with_ansi() {
+    let (r, out, _sleeps, remaining) = run_watch(true);
+    assert_eq!(r, Ok(()));
+    assert_eq!(remaining, 0);
+    assert!(
+        out.contains("\x1b["),
+        "expected ANSI cursor movement: {out:?}"
+    );
+    assert!(out.contains("12.002"), "{out:?}");
+}
+
+#[test]
+fn watch_interval_defaults_to_200_and_has_minimum_50() {
+    match parse(&["powerz", "watch"]).command {
+        Command::Watch { interval } => assert_eq!(interval, 200),
+        other => panic!("{other:?}"),
+    }
+    match parse(&["powerz", "watch", "--interval", "50"]).command {
+        Command::Watch { interval } => assert_eq!(interval, 50),
+        other => panic!("{other:?}"),
+    }
+    let e = Cli::try_parse_from(["powerz", "watch", "--interval", "49"]).unwrap_err();
+    assert_eq!(e.exit_code(), 2);
+}
+
+// ---- AC-STQEA1.5: stream ----
+
+const START_UNIX_MS: u64 = 1_790_000_000_000;
+const BASE: u32 = 50_000;
+
+fn ts(offsets: &[u32]) -> Vec<u32> {
+    offsets.iter().map(|o| BASE + o).collect()
+}
+
+fn csv_rows(csv: &[u8]) -> (String, Vec<Vec<String>>) {
+    let text = text(csv);
+    let header = text.lines().next().unwrap_or_default().to_owned();
+    let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_reader(csv);
+    let rows = rdr
+        .records()
+        .map(|r| {
+            r.expect("valid CSV row")
+                .iter()
+                .map(str::to_owned)
+                .collect()
+        })
+        .collect();
+    (header, rows)
+}
+
+fn f(s: &str) -> f64 {
+    s.parse().unwrap_or_else(|_| panic!("not a number: {s:?}"))
+}
+
+fn check_row(row: &[String], k: u32) {
+    assert_eq!(row.len(), 12, "{row:?}");
+    let elapsed_s = f64::from(k) * 0.1;
+    assert_eq!(row[0], format!("0:00:00.{:03}", k * 100), "{row:?}");
+    assert!(
+        (f(&row[1]) - (START_UNIX_MS as f64 / 1000.0 + elapsed_s)).abs() < 1e-3,
+        "Unix {row:?}"
+    );
+    assert!(approx(f(&row[2]), 5.0), "VBUS {row:?}");
+    assert!(approx(f(&row[3]), -2.0), "IBUS {row:?}");
+    assert!(approx(f(&row[4]), 0.008), "DP {row:?}");
+    assert!(approx(f(&row[5]), 0.009), "DM {row:?}");
+    assert!(approx(f(&row[6]), 0.805), "CC1 {row:?}");
+    assert!(approx(f(&row[7]), 0.007), "CC2 {row:?}");
+    assert_eq!(row[8], "", "TEMP must be empty: {row:?}");
+    assert!(
+        approx(f(&row[9]), -2.0 * elapsed_s / 3600.0),
+        "CHARGE {row:?}"
+    );
+    assert!(
+        approx(f(&row[10]), -10.0 * elapsed_s / 3600.0),
+        "ENERGY {row:?}"
+    );
+    assert!(approx(f(&row[11]), -10.0), "PWR {row:?}");
+}
+
+#[test]
+fn stream_writes_vendor_csv_until_duration_and_stops_queue() {
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            poll_step(4, &ts(&[0, 100, 200])),
+            poll_step(5, &ts(&[300, 400])),
+            Step::transact(stop_queue(6), accept(6)),
+        ],
+    ]
+    .concat();
+    let mut s = session(Meter::new(script));
+    let stop = AtomicBool::new(false);
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: Some(Duration::from_millis(250)),
+        start_unix_ms: START_UNIX_MS,
+    };
+    let summary = stream(&mut s, &opts, &stop, &mut csv, &mut err).unwrap();
+
+    let (header, rows) = csv_rows(&csv);
+    assert_eq!(header, CSV_HEADER);
+    assert_eq!(
+        header,
+        "ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR"
+    );
+    assert_eq!(rows.len(), 3, "rows: {rows:?}");
+    for (k, row) in rows.iter().enumerate() {
+        check_row(row, k as u32);
+    }
+    assert_eq!(summary.samples, 3);
+    assert!(summary.gaps.is_empty(), "{:?}", summary.gaps);
+    assert_eq!(s.transport().inner.remaining(), 0, "queue must be stopped");
+    assert_eq!(
+        s.transport().inner.written().last(),
+        Some(&stop_queue(6)),
+        "last request must be STOP_QUEUE"
+    );
+    let err = text(&err);
+    assert!(
+        err.contains('3') && err.to_lowercase().contains("sample"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn stream_stops_queue_on_ctrl_c_and_keeps_received_rows() {
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            poll_step(4, &ts(&[0, 100, 200])),
+            poll_step(5, &ts(&[300, 400])),
+            Step::transact(stop_queue(6), accept(6)),
+        ],
+    ]
+    .concat();
+    let meter = Meter::new(script).stop_after_polls(2);
+    let stop = meter.stop.clone();
+    let mut s = session(meter);
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: None,
+        start_unix_ms: START_UNIX_MS,
+    };
+    let summary = stream(&mut s, &opts, &stop, &mut csv, &mut err).unwrap();
+    let (_, rows) = csv_rows(&csv);
+    assert_eq!(rows.len(), 5, "rows: {rows:?}");
+    for (k, row) in rows.iter().enumerate() {
+        check_row(row, k as u32);
+    }
+    assert_eq!(summary.samples, 5);
+    assert_eq!(s.transport().inner.remaining(), 0, "queue must be stopped");
+    assert!(text(&err).contains('5'), "stderr: {}", text(&err));
+}
+
+#[test]
+fn stream_reports_gaps_on_stderr() {
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            poll_step(4, &ts(&[0, 100, 200])),
+            poll_step(5, &ts(&[300, 600])),
+            Step::transact(stop_queue(6), accept(6)),
+        ],
+    ]
+    .concat();
+    let meter = Meter::new(script).stop_after_polls(2);
+    let stop = meter.stop.clone();
+    let mut s = session(meter);
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: None,
+        start_unix_ms: START_UNIX_MS,
+    };
+    let summary = stream(&mut s, &opts, &stop, &mut csv, &mut err).unwrap();
+    assert_eq!(
+        summary.gaps,
+        vec![Gap {
+            from_ms: BASE + 300,
+            to_ms: BASE + 600,
+            expected: 3,
+            received: 1,
+        }]
+    );
+    assert_eq!(summary.samples, 5);
+    let (_, rows) = csv_rows(&csv);
+    assert_eq!(rows.last().map(|r| r[0].as_str()), Some("0:00:00.600"));
+    assert!(
+        text(&err).to_lowercase().contains("gap"),
+        "stderr: {}",
+        text(&err)
+    );
+    assert_eq!(s.transport().inner.remaining(), 0);
+}
+
+#[test]
+fn stream_rate_accepts_only_2_10_50_1000() {
+    for rate in ["2", "10", "50", "1000"] {
+        parse(&["powerz", "stream", "--rate", rate, "--csv", "out.csv"]);
+    }
+    for rate in ["0", "7", "100", "fast"] {
+        let e = Cli::try_parse_from(["powerz", "stream", "--rate", rate, "--csv", "out.csv"])
+            .unwrap_err();
+        assert_eq!(e.exit_code(), 2, "rate {rate}");
+    }
+    match parse(&[
+        "powerz",
+        "stream",
+        "--rate",
+        "50",
+        "--csv",
+        "o.csv",
+        "--duration",
+        "1.5",
+    ])
+    .command
+    {
+        Command::Stream {
+            rate,
+            csv,
+            duration,
+        } => {
+            assert_eq!(rate, 50);
+            assert_eq!(csv, std::path::PathBuf::from("o.csv"));
+            assert_eq!(duration, Some(1.5));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---- AC-STQEA1.6: device and transport selection ----
+
+#[test]
+fn several_meters_without_device_is_usage_error_naming_serials() {
+    let devices = two_devices();
+    let e = select_device(&devices, None).unwrap_err();
+    assert_eq!(e.exit_code(), 2, "{e:?}");
+    let msg = e.to_string();
+    assert!(
+        msg.contains(SYNTH_SERIAL) && msg.contains("654321"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn device_flag_picks_the_matching_meter() {
+    let devices = two_devices();
+    assert_eq!(select_device(&devices, Some("654321")), Ok(&devices[1]));
+    assert_eq!(select_device(&devices, Some(SYNTH_SERIAL)), Ok(&devices[0]));
+}
+
+#[test]
+fn single_meter_needs_no_device_flag() {
+    let devices = vec![two_devices().remove(0)];
+    assert_eq!(select_device(&devices, None), Ok(&devices[0]));
+}
+
+#[test]
+fn unknown_serial_or_no_meter_is_no_matching_device() {
+    let devices = two_devices();
+    let e = select_device(&devices, Some("999999")).unwrap_err();
+    assert_eq!(e.exit_code(), 3, "{e:?}");
+    let e = select_device(&[], None).unwrap_err();
+    assert_eq!(e.exit_code(), 3, "{e:?}");
+}
+
+#[test]
+fn transport_defaults_to_bulk_and_parses_all_three() {
+    assert_eq!(parse(&["powerz", "read"]).transport, TransportKind::Bulk);
+    for (arg, kind) in [
+        ("bulk", TransportKind::Bulk),
+        ("cdc", TransportKind::Cdc),
+        ("hid", TransportKind::Hid),
+    ] {
+        assert_eq!(
+            parse(&["powerz", "--transport", arg, "read"]).transport,
+            kind
+        );
+    }
+    assert_eq!(
+        parse(&["powerz", "--device", "654321", "info"])
+            .device
+            .as_deref(),
+        Some("654321")
+    );
+}
+
+#[test]
+fn hid_is_accepted_only_for_read_and_watch() {
+    for args in [
+        &["powerz", "--transport", "hid", "read"][..],
+        &["powerz", "--transport", "hid", "watch"],
+        &["powerz", "--transport", "bulk", "info"],
+        // CDC carries read/watch only (FW 2.0.6: no memory read over CDC).
+        &["powerz", "--transport", "cdc", "read"],
+        &["powerz", "info"],
+    ] {
+        assert_eq!(validate(&parse(args)), Ok(()), "{args:?}");
+    }
+    for args in [
+        &["powerz", "--transport", "hid", "info"][..],
+        &[
+            "powerz",
+            "--transport",
+            "cdc",
+            "stream",
+            "--rate",
+            "10",
+            "--csv",
+            "o.csv",
+        ],
+        &[
+            "powerz",
+            "--transport",
+            "hid",
+            "stream",
+            "--rate",
+            "10",
+            "--csv",
+            "o.csv",
+        ],
+    ] {
+        let e = validate(&parse(args)).unwrap_err();
+        assert_eq!(e.exit_code(), 2, "{args:?}: {e:?}");
+        // The message names the transport that was refused.
+        assert!(e.to_string().to_lowercase().contains(args[2]), "{e}");
+    }
+}
+
+// ---- AC-STQEA1.7: --trace ----
+
+/// `(marker, lowercase hex)` of every non-empty trace line.
+fn trace_lines(s: &str) -> Vec<(char, String)> {
+    s.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let mut chars = l.trim_start().chars();
+            let marker = chars.next().unwrap();
+            let hex: String = chars.filter(|c| !c.is_whitespace()).collect();
+            (marker, hex.to_lowercase())
+        })
+        .collect()
+}
+
+#[test]
+fn trace_writes_sent_and_received_frames_as_hex() {
+    let req = get_data(1, 0x001);
+    let reply = adc_reply(1, ADC_A);
+    let sink = SharedBuf::default();
+    let mut t = TraceTransport::new(
+        MockTransport::new(vec![
+            Step::transact(req.clone(), reply.clone()),
+            Step::read([0xAB, 0x01]),
+        ]),
+        sink.clone(),
+    );
+    assert_eq!(
+        t.transact(&req, Duration::from_millis(1000)).unwrap(),
+        reply
+    );
+    assert_eq!(
+        t.read(Duration::from_millis(1000)).unwrap(),
+        vec![0xAB, 0x01]
+    );
+    assert_eq!(
+        trace_lines(&sink.text()),
+        vec![
+            ('>', hex_of(&req)),
+            ('<', hex_of(&reply)),
+            ('<', "ab01".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn trace_wraps_a_whole_command() {
+    let sink = SharedBuf::default();
+    let traced = TraceTransport::new(MockTransport::new(vec![adc_step(1, ADC_A)]), sink.clone());
+    let mut s = session(traced);
+    let mut out = Vec::new();
+    read(&mut s, true, &mut out).unwrap();
+    let lines = trace_lines(&sink.text());
+    assert_eq!(
+        lines,
+        vec![
+            ('>', "0c010200".to_owned()),
+            ('<', hex_of(&adc_reply(1, ADC_A)))
+        ]
+    );
+    // Trace output never leaks into stdout.
+    let v: Value = serde_json::from_slice(&out).expect("stdout stays pure JSON");
+    assert!(v.is_object());
+}
+
+#[test]
+fn trace_flag_parses_globally() {
+    assert!(parse(&["powerz", "--trace", "read"]).trace);
+    assert!(parse(&["powerz", "read", "--trace"]).trace);
+    assert!(!parse(&["powerz", "read"]).trace);
+}
+
+// ---- AC-STQEA1.8: exit codes ----
+
+#[test]
+fn exit_codes_per_error_kind() {
+    assert_eq!(CliError::Usage("u".into()).exit_code(), 2);
+    assert_eq!(CliError::NoDevice("n".into()).exit_code(), 3);
+    assert_eq!(CliError::Permission("p".into()).exit_code(), 4);
+    assert_eq!(CliError::Device("d".into()).exit_code(), 5);
+}
+
+#[test]
+fn errors_carry_their_message() {
+    assert!(
+        CliError::Usage("bad flag xyz".into())
+            .to_string()
+            .contains("bad flag xyz")
+    );
+    assert!(
+        CliError::Device("meter went away".into())
+            .to_string()
+            .contains("meter went away")
+    );
+}
+
+#[test]
+fn session_and_transport_errors_map_to_exit_codes() {
+    let t = |e: transport::Error| CliError::from(session::Error::Transport(e)).exit_code();
+    assert_eq!(t(transport::Error::NotFound), 3);
+    assert_eq!(t(transport::Error::Permission("denied".into())), 4);
+    assert_eq!(t(transport::Error::Timeout), 5);
+    assert_eq!(t(transport::Error::Disconnected), 5);
+    assert_eq!(t(transport::Error::Io("x".into())), 5);
+    assert_eq!(
+        CliError::from(session::Error::Protocol("p".into())).exit_code(),
+        5
+    );
+    assert_eq!(CliError::from(session::Error::AuthFailed).exit_code(), 5);
+    assert_eq!(
+        CliError::from(session::Error::Rejected { request_type: 0x0E }).exit_code(),
+        5
+    );
+    assert_eq!(CliError::from(transport::Error::NotFound).exit_code(), 3);
+    assert_eq!(
+        CliError::from(transport::Error::Permission("p".into())).exit_code(),
+        4
+    );
+    assert_eq!(CliError::from(transport::Error::Timeout).exit_code(), 5);
+}
+
+#[test]
+fn linux_permission_error_names_the_udev_rule() {
+    let e = CliError::from(session::Error::Transport(permission_error(
+        "linux",
+        "cannot open /dev/bus/usb/001/004",
+    )));
+    assert_eq!(e.exit_code(), 4);
+    assert!(e.to_string().contains("60-powerz.rules"), "{e}");
+}
+
+#[test]
+fn device_failure_mid_command_is_exit_5() {
+    let mut s = session(MockTransport::new(vec![Step::transact_err(
+        get_data(1, 0x001),
+        transport::Error::Timeout,
+    )]));
+    let mut out = Vec::new();
+    let e = read(&mut s, false, &mut out).unwrap_err();
+    assert_eq!(e.exit_code(), 5, "{e:?}");
+}
+
+/// Regression (first real-device run): the KM003C answers the first poll
+/// after 0x0E with an empty PUT_DATA. The elapsed-time origin must come from
+/// the first *record*, not from that empty poll, or every later record at the
+/// meter's large uptime looks past `--duration` and nothing is written.
+#[test]
+fn stream_empty_first_poll_does_not_fix_the_time_origin() {
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            Step::transact(get_data(4, 0x002), put_header(4, 1).to_vec()),
+            poll_step(5, &ts(&[0, 100, 200])),
+            poll_step(6, &ts(&[300, 400])),
+            Step::transact(stop_queue(7), accept(7)),
+        ],
+    ]
+    .concat();
+    let mut s = session(Meter::new(script));
+    let stop = AtomicBool::new(false);
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: Some(Duration::from_millis(250)),
+        start_unix_ms: START_UNIX_MS,
+    };
+    let summary = stream(&mut s, &opts, &stop, &mut csv, &mut err).unwrap();
+    let (_, rows) = csv_rows(&csv);
+    assert_eq!(rows.len(), 3, "rows: {rows:?}");
+    assert_eq!(summary.samples, 3);
+}
+
+/// A start that is REJECTed writes nothing (not even the header), so a
+/// previous CSV is not clobbered by a header-only file.
+#[test]
+fn stream_start_failure_writes_no_csv() {
+    let mut script = start_steps(Rate::Sps10.code());
+    script.pop();
+    script.push(Step::transact(
+        start_queue(3, Rate::Sps10.code()),
+        vec![0x06, 3, 0, 0],
+    ));
+    let mut s = session(Meter::new(script));
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: None,
+        start_unix_ms: START_UNIX_MS,
+    };
+    assert!(stream(&mut s, &opts, &AtomicBool::new(false), &mut csv, &mut err).is_err());
+    assert!(csv.is_empty(), "csv: {:?}", text(&csv));
+}
+
+/// Device time running backwards (meter reboot) ends the stream with a
+/// device error instead of writing rows with a 49-day elapsed time.
+#[test]
+fn stream_backwards_device_time_is_a_device_error() {
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            poll_step(4, &ts(&[0, 100])),
+            poll_step(5, &[BASE - 5_000]),
+            Step::transact(stop_queue(6), accept(6)),
+        ],
+    ]
+    .concat();
+    let mut s = session(Meter::new(script));
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: None,
+        start_unix_ms: START_UNIX_MS,
+    };
+    let r = stream(&mut s, &opts, &AtomicBool::new(false), &mut csv, &mut err);
+    assert!(matches!(r, Err(ref e) if e.exit_code() == 5), "{r:?}");
+    assert_eq!(csv_rows(&csv).1.len(), 2);
+    assert_eq!(s.transport().inner.remaining(), 0, "queue must be stopped");
+}
+
+/// A meter that stops sending data (e.g. it rebooted and answers every poll
+/// empty) ends the stream after 5 s of polls instead of hanging forever.
+#[test]
+fn stream_gives_up_after_five_seconds_without_data() {
+    let polls = (5_000 / Streamer::poll_period(Rate::Sps10).as_millis()) as u8;
+    let mut script = start_steps(Rate::Sps10.code());
+    for k in 0..=polls {
+        let id = 4 + k;
+        script.push(Step::transact(
+            get_data(id, 0x002),
+            put_header(id, 1).to_vec(),
+        ));
+    }
+    let stop_id = 5 + polls;
+    script.push(Step::transact(stop_queue(stop_id), accept(stop_id)));
+    let mut s = session(Meter::new(script));
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: None,
+        start_unix_ms: START_UNIX_MS,
+    };
+    let r = stream(&mut s, &opts, &AtomicBool::new(false), &mut csv, &mut err);
+    assert!(matches!(r, Err(ref e) if e.exit_code() == 5), "{r:?}");
+    assert!(r.unwrap_err().to_string().contains("no data"));
+}
+
+/// A frame the guard refuses is never sent, so `--trace` must not log it as
+/// sent (`>`); it is logged as refused (`x`).
+#[test]
+fn trace_marks_a_refused_frame_as_not_sent() {
+    use powerz_protocol::transport::Transport;
+    use powerz_protocol::transport::guard::GuardedTransport;
+    use powerz_protocol::transport::mock::MockTransport;
+    let mut log = Vec::new();
+    {
+        let inner = GuardedTransport::new(MockTransport::new(vec![]));
+        let mut t = TraceTransport::new(inner, &mut log);
+        assert!(
+            t.transact(&[0x08, 0x01, 0x00, 0x00], Duration::from_millis(10))
+                .is_err()
+        );
+    }
+    let log = text(&log);
+    assert!(!log.contains("> 08"), "{log}");
+    assert!(log.starts_with("x 08 01 00 00"), "{log}");
+}
+
+/// `start_unix_ms: 0` asks for the wall clock at the first received record,
+/// so session setup time (CONNECT, auth, first poll) does not shift `Unix`.
+#[test]
+fn stream_unix_zero_uses_wall_clock_at_first_record() {
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            poll_step(4, &ts(&[0, 100])),
+            Step::transact(stop_queue(5), accept(5)),
+        ],
+    ]
+    .concat();
+    let mut s = session(Meter::new(script));
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: Some(Duration::from_millis(50)),
+        start_unix_ms: 0,
+    };
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    stream(&mut s, &opts, &AtomicBool::new(false), &mut csv, &mut err).unwrap();
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let (_, rows) = csv_rows(&csv);
+    let unix: f64 = rows[0][1].parse().unwrap();
+    assert!(
+        unix >= before - 0.001 && unix <= after + 0.001,
+        "{unix} not in [{before}, {after}]"
+    );
+}

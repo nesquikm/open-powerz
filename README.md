@@ -29,9 +29,11 @@ modern UI.
 | `apps/desktop` | Tauri 2 desktop app (Svelte 5 + TypeScript + Vite, uPlot charts) |
 | `specs/` | requirements, technical spec, plans |
 
+The USB protocol the meter speaks is documented in [docs/protocol.md](docs/protocol.md).
+
 ## Building
 
-Requirements: Rust (stable, 1.85 or newer), [Bun](https://bun.sh), and the
+Requirements: Rust (stable, 1.96 or newer), [Bun](https://bun.sh), and the
 [Tauri 2 system prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ```bash
@@ -40,6 +42,27 @@ bun run build:web             # build the web UI (the Tauri crate embeds it)
 cargo build --workspace       # library, CLI and desktop app
 cargo run -p powerz-cli       # the CLI
 bun run dev                   # desktop app with hot reload
+```
+
+## Try it without a meter
+
+The `powerz` CLI ships a simulated KM003C, the **demo device**:
+
+```bash
+cargo run -p powerz-cli -- --transport sim info
+cargo run -p powerz-cli -- --transport sim --scenario load-5v-1a read
+cargo run -p powerz-cli -- list --include-demo
+```
+
+Scenarios: `idle`, `load-5v-1a`, `pd-9v-2a`, `noisy-negative`. For tests, the
+simulator also reads `POWERZ_SIM_CLOCK=fake` (deterministic simulated time),
+`POWERZ_SIM_FAULT` (e.g. `timeout@2,disconnect@3,wrong-id@4,permission`) and
+`POWERZ_SIM_CTRL_C_AFTER=N` (act as if Ctrl-C was pressed after N polls).
+
+Hardware-in-the-loop tests against a real meter run only with `POWERZ_HIL=1`:
+
+```bash
+POWERZ_HIL=1 cargo test -p powerz-cli --test hil
 ```
 
 ## License

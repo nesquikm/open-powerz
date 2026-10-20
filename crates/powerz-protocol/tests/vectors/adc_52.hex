@@ -1,0 +1,4 @@
+# 52-byte ADC snapshot reply (GET_DATA mask 0x001)
+# source: notes/device/vectors/t1_t3_bulk_adc.jsonl (session 1, firmware 2.0.6), frame #2 (52 bytes)
+410180020100000b64100000a1ffffff91100000b0fffffff510000000000000
+ba0e25032601d402f202307d008002f00000ff00

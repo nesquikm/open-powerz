@@ -1,0 +1,18 @@
+# udev rules for the ChargerLAB POWER-Z KM002C / KM003C USB-C tester.
+#
+# Install:  sudo cp 60-powerz.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload-rules && sudo udevadm trigger
+# See docs/linux.md for details.
+#
+# Grant the logged-in (seat) user access to the USB device node, its hidraw
+# node and its CDC tty, and keep ModemManager away from the CDC serial port.
+
+# KM002C (5fc9:0061)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0061", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0061", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0061", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# KM003C (5fc9:0063)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0063", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0063", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0063", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
