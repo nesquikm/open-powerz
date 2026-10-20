@@ -77,7 +77,7 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
   `history_range`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
   `stop_recording`, `export_session`; backend events `Batch`, `Gap`, `Status`, `Error` and
   `Recording` (started / progress / stopped / failed) over one session channel, with export
-  progress on its own channel. The UI reaches them only through `src/lib/backend.ts`, the
+  progress on its own channel. The UI reaches them only through `apps/desktop/src/lib/backend.ts`, the
   seam the Playwright mock replaces.
 - CLI: `powerz <subcommand>` with `clap` once the first command lands.
 

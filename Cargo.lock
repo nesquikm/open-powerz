@@ -2591,6 +2591,7 @@ dependencies = [
  "powerz-protocol",
  "powerz-record",
  "powerz-sim",
+ "proptest",
  "serde",
  "serde_json",
  "tauri",

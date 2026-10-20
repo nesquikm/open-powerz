@@ -26,6 +26,8 @@ export interface Sample {
 export interface Batch {
   samples: Sample[];
   temp_c: number | null;
+  /** Statistics since the session start or the last reset, as of this batch. */
+  stats: StatsSnapshot;
 }
 
 export type ErrorKind =
@@ -134,6 +136,43 @@ export interface ExportResult {
   rows: number;
 }
 
+/** Min, max and mean of one quantity. */
+export interface MinMaxAvg {
+  min: number;
+  max: number;
+  avg: number;
+}
+
+/** Running statistics since the session start or the last reset (mirrors `src-tauri/src/stats.rs`). */
+export interface StatsSnapshot {
+  elapsed_ms: number;
+  samples: number;
+  charge_ah: number;
+  energy_wh: number;
+  vbus: MinMaxAvg | null;
+  ibus: MinMaxAvg | null;
+  power: MinMaxAvg | null;
+}
+
+/** A chart series in the session history. */
+export type Series = "vbus" | "ibus" | "dp" | "dm" | "cc1" | "cc2";
+
+/** The min and max of one series over one time bucket (mirrors `src-tauri/src/history.rs`). */
+export interface Bucket {
+  t_ms: number;
+  min: number;
+  max: number;
+}
+
+/** The buckets of one series. */
+export interface SeriesBuckets {
+  series: Series;
+  buckets: Bucket[];
+}
+
+/** One {@link SeriesBuckets} per requested series, in the requested order. */
+export type BucketsFor<S extends readonly Series[]> = { [K in keyof S]: SeriesBuckets };
+
 /** Every event the backend sends over the session channel. */
 export type BackendEvent =
   | { type: "batch"; data: Batch }
@@ -211,6 +250,36 @@ export async function exportSession(
   const channel = new Channel<ExportProgress>();
   channel.onmessage = onProgress;
   return invoke<ExportResult | null>("export_session", { suggestedName, onProgress: channel });
+}
+
+/** Statistics of the open session since its start or the last reset. */
+export async function stats(): Promise<StatsSnapshot> {
+  if (mock) return mock.stats();
+  return invoke<StatsSnapshot>("stats");
+}
+
+/** Min / max buckets of the open session's history over `t0Ms..=t1Ms`, at most
+ * `buckets` per series. */
+export async function historyRange<const S extends readonly Series[]>(
+  series: S,
+  t0Ms: number,
+  t1Ms: number,
+  buckets: number,
+): Promise<BucketsFor<S>> {
+  if (mock) return mock.historyRange(series, t0Ms, t1Ms, buckets);
+  return invoke<BucketsFor<S>>("history_range", { series, t0Ms, t1Ms, buckets });
+}
+
+/** Zeroes the session statistics; they count again from the next sample. */
+export async function resetStats(): Promise<void> {
+  if (mock) return mock.resetStats();
+  await invoke("reset_stats");
+}
+
+/** Discards the session history; the stream (and any recording) goes on. */
+export async function clearHistory(): Promise<void> {
+  if (mock) return mock.clearHistory();
+  await invoke("clear_history");
 }
 
 /** App and protocol-library versions for the About dialog. */

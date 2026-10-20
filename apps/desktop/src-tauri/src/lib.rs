@@ -1,6 +1,9 @@
 pub mod batch;
 pub mod devices;
+pub mod history;
 pub mod recording;
+pub mod stats;
+pub mod store;
 pub mod ui_error;
 pub mod worker;
 
@@ -16,7 +19,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::devices::{AppOpener, DeviceListing, DeviceManager, WatchHandle};
 use crate::recording::{ExportProgress, RecordingSummary};
 use crate::ui_error::UiError;
-use crate::worker::{BackendEvent, WorkerControl};
+use crate::worker::BackendEvent;
 
 /// The app and protocol-library versions shown in the About dialog.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -170,17 +173,18 @@ fn ask_save_path(
         .blocking_save_file()
 }
 
-/// Refuse before the dialog when no meter is connected, ask where to save,
-/// then run `then` with the open session's control and the chosen path;
-/// `None` when the dialog was cancelled (nothing runs). The control is taken
-/// again after the dialog, since the session may have ended meanwhile.
-fn with_save_path<R>(
+/// Refuse before the dialog when `prepare` does, ask where to save, then
+/// run `then` with what `prepare` gives and the chosen path; `None` when the
+/// dialog was cancelled (nothing runs). `prepare` runs again after the
+/// dialog, since the session may have ended meanwhile.
+fn with_save_path<P, R>(
     state: &AppState,
     app: &tauri::AppHandle,
     suggested_name: &str,
-    then: impl FnOnce(WorkerControl, &Path) -> Result<R, UiError>,
+    prepare: impl Fn(&AppManager) -> Result<P, UiError>,
+    then: impl FnOnce(P, &Path) -> Result<R, UiError>,
 ) -> Result<Option<R>, UiError> {
-    state.manager().control()?;
+    prepare(&state.manager())?;
     let Some(choice) = ask_save_path(app, suggested_name) else {
         return Ok(None);
     };
@@ -191,8 +195,8 @@ fn with_save_path<R>(
             "The save dialog did not return a file on disk; pick a folder on this computer.",
         )
     })?;
-    let control = state.manager().control()?;
-    then(control, &path).map(Some)
+    let prepared = prepare(&state.manager())?;
+    then(prepared, &path).map(Some)
 }
 
 /// Open the save dialog with `suggested_name` and record the stream to the
@@ -206,10 +210,16 @@ async fn start_recording(
 ) -> Result<Option<String>, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        with_save_path(&state, &app, &suggested_name, |control, path| {
-            control.record_to(path)?;
-            Ok(path.to_string_lossy().into_owned())
-        })
+        with_save_path(
+            &state,
+            &app,
+            &suggested_name,
+            AppManager::control,
+            |control, path| {
+                control.record_to(path)?;
+                Ok(path.to_string_lossy().into_owned())
+            },
+        )
     })
     .await
 }
@@ -223,6 +233,55 @@ async fn stop_recording(state: Shared<'_>) -> Result<RecordingSummary, UiError> 
         control.stop_recording()
     })
     .await
+}
+
+/// The session's store, taken under the lock; queries run without it.
+fn session_store(state: &AppState) -> Result<store::SessionStore, UiError> {
+    state.manager().session_store()
+}
+
+/// Statistics of the session (open or last) since its start or the last
+/// reset.
+#[tauri::command]
+async fn stats(state: Shared<'_>) -> Result<stats::StatsSnapshot, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(session_store(&state)?.stats())).await
+}
+
+/// Zero the session's statistics; they count again from the next sample.
+#[tauri::command]
+async fn reset_stats(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        session_store(&state)?.reset_stats();
+        Ok(())
+    })
+    .await
+}
+
+/// Discard the session's history (the stream and any recording go on).
+#[tauri::command]
+async fn clear_history(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        session_store(&state)?.clear_history();
+        Ok(())
+    })
+    .await
+}
+
+/// Min / max buckets of the session's history (open or last) over `t0_ms..=t1_ms`,
+/// at most `buckets` per series.
+#[tauri::command]
+async fn history_range(
+    state: Shared<'_>,
+    series: Vec<history::Series>,
+    t0_ms: u64,
+    t1_ms: u64,
+    buckets: usize,
+) -> Result<Vec<history::SeriesBuckets>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(session_store(&state)?.history_range(&series, t0_ms, t1_ms, buckets))).await
 }
 
 /// Where an export went and how many rows it wrote.
@@ -244,23 +303,29 @@ async fn export_session(
 ) -> Result<Option<ExportResult>, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        with_save_path(&state, &app, &suggested_name, |control, path| {
-            let job = control.export_to(path, move |p| {
-                let _ = on_progress.send(p);
-            })?;
-            let rows = job
-                .join()
-                .map_err(|_| UiError::internal())
-                .and_then(|done| done)
-                .inspect_err(|_| {
-                    // A half-written export is worse than none.
-                    let _ = std::fs::remove_file(path);
+        with_save_path(
+            &state,
+            &app,
+            &suggested_name,
+            AppManager::exporter,
+            |exporter, path| {
+                let job = exporter.export_to(path, move |p| {
+                    let _ = on_progress.send(p);
                 })?;
-            Ok(ExportResult {
-                path: path.to_string_lossy().into_owned(),
-                rows,
-            })
-        })
+                let rows = job
+                    .join()
+                    .map_err(|_| UiError::internal())
+                    .and_then(|done| done)
+                    .inspect_err(|_| {
+                        // A half-written export is worse than none.
+                        let _ = std::fs::remove_file(path);
+                    })?;
+                Ok(ExportResult {
+                    path: path.to_string_lossy().into_owned(),
+                    rows,
+                })
+            },
+        )
     })
     .await
 }
@@ -294,7 +359,11 @@ pub fn run() {
             set_rate,
             start_recording,
             stop_recording,
-            export_session
+            export_session,
+            history_range,
+            stats,
+            reset_stats,
+            clear_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running the open-powerz desktop app");

@@ -16,8 +16,11 @@ use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
 use serde::Serialize;
 
 use crate::batch::{Batch, Batcher, Sample};
+use crate::history::{Series, SeriesBuckets};
 use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
-use crate::ui_error::{self, UiError};
+use crate::stats::StatsSnapshot;
+use crate::store::SessionStore;
+use crate::ui_error::{self, ErrorKind, UiError};
 
 /// Worker start-up settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,14 +78,14 @@ pub enum GapKind {
     Outage,
 }
 
-/// A span of device time without samples.
+/// A span of session time without samples.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Gap {
     /// Kind of gap.
     pub kind: GapKind,
-    /// Last device time before the gap, ms.
+    /// Last session time before the gap, ms.
     pub from_ms: u64,
-    /// First device time after the gap, ms.
+    /// First session time after the gap, ms.
     pub to_ms: u64,
 }
 
@@ -222,10 +225,9 @@ pub struct Worker<T: Transport, C: Clock> {
     batcher: Batcher,
     /// Wall-clock time the next queue poll is due, ms.
     next_poll_ms: u64,
-    /// Every record of this session, for export.
-    history: Vec<QueueRecord>,
-    /// Wall-clock time at the session's first record, ms.
-    history_unix_ms: Option<u64>,
+    /// The session's history and statistics, shared with the other
+    /// connections to this meter and with the commands that query them.
+    store: SessionStore,
     /// The open recording, if any.
     recording: Option<Recorder>,
     /// The file the open recording writes, when it was opened by path.
@@ -247,11 +249,23 @@ impl<T: Transport, C: Clock> std::fmt::Debug for Worker<T, C> {
 }
 
 impl<T: Transport, C: Clock + Clone> Worker<T, C> {
-    /// Connect, authenticate and start the queue.
+    /// Connect, authenticate and start the queue, with a session of its own.
     pub fn start(
         transport: T,
         clock: C,
         config: WorkerConfig,
+        sink: impl EventSink,
+    ) -> Result<Worker<T, C>, UiError> {
+        Worker::start_with_store(transport, clock, config, SessionStore::new(), sink)
+    }
+
+    /// [`Worker::start`] appending to the session in `store`, as a
+    /// reconnect of the same meter does.
+    pub fn start_with_store(
+        transport: T,
+        clock: C,
+        config: WorkerConfig,
+        store: SessionStore,
         sink: impl EventSink,
     ) -> Result<Worker<T, C>, UiError> {
         let (session, info) = open_session(transport, clock.clone(), config)?;
@@ -260,6 +274,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             clock,
             config,
             info,
+            store,
             Box::new(sink),
         ))
     }
@@ -270,9 +285,11 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         mut clock: C,
         config: WorkerConfig,
         info: ConnectedInfo,
+        store: SessionStore,
         sink: Sink,
     ) -> Worker<T, C> {
         let now = clock.now_ms();
+        store.start_run();
         let mut worker = Worker {
             session: Some(session),
             clock,
@@ -284,8 +301,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             temp_c: None,
             batcher: Batcher::new(now),
             next_poll_ms: now,
-            history: Vec::new(),
-            history_unix_ms: None,
+            store,
             recording: None,
             recording_path: None,
             sink,
@@ -317,45 +333,74 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Ok(())
     }
 
+    /// Send `batch` with the statistics up to and including it.
+    fn emit_batch(&mut self, mut batch: Batch) {
+        batch.stats = self.store.stats();
+        self.emit(BackendEvent::Batch(batch));
+    }
+
     /// Send pending samples out now.
     fn flush_batch(&mut self) {
         let now = self.clock.now_ms();
         if let Some(batch) = self.batcher.flush(now) {
-            self.emit(BackendEvent::Batch(batch));
+            self.emit_batch(batch);
         }
     }
 
     /// Hand the records of `poll` to the batcher; a stream gap flushes the
     /// samples before it and goes out as its own event.
-    /// Every record also goes to the session history and the open
-    /// recording; a failed write ends the recording.
+    /// Every record is moved onto the session timeline (device time can go
+    /// backwards), then goes to the session history, the statistics, the
+    /// batcher and the open recording; a failed write ends the recording.
     fn queue_records(&mut self, poll: &session::StreamPoll) {
         let now = self.clock.now_ms();
+        let store = self.store.clone();
+        // Held across the records, let go whenever an event goes out.
+        let mut data = None;
         let mut gaps = poll.gaps.iter().peekable();
         let mut write_err = None;
         for r in &poll.records {
-            while let Some(gap) = gaps.next_if(|g| g.to_ms <= r.time_ms()) {
+            // A poll's records and gaps come in device-time order; a gap
+            // ends at the record after the hole.
+            let mut gaps_due = 0;
+            while gaps.next_if(|g| g.to_ms <= r.time_ms()).is_some() {
+                gaps_due += 1;
+            }
+            if gaps_due > 0 {
+                // The samples before the gap go out with their statistics.
+                data = None;
                 self.flush_batch();
+            }
+            let added = data.get_or_insert_with(|| store.lock()).append(r, now);
+            let r = added.record;
+            if gaps_due > 0 {
+                data = None;
+                let to_ms = u64::from(r.time_ms());
                 let gap = Gap {
                     kind: GapKind::Stream,
-                    from_ms: u64::from(gap.from_ms),
-                    to_ms: u64::from(gap.to_ms),
+                    from_ms: added.before_ms.map_or(to_ms, u64::from),
+                    to_ms,
                 };
-                if let Some(rec) = self.recording.as_mut() {
-                    rec.gap(gap.clone());
+                for _ in 0..gaps_due {
+                    if let Some(rec) = self.recording.as_mut() {
+                        rec.gap(gap.clone());
+                    }
+                    self.emit(BackendEvent::Gap(gap.clone()));
                 }
-                self.emit(BackendEvent::Gap(gap));
             }
-            self.batcher.push(sample(r));
-            self.history_unix_ms.get_or_insert(now);
-            self.history.push(*r);
+            self.batcher.push(sample(&r));
             if write_err.is_none()
                 && let Some(rec) = self.recording.as_mut()
-                && let Err(e) = rec.push(r, now)
             {
-                write_err = Some(e);
+                if added.new_run {
+                    rec.break_run();
+                }
+                if let Err(e) = rec.push(&r, now) {
+                    write_err = Some(e);
+                }
             }
         }
+        drop(data);
         if let Some(e) = write_err {
             self.fail_recording(recording::io_error(&e));
         }
@@ -478,11 +523,40 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         out: Box<dyn Write + Send>,
         progress: impl FnMut(ExportProgress) + Send + 'static,
     ) -> JoinHandle<Result<u64, UiError>> {
-        let records = self.history.clone();
-        let start_unix_ms = self.history_unix_ms.unwrap_or_else(|| self.clock.now_ms());
-        std::thread::spawn(move || {
-            recording::export_records(&records, out, start_unix_ms, progress)
-        })
+        let now = self.clock.now_ms();
+        export_store(&self.store, out, now, progress)
+    }
+
+    /// Number of records in the session history.
+    pub fn history_len(&self) -> usize {
+        self.store.history_len()
+    }
+
+    /// Min / max buckets of the session history over `t0..=t1`.
+    pub fn history_range(
+        &self,
+        series: &[Series],
+        t0: u64,
+        t1: u64,
+        buckets: usize,
+    ) -> Vec<SeriesBuckets> {
+        self.store.history_range(series, t0, t1, buckets)
+    }
+
+    /// Discard the session history. A running export works on its own copy
+    /// and a recording writes its own file, so neither is affected.
+    pub fn clear_history(&mut self) {
+        self.store.clear_history();
+    }
+
+    /// Zero the session statistics; they count again from the next record.
+    pub fn reset_stats(&mut self) {
+        self.store.reset_stats();
+    }
+
+    /// The session statistics so far.
+    pub fn stats(&self) -> StatsSnapshot {
+        self.store.stats()
     }
 
     /// Run one cycle: poll the queue when due, send a batch when due, then
@@ -504,7 +578,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         self.batcher.set_temp(self.temp_c);
         let now = self.clock.now_ms();
         if let Some(batch) = self.batcher.poll(now) {
-            self.emit(BackendEvent::Batch(batch));
+            self.emit_batch(batch);
         }
         let wake = self.next_poll_ms.min(self.batcher.next_due_ms());
         let wait = wake.saturating_sub(now).max(1);
@@ -573,6 +647,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             return Err(not_connected());
         };
         session.start_stream(rate).map_err(|e| session_error(&e))?;
+        // The interval across the restart was not measured.
+        self.store.start_run();
         self.rate = rate;
         self.emit(BackendEvent::Status(Status::Rate {
             rate_sps: rate.sps(),
@@ -600,9 +676,6 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::SetRate(rate, reply) => {
                 let _ = reply.send(self.set_rate(rate));
             }
-            Command::StartRecording(out, reply) => {
-                let _ = reply.send(self.start_recording(out));
-            }
             Command::RecordTo(path, reply) => {
                 let _ = reply.send(self.record_to(&path));
             }
@@ -612,17 +685,15 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::StopRecording(reply) => {
                 let _ = reply.send(self.stop_recording());
             }
-            Command::Export(out, progress, reply) => {
-                let _ = reply.send(self.export(out, progress));
-            }
         }
     }
 }
 
 /// Requests the UI sends to a running worker, applied between steps.
+/// History and statistics queries do not go through the worker: they run
+/// on the caller's thread against the [`SessionStore`].
 enum Command {
     SetRate(Rate, mpsc::Sender<Result<(), UiError>>),
-    StartRecording(Box<dyn Write + Send>, mpsc::Sender<Result<(), UiError>>),
     RecordTo(PathBuf, mpsc::Sender<Result<(), UiError>>),
     ExportTo(
         PathBuf,
@@ -630,23 +701,86 @@ enum Command {
         mpsc::Sender<Result<ExportJob, UiError>>,
     ),
     StopRecording(mpsc::Sender<Result<RecordingSummary, UiError>>),
-    Export(Box<dyn Write + Send>, ProgressFn, mpsc::Sender<ExportJob>),
 }
 
 impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Command::SetRate(rate, _) => f.debug_tuple("SetRate").field(rate).finish(),
-            Command::StartRecording(..) => f.write_str("StartRecording"),
             Command::RecordTo(path, _) => f.debug_tuple("RecordTo").field(path).finish(),
             Command::ExportTo(path, ..) => f.debug_tuple("ExportTo").field(path).finish(),
             Command::StopRecording(_) => f.write_str("StopRecording"),
-            Command::Export(..) => f.write_str("Export"),
         }
     }
 }
 
 type ProgressFn = Box<dyn FnMut(ExportProgress) + Send>;
+
+/// Export every record of `store` to `out` on a thread of its own; the
+/// export works on a snapshot that shares the stored samples. `now_ms` is
+/// the `Unix` origin when the history is empty.
+fn export_store(
+    store: &SessionStore,
+    out: Box<dyn Write + Send>,
+    now_ms: u64,
+    progress: impl FnMut(ExportProgress) + Send + 'static,
+) -> ExportJob {
+    let (history, start_unix_ms) = store.export_source(now_ms);
+    std::thread::spawn(move || {
+        recording::export_iter(
+            history.len() as u64,
+            history.iter_runs(),
+            out,
+            start_unix_ms,
+            progress,
+        )
+    })
+}
+
+/// Exports a session: through its worker while one runs, so the file being
+/// recorded to is refused; straight from its store once the meter is gone.
+#[derive(Debug, Clone)]
+pub struct Exporter {
+    control: Option<WorkerControl>,
+    store: SessionStore,
+    now_ms: u64,
+}
+
+impl Exporter {
+    /// Export through `control` when the session is open, else from `store`;
+    /// `now_ms` is the `Unix` origin of an empty history.
+    pub(crate) fn new(
+        control: Option<WorkerControl>,
+        store: SessionStore,
+        now_ms: u64,
+    ) -> Exporter {
+        Exporter {
+            control,
+            store,
+            now_ms,
+        }
+    }
+
+    /// Create the file at `path` and export the session to it.
+    pub fn export_to(
+        &self,
+        path: &Path,
+        progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> Result<ExportJob, UiError> {
+        match &self.control {
+            Some(control) => control.export_to(path, progress),
+            None => {
+                let file = recording::create_file(path)?;
+                Ok(export_store(
+                    &self.store,
+                    Box::new(file),
+                    self.now_ms,
+                    progress,
+                ))
+            }
+        }
+    }
+}
 
 /// A running export: joins to the rows written.
 pub type ExportJob = JoinHandle<Result<u64, UiError>>;
@@ -654,38 +788,45 @@ pub type ExportJob = JoinHandle<Result<u64, UiError>>;
 /// How long a request to the worker may take before the UI gives up.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Sends rate, recording and export requests to a running worker. It works
+/// Sends rate, recording and export requests to a running worker and
+/// answers history and statistics queries from its session store. It works
 /// without the [`WorkerHandle`], so a caller can wait for the answer without
 /// holding the lock that guards the handle.
 #[derive(Debug, Clone)]
 pub struct WorkerControl {
     commands: mpsc::Sender<Command>,
+    store: SessionStore,
 }
 
-/// The answer when the worker is gone or does not reply in time.
+/// The answer when the worker is gone.
 fn not_connected() -> UiError {
     UiError::usage("The meter is not connected.")
+}
+
+/// The answer when the worker does not reply in time; the request may still
+/// be carried out.
+fn busy() -> UiError {
+    UiError {
+        kind: ErrorKind::Timeout,
+        message: "The meter is busy. Try again.".to_owned(),
+        hint: None,
+    }
 }
 
 impl WorkerControl {
     /// Send `command` and wait (up to [`COMMAND_TIMEOUT`]) for its answer.
     fn ask<R>(&self, command: Command, answer: &mpsc::Receiver<R>) -> Result<R, UiError> {
         self.commands.send(command).map_err(|_| not_connected())?;
-        answer
-            .recv_timeout(COMMAND_TIMEOUT)
-            .map_err(|_| not_connected())
+        answer.recv_timeout(COMMAND_TIMEOUT).map_err(|e| match e {
+            mpsc::RecvTimeoutError::Timeout => busy(),
+            mpsc::RecvTimeoutError::Disconnected => not_connected(),
+        })
     }
 
     /// Restart the running queue at `rate` and wait for the worker's answer.
     pub fn set_rate(&self, rate: Rate) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::SetRate(rate, reply), &answer)?
-    }
-
-    /// Start recording to `out` and wait for the worker's answer.
-    pub fn start_recording(&self, out: Box<dyn Write + Send>) -> Result<(), UiError> {
-        let (reply, answer) = mpsc::channel();
-        self.ask(Command::StartRecording(out, reply), &answer)?
     }
 
     /// Record to a new file at `path`. The worker checks first and creates
@@ -702,14 +843,32 @@ impl WorkerControl {
         self.ask(Command::StopRecording(reply), &answer)?
     }
 
-    /// Export the session so far to `out` on a thread of its own.
-    pub fn export(
+    /// The session statistics so far.
+    pub fn stats(&self) -> Result<StatsSnapshot, UiError> {
+        Ok(self.store.stats())
+    }
+
+    /// Zero the session statistics.
+    pub fn reset_stats(&self) -> Result<(), UiError> {
+        self.store.reset_stats();
+        Ok(())
+    }
+
+    /// Discard the session history.
+    pub fn clear_history(&self) -> Result<(), UiError> {
+        self.store.clear_history();
+        Ok(())
+    }
+
+    /// Min / max buckets of the session history over `t0..=t1`.
+    pub fn history_range(
         &self,
-        out: Box<dyn Write + Send>,
-        progress: impl FnMut(ExportProgress) + Send + 'static,
-    ) -> Result<ExportJob, UiError> {
-        let (reply, answer) = mpsc::channel();
-        self.ask(Command::Export(out, Box::new(progress), reply), &answer)
+        series: &[Series],
+        t0: u64,
+        t1: u64,
+        buckets: usize,
+    ) -> Result<Vec<SeriesBuckets>, UiError> {
+        Ok(self.store.history_range(series, t0, t1, buckets))
     }
 
     /// Create the file at `path` and export the session to it.
@@ -731,14 +890,19 @@ impl WorkerControl {
 #[derive(Debug)]
 pub struct WorkerHandle {
     stop: Arc<AtomicBool>,
+    /// Set when the `disconnected` status has been sent.
+    ended: Arc<AtomicBool>,
     commands: mpsc::Sender<Command>,
+    store: SessionStore,
     thread: Option<JoinHandle<()>>,
 }
 
 impl WorkerHandle {
-    /// The worker thread has ended (session closed or failed).
+    /// The session has ended (closed or failed): its `disconnected` status
+    /// is out, or its thread has returned.
     pub fn is_finished(&self) -> bool {
-        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+        self.ended.load(Ordering::SeqCst)
+            || self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
     /// Restart the running queue at `rate`.
@@ -750,6 +914,7 @@ impl WorkerHandle {
     pub fn control(&self) -> WorkerControl {
         WorkerControl {
             commands: self.commands.clone(),
+            store: self.store.clone(),
         }
     }
 
@@ -792,14 +957,52 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
+    spawn_with_store(open, clock, config, SessionStore::new(), sink, stop)
+}
+
+/// [`spawn_with_stop`] appending to the session in `store`, as a reconnect
+/// of the same meter does.
+pub fn spawn_with_store<T, C, O>(
+    open: O,
+    clock: C,
+    config: WorkerConfig,
+    store: SessionStore,
+    sink: impl EventSink,
+    stop: Arc<AtomicBool>,
+) -> WorkerHandle
+where
+    T: Transport,
+    C: Clock + Clone + Send + 'static,
+    O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
+{
     let flag = Arc::clone(&stop);
     let (commands, inbox) = mpsc::channel();
+    let ended = Arc::new(AtomicBool::new(false));
+    let ended_by_sink = Arc::clone(&ended);
+    let mut sink = sink;
+    // The session is over the moment its `disconnected` status goes out, so
+    // the UI may reconnect at once even though this thread is still unwinding.
+    let marking = move |event: BackendEvent| {
+        if let BackendEvent::Status(Status::Disconnected { .. }) = event {
+            ended_by_sink.store(true, Ordering::SeqCst);
+        }
+        sink(event);
+    };
     // Shared so a panicking worker can still report that the session ended.
-    let sink: Arc<Mutex<Sink>> = Arc::new(Mutex::new(Box::new(sink)));
+    let sink: Arc<Mutex<Sink>> = Arc::new(Mutex::new(Box::new(marking)));
     let worker_sink = Arc::clone(&sink);
+    let worker_store = store.clone();
     let thread = std::thread::spawn(move || {
         let ran = catch_unwind(AssertUnwindSafe(|| {
-            run_worker(open, clock, config, &flag, &inbox, worker_sink)
+            run_worker(
+                open,
+                clock,
+                config,
+                worker_store,
+                &flag,
+                &inbox,
+                worker_sink,
+            )
         }));
         if let Err(payload) = ran {
             let mut sink = sink.lock().unwrap_or_else(PoisonError::into_inner);
@@ -808,7 +1011,9 @@ where
     });
     WorkerHandle {
         stop,
+        ended,
         commands,
+        store,
         thread: Some(thread),
     }
 }
@@ -818,6 +1023,7 @@ fn run_worker<T, C, O>(
     open: O,
     clock: C,
     config: WorkerConfig,
+    store: SessionStore,
     stop: &AtomicBool,
     inbox: &mpsc::Receiver<Command>,
     sink: Arc<Mutex<Sink>>,
@@ -834,7 +1040,7 @@ fn run_worker<T, C, O>(
         .map_err(|e| ui_error::from_transport(&e, std::env::consts::OS))
         .and_then(|transport| open_session(transport, clock.clone(), config));
     let mut worker = match opened {
-        Ok((session, info)) => Worker::running(session, clock, config, info, forward),
+        Ok((session, info)) => Worker::running(session, clock, config, info, store, forward),
         Err(error) => {
             let mut forward = forward;
             forward(disconnected(Some(error)));

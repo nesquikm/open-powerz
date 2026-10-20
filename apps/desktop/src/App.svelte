@@ -1,8 +1,10 @@
 <script lang="ts">
   import {
+    clearHistory,
     connect,
     disconnect,
     exportSession,
+    resetStats as resetStatsCommand,
     setRate,
     startRecording,
     stopRecording,
@@ -18,6 +20,7 @@
   import { setContext } from "svelte";
   import { ExportJob, Recording } from "./lib/recording.svelte";
   import { Session } from "./lib/session.svelte";
+  import { StatsControls } from "./lib/stats.svelte";
   import { shortcutFor, type ShortcutAction } from "./lib/shortcuts";
   import {
     applyTheme,
@@ -41,6 +44,14 @@
   /** A stream is running that can be recorded. */
   const canRecord = $derived(session.state === "streaming" || session.state === "rate_locked");
   const exportJob = new ExportJob();
+  const statsControls = new StatsControls();
+  const statsDeps = {
+    resetStats: async () => {
+      await resetStatsCommand();
+      session.statsReset();
+    },
+    clearHistory,
+  };
   /** The open session holds samples to export. */
   const canExport = $derived(canRecord && session.latest !== null);
 
@@ -123,8 +134,13 @@
     void recording.toggle({ canRecord, startRecording, stopRecording, now: () => new Date() });
   }
 
-  // Hooks filled in by later FRs (stats, chart).
-  function resetStats(): void {}
+  /** R shortcut: zero the session statistics. */
+  function resetStats(): void {
+    if (!canRecord) return;
+    void statsControls.reset(statsDeps);
+  }
+
+  // Hook filled in by a later FR (chart).
   function returnChartToLive(): void {}
 
   let helpOpen = $state(false);
@@ -221,7 +237,12 @@
       <section class="chart panel" aria-label="Chart"></section>
     </div>
     <div class="side-panel">
-      <StatsPanel />
+      <StatsPanel
+        stats={session.stats}
+        controls={statsControls}
+        deps={statsDeps}
+        canReset={canRecord}
+      />
     </div>
   </main>
   {#if helpOpen}

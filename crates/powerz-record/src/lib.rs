@@ -46,6 +46,13 @@ impl Integrator {
         self.last = Some((time_ms, vbus_v, ibus_a));
         (self.charge_ah, self.energy_wh)
     }
+
+    /// End the current run without zeroing the sums: the interval up to the
+    /// next sample contributes nothing (use it across an outage or a clock
+    /// jump, where no samples were measured).
+    pub fn break_run(&mut self) {
+        self.last = None;
+    }
 }
 
 /// `x` with at most 8 significant digits as a plain decimal, trailing zeros
@@ -122,6 +129,12 @@ impl<W: Write> CsvRecorder<W> {
         )?;
         self.rows += 1;
         Ok(())
+    }
+
+    /// The interval up to the next row was not measured (an outage or a
+    /// clock jump): it adds no charge or energy. Elapsed time is unchanged.
+    pub fn break_run(&mut self) {
+        self.integrator.break_run();
     }
 
     /// Rows written so far.
@@ -228,6 +241,39 @@ mod tests {
         for x in [1e-7, -3.3e-9, 4.2e-15, 1.5e9] {
             assert!(!sig8(x).contains('e'), "{x} -> {}", sig8(x));
         }
+    }
+
+    #[test]
+    fn break_run_skips_one_interval_and_keeps_the_sums() {
+        let mut i = Integrator::new();
+        i.push(0, 5.0, 1.0);
+        let before = i.push(3_600, 5.0, 1.0); // 0.001 Ah, 0.005 Wh
+        i.break_run();
+        // An hour-long outage adds nothing; the sums carry on after it.
+        assert_eq!(i.push(3_603_600, 5.0, 1.0), before);
+        let (q, e) = i.push(3_607_200, 5.0, 1.0);
+        assert!(close(q, 0.002), "charge {q}");
+        assert!(close(e, 0.010), "energy {e}");
+    }
+
+    #[test]
+    fn a_recorder_run_break_skips_one_interval_in_charge_and_energy() {
+        let row = |t: u32| {
+            let mut b = Vec::with_capacity(20);
+            b.extend_from_slice(&t.to_le_bytes());
+            b.extend_from_slice(&5_000_000i32.to_le_bytes());
+            b.extend_from_slice(&1_000_000i32.to_le_bytes());
+            b.extend_from_slice(&[0u8; 8]);
+            QueueRecord::decode(&b, powerz_protocol::decode::Rate::Sps1000).unwrap()
+        };
+        let mut csv = CsvRecorder::new(Vec::new()).unwrap();
+        csv.push(&row(0), 0).unwrap();
+        csv.push(&row(3_600), 0).unwrap();
+        csv.break_run();
+        csv.push(&row(3_603_600), 0).unwrap();
+        let text = String::from_utf8(csv.finish().unwrap()).unwrap();
+        let last: Vec<&str> = text.lines().last().unwrap().split(',').collect();
+        assert_eq!((last[9], last[10]), ("0.001", "0.005"), "{text}");
     }
 
     #[test]

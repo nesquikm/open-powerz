@@ -200,6 +200,39 @@ fn spawn_opens_the_pipe_on_a_dedicated_thread_and_disconnects() {
     );
 }
 
+/// A reconnect that arrives right after the `disconnected` status must not
+/// be refused because the old worker thread has not quite returned yet.
+#[test]
+fn handle_counts_as_finished_once_the_disconnected_status_is_out() {
+    use powerz_protocol::transport;
+    let clock = clock();
+    let open = || Err::<Pipe, _>(transport::Error::Disconnected);
+    let (seen_tx, seen_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let sink = move |e: BackendEvent| {
+        if let BackendEvent::Status(Status::Disconnected { .. }) = e {
+            let _ = seen_tx.send(());
+            // Hold the worker thread inside its last event.
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        }
+    };
+    let handle = worker::spawn(open, clock, config(Rate::Sps50), sink);
+    seen_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("no disconnected status");
+    let finished = handle.is_finished();
+    let _ = release_tx.send(());
+    handle.disconnect();
+    assert!(
+        finished,
+        "the handle still counted as running after its disconnected status"
+    );
+}
+
 // ---- AC-VHY378.3: rate fallback when auth or the queue start is rejected ----
 
 fn assert_rate_locked_at_meter_rate(opts: PipeOpts) {
@@ -555,4 +588,78 @@ fn a_failed_snapshot_keeps_the_session_and_every_polled_record() {
     );
     let delivered = log.lock().unwrap().records_delivered;
     assert_eq!(samples(&events).len(), delivered, "records were dropped");
+}
+
+// ---- requests while the worker is busy ----
+
+/// Spawn a worker whose sink holds the worker thread inside its first
+/// non-empty batch until `release` is sent.
+fn spawn_held() -> (worker::WorkerHandle, mpsc::Sender<()>) {
+    let clock = clock();
+    let c = clock.clone();
+    let open = move || {
+        Ok(Pipe::sim(
+            Scenario::Load5v1a,
+            FaultPlan::new(),
+            &c,
+            PipeOpts::default(),
+        ))
+    };
+    let (seen_tx, seen_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let mut held = false;
+    let sink = move |e: BackendEvent| {
+        if let BackendEvent::Batch(b) = &e
+            && !b.samples.is_empty()
+            && !held
+        {
+            held = true;
+            let _ = seen_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(20));
+        }
+    };
+    let handle = worker::spawn(open, clock, config(Rate::Sps50), sink);
+    seen_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("no samples");
+    (handle, release_tx)
+}
+
+#[test]
+fn a_request_the_busy_worker_cannot_answer_in_time_says_busy() {
+    use open_powerz_desktop_lib::ui_error::ErrorKind;
+    let (handle, release) = spawn_held();
+    let answer = handle.control().set_rate(Rate::Sps10);
+    let _ = release.send(());
+    handle.disconnect();
+    let err = answer.expect_err("a held worker answered");
+    assert_eq!(err.kind, ErrorKind::Timeout, "{err:?}");
+    assert_eq!(err.message, "The meter is busy. Try again.");
+}
+
+#[test]
+fn history_and_stats_are_answered_while_the_worker_is_busy() {
+    use open_powerz_desktop_lib::history::Series;
+    let (handle, release) = spawn_held();
+    let control = handle.control();
+    let started = std::time::Instant::now();
+    let stats = control.stats();
+    let range = control.history_range(&[Series::Vbus], 0, u64::MAX, 100);
+    let reset = control.reset_stats();
+    let cleared = control.clear_history();
+    let took = started.elapsed();
+    let _ = release.send(());
+    handle.disconnect();
+    assert!(stats.expect("stats").samples > 0);
+    assert!(!range.expect("history_range")[0].buckets.is_empty());
+    reset.expect("reset_stats");
+    cleared.expect("clear_history");
+    assert!(
+        took < Duration::from_secs(1),
+        "the queries waited {took:?} on the worker"
+    );
 }

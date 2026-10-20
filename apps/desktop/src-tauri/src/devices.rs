@@ -19,7 +19,10 @@ use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{Persona, Scenario, SimDevice};
 use serde::Serialize;
 
+use crate::history::{Series, SeriesBuckets};
 use crate::recording::{ExportProgress, RecordingSummary};
+use crate::stats::StatsSnapshot;
+use crate::store::SessionStore;
 use crate::ui_error::UiError;
 use crate::worker::{
     self, BackendEvent, EventSink, Gap, GapKind, Status, WorkerConfig, WorkerHandle,
@@ -196,8 +199,11 @@ pub struct DeviceManager<O, C> {
     clock: C,
     worker: Option<WorkerHandle>,
     next_session_id: u64,
-    /// Session history per meter serial (or device id when it has none).
-    histories: HashMap<String, Arc<Mutex<History>>>,
+    /// Session per meter serial (or device id when it has none): what the
+    /// outage gap needs, and the data every connection appends to.
+    histories: HashMap<String, (Arc<Mutex<History>>, SessionStore)>,
+    /// The data of the most recent session, kept readable after it ends.
+    last_store: Option<SessionStore>,
 }
 
 /// What a session history remembers between connections.
@@ -211,7 +217,8 @@ struct History {
 }
 
 /// Wrap `sink` so the events update `history`: the first samples after an
-/// outage are preceded by an outage gap.
+/// outage are preceded by an outage gap. Sample times are session times,
+/// which never go backwards across a reconnect.
 fn history_sink(history: Arc<Mutex<History>>, mut sink: impl EventSink) -> impl EventSink {
     move |event: BackendEvent| {
         let mut gap = None;
@@ -267,6 +274,7 @@ where
             worker: None,
             next_session_id: 1,
             histories: HashMap::new(),
+            last_store: None,
         }
     }
 
@@ -311,25 +319,29 @@ where
         }
         let key = device.serial.clone().unwrap_or_else(|| device.id.clone());
         let next_session_id = &mut self.next_session_id;
-        let history = Arc::clone(self.histories.entry(key).or_insert_with(|| {
+        let (history, store) = self.histories.entry(key).or_insert_with(|| {
             let session_id = *next_session_id;
             *next_session_id += 1;
-            Arc::new(Mutex::new(History {
+            let history = History {
                 session_id,
                 last_ms: None,
                 outage: false,
-            }))
-        }));
+            };
+            (Arc::new(Mutex::new(history)), SessionStore::new())
+        });
+        let (history, store) = (Arc::clone(history), store.clone());
+        self.last_store = Some(store.clone());
         let session_id = history
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .session_id;
         let opener = Arc::clone(&self.opener);
         let config = WorkerConfig { rate, session_id };
-        self.worker = Some(worker::spawn_with_stop(
+        self.worker = Some(worker::spawn_with_store(
             move || opener.open(&device),
             self.clock.clone(),
             config,
+            store,
             history_sink(history, sink),
             stop,
         ));
@@ -368,14 +380,63 @@ where
         self.control()?.stop_recording()
     }
 
-    /// Export the open session so far to a new file at `path` on a thread
-    /// of its own; `progress` is called on that thread.
+    /// The data of the open session, or of the last one once the meter is
+    /// gone (unplugging keeps the data). Refused only before any connect.
+    pub fn session_store(&self) -> Result<SessionStore, UiError> {
+        self.last_store
+            .clone()
+            .ok_or_else(|| UiError::usage("No meter is connected."))
+    }
+
+    /// What [`DeviceManager::export_session`] needs, so a caller can wait
+    /// for the worker's answer after releasing its lock on the manager.
+    pub fn exporter(&self) -> Result<worker::Exporter, UiError> {
+        let store = self.session_store()?;
+        let control = self.control().ok();
+        Ok(worker::Exporter::new(
+            control,
+            store,
+            self.clock.clone().now_ms(),
+        ))
+    }
+
+    /// Export the session so far (the open one, or the last one) to a new
+    /// file at `path` on a thread of its own; `progress` is called on that
+    /// thread.
     pub fn export_session(
         &self,
         path: &Path,
         progress: impl FnMut(ExportProgress) + Send + 'static,
     ) -> Result<worker::ExportJob, UiError> {
-        self.control()?.export_to(path, progress)
+        self.exporter()?.export_to(path, progress)
+    }
+
+    /// Statistics of the session.
+    pub fn stats(&self) -> Result<StatsSnapshot, UiError> {
+        Ok(self.session_store()?.stats())
+    }
+
+    /// Min / max buckets of the session's history.
+    pub fn history_range(
+        &self,
+        series: &[Series],
+        t0: u64,
+        t1: u64,
+        buckets: usize,
+    ) -> Result<Vec<SeriesBuckets>, UiError> {
+        Ok(self.session_store()?.history_range(series, t0, t1, buckets))
+    }
+
+    /// Zero the session's statistics.
+    pub fn reset_stats(&self) -> Result<(), UiError> {
+        self.session_store()?.reset_stats();
+        Ok(())
+    }
+
+    /// Discard the session's history.
+    pub fn clear_history(&self) -> Result<(), UiError> {
+        self.session_store()?.clear_history();
+        Ok(())
     }
 
     /// Take the open session out of the manager, so a caller can close it
@@ -486,6 +547,7 @@ mod tests {
                 dm_v: 0.0,
             }],
             temp_c: None,
+            stats: Default::default(),
         })
     }
 

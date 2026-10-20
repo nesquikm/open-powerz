@@ -340,3 +340,107 @@ fn reconnecting_the_same_serial_appends_to_the_same_session_with_an_outage_gap()
         .unwrap();
     assert!(outage < first_samples, "outage gap after the new samples");
 }
+
+/// Sample times of every batch in `events`.
+fn sample_times(events: &[BackendEvent]) -> Vec<u32> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            BackendEvent::Batch(b) => Some(b.samples.iter().map(|s| s.t_ms)),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+#[test]
+fn reconnecting_the_same_serial_continues_the_history_and_the_stats() {
+    use open_powerz_desktop_lib::history::Series;
+    let (mut m, _opens, _) = manager(vec![FaultPlan::new().disconnect_after_polls(20)]);
+    let (rx, sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink).unwrap();
+    let first = recv_until(&rx, |e| {
+        matches!(e, BackendEvent::Status(Status::Disconnected { .. }))
+    });
+    let kept = sample_times(&first);
+    assert!(!kept.is_empty(), "no samples before the unplug");
+
+    let (rx2, sink2) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink2).unwrap();
+    let second = recv_until(
+        &rx2,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    let seen = sample_times(&second);
+    let stats = m.stats().expect("stats");
+    let range = m
+        .history_range(&[Series::Vbus], 0, u64::MAX, 8_192)
+        .expect("history_range");
+    m.disconnect().unwrap();
+
+    assert!(
+        stats.samples as usize >= kept.len() + seen.len(),
+        "stats count {} samples; the two connections sent {} + {}",
+        stats.samples,
+        kept.len(),
+        seen.len()
+    );
+    // The meter restarted its clock, but the session timeline goes on.
+    assert!(
+        seen[0] > kept[kept.len() - 1],
+        "second connection starts at {} after the first ended at {}",
+        seen[0],
+        kept[kept.len() - 1]
+    );
+    let buckets = &range[0].buckets;
+    assert_eq!(
+        buckets.first().map(|b| b.t_ms),
+        Some(u64::from(kept[0])),
+        "the history lost the first connection"
+    );
+}
+
+// ---- the data stays readable after the meter is gone ----
+
+#[test]
+fn history_stats_and_export_still_answer_after_a_disconnect() {
+    use open_powerz_desktop_lib::history::Series;
+    let (mut m, _opens, _) = manager(vec![]);
+    let err = m.stats().expect_err("stats before any session");
+    assert_eq!(err.message, "No meter is connected.");
+
+    let (rx, sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink).unwrap();
+    recv_until(
+        &rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    m.disconnect().unwrap();
+
+    let stats = m.stats().expect("stats after disconnect");
+    assert!(stats.samples > 0);
+    let range = m
+        .history_range(&[Series::Vbus], 0, u64::MAX, 100)
+        .expect("history_range after disconnect");
+    assert!(!range[0].buckets.is_empty());
+
+    let dir = std::env::temp_dir().join(format!("powerz-kept-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("kept.csv");
+    let rows = m
+        .export_session(&path, |_| {})
+        .expect("export after disconnect")
+        .join()
+        .unwrap()
+        .expect("export");
+    assert_eq!(rows, stats.samples);
+    let lines = std::fs::read_to_string(&path).unwrap().lines().count() as u64;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(lines, rows + 1);
+
+    m.reset_stats().expect("reset_stats after disconnect");
+    assert_eq!(m.stats().unwrap().samples, 0);
+    m.clear_history().expect("clear_history after disconnect");
+    let range = m.history_range(&[Series::Vbus], 0, u64::MAX, 100).unwrap();
+    assert!(range[0].buckets.is_empty());
+}

@@ -9,11 +9,16 @@
 import type {
   AppInfo,
   BackendEvent,
+  BucketsFor,
   DeviceListing,
   ExportProgress,
   ExportResult,
+  MinMaxAvg,
   RecordingSummary,
   Sample,
+  Series,
+  SeriesBuckets,
+  StatsSnapshot,
   UiError,
 } from "./backend";
 
@@ -67,6 +72,98 @@ function sampleAt(scenario: Scenario, tMs: number): Sample {
   }
 }
 
+/** Running min / max / sum of one quantity. */
+class RunningMinMax {
+  min = Infinity;
+  max = -Infinity;
+  sum = 0;
+
+  push(x: number): void {
+    this.min = Math.min(this.min, x);
+    this.max = Math.max(this.max, x);
+    this.sum += x;
+  }
+
+  snapshot(n: number): MinMaxAvg | null {
+    return n > 0 ? { min: this.min, max: this.max, avg: this.sum / n } : null;
+  }
+}
+
+/** Statistics over the samples since the last reset, like `src-tauri/src/stats.rs`:
+ * charge and energy by the trapezoid rule, never across a reset. */
+class MockStats {
+  #first: number | null = null;
+  #last: Sample | null = null;
+  #samples = 0;
+  #chargeAh = 0;
+  #energyWh = 0;
+  #vbus = new RunningMinMax();
+  #ibus = new RunningMinMax();
+  #power = new RunningMinMax();
+
+  push(s: Sample): void {
+    const prev = this.#last;
+    if (prev) {
+      const dtH = (s.t_ms - prev.t_ms) / 3_600_000;
+      this.#chargeAh += ((prev.ibus_a + s.ibus_a) / 2) * dtH;
+      this.#energyWh += ((prev.vbus_v * prev.ibus_a + s.vbus_v * s.ibus_a) / 2) * dtH;
+    }
+    this.#first ??= s.t_ms;
+    this.#last = s;
+    this.#samples += 1;
+    this.#vbus.push(s.vbus_v);
+    this.#ibus.push(s.ibus_a);
+    this.#power.push(s.vbus_v * s.ibus_a);
+  }
+
+  snapshot(): StatsSnapshot {
+    const n = this.#samples;
+    return {
+      elapsed_ms: this.#first === null || !this.#last ? 0 : this.#last.t_ms - this.#first,
+      samples: n,
+      charge_ah: this.#chargeAh,
+      energy_wh: this.#energyWh,
+      vbus: this.#vbus.snapshot(n),
+      ibus: this.#ibus.snapshot(n),
+      power: this.#power.snapshot(n),
+    };
+  }
+}
+
+const SERIES_FIELD: Record<Series, keyof Sample> = {
+  vbus: "vbus_v",
+  ibus: "ibus_a",
+  dp: "dp_v",
+  dm: "dm_v",
+  cc1: "cc1_v",
+  cc2: "cc2_v",
+};
+
+/** Min / max buckets of `history` over `t0..=t1`, at most `buckets` per series. */
+function bucketsOf(
+  history: Sample[],
+  series: readonly Series[],
+  t0: number,
+  t1: number,
+  buckets: number,
+): SeriesBuckets[] {
+  const inRange = history.filter((s) => s.t_ms >= t0 && s.t_ms <= t1);
+  const per = buckets > 0 ? Math.max(1, Math.ceil(inRange.length / buckets)) : 0;
+  return series.map((name) => {
+    const field = SERIES_FIELD[name];
+    const out: SeriesBuckets = { series: name, buckets: [] };
+    if (per === 0) return out;
+    for (let i = 0; i < inRange.length; i += per) {
+      const chunk = inRange.slice(i, i + per);
+      const head = chunk[0];
+      if (!head) break;
+      const values = chunk.map((s) => s[field]);
+      out.buckets.push({ t_ms: head.t_ms, min: Math.min(...values), max: Math.max(...values) });
+    }
+    return out;
+  });
+}
+
 interface Running {
   scenario: Scenario;
   rateSps: number;
@@ -80,6 +177,9 @@ interface Running {
   streamed: number;
   /** The open recording, if any. */
   recording: MockRecording | null;
+  /** Every sample since the start or the last clear (what the chart zooms into). */
+  history: Sample[];
+  stats: MockStats;
 }
 
 interface MockRecording {
@@ -140,6 +240,8 @@ export class MockBackend {
       onEvent,
       streamed: 0,
       recording: null,
+      history: [],
+      stats: new MockStats(),
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
     this.#session = session;
@@ -152,11 +254,14 @@ export class MockBackend {
     const step = 1000 / s.rateSps;
     const samples: Sample[] = [];
     for (let i = 0; i < n; i++) {
-      samples.push(sampleAt(s.scenario, Math.round(s.nextMs)));
+      const sample = sampleAt(s.scenario, Math.round(s.nextMs));
+      samples.push(sample);
+      s.history.push(sample);
+      s.stats.push(sample);
       s.nextMs += step;
     }
     const tempC = s.rateSps === 1000 ? null : 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
-    s.onEvent({ type: "batch", data: { samples, temp_c: tempC } });
+    s.onEvent({ type: "batch", data: { samples, temp_c: tempC, stats: s.stats.snapshot() } });
     s.streamed += n;
     const rec = s.recording;
     if (rec) {
@@ -173,9 +278,15 @@ export class MockBackend {
     }
   }
 
-  async disconnect(): Promise<void> {
+  /** The open session; refuses like the backend when none is. */
+  #open(): Running {
     const s = this.#session;
     if (!s) throw usage("No meter is connected.");
+    return s;
+  }
+
+  async disconnect(): Promise<void> {
+    const s = this.#open();
     clearInterval(s.timer);
     this.#session = null;
     if (s.recording) {
@@ -190,8 +301,7 @@ export class MockBackend {
   }
 
   async setRate(rateSps: number): Promise<void> {
-    const s = this.#session;
-    if (!s) throw usage("No meter is connected.");
+    const s = this.#open();
     s.rateSps = rateSps;
     s.carry = 0;
     s.onEvent({ type: "status", data: { state: "rate", rate_sps: rateSps, rate_locked: false } });
@@ -199,8 +309,7 @@ export class MockBackend {
 
   /** There is no save dialog in the browser: the proposed name is the "path". */
   async startRecording(suggestedName: string): Promise<string | null> {
-    const s = this.#session;
-    if (!s) throw usage("No meter is connected.");
+    const s = this.#open();
     if (s.recording) throw usage("A recording is already running.");
     s.recording = { path: suggestedName, rows: 0, elapsedMs: 0, sinceProgressMs: 0 };
     s.onEvent({ type: "recording", data: { state: "started" } });
@@ -208,8 +317,7 @@ export class MockBackend {
   }
 
   async stopRecording(): Promise<RecordingSummary> {
-    const s = this.#session;
-    if (!s) throw usage("No meter is connected.");
+    const s = this.#open();
     const rec = s.recording;
     if (!rec) throw usage("Nothing is being recorded.");
     s.recording = null;
@@ -221,8 +329,7 @@ export class MockBackend {
     suggestedName: string,
     onProgress: (progress: ExportProgress) => void,
   ): Promise<ExportResult | null> {
-    const s = this.#session;
-    if (!s) throw usage("No meter is connected.");
+    const s = this.#open();
     const rows = s.streamed;
     return new Promise((resolve) =>
       setTimeout(() => {
@@ -230,6 +337,34 @@ export class MockBackend {
         resolve({ path: suggestedName, rows });
       }, 0),
     );
+  }
+
+  async stats(): Promise<StatsSnapshot> {
+    const s = this.#open();
+    return s.stats.snapshot();
+  }
+
+  async historyRange<const S extends readonly Series[]>(
+    series: S,
+    t0Ms: number,
+    t1Ms: number,
+    buckets: number,
+  ): Promise<BucketsFor<S>> {
+    const s = this.#open();
+    // `bucketsOf` maps `series` one to one, so the tuple shape holds.
+    return bucketsOf(s.history, series, t0Ms, t1Ms, buckets) as BucketsFor<S>;
+  }
+
+  /** Zeroes the stats; they count again from the next sample. The history stays. */
+  async resetStats(): Promise<void> {
+    const s = this.#open();
+    s.stats = new MockStats();
+  }
+
+  /** Discards the history; the stream and any recording go on. */
+  async clearHistory(): Promise<void> {
+    const s = this.#open();
+    s.history = [];
   }
 
   async appInfo(): Promise<AppInfo> {

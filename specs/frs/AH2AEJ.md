@@ -32,7 +32,7 @@ Add a per-session sample history with min/max decimation queries and running sta
 
 ## Technical Design
 
-Shared integrator from the `powerz-record` crate (FR 0P7HSJ). The `history` module stores `Vec<u32>` time plus raw `i32`/`u16` columns (20 bytes per sample) and an incremental min/max pyramid of `f32` values over blocks of 64·4^k samples. A query picks the coarsest pyramid level giving at least `buckets` blocks in range, merges blocks into buckets and reads raw samples only at the two edges. The `stats` module keeps running sums (compensated summation for averages). Commands `history_range`, `stats`, `reset_stats`, `clear_history`; a stats snapshot also rides every batch. UI: `src/lib/stats.ts` (formatting) and `StatsPanel.svelte`.
+Shared integrator from the `powerz-record` crate (FR 0P7HSJ). The `history` module stores `u32` time plus raw `i32`/`u16` columns (20 bytes per sample) in fixed chunks of 65,536 samples, so an append never copies old data, and an incremental min/max pyramid of `f32` values over blocks of 64·4^k samples. A query picks the coarsest pyramid level giving at least `buckets` blocks in range, merges blocks into buckets and reads raw samples only at the two edges. The `stats` module keeps running sums (compensated summation for averages). Commands `history_range`, `stats`, `reset_stats`, `clear_history`; a stats snapshot also rides every batch. UI: `src/lib/stats.ts` (formatting) and `StatsPanel.svelte`.
 
 ## Testing
 

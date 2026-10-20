@@ -3,6 +3,8 @@
 
 use serde::Serialize;
 
+use crate::stats::StatsSnapshot;
+
 /// One queue record in SI units, timestamped in device time.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Sample {
@@ -29,6 +31,8 @@ pub struct Batch {
     pub samples: Vec<Sample>,
     /// Latest chip temperature, °C; `None` when the meter reports it invalid.
     pub temp_c: Option<f64>,
+    /// Session statistics up to and including this batch.
+    pub stats: StatsSnapshot,
 }
 
 /// Flush pending samples once this much time (tenths of a ms, 16.7 ms ≈
@@ -96,6 +100,7 @@ impl Batcher {
         Batch {
             samples: std::mem::take(&mut self.pending),
             temp_c: self.temp_c,
+            stats: StatsSnapshot::default(),
         }
     }
 }

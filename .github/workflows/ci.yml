@@ -59,7 +59,7 @@ jobs:
 
       # Timing bounds only mean something in an optimized build (1 M-row export ≤ 5 s).
       - name: Rust release-mode timing tests
-        run: cargo test --release -p open-powerz-desktop --locked --test recording
+        run: cargo test --release -p open-powerz-desktop --locked --test recording --test history
 
       - name: Rust docs
         run: cargo doc -p powerz-protocol --no-deps --locked

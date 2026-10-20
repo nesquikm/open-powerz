@@ -1,4 +1,4 @@
-import type { BackendEvent, DeviceListing, Sample, UiError } from "./backend";
+import type { BackendEvent, DeviceListing, Sample, StatsSnapshot, UiError } from "./backend";
 import { sortDevices, type ConnectionState } from "./format";
 
 /** Reactive UI state of the live session. */
@@ -17,6 +17,14 @@ export class Session {
   tempC = $state<number | null>(null);
   /** Measured queue rate. */
   rateSps = $state<number | null>(null);
+  /** Statistics of the latest batch, null until the first one. They stay after a
+   * disconnect, so the final totals remain readable. */
+  stats = $state<StatsSnapshot | null>(null);
+
+  /** The backend zeroed the statistics: show none until the next batch. */
+  statsReset(): void {
+    this.stats = null;
+  }
 
   /** A session is open or opening (the picker is locked, the button reads Disconnect). */
   get active(): boolean {
@@ -70,6 +78,7 @@ export class Session {
         const last = event.data.samples.at(-1);
         if (last) this.latest = last;
         this.tempC = event.data.temp_c;
+        this.stats = event.data.stats;
         break;
       }
       case "status":

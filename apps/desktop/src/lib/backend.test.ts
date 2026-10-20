@@ -28,6 +28,16 @@ import {
   type DeviceListing,
 } from "./backend";
 
+const NO_STATS: StatsSnapshot = {
+  elapsed_ms: 0,
+  samples: 0,
+  charge_ah: 0,
+  energy_wh: 0,
+  vbus: null,
+  ibus: null,
+  power: null,
+};
+
 const meter: DeviceListing = {
   id: "usb:1:4",
   label: "KM003C — 12345678",
@@ -80,7 +90,10 @@ describe("session commands", () => {
       rateSps: 50,
       onEvent: channels[0],
     });
-    const ev: BackendEvent = { type: "batch", data: { samples: [], temp_c: null } };
+    const ev: BackendEvent = {
+      type: "batch",
+      data: { samples: [], temp_c: null, stats: NO_STATS },
+    };
     channels[0]?.onmessage(ev);
     expect(events).toEqual([ev]);
   });
@@ -184,5 +197,44 @@ describe("recording commands (AC-0P7HSJ.3, AC-0P7HSJ.5)", () => {
     };
     channels.at(-1)?.onmessage(ev);
     expect(events).toEqual([ev]);
+  });
+});
+
+// ---- FR AH2AEJ: history and stats commands ----
+
+import { clearHistory, historyRange, resetStats, stats, type StatsSnapshot } from "./backend";
+
+describe("history and stats commands (AC-AH2AEJ.2, AC-AH2AEJ.4, AC-AH2AEJ.5)", () => {
+  const snap: StatsSnapshot = {
+    elapsed_ms: 1000,
+    samples: 50,
+    charge_ah: -0.001,
+    energy_wh: -0.005,
+    vbus: { min: 4.9, max: 5.1, avg: 5 },
+    ibus: { min: -0.3, max: -0.1, avg: -0.2 },
+    power: { min: -1.5, max: -0.5, avg: -1 },
+  };
+
+  it("queries a history range per series", async () => {
+    const answer = [{ series: "vbus", buckets: [{ t_ms: 0, min: 4.9, max: 5.1 }] }];
+    invoke.mockResolvedValue(answer);
+    await expect(historyRange(["vbus", "ibus"], 0, 60_000, 2000)).resolves.toEqual(answer);
+    expect(invoke).toHaveBeenCalledWith("history_range", {
+      series: ["vbus", "ibus"],
+      t0Ms: 0,
+      t1Ms: 60_000,
+      buckets: 2000,
+    });
+  });
+
+  it("reads, resets and clears", async () => {
+    invoke.mockResolvedValue(snap);
+    await expect(stats()).resolves.toEqual(snap);
+    expect(invoke).toHaveBeenCalledWith("stats");
+    invoke.mockResolvedValue(undefined);
+    await resetStats();
+    expect(invoke).toHaveBeenCalledWith("reset_stats");
+    await clearHistory();
+    expect(invoke).toHaveBeenCalledWith("clear_history");
   });
 });

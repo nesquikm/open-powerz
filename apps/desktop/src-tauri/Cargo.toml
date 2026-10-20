@@ -28,6 +28,8 @@ tauri-plugin-dialog = "2.8.3"
 [dev-dependencies]
 # The golden-file tests compare desktop recordings with `powerz stream`.
 powerz-cli = { path = "../../../crates/powerz-cli" }
+# Property tests for the history decimation (FR AH2AEJ).
+proptest = "1.12.0"
 
 [lints]
 workspace = true

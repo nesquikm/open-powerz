@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { BackendEvent, DeviceListing, Sample, UiError } from "./backend";
+import type { BackendEvent, DeviceListing, Sample, StatsSnapshot, UiError } from "./backend";
 import { Session } from "./session.svelte";
+
+const NO_STATS: StatsSnapshot = {
+  elapsed_ms: 0,
+  samples: 0,
+  charge_ah: 0,
+  energy_wh: 0,
+  vbus: null,
+  ibus: null,
+  power: null,
+};
 
 function sample(t_ms: number, vbus_v = 5): Sample {
   return { t_ms, vbus_v, ibus_a: 1, cc1_v: 1.68, cc2_v: 0, dp_v: 0.6, dm_v: 0 };
@@ -122,7 +132,10 @@ describe("Session readout values (AC-AH2AEK.2, AC-AH2AEK.9)", () => {
   it("keeps the latest sample of each batch", () => {
     const s = new Session();
     s.handleEvent(connected());
-    s.handleEvent({ type: "batch", data: { samples: [sample(1, 5), sample(2, 9)], temp_c: 30 } });
+    s.handleEvent({
+      type: "batch",
+      data: { samples: [sample(1, 5), sample(2, 9)], temp_c: 30, stats: NO_STATS },
+    });
     expect(s.latest?.vbus_v).toBe(9);
     expect(s.tempC).toBe(30);
   });
@@ -130,23 +143,26 @@ describe("Session readout values (AC-AH2AEK.2, AC-AH2AEK.9)", () => {
   it("keeps the last sample across an empty heartbeat batch", () => {
     const s = new Session();
     s.handleEvent(connected());
-    s.handleEvent({ type: "batch", data: { samples: [sample(1, 12)], temp_c: 30 } });
-    s.handleEvent({ type: "batch", data: { samples: [], temp_c: 30 } });
+    s.handleEvent({
+      type: "batch",
+      data: { samples: [sample(1, 12)], temp_c: 30, stats: NO_STATS },
+    });
+    s.handleEvent({ type: "batch", data: { samples: [], temp_c: 30, stats: NO_STATS } });
     expect(s.latest?.vbus_v).toBe(12);
   });
 
   it("drops a stale temperature once the meter stops reporting it", () => {
     const s = new Session();
     s.handleEvent(connected());
-    s.handleEvent({ type: "batch", data: { samples: [sample(1)], temp_c: 31.5 } });
-    s.handleEvent({ type: "batch", data: { samples: [sample(2)], temp_c: null } });
+    s.handleEvent({ type: "batch", data: { samples: [sample(1)], temp_c: 31.5, stats: NO_STATS } });
+    s.handleEvent({ type: "batch", data: { samples: [sample(2)], temp_c: null, stats: NO_STATS } });
     expect(s.tempC).toBeNull();
   });
 
   it("clears the readout when disconnected", () => {
     const s = new Session();
     s.handleEvent(connected());
-    s.handleEvent({ type: "batch", data: { samples: [sample(1)], temp_c: 31.5 } });
+    s.handleEvent({ type: "batch", data: { samples: [sample(1)], temp_c: 31.5, stats: NO_STATS } });
     s.handleEvent({ type: "status", data: { state: "disconnected", error: null } });
     expect(s.latest).toBeNull();
     expect(s.tempC).toBeNull();
@@ -179,6 +195,7 @@ describe("Session lifecycle edges (review round 1)", () => {
     data: {
       samples: [{ t_ms: 1, vbus_v: vbus, ibus_a: 0, cc1_v: 0, cc2_v: 0, dp_v: 0, dm_v: 0 }],
       temp_c: 30,
+      stats: NO_STATS,
     },
   });
   const connected: BackendEvent = {
@@ -233,5 +250,48 @@ describe("Session lifecycle edges (review round 1)", () => {
     expect(s.canToggleConnect).toBe(false);
     s.handleEvent(connected);
     expect(s.canToggleConnect).toBe(true);
+  });
+});
+
+// ---- FR AH2AEJ: the stats snapshot riding each batch ----
+
+describe("Session stats (AC-AH2AEJ.6)", () => {
+  const snap = {
+    elapsed_ms: 2000,
+    samples: 100,
+    charge_ah: -0.12,
+    energy_wh: -0.6,
+    vbus: { min: 4.9, max: 5.1, avg: 5 },
+    ibus: { min: -0.3, max: -0.1, avg: -0.2 },
+    power: { min: -1.5, max: -0.5, avg: -1 },
+  };
+
+  it("starts without stats", () => {
+    expect(new Session().stats).toBeNull();
+  });
+
+  it("takes the stats of every batch, heartbeats included", () => {
+    const s = new Session();
+    s.handleEvent(connected());
+    s.handleEvent({ type: "batch", data: { samples: [sample(1)], temp_c: null, stats: snap } });
+    expect(s.stats).toEqual(snap);
+    const later = { ...snap, samples: 101, charge_ah: -0.13 };
+    s.handleEvent({ type: "batch", data: { samples: [], temp_c: null, stats: later } });
+    expect(s.stats).toEqual(later);
+  });
+});
+
+describe("Session stats after a reset (review round 1)", () => {
+  it("blanks the stats until the next batch brings fresh ones", () => {
+    const s = new Session();
+    s.handleEvent(connected());
+    s.handleEvent({
+      type: "batch",
+      data: { samples: [sample(1)], temp_c: 30, stats: { ...NO_STATS, samples: 7 } },
+    });
+    s.statsReset();
+    expect(s.stats).toBeNull();
+    s.handleEvent({ type: "batch", data: { samples: [sample(2)], temp_c: 30, stats: NO_STATS } });
+    expect(s.stats).toEqual(NO_STATS);
   });
 });

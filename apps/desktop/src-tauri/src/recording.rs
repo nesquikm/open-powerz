@@ -164,6 +164,11 @@ impl Recorder {
         self.csv.push(r, now_unix_ms)
     }
 
+    /// Nothing was measured up to the next row: it adds no charge or energy.
+    pub(crate) fn break_run(&mut self) {
+        self.csv.break_run();
+    }
+
     /// Remember a stream gap seen while recording.
     pub(crate) fn gap(&mut self, gap: Gap) {
         self.gaps.push(gap);
@@ -212,24 +217,49 @@ pub fn export_records<W: Write>(
     records: &[QueueRecord],
     out: W,
     start_unix_ms: u64,
+    progress: impl FnMut(ExportProgress),
+) -> Result<u64, UiError> {
+    export_iter(
+        records.len() as u64,
+        records.iter().map(|&r| (r, false)),
+        out,
+        start_unix_ms,
+        progress,
+    )
+}
+
+/// [`export_records`] over `total` records read from an iterator, each with
+/// whether it starts a new measuring run (charge and energy then skip the
+/// interval before it, as the session statistics do).
+pub fn export_iter<W: Write>(
+    total: u64,
+    records: impl IntoIterator<Item = (QueueRecord, bool)>,
+    out: W,
+    start_unix_ms: u64,
     mut progress: impl FnMut(ExportProgress),
 ) -> Result<u64, UiError> {
-    let total = records.len() as u64;
     let fail = |e: io::Error| io_error(&e);
+    let every = EXPORT_PROGRESS_ROWS as u64;
     let mut csv = CsvRecorder::new(BufWriter::with_capacity(1 << 16, out)).map_err(fail)?;
-    for chunk in records.chunks(EXPORT_PROGRESS_ROWS) {
-        for r in chunk {
-            csv.push(r, start_unix_ms).map_err(fail)?;
+    for (r, new_run) in records {
+        if new_run {
+            csv.break_run();
         }
-        progress(ExportProgress {
-            done: csv.rows(),
-            total,
-        });
+        csv.push(&r, start_unix_ms).map_err(fail)?;
+        if csv.rows() % every == 0 {
+            progress(ExportProgress {
+                done: csv.rows(),
+                total,
+            });
+        }
     }
     let rows = csv.rows();
+    if rows % every != 0 {
+        progress(ExportProgress { done: rows, total });
+    }
     let buffered = csv.finish().map_err(fail)?;
     buffered.into_inner().map_err(|e| io_error(e.error()))?;
-    if records.is_empty() {
+    if rows == 0 {
         progress(ExportProgress { done: 0, total: 0 });
     }
     Ok(rows)
