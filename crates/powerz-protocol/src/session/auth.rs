@@ -81,7 +81,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
         }
         // The meter echoes the timestamp and the random value.
         let echo = crypto::decrypt(&auth_reply_key(), &reply[frame::HEADER_LEN..]);
-        let rnd = 8 + credential.len();
+        // Same clamp as `auth_plaintext`, so the offsets always agree.
+        let rnd = 8 + credential.len().min(OTP_CREDENTIAL_LEN);
         if echo[0..8] != plaintext[0..8] || echo[rnd..rnd + 8] != plaintext[rnd..rnd + 8] {
             return Err(Error::AuthFailed);
         }

@@ -60,7 +60,7 @@ pub struct Cli {
         help_heading = GLOBAL
     )]
     pub scenario: Scenario,
-    /// Log every frame sent (`>`) and received (`<`) to stderr as hex.
+    /// Log every frame sent (`>`), received (`<`) or refused by the safety guard (`x`) to stderr as hex.
     #[arg(long, global = true, help_heading = GLOBAL)]
     pub trace: bool,
     /// Subcommand to run.

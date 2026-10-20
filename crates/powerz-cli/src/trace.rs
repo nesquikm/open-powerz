@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use powerz_protocol::transport::{Error, Transport};
 
-/// Wraps a transport and writes each frame sent as `> <hex>` and each frame
-/// received as `< <hex>` (one line per frame) to `sink`.
+/// Wraps a transport and writes each frame sent as `> <hex>`, each frame
+/// received as `< <hex>` and each frame the guard refused before sending as
+/// `x <hex>` (one line per frame) to `sink`.
 #[derive(Debug)]
 pub struct TraceTransport<T, W> {
     inner: T,

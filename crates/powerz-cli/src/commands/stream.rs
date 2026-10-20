@@ -35,12 +35,12 @@ pub struct StreamSummary {
     pub gaps: Vec<Gap>,
 }
 
-/// `powerz stream`: start the queue at `opts.rate`, poll it with
-/// [`Streamer`], write CSV rows to `csv` (header [`record::CSV_HEADER`]),
-/// stop the queue when the duration is reached or `stop` is set, and print
 /// How long `stream` keeps polling without receiving a single record.
 const NO_DATA: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// `powerz stream`: start the queue at `opts.rate`, poll it with
+/// [`Streamer`], write CSV rows to `csv` (header [`record::CSV_HEADER`]),
+/// stop the queue when the duration is reached or `stop` is set, and print
 /// the sample count and any gaps to `err`.
 pub fn stream<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
