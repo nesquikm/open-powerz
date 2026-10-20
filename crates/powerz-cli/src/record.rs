@@ -41,6 +41,30 @@ impl Integrator {
     }
 }
 
+/// `x` with at most 8 significant digits, trailing zeros trimmed, in
+/// exponent form below 1e-5 (like the vendor recorder's precision 8).
+pub fn sig8(x: f64) -> String {
+    if x == 0.0 || !x.is_finite() {
+        return if x == 0.0 { "0".into() } else { x.to_string() };
+    }
+    let mag = x.abs().log10().floor() as i32;
+    if !(-5..8).contains(&mag) {
+        let text = format!("{x:.7e}");
+        let (mantissa, exp) = text.split_once('e').unwrap_or((&text, "0"));
+        return format!("{}e{exp}", trim_zeros(mantissa));
+    }
+    let decimals = usize::try_from(7 - mag).unwrap_or(0);
+    trim_zeros(&format!("{x:.decimals$}")).to_string()
+}
+
+fn trim_zeros(s: &str) -> &str {
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +128,15 @@ mod tests {
         let (q, e) = i.push(100, 5.0, -2.0);
         assert!(close(q, -2.0 * 0.1 / 3600.0), "charge {q}");
         assert!(close(e, -10.0 * 0.1 / 3600.0), "energy {e}");
+    }
+
+    #[test]
+    fn sig8_keeps_eight_significant_digits_without_float_noise() {
+        assert_eq!(sig8(-0.00000038183600000000003), "-3.81836e-7");
+        assert_eq!(sig8(0.0), "0");
+        assert_eq!(sig8(5.0), "5");
+        assert_eq!(sig8(12.345678912), "12.345679");
+        assert_eq!(sig8(-0.000012085555555555555), "-0.000012085556");
+        assert_eq!(sig8(2.5e-12), "2.5e-12");
     }
 }

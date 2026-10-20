@@ -315,12 +315,12 @@ impl SimDevice {
         SimDevice::open(persona, scenario, TimeSource::Sim { clock, start })
     }
 
-    /// A freshly opened meter: on bulk and CDC one stale DISCONNECT waits
-    /// for the first read; HID starts with nothing pending.
+    /// A freshly opened meter: on bulk one stale DISCONNECT waits on the IN
+    /// endpoint for the first read; CDC and HID start with nothing pending.
     fn open(persona: Persona, scenario: Scenario, time: TimeSource) -> SimDevice {
         let pending = match persona {
-            Persona::Hid => VecDeque::new(),
-            Persona::Bulk | Persona::Cdc => VecDeque::from([device::STALE_DISCONNECT.to_vec()]),
+            Persona::Bulk => VecDeque::from([device::STALE_DISCONNECT.to_vec()]),
+            Persona::Cdc | Persona::Hid => VecDeque::new(),
         };
         SimDevice {
             persona,
@@ -378,13 +378,16 @@ impl Transport for SimDevice {
             return Err(Error::Timeout);
         }
         let is_poll = device::is_queue_poll(request);
+        if self.persona == Persona::Hid && !powerz_protocol::frame::is_get_data(request) {
+            // Over HID the meter neither answers nor acts on anything but
+            // GET_DATA.
+            return Err(Error::Timeout);
+        }
         let mut replies = self.handle(request);
         if self.persona == Persona::Hid {
-            // Only GET_DATA is answered; a reply longer than one report
-            // crashes the meter's HID stack ("reboot").
-            if !powerz_protocol::frame::is_get_data(request) {
-                replies.clear();
-            } else if replies.iter().any(|r| r.len() > HID_REPORT_LEN) {
+            // A reply longer than one report crashes the meter's HID stack
+            // ("reboot").
+            if replies.iter().any(|r| r.len() > HID_REPORT_LEN) {
                 self.unplugged = true;
                 self.pending.clear();
                 return Err(Error::Disconnected);
@@ -445,5 +448,22 @@ impl powerz_protocol::transport::hid::HidIo for SimDevice {
         let n = report.len().min(buf.len());
         buf[..n].copy_from_slice(&report[..n]);
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod persona_tests {
+    use super::*;
+
+    #[test]
+    fn hid_control_commands_have_no_effect_on_state() {
+        // The real meter ignores control commands over HID (no reply, no
+        // effect); the HID persona must not act on them either.
+        let mut dev = SimDevice::new(Persona::Hid, Scenario::Idle);
+        let _ = dev.transact(
+            &powerz_protocol::frame::connect(1),
+            Duration::from_millis(20),
+        );
+        assert!(!dev.connected);
     }
 }

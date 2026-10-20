@@ -6,8 +6,8 @@
 //! [`MockTransport`](powerz_protocol::transport::MockTransport) and an
 //! in-memory buffer. `main.rs` only parses arguments and calls [`run`].
 //!
-//! Command functions receive a session that is already open (no CONNECT is
-//! sent; the meter does not need one); they send only the requests their command
+//! Command functions receive a session that is already open (and, on bulk,
+//! already CONNECTed: memory read is REJECTed without it); they send only the requests their command
 //! needs, starting with the session's next transaction id.
 //!
 //! Modules: [`args`] (clap definitions and validation), [`commands`] (one

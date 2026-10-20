@@ -1,5 +1,6 @@
 //! `powerz stream`.
 
+use crate::record::sig8;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -58,8 +59,12 @@ pub fn stream<T: Transport, C: Clock>(
     let mut integrator = record::Integrator::new();
     let mut write_err: Option<std::io::Error> = None;
     let polled = Streamer::run(session, opts.rate, |poll| {
-        let start =
-            *first_ms.get_or_insert_with(|| poll.records.first().map_or(0, |r| r.time_ms()));
+        // The origin is the first record's device time; an empty poll (the
+        // meter's first reply after 0x0E) must not fix it.
+        let Some(first) = poll.records.first() else {
+            return !stop.load(Ordering::SeqCst);
+        };
+        let start = *first_ms.get_or_insert(first.time_ms());
         let elapsed = |t: u32| u64::from(t.wrapping_sub(start));
         summary.gaps.extend(
             poll.gaps
@@ -108,15 +113,17 @@ fn write_row(
     let unix = unix_ms as f64 / 1000.0;
     writeln!(
         csv,
-        "{},{unix:.3},{},{},{},{},{},{},,{charge_ah},{energy_wh},{}",
+        "{},{unix:.3},{},{},{},{},{},{},,{},{},{}",
         record::format_elapsed(elapsed_ms),
-        r.vbus_v(),
-        r.ibus_a(),
-        r.dp_v(),
-        r.dm_v(),
-        r.cc1_v(),
-        r.cc2_v(),
-        r.vbus_v() * r.ibus_a(),
+        sig8(r.vbus_v()),
+        sig8(r.ibus_a()),
+        sig8(r.dp_v()),
+        sig8(r.dm_v()),
+        sig8(r.cc1_v()),
+        sig8(r.cc2_v()),
+        sig8(charge_ah),
+        sig8(energy_wh),
+        sig8(r.vbus_v() * r.ibus_a()),
     )
 }
 

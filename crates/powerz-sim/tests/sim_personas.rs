@@ -128,3 +128,17 @@ fn hid_control_commands_get_no_reply() {
     let reply = d.transact(&get_data(5, Attribute::ADC), T).unwrap();
     assert_eq!(reply[1], 5);
 }
+
+#[test]
+fn cdc_starts_with_no_stale_disconnect() {
+    // The stale DISCONNECT waits on the bulk IN endpoint only; on CDC the
+    // first ADCNEW-type request still gets no reply at all.
+    let mut dev = SimDevice::new(Persona::Cdc, Scenario::Idle);
+    assert_eq!(
+        dev.transact(
+            &[0x01, 0x01, 0x00, 0x00],
+            std::time::Duration::from_millis(20)
+        ),
+        Err(TransportError::Timeout)
+    );
+}

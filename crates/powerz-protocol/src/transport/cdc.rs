@@ -169,8 +169,27 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
         self.read_frame(timeout)
     }
 
+    /// Follow-up transfers (memory-read data) carry no header, so they are
+    /// returned raw: whatever is buffered, else the next chunk that arrives.
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.read_frame(timeout)
+        if !self.pending.is_empty() {
+            return Ok(std::mem::take(&mut self.pending));
+        }
+        let deadline = Instant::now() + timeout;
+        let mut chunk = [0u8; READ_CHUNK];
+        while Instant::now() < deadline {
+            match self.port.read(&mut chunk) {
+                Ok(0) => {}
+                Ok(n) => return Ok(chunk[..n].to_vec()),
+                Err(e) => match e.kind() {
+                    io::ErrorKind::TimedOut
+                    | io::ErrorKind::WouldBlock
+                    | io::ErrorKind::Interrupted => {}
+                    _ => return Err(map_io_error(&e, std::env::consts::OS)),
+                },
+            }
+        }
+        Err(Error::Timeout)
     }
 }
 
@@ -360,6 +379,33 @@ mod tests {
         // The next request gets a full, fresh reply, not the stale prefix.
         port.0.borrow_mut().chunks.push_back(Ok(adc.clone()));
         assert_eq!(t.transact(&req, T).unwrap(), adc);
+    }
+
+    #[test]
+    fn follow_up_read_returns_raw_bytes_not_a_parsed_frame() {
+        // Memory-read data is headerless AES output; a block that happens to
+        // start like a PUT_DATA header must still come back as-is.
+        let mut data = vec![0x41, 0x01, 0x80, 0x02];
+        data.extend([0x5A; 12]);
+        let port = FakePort::with_chunks(vec![Ok(data.clone())]);
+        let mut t = CdcTransport::with_port(port);
+        assert_eq!(t.read(Duration::from_millis(50)).unwrap(), data);
+    }
+
+    #[test]
+    fn follow_up_read_returns_bytes_left_after_the_confirmation() {
+        // Confirmation (0x44, framed by obj = 4 words) and data in one chunk.
+        let mut chunk = vec![0xC4, 0x01, 0x01, 0x01];
+        chunk.extend([0x11; 16]);
+        chunk.extend([0x41; 16]);
+        let port = FakePort::with_chunks(vec![Ok(chunk.clone())]);
+        let mut t = CdcTransport::with_port(port);
+        let confirm = t.transact(&[0x44, 0x01, 0x01, 0x01], T).unwrap();
+        assert_eq!(confirm, chunk[..20].to_vec());
+        assert_eq!(
+            t.read(Duration::from_millis(50)).unwrap(),
+            chunk[20..].to_vec()
+        );
     }
 
     #[test]

@@ -44,6 +44,27 @@ cargo run -p powerz-cli       # the CLI
 bun run dev                   # desktop app with hot reload
 ```
 
+## Try it without a meter
+
+The `powerz` CLI ships a simulated KM003C, the **demo device**:
+
+```bash
+cargo run -p powerz-cli -- --transport sim info
+cargo run -p powerz-cli -- --transport sim --scenario load-5v-1a read
+cargo run -p powerz-cli -- list --include-demo
+```
+
+Scenarios: `idle`, `load-5v-1a`, `pd-9v-2a`, `noisy-negative`. For tests, the
+simulator also reads `POWERZ_SIM_CLOCK=fake` (deterministic simulated time),
+`POWERZ_SIM_FAULT` (e.g. `timeout@2,disconnect@3,wrong-id@4,permission`) and
+`POWERZ_SIM_CTRL_C_AFTER=N` (act as if Ctrl-C was pressed after N polls).
+
+Hardware-in-the-loop tests against a real meter run only with `POWERZ_HIL=1`:
+
+```bash
+POWERZ_HIL=1 cargo test -p powerz-cli --test hil
+```
+
 ## License
 
 MIT, see [LICENSE](LICENSE). The repository will also ship the AES keys the meter uses

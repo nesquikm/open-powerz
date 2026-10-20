@@ -727,3 +727,33 @@ fn device_failure_mid_command_is_exit_5() {
     let e = read(&mut s, false, &mut out).unwrap_err();
     assert_eq!(e.exit_code(), 5, "{e:?}");
 }
+
+/// Regression (first real-device run): the KM003C answers the first poll
+/// after 0x0E with an empty PUT_DATA. The elapsed-time origin must come from
+/// the first *record*, not from that empty poll, or every later record at the
+/// meter's large uptime looks past `--duration` and nothing is written.
+#[test]
+fn stream_empty_first_poll_does_not_fix_the_time_origin() {
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            Step::transact(get_data(4, 0x002), put_header(4, 1).to_vec()),
+            poll_step(5, &ts(&[0, 100, 200])),
+            poll_step(6, &ts(&[300, 400])),
+            Step::transact(stop_queue(7), accept(7)),
+        ],
+    ]
+    .concat();
+    let mut s = session(Meter::new(script));
+    let stop = AtomicBool::new(false);
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: Some(Duration::from_millis(250)),
+        start_unix_ms: START_UNIX_MS,
+    };
+    let summary = stream(&mut s, &opts, &stop, &mut csv, &mut err).unwrap();
+    let (_, rows) = csv_rows(&csv);
+    assert_eq!(rows.len(), 3, "rows: {rows:?}");
+    assert_eq!(summary.samples, 3);
+}
