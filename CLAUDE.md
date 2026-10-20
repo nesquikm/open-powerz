@@ -395,7 +395,8 @@ Values are lowercase literal `true`/`false` — no quoting, no `yes`/`no`.
 
 ## Verification
 
-verify_mode: advisory
+verify_skill: visual-check
+verify_mode: blocking
 run_cmd: bun run dev
 
 ## Docs
