@@ -26,7 +26,7 @@ research notes (outside the repo), keeping `[device]` / `[static]` / `[inferred]
 ### Directory Structure
 
 ```
-Cargo.toml                       # workspace: resolver 3, edition 2024, MSRV 1.85
+Cargo.toml                       # workspace: resolver 3, edition 2024, MSRV 1.96
 package.json / bun.lock          # Bun workspace root (apps/desktop)
 crates/powerz-protocol/src/      # lib.rs (+ transport/, frame/, decode/, auth/ as they land)
 crates/powerz-cli/src/main.rs    # `powerz` binary

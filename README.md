@@ -31,7 +31,7 @@ modern UI.
 
 ## Building
 
-Requirements: Rust (stable, 1.85 or newer), [Bun](https://bun.sh), and the
+Requirements: Rust (stable, 1.96 or newer), [Bun](https://bun.sh), and the
 [Tauri 2 system prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ```bash

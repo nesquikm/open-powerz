@@ -6,7 +6,7 @@ Unofficial open-source, cross-platform (macOS, Linux, Windows) desktop app + CLI
 
 ## Tech Stack
 
-- **Language:** Rust (edition 2024, MSRV 1.85) for the protocol library, CLI and Tauri backend; TypeScript (~6.0) for the web UI
+- **Language:** Rust (edition 2024, MSRV 1.96) for the protocol library, CLI and Tauri backend; TypeScript (~6.0) for the web UI
 - **Framework:** Tauri 2 desktop shell; Svelte 5 (runes) web UI; uPlot for charts
 - **USB / IO (planned):** `nusb` (vendor bulk), `hidapi` (HID), `serialport` (CDC), RustCrypto `aes` + `crc32fast` (auth, memory read)
 - **Build:** cargo workspace; Vite 8 for the UI; Bun 1.3 as the JS package manager / script runner
