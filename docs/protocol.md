@@ -538,9 +538,11 @@ Record body:
 
 ## Never-send commands
 
-Our library refuses to build these requests. The guard in the transport layer
-rejects them before any byte reaches the meter, so a bug or a CLI typo cannot
-brick, decalibrate or reboot a device. [device] [static]
+Our library refuses to send these requests, so a bug or a CLI typo cannot
+brick, decalibrate or reboot a device. Three checks run before any byte
+reaches the meter: the transport-layer guard refuses the six frame types, the
+session refuses memory reads outside the four known blocks, and the HID
+transport sends only the ADC snapshot. [device] [static]
 
 | request | why | tag |
 |---|---|---|
@@ -553,6 +555,6 @@ brick, decalibrate or reboot a device. [device] [static]
 | memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
 | any HID request other than the ADC snapshot (GET_DATA mask 0x001) | replies over 64 bytes hang and reboot the meter; control commands are ignored | [device] (firmware 2.0.6) |
 
-Separate from the guard, one session rule applies on CDC: there SYNC / CONNECT
-/ DISCONNECT (0x01..0x03) start or stop the ADCNEW stream, so the CDC
-transport sends them only for that purpose. [device] (firmware 2.0.6)
+Separate from the guard, one rule applies on CDC: there SYNC / CONNECT /
+DISCONNECT (0x01..0x03) start or stop the ADCNEW stream, so the CDC transport
+refuses to send them (ADCNEW is not supported yet). [device] (firmware 2.0.6)

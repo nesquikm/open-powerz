@@ -22,7 +22,8 @@ pub struct StreamOptions {
     pub duration: Option<Duration>,
     /// Wall-clock time of the first record, ms since the Unix epoch; the
     /// `Unix` column is this plus the record's elapsed device time, in
-    /// seconds.
+    /// seconds. `0` means "read the wall clock when the first record
+    /// arrives" (what the CLI uses, so setup time does not shift `Unix`).
     pub start_unix_ms: u64,
 }
 
@@ -64,6 +65,7 @@ pub fn stream<T: Transport, C: Clock>(
         gaps: Vec::new(),
     };
     let mut first_ms: Option<u32> = None;
+    let mut unix_origin: Option<u64> = None;
     let mut integrator = record::Integrator::new();
     let mut write_err: Option<std::io::Error> = None;
     let polled = Streamer::run(session, opts.rate, |poll| {
@@ -101,7 +103,12 @@ pub fn stream<T: Transport, C: Clock>(
                 return false;
             }
             let (charge, energy) = integrator.push(r.time_ms(), r.vbus_v(), r.ibus_a());
-            let unix_ms = opts.start_unix_ms + el;
+            let unix_ms = *unix_origin.get_or_insert_with(|| match opts.start_unix_ms {
+                0 => std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64),
+                fixed => fixed,
+            }) + el;
             if let Err(e) = write_row(csv, r, el, unix_ms, charge, energy) {
                 write_err = Some(e);
                 return false;

@@ -4,7 +4,7 @@
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use powerz_protocol::frame;
 use powerz_protocol::session::{Clock, Session, SystemClock};
@@ -219,9 +219,8 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
             let stop = ctrl_c_flag()?;
             // Created on the first write, i.e. only once the queue started.
             let file = LazyFile::new(csv.clone());
-            let start_unix_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64);
+            // Stamped when the first record arrives (see StreamOptions).
+            let start_unix_ms = 0;
             let opts = StreamOptions {
                 rate,
                 duration,

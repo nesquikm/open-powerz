@@ -242,7 +242,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
     pub fn read_adc(&mut self) -> Result<AdcSnapshot, Error> {
         let payload = self.get_section(Attribute::ADC, "ADC")?;
         let adc = AdcSnapshot::decode(&payload)?;
-        if let Some(rate) = adc.rate_code().and_then(Rate::from_code) {
+        if let Some(rate) = adc.rate_code().and_then(meter_rate_from_code) {
             self.meter_rate = Some(rate);
         }
         Ok(adc)
@@ -252,9 +252,19 @@ impl<T: Transport, C: Clock> Session<T, C> {
     pub fn read_settings(&mut self) -> Result<Settings, Error> {
         let payload = self.get_section(Attribute::SETTINGS, "SETTINGS")?;
         let settings = Settings::decode(&payload)?;
-        if let Some(rate) = Rate::from_code(settings.rate_code()) {
+        if let Some(rate) = meter_rate_from_code(settings.rate_code()) {
             self.meter_rate = Some(rate);
         }
         Ok(settings)
+    }
+}
+
+/// The rate the meter actually runs at for a reported code: code 4 is
+/// accepted by FW 2.0.6 but behaves like code 0 (2 SPS, 0.1 mV units).
+fn meter_rate_from_code(code: u8) -> Option<Rate> {
+    if code == 4 {
+        Some(Rate::Sps2)
+    } else {
+        Rate::from_code(code)
     }
 }

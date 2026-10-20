@@ -23,7 +23,7 @@ In `powerz-protocol`, add a `Session` over any `Transport` that implements CONNE
 
 ## Acceptance Criteria
 
-- AC-N6EHQC.1: `Session::open(transport)` works without CONNECT; `connect()` sends CONNECT and returns `Ok` only on ACCEPT.
+- AC-N6EHQC.1: `Session::open(transport)` works without CONNECT; `connect()` sends CONNECT and returns `Ok` only on ACCEPT. On bulk, FW 2.0.6 REJECTs memory read (and so `device_info` and auth) until CONNECT has been sent; a REJECTed memory read returns `Error::Rejected`.
 - AC-N6EHQC.2: Every request uses the next `SequenceCounter` id; a reply is matched when its id equals the request id, except a 0x4C reply, which is matched with id 0. A reply with another id is discarded and the next one read, up to 3 times, then `Error::Protocol`. REJECT returns `Error::Rejected { request_type }`; a DISCONNECT reply to GET_DATA returns an empty section list.
 - AC-N6EHQC.3: `read_adc()`, `read_settings()` and `get_data(mask)` return decoded values; the auth level from header bits 17..18 of the latest PUT_DATA reply is available as `auth_level()`.
 - AC-N6EHQC.4: Module `crypto` holds the four 16-byte AES keys as constants (indexes 0–3, source documented as `[static]`) and provides AES-128-ECB with 0xFF padding of the last partial block and IEEE CRC-32.

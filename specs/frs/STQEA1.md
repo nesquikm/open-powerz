@@ -30,7 +30,7 @@ Implement the `powerz` binary in `crates/powerz-cli` on top of `powerz-protocol`
 - AC-STQEA1.4: `powerz watch [--interval MS]` refreshes the `read` view in place every MS milliseconds (default 200, minimum 50) until Ctrl-C, then exits 0.
 - AC-STQEA1.5: `powerz stream --rate {2,10,50,1000} --csv FILE [--duration SECONDS]` starts the queue at that rate and writes a CSV with the header `ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR`: ElapsedTime as `h:mm:ss.mmm` and Unix as seconds with 3 decimals, both counted from the first received record (an empty poll does not start the clock), numeric columns with at most 8 significant digits (trailing zeros trimmed, exponent form below 1e-5), TEMP empty, CHARGE in Ah and ENERGY in Wh integrated from signed current, PWR = VBUS × IBUS. It stops the queue on exit (duration reached or Ctrl-C) and prints the sample count and any gaps to stderr.
 - AC-STQEA1.6: With several meters attached, every device command requires `--device SERIAL` and otherwise exits with code 2 naming the serials; `--transport bulk|cdc|hid` selects the pipe (default bulk), and `hid` and `cdc` are accepted only for `read` and `watch` (FW 2.0.6 answers no memory read over CDC, so device info and auth need bulk).
-- AC-STQEA1.7: `--trace` writes every frame sent and received to stderr as `>` or `<` followed by hex.
+- AC-STQEA1.7: `--trace` writes every frame sent and received to stderr as `>` or `<` followed by hex, and a frame the safety guard refused before sending as `x` followed by hex.
 - AC-STQEA1.8: Exit codes are 0 success, 2 usage error, 3 no matching device, 4 permission denied (on Linux the message names the udev rule from the transport FR), and 5 device or protocol error.
 
 ## Technical Design

@@ -327,3 +327,22 @@ fn session_streamer_run_polls_until_callback_stops_and_sleeps_between() {
     assert_eq!(clock.total_slept(), Streamer::poll_period(Rate::Sps10) * 2);
     assert_eq!(s.transport().remaining(), 0);
 }
+
+#[test]
+fn session_meter_rate_code_4_behaves_like_code_0() {
+    // FW 2.0.6 accepts rate code 4 but runs it like code 0 (2 SPS, 0.1 mV).
+    let mut adc = with_id(vector(ADC_52), 1);
+    adc[8 + 0x26] = 4;
+    let mut s = Session::open(MockTransport::new(vec![
+        Step::transact(get_data(1, 0x001), adc),
+        Step::transact(get_data(2, 0x002), queue_reply(2, 0, &[1000, 1500])),
+    ]));
+    s.read_adc().unwrap();
+    let p = s.poll_stream().unwrap();
+    assert!(p.gaps.is_empty(), "500 ms steps are contiguous at 2 SPS");
+    assert_eq!(
+        p.records[0].cc1_v(),
+        805.0 / 10_000.0,
+        "0.1 mV units at code 0/4"
+    );
+}

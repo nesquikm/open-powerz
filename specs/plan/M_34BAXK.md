@@ -51,7 +51,7 @@ codename: Wire Whisperer
   verify: `cargo test -p powerz-cli`
 - [x] Device simulator and end-to-end tests — G0W08Z
   verify: `cargo test -p powerz-sim -p powerz-cli`
-- [ ] Real-device smoke run of every `powerz` subcommand on the KM003C over bulk and CDC (manual)
+- [x] Real-device smoke run of every `powerz` subcommand on the KM003C over bulk and CDC (manual; CDC carries read/watch only on FW 2.0.6)
   verify: transcript of `powerz list/info/read/stream --rate 1000` attached to the PR
 
 **Tests:**
@@ -60,7 +60,7 @@ codename: Wire Whisperer
 **Acceptance Criteria:**
 - [x] Gating rule from CLAUDE.md passes locally on macOS
 - [ ] CI is green on all three OSes
-- [ ] Every AC of the seven FRs above is traced to a test by `/spec-review`
-- [ ] `powerz stream --rate 1000` records 60 s on the KM003C with no host-side gaps
+- [x] Every AC of the seven FRs above is traced to a test by `/spec-review`
+- [x] `powerz stream --rate 1000` records 60 s on the KM003C with no host-side gaps
 
 **Gate:** `bun install --frozen-lockfile && bun run lint && bun run check && bun run test && bun run build:web && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`

@@ -855,3 +855,39 @@ fn trace_marks_a_refused_frame_as_not_sent() {
     assert!(!log.contains("> 08"), "{log}");
     assert!(log.starts_with("x 08 01 00 00"), "{log}");
 }
+
+/// `start_unix_ms: 0` asks for the wall clock at the first received record,
+/// so session setup time (CONNECT, auth, first poll) does not shift `Unix`.
+#[test]
+fn stream_unix_zero_uses_wall_clock_at_first_record() {
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            poll_step(4, &ts(&[0, 100])),
+            Step::transact(stop_queue(5), accept(5)),
+        ],
+    ]
+    .concat();
+    let mut s = session(Meter::new(script));
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: Some(Duration::from_millis(50)),
+        start_unix_ms: 0,
+    };
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    stream(&mut s, &opts, &AtomicBool::new(false), &mut csv, &mut err).unwrap();
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let (_, rows) = csv_rows(&csv);
+    let unix: f64 = rows[0][1].parse().unwrap();
+    assert!(
+        unix >= before - 0.001 && unix <= after + 0.001,
+        "{unix} not in [{before}, {after}]"
+    );
+}
