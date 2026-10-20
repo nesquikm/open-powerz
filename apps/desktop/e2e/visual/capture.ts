@@ -75,6 +75,17 @@ async function main(): Promise<void> {
       await page.keyboard.press(" ");
       await page.waitForTimeout(400);
       await shot("demo-recording-stopped");
+      if (size.name === "narrow") {
+        await page.getByRole("button", { name: "More: theme and About" }).click();
+        await page.waitForTimeout(200);
+        await shot("menu-open");
+        await page.keyboard.press("Escape");
+      }
+      // Reverse current: the arrow flips.
+      await page.getByRole("button", { name: "Disconnect" }).click();
+      await page.getByText("Disconnected", { exact: false }).first().waitFor();
+      await streamDemo(page, "noisy-negative");
+      await shot("demo-negative");
       await page.close();
     }
   }

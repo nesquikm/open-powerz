@@ -62,9 +62,13 @@
   setContext("motion", () => motion);
   $effect(() => watchMediaQuery(REDUCED_MOTION_QUERY, (reduced) => (reducedMotion = reduced)));
 
-  function cycleTheme(): void {
-    themeChoice = nextTheme(themeChoice);
+  function setTheme(choice: ThemeChoice): void {
+    themeChoice = choice;
     saveTheme(themeChoice, storage);
+  }
+
+  function cycleTheme(): void {
+    setTheme(nextTheme(themeChoice));
   }
 
   /** Rate requested on connect (and changed by the 1–4 shortcuts). */
@@ -182,7 +186,7 @@
   <TopBar
     {session}
     {themeChoice}
-    onCycleTheme={cycleTheme}
+    onSetTheme={setTheme}
     onToggleConnect={() => void toggleConnection()}
     onAbout={() => (aboutOpen = true)}
     onSelectRate={(sps) => void selectRate(sps)}

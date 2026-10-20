@@ -49,7 +49,7 @@
     min-width: 0;
   }
   select {
-    max-width: 16rem;
+    max-width: 12rem;
     min-width: 0;
   }
 </style>

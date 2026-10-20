@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DeviceListing, Sample } from "./backend";
 import {
+  currentDirectionText,
   DASH,
   badgeLabel,
   deviceOptionLabel,
@@ -147,5 +148,14 @@ describe("badgeLabel (AC-AH2AEK.3)", () => {
     expect(badgeLabel("streaming")).toBe("Streaming");
     expect(badgeLabel("rate_locked")).toBe("Rate locked");
     expect(badgeLabel("error")).toBe("Error");
+  });
+});
+
+describe("current direction text (orchestrator visual review)", () => {
+  it("names the direction the arrow shows, and nothing at zero", () => {
+    expect(currentDirectionText(1.2)).toBe("Current flows source → sink");
+    expect(currentDirectionText(-0.2)).toBe("Current flows sink → source (reversed)");
+    expect(currentDirectionText(0)).toBeNull();
+    expect(currentDirectionText(null)).toBeNull();
   });
 });

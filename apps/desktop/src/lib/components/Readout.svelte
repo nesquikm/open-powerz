@@ -1,29 +1,43 @@
 <script lang="ts">
-  import { readoutView } from "../format";
+  import { DASH, currentDirectionText, readoutView } from "../format";
   import type { Session } from "../session.svelte";
 
   let { session }: { session: Session } = $props();
 
   const view = $derived(readoutView(session.latest, session.tempC, session.rateSps));
+  const direction = $derived(currentDirectionText(session.latest?.ibus_a));
 </script>
 
 <section class="readout panel" aria-label="Live readout">
   <div class="primary">
     <div class="cell">
       <span class="label">VBUS</span>
-      <span class="value" aria-label="VBUS">{view.vbus}<span class="unit">V</span></span>
-    </div>
-    <div class="cell">
-      <span class="label">IBUS</span>
-      <span class="value" aria-label="IBUS"
-        >{view.ibus}<span class="unit">A</span><span class="arrow" aria-hidden="true"
-          >{view.ibusArrow}</span
+      <span class="value" aria-label="VBUS"
+        ><span class="digits" class:empty={view.vbus === DASH}>{view.vbus}</span><span class="unit"
+          >V</span
         ></span
       >
     </div>
     <div class="cell">
+      <span class="label">IBUS</span>
+      <span class="value" aria-label="IBUS"
+        ><span class="digits" class:empty={view.ibus === DASH}>{view.ibus}</span><span class="unit"
+          >A</span
+        ><span class="arrow" aria-hidden="true" title={direction ?? undefined}
+          >{view.ibusArrow}</span
+        ></span
+      >
+      {#if direction}
+        <span class="visually-hidden">{direction}</span>
+      {/if}
+    </div>
+    <div class="cell">
       <span class="label">Power</span>
-      <span class="value" aria-label="Power">{view.power}<span class="unit">W</span></span>
+      <span class="value" aria-label="Power"
+        ><span class="digits" class:empty={view.power === DASH}>{view.power}</span><span
+          class="unit">W</span
+        ></span
+      >
     </div>
     <div class="cell" title={view.tempTooltip ?? undefined}>
       <span class="label">Temp</span>
@@ -31,7 +45,9 @@
         class="value"
         aria-label="Temperature"
         aria-describedby={view.tempTooltip ? "readout-temp-note" : undefined}
-        >{view.temp}<span class="unit">°C</span></span
+        ><span class="digits" class:empty={view.temp === DASH}>{view.temp}</span><span class="unit"
+          >°C</span
+        ></span
       >
       {#if view.tempTooltip}
         <span id="readout-temp-note" class="visually-hidden">{view.tempTooltip}</span>
@@ -42,7 +58,11 @@
     {#each [["D+", view.dp], ["D−", view.dm], ["CC1", view.cc1], ["CC2", view.cc2]] as [name, value] (name)}
       <span class="line" aria-label={name}>
         <span class="label">{name}</span>
-        <span class="small-value">{value}<span class="unit">V</span></span>
+        <span class="small-value"
+          ><span class="digits" class:empty={value === DASH}>{value}</span><span class="unit"
+            >V</span
+          ></span
+        >
       </span>
     {/each}
   </div>
@@ -95,12 +115,19 @@
     font-size: 0.5em;
     text-align: center;
   }
+  /* Same four columns as the readout above, so the values line up. */
   .secondary {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 8rem));
-    gap: 1rem;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1rem 1.5rem;
     padding-top: 0.75rem;
     border-top: 1px solid var(--border);
+  }
+  /* The "—" of a missing value: smaller and quieter than a reading. */
+  .digits.empty {
+    color: var(--muted);
+    font-size: 0.6em;
+    vertical-align: middle;
   }
   .line {
     display: grid;

@@ -4,11 +4,12 @@
   import type { Session } from "../session.svelte";
   import type { ThemeChoice } from "../theme";
   import DevicePicker from "./DevicePicker.svelte";
+  import ThemeControl from "./ThemeControl.svelte";
 
   let {
     session,
     themeChoice,
-    onCycleTheme,
+    onSetTheme,
     onToggleConnect,
     onAbout,
     onSelectRate,
@@ -22,7 +23,7 @@
   }: {
     session: Session;
     themeChoice: ThemeChoice;
-    onCycleTheme: () => void;
+    onSetTheme: (choice: ThemeChoice) => void;
     onToggleConnect: () => void;
     onAbout: () => void;
     onSelectRate: (sps: number) => void;
@@ -38,11 +39,8 @@
     onExport: () => void;
   } = $props();
 
-  const THEME_LABELS: Record<ThemeChoice, string> = {
-    system: "System",
-    light: "Light",
-    dark: "Dark",
-  };
+  /** The "⋯" menu that holds theme and About on narrow windows. */
+  let menuOpen = $state(false);
 
   const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
   const recordDisabled = $derived(
@@ -51,6 +49,12 @@
       (recording.phase === "idle" && !canRecord),
   );
 </script>
+
+<svelte:window
+  onkeydown={(e) => {
+    if (menuOpen && e.key === "Escape") menuOpen = false;
+  }}
+/>
 
 <header class="top-bar" aria-label="Device controls">
   <div class="group">
@@ -72,6 +76,7 @@
     <span class="rate">
       <select
         aria-label="Sample rate"
+        title={picker.label ?? undefined}
         disabled={picker.disabled}
         value={rateSps}
         onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
@@ -80,7 +85,8 @@
           <option value={sps}>{sps} SPS</option>
         {/each}
       </select>
-      {#if picker.label !== null}
+      <!-- The locked rate is news worth showing; "stop to change" is a tooltip. -->
+      {#if picker.label !== null && session.state === "rate_locked"}
         <span class="rate-note">{picker.label}</span>
       {/if}
     </span>
@@ -120,15 +126,33 @@
     >
       Export
     </button>
-    <button
-      type="button"
-      class="theme-toggle"
-      title="Cycle theme: System, Light, Dark"
-      onclick={onCycleTheme}
-    >
-      {THEME_LABELS[themeChoice]} theme
-    </button>
-    <button type="button" onclick={onAbout}>About</button>
+    <!-- Wide windows: theme and About inline. Narrow: behind the "⋯" menu. -->
+    <span class="settings-inline">
+      <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
+      <button type="button" onclick={onAbout}>About</button>
+    </span>
+    <span class="settings-menu">
+      <button
+        type="button"
+        class="more"
+        aria-label="More: theme and About"
+        aria-expanded={menuOpen}
+        aria-controls="top-bar-menu"
+        onclick={() => (menuOpen = !menuOpen)}>⋯</button
+      >
+      {#if menuOpen}
+        <div id="top-bar-menu" class="menu panel">
+          <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
+          <button
+            type="button"
+            onclick={() => {
+              menuOpen = false;
+              onAbout();
+            }}>About</button
+          >
+        </div>
+      {/if}
+    </span>
   </div>
 </header>
 
@@ -138,7 +162,7 @@
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5rem 1.5rem;
+    gap: 0.5rem 0.75rem;
     min-width: 0;
     padding: 0.625rem 1rem;
     background: var(--surface);
@@ -224,5 +248,39 @@
   }
   .badge[data-state="error"]::before {
     background: var(--danger);
+  }
+  .settings-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .settings-menu {
+    display: none;
+    position: relative;
+  }
+  .more {
+    min-width: 2.25rem;
+    font-weight: 700;
+  }
+  .menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.375rem);
+    /* Size to the content, not to the small button it hangs from. */
+    width: max-content;
+    z-index: 10;
+    display: grid;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
+  }
+  /* Below ~1000 px the bar keeps one row: theme and About move into the menu. */
+  @media (max-width: 999.98px) {
+    .settings-inline {
+      display: none;
+    }
+    .settings-menu {
+      display: inline-flex;
+    }
   }
 </style>

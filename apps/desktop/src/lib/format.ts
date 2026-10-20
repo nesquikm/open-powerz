@@ -17,6 +17,14 @@ export function formatCurrent(amps: number | null | undefined): { text: string; 
   return { text, arrow: text.startsWith("-") ? "←" : "→" };
 }
 
+/** What the IBUS arrow means, for its tooltip and screen readers; null when there is no arrow. */
+export function currentDirectionText(amps: number | null | undefined): string | null {
+  const { arrow } = formatCurrent(amps);
+  if (arrow === "→") return "Current flows source → sink";
+  if (arrow === "←") return "Current flows sink → source (reversed)";
+  return null;
+}
+
 /** Temperature text with one decimal, plus a tooltip explaining a missing value. */
 export function temperatureDisplay(
   tempC: number | null,
