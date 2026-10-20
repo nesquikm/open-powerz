@@ -5,8 +5,10 @@
 //! authentication land here milestone by milestone; see `specs/` for the
 //! plan. The wire format is documented in `docs/protocol.md`.
 
+pub mod crypto;
 pub mod decode;
 pub mod frame;
+pub mod session;
 pub mod transport;
 
 /// USB vendor ID shared by all POWER-Z meters.

@@ -1,0 +1,260 @@
+//! Device session over any [`Transport`]: CONNECT, one-in-flight
+//! request/reply matching, memory read, device info, authentication and
+//! ADC-queue streaming. See `docs/protocol.md`.
+//!
+//! The [`Session`] methods are grouped by feature:
+//!
+//! - core (this module): [`connect`](Session::connect),
+//!   [`get_data`](Session::get_data), [`read_adc`](Session::read_adc),
+//!   [`read_settings`](Session::read_settings);
+//! - memory read: [`memory_read`](Session::memory_read),
+//!   [`device_info`](Session::device_info);
+//! - authentication: [`authenticate`](Session::authenticate);
+//! - ADC-queue streaming: [`start_stream`](Session::start_stream),
+//!   [`stop_stream`](Session::stop_stream),
+//!   [`poll_stream`](Session::poll_stream).
+
+mod auth;
+mod memory;
+mod stream;
+
+use std::time::Duration;
+
+use crate::decode::{AdcSnapshot, DecodeError, Rate, Settings};
+use crate::frame::{self, Attribute, FrameError, Reply, SequenceCounter};
+use crate::transport::{self, Transport};
+
+pub use auth::{auth_plaintext, auth_request};
+pub use memory::{DeviceInfo, memory_read_plaintext, memory_read_request};
+pub use stream::{Gap, StreamPoll, Streamer};
+
+/// Errors from a [`Session`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Error {
+    /// The transport failed (timeout, unplug, ...).
+    #[error("transport: {0}")]
+    Transport(#[from] transport::Error),
+    /// The meter answered with something the protocol does not allow here.
+    #[error("protocol error: {0}")]
+    Protocol(String),
+    /// The meter answered REJECT.
+    #[error("request type {request_type:#04x} was rejected")]
+    Rejected {
+        /// Message type of the rejected request.
+        request_type: u8,
+    },
+    /// The memory read is not one of the known safe blocks; nothing was sent.
+    #[error("memory read of {len} bytes at {addr:#x} is not allowed")]
+    Forbidden {
+        /// Requested address.
+        addr: u32,
+        /// Requested length.
+        len: u32,
+    },
+    /// Authentication did not succeed.
+    #[error("authentication failed")]
+    AuthFailed,
+    /// A reply could not be decoded.
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    /// A reply frame was malformed.
+    #[error(transparent)]
+    Frame(#[from] FrameError),
+}
+
+/// Source of wall-clock time, randomness and sleeping, injected so that
+/// authentication and request spacing are deterministic in tests.
+pub trait Clock {
+    /// Current wall-clock time in milliseconds since the Unix epoch; a
+    /// [`sleep`](Clock::sleep) must advance it.
+    fn now_ms(&mut self) -> u64;
+    /// A fresh random value.
+    fn random_u64(&mut self) -> u64;
+    /// Block for `duration`.
+    fn sleep(&mut self, duration: Duration);
+}
+
+/// The real [`Clock`]: system time, OS-seeded randomness, thread sleep.
+#[derive(Debug, Clone, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&mut self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64)
+    }
+    fn random_u64(&mut self) -> u64 {
+        // The auth nonce comes from the OS random source.
+        getrandom::u64().unwrap_or_else(|_| self.now_ms().rotate_left(17) ^ 0x9E37_79B9_7F4A_7C15)
+    }
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+/// One PUT_DATA section, owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedSection {
+    /// Attribute of the section.
+    pub att: Attribute,
+    /// Section payload, header excluded.
+    pub payload: Vec<u8>,
+}
+
+/// Mismatched-id replies discarded before a request fails.
+const MAX_STALE_REPLIES: usize = 3;
+
+/// Error for a reply that does not answer `request` the way the protocol
+/// requires: REJECT becomes [`Error::Rejected`], anything else
+/// [`Error::Protocol`] naming the request as `what`.
+fn unexpected_reply(request: &[u8], what: &str, reply: Reply) -> Error {
+    match reply {
+        Reply::Reject(_) => Error::Rejected {
+            request_type: request[0],
+        },
+        other => Error::Protocol(format!("unexpected reply to {what}: {other:?}")),
+    }
+}
+
+/// A session with the meter over `T`.
+#[derive(Debug)]
+pub struct Session<T: Transport, C: Clock = SystemClock> {
+    transport: T,
+    clock: C,
+    counter: SequenceCounter,
+    auth_level: u8,
+    last_auth_ms: Option<u64>,
+    stream: Option<Rate>,
+    /// The meter's own queue rate, as last reported by ADC or SETTINGS.
+    meter_rate: Option<Rate>,
+    /// Device time of the last record returned by `poll_stream`.
+    last_record_ms: Option<u32>,
+}
+
+impl<T: Transport> Session<T, SystemClock> {
+    /// Open a session over `transport`; no CONNECT is sent.
+    pub fn open(transport: T) -> Self {
+        Session::with_clock(transport, SystemClock)
+    }
+}
+
+impl<T: Transport, C: Clock> Session<T, C> {
+    /// Open a session with an injected clock; no CONNECT is sent.
+    pub fn with_clock(transport: T, clock: C) -> Self {
+        Session {
+            transport,
+            clock,
+            counter: SequenceCounter::new(),
+            auth_level: 0,
+            last_auth_ms: None,
+            stream: None,
+            meter_rate: None,
+            last_record_ms: None,
+        }
+    }
+
+    /// The underlying transport.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    /// The underlying transport, mutably.
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
+    /// Auth level last reported by the meter (0, 1 or 2).
+    pub fn auth_level(&self) -> u8 {
+        self.auth_level
+    }
+
+    /// Send `request` with the transport's default timeout; return the reply
+    /// whose id matches the request id (id 0 for a 0x4C request). Up to
+    /// [`MAX_STALE_REPLIES`] mismatched replies are discarded.
+    fn exchange(&mut self, request: &[u8]) -> Result<Vec<u8>, Error> {
+        let timeout = transport::default_timeout(request);
+        let expected_id = if request[0] == 0x4C { 0 } else { request[1] };
+        let mut reply = self.transport.transact(request, timeout)?;
+        let mut rereads = 0;
+        while reply.get(1) != Some(&expected_id) {
+            if rereads == MAX_STALE_REPLIES {
+                return Err(Error::Protocol(format!(
+                    "no reply with id {expected_id:#04x} after {MAX_STALE_REPLIES} re-reads"
+                )));
+            }
+            reply = self.transport.read(timeout)?;
+            rereads += 1;
+        }
+        Ok(reply)
+    }
+
+    /// Send a control request that must be answered with ACCEPT; `what`
+    /// names the request in the error message.
+    fn expect_accept(&mut self, request: &[u8], what: &str) -> Result<(), Error> {
+        let reply = self.exchange(request)?;
+        match frame::classify_reply(&reply)? {
+            Reply::Accept(_) => Ok(()),
+            other => Err(unexpected_reply(request, what, other)),
+        }
+    }
+
+    /// Send CONNECT; `Ok` only on ACCEPT.
+    pub fn connect(&mut self) -> Result<(), Error> {
+        let request = frame::connect(self.counter.next());
+        self.expect_accept(&request, "CONNECT")
+    }
+
+    /// GET_DATA with `mask`; a DISCONNECT reply gives an empty list.
+    pub fn get_data(&mut self, mask: Attribute) -> Result<Vec<OwnedSection>, Error> {
+        let request = frame::get_data(self.counter.next(), mask);
+        let reply = self.exchange(&request)?;
+        match frame::classify_reply(&reply)? {
+            Reply::PutData(h) => {
+                self.auth_level = h.data().permi;
+                if reply.len() == frame::HEADER_LEN {
+                    return Ok(Vec::new());
+                }
+                Ok(frame::parse_put_data(&reply)?
+                    .into_iter()
+                    .map(|s| OwnedSection {
+                        att: s.att,
+                        payload: s.payload.to_vec(),
+                    })
+                    .collect())
+            }
+            Reply::Disconnect(_) => Ok(Vec::new()),
+            other => Err(unexpected_reply(&request, "GET_DATA", other)),
+        }
+    }
+
+    /// GET_DATA for the single attribute `att`; return the payload of its
+    /// section, `name` naming it in the error when the reply lacks it.
+    fn get_section(&mut self, att: Attribute, name: &str) -> Result<Vec<u8>, Error> {
+        self.get_data(att)?
+            .into_iter()
+            .find(|s| s.att == att)
+            .map(|s| s.payload)
+            .ok_or_else(|| Error::Protocol(format!("reply has no {name} section")))
+    }
+
+    /// Read and decode one ADC snapshot.
+    pub fn read_adc(&mut self) -> Result<AdcSnapshot, Error> {
+        let payload = self.get_section(Attribute::ADC, "ADC")?;
+        let adc = AdcSnapshot::decode(&payload)?;
+        if let Some(rate) = adc.rate_code().and_then(Rate::from_code) {
+            self.meter_rate = Some(rate);
+        }
+        Ok(adc)
+    }
+
+    /// Read and decode the SETTINGS block.
+    pub fn read_settings(&mut self) -> Result<Settings, Error> {
+        let payload = self.get_section(Attribute::SETTINGS, "SETTINGS")?;
+        let settings = Settings::decode(&payload)?;
+        if let Some(rate) = Rate::from_code(settings.rate_code()) {
+            self.meter_rate = Some(rate);
+        }
+        Ok(settings)
+    }
+}

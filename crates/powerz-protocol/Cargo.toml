@@ -15,7 +15,9 @@ default = ["hid"]
 hid = ["dep:hidapi"]
 
 [dependencies]
+aes = "0.8.4"
 crc32fast = "1.5.3"
+getrandom = "0.4.3"
 hidapi = { version = "2.6.7", optional = true }
 nusb = "0.2.8"
 serialport = "4.10.1"

@@ -1,0 +1,7 @@
+# memory read of 0x420 (64 bytes) over bulk, one frame per line:
+# request (44 id 01 01 + 32 encrypted bytes), confirmation (c4 id 01 01 + 16 plaintext bytes),
+# data (64 bytes, AES-128-ECB key slot 0)
+# source: notes/device/vectors/t12_info_auth_bulk.jsonl (session 1, firmware 2.0.6), frames #3..#5
+4402010133f8860c0054288cdc7e52729826872dd18b539a39c407d5c063d91102e36a9e
+c40201012004000040000000ffffffff1b8c1b24
+67d6a486f528d58fb7d9d36f0e735c788357cd30dc18a47608b2683593c2d75e9c8d969178ca9144c9dbec8352eb615c2752eb111dc105d1e37262f64682aece
