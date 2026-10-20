@@ -1,7 +1,8 @@
+//! `powerz` binary: parses arguments and hands off to [`powerz_cli::run`].
+
+use clap::Parser;
+
 fn main() {
-    println!(
-        "powerz {} (open-powerz, unofficial). Looking for VID 0x{:04X}; device commands are not implemented yet.",
-        env!("CARGO_PKG_VERSION"),
-        powerz_protocol::VID
-    );
+    let cli = powerz_cli::Cli::parse();
+    std::process::exit(powerz_cli::run(cli));
 }
