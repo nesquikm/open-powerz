@@ -3,7 +3,9 @@
 //!
 //! Transports (vendor bulk, HID, CDC), framing, decoders and session
 //! authentication land here milestone by milestone; see `specs/` for the
-//! plan. The wire format will be documented in `docs/protocol.md`.
+//! plan. The wire format is documented in `docs/protocol.md`.
+
+pub mod frame;
 
 /// USB vendor ID shared by all POWER-Z meters.
 pub const VID: u16 = 0x5FC9;

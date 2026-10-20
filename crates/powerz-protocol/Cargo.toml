@@ -11,9 +11,11 @@ keywords = ["usb-c", "usb-pd", "power-meter", "km003c", "power-z"]
 categories = ["hardware-support"]
 
 [dependencies]
+thiserror = "2"
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+proptest = "1.12.0"
 sha2 = "0.11.1"
