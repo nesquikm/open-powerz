@@ -45,7 +45,9 @@ fn digits_in_hex_bytes(text: &str) -> Vec<char> {
         .filter(|l| !l.trim_start().starts_with('#'))
         .collect();
     let h: Vec<char> = body.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    h.chunks_exact(2)
+    h.as_chunks::<2>()
+        .0
+        .iter()
         .filter_map(|p| u8::from_str_radix(&p.iter().collect::<String>(), 16).ok())
         .filter(u8::is_ascii_digit)
         .map(char::from)

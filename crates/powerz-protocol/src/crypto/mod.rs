@@ -28,8 +28,8 @@ pub fn pad_ff(data: &[u8]) -> Vec<u8> {
 pub fn encrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let cipher = Aes128::new(&GenericArray::from(*key));
     let mut out = pad_ff(data);
-    for block in out.chunks_exact_mut(BLOCK_LEN) {
-        cipher.encrypt_block(GenericArray::from_mut_slice(block));
+    for block in out.as_chunks_mut::<BLOCK_LEN>().0 {
+        cipher.encrypt_block(GenericArray::from_mut_slice(block.as_mut_slice()));
     }
     out
 }
@@ -39,8 +39,8 @@ pub fn encrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
 pub fn decrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let cipher = Aes128::new(&GenericArray::from(*key));
     let mut out = data.to_vec();
-    for block in out.chunks_exact_mut(BLOCK_LEN) {
-        cipher.decrypt_block(GenericArray::from_mut_slice(block));
+    for block in out.as_chunks_mut::<BLOCK_LEN>().0 {
+        cipher.decrypt_block(GenericArray::from_mut_slice(block.as_mut_slice()));
     }
     out
 }

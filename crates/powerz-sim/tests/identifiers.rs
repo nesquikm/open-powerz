@@ -42,7 +42,9 @@ fn hex_squashed(text: &str) -> Vec<char> {
 /// ASCII digits hidden in hex byte pairs (e.g. a serial stored as `31 32 ..`).
 fn digits_in_hex_bytes(text: &str) -> Vec<char> {
     let h = hex_squashed(text);
-    h.chunks_exact(2)
+    h.as_chunks::<2>()
+        .0
+        .iter()
         .filter_map(|p| u8::from_str_radix(&p.iter().collect::<String>(), 16).ok())
         .filter(u8::is_ascii_digit)
         .map(char::from)

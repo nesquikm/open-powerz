@@ -153,7 +153,9 @@ mod tests {
         let payload = section_payload(QUEUE_1268);
         assert_eq!(payload.len(), 63 * 20);
         let records: Vec<QueueRecord> = payload
-            .chunks_exact(20)
+            .as_chunks::<20>()
+            .0
+            .iter()
             .map(|c| QueueRecord::decode(c, Rate::Sps50).unwrap())
             .collect();
         assert_eq!(records.len(), 63);
