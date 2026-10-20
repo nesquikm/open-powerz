@@ -24,9 +24,16 @@ pub struct PortCandidate {
 
 /// Pick the meter's port: VID 0x5FC9 and the given serial number.
 pub fn match_port<'a>(ports: &'a [PortCandidate], serial: &str) -> Option<&'a PortCandidate> {
-    ports
-        .iter()
-        .find(|p| p.vid == crate::VID && p.serial.as_deref() == Some(serial))
+    let ours: Vec<&PortCandidate> = ports.iter().filter(|p| p.vid == crate::VID).collect();
+    ours.iter()
+        .find(|p| p.serial.as_deref() == Some(serial))
+        .copied()
+        // Windows often reports no serial for a composite device's COM port:
+        // fall back to the only POWER-Z port, never guess between several.
+        .or_else(|| match ours.as_slice() {
+            [only] if only.serial.is_none() => Some(*only),
+            _ => None,
+        })
 }
 
 /// Length of the first complete frame at the start of `buf`, walking the
@@ -90,6 +97,8 @@ impl<P: Read + Write> CdcTransport<P> {
                 return Err(Error::Timeout);
             }
             match self.port.read(&mut chunk) {
+                // End of stream: the port went away.
+                Ok(0) => return Err(Error::Disconnected),
                 Ok(n) => self.pending.extend_from_slice(&chunk[..n]),
                 Err(e) => match e.kind() {
                     io::ErrorKind::TimedOut
@@ -179,7 +188,7 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
         let mut chunk = [0u8; READ_CHUNK];
         while Instant::now() < deadline {
             match self.port.read(&mut chunk) {
-                Ok(0) => {}
+                Ok(0) => return Err(Error::Disconnected),
                 Ok(n) => return Ok(chunk[..n].to_vec()),
                 Err(e) => match e.kind() {
                     io::ErrorKind::TimedOut
@@ -458,5 +467,49 @@ mod tests {
             Err(Error::Forbidden { ty: 0x48 })
         );
         assert!(port.written().is_empty());
+    }
+
+    #[test]
+    fn eof_from_the_port_is_disconnected() {
+        let port = FakePort::with_chunks(vec![Ok(Vec::new())]);
+        let mut t = CdcTransport::with_port(port);
+        assert_eq!(
+            t.transact(&[0x0C, 0x01, 0x02, 0x00], T),
+            Err(Error::Disconnected)
+        );
+    }
+
+    #[test]
+    fn match_port_falls_back_to_the_only_power_z_port_without_a_serial() {
+        // Windows often reports no serial for a composite device's COM port.
+        let ports = vec![
+            PortCandidate {
+                name: "COM3".into(),
+                vid: 0x1234,
+                pid: 0x0001,
+                serial: None,
+            },
+            PortCandidate {
+                name: "COM7".into(),
+                vid: 0x5FC9,
+                pid: 0x0063,
+                serial: None,
+            },
+        ];
+        assert_eq!(
+            match_port(&ports, "SERIAL-0002").map(|p| p.name.as_str()),
+            Some("COM7")
+        );
+        let two = vec![
+            ports[1].clone(),
+            PortCandidate {
+                name: "COM8".into(),
+                ..ports[1].clone()
+            },
+        ];
+        assert!(
+            match_port(&two, "SERIAL-0002").is_none(),
+            "ambiguous: never guess"
+        );
     }
 }

@@ -63,3 +63,12 @@ remove the blacklist file if you created one).
 
 A Flatpak build needs `--device=all` to reach raw USB and hidraw nodes; the
 udev rule must still be installed on the host.
+
+## Headless, SSH and container use
+
+`TAG+="uaccess"` grants access only to the user logged in at the local seat.
+On a headless machine (Raspberry Pi, server), over SSH or inside a container,
+use a group instead: add `GROUP="plugdev", MODE="0660"` to each line of the
+rule (or copy it to `61-powerz-plugdev.rules` with those keys), add yourself
+to the group with `sudo usermod -aG plugdev $USER`, then log in again and
+re-plug the meter.

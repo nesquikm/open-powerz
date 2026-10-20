@@ -15,7 +15,7 @@ use powerz_cli::{
     select_device, stream, validate, watch,
 };
 use powerz_protocol::decode::Rate;
-use powerz_protocol::session::{self, Gap};
+use powerz_protocol::session::{self, Gap, Streamer};
 use powerz_protocol::transport::discovery::Model;
 use powerz_protocol::transport::mock::{MockTransport, Step};
 use powerz_protocol::transport::{self, Transport, permission_error};
@@ -756,4 +756,99 @@ fn stream_empty_first_poll_does_not_fix_the_time_origin() {
     let (_, rows) = csv_rows(&csv);
     assert_eq!(rows.len(), 3, "rows: {rows:?}");
     assert_eq!(summary.samples, 3);
+}
+
+/// A start that is REJECTed writes nothing (not even the header), so a
+/// previous CSV is not clobbered by a header-only file.
+#[test]
+fn stream_start_failure_writes_no_csv() {
+    let mut script = start_steps(Rate::Sps10.code());
+    script.pop();
+    script.push(Step::transact(
+        start_queue(3, Rate::Sps10.code()),
+        vec![0x06, 3, 0, 0],
+    ));
+    let mut s = session(Meter::new(script));
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: None,
+        start_unix_ms: START_UNIX_MS,
+    };
+    assert!(stream(&mut s, &opts, &AtomicBool::new(false), &mut csv, &mut err).is_err());
+    assert!(csv.is_empty(), "csv: {:?}", text(&csv));
+}
+
+/// Device time running backwards (meter reboot) ends the stream with a
+/// device error instead of writing rows with a 49-day elapsed time.
+#[test]
+fn stream_backwards_device_time_is_a_device_error() {
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            poll_step(4, &ts(&[0, 100])),
+            poll_step(5, &[BASE - 5_000]),
+            Step::transact(stop_queue(6), accept(6)),
+        ],
+    ]
+    .concat();
+    let mut s = session(Meter::new(script));
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: None,
+        start_unix_ms: START_UNIX_MS,
+    };
+    let r = stream(&mut s, &opts, &AtomicBool::new(false), &mut csv, &mut err);
+    assert!(matches!(r, Err(ref e) if e.exit_code() == 5), "{r:?}");
+    assert_eq!(csv_rows(&csv).1.len(), 2);
+    assert_eq!(s.transport().inner.remaining(), 0, "queue must be stopped");
+}
+
+/// A meter that stops sending data (e.g. it rebooted and answers every poll
+/// empty) ends the stream after 5 s of polls instead of hanging forever.
+#[test]
+fn stream_gives_up_after_five_seconds_without_data() {
+    let polls = (5_000 / Streamer::poll_period(Rate::Sps10).as_millis()) as u8;
+    let mut script = start_steps(Rate::Sps10.code());
+    for k in 0..=polls {
+        let id = 4 + k;
+        script.push(Step::transact(
+            get_data(id, 0x002),
+            put_header(id, 1).to_vec(),
+        ));
+    }
+    let stop_id = 5 + polls;
+    script.push(Step::transact(stop_queue(stop_id), accept(stop_id)));
+    let mut s = session(Meter::new(script));
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: None,
+        start_unix_ms: START_UNIX_MS,
+    };
+    let r = stream(&mut s, &opts, &AtomicBool::new(false), &mut csv, &mut err);
+    assert!(matches!(r, Err(ref e) if e.exit_code() == 5), "{r:?}");
+    assert!(r.unwrap_err().to_string().contains("no data"));
+}
+
+/// A frame the guard refuses is never sent, so `--trace` must not log it as
+/// sent (`>`); it is logged as refused (`x`).
+#[test]
+fn trace_marks_a_refused_frame_as_not_sent() {
+    use powerz_protocol::transport::Transport;
+    use powerz_protocol::transport::guard::GuardedTransport;
+    use powerz_protocol::transport::mock::MockTransport;
+    let mut log = Vec::new();
+    {
+        let inner = GuardedTransport::new(MockTransport::new(vec![]));
+        let mut t = TraceTransport::new(inner, &mut log);
+        assert!(
+            t.transact(&[0x08, 0x01, 0x00, 0x00], Duration::from_millis(10))
+                .is_err()
+        );
+    }
+    let log = text(&log);
+    assert!(!log.contains("> 08"), "{log}");
+    assert!(log.starts_with("x 08 01 00 00"), "{log}");
 }

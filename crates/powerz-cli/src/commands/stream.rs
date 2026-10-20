@@ -38,6 +38,9 @@ pub struct StreamSummary {
 /// `powerz stream`: start the queue at `opts.rate`, poll it with
 /// [`Streamer`], write CSV rows to `csv` (header [`record::CSV_HEADER`]),
 /// stop the queue when the duration is reached or `stop` is set, and print
+/// How long `stream` keeps polling without receiving a single record.
+const NO_DATA: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// the sample count and any gaps to `err`.
 pub fn stream<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
@@ -46,8 +49,13 @@ pub fn stream<T: Transport, C: Clock>(
     csv: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<StreamSummary, CliError> {
-    writeln!(csv, "{}", record::CSV_HEADER)?;
     session.start_stream(opts.rate)?;
+    // Only now: a failed start must not leave a header-only file behind.
+    writeln!(csv, "{}", record::CSV_HEADER)?;
+    // Give up after this many polls in a row without a record.
+    let no_data_limit = NO_DATA.as_millis() / Streamer::poll_period(opts.rate).as_millis().max(1);
+    let mut empty_polls: u128 = 0;
+    let mut device_err: Option<CliError> = None;
 
     let limit_ms = opts.duration.map(|d| d.as_millis());
     let within_limit = |elapsed_ms: u64| limit_ms.is_none_or(|l| u128::from(elapsed_ms) < l);
@@ -62,10 +70,25 @@ pub fn stream<T: Transport, C: Clock>(
         // The origin is the first record's device time; an empty poll (the
         // meter's first reply after 0x0E) must not fix it.
         let Some(first) = poll.records.first() else {
+            empty_polls += 1;
+            if empty_polls > no_data_limit {
+                device_err = Some(CliError::Device(format!(
+                    "no data from the meter for {} s",
+                    NO_DATA.as_secs()
+                )));
+                return false;
+            }
             return !stop.load(Ordering::SeqCst);
         };
+        empty_polls = 0;
         let start = *first_ms.get_or_insert(first.time_ms());
-        let elapsed = |t: u32| u64::from(t.wrapping_sub(start));
+        if poll.records.iter().any(|r| r.time_ms() < start) {
+            device_err = Some(CliError::Device(
+                "the meter's clock went backwards (did it reboot?); stream stopped".into(),
+            ));
+            return false;
+        }
+        let elapsed = |t: u32| u64::from(t - start);
         summary.gaps.extend(
             poll.gaps
                 .iter()
@@ -90,6 +113,10 @@ pub fn stream<T: Transport, C: Clock>(
     // Always try to stop the queue, even after a failed poll or write.
     let stopped = session.stop_stream();
     polled?;
+    if let Some(e) = device_err {
+        csv.flush()?;
+        return Err(e);
+    }
     if let Some(e) = write_err {
         return Err(e.into());
     }

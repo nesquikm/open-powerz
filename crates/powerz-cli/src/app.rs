@@ -196,11 +196,12 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
                 interval: Duration::from_millis(*interval),
                 tty: out.is_terminal(),
             };
+            let stop_for_sleep = Arc::clone(&stop);
             watch(
                 &mut session,
                 &opts,
                 &stop,
-                &mut std::thread::sleep,
+                &mut |d| sleep_unless_stopped(d, &stop_for_sleep),
                 &mut out,
             )
         }
@@ -216,8 +217,8 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
                 .transpose()
                 .map_err(|e| CliError::Usage(format!("invalid --duration: {e}")))?;
             let stop = ctrl_c_flag()?;
-            let file = std::fs::File::create(csv)
-                .map_err(|e| CliError::Device(format!("cannot create {}: {e}", csv.display())))?;
+            // Created on the first write, i.e. only once the queue started.
+            let file = LazyFile::new(csv.clone());
             let start_unix_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
@@ -238,17 +239,97 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
     }
 }
 
+/// Sleep for `d` in short slices, returning early once `stop` is set, so a
+/// long `watch --interval` still honours Ctrl-C promptly.
+fn sleep_unless_stopped(d: Duration, stop: &AtomicBool) {
+    const SLICE: Duration = Duration::from_millis(50);
+    let deadline = std::time::Instant::now() + d;
+    while !stop.load(Ordering::SeqCst) {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        std::thread::sleep(SLICE.min(deadline - now));
+    }
+}
+
+/// A file that is created (truncating any old one) on its first write, so a
+/// command that fails before writing leaves an existing file untouched.
+struct LazyFile {
+    path: std::path::PathBuf,
+    file: Option<std::fs::File>,
+}
+
+impl LazyFile {
+    fn new(path: std::path::PathBuf) -> LazyFile {
+        LazyFile { path, file: None }
+    }
+
+    fn file(&mut self) -> std::io::Result<&mut std::fs::File> {
+        if self.file.is_none() {
+            let f = std::fs::File::create(&self.path).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("cannot create {}: {e}", self.path.display()),
+                )
+            })?;
+            self.file = Some(f);
+        }
+        Ok(self.file.as_mut().expect("just created"))
+    }
+}
+
+impl std::io::Write for LazyFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file()?.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.file.as_mut() {
+            Some(f) => f.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
 /// The process-wide stop flag (set by Ctrl-C).
 fn stop_flag() -> Arc<AtomicBool> {
     static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
     Arc::clone(STOP.get_or_init(|| Arc::new(AtomicBool::new(false))))
 }
 
-/// Install a Ctrl-C handler that sets the returned flag.
+/// Install a Ctrl-C (and SIGTERM / SIGHUP) handler that sets the returned
+/// flag, so `stream` always gets to stop the meter's queue.
 fn ctrl_c_flag() -> Result<Arc<AtomicBool>, CliError> {
     let stop = stop_flag();
     let flag = Arc::clone(&stop);
     ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
         .map_err(|e| CliError::Device(format!("cannot install Ctrl-C handler: {e}")))?;
     Ok(stop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sleep_unless_stopped_returns_at_once_when_already_stopped() {
+        let stop = AtomicBool::new(true);
+        let t = std::time::Instant::now();
+        sleep_unless_stopped(Duration::from_secs(10), &stop);
+        assert!(t.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn lazy_file_is_not_created_until_written() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("powerz-lazy-{}.csv", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut f = LazyFile::new(path.clone());
+        f.flush().unwrap();
+        assert!(!path.exists());
+        f.write_all(b"x").unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_file(&path);
+    }
 }

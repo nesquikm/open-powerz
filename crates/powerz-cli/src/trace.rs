@@ -41,10 +41,23 @@ impl<T: Transport, W: Write> TraceTransport<T, W> {
 
 impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.log('>', request);
-        let reply = self.inner.transact(request, timeout)?;
-        self.log('<', &reply);
-        Ok(reply)
+        match self.inner.transact(request, timeout) {
+            // Refused before any byte was written: say so, never "sent".
+            Err(
+                e @ (Error::Forbidden { .. }
+                | Error::UnsupportedOnHid
+                | Error::UnsupportedOnCdc { .. }),
+            ) => {
+                self.log('x', request);
+                Err(e)
+            }
+            result => {
+                self.log('>', request);
+                let reply = result?;
+                self.log('<', &reply);
+                Ok(reply)
+            }
+        }
     }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {

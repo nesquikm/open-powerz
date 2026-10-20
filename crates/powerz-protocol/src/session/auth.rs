@@ -15,14 +15,23 @@ const AUTH_SPACING_MS: u64 = 1000;
 const OTP_CREDENTIAL_LEN: usize = 16;
 
 /// Plaintext of an auth request: `u64 now_ms ‖ credential ‖ u64 random`,
-/// padded with 0xFF to 32 bytes.
+/// padded with 0xFF to 32 bytes. Only the first 16 credential bytes fit and
+/// are used (the UID is 12 bytes, the OTP credential 16).
 pub fn auth_plaintext(now_ms: u64, credential: &[u8], random: u64) -> [u8; 32] {
     let mut p = [0xFF; 32];
+    let credential = &credential[..credential.len().min(OTP_CREDENTIAL_LEN)];
     let n = credential.len();
     p[0..8].copy_from_slice(&now_ms.to_le_bytes());
     p[8..8 + n].copy_from_slice(credential);
     p[8 + n..16 + n].copy_from_slice(&random.to_le_bytes());
     p
+}
+
+/// How long to wait before the next auth request: the rest of
+/// [`AUTH_SPACING_MS`] since `last`, never more (the wall clock can step back).
+fn spacing_sleep(last_ms: u64, now_ms: u64) -> Duration {
+    let due = last_ms.saturating_add(AUTH_SPACING_MS);
+    Duration::from_millis(due.saturating_sub(now_ms).min(AUTH_SPACING_MS))
 }
 
 /// Whole auth frame: `4C id 00 02` + AES(key 3) of `plaintext`.
@@ -87,11 +96,33 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// Sleep until [`AUTH_SPACING_MS`] have passed since the last auth request.
     fn wait_auth_spacing(&mut self) {
         if let Some(last) = self.last_auth_ms {
-            let now = self.clock.now_ms();
-            let due = last.saturating_add(AUTH_SPACING_MS);
-            if now < due {
-                self.clock.sleep(Duration::from_millis(due - now));
+            let wait = spacing_sleep(last, self.clock.now_ms());
+            if !wait.is_zero() {
+                self.clock.sleep(wait);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_spacing_sleep_is_clamped_when_the_clock_steps_back() {
+        assert_eq!(spacing_sleep(10_000, 10_400), Duration::from_millis(600));
+        assert_eq!(spacing_sleep(10_000, 11_000), Duration::ZERO);
+        // Wall clock stepped back by an hour: never sleep longer than 1 s.
+        assert_eq!(
+            spacing_sleep(10_000_000, 6_400_000),
+            Duration::from_millis(1000)
+        );
+    }
+
+    #[test]
+    fn auth_plaintext_with_an_overlong_credential_does_not_panic() {
+        let p = auth_plaintext(1, &[0xAB; 20], 2);
+        assert_eq!(&p[8..24], &[0xAB; 16]);
+        assert_eq!(&p[24..32], &2u64.to_le_bytes());
     }
 }

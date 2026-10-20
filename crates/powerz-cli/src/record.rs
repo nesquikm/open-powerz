@@ -32,7 +32,8 @@ impl Integrator {
     pub fn push(&mut self, time_ms: u32, vbus_v: f64, ibus_a: f64) -> (f64, f64) {
         if let Some((t0, v0, i0)) = self.last {
             // Trapezoidal rule over the interval since the previous sample.
-            let hours = f64::from(time_ms.wrapping_sub(t0)) / 3_600_000.0;
+            // A backwards step (meter reboot) contributes nothing.
+            let hours = f64::from(time_ms.saturating_sub(t0)) / 3_600_000.0;
             self.charge_ah += (i0 + ibus_a) / 2.0 * hours;
             self.energy_wh += (v0 * i0 + vbus_v * ibus_a) / 2.0 * hours;
         }
@@ -138,5 +139,15 @@ mod tests {
         assert_eq!(sig8(12.345678912), "12.345679");
         assert_eq!(sig8(-0.000012085555555555555), "-0.000012085556");
         assert_eq!(sig8(2.5e-12), "2.5e-12");
+    }
+
+    #[test]
+    fn integrator_ignores_an_interval_that_runs_backwards() {
+        let mut i = Integrator::new();
+        i.push(1_000, 5.0, 1.0);
+        let (c1, e1) = i.push(4_600, 5.0, 1.0); // 3.6 s at 1 A = 0.001 Ah
+        let (c2, e2) = i.push(100, 5.0, 1.0); // meter rebooted: no huge jump
+        assert!((c1 - 0.001).abs() < 1e-12);
+        assert_eq!((c2, e2), (c1, e1));
     }
 }

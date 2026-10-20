@@ -35,7 +35,7 @@ Implement the `powerz` binary in `crates/powerz-cli` on top of `powerz-protocol`
 
 ## Technical Design
 
-`clap` derive for arguments. Each subcommand is a library function over a `Session` and a `Write` sink, so tests drive it with `MockTransport` and an in-memory buffer; `main` only wires real devices, signals (`ctrlc`) and exit codes. CSV via the `csv` crate. `watch` redraws with ANSI cursor movement only when stdout is a terminal, and prints one line per refresh otherwise.
+`clap` derive for arguments. Each subcommand is a library function over a `Session` and a `Write` sink, so tests drive it with `MockTransport` and an in-memory buffer; `main` only wires real devices, signals (`ctrlc`) and exit codes. CSV rows are written directly (the `csv` crate is a test-only dependency used to parse them back). `watch` redraws with ANSI cursor movement only when stdout is a terminal, and prints one line per refresh otherwise.
 
 ## Testing
 
