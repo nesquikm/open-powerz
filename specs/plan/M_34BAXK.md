@@ -59,7 +59,7 @@ codename: Wire Whisperer
 
 **Acceptance Criteria:**
 - [x] Gating rule from CLAUDE.md passes locally on macOS
-- [ ] CI is green on all three OSes
+- [x] CI is green on all three OSes
 - [x] Every AC of the seven FRs above is traced to a test by `/spec-review`
 - [x] `powerz stream --rate 1000` records 60 s on the KM003C with no host-side gaps
 
