@@ -40,7 +40,7 @@ codename: Live Wire
   verify: Vitest passes; visual-check screenshots reviewed (light/dark × ~900/~1600 px × demo streaming/no device)
 - [x] Stats panel and recording controls in the UI — AH2AEJ, 0P7HSJ
   verify: Vitest passes; visual-check screenshots of the panel reviewed in both themes
-- [ ] uPlot chart with live window, zoom/pan via `history_range`, series toggles, hover readout — AH2AEM
+- [x] uPlot chart with live window, zoom/pan via `history_range`, series toggles, hover readout — AH2AEM
   verify: Vitest passes; visual-check screenshots of live and zoomed views reviewed
 - [ ] WebdriverIO + tauri-driver real-app suite, Playwright + axe UI suite, CI `e2e` job — AH2AEN
   verify: `bun run e2e:ui` passes locally; CI `e2e` job green on its matrix

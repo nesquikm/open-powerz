@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BackendEvent, Batch } from "./backend";
-import { MockBackend } from "./mockBackend";
+import { MAX_SYNTHETIC_SAMPLES, MockBackend, syntheticFromUrl } from "./mockBackend";
 
 function batches(events: BackendEvent[]): Batch[] {
   return events.flatMap((e) => (e.type === "batch" ? [e.data] : []));
@@ -200,5 +200,67 @@ describe("MockBackend history and stats (AC-AH2AEJ.2, AC-AH2AEJ.4, AC-AH2AEJ.5, 
     const [vbus] = await backend.historyRange(["vbus"], 0, Number.MAX_SAFE_INTEGER, 100);
     expect(vbus.buckets).toEqual([]);
     await backend.disconnect();
+  });
+});
+
+describe("MockBackend synthetic history (AC-AH2AEM.4)", () => {
+  it("serves a 10-million-sample history fast enough for a pan step", async () => {
+    const backend = new MockBackend();
+    await backend.connect("demo:load-5v-1a", 1000, () => {});
+    await backend.seedSyntheticHistory(10_000_000);
+
+    const [whole] = await backend.historyRange(["vbus"], 0, Number.MAX_SAFE_INTEGER, 1200);
+    expect(whole.buckets.length).toBeLessThanOrEqual(1200);
+    expect(whole.buckets.length).toBeGreaterThanOrEqual(1190);
+    expect(whole.buckets[0]?.t_ms).toBe(0);
+    expect(whole.buckets.at(-1)?.t_ms).toBeGreaterThan(9_990_000 - 10_000);
+
+    // A pan step over a tenth of the history (one million samples).
+    const started = performance.now();
+    const [vbus, ibus] = await backend.historyRange(["vbus", "ibus"], 4_000_000, 5_000_000, 1200);
+    const elapsed = performance.now() - started;
+    await backend.disconnect();
+
+    expect(elapsed).toBeLessThan(100);
+    expect(vbus.buckets.length).toBeGreaterThanOrEqual(1190);
+    expect(vbus.buckets.length).toBeLessThanOrEqual(1200);
+    expect(vbus.buckets[0]?.t_ms).toBeGreaterThanOrEqual(4_000_000);
+    expect(vbus.buckets.at(-1)?.t_ms).toBeLessThanOrEqual(5_000_000);
+    for (const b of vbus.buckets) {
+      expect(b.min).toBeLessThanOrEqual(b.max);
+      expect(b.min).toBeCloseTo(5, 0);
+    }
+    for (const b of ibus.buckets) expect(b.max).toBeCloseTo(1, 0);
+  });
+
+  it("refuses to seed without a session, like every other history call", async () => {
+    await expect(new MockBackend().seedSyntheticHistory(1_000)).rejects.toMatchObject({
+      kind: "usage",
+    });
+  });
+});
+
+describe("MockBackend synthetic seed limits (AC-AH2AEM.4)", () => {
+  it("honours ?synthetic= only in dev builds", () => {
+    expect(syntheticFromUrl("?synthetic=5000", true)).toBe(5_000);
+    expect(syntheticFromUrl("?synthetic=5000", false)).toBeNull();
+    expect(syntheticFromUrl("?synthetic=abc", true)).toBeNull();
+    expect(syntheticFromUrl(undefined, true)).toBeNull();
+  });
+
+  it("clamps the seed size", () => {
+    expect(MAX_SYNTHETIC_SAMPLES).toBeLessThanOrEqual(20_000_000);
+    expect(MAX_SYNTHETIC_SAMPLES).toBeGreaterThanOrEqual(10_000_000);
+    expect(syntheticFromUrl("?synthetic=999999999999", true)).toBe(MAX_SYNTHETIC_SAMPLES);
+  });
+
+  it("seeds the same values a live sample would carry", async () => {
+    const backend = new MockBackend();
+    await backend.connect("demo:pd-9v-2a", 1000, () => {});
+    await backend.seedSyntheticHistory(5_000);
+    const [vbus, cc1] = await backend.historyRange(["vbus", "cc1"], 1_234, 1_234, 1);
+    await backend.disconnect();
+    expect(vbus.buckets[0]?.min).toBeCloseTo(9 + 0.02 * Math.sin(1.234 * 5), 5);
+    expect(cc1.buckets[0]?.max).toBeCloseTo(1.05, 5);
   });
 });

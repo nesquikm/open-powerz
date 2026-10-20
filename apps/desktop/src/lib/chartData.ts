@@ -1,0 +1,506 @@
+import type uPlot from "uplot";
+import type { Gap, Sample, SeriesBuckets } from "./backend";
+import { CHART_SERIES, type ChartSeriesKey, type SeriesVisibility } from "./chartSeries";
+
+/** Live ring capacity: 10 minutes at 1000 SPS. */
+export const LIVE_CAPACITY = 600_000;
+
+export type LiveWindowId = "10s" | "1m" | "10m" | "all";
+
+export interface LiveWindow {
+  id: LiveWindowId;
+  label: string;
+  /** Span shown, `null` for the whole session. */
+  ms: number | null;
+}
+
+/** The live windows the selector offers. */
+export const LIVE_WINDOWS: readonly LiveWindow[] = [
+  { id: "10s", label: "10 s", ms: 10_000 },
+  { id: "1m", label: "1 min", ms: 60_000 },
+  { id: "10m", label: "10 min", ms: 600_000 },
+  { id: "all", label: "Whole session", ms: null },
+];
+
+/** What the chart draws: shared x (ms) and one y array per series (`null` = no point). */
+export interface ChartFrame {
+  x: number[];
+  y: Record<ChartSeriesKey, (number | null)[]>;
+  /** Points stand for min/max of a time bucket, not raw samples. */
+  decimated: boolean;
+}
+
+/** Stored channels, power is derived (VBUS × IBUS). */
+type StoredKey = "vbus" | "ibus" | "dp" | "dm" | "cc1" | "cc2";
+
+function emptyY(): Record<ChartSeriesKey, (number | null)[]> {
+  const y = {} as Record<ChartSeriesKey, (number | null)[]>;
+  for (const s of CHART_SERIES) y[s.key] = [];
+  return y;
+}
+
+/** Most gaps a {@link GapList} keeps; older ones go first. */
+export const MAX_GAPS = 10_000;
+
+/** A session's gaps sorted by start, capped at the newest `cap`; ranges are found by
+ * binary search, so drawing never rescans the whole list. */
+export class GapList {
+  readonly cap: number;
+  #gaps: Gap[] = [];
+
+  constructor(cap: number = MAX_GAPS) {
+    this.cap = Math.max(1, Math.floor(cap));
+  }
+
+  get length(): number {
+    return this.#gaps.length;
+  }
+
+  push(gap: Gap): void {
+    const gaps = this.#gaps;
+    // Gaps arrive in time order, so this is almost always an append.
+    if (gaps.length === 0 || (gaps[gaps.length - 1]?.from_ms ?? -Infinity) <= gap.from_ms) {
+      gaps.push(gap);
+    } else {
+      gaps.splice(this.#firstFrom(gap.from_ms), 0, gap);
+    }
+    if (gaps.length > this.cap) gaps.splice(0, gaps.length - this.cap);
+  }
+
+  clear(): void {
+    this.#gaps = [];
+  }
+
+  /** Forgets the gaps starting before `ms`. */
+  dropBefore(ms: number): void {
+    const i = this.#firstFrom(ms);
+    if (i > 0) this.#gaps.splice(0, i);
+  }
+
+  /** The gaps starting in [t0Ms, t1Ms], oldest first. */
+  within(t0Ms: number, t1Ms: number): Gap[] {
+    let i = this.#firstFrom(t0Ms);
+    const out: Gap[] = [];
+    for (; i < this.#gaps.length; i++) {
+      const g = this.#gaps[i];
+      if (!g || g.from_ms > t1Ms) break;
+      out.push(g);
+    }
+    return out;
+  }
+
+  /** First index whose gap starts at or after `ms`. */
+  #firstFrom(ms: number): number {
+    let a = 0;
+    let b = this.#gaps.length;
+    while (a < b) {
+      const m = (a + b) >>> 1;
+      if ((this.#gaps[m]?.from_ms ?? 0) < ms) a = m + 1;
+      else b = m;
+    }
+    return a;
+  }
+}
+
+/** Where a gap's break point sits: between its last sample before (`from_ms`) and the
+ * first sample after (`nextMs`), so x stays sorted. */
+function breakAt(gap: Gap, nextMs: number): number {
+  return (gap.from_ms + Math.max(gap.from_ms, Math.min(gap.to_ms, nextMs))) / 2;
+}
+
+/** `v`, or `null` when it is not a finite number (no point is drawn). */
+function finite(v: number | undefined): number | null {
+  return v !== undefined && Number.isFinite(v) ? v : null;
+}
+
+/** Number of series a frame carries, and their channels in CHART_SERIES order. */
+const SERIES_COUNT = CHART_SERIES.length;
+
+/** Fixed-capacity ring of the newest samples, one typed array per channel. */
+export class LiveBuffer {
+  readonly capacity: number;
+  #t: Float64Array;
+  #ch: Record<StoredKey, Float64Array>;
+  /** Index of the oldest sample. */
+  #head = 0;
+  #len = 0;
+  /** Gaps between buffered samples, oldest first (AC-AH2AEM.7). */
+  #gaps = new GapList();
+  /** Per-series min/max scratch for the reduction (reused across frames). */
+  #min = new Float64Array(SERIES_COUNT);
+  #max = new Float64Array(SERIES_COUNT);
+  #minAt = new Int32Array(SERIES_COUNT);
+  #maxAt = new Int32Array(SERIES_COUNT);
+
+  constructor(capacity: number = LIVE_CAPACITY) {
+    this.capacity = Math.max(1, Math.floor(capacity));
+    this.#t = new Float64Array(this.capacity);
+    this.#ch = {
+      vbus: new Float64Array(this.capacity),
+      ibus: new Float64Array(this.capacity),
+      dp: new Float64Array(this.capacity),
+      dm: new Float64Array(this.capacity),
+      cc1: new Float64Array(this.capacity),
+      cc2: new Float64Array(this.capacity),
+    };
+  }
+
+  get length(): number {
+    return this.#len;
+  }
+
+  get firstMs(): number | null {
+    return this.#len === 0 ? null : (this.#t[this.#head] ?? null);
+  }
+
+  get lastMs(): number | null {
+    return this.#len === 0 ? null : (this.#t[this.#slot(this.#len - 1)] ?? null);
+  }
+
+  /** Drops every sample (a new session starts). */
+  clear(): void {
+    this.#head = 0;
+    this.#len = 0;
+    this.#gaps.clear();
+  }
+
+  /** The stream stopped after the sample at `from_ms` and resumed at `to_ms`: the line
+   * breaks there. */
+  markGap(gap: Gap): void {
+    this.#gaps.push(gap);
+  }
+
+  /** Appends a batch; the oldest samples go once the ring is full. */
+  push(samples: readonly Sample[]): void {
+    const cap = this.capacity;
+    // Only the newest `cap` samples can survive.
+    const from = Math.max(0, samples.length - cap);
+    for (let k = from; k < samples.length; k++) {
+      const s = samples[k];
+      if (!s) continue;
+      let slot: number;
+      if (this.#len < cap) {
+        slot = this.#slot(this.#len);
+        this.#len++;
+      } else {
+        slot = this.#head;
+        this.#head = (this.#head + 1) % cap;
+      }
+      this.#t[slot] = s.t_ms;
+      this.#ch.vbus[slot] = s.vbus_v;
+      this.#ch.ibus[slot] = s.ibus_a;
+      this.#ch.dp[slot] = s.dp_v;
+      this.#ch.dm[slot] = s.dm_v;
+      this.#ch.cc1[slot] = s.cc1_v;
+      this.#ch.cc2[slot] = s.cc2_v;
+    }
+    // Gaps that start before the oldest sample no longer sit between two samples.
+    const first = this.firstMs;
+    if (first !== null) this.#gaps.dropBefore(first);
+  }
+
+  /** Samples in [t0Ms, t1Ms], reduced to at most two points per pixel of `widthPx`
+   * (each pixel's min and max, in time order) when there are more than that. A gap
+   * breaks the line after its `from_ms` sample; non-finite values draw no point. */
+  window(t0Ms: number, t1Ms: number, widthPx: number): ChartFrame {
+    const lo = this.#lowerBound(t0Ms);
+    const hi = this.#upperBound(t1Ms); // exclusive
+    const count = Math.max(0, hi - lo);
+    const pixels = Number.isFinite(widthPx) ? Math.max(1, Math.floor(widthPx)) : 1;
+    const y = emptyY();
+    const x: number[] = [];
+    const gaps = this.#gaps.within(t0Ms, t1Ms).filter((gap) => gap.from_ms < t1Ms);
+    const t = this.#t;
+    const cap = this.capacity;
+    let g = 0;
+    /** Null points for every gap starting before `ms`: uPlot breaks the line there. */
+    const breaksBefore = (ms: number, points: number): void => {
+      while (g < gaps.length) {
+        const gap = gaps[g];
+        if (!gap || gap.from_ms >= ms) break;
+        pushBreak(x, y, breakAt(gap, ms), points);
+        g++;
+      }
+    };
+    if (count <= pixels * 2) {
+      const { vbus, ibus, dp, dm, cc1, cc2 } = this.#ch;
+      let slot = this.#slot(lo);
+      for (let i = lo; i < hi; i++) {
+        const ms = t[slot] ?? 0;
+        breaksBefore(ms, 1);
+        x.push(ms);
+        const v = vbus[slot] ?? NaN;
+        const a = ibus[slot] ?? NaN;
+        y.vbus.push(finite(v));
+        y.ibus.push(finite(a));
+        y.power.push(finite(v * a));
+        y.dp.push(finite(dp[slot]));
+        y.dm.push(finite(dm[slot]));
+        y.cc1.push(finite(cc1[slot]));
+        y.cc2.push(finite(cc2[slot]));
+        if (++slot === cap) slot = 0;
+      }
+      return { x, y, decimated: false };
+    }
+    const scale = pixels / Math.max(t1Ms - t0Ms, Number.EPSILON);
+    const bucketOf = (ms: number): number => Math.min(pixels - 1, Math.floor((ms - t0Ms) * scale));
+    let i = lo;
+    let slot = this.#slot(lo);
+    while (i < hi) {
+      const firstMs = t[slot] ?? 0;
+      breaksBefore(firstMs, 2);
+      const bucket = bucketOf(firstMs);
+      // A bucket never spans a gap: samples up to its `from_ms` belong before the break.
+      const gapFrom = gaps[g]?.from_ms ?? Infinity;
+      this.#resetExtremes();
+      let lastMs = firstMs;
+      let n = 0;
+      while (i < hi) {
+        const ms = t[slot] ?? 0;
+        if (n > 0 && (ms > gapFrom || bucketOf(ms) !== bucket)) break;
+        this.#take(slot, n);
+        lastMs = ms;
+        n++;
+        i++;
+        if (++slot === cap) slot = 0;
+      }
+      x.push(firstMs, lastMs);
+      this.#pushExtremes(y);
+    }
+    return { x, y, decimated: true };
+  }
+
+  #resetExtremes(): void {
+    this.#min.fill(Infinity);
+    this.#max.fill(-Infinity);
+    this.#minAt.fill(0);
+    this.#maxAt.fill(0);
+  }
+
+  /** Folds the sample in `slot` (the bucket's `n`-th) into every series' extremes at once. */
+  #take(slot: number, n: number): void {
+    const ch = this.#ch;
+    const v = ch.vbus[slot] ?? NaN;
+    const a = ch.ibus[slot] ?? NaN;
+    // CHART_SERIES order: vbus, ibus, power, dp, dm, cc1, cc2.
+    this.#fold(0, v, n);
+    this.#fold(1, a, n);
+    this.#fold(2, v * a, n);
+    this.#fold(3, ch.dp[slot] ?? NaN, n);
+    this.#fold(4, ch.dm[slot] ?? NaN, n);
+    this.#fold(5, ch.cc1[slot] ?? NaN, n);
+    this.#fold(6, ch.cc2[slot] ?? NaN, n);
+  }
+
+  #fold(k: number, v: number, n: number): void {
+    // NaN fails both comparisons; ±Infinity is skipped explicitly.
+    if (v === Infinity || v === -Infinity) return;
+    if (v < (this.#min[k] ?? Infinity)) {
+      this.#min[k] = v;
+      this.#minAt[k] = n;
+    }
+    if (v > (this.#max[k] ?? -Infinity)) {
+      this.#max[k] = v;
+      this.#maxAt[k] = n;
+    }
+  }
+
+  /** The bucket's two points per series: its extremes in time order, `null` if none. */
+  #pushExtremes(y: ChartFrame["y"]): void {
+    for (let k = 0; k < SERIES_COUNT; k++) {
+      const key = CHART_SERIES[k]?.key;
+      if (!key) continue;
+      const min = this.#min[k] ?? Infinity;
+      const max = this.#max[k] ?? -Infinity;
+      const ys = y[key];
+      if (min > max) ys.push(null, null);
+      else if ((this.#minAt[k] ?? 0) <= (this.#maxAt[k] ?? 0)) ys.push(min, max);
+      else ys.push(max, min);
+    }
+  }
+
+  /** Ring slot of the logical index `i` (0 = oldest). */
+  #slot(i: number): number {
+    return (this.#head + i) % this.capacity;
+  }
+
+  /** First logical index with t >= ms. */
+  #lowerBound(ms: number): number {
+    let a = 0;
+    let b = this.#len;
+    while (a < b) {
+      const m = (a + b) >>> 1;
+      if ((this.#t[this.#slot(m)] ?? 0) < ms) a = m + 1;
+      else b = m;
+    }
+    return a;
+  }
+
+  /** First logical index with t > ms. */
+  #upperBound(ms: number): number {
+    let a = 0;
+    let b = this.#len;
+    while (a < b) {
+      const m = (a + b) >>> 1;
+      if ((this.#t[this.#slot(m)] ?? 0) <= ms) a = m + 1;
+      else b = m;
+    }
+    return a;
+  }
+}
+
+/** The live window's [t0, t1] in ms: the last `span` up to the newest sample (never
+ * before the first one), or the whole buffer; `null` before the first sample. */
+export function liveRange(id: LiveWindowId, buf: LiveBuffer): [number, number] | null {
+  const first = buf.firstMs;
+  const last = buf.lastMs;
+  if (first === null || last === null) return null;
+  const ms = LIVE_WINDOWS.find((w) => w.id === id)?.ms ?? null;
+  return ms === null ? [first, last] : [Math.max(first, last - ms), last];
+}
+
+/** Reduced motion: `range` (a `spanMs` live window) advanced in tenth-of-a-span steps
+ * instead of scrolling; the end never passes the newest sample, so no blank strip
+ * shows, and the start never precedes `firstMs`. A window still shorter than its span
+ * (the session is younger) is returned as it is. */
+export function steppedRange(
+  range: [number, number],
+  spanMs: number,
+  firstMs: number,
+): [number, number] {
+  if (range[1] - range[0] < spanMs || !(spanMs > 0)) return range;
+  const step = spanMs / 10;
+  const end = Math.floor(range[1] / step) * step;
+  return [Math.max(firstMs, end - spanMs), end];
+}
+
+/** `points` null points at `ms` (two in decimated frames, which pair their points). */
+function pushBreak(x: number[], y: ChartFrame["y"], ms: number, points: number): void {
+  for (let k = 0; k < points; k++) {
+    x.push(ms);
+    for (const s of CHART_SERIES) y[s.key].push(null);
+  }
+}
+
+/** uPlot aligned data: x, then one array per series in CHART_SERIES order. */
+export function toAlignedData(frame: ChartFrame): uPlot.AlignedData {
+  return [frame.x, ...CHART_SERIES.map((s) => frame.y[s.key])];
+}
+
+/** A `history_range` answer as a chart frame: two points per bucket (its min, then its
+ * max) at the bucket's time; series the answer does not carry, and non-finite values,
+ * stay `null`. Each gap inside the answer's span adds a null pair after the bucket at
+ * its `from_ms`, so the line breaks there. */
+export function bucketsToFrame(
+  result: readonly SeriesBuckets[],
+  gaps: readonly Gap[] = [],
+): ChartFrame {
+  const times = new Set<number>();
+  for (const s of result) for (const b of s.buckets) times.add(b.t_ms);
+  const sorted = [...times].sort((a, b) => a - b);
+  const firstT = sorted[0] ?? 0;
+  const lastT = sorted[sorted.length - 1] ?? 0;
+  const breaks = gaps
+    .filter((gap) => sorted.length > 0 && gap.from_ms >= firstT && gap.from_ms < lastT)
+    .sort((a, b) => a.from_ms - b.from_ms);
+  const x: number[] = [];
+  /** Frame index of each bucket time's min point. */
+  const index = new Map<number, number>();
+  let g = 0;
+  for (const t of sorted) {
+    while (g < breaks.length) {
+      const gap = breaks[g];
+      if (!gap || gap.from_ms >= t) break;
+      const ms = breakAt(gap, t);
+      x.push(ms, ms);
+      g++;
+    }
+    index.set(t, x.length);
+    x.push(t, t);
+  }
+  const y = emptyY();
+  for (const s of CHART_SERIES) y[s.key] = new Array<number | null>(x.length).fill(null);
+  for (const s of result) {
+    const ys = y[s.series];
+    for (const b of s.buckets) {
+      const i = index.get(b.t_ms);
+      if (i === undefined) continue;
+      ys[i] = finite(b.min);
+      ys[i + 1] = finite(b.max);
+    }
+  }
+  return { x, y, decimated: true };
+}
+
+/** One series' value under the cursor: a sample's value, or a bucket's min–max range. */
+export type HoverValue =
+  | { key: ChartSeriesKey; kind: "value"; value: number }
+  | { key: ChartSeriesKey; kind: "range"; min: number; max: number };
+
+/** What the hover readout shows: the point's time and each visible series' value. */
+export interface HoverReadout {
+  t_ms: number;
+  values: HoverValue[];
+}
+
+/** No series has a value at index `i` (a gap break, or an all-bad bucket). */
+function blankAt(frame: ChartFrame, i: number): boolean {
+  for (const s of CHART_SERIES) {
+    const v = frame.y[s.key][i];
+    if (v !== null && v !== undefined) return false;
+  }
+  return true;
+}
+
+/** Index of the x nearest `atMs` (x is sorted) that is not blank; -1 when there is none. */
+function nearestIndex(frame: ChartFrame, atMs: number): number {
+  const x = frame.x;
+  let a = 0;
+  let b = x.length;
+  while (a < b) {
+    const m = (a + b) >>> 1;
+    if ((x[m] ?? 0) < atMs) a = m + 1;
+    else b = m;
+  }
+  let left = a - 1;
+  let right = a;
+  while (left >= 0 && blankAt(frame, left)) left--;
+  while (right < x.length && blankAt(frame, right)) right++;
+  if (left < 0) return right < x.length ? right : -1;
+  if (right >= x.length) return left;
+  return atMs - (x[left] ?? 0) <= (x[right] ?? 0) - atMs ? left : right;
+}
+
+/** The readout at `atMs`: the nearest sample's values, or (decimated view) the nearest
+ * bucket's min–max per series; hidden and missing series are left out; `null` when empty. */
+export function hoverReadout(
+  frame: ChartFrame,
+  atMs: number,
+  visibility: SeriesVisibility,
+): HoverReadout | null {
+  const i = nearestIndex(frame, atMs);
+  if (i < 0) return null;
+  // Decimated frames carry two points per bucket: indices 2k and 2k+1.
+  const lo = frame.decimated ? i - (i % 2) : i;
+  const hi = frame.decimated ? Math.min(lo + 1, frame.x.length - 1) : i;
+  const values: HoverValue[] = [];
+  for (const s of CHART_SERIES) {
+    if (!visibility[s.key]) continue;
+    const ys = frame.y[s.key];
+    let min = Infinity;
+    let max = -Infinity;
+    for (let k = lo; k <= hi; k++) {
+      const v = ys[k];
+      if (v === null || v === undefined || !Number.isFinite(v)) continue;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    if (min > max) continue;
+    values.push(
+      min === max
+        ? { key: s.key, kind: "value", value: min }
+        : { key: s.key, kind: "range", min, max },
+    );
+  }
+  return { t_ms: frame.x[lo] ?? atMs, values };
+}

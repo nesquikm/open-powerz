@@ -40,36 +40,49 @@ function scenarioOf(deviceId: string): Scenario | undefined {
   return SCENARIOS.find((s) => s === name);
 }
 
-/** The scenario's reading at device time `tMs`. */
-function sampleAt(scenario: Scenario, tMs: number): Sample {
+/** Writes the scenario's reading at device time `tMs` into `out` (so a large seed can
+ * reuse one object instead of allocating a sample per point). */
+function writeSample(scenario: Scenario, tMs: number, out: Sample): Sample {
   const t = tMs / 1000;
-  const lines = { cc1_v: 1.68, cc2_v: 0, dp_v: 0.6, dm_v: 0.6 };
+  out.t_ms = tMs;
+  out.cc1_v = 1.68;
+  out.cc2_v = 0;
+  out.dp_v = 0.6;
+  out.dm_v = 0.6;
   switch (scenario) {
     case "idle":
-      return { t_ms: tMs, vbus_v: 0.004, ibus_a: 0, ...lines, cc1_v: 0.08 };
+      out.vbus_v = 0.004;
+      out.ibus_a = 0;
+      out.cc1_v = 0.08;
+      break;
     case "load-5v-1a":
-      return {
-        t_ms: tMs,
-        vbus_v: 5 + 0.01 * Math.sin(t * 7),
-        ibus_a: 1 + 0.02 * Math.sin(t * 3),
-        ...lines,
-      };
+      out.vbus_v = 5 + 0.01 * Math.sin(t * 7);
+      out.ibus_a = 1 + 0.02 * Math.sin(t * 3);
+      break;
     case "pd-9v-2a":
-      return {
-        t_ms: tMs,
-        vbus_v: 9 + 0.02 * Math.sin(t * 5),
-        ibus_a: 2 + 0.05 * Math.sin(t * 2),
-        ...lines,
-        cc1_v: 1.05,
-      };
+      out.vbus_v = 9 + 0.02 * Math.sin(t * 5);
+      out.ibus_a = 2 + 0.05 * Math.sin(t * 2);
+      out.cc1_v = 1.05;
+      break;
     case "noisy-negative":
-      return {
-        t_ms: tMs,
-        vbus_v: 5 + 0.05 * Math.sin(t * 31),
-        ibus_a: -0.2 + 0.05 * Math.sin(t * 17),
-        ...lines,
-      };
+      out.vbus_v = 5 + 0.05 * Math.sin(t * 31);
+      out.ibus_a = -0.2 + 0.05 * Math.sin(t * 17);
+      break;
   }
+  return out;
+}
+
+/** The scenario's reading at device time `tMs`. */
+function sampleAt(scenario: Scenario, tMs: number): Sample {
+  return writeSample(scenario, tMs, {
+    t_ms: 0,
+    vbus_v: 0,
+    ibus_a: 0,
+    cc1_v: 0,
+    cc2_v: 0,
+    dp_v: 0,
+    dm_v: 0,
+  });
 }
 
 /** Running min / max / sum of one quantity. */
@@ -139,29 +152,105 @@ const SERIES_FIELD: Record<Series, keyof Sample> = {
   cc2: "cc2_v",
 };
 
-/** Min / max buckets of `history` over `t0..=t1`, at most `buckets` per series. */
-function bucketsOf(
-  history: Sample[],
-  series: readonly Series[],
-  t0: number,
-  t1: number,
-  buckets: number,
-): SeriesBuckets[] {
-  const inRange = history.filter((s) => s.t_ms >= t0 && s.t_ms <= t1);
-  const per = buckets > 0 ? Math.max(1, Math.ceil(inRange.length / buckets)) : 0;
-  return series.map((name) => {
-    const field = SERIES_FIELD[name];
-    const out: SeriesBuckets = { series: name, buckets: [] };
-    if (per === 0) return out;
-    for (let i = 0; i < inRange.length; i += per) {
-      const chunk = inRange.slice(i, i + per);
-      const head = chunk[0];
-      if (!head) break;
-      const values = chunk.map((s) => s[field]);
-      out.buckets.push({ t_ms: head.t_ms, min: Math.min(...values), max: Math.max(...values) });
+const FIELDS = Object.keys(SERIES_FIELD) as Series[];
+
+/** Spare room left after a synthetic seed, so live samples append without a copy. */
+const SEED_HEADROOM = 1 << 20;
+
+/** The session history as columns (sample times plus one column per series), so a
+ * range is found by binary search and bucketed without building sample objects:
+ * a pan over a 10-million-sample history stays well inside a frame (AC-AH2AEM.4). */
+class HistoryColumns {
+  length = 0;
+  #t = new Float64Array(0);
+  /** Float32 values (plenty for a demo double) keep a 10M seed near 320 MB. */
+  #cols = {} as Record<Series, Float32Array>;
+
+  constructor(capacity = 1024) {
+    this.#alloc(capacity);
+  }
+
+  #alloc(capacity: number): void {
+    const t = new Float64Array(capacity);
+    t.set(this.#t.subarray(0, this.length));
+    this.#t = t;
+    for (const name of FIELDS) {
+      const col = new Float32Array(capacity);
+      const old = this.#cols[name] as Float32Array | undefined;
+      if (old) col.set(old.subarray(0, this.length));
+      this.#cols[name] = col;
     }
-    return out;
-  });
+  }
+
+  push(s: Sample): void {
+    if (this.length === this.#t.length) this.#alloc(Math.max(1024, this.#t.length * 2));
+    const i = this.length++;
+    this.#t[i] = s.t_ms;
+    for (const name of FIELDS) this.#cols[name][i] = s[SERIES_FIELD[name]] as number;
+  }
+
+  /** Appends `n` scenario samples, one per millisecond from 0, straight into the
+   * columns (no sample object per point). */
+  fillSynthetic(scenario: Scenario, n: number): void {
+    if (this.length + n > this.#t.length) this.#alloc(this.length + n + SEED_HEADROOM);
+    const s = sampleAt(scenario, 0);
+    for (let t = 0; t < n; t++) {
+      writeSample(scenario, t, s);
+      const i = this.length++;
+      this.#t[i] = t;
+      for (const name of FIELDS) this.#cols[name][i] = s[SERIES_FIELD[name]] as number;
+    }
+  }
+
+  /** The first index whose time is `>= t` (or `> t` when `after`). */
+  #search(t: number, after: boolean): number {
+    let lo = 0;
+    let hi = this.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      const v = this.#t[mid] as number;
+      if (v < t || (after && v === t)) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  /** Min / max buckets over `t0..=t1`, at most `buckets` per series. */
+  buckets(series: readonly Series[], t0: number, t1: number, buckets: number): SeriesBuckets[] {
+    const from = this.#search(t0, false);
+    const to = this.#search(t1, true);
+    const n = Math.max(0, to - from);
+    const per = buckets > 0 ? Math.max(1, Math.ceil(n / buckets)) : 0;
+    return series.map((name) => {
+      const out: SeriesBuckets = { series: name, buckets: [] };
+      if (per === 0) return out;
+      const col = this.#cols[name];
+      for (let i = from; i < to; i += per) {
+        const end = Math.min(to, i + per);
+        let min = Infinity;
+        let max = -Infinity;
+        for (let j = i; j < end; j++) {
+          const v = col[j] as number;
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+        out.buckets.push({ t_ms: this.#t[i] as number, min, max });
+      }
+      return out;
+    });
+  }
+}
+
+/** The largest synthetic seed (a 20M seed is already about 640 MB of columns). */
+export const MAX_SYNTHETIC_SAMPLES = 20_000_000;
+
+/** `?synthetic=<n>` in the page URL seeds an `n`-sample history (at most
+ * {@link MAX_SYNTHETIC_SAMPLES}) on connect, for the Playwright pan-performance check
+ * (AC-AH2AEM.4); dev builds only, and the device list is unchanged. */
+export function syntheticFromUrl(search: string | undefined, dev: boolean): number | null {
+  if (!dev || !search) return null;
+  const n = Number(new URLSearchParams(search).get("synthetic"));
+  return Number.isInteger(n) && n > 0 ? Math.min(n, MAX_SYNTHETIC_SAMPLES) : null;
 }
 
 interface Running {
@@ -178,7 +267,7 @@ interface Running {
   /** The open recording, if any. */
   recording: MockRecording | null;
   /** Every sample since the start or the last clear (what the chart zooms into). */
-  history: Sample[];
+  history: HistoryColumns;
   stats: MockStats;
 }
 
@@ -240,11 +329,14 @@ export class MockBackend {
       onEvent,
       streamed: 0,
       recording: null,
-      history: [],
+      history: new HistoryColumns(),
       stats: new MockStats(),
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
     this.#session = session;
+    const search = (globalThis as { location?: { search?: string } }).location?.search;
+    const synthetic = syntheticFromUrl(search, import.meta.env.DEV);
+    if (synthetic !== null) await this.seedSyntheticHistory(synthetic);
   }
 
   #tick(s: Running): void {
@@ -351,8 +443,20 @@ export class MockBackend {
     buckets: number,
   ): Promise<BucketsFor<S>> {
     const s = this.#open();
-    // `bucketsOf` maps `series` one to one, so the tuple shape holds.
-    return bucketsOf(s.history, series, t0Ms, t1Ms, buckets) as BucketsFor<S>;
+    // `HistoryColumns.buckets` maps `series` one to one, so the tuple shape holds.
+    return s.history.buckets(series, t0Ms, t1Ms, buckets) as BucketsFor<S>;
+  }
+
+  /** Replaces the history with `n` (at most {@link MAX_SYNTHETIC_SAMPLES}) scenario
+   * samples, one per millisecond from 0, and moves the live stream past them: a large
+   * history for the pan check (AC-AH2AEM.4). */
+  async seedSyntheticHistory(n: number): Promise<void> {
+    const s = this.#open();
+    const count = Math.max(0, Math.min(Math.floor(n), MAX_SYNTHETIC_SAMPLES));
+    const history = new HistoryColumns(count + SEED_HEADROOM);
+    history.fillSynthetic(s.scenario, count);
+    s.history = history;
+    s.nextMs = Math.max(s.nextMs, count);
   }
 
   /** Zeroes the stats; they count again from the next sample. The history stays. */
@@ -364,7 +468,7 @@ export class MockBackend {
   /** Discards the history; the stream and any recording go on. */
   async clearHistory(): Promise<void> {
     const s = this.#open();
-    s.history = [];
+    s.history = new HistoryColumns();
   }
 
   async appInfo(): Promise<AppInfo> {

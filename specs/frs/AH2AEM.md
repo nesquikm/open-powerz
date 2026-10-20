@@ -34,7 +34,7 @@ Add a uPlot chart to the desktop UI with a live scrolling window, zoom and pan o
 
 ## Technical Design
 
-`Chart.svelte` wraps uPlot with a `ResizeObserver`. `src/lib/chartData.ts` keeps the live window in a typed-array ring buffer fed by batches and reduced on the client to at most two points per pixel, and turns `history_range` buckets (min and max per bucket) into uPlot series. Zoom and pan requests go through a single in-flight token scheduled on `requestAnimationFrame`, so stale answers are dropped. Gaps become `null` points. Axis and series styles read the theme's CSS custom properties and re-apply on theme change.
+`Chart.svelte` wraps uPlot with a `ResizeObserver`. `src/lib/chartData.ts` keeps the live window in a typed-array ring buffer fed by batches and reduced on the client to at most two points per pixel, and turns `history_range` buckets (min and max per bucket) into uPlot series. "Whole session" beyond the live buffer is drawn from `history_range` (refreshed at most 4 times a second), which also tells the session's true start; views are clamped to the session. Drag zooms, Shift/middle-drag pans, and the wheel zooms when the chart is focused or with Ctrl/⌘. Zoom and pan requests go through a single in-flight token scheduled on `requestAnimationFrame`, so stale answers are dropped. Gaps become `null` points after the gap's last sample. Axis and series styles read the theme tokens from `theme.ts` (`THEME_COLORS`, the same source as the CSS custom properties) and re-apply on theme change.
 
 ## Testing
 

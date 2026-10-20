@@ -11,6 +11,7 @@
     toUiError,
   } from "./lib/backend";
   import About from "./lib/components/About.svelte";
+  import Chart from "./lib/components/Chart.svelte";
   import ErrorBanner from "./lib/components/ErrorBanner.svelte";
   import Notice from "./lib/components/Notice.svelte";
   import Readout from "./lib/components/Readout.svelte";
@@ -62,9 +63,13 @@
   // Follow OS light/dark changes (only visible while the choice is System).
   $effect(() => watchMediaQuery(DARK_QUERY, (dark) => (systemDark = dark)));
 
+  const resolvedTheme = $derived(resolveTheme(themeChoice, systemDark));
   $effect(() => {
-    applyTheme(resolveTheme(themeChoice, systemDark), document.documentElement);
+    applyTheme(resolvedTheme, document.documentElement);
   });
+
+  /** The live chart, fed from the session's batches. */
+  let chart: Chart | undefined = $state();
 
   // Reduced motion (AC-AH2AEK.7): follow the OS setting live; the chart reads
   // `getContext<() => MotionSettings>("motion")().chartScroll`.
@@ -103,8 +108,12 @@
     const id = session.selectedId;
     if (id === null) return;
     session.beginConnect();
+    chart?.reset();
     try {
       await connect(id, requestedRateSps, (event) => {
+        // Same guard as the session: a late batch after the end draws nothing.
+        if (event.type === "batch" && session.active) chart?.push(event.data.samples);
+        if (event.type === "gap" && session.active) chart?.markGap(event.data);
         session.handleEvent(event);
         if (event.type === "recording") recording.handleEvent(event.data);
         if (event.type === "status" && event.data.state === "disconnected") {
@@ -140,8 +149,10 @@
     void statsControls.reset(statsDeps);
   }
 
-  // Hook filled in by a later FR (chart).
-  function returnChartToLive(): void {}
+  /** L shortcut: the chart back to its live window. */
+  function returnChartToLive(): void {
+    chart?.returnToLive();
+  }
 
   let helpOpen = $state(false);
   let aboutOpen = $state(false);
@@ -234,7 +245,9 @@
   <main class="content">
     <div class="main-area">
       <Readout {session} />
-      <section class="chart panel" aria-label="Chart"></section>
+      <section class="chart panel" aria-label="Chart">
+        <Chart bind:this={chart} theme={resolvedTheme} />
+      </section>
     </div>
     <div class="side-panel">
       <StatsPanel
@@ -283,6 +296,8 @@
   }
   .chart {
     min-width: 0;
+    min-height: 0;
+    padding: 0.75rem;
   }
   /* Stacked (< 1200 px): stats panel moves under the chart. */
   @media (max-width: 1199.98px) {
