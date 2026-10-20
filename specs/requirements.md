@@ -103,6 +103,8 @@ update and signed release packaging are not planned.
 - Firmware variants: ADC section length 40 or 44 bytes (44 on FW 2.0.6); parse by section size.
 - A stale DISCONNECT frame is often queued on the bulk IN endpoint at open: drain it.
 - Auth level is lost on every close/reopen: authenticate again after each open.
+- Memory read (and so device info and auth) is REJECTed on bulk until CONNECT has been
+  sent (FW 2.0.6, found by the first real-device CLI run); the CLI sends CONNECT on bulk.
 - At 1000 SPS a reply holds at most 63 queue records: poll at least every ~30–60 ms.
 - On CDC, frame types 0x01/0x02/0x03 start or stop the ADCNEW push stream, so CONNECT must
   never be sent there.

@@ -138,7 +138,7 @@ Control types (main header type below 0x40):
 | type | name | argument (att) | reply | tag |
 |---|---|---|---|---|
 | 0x01 | SYNC | none | used as a per-chunk acknowledgement during firmware download; on CDC this byte starts ADCNEW instead | [doc] [static] [device] |
-| 0x02 | CONNECT | 0 | ACCEPT over bulk; not required for anything tested; no reply over HID; on CDC it starts an ADCNEW stream | [doc] [static] [device] (firmware 2.0.6) |
+| 0x02 | CONNECT | 0 | ACCEPT over bulk; required before memory read (and so before auth) on bulk; no reply over HID; on CDC it starts an ADCNEW stream | [doc] [static] [device] (firmware 2.0.6) |
 | 0x03 | DISCONNECT | none | can arrive instead of PUT_DATA; a stale one often waits on EP 0x81 at open, so drain IN first | [doc] [static] [device] |
 | 0x04 | RESET | none | not used by the vendor app; never sent by us | [doc] [inferred] |
 | 0x05 | ACCEPT | reply only | | [doc] [static] [device] |
@@ -311,7 +311,11 @@ first 96 bytes; device overrides its "96 bytes" reading.
 ## Memory read and device info
 
 [device] On firmware 2.0.6, memory read (type 0x44) works without auth: all
-four known addresses were read at auth level 0.
+four known addresses were read at auth level 0. [device] It does need CONNECT
+first on firmware 2.0.6: without a prior CONNECT on the bulk pipe the meter
+answers the memory read with REJECT (`06 id 00 00`); after CONNECT the same
+request succeeds (checked 2026-10-20 with the `powerz` CLI). Auth reads the UID
+or OTP by memory read, so it needs CONNECT too.
 
 Request: header `44 id 01 01`, then 32 bytes, the AES-128-ECB encryption
 (key slot 0, see `crypto::keys`) of this plaintext: [static] [device]
@@ -384,7 +388,7 @@ Recommended order for our library (bulk transport): [device] [static]
 | step | action | tag |
 |---|---|---|
 | 1 | open, claim IF0, drain any stale DISCONNECT waiting on EP 0x81 | [device] |
-| 2 | optional CONNECT (`02 id 00 00`, expect ACCEPT); nothing depends on it | [static] [device] (firmware 2.0.6) |
+| 2 | CONNECT (`02 id 00 00`, expect ACCEPT); memory read and auth are REJECTed without it | [static] [device] (firmware 2.0.6) |
 | 3 | memory read of the UID and the OTP block | [static] [device] |
 | 4 | authenticate (0x4C), level 1 | [static] [device] |
 | 5 | memory read of the info blocks `0x420` and `0x4420` | [static] [device] |

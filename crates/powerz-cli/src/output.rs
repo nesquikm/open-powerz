@@ -17,8 +17,7 @@ pub(crate) fn write_json(out: &mut dyn Write, value: &serde_json::Value) -> Resu
 
 /// Temperature with 3 decimals, or `-` when the meter reports it invalid.
 fn temp_text(a: &AdcSnapshot) -> String {
-    a.temp_c()
-        .map_or_else(|| "-".to_string(), |t| format!("{t:.3}"))
+    a.temp_c().map_or_else(|| "-".to_string(), fixed3)
 }
 
 /// The snapshot as JSON: `vbus_v`, `ibus_a`, `power_w`, `temp_c` (null when
@@ -39,14 +38,14 @@ pub(crate) fn adc_json(a: &AdcSnapshot) -> serde_json::Value {
 /// The snapshot as labelled lines, one value per line, 3 decimals.
 pub(crate) fn write_adc_lines(out: &mut dyn Write, a: &AdcSnapshot) -> Result<(), CliError> {
     let temp = temp_text(a);
-    writeln!(out, "VBUS:   {:.3} V", a.vbus_v())?;
-    writeln!(out, "IBUS:   {:.3} A", a.ibus_a())?;
-    writeln!(out, "Power:  {:.3} W", a.power_w())?;
+    writeln!(out, "VBUS:   {} V", fixed3(a.vbus_v()))?;
+    writeln!(out, "IBUS:   {} A", fixed3(a.ibus_a()))?;
+    writeln!(out, "Power:  {} W", fixed3(a.power_w()))?;
     writeln!(out, "Temp:   {temp} °C")?;
-    writeln!(out, "D+:     {:.3} V", a.dp_v())?;
-    writeln!(out, "D−:     {:.3} V", a.dm_v())?;
-    writeln!(out, "CC1:    {:.3} V", a.cc1_v())?;
-    writeln!(out, "CC2:    {:.3} V", a.cc2_v())?;
+    writeln!(out, "D+:     {} V", fixed3(a.dp_v()))?;
+    writeln!(out, "D−:     {} V", fixed3(a.dm_v()))?;
+    writeln!(out, "CC1:    {} V", fixed3(a.cc1_v()))?;
+    writeln!(out, "CC2:    {} V", fixed3(a.cc2_v()))?;
     Ok(())
 }
 
@@ -55,15 +54,39 @@ pub(crate) fn write_adc_line(out: &mut dyn Write, a: &AdcSnapshot) -> Result<(),
     let temp = temp_text(a);
     writeln!(
         out,
-        "VBUS {:.3} V  IBUS {:.3} A  Power {:.3} W  Temp {temp} °C  \
-         D+ {:.3} V  D− {:.3} V  CC1 {:.3} V  CC2 {:.3} V",
-        a.vbus_v(),
-        a.ibus_a(),
-        a.power_w(),
-        a.dp_v(),
-        a.dm_v(),
-        a.cc1_v(),
-        a.cc2_v()
+        "VBUS {} V  IBUS {} A  Power {} W  Temp {temp} °C  \
+         D+ {} V  D− {} V  CC1 {} V  CC2 {} V",
+        fixed3(a.vbus_v()),
+        fixed3(a.ibus_a()),
+        fixed3(a.power_w()),
+        fixed3(a.dp_v()),
+        fixed3(a.dm_v()),
+        fixed3(a.cc1_v()),
+        fixed3(a.cc2_v())
     )?;
     Ok(())
+}
+
+/// `x` with three decimals; values that round to zero print as `0.000`,
+/// never `-0.000`.
+pub(crate) fn fixed3(x: f64) -> String {
+    let text = format!("{x:.3}");
+    if text == "-0.000" {
+        "0.000".to_string()
+    } else {
+        text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed3_never_prints_negative_zero() {
+        assert_eq!(fixed3(-0.000115), "0.000");
+        assert_eq!(fixed3(-0.0), "0.000");
+        assert_eq!(fixed3(-0.0012), "-0.001");
+        assert_eq!(fixed3(5.0), "5.000");
+    }
 }

@@ -12,7 +12,7 @@ use powerz_protocol::transport::cdc::CdcTransport;
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
 
-use crate::args::{Cli, Command, TransportKind, rate_from_sps, validate};
+use crate::args::{Cli, Command, TransportKind, needs_connect, rate_from_sps, validate};
 use crate::commands::{
     StreamOptions, WatchOptions, info, list, read, select_device, stream, watch,
 };
@@ -57,16 +57,25 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     }
 }
 
-/// Wrap `t` for `--trace` if asked, open a session (no CONNECT) and run.
+/// Wrap `t` for `--trace` if asked, open a session, send CONNECT where the
+/// pipe needs it and run.
 fn with_transport<T: Transport>(cli: &Cli, t: T) -> Result<(), CliError> {
     if cli.trace {
-        dispatch(
+        start(
             cli,
             Session::open(TraceTransport::new(t, std::io::stderr())),
         )
     } else {
-        dispatch(cli, Session::open(t))
+        start(cli, Session::open(t))
     }
+}
+
+/// CONNECT (bulk only) then dispatch.
+fn start<T: Transport>(cli: &Cli, mut session: Session<T>) -> Result<(), CliError> {
+    if needs_connect(cli.transport) {
+        session.connect()?;
+    }
+    dispatch(cli, session)
 }
 
 /// Run one device subcommand on an open session.

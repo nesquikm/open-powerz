@@ -138,3 +138,26 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
     }
     Ok(())
 }
+
+/// Whether a session on `kind` must send CONNECT before device commands.
+///
+/// FW 2.0.6 REJECTs memory reads (and so `info` and auth) until CONNECT. On
+/// CDC the byte 0x02 starts the ADCNEW push stream instead, and HID never
+/// answers CONNECT, so only bulk sends it.
+pub fn needs_connect(kind: TransportKind) -> bool {
+    matches!(kind, TransportKind::Bulk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_is_sent_on_bulk_only() {
+        // Memory read is REJECTed until CONNECT (FW 2.0.6); on CDC the byte
+        // 0x02 starts the ADCNEW stream instead, and HID ignores CONNECT.
+        assert!(needs_connect(TransportKind::Bulk));
+        assert!(!needs_connect(TransportKind::Cdc));
+        assert!(!needs_connect(TransportKind::Hid));
+    }
+}

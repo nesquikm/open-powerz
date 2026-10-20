@@ -69,6 +69,12 @@ impl<T: Transport, C: Clock> Session<T, C> {
         let request = memory_read_request(self.counter.next(), addr, len);
         let reply = self.exchange(&request)?;
         let plaintext = memory_read_plaintext(addr, len);
+        // FW 2.0.6 REJECTs memory reads until CONNECT has been sent.
+        if reply.first().map(|b| b & 0x7F) == Some(0x06) {
+            return Err(Error::Rejected {
+                request_type: request[0],
+            });
+        }
         if reply.len() != CONFIRMATION_LEN || reply[0] != 0xC4 || reply[4..] != plaintext[..16] {
             return Err(Error::Protocol(format!(
                 "bad memory-read confirmation for {len} bytes at {addr:#x}"

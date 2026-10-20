@@ -170,3 +170,16 @@ fn session_device_info_reads_all_four_blocks_at_level_zero() {
         "device_info must not authenticate"
     );
 }
+
+#[test]
+fn session_memread_reject_is_rejected_error() {
+    // FW 2.0.6 REJECTs memory reads until CONNECT has been sent.
+    let mut s = session(vec![Step::transact(
+        memread_request(1, 0x420, 64),
+        reject(1),
+    )]);
+    assert!(matches!(
+        s.memory_read(0x420, 64),
+        Err(Error::Rejected { .. })
+    ));
+}
