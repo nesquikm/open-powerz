@@ -1,8 +1,8 @@
 ---
 title: Protocol reference document
 milestone: M_34BAXK
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-20T19:28:51Z
 id: fr_01M5CYB1320MSY6S4RRPZVJ3EB
 created_at: 2026-10-20T15:25:32.899Z
 changelog_category: Added

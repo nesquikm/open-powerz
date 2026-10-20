@@ -1,8 +1,8 @@
 ---
 title: Device discovery and transports
 milestone: M_34BAXK
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-20T19:28:51Z
 id: fr_01M5CYB13ATHJ8G3GPNXSJGK7E
 created_at: 2026-10-20T15:25:32.899Z
 changelog_category: Added

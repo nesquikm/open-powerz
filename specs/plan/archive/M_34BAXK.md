@@ -1,8 +1,8 @@
 ---
 milestone: M_34BAXK
 id: fr_01M5CXT39J3QY24WCCV734BAXK
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-20T19:28:51Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -20,13 +20,13 @@ codename: Wire Whisperer
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [ZVJ3EB](../frs/ZVJ3EB.md) | Protocol reference document | n/a |
-| [BXYTJX](../frs/BXYTJX.md) | Frame codec | n/a |
-| [E88WR5](../frs/E88WR5.md) | Measurement and settings decoders | n/a |
-| [SJGK7E](../frs/SJGK7E.md) | Device discovery and transports | n/a |
-| [N6EHQC](../frs/N6EHQC.md) | Device session: auth, device info and streaming | n/a |
-| [STQEA1](../frs/STQEA1.md) | powerz command-line tool | n/a |
-| [G0W08Z](../frs/G0W08Z.md) | Device simulator and end-to-end tests | n/a |
+| [ZVJ3EB](../../frs/archive/ZVJ3EB.md) | Protocol reference document | n/a |
+| [BXYTJX](../../frs/archive/BXYTJX.md) | Frame codec | n/a |
+| [E88WR5](../../frs/archive/E88WR5.md) | Measurement and settings decoders | n/a |
+| [SJGK7E](../../frs/archive/SJGK7E.md) | Device discovery and transports | n/a |
+| [N6EHQC](../../frs/archive/N6EHQC.md) | Device session: auth, device info and streaming | n/a |
+| [STQEA1](../../frs/archive/STQEA1.md) | powerz command-line tool | n/a |
+| [G0W08Z](../../frs/archive/G0W08Z.md) | Device simulator and end-to-end tests | n/a |
 
 **Tasks:**
 - [x] Cargo workspace with `crates/powerz-protocol`, `crates/powerz-cli`, `apps/desktop/src-tauri`

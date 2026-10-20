@@ -1,8 +1,8 @@
 ---
 title: "Device session: auth, device info and streaming"
 milestone: M_34BAXK
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-20T19:28:51Z
 id: fr_01M5CYB13K07AGTEP46VN6EHQC
 created_at: 2026-10-20T15:25:32.899Z
 changelog_category: Added
