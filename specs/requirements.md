@@ -53,8 +53,8 @@ Feature scope (from the research notes): **MVP** = discovery + live meter + reco
 UFCS analyzer, vendor `.db`/`.sqlite` import/export. Each lands as its own FR in
 `specs/frs/`.
 
-Roadmap (one plan per milestone in `specs/plan/`): M_34BAXK Protocol Core and CLI →
-M_R4WG4Q Desktop Meter → M_NE3C7K PD Analyzer → M_X4VEQ3 Triggers and Extras. Firmware
+Roadmap (one plan per milestone in `specs/plan/`; done ones move to `specs/plan/archive/`):
+M_34BAXK Protocol Core and CLI (done) → M_R4WG4Q Desktop Meter → M_NE3C7K PD Analyzer → M_X4VEQ3 Triggers and Extras. Firmware
 update and signed release packaging are not planned.
 
 ## 2. Functional Requirements (cross-cutting only)
