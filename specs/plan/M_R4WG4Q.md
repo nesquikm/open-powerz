@@ -25,6 +25,12 @@ codename: Live Wire
 - Device connect/disconnect handling with hotplug; recording survives an unplug with data kept.
 - Batched IPC from the Rust backend to the UI (20–60 Hz frames), never one message per sample.
 - Modern UI with light and dark themes; does not copy the vendor look.
+- "Demo device" in the device picker, backed by the `powerz-sim` simulator and its named
+  scenarios (idle, 5V-1A load, PD 9V-2A charge, noisy/negative current).
+- Desktop e2e tests with Playwright against the Tauri app wired to the demo device, covering
+  connect, live values, chart, record and export; `/dev-process-toolkit:visual-check`
+  screenshots (light/dark, narrow/wide, with/without device) are part of each UI FR's
+  definition of done.
 
 **FR list:** to be written.
 

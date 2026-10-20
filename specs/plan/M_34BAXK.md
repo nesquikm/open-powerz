@@ -26,6 +26,7 @@ codename: Wire Whisperer
 | [SJGK7E](../frs/SJGK7E.md) | Device discovery and transports | n/a |
 | [N6EHQC](../frs/N6EHQC.md) | Device session: auth, device info and streaming | n/a |
 | [STQEA1](../frs/STQEA1.md) | powerz command-line tool | n/a |
+| [G0W08Z](../frs/G0W08Z.md) | Device simulator and end-to-end tests | n/a |
 
 **Tasks:**
 - [x] Cargo workspace with `crates/powerz-protocol`, `crates/powerz-cli`, `apps/desktop/src-tauri`
@@ -34,20 +35,22 @@ codename: Wire Whisperer
   verify: `bun run lint && bun run check && bun run test && bun run build:web`
 - [x] GitHub Actions gate on ubuntu-24.04, macos-latest, windows-latest
   verify: `.github/workflows/ci.yml` runs the gating rule
-- [ ] Raise the workspace MSRV to Rust 1.96 and refresh the lockfile (unpins 34 transitive crates)
+- [x] Raise the workspace MSRV to Rust 1.96 and refresh the lockfile (unpins 34 transitive crates)
   verify: `cargo update --workspace` then the gating rule passes
-- [ ] Protocol reference document — ZVJ3EB
+- [x] Protocol reference document — ZVJ3EB
   verify: `cargo test -p powerz-protocol --test protocol_doc`
-- [ ] Frame codec — BXYTJX
+- [x] Frame codec — BXYTJX
   verify: `cargo test -p powerz-protocol frame`
-- [ ] Measurement and settings decoders — E88WR5
+- [x] Measurement and settings decoders — E88WR5
   verify: `cargo test -p powerz-protocol decode`
-- [ ] Device discovery and transports — SJGK7E
+- [x] Device discovery and transports — SJGK7E
   verify: `cargo test -p powerz-protocol transport`
-- [ ] Device session: auth, device info and streaming — N6EHQC
+- [x] Device session: auth, device info and streaming — N6EHQC
   verify: `cargo test -p powerz-protocol --test session_stream`
-- [ ] powerz command-line tool — STQEA1
+- [x] powerz command-line tool — STQEA1
   verify: `cargo test -p powerz-cli`
+- [ ] Device simulator and end-to-end tests — G0W08Z
+  verify: `cargo test -p powerz-sim -p powerz-cli`
 - [ ] Real-device smoke run of every `powerz` subcommand on the KM003C over bulk and CDC (manual)
   verify: transcript of `powerz list/info/read/stream --rate 1000` attached to the PR
 
@@ -57,7 +60,7 @@ codename: Wire Whisperer
 **Acceptance Criteria:**
 - [x] Gating rule from CLAUDE.md passes locally on macOS
 - [ ] CI is green on all three OSes
-- [ ] Every AC of the six FRs above is traced to a test by `/spec-review`
+- [ ] Every AC of the seven FRs above is traced to a test by `/spec-review`
 - [ ] `powerz stream --rate 1000` records 60 s on the KM003C with no host-side gaps
 
 **Gate:** `bun install --frozen-lockfile && bun run lint && bun run check && bun run test && bun run build:web && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`

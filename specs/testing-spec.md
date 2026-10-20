@@ -40,6 +40,17 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
 - Tauri/WebView internals, third-party crates, generated files under `src-tauri/gen/`
 - Real hardware in CI. Device tests are manual, run through the CLI, and their logs become fixtures
 
+### End-to-end and hardware-in-the-loop
+- **Simulator e2e (in the gate):** the `powerz` binary is run with `assert_cmd` against the
+  `powerz-sim` demo device on Linux, macOS and Windows; human-readable output is
+  snapshot-tested with `insta`.
+- **HIL (opt-in):** the same flows against a real meter run only with `POWERZ_HIL=1`, using
+  only the safe command set in `docs/protocol.md`; CI never sets it.
+- **Future (desktop, M_R4WG4Q):** Playwright e2e against the Tauri app wired to the demo
+  device (connect, live values, chart, record, export), plus visual-check screenshots.
+- **Future (Linux CI):** expose the simulator as a real USB device (dummy_hcd + FunctionFS
+  gadget, or USB/IP) so the nusb bulk path is tested end to end.
+
 ## 4. Coverage Targets
 | Layer   | Target | Minimum |
 |---------|--------|---------|

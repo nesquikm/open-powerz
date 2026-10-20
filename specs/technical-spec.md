@@ -17,6 +17,10 @@ A Rust cargo workspace with three crates and one web UI:
 - `open-powerz-desktop` (Tauri 2 backend, `apps/desktop/src-tauri`): owns device sessions on a
   worker thread, exposes Tauri commands, and streams batched measurement frames to the UI
   over `tauri::ipc::Channel`.
+- `powerz-sim` (library): a stateful simulated KM003C behind the same `Transport` trait, with
+  bulk, CDC and HID personas, named scenarios and fault injection. It is both the e2e test
+  device and a shipped "demo device" (`powerz --transport sim`, and the desktop picker in
+  M_R4WG4Q).
 - Web UI (`apps/desktop/src`): Svelte 5 + TypeScript, uPlot charts, built by Vite and embedded
   into the Tauri binary.
 
