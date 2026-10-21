@@ -17,6 +17,7 @@ import {
   sliderToSpan,
   spanToSlider,
   stepPlayhead,
+  zoomInDisplay,
   type TimeRange,
   type TimeWarp,
 } from "./timeline";
@@ -395,5 +396,111 @@ describe("overview strip window (AC-FENCD9.1 / AC-FENCD9.2)", () => {
       t0Ms: 90_000,
       t1Ms: 100_000,
     });
+  });
+});
+
+describe("zoom on the chart as drawn (AC-FENCD9.14)", () => {
+  const SESSION = { firstMs: 0, lastMs: END };
+  const WHOLE: TimeRange = { t0Ms: 0, t1Ms: END };
+
+  /** Display time of a range under `w`. */
+  function shown(w: TimeWarp, r: TimeRange): number {
+    return w.fwd(r.t1Ms) - w.fwd(r.t0Ms);
+  }
+  /** Data time of a range (the outage cut out). */
+  function dataMs(r: TimeRange): number {
+    const cut = Math.max(0, Math.min(r.t1Ms, GAP_TO) - Math.max(r.t0Ms, GAP_FROM));
+    return r.t1Ms - r.t0Ms - cut;
+  }
+
+  it("keeps the anchor at its display position and scales the displayed time by the factor", () => {
+    const w = buildWarp(OUTAGE, WHOLE, WIDTH);
+    for (const [atMs, factor] of [
+      [END - 2_000, 0.8],
+      [10_000, 0.8],
+      [GAP_FROM + 1_200_000, 0.5],
+      [END - 5_000, 0.64],
+    ] as const) {
+      const next = zoomInDisplay(WHOLE, atMs, factor, w, SESSION);
+      const before = shown(w, WHOLE);
+      const after = shown(w, next);
+      expect(after / before).toBeCloseTo(factor, 6);
+      const fracBefore = (w.fwd(atMs) - w.fwd(WHOLE.t0Ms)) / before;
+      const fracAfter = (w.fwd(atMs) - w.fwd(next.t0Ms)) / after;
+      expect(fracAfter).toBeCloseTo(fracBefore, 6);
+      expect(next.t0Ms).toBeGreaterThanOrEqual(SESSION.firstMs);
+      expect(next.t1Ms).toBeLessThanOrEqual(SESSION.lastMs);
+    }
+  });
+
+  it("zooming in near the end keeps the data on screen instead of an empty gap", () => {
+    // Two + presses around a playhead near the end of the whole session.
+    let view = WHOLE;
+    const at = END - 1_000;
+    for (let i = 0; i < 2; i++) {
+      const w = buildWarp(OUTAGE, view, WIDTH);
+      view = zoomInDisplay(view, at, 0.8, w, SESSION);
+    }
+    expect(dataMs(view) / dataMs(WHOLE)).toBeGreaterThan(0.64 * 0.85);
+    expect(dataMs(view) / dataMs(WHOLE)).toBeLessThan(0.64 * 1.15);
+    // The break that is left still takes at most MAX_BREAK_PX of the plot.
+    const w = buildWarp(OUTAGE, view, WIDTH);
+    for (const b of w.breaks) {
+      const a = Math.max(b.fromMs, view.t0Ms);
+      const z = Math.min(b.toMs, view.t1Ms);
+      expect(px(w, view, WIDTH, a, z)).toBeLessThanOrEqual(MAX_BREAK_PX);
+    }
+  });
+
+  it("zooming out is clamped to the whole session", () => {
+    const view: TimeRange = { t0Ms: END - 10_000, t1Ms: END - 2_000 };
+    const w = buildWarp(OUTAGE, view, WIDTH);
+    const next = zoomInDisplay(view, END - 3_000, 1_000, w, SESSION);
+    expect(next.t0Ms).toBeCloseTo(SESSION.firstMs, 3);
+    expect(next.t1Ms).toBeCloseTo(SESSION.lastMs, 3);
+    // A partial zoom out past the end shifts back inside, keeping its displayed span.
+    const out = zoomInDisplay(view, END - 2_500, 1.25, w, SESSION);
+    expect(out.t1Ms).toBeLessThanOrEqual(SESSION.lastMs);
+    expect(out.t0Ms).toBeGreaterThanOrEqual(SESSION.firstMs);
+    expect(shown(w, out) / shown(w, view)).toBeCloseTo(1.25, 6);
+  });
+
+  it("is the plain session-time zoom with no gap to collapse", () => {
+    const session = { firstMs: 0, lastMs: 100_000 };
+    const view: TimeRange = { t0Ms: 20_000, t1Ms: 60_000 };
+    const w = buildWarp([], view, WIDTH);
+    const next = zoomInDisplay(view, 30_000, 0.8, w, session);
+    // 40 s → 32 s, the anchor a quarter of the way in.
+    expect(next.t1Ms - next.t0Ms).toBeCloseTo(32_000, 6);
+    expect((30_000 - next.t0Ms) / (next.t1Ms - next.t0Ms)).toBeCloseTo(0.25, 6);
+  });
+
+  it("never zooms in below MIN_SPAN_MS", () => {
+    const view: TimeRange = { t0Ms: 1_000, t1Ms: 1_012 };
+    const w = buildWarp([], view, WIDTH);
+    const next = zoomInDisplay(view, 1_006, 0.1, w, { firstMs: 0, lastMs: 100_000 });
+    expect(next.t1Ms - next.t0Ms).toBeCloseTo(MIN_SPAN_MS, 6);
+  });
+});
+
+describe("zoomInDisplay edge cases (AC-FENCD9.14)", () => {
+  const session = { firstMs: 0, lastMs: 100_000 };
+  const view = { t0Ms: 40_000, t1Ms: 60_000 };
+  const warp = buildWarp([], view, 1000);
+
+  it("leaves the view as it is for a non-finite factor or anchor", () => {
+    expect(zoomInDisplay(view, 50_000, Number.NaN, warp, session)).toEqual(view);
+    expect(zoomInDisplay(view, Number.NaN, 0.8, warp, session)).toEqual(view);
+    expect(zoomInDisplay(view, 50_000, Number.POSITIVE_INFINITY, warp, session)).toEqual(view);
+  });
+
+  it("lands exactly on the session end when the zoom reaches it", () => {
+    const atEnd = { t0Ms: 90_000, t1Ms: 100_000 };
+    const out = zoomInDisplay(atEnd, 99_000, 1.3, buildWarp([], atEnd, 1000), session);
+    expect(out.t1Ms).toBe(session.lastMs);
+    expect(out.t1Ms - out.t0Ms).toBeCloseTo(13_000, 6);
+    const atStart = { t0Ms: 0, t1Ms: 10_000 };
+    const back = zoomInDisplay(atStart, 1_000, 1.3, buildWarp([], atStart, 1000), session);
+    expect(back.t0Ms).toBe(session.firstMs);
   });
 });

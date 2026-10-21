@@ -421,11 +421,28 @@ fn a_user_disconnect_and_reconnect_leaves_a_history_gap_too() {
         |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
     );
     let seen = sample_times(&second);
-    let gaps = m.history_gaps(0, u64::MAX).expect("history_gaps");
+    // The break is in the history as soon as the second run's first record
+    // is; allow the worker a moment on a slow runner before judging.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let gaps = loop {
+        let gaps = m.history_gaps(0, u64::MAX).expect("history_gaps");
+        if !gaps.is_empty() || Instant::now() > deadline {
+            break gaps;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let len = m.session_store().map(|s| s.history_len()).unwrap_or(0);
     m.disconnect().unwrap();
     // No outage event says so (the user disconnected), but the chart must
     // still break the line between the two connections.
-    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(
+        gaps.len(),
+        1,
+        "{gaps:?}; history holds {len} records; first run {} samples ending at {:?}, second starting at {:?}",
+        kept.len(),
+        kept.last(),
+        seen.first()
+    );
     assert!(gaps[0].from_ms >= u64::from(kept[kept.len() - 1]));
     assert_eq!(gaps[0].to_ms, u64::from(seen[0]));
 }

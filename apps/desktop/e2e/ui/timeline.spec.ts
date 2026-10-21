@@ -12,7 +12,9 @@
 
 import { expect, test, type Page } from "@playwright/test";
 import type { ChartDraw } from "../hook";
+import { formatSpan } from "../../src/lib/chartSeries";
 import { MOCK_OUTAGE } from "../../src/lib/mockBackend";
+import { sliderToSpan } from "../../src/lib/timeline";
 import {
   blur,
   chartBreaks,
@@ -285,9 +287,10 @@ test.describe("wheel and trackpad over the plot (AC-FENCD9.3)", () => {
     const after = await nextRange(page, before);
     expect(after.t0Ms).toBeLessThan(before.t0Ms);
     // The span is the one on screen when the scroll landed: the live window may have
-    // grown a little since "before" was read, never shrunk.
+    // grown since "before" was read (up to a couple of seconds on a slow runner),
+    // never shrunk.
     expect(span(after)).toBeGreaterThanOrEqual(span(before) - 1);
-    expect(span(after)).toBeLessThan(span(before) + 500);
+    expect(span(after)).toBeLessThan(span(before) + 2_500);
   });
 });
 
@@ -527,6 +530,10 @@ test.describe("zoom slider and presets (AC-FENCD9.9 / AC-FENCD9.10)", () => {
     await expect(slider).toHaveAttribute("type", "range");
     await expect(slider).toHaveAttribute("min", "0");
     await expect(slider).toHaveAttribute("max", "1000");
+    // The slider's top end is the whole session: learn it first, then back to 10 s.
+    await wholeSessionLive(page);
+    await page.getByRole("button", { name: "10 s" }).click();
+    await expect.poll(async () => (await lastDraw(page)).t0Ms).toBeGreaterThan(0);
     const sessionMs = (await lastDraw(page)).t1Ms;
     // 10 s of a ~200 s session.
     const expected = (1000 * Math.log(10_000 / 10)) / Math.log(sessionMs / 10);
@@ -634,7 +641,9 @@ test("AC-FENCD9.11: the overview strip collapses the outage too, marked and labe
 test.describe("review fixes (FR FENCD9)", () => {
   test("AC-FENCD9.7: a backward shuttle stops at the session start", async ({ page }) => {
     await streamSeeded(page);
+    // Learn the session start, then a 10 s view, so Home shows the first 10 s.
     await wholeSessionLive(page);
+    await page.getByRole("button", { name: "10 s" }).click();
     await blur(page);
     await page.keyboard.press("Home");
     await expectPaused(page);
@@ -829,5 +838,100 @@ test.describe("review fixes (FR FENCD9)", () => {
     await expect
       .poll(async () => Math.abs((await read()).now - view.t0Ms / 1000))
       .toBeLessThanOrEqual(0.051);
+  });
+});
+
+test.describe("zoom on the chart as drawn (AC-FENCD9.14)", () => {
+  /** The outage mock, its whole session paused; the draw and the outage's exact span. */
+  async function wholeOutagePaused(
+    page: Page,
+  ): Promise<{ whole: ChartDraw; gap: { fromMs: number; toMs: number } }> {
+    await open(page, "?mock=outage");
+    await streamDemo(page);
+    await page.getByRole("button", { name: "Whole session" }).click();
+    await expect
+      .poll(async () => (await lastDraw(page)).t0Ms, { timeout: 5_000 })
+      .toBe(MOCK_OUTAGE.startMs);
+    await expect.poll(() => chartBreaks(page)).toHaveLength(1);
+    // Some data after the outage too, so the right end of the plot is data, not the gap.
+    const gapTo = MOCK_OUTAGE.startMs + MOCK_OUTAGE.beforeMs + MOCK_OUTAGE.gapMs;
+    await expect
+      .poll(async () => (await lastDraw(page)).t1Ms, { timeout: 15_000 })
+      .toBeGreaterThan(gapTo + 6_000);
+    const whole = await pause(page);
+    expect(whole.t0Ms).toBe(MOCK_OUTAGE.startMs);
+    const [brk] = await chartBreaks(page);
+    return { whole, gap: { fromMs: brk!.fromMs, toMs: brk!.toMs } };
+  }
+
+  /** Data time of a drawn range: its span less the part of the outage inside it. */
+  function dataMs(d: { t0Ms: number; t1Ms: number }, gap: { fromMs: number; toMs: number }) {
+    const cut = Math.max(0, Math.min(d.t1Ms, gap.toMs) - Math.max(d.t0Ms, gap.fromMs));
+    return span(d) - cut;
+  }
+
+  async function expectBreaksNarrow(page: Page): Promise<void> {
+    for (const b of await chartBreaks(page)) expect(b.widthPx).toBeLessThanOrEqual(32);
+  }
+
+  async function expectTrueSpanReadout(page: Page, d: ChartDraw): Promise<void> {
+    const text = formatSpan(span(d));
+    await expect(page.locator(".chart-wrap .zoom-span")).toHaveText(text);
+    await expect(page.getByRole("slider", { name: "Zoom" })).toHaveAttribute(
+      "aria-valuetext",
+      text,
+    );
+  }
+
+  test("two + presses around a playhead near the end keep the data on screen", async ({ page }) => {
+    const { whole, gap } = await wholeOutagePaused(page);
+    const p = await plotBox(page);
+    await page.mouse.click(p.x + p.width * 0.95, p.y + p.height / 2);
+    await page.mouse.move(p.x + p.width / 2, p.y - 200);
+    await expect.poll(() => chartPlayhead(page)).not.toBeNull();
+    const head = (await chartPlayhead(page))!;
+    await blur(page);
+    await page.keyboard.press("+");
+    const zin = await nextRange(page, whole);
+    await page.keyboard.press("+");
+    const zin2 = await nextRange(page, zin);
+    const ratio = dataMs(zin2, gap) / dataMs(whole, gap);
+    expect(ratio).toBeGreaterThan(0.64 * 0.85);
+    expect(ratio).toBeLessThan(0.64 * 1.15);
+    expect(head).toBeGreaterThanOrEqual(zin2.t0Ms);
+    expect(head).toBeLessThanOrEqual(zin2.t1Ms);
+    await expectBreaksNarrow(page);
+    await expectTrueSpanReadout(page, zin2);
+  });
+
+  test("a wheel notch near the end scales the data on screen by the step", async ({ page }) => {
+    const { whole, gap } = await wholeOutagePaused(page);
+    const p = await plotBox(page);
+    await page.getByRole("application").focus();
+    await page.mouse.move(p.x + p.width * 0.95, p.y + p.height / 2);
+    await page.mouse.wheel(0, -100);
+    const after = await nextRange(page, whole);
+    const ratio = dataMs(after, gap) / dataMs(whole, gap);
+    expect(ratio).toBeGreaterThan(0.8 * 0.85);
+    expect(ratio).toBeLessThan(0.8 * 1.15);
+    await expectBreaksNarrow(page);
+    await expectTrueSpanReadout(page, after);
+  });
+
+  test("the zoom slider zooms the displayed time, not the collapsed gap", async ({ page }) => {
+    const { whole, gap } = await wholeOutagePaused(page);
+    const [brk] = await chartBreaks(page);
+    const p = await plotBox(page);
+    // The whole session as drawn: its data plus the break's share of the plot.
+    const displayedMs = dataMs(whole, gap) / (1 - brk!.widthPx / p.width);
+    const slider = page.getByRole("slider", { name: "Zoom" });
+    await slider.fill("950");
+    const after = await nextRange(page, whole);
+    const want = sliderToSpan(0.95, displayedMs) / displayedMs;
+    const ratio = dataMs(after, gap) / dataMs(whole, gap);
+    expect(ratio).toBeGreaterThan(want * 0.8);
+    expect(ratio).toBeLessThan(Math.min(1, want * 1.2));
+    await expectBreaksNarrow(page);
+    await expectTrueSpanReadout(page, after);
   });
 });

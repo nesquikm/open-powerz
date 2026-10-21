@@ -294,3 +294,45 @@ export function overviewClick(
   const span = view.t1Ms - view.t0Ms;
   return fitSpan(at - span / 2, span, session);
 }
+
+/** Zooms `view` by `factor` on the chart as drawn with `warp` (long gaps collapsed):
+ * the displayed time scales by `factor` (never below MIN_SPAN_MS, never past the whole
+ * session as drawn), `atMs` keeps its place on screen, and the result is moved, not
+ * resized, to lie inside the session (AC-FENCD9.14). */
+export function zoomInDisplay(
+  view: TimeRange,
+  atMs: number,
+  factor: number,
+  warp: TimeWarp,
+  session: SessionExtent,
+): TimeRange {
+  // Session bounds are measured in `warp`, built for the view: a collapsed gap outside
+  // the view counts at its true length there, so the whole-session clamp is the
+  // view's estimate, not the overview's.
+  if (!Number.isFinite(factor) || !Number.isFinite(atMs)) return view;
+  const d0 = warp.fwd(view.t0Ms);
+  const d1 = warp.fwd(view.t1Ms);
+  const span = d1 - d0;
+  const s0 = warp.fwd(session.firstMs);
+  const s1 = warp.fwd(session.lastMs);
+  const maxSpan = Math.max(MIN_SPAN_MS, s1 - s0);
+  const next = Math.min(maxSpan, Math.max(MIN_SPAN_MS, span * factor));
+  if (s1 > s0 && next >= s1 - s0) return { t0Ms: session.firstMs, t1Ms: session.lastMs };
+  const frac = span > 0 ? (warp.fwd(atMs) - d0) / span : 0.5;
+  let n0 = warp.fwd(atMs) - frac * next;
+  // Pinned to an end, the end is the session's own (no float drift past it).
+  let atStart = false;
+  let atEnd = false;
+  if (s1 > s0) {
+    if (n0 <= s0) {
+      n0 = s0;
+      atStart = true;
+    } else if (n0 >= s1 - next) {
+      n0 = s1 - next;
+      atEnd = true;
+    }
+  }
+  const t0Ms = atStart ? session.firstMs : warp.bwd(n0);
+  const t1Ms = atEnd ? session.lastMs : warp.bwd(n0 + next);
+  return { t0Ms, t1Ms };
+}

@@ -1,7 +1,7 @@
 import type { Series, SeriesBuckets } from "./backend";
 import { LIVE_WINDOWS, type LiveWindowId } from "./chartData";
 import { formatSessionTime } from "./chartSeries";
-import { MIN_SPAN_MS } from "./timeline";
+import { MIN_SPAN_MS, zoomInDisplay, type TimeWarp } from "./timeline";
 
 /** The chart never redraws more often than this, whatever the display's refresh rate. */
 export const MAX_REDRAW_HZ = 60;
@@ -105,17 +105,6 @@ const PAN_STEP = 0.1;
 /** A wheel pan moves the view by (scroll delta / this) of its span: 100 px → a tenth. */
 const WHEEL_PAN_PX = 1000;
 
-/** Zooms `shown` by `factor` keeping `atMs` at the same fraction of the view; never
- * wider than the session. */
-function zoom(shown: TimeRange, atMs: number, factor: number, session: SessionExtent): TimeRange {
-  const span = shown.t1Ms - shown.t0Ms;
-  const maxSpan = Math.max(MIN_SPAN_MS, session.lastMs - session.firstMs);
-  const next = Math.min(maxSpan, Math.max(MIN_SPAN_MS, span * factor));
-  const frac = span > 0 ? (atMs - shown.t0Ms) / span : 0.5;
-  const t0Ms = atMs - frac * next;
-  return { t0Ms, t1Ms: t0Ms + next };
-}
-
 /** `r` moved (never resized, unless wider than the session) to lie inside the session,
  * so a pan cannot scroll into empty time before the first or after the newest sample. */
 function clampToSession(r: TimeRange, session: SessionExtent): TimeRange {
@@ -128,15 +117,22 @@ function clampToSession(r: TimeRange, session: SessionExtent): TimeRange {
   return r;
 }
 
+/** Session time as display time: no gap collapsed. */
+const NO_WARP: TimeWarp = { fwd: (ms) => ms, bwd: (d) => d, breaks: [] };
+
 /** The view after `gesture`: every zoom or pan gesture leaves live mode for a fixed
  * history range inside the session, the Live gesture returns to the remembered live
- * window. */
+ * window. Zooms scale the chart as drawn with `warp`, the view's collapsed gaps
+ * (AC-FENCD9.14). */
 export function applyGesture(
   view: ChartView,
   gesture: ChartGesture,
   shown: TimeRange,
   session: SessionExtent,
+  warp: TimeWarp = NO_WARP,
 ): ChartView {
+  const zoom = (r: TimeRange, atMs: number, factor: number): TimeRange =>
+    zoomInDisplay(r, atMs, factor, warp, session);
   const history = (r: TimeRange): ChartView => {
     const { t0Ms, t1Ms } = clampToSession(r, session);
     return { mode: "history", window: view.window, t0Ms, t1Ms };
@@ -155,7 +151,7 @@ export function applyGesture(
       return history({ t0Ms: session.firstMs, t1Ms: session.firstMs + span });
     case "zoom":
       if (!(gesture.factor > 0) || !Number.isFinite(gesture.factor)) return view;
-      return history(zoom(shown, gesture.atMs, gesture.factor, session));
+      return history(zoom(shown, gesture.atMs, gesture.factor));
     case "fit":
       return view.mode === "live" && view.window === "all" ? view : { mode: "live", window: "all" };
     case "select": {
@@ -187,9 +183,7 @@ export function applyGesture(
         return history({ t0Ms: shown.t0Ms + deltaMs, t1Ms: shown.t0Ms + deltaMs + width });
       }
       if (gesture.deltaY === 0) return view;
-      return history(
-        zoom(shown, gesture.atMs, gesture.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP, session),
-      );
+      return history(zoom(shown, gesture.atMs, gesture.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP));
     }
     case "pan":
       return history({ t0Ms: shown.t0Ms + gesture.deltaMs, t1Ms: shown.t1Ms + gesture.deltaMs });
@@ -206,9 +200,9 @@ export function applyGesture(
             t1Ms: shown.t1Ms + span * PAN_STEP,
           });
         case "ArrowUp":
-          return history(zoom(shown, mid, ZOOM_STEP, session));
+          return history(zoom(shown, mid, ZOOM_STEP));
         case "ArrowDown":
-          return history(zoom(shown, mid, 1 / ZOOM_STEP, session));
+          return history(zoom(shown, mid, 1 / ZOOM_STEP));
         case "End":
           // End returns to live (AC-DDDYDJ.5); already live, unchanged.
           return view.mode === "live" ? view : { mode: "live", window: view.window };

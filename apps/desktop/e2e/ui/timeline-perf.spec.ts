@@ -184,7 +184,12 @@ test("a shuttle step over a 10M-sample history renders in ≤ 100 ms (AC-FENCD9.
 
 test("with the overview strip shown, 1000 SPS live redraws stay at 20–60 per second (AC-FENCD9.12)", async ({
   page,
+  browserName,
 }) => {
+  // Timed on Chromium only, like every timing in this suite: headless WebKit on the CI
+  // VMs (no GPU) paints at ~12 Hz whatever the app does. Real-device redraw rates are
+  // checked by hand on the meter.
+  test.skip(browserName !== "chromium", "timed on Chromium only");
   await open(page);
   await streamDemo(page);
   await expect(page.locator(".chart-wrap .overview")).toBeVisible();

@@ -66,6 +66,7 @@
     sliderToSpan,
     spanToSlider,
     stepPlayhead,
+    zoomInDisplay,
     type TimeWarp,
   } from "../timeline";
   import { E2E_BUILD, ChartProbe, installChartProbe } from "../e2eHook";
@@ -150,7 +151,21 @@
       view.mode === "live"
         ? Math.min(windowMs(liveWindow) ?? sessionSpan, sessionSpan)
         : range[1] - range[0];
-    const value = Math.round(spanToSlider(span, sessionSpan) * ZOOM_SLIDER_MAX);
+    // The slider scales the chart as drawn: long gaps collapsed (AC-FENCD9.14).
+    const { warp: whole, span: wholeShown } = wholeDisplay(firstMs, lastMs);
+    // Live: the live window's own stretch of the session, measured as drawn too, so a
+    // collapsed gap inside it counts as drawn on both sides of the comparison.
+    const liveSpan = windowMs(liveWindow);
+    const shownSpan =
+      view.mode === "live"
+        ? liveSpan === null
+          ? wholeShown
+          : Math.min(
+              whole.fwd(lastMs) - whole.fwd(Math.max(firstMs, lastMs - liveSpan)),
+              wholeShown,
+            )
+        : whole.fwd(range[1]) - whole.fwd(range[0]);
+    const value = Math.round(spanToSlider(shownSpan, wholeShown) * ZOOM_SLIDER_MAX);
     if (value !== zoomValue) zoomValue = value;
     const text = formatSpan(span);
     if (text !== zoomText) zoomText = text;
@@ -161,11 +176,40 @@
     const range = currentRange();
     if (range === null) return;
     const value = Number((e.currentTarget as HTMLInputElement).value) / ZOOM_SLIDER_MAX;
-    const { firstMs, lastMs } = sessionExtent(range[0], range[1]);
-    const span = sliderToSpan(value, lastMs - firstMs);
-    const mid = (range[0] + range[1]) / 2;
-    gesture({ kind: "range", t0Ms: mid - span / 2, t1Ms: mid + span / 2 });
+    const session = sessionExtent(range[0], range[1]);
+    // Positions map to spans of the chart as drawn, the top to the whole session as
+    // drawn, zoomed around the view's centre on screen (AC-FENCD9.14).
+    const { warp: whole, span: wholeShown } = wholeDisplay(session.firstMs, session.lastMs);
+    const d0 = whole.fwd(range[0]);
+    const d1 = whole.fwd(range[1]);
+    const target = sliderToSpan(value, wholeShown);
+    // A view with no width on the chart has nothing to scale.
+    if (!(d1 > d0)) return;
+    const r = zoomInDisplay(
+      { t0Ms: range[0], t1Ms: range[1] },
+      whole.bwd((d0 + d1) / 2),
+      target / (d1 - d0),
+      whole,
+      session,
+    );
+    gesture({ kind: "range", t0Ms: r.t0Ms, t1Ms: r.t1Ms });
   }
+
+  /** The whole session drawn across the plot, the zoom slider's scale: its warp and
+   * its span as drawn (long gaps collapsed). */
+  function wholeDisplay(firstMs: number, lastMs: number): { warp: TimeWarp; span: number } {
+    // Every draw asks (the slider follows the view): rebuild only when the session, the
+    // plot width or the gap list changed.
+    const width = plotWidthPx();
+    const key = `${firstMs}|${lastMs}|${width}|${sessionGaps.version}`;
+    if (wholeCache === null || wholeCache.key !== key) {
+      const warp = warpFor(firstMs, lastMs, width);
+      wholeCache = { key, warp, span: warp.fwd(lastMs) - warp.fwd(firstMs) };
+    }
+    return wholeCache;
+  }
+  /** The whole-session map the zoom slider last used, and what it was built for. */
+  let wholeCache: { key: string; warp: TimeWarp; span: number } | null = null;
 
   /** The playhead, session ms: placed by a click on the plot, moved by ← / →
    * (AC-FENCD9.6); `null` until placed. */
@@ -579,7 +623,7 @@
     if (range === null && g.kind !== "live") return;
     const [t0Ms, t1Ms] = range ?? [0, 0];
     const session = sessionExtent(t0Ms, t1Ms);
-    const next = applyGesture(view, g, { t0Ms, t1Ms }, session);
+    const next = applyGesture(view, g, { t0Ms, t1Ms }, session, warpFor(t0Ms, t1Ms, plotWidthPx()));
     if (next === view) return;
     const wasLive = view.mode === "live";
     view = next;
