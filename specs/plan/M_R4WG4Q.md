@@ -74,7 +74,7 @@ codename: Live Wire
   verify: `bun run test` passes; `bun run e2e:ui` passes the notice, zoom and empty-state specs
 - [x] Clear-confirm Escape, menu pattern, About focus, wider shortcut overlay — M46CTX
   verify: `bun run e2e:ui` passes the keyboard and overlay specs incl. axe
-- [ ] DPR-1 line widths, stable top bar and notices, readout, window preset, narrow polish — AKNVND
+- [x] DPR-1 line widths, stable top bar and notices, readout, window preset, narrow polish — AKNVND
   verify: `bun run test` passes; `bun run e2e:ui` passes the polish specs; light 900 / dark 1600 shots reviewed
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. 1000 SPS "—" temperature) and a recorded CSV listed in the report

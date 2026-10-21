@@ -25,6 +25,9 @@ export default defineConfig({
   testDir: ".",
   testMatch: "**/*.spec.ts",
   fullyParallel: true,
+  // One worker locally: parallel WebKit pages streaming for minutes exhausted a dev
+  // machine's memory. CI keeps Playwright's default.
+  workers: process.env.CI ? undefined : 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   timeout: 60_000,

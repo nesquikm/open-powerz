@@ -3,14 +3,18 @@ import { THEME_COLORS, type ResolvedTheme, type ThemeStorage } from "./theme";
 import {
   CHART_AXES,
   CHART_SERIES,
+  LIVE_WINDOW_KEY,
   SERIES_VISIBILITY_KEY,
   ZERO_BASED_KEY,
   chartOptions,
   defaultVisibility,
+  loadLiveWindow,
   loadVisibility,
   loadZeroBased,
+  saveLiveWindow,
   saveVisibility,
   saveZeroBased,
+  seriesStroke,
   seriesStyles,
   toggleSeries,
   visibleAxes,
@@ -486,5 +490,93 @@ describe("the zoom readout's span (AC-FENCD9.9)", () => {
     expect(formatSpan(250)).toBe("0.25 s");
     expect(formatSpan(10)).toBe("0.01 s");
     expect(formatSpan(Number.NaN)).toBe("—");
+  });
+});
+
+describe("series stroke per pixel ratio (AC-AKNVND.1)", () => {
+  const DASHED = CHART_SERIES.filter((s) => s.key !== "vbus" && s.key !== "power");
+
+  it("draws the solid VBUS line at least 1.5 CSS px wide at DPR 1", () => {
+    const s = seriesStroke("vbus", 1);
+    expect(s.dash).toEqual([]);
+    expect(s.width).toBeGreaterThanOrEqual(1.5);
+  });
+
+  it("gives every dashed series a whole-pixel dash pattern at DPR 1 and 2", () => {
+    for (const dpr of [1, 2]) {
+      for (const def of DASHED) {
+        const s = seriesStroke(def.key, dpr);
+        expect(s.dash.length, `${def.key} is dashed`).toBeGreaterThan(0);
+        for (const d of s.dash) {
+          expect(d, `${def.key} dash entry`).toBeGreaterThan(0);
+          expect(Number.isInteger(d * dpr), `${def.key} dash ${d} at DPR ${dpr}`).toBe(true);
+        }
+        expect(s.width, `${def.key} width`).toBeGreaterThanOrEqual(1);
+      }
+    }
+  });
+
+  it("keeps each dashed series' pattern distinct at DPR 1", () => {
+    const patterns = DASHED.map((d) => seriesStroke(d.key, 1).dash.join(","));
+    expect(new Set(patterns).size).toBe(patterns.length);
+  });
+
+  it("chartOptions passes the DPR-1 widths and dashes to uPlot", () => {
+    const opts = chartOptions({
+      theme: "light",
+      visibility: defaultVisibility(),
+      width: 800,
+      height: 400,
+      pxRatio: 1,
+    } as Parameters<typeof chartOptions>[0] & { pxRatio: number });
+    CHART_SERIES.forEach((def, i) => {
+      const series = opts.series[i + 1];
+      const want = seriesStroke(def.key, 1);
+      expect(series?.width, `${def.key} width`).toBe(want.width);
+      expect(series?.dash, `${def.key} dash`).toEqual(want.dash);
+    });
+    expect(opts.series[1]?.width).toBeGreaterThanOrEqual(1.5);
+  });
+});
+
+describe("live window preference (AC-AKNVND.5)", () => {
+  it("defaults to 10 s with nothing stored", () => {
+    expect(loadLiveWindow(new FakeStorage())).toBe("10s");
+    expect(loadLiveWindow(undefined)).toBe("10s");
+  });
+
+  it("round-trips every window choice", () => {
+    for (const id of ["10s", "1m", "10m", "all"] as const) {
+      const storage = new FakeStorage();
+      saveLiveWindow(id, storage);
+      expect(storage.map.get(LIVE_WINDOW_KEY)).toBeDefined();
+      expect(loadLiveWindow(storage)).toBe(id);
+    }
+  });
+
+  it("falls back to 10 s on a corrupt or unknown value", () => {
+    for (const raw of ["not json", '"5m"', "42", "null", "{}"]) {
+      const storage = new FakeStorage();
+      storage.map.set(LIVE_WINDOW_KEY, raw);
+      expect(loadLiveWindow(storage), raw).toBe("10s");
+    }
+  });
+
+  it("ignores storage that throws", () => {
+    const broken: ThemeStorage = {
+      getItem: () => {
+        throw new Error("denied");
+      },
+      setItem: () => {
+        throw new Error("denied");
+      },
+    };
+    expect(() => saveLiveWindow("1m", broken)).not.toThrow();
+    expect(loadLiveWindow(broken)).toBe("10s");
+  });
+
+  it("is stored apart from the legend choice", () => {
+    expect(LIVE_WINDOW_KEY).not.toBe(SERIES_VISIBILITY_KEY);
+    expect(LIVE_WINDOW_KEY).toMatch(/^open-powerz\.chart\./);
   });
 });

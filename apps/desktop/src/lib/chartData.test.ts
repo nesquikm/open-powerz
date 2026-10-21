@@ -8,6 +8,7 @@ import {
   LiveBuffer,
   MAX_GAPS,
   bucketsToFrame,
+  formatHoverValue,
   hoverReadout,
   liveRange,
   steppedRange,
@@ -795,5 +796,28 @@ describe("LiveBuffer edge samples (AC-9CFMD3.4)", () => {
     const buf = at50Sps();
     expect(buf.window(-50, 30, 800).x).toEqual([0, 20, 40]);
     expect(buf.window(1_985, 2_100, 800).x).toEqual([1_980, 2_000]);
+  });
+});
+
+describe("hover readout text (AC-AKNVND.4)", () => {
+  it("writes a range whose ends format alike as one value", () => {
+    const text = formatHoverValue({ key: "vbus", kind: "range", min: 4.9901, max: 4.9904 });
+    expect(text).toBe("4.990 V");
+    expect(text).not.toContain("–");
+  });
+
+  it("keeps a real range as min–max", () => {
+    expect(formatHoverValue({ key: "vbus", kind: "range", min: 4.8, max: 5.2 })).toBe(
+      "4.800–5.200 V",
+    );
+  });
+
+  it("writes a single value with its unit", () => {
+    expect(formatHoverValue({ key: "ibus", kind: "value", value: 1 })).toBe("1.000 A");
+  });
+
+  it("treats a negative range that rounds to one text as one value", () => {
+    const text = formatHoverValue({ key: "ibus", kind: "range", min: -0.12049, max: -0.1201 });
+    expect(text).toBe("\u2212" + "0.120 A");
   });
 });

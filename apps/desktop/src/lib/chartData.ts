@@ -1,8 +1,10 @@
 import type uPlot from "uplot";
 import type { Gap, HistoryGap, Sample, SeriesBuckets } from "./backend";
+import { formatFixed } from "./format";
 import {
   CHART_SERIES,
   formatDuration,
+  seriesDef,
   type ChartSeriesKey,
   type SeriesVisibility,
 } from "./chartSeries";
@@ -600,6 +602,16 @@ export function gapLabelFits(textPx: number, bandPx: number, pxRatio: number): b
 export type HoverValue =
   | { key: ChartSeriesKey; kind: "value"; value: number }
   | { key: ChartSeriesKey; kind: "range"; min: number; max: number };
+
+/** `5.500 V`, or `4.800–5.200 V` for a decimated bucket; a range whose ends format to
+ * the same text reads as that one value (AC-AKNVND.4). */
+export function formatHoverValue(v: HoverValue): string {
+  const unit = seriesDef(v.key)?.unit ?? "";
+  if (v.kind === "value") return `${formatFixed(v.value, 3)} ${unit}`;
+  const lo = formatFixed(v.min, 3);
+  const hi = formatFixed(v.max, 3);
+  return lo === hi ? `${lo} ${unit}` : `${lo}–${hi} ${unit}`;
+}
 
 /** What the hover readout shows: the point's time and each visible series' value. */
 export interface HoverReadout {

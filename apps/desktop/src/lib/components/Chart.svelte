@@ -10,6 +10,7 @@
     LIVE_WINDOWS,
     LiveBuffer,
     bucketsToFrame,
+    formatHoverValue,
     gapBands,
     gapLabelFits,
     hoverReadout,
@@ -19,7 +20,6 @@
     type ChartFrame,
     type GapBand,
     type HoverReadout,
-    type HoverValue,
     type LiveWindowId,
   } from "../chartData";
   import {
@@ -29,8 +29,10 @@
     chartOptions,
     formatSessionTime,
     formatSpan,
+    loadLiveWindow,
     loadVisibility,
     loadZeroBased,
+    saveLiveWindow,
     saveVisibility,
     saveZeroBased,
     seriesDef,
@@ -73,7 +75,6 @@
     type TimeWarp,
   } from "../timeline";
   import { E2E_BUILD, ChartProbe, installChartProbe } from "../e2eHook";
-  import { formatSigned, formatSignedNumber } from "../stats";
   import { THEME_COLORS, type MotionSettings, type ResolvedTheme } from "../theme";
   import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
 
@@ -94,9 +95,11 @@
   const buffer = new LiveBuffer(LIVE_CAPACITY);
   /** This session's gaps, so history frames break where the stream did (AC-AH2AEM.7). */
   const sessionGaps = new GapList();
-  let liveWindow: LiveWindowId = $state("10s");
+  /** The chosen live window, kept for the session (AC-AKNVND.5). */
+  const storedWindow = loadLiveWindow(sessionStore());
+  let liveWindow: LiveWindowId = $state(storedWindow);
   /** Live (scrolling) or a fixed history range picked by zoom / pan (AC-AH2AEM.3). */
-  let view: ChartView = $state({ mode: "live", window: "10s" });
+  let view: ChartView = $state({ mode: "live", window: storedWindow });
   /** The last `history_range` answer drawn in history mode. */
   let historyFrame: ChartFrame | null = null;
   /** The range `historyFrame` answers. */
@@ -396,13 +399,6 @@
     const atMs = hoverAtMs ?? playheadMs;
     hover =
       atMs === null || shownFrame === null ? null : hoverReadout(shownFrame, atMs, visibility);
-  }
-
-  /** `5.500 V`, or `4.800–5.200 V` for a decimated bucket. */
-  function hoverText(v: HoverValue): string {
-    const unit = seriesDef(v.key)?.unit ?? "";
-    if (v.kind === "value") return formatSigned(v.value, 3, unit);
-    return `${formatSignedNumber(v.min, 3)}–${formatSignedNumber(v.max, 3)} ${unit}`;
   }
 
   /** Legend on/off choice, kept for the session (AC-AH2AEM.5). */
@@ -751,7 +747,7 @@
   export function fitSession(): void {
     gesture({ kind: "fit" });
     if (view.mode === "live" && liveWindow !== view.window) {
-      liveWindow = view.window;
+      chooseLiveWindow(view.window);
       sessionGate.reset();
     }
   }
@@ -759,6 +755,12 @@
   /** End key: back to the scrolling live window (the Live button toggles via `liveToggle`). */
   export function returnToLive(): void {
     gesture({ kind: "live" });
+  }
+
+  /** Set the live window and keep the choice for the session (AC-AKNVND.5). */
+  function chooseLiveWindow(id: LiveWindowId): void {
+    liveWindow = id;
+    saveLiveWindow(id, sessionStore());
   }
 
   /** A window button: live, that scrolling window; paused, that span around the playhead
@@ -769,12 +771,12 @@
       if (range === null) return;
       const session = sessionExtent(range[0], range[1]);
       const next = presetRange(windowMs(id), anchorMs(range), session);
-      liveWindow = id;
+      chooseLiveWindow(id);
       showRange(next);
       if (view.mode === "history") view = { ...view, window: id };
       return;
     }
-    liveWindow = id;
+    chooseLiveWindow(id);
     view = { mode: "live", window: id };
     leaveHistory();
     sessionGate.reset();
@@ -805,6 +807,19 @@
     gesture({ kind: "key", key: e.key });
   }
 
+  /** Device pixel ratio the plot is drawn at: line widths and dashes snap to it
+   * (AC-AKNVND.1), so a change (window moved to another screen, zoom) rebuilds the plot. */
+  let pxRatio = $state(globalThis.devicePixelRatio || 1);
+  $effect(() => {
+    if (typeof matchMedia !== "function") return;
+    const query = matchMedia(`(resolution: ${pxRatio}dppx)`);
+    const onChange = (): void => {
+      pxRatio = globalThis.devicePixelRatio || 1;
+    };
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  });
+
   /** The host's size in CSS pixels, never zero (uPlot needs a positive size). */
   function sizeOf(el: HTMLElement): { width: number; height: number } {
     return { width: Math.max(1, el.clientWidth), height: Math.max(1, el.clientHeight) };
@@ -816,7 +831,14 @@
   $effect(() => {
     const el = host;
     if (!el) return;
-    const opts = chartOptions({ theme, visibility, zeroBased, originMs, ...sizeOf(el) });
+    const opts = chartOptions({
+      theme,
+      visibility,
+      zeroBased,
+      originMs,
+      pxRatio,
+      ...sizeOf(el),
+    });
     const timeAxis = opts.axes?.[0];
     // Long gaps collapse to a narrow break: x is drawn through the warp (AC-FENCD9.11).
     opts.scales = {
@@ -1097,9 +1119,16 @@
     over.addEventListener("dblclick", onDblClick);
     el.addEventListener("mousedown", onDragStart, true);
 
+    // Resize the plot on the next frame, not inside the observation (a resize there makes
+    // WebKit log a ResizeObserver loop error). One pending frame at a time.
+    let resizeFrame = 0;
     const observer = new ResizeObserver(() => {
-      u.setSize(sizeOf(el));
-      scheduler.invalidate();
+      if (resizeFrame) return;
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0;
+        u.setSize(sizeOf(el));
+        scheduler.invalidate();
+      });
     });
     observer.observe(el);
     // Draw now, so a rebuilt plot (legend toggle, theme change) never flashes empty;
@@ -1111,6 +1140,7 @@
       el.removeEventListener("mousedown", onDragStart, true);
       onDragEnd();
       observer.disconnect();
+      if (resizeFrame) cancelAnimationFrame(resizeFrame);
       u.destroy();
       if (plot === u) plot = null;
     };
@@ -1205,7 +1235,7 @@
       {#each hover.values as v (v.key)}
         <span class="hover-value">
           <span class="hover-label">{seriesDef(v.key)?.label ?? v.key}</span>
-          {hoverText(v)}
+          {formatHoverValue(v)}
         </span>
       {/each}
     {/if}
@@ -1325,6 +1355,17 @@
     font-size: 0.85em;
     font-variant-numeric: tabular-nums;
     color: var(--text, CanvasText);
+  }
+  /* Below the supported 900 px minimum the readout keeps to one line: tighter, and
+     clipped at the edge rather than wrapping under itself. */
+  @media (max-width: 700px) {
+    .hover {
+      flex-wrap: nowrap;
+      gap: 0.5rem;
+      overflow: hidden;
+      white-space: nowrap;
+      font-size: 0.8em;
+    }
   }
   .hover-time,
   .hover-label {

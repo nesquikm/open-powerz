@@ -15,6 +15,7 @@
     type BackendEvent,
   } from "./lib/backend";
   import { attachSession } from "./lib/attach";
+  import { AutoDismiss, type HoldReason } from "./lib/autoDismiss";
   import About from "./lib/components/About.svelte";
   import Chart from "./lib/components/Chart.svelte";
   import ErrorBanner from "./lib/components/ErrorBanner.svelte";
@@ -56,6 +57,32 @@
   /** A stream is running that can be recorded. */
   const canRecord = $derived(session.state === "streaming" || session.state === "rate_locked");
   const exportJob = new ExportJob();
+  // Information notices leave by themselves; errors stay until dismissed (AC-AKNVND.8).
+  const recordingNoticeTimer = new AutoDismiss(() => recording.dismiss());
+  const exportNoticeTimer = new AutoDismiss(() => exportJob.dismissNotice());
+  $effect(() => {
+    if (recording.notice !== null && recording.error === null) recordingNoticeTimer.start();
+    else recordingNoticeTimer.stop();
+    return () => recordingNoticeTimer.stop();
+  });
+  $effect(() => {
+    if (exportJob.path !== null && exportJob.rows !== null) exportNoticeTimer.start();
+    else exportNoticeTimer.stop();
+    return () => exportNoticeTimer.stop();
+  });
+  /** The pointer over the notices, or focus in them, holds both countdowns. */
+  function holdNotices(reason: HoldReason, held: boolean): void {
+    for (const t of [recordingNoticeTimer, exportNoticeTimer]) {
+      if (held) t.hold(reason);
+      else t.release(reason);
+    }
+  }
+  /** Whether an event's related target is outside the notice stack. */
+  function leftStack(e: PointerEvent | FocusEvent): boolean {
+    const stack = e.currentTarget as HTMLElement;
+    const to = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+    return to === null || !stack.contains(to);
+  }
   const statsControls = new StatsControls();
   const statsDeps = {
     resetStats: async () => {
@@ -309,32 +336,47 @@
     rateSps={session.rateSps ?? requestedRateSps}
   />
   <ErrorBanner {session} />
-  {#if recording.notice !== null || recording.error !== null}
-    <Notice
-      tone={recording.error ? "error" : "info"}
-      message={recording.error?.message ?? null}
-      onDismiss={() => recording.dismiss()}
-    >
-      {#if recording.notice}<p>{recording.notice}</p>{/if}
-      {#if recording.savedPath !== null}
-        {@render fileActions(recording.savedPath)}
-      {/if}
-    </Notice>
-  {/if}
-  {#if exportJob.path !== null && exportJob.rows !== null}
-    {@const path = exportJob.path}
-    <Notice tone="info" onDismiss={() => exportJob.dismissNotice()}>
-      <p>{exportNoticeText({ rows: exportJob.rows, path })}</p>
-      {@render fileActions(path)}
-    </Notice>
-  {/if}
-  {#if exportJob.error !== null}
-    <Notice
-      tone="error"
-      message={exportJob.error.message}
-      onDismiss={() => (exportJob.error = null)}
-    />
-  {/if}
+  <!-- Notices float in one compact stack over the side panel, so any number of them
+       never moves the main layout (AC-AKNVND.3). -->
+  <div
+    class="notice-stack"
+    role="presentation"
+    onpointerover={() => holdNotices("pointer", true)}
+    onpointerout={(e) => {
+      if (leftStack(e)) holdNotices("pointer", false);
+    }}
+    onfocusin={() => holdNotices("focus", true)}
+    onfocusout={(e) => {
+      if (leftStack(e)) holdNotices("focus", false);
+    }}
+  >
+    {#if recording.notice !== null || recording.error !== null}
+      <Notice
+        tone={recording.error ? "error" : "info"}
+        message={recording.error?.message ?? null}
+        onDismiss={() => recording.dismiss()}
+      >
+        {#if recording.notice}<p>{recording.notice}</p>{/if}
+        {#if recording.savedPath !== null}
+          {@render fileActions(recording.savedPath)}
+        {/if}
+      </Notice>
+    {/if}
+    {#if exportJob.path !== null && exportJob.rows !== null}
+      {@const path = exportJob.path}
+      <Notice tone="info" onDismiss={() => exportJob.dismissNotice()}>
+        <p>{exportNoticeText({ rows: exportJob.rows, path })}</p>
+        {@render fileActions(path)}
+      </Notice>
+    {/if}
+    {#if exportJob.error !== null}
+      <Notice
+        tone="error"
+        message={exportJob.error.message}
+        onDismiss={() => (exportJob.error = null)}
+      />
+    {/if}
+  </div>
   <main class="content">
     <div class="main-area">
       <Readout {session} />
@@ -370,6 +412,30 @@
     flex-wrap: wrap;
     gap: 0.5rem;
     margin-top: 0.375rem;
+  }
+  .notice-stack {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    width: 18rem;
+    max-width: calc(100vw - 2rem);
+    max-height: calc(100vh - 6rem);
+    overflow-y: auto;
+    pointer-events: none;
+  }
+  .notice-stack:empty {
+    display: none;
+  }
+  .notice-stack > :global(.notice) {
+    margin: 0;
+    pointer-events: auto;
+    background: var(--surface);
+    box-shadow: 0 0.25rem 1rem rgb(0 0 0 / 0.25);
+    font-size: 0.875rem;
   }
   .shell {
     display: flex;
@@ -410,6 +476,9 @@
       grid-template-areas:
         "main"
         "side";
+    }
+    .notice-stack {
+      width: 24rem;
     }
   }
 </style>

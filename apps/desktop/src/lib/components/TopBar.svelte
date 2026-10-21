@@ -153,11 +153,24 @@
   $effect(() => {
     const el = bar;
     if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => fit());
+    // Refit on the next frame, not inside the observation: fit() resizes the bar, and a
+    // resize inside the callback makes WebKit log a ResizeObserver loop error. One
+    // pending frame at a time.
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        fit();
+      });
+    });
     observer.observe(el);
     for (const group of el.querySelectorAll(".group")) observer.observe(group);
     fit();
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
   });
 
   const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
@@ -205,7 +218,6 @@
   <button
     type="button"
     class={inMenu ? undefined : "export"}
-    class:busy={exportJob.running}
     role={inMenu ? "menuitem" : undefined}
     tabindex={inMenu ? -1 : undefined}
     title="Export the session so far to CSV"
@@ -233,6 +245,22 @@
     >
   </div>
   <div class="group end">
+    <!-- Left of the rate picker: the end group is flush right, so the progress grows it
+         leftwards and moves neither the rate picker nor Record. -->
+    {#if exportJob.running}
+      <span class="export-progress" role="status">
+        <progress
+          aria-label="Export progress"
+          max={exportJob.total || 1}
+          value={exportJob.total > 0 ? exportJob.done : undefined}
+        ></progress>
+        <span class="narrow-hidden"
+          >Exporting {exportJob.done.toLocaleString("en-US")} / {exportJob.total.toLocaleString(
+            "en-US",
+          )}</span
+        >
+      </span>
+    {/if}
     <span class="rate">
       <span class="rate-inline">{@render rateSelect()}</span>
       <!-- Short of room: the note moves into the "⋯" menu (the select keeps it as a tooltip). -->
@@ -259,20 +287,6 @@
     >
       {recording.phase === "recording" || recording.phase === "stopping" ? "Stop" : "Record"}
     </button>
-    {#if exportJob.running}
-      <span class="export-progress" role="status">
-        <progress
-          aria-label="Export progress"
-          max={exportJob.total || 1}
-          value={exportJob.total > 0 ? exportJob.done : undefined}
-        ></progress>
-        <span class="narrow-hidden"
-          >Exporting {exportJob.done.toLocaleString("en-US")} / {exportJob.total.toLocaleString(
-            "en-US",
-          )}</span
-        >
-      </span>
-    {/if}
     {@render exportButton(false)}
     <!-- Room to spare: theme and About inline. Short of room: behind the "⋯" menu. -->
     <span class="settings-inline">
@@ -531,8 +545,8 @@
     display: inline-flex;
   }
   /* Level 3 (always below 1000 px): tighter spacing; the recording indicator shows just
-     its time, and a running export just its progress bar in place of the (disabled)
-     Export button; the hidden text stays for screen readers. */
+     its time, and a running export just its progress bar; the hidden text stays for
+     screen readers. */
   .top-bar:global(.compact) {
     column-gap: 0.5rem;
   }
@@ -543,11 +557,8 @@
   .top-bar:global(.compact) :global(select) {
     padding-inline: 0.55rem;
   }
-  .top-bar:global(.compact) .export.busy {
-    display: none;
-  }
   .top-bar:global(.compact) .export-progress progress {
-    width: 4.5rem;
+    width: 4rem;
   }
   .top-bar:global(.compact) .narrow-hidden {
     position: absolute;

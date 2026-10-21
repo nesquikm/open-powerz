@@ -1,4 +1,5 @@
 import uPlot from "uplot";
+import type { LiveWindowId } from "./chartData";
 import { DASH, MINUS, formatFixed } from "./format";
 import { THEME_COLORS, type ResolvedTheme, type ThemeStorage } from "./theme";
 
@@ -186,6 +187,16 @@ export function toggleSeries(v: SeriesVisibility, key: ChartSeriesKey): SeriesVi
   return { ...v, [key]: !v[key] };
 }
 
+/** Store `value` as JSON under `key`; storage failures are ignored (the in-memory choice
+ * stays, it just won't survive a reload). */
+function saveJson(key: string, value: unknown, storage: ThemeStorage | undefined): void {
+  try {
+    storage?.setItem(key, JSON.stringify(value));
+  } catch {
+    // storage unavailable: keep the in-memory choice
+  }
+}
+
 /** Storage key for the legend's on/off choice (session storage: it lasts for the session). */
 export const SERIES_VISIBILITY_KEY = "open-powerz.chart.visibility";
 
@@ -210,11 +221,7 @@ export function loadVisibility(storage: ThemeStorage | undefined): SeriesVisibil
 
 /** Persist the choice; storage failures are ignored (the choice just won't survive a reload). */
 export function saveVisibility(v: SeriesVisibility, storage: ThemeStorage | undefined): void {
-  try {
-    storage?.setItem(SERIES_VISIBILITY_KEY, JSON.stringify(v));
-  } catch {
-    // storage unavailable: keep the in-memory choice
-  }
+  saveJson(SERIES_VISIBILITY_KEY, v, storage);
 }
 
 /** Storage key for the "Zero-based axes" choice (session storage, like the legend). */
@@ -232,11 +239,30 @@ export function loadZeroBased(storage: ThemeStorage | undefined): boolean {
 
 /** Persist the "Zero-based axes" choice; storage failures are ignored. */
 export function saveZeroBased(on: boolean, storage: ThemeStorage | undefined): void {
+  saveJson(ZERO_BASED_KEY, on, storage);
+}
+
+/** Storage key for the chosen live window (session storage, like the legend) (AC-AKNVND.5). */
+export const LIVE_WINDOW_KEY = "open-powerz.chart.liveWindow";
+
+/** Every live window id (kept here: `chartData` imports this module). */
+const LIVE_WINDOW_IDS: readonly LiveWindowId[] = ["10s", "1m", "10m", "all"];
+
+/** The stored live window; 10 s when missing, corrupt, unknown or unreadable. */
+export function loadLiveWindow(storage: ThemeStorage | undefined): LiveWindowId {
   try {
-    storage?.setItem(ZERO_BASED_KEY, JSON.stringify(on));
+    const raw = storage?.getItem(LIVE_WINDOW_KEY);
+    if (raw == null) return "10s";
+    const id: unknown = JSON.parse(raw);
+    return LIVE_WINDOW_IDS.find((w) => w === id) ?? "10s";
   } catch {
-    // storage unavailable: keep the in-memory choice
+    return "10s";
   }
+}
+
+/** Persist the chosen live window; storage failures are ignored. */
+export function saveLiveWindow(id: LiveWindowId, storage: ThemeStorage | undefined): void {
+  saveJson(LIVE_WINDOW_KEY, id, storage);
 }
 
 /** A value axis range that always includes zero (AC-AH2AEM.9): from min(0, dataMin) to
@@ -295,6 +321,24 @@ export function seriesStyles(theme: ResolvedTheme): SeriesStyle[] {
   }));
 }
 
+/** Line width (CSS px) and dash pattern (CSS px) for one series at device pixel ratio `dpr`. */
+export interface SeriesStroke {
+  width: number;
+  dash: number[];
+}
+
+/** Line width every series aims for, in CSS px, before snapping to device pixels. */
+const LINE_WIDTH = 1.5;
+
+/** Width and dash for `key` at `dpr`, snapped to whole device pixels (AC-AKNVND.1): at
+ * DPR 1 a line is 2 px wide, so it is never a 1 px blend with the grid line under it, and
+ * every dash and gap is a whole pixel, so dashed series keep their colour. */
+export function seriesStroke(key: ChartSeriesKey, dpr: number): SeriesStroke {
+  const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  const snap = (cssPx: number): number => Math.max(1, Math.round(cssPx * ratio)) / ratio;
+  return { width: snap(LINE_WIDTH), dash: DASHES[key].map(snap) };
+}
+
 export interface ChartOptionsInput {
   theme: ResolvedTheme;
   visibility: SeriesVisibility;
@@ -304,6 +348,8 @@ export interface ChartOptionsInput {
   zeroBased?: boolean;
   /** The session start in x units (ms): the time axis counts from it (AC-272WSN.1). */
   originMs?: () => number;
+  /** Device pixel ratio the plot is drawn at; line widths and dashes snap to it. */
+  pxRatio?: number;
 }
 
 /** uPlot options: x = ms since the session start (labelled in seconds), then one series per CHART_SERIES entry on its axis scale. */
@@ -314,20 +360,26 @@ export function chartOptions({
   height,
   zeroBased = false,
   originMs = () => 0,
+  pxRatio = globalThis.devicePixelRatio || 1,
 }: ChartOptionsInput): uPlot.Options {
   const p = THEME_COLORS[theme];
   const styles = seriesStyles(theme);
   const shown = visibleAxes(visibility);
   const series: uPlot.Series[] = [
     {},
-    ...CHART_SERIES.map((s, i) => ({
-      label: s.label,
-      scale: s.axis,
-      show: visibility[s.key],
-      stroke: styles[i]?.stroke,
-      dash: styles[i]?.dash,
-      spanGaps: false,
-    })),
+    ...CHART_SERIES.map((s, i) => {
+      const stroke = seriesStroke(s.key, pxRatio);
+      return {
+        label: s.label,
+        scale: s.axis,
+        show: visibility[s.key],
+        stroke: styles[i]?.stroke,
+        width: stroke.width,
+        // uPlot hands the dash to the canvas as is, in device pixels.
+        dash: stroke.dash.map((d) => d * pxRatio),
+        spanGaps: false,
+      };
+    }),
   ];
   const axes: uPlot.Axis[] = [
     {
