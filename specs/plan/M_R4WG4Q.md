@@ -30,6 +30,7 @@ codename: Live Wire
 | [DDDYDJ](../frs/DDDYDJ.md) | Live and paused chart states | n/a |
 | [FENCD9](../frs/FENCD9.md) | Timeline navigation | n/a |
 | [VEDDFD](../frs/VEDDFD.md) | Resync the UI with a running session on load | n/a |
+| [5X154V](../frs/5X154V.md) | Clear chart history clears what the chart shows | n/a |
 
 **Tasks:**
 - [x] Extract `crates/powerz-record` from the CLI — 0P7HSJ (the `--include-demo` help text needed no fix)
@@ -58,6 +59,8 @@ codename: Live Wire
   verify: `bun run test` passes; `bun run e2e:ui` passes the timeline specs incl. the 10M-sample timings
 - [x] Resync with a running session on load: backend attach + swappable sink, UI rebuild, mock — VEDDFD
   verify: `cargo test --workspace --locked` and `bun run test` pass; `bun run e2e:ui` passes the reload specs
+- [ ] Clear chart history clears the chart, overview and export; clearer stats labels — 5X154V
+  verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `clear.spec.ts`
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. 1000 SPS "—" temperature) and a recorded CSV listed in the report
 
