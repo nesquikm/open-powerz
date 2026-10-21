@@ -209,7 +209,6 @@ describe("series styles (AC-AH2AEM.8)", () => {
       const styles = seriesStyles(theme);
       CHART_SERIES.forEach((s, i) => {
         expect(opts.series[i + 1]?.stroke).toBe(styles[i]?.stroke);
-        expect(opts.series[i + 1]?.dash).toEqual(styles[i]?.dash);
       });
       const tokens = Object.values(THEME_COLORS[theme]).filter((v) => typeof v === "string");
       for (const a of opts.axes ?? []) expect(tokens).toContain(a.stroke);
@@ -533,9 +532,57 @@ describe("series stroke per pixel ratio (AC-AKNVND.1)", () => {
       const series = opts.series[i + 1];
       const want = seriesStroke(def.key, 1);
       expect(series?.width, `${def.key} width`).toBe(want.width);
-      expect(series?.dash, `${def.key} dash`).toEqual(want.dash);
     });
     expect(opts.series[1]?.width).toBeGreaterThanOrEqual(1.5);
+  });
+});
+
+describe("dashes without a canvas dash (AC-4NSVC9.3)", () => {
+  const DASHED = CHART_SERIES.filter((s) => seriesStroke(s.key, 1).dash.length > 0);
+
+  it("has dashed series to draw", () => {
+    expect(DASHED.map((s) => s.key)).toEqual(["ibus", "power", "dp", "dm", "cc1", "cc2"]);
+  });
+
+  for (const pxRatio of [1, 2]) {
+    it(`never hands uPlot a dash setting at DPR ${pxRatio}`, () => {
+      const opts = chartOptions({
+        theme: "light",
+        visibility: defaultVisibility(),
+        width: 800,
+        height: 400,
+        pxRatio,
+      });
+      CHART_SERIES.forEach((def, i) => {
+        const dash = opts.series[i + 1]?.dash;
+        expect(dash === undefined || dash.length === 0, `${def.key} canvas dash ${dash}`).toBe(
+          true,
+        );
+      });
+    });
+
+    it(`gives every dashed series its own paths builder at DPR ${pxRatio}`, () => {
+      const opts = chartOptions({
+        theme: "dark",
+        visibility: defaultVisibility(),
+        width: 800,
+        height: 400,
+        pxRatio,
+      });
+      CHART_SERIES.forEach((def, i) => {
+        if (!DASHED.includes(def)) return;
+        expect(typeof opts.series[i + 1]?.paths, `${def.key} paths builder`).toBe("function");
+      });
+    });
+  }
+
+  it("keeps the legend's dash patterns, distinct per dashed series", () => {
+    for (const theme of THEMES) {
+      const styles = seriesStyles(theme).filter((s) => DASHED.some((d) => d.key === s.key));
+      expect(styles).toHaveLength(DASHED.length);
+      for (const s of styles) expect(s.dash.length, `${s.key} legend dash`).toBeGreaterThan(0);
+      expect(new Set(styles.map((s) => s.dash.join(","))).size).toBe(DASHED.length);
+    }
   });
 });
 

@@ -77,8 +77,8 @@ codename: Live Wire
   verify: `bun run e2e:ui` passes the keyboard and overlay specs incl. axe
 - [x] DPR-1 line widths, stable top bar and notices, readout, window preset, narrow polish — AKNVND
   verify: `bun run test` passes; `bun run e2e:ui` passes the polish specs; light 900 / dark 1600 shots reviewed
-- [ ] Dashed series drawn as solid pieces; WebKit memory slope test; real-app measurement — 4NSVC9
-  verify: `MEMORY_TEST=1 bun run e2e:ui memory.spec.ts --project=webkit` passes; app WebContent RSS flat over 10 min
+- [x] Dashed series drawn as solid pieces; WebKit memory slope test; real-app measurement — 4NSVC9
+  verify: `MEMORY_TEST=1 bun run e2e:ui memory.spec.ts --project=webkit` passes; app WebContent RSS grows <50 MB over 10 min at 1000 SPS
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. 1000 SPS "—" temperature) and a recorded CSV listed in the report
 

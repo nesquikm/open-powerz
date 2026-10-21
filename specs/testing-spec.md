@@ -81,6 +81,12 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
   against an attached KM003C, safe command set only: connect, live values, 1000 SPS with
   temperature "—" and its tooltip, record and export, light and dark at ~900 and ~1600 px.
   The screenshots are listed in the PR / milestone report next to the demo-device ones.
+- **Memory soak (manual, macOS):** the real app streams at 50 SPS for one hour with its window
+  visible; the web content process RSS is noted after 2 minutes of warm-up and at the end, and
+  must grow by less than 50 MB (FR 4NSVC9). A 10-minute 1000 SPS demo run uses the same
+  measure. Both figures go in the PR's manual hardware checks.
+  In CI, the `e2e-ui` job runs the WebKit memory bound (`memory.spec.ts`, `MEMORY_TEST=1`) as a
+  step of its own with one worker, on Linux and macOS.
 - **Visual checks (blocking):** `/dev-process-toolkit:visual-check` screenshots for every UI
   FR — light and dark, ~900 and ~1600 px wide, demo device streaming and no device — read
   and fixed before the FR is done.

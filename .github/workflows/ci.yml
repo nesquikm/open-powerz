@@ -223,6 +223,14 @@ jobs:
       - name: UI e2e
         run: bun run e2e:ui
 
+      # FR 4NSVC9: the WebKit memory bound, alone with one worker so no other page's
+      # process is measured. It reads RSS with ps, so not on Windows.
+      - name: UI memory (WebKit)
+        if: runner.os != 'Windows'
+        env:
+          MEMORY_TEST: "1"
+        run: bun run e2e:ui memory.spec.ts --project=webkit --workers=1
+
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

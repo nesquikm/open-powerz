@@ -323,8 +323,12 @@ export class LiveBuffer {
    * samples, so lines run to the view's edges at any zoom (AC-9CFMD3.4); reduced to at
    * most two points per pixel of `widthPx` (each pixel's min and max, in time order)
    * when there are more than that. A gap breaks the line after its `from_ms` sample;
-   * non-finite values draw no point. */
-  window(t0Ms: number, t1Ms: number, widthPx: number): ChartFrame {
+   * non-finite values draw no point.
+   *
+   * With `into`, the frame is written into that frame's own arrays and returned: a live
+   * chart redrawing every frame then makes no new arrays, which WebKit would otherwise
+   * keep in memory long after they are dropped (AC-4NSVC9.2). */
+  window(t0Ms: number, t1Ms: number, widthPx: number, into?: ChartFrame): ChartFrame {
     const t = this.#t;
     const timeAt = (i: number): number => t[this.#slot(i)] ?? 0;
     const [lo, hi] = widenToNeighbours(
@@ -337,8 +341,39 @@ export class LiveBuffer {
     );
     const count = Math.max(0, hi - lo);
     const pixels = Number.isFinite(widthPx) ? Math.max(1, Math.floor(widthPx)) : 1;
-    const y = emptyY();
-    const x: number[] = [];
+    const y = into ? into.y : emptyY();
+    const x: number[] = into ? into.x : [];
+    // Points are written by index, never by clearing and pushing: emptying an array can
+    // free its storage, and a refilled `into` should keep it.
+    let len = 0;
+    const { vbus: yv, ibus: yi, power: yp, dp: yd, dm: ym, cc1: y1, cc2: y2 } = y;
+    const point = (
+      ms: number,
+      v: number | null,
+      a: number | null,
+      w: number | null,
+      d: number | null,
+      m: number | null,
+      c1: number | null,
+      c2: number | null,
+    ): void => {
+      x[len] = ms;
+      yv[len] = v;
+      yi[len] = a;
+      yp[len] = w;
+      yd[len] = d;
+      ym[len] = m;
+      y1[len] = c1;
+      y2[len] = c2;
+      len++;
+    };
+    const done = (decimated: boolean): ChartFrame => {
+      x.length = len;
+      for (const s of CHART_SERIES) y[s.key].length = len;
+      if (!into) return { x, y, decimated };
+      into.decimated = decimated;
+      return into;
+    };
     const g0 = count > 0 ? Math.min(t0Ms, timeAt(lo)) : t0Ms;
     const g1 = count > 0 ? Math.max(t1Ms, timeAt(hi - 1)) : t1Ms;
     const gaps = this.#gaps.within(g0, g1).filter((gap) => gap.from_ms < g1);
@@ -349,7 +384,8 @@ export class LiveBuffer {
       while (g < gaps.length) {
         const gap = gaps[g];
         if (!gap || gap.from_ms >= ms) break;
-        pushBreak(x, y, breakAt(gap, ms), points);
+        const at = breakAt(gap, ms);
+        for (let k = 0; k < points; k++) point(at, null, null, null, null, null, null, null);
         g++;
       }
     };
@@ -359,19 +395,21 @@ export class LiveBuffer {
       for (let i = lo; i < hi; i++) {
         const ms = t[slot] ?? 0;
         breaksBefore(ms, 1);
-        x.push(ms);
         const v = vbus[slot] ?? NaN;
         const a = ibus[slot] ?? NaN;
-        y.vbus.push(finite(v));
-        y.ibus.push(finite(a));
-        y.power.push(finite(v * a));
-        y.dp.push(finite(dp[slot]));
-        y.dm.push(finite(dm[slot]));
-        y.cc1.push(finite(cc1[slot]));
-        y.cc2.push(finite(cc2[slot]));
+        point(
+          ms,
+          finite(v),
+          finite(a),
+          finite(v * a),
+          finite(dp[slot]),
+          finite(dm[slot]),
+          finite(cc1[slot]),
+          finite(cc2[slot]),
+        );
         if (++slot === cap) slot = 0;
       }
-      return { x, y, decimated: false };
+      return done(false);
     }
     const scale = pixels / Math.max(t1Ms - t0Ms, Number.EPSILON);
     const bucketOf = (ms: number): number => Math.min(pixels - 1, Math.floor((ms - t0Ms) * scale));
@@ -395,10 +433,12 @@ export class LiveBuffer {
         i++;
         if (++slot === cap) slot = 0;
       }
-      x.push(firstMs, lastMs);
-      this.#pushExtremes(y);
+      x[len] = firstMs;
+      x[len + 1] = lastMs;
+      this.#putExtremes(y, len);
+      len += 2;
     }
-    return { x, y, decimated: true };
+    return done(true);
   }
 
   #resetExtremes(): void {
@@ -436,17 +476,19 @@ export class LiveBuffer {
     }
   }
 
-  /** The bucket's two points per series: its extremes in time order, `null` if none. */
-  #pushExtremes(y: ChartFrame["y"]): void {
+  /** The bucket's two points per series, at `at` and `at + 1`: its extremes in time
+   * order, `null` if none. */
+  #putExtremes(y: ChartFrame["y"], at: number): void {
     for (let k = 0; k < SERIES_COUNT; k++) {
       const key = CHART_SERIES[k]?.key;
       if (!key) continue;
       const min = this.#min[k] ?? Infinity;
       const max = this.#max[k] ?? -Infinity;
       const ys = y[key];
-      if (min > max) ys.push(null, null);
-      else if ((this.#minAt[k] ?? 0) <= (this.#maxAt[k] ?? 0)) ys.push(min, max);
-      else ys.push(max, min);
+      const empty = min > max;
+      const minFirst = (this.#minAt[k] ?? 0) <= (this.#maxAt[k] ?? 0);
+      ys[at] = empty ? null : minFirst ? min : max;
+      ys[at + 1] = empty ? null : minFirst ? max : min;
     }
   }
 
@@ -503,14 +545,6 @@ export function steppedRange(
   const step = spanMs / 10;
   const end = Math.floor(range[1] / step) * step;
   return [Math.max(firstMs, end - spanMs), end];
-}
-
-/** `points` null points at `ms` (two in decimated frames, which pair their points). */
-function pushBreak(x: number[], y: ChartFrame["y"], ms: number, points: number): void {
-  for (let k = 0; k < points; k++) {
-    x.push(ms);
-    for (const s of CHART_SERIES) y[s.key].push(null);
-  }
 }
 
 /** uPlot aligned data: x, then one array per series in CHART_SERIES order. */

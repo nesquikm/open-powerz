@@ -454,6 +454,9 @@
     return view.mode === "history" ? [view.t0Ms, view.t1Ms] : shownRange();
   }
 
+  /** The live frame, refilled in place on every draw (AC-4NSVC9.2). */
+  const liveFrame: ChartFrame = emptyFrame();
+
   /** An empty frame, drawn before any data. */
   function emptyFrame(): ChartFrame {
     return buffer.window(0, 0, 1);
@@ -465,7 +468,9 @@
     const from = source();
     if (from === "history" && historyFrame !== null) return historyFrame;
     if (from === "session" && sessionFrame !== null) return sessionFrame;
-    return range === null ? emptyFrame() : buffer.window(range[0], range[1], plotWidthPx() || 1);
+    return range === null
+      ? emptyFrame()
+      : buffer.window(range[0], range[1], plotWidthPx() || 1, liveFrame);
   }
 
   /** In live mode, asks for the whole session while its start is unknown, or while
@@ -544,6 +549,9 @@
     };
   }
 
+  /** The strip's share of the live buffer, refilled in place on every paint (AC-4NSVC9.2). */
+  const stripFrame: ChartFrame = emptyFrame();
+
   /** The strip's envelope: the history answer up to where the live buffer starts, the
    * buffer after it. */
   function envelopeSources(cols: number): EnvelopeSource[] {
@@ -552,7 +560,7 @@
     const bufLast = buffer.lastMs;
     if (sessionFrame !== null) out.push({ frame: sessionFrame, beforeMs: bufFirst ?? Infinity });
     if (bufFirst !== null && bufLast !== null)
-      out.push({ frame: buffer.window(bufFirst, bufLast, cols), beforeMs: Infinity });
+      out.push({ frame: buffer.window(bufFirst, bufLast, cols, stripFrame), beforeMs: Infinity });
     return out;
   }
 

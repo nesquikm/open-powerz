@@ -1,5 +1,6 @@
 import uPlot from "uplot";
 import type { LiveWindowId } from "./chartData";
+import { forEachDashPiece } from "./dashPath";
 import { DASH, MINUS, formatFixed } from "./format";
 import { THEME_COLORS, type ResolvedTheme, type ThemeStorage } from "./theme";
 
@@ -339,6 +340,80 @@ export function seriesStroke(key: ChartSeriesKey, dpr: number): SeriesStroke {
   return { width: snap(LINE_WIDTH), dash: DASHES[key].map(snap) };
 }
 
+/** The one dash setting every series hands uPlot: none. Shared, so uPlot sets it once. */
+const NO_DASH: number[] = [];
+
+/** Device-pixel positions of the series being stroked, shared by every series. */
+const SCRATCH_X: (number | null)[] = [];
+const SCRATCH_Y: (number | null)[] = [];
+
+/** A uPlot paths builder that strokes the series itself, straight on the plot's context,
+ * in `color` at `deviceWidth` and dashed with `devicePattern` (device px; empty: solid),
+ * over the visible window `idx0..idx1`; nulls are gaps. It hands uPlot no path back.
+ *
+ * WebKit never tells its garbage collector what a `Path2D` holds, so the paths of a live
+ * chart (new ones every frame) pile up in native memory, solid or dashed alike (FR 4NSVC9).
+ * This builds no `Path2D` and sets no canvas dash: the dashes are solid pieces of one
+ * plain context path (AC-4NSVC9.3). */
+export function dashedPaths(
+  devicePattern: readonly number[],
+  color = "",
+  deviceWidth = 0,
+): uPlot.Series.PathBuilder {
+  return (u, seriesIdx, idx0, idx1) => {
+    const ctx = u.ctx;
+    const xData = u.data[0];
+    const yData = u.data[seriesIdx];
+    const scale = u.series[seriesIdx]?.scale ?? "y";
+    if (!ctx || !xData || !yData || idx1 < idx0 || deviceWidth <= 0 || !color) return null;
+    const count = idx1 - idx0 + 1;
+    // Reused from frame to frame: a live chart makes no new arrays per draw.
+    const xs = SCRATCH_X;
+    const ys = SCRATCH_Y;
+    xs.length = count;
+    ys.length = count;
+    for (let i = 0; i < count; i++) {
+      const x = xData[idx0 + i];
+      const y = yData[idx0 + i];
+      const ok = x != null && y != null && Number.isFinite(x) && Number.isFinite(y);
+      // Whole device pixels, as uPlot's own linear paths round them.
+      xs[i] = ok ? Math.round(u.valToPos(x, "x", true)) : null;
+      ys[i] = ok ? Math.round(u.valToPos(y, scale, true)) : null;
+    }
+    const { left, top, width, height } = u.bbox;
+    // An odd width sits on pixel centres, as uPlot aligns its own strokes.
+    const offset = (deviceWidth % 2) / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(
+      left - deviceWidth / 2,
+      top - deviceWidth / 2,
+      width + deviceWidth,
+      height + deviceWidth,
+    );
+    ctx.clip();
+    ctx.translate(offset, offset);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = deviceWidth;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "butt";
+    ctx.setLineDash(NO_DASH);
+    ctx.beginPath();
+    let ex = NaN;
+    let ey = NaN;
+    forEachDashPiece(xs, ys, devicePattern, (x0, y0, x1, y1) => {
+      // A dash running on across a vertex continues the same subpath.
+      if (x0 !== ex || y0 !== ey) ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ex = x1;
+      ey = y1;
+    });
+    ctx.stroke();
+    ctx.restore();
+    return null;
+  };
+}
+
 export interface ChartOptionsInput {
   theme: ResolvedTheme;
   visibility: SeriesVisibility;
@@ -375,9 +450,15 @@ export function chartOptions({
         show: visibility[s.key],
         stroke: styles[i]?.stroke,
         width: stroke.width,
-        // uPlot hands the dash to the canvas as is, in device pixels.
-        dash: stroke.dash.map((d) => d * pxRatio),
+        // Never a canvas dash and never a Path2D: WebKit leaks memory with both
+        // (AC-4NSVC9.3). Every series strokes itself, a dashed one as solid pieces.
+        dash: NO_DASH,
         spanGaps: false,
+        paths: dashedPaths(
+          stroke.dash.map((d) => d * pxRatio),
+          styles[i]?.stroke ?? p.text,
+          stroke.width * pxRatio,
+        ),
       };
     }),
   ];

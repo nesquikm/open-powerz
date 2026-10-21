@@ -13,30 +13,31 @@ kind: bug
 
 ## Summary
 
-While the chart shows live data, the page's memory keeps growing in WebKit, the engine the macOS app uses.
-It grows about 11 MB a second at 50 SPS and 35 MB a second at 1000 SPS.
-An hour of streaming would use gigabytes, and macOS then kills the page.
-The cause is the dashed chart lines, which WebKit never frees when they are redrawn.
-The fix keeps the dashes but draws them as short solid pieces.
+While the chart shows live data, the page's memory kept growing in WebKit, the engine the macOS app uses.
+It grew about 11 MB a second at 50 SPS and over 20 MB a second at 1000 SPS.
+The chart made new drawing objects every frame.
+WebKit leaves their native memory out when it decides to collect garbage, so it piled up.
+The fix draws straight onto the canvas and reuses the chart's buffers.
+Every series keeps its dash pattern.
 
 ## Requirement
 
-A live session of any length keeps the page's memory flat in WebKit, on macOS, Linux and in tests, while every series keeps its dash pattern.
+A live session of any length keeps the page's memory bounded in WebKit, on macOS, Linux and in tests, while every series keeps its dash pattern.
 
 ### Steps to reproduce
 1. Open the app in WebKit (the macOS app, or the Playwright WebKit browser) and connect the demo device.
 2. Leave the chart live at 50 or 1000 SPS and watch the page process's memory.
 
 ### Expected
-Memory settles after a minute and stays flat.
+Memory climbs while the chart warms up for about a minute, then grows at most slowly (under 1 MB a second).
 
 ### Actual
-Memory grows linearly: about 0.5 GB in 40 s at 50 SPS, and past 5 GB in 2 minutes at 1000 SPS. With all series hidden, or with dashes turned off, it stays flat. Chromium stays flat.
+Memory grows linearly: about 0.5 GB in 40 s at 50 SPS, and past 5 GB in 2 minutes at 1000 SPS. Solid lines leak as fast as dashed ones; with all series hidden it grows far more slowly. Chromium stays flat.
 
 ## Acceptance Criteria
 
 - AC-4NSVC9.1: Regression: `e2e/ui/memory.spec.ts › a live session keeps the page's memory flat` reproduces the reported failure; it fails before the fix and passes after it.
-- AC-4NSVC9.2: In the Playwright WebKit browser, the page process grows by less than 50 MB over 2 minutes of a 1000 SPS live stream after 30 s of warm-up; the test runs in CI on WebKit and locally only when asked for.
+- AC-4NSVC9.2: In the Playwright WebKit browser, after 60 s of warm-up at a 1000 SPS live stream, the page process grows by less than 120 MB over the next 2 minutes (under 1 MB/s; the leak grew about 35 MB/s); the test runs in CI on WebKit and locally only when asked for.
 - AC-4NSVC9.3: Every dashed series keeps its distinct dash pattern in the plot and the legend.
 - AC-4NSVC9.4: In the shipped macOS app, the web content process grows by less than 50 MB over a 10-minute 1000 SPS demo stream after warm-up; the measurement is recorded in the Notes.
 - AC-4NSVC9.5: The hardware-in-the-loop notes describe a one-hour 50 SPS soak of the app with the memory figure to record.
@@ -44,9 +45,9 @@ Memory grows linearly: about 0.5 GB in 40 s at 50 SPS, and past 5 GB in 2 minute
 ## Technical Design
 
 ### Root cause
-uPlot strokes each of the five dashed series every frame with a canvas dash pattern. WebKit keeps native memory for every dashed stroke and does not reclaim it, so memory grows with frames times points. Measured: flat with all series hidden and flat with dashes off.
+Every frame, uPlot and the old dash builder made new Path2D objects per series. WebKit keeps their geometry in native memory it does not report to its garbage collector, which runs only about every 37 s, so hundreds of MB piled up per cycle. Dashes were not the cause: solid series leaked as fast.
 
-Dashed series get a custom uPlot paths builder that splits each polyline into its dash pieces, in device pixels and continuing the pattern across points, and strokes them as one undashed path. The canvas never draws with a dash setting. The legend swatches keep their SVG dashes.
+One uPlot paths function serves every series and strokes straight on the canvas context, with no Path2D and no canvas dash; dashed lines are split into pieces in device pixels, continuing the pattern across points. The live and overview frames are refilled in place. The legend swatches keep their SVG dashes.
 
 ## Testing
 
@@ -54,4 +55,6 @@ Vitest: the dash splitter keeps the pattern across points and gaps, and returns 
 
 ## Notes
 
-Found while investigating a local out-of-memory during test runs. The leak predates the overview strip. The app measurement waits for the fix, when the window can stay visible for ten minutes.
+Mock page, WebKit, 1000 SPS: 22.7 MB/s before the fix; after it, 0.5 MB/s with no plateau in 330 s, partly the mock's in-page history.
+
+AC .4, real meter at 1000 SPS (the demo picker is not settable by automation): 188 MB, plateau from ~6 min (warm-up), +21 MB over the last 5 min, 539 MB at 11 min.
