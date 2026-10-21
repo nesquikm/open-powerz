@@ -84,3 +84,69 @@ describe("StatsControls edges (review round 1)", () => {
     await expect(c.reset(d)).resolves.toBe(false);
   });
 });
+
+describe("StatsControls clears the chart after the backend clear (AC-5X154V.2)", () => {
+  function depsWithChart() {
+    const calls: string[] = [];
+    let finishBackend: () => void = () => {};
+    const d = {
+      resetStats: vi.fn(async () => {}),
+      clearHistory: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            calls.push("backend:start");
+            finishBackend = () => {
+              calls.push("backend:done");
+              resolve();
+            };
+          }),
+      ),
+      clearChart: vi.fn(() => {
+        calls.push("chart");
+      }),
+    };
+    return { d, calls, finishBackend: () => finishBackend() };
+  }
+
+  it("empties the chart once, only after the backend clear succeeded", async () => {
+    const c = new StatsControls();
+    const { d, calls, finishBackend } = depsWithChart();
+    c.requestClear();
+    const done = c.confirmClear(d);
+    // The backend has not answered yet, so the chart still shows its data.
+    await Promise.resolve();
+    expect(d.clearChart).not.toHaveBeenCalled();
+    finishBackend();
+    await done;
+    expect(d.clearChart).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(["backend:start", "backend:done", "chart"]);
+    expect(c.error).toBeNull();
+  });
+
+  it("leaves the chart as it is when the backend refuses the clear", async () => {
+    const c = new StatsControls();
+    const d = { ...deps(), clearChart: vi.fn() };
+    d.clearHistory.mockRejectedValueOnce(refused);
+    c.requestClear();
+    await c.confirmClear(d);
+    expect(d.clearChart).not.toHaveBeenCalled();
+    expect(c.error).toEqual(refused);
+  });
+
+  it("never empties the chart without a confirmed request", async () => {
+    const c = new StatsControls();
+    const d = { ...deps(), clearChart: vi.fn() };
+    await c.confirmClear(d);
+    c.requestClear();
+    c.cancelClear();
+    await c.confirmClear(d);
+    expect(d.clearChart).not.toHaveBeenCalled();
+  });
+
+  it("a stats reset never touches the chart", async () => {
+    const c = new StatsControls();
+    const d = { ...deps(), clearChart: vi.fn() };
+    await c.reset(d);
+    expect(d.clearChart).not.toHaveBeenCalled();
+  });
+});

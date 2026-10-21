@@ -793,6 +793,89 @@ fn clear_history_discards_the_history_and_the_stream_goes_on() {
     assert!(worker.history_len() > 0, "the history stopped growing");
 }
 
+/// Data rows of a CSV (the header not counted).
+fn csv_rows(bytes: &[u8]) -> Vec<String> {
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some(powerz_record::CSV_HEADER));
+    lines.map(str::to_owned).collect()
+}
+
+// ---- FR 5X154V: Clear chart history ----
+
+#[test]
+fn ac_5x154v_3_an_export_after_a_clear_holds_only_the_rows_recorded_after_it() {
+    let clock = clock();
+    let pipe = Pipe::sim(
+        Scenario::Load5v1a,
+        FaultPlan::new(),
+        &clock,
+        PipeOpts::default(),
+    );
+    let (events, sink) = capture(&clock);
+    let mut worker = Worker::start(pipe, clock.clone(), config(Rate::Sps1000), sink).unwrap();
+    run_for(&mut worker, &clock, 1_000);
+    let before = samples_of(&events).len();
+    assert!(before > 0);
+    assert_eq!(worker.history_len(), before);
+
+    worker.clear_history();
+    run_for(&mut worker, &clock, 1_000);
+    worker.stop();
+    let all = samples_of(&events);
+    let after = all.len() - before;
+    assert!(after > 0, "the stream stopped after the clear");
+
+    let (tx, rx) = mpsc::channel();
+    let rows = worker
+        .export(Box::new(ChannelWriter(tx)), |_| {})
+        .join()
+        .unwrap()
+        .unwrap();
+    let exported: Vec<u8> = rx.try_iter().flatten().collect();
+    assert_eq!(rows, after as u64, "the export counts only the later rows");
+    assert_eq!(
+        csv_rows(&exported).len(),
+        after,
+        "the export file holds only the rows recorded after the clear"
+    );
+}
+
+#[test]
+fn ac_5x154v_4_a_recording_open_across_a_clear_keeps_every_row() {
+    let clock = clock();
+    let pipe = Pipe::sim(
+        Scenario::Load5v1a,
+        FaultPlan::new(),
+        &clock,
+        PipeOpts::default(),
+    );
+    let (events, sink) = capture(&clock);
+    let mut worker = Worker::start(pipe, clock.clone(), config(Rate::Sps1000), sink).unwrap();
+    let (tx, rx) = mpsc::channel();
+    worker.start_recording(Box::new(ChannelWriter(tx))).unwrap();
+    run_for(&mut worker, &clock, 1_000);
+    let before = samples_of(&events).len();
+    assert!(before > 0);
+
+    worker.clear_history();
+    assert_eq!(worker.history_len(), 0);
+    run_for(&mut worker, &clock, 1_000);
+    let summary = worker.stop_recording().unwrap();
+    worker.stop();
+
+    let all = samples_of(&events);
+    assert!(all.len() > before, "the stream stopped after the clear");
+    let recorded: Vec<u8> = rx.try_iter().flatten().collect();
+    let rows = csv_rows(&recorded);
+    assert_eq!(
+        rows.len(),
+        all.len(),
+        "the recording keeps every row from before and after the clear"
+    );
+    assert_eq!(summary.rows, all.len() as u64);
+}
+
 /// A writer that hands every write to a channel.
 struct ChannelWriter(mpsc::Sender<Vec<u8>>);
 

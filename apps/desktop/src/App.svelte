@@ -56,6 +56,8 @@
       session.statsReset();
     },
     clearHistory,
+    // The backend history is gone: the chart drops what it still holds (FR 5X154V).
+    clearChart: () => chart?.clearHistory(),
   };
   /** The open session holds samples to export. */
   const canExport = $derived(canRecord && session.latest !== null);

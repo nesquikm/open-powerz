@@ -117,6 +117,9 @@
     if (!el || !canvas || state === null) {
       if (box !== null) box = null;
       onbox?.(null);
+      // Nothing to show (a clear, a new session): forget what was painted, so the old
+      // envelope and its breaks go now, not at the next sample (FR 5X154V).
+      if (state === null && paintKey !== "") clearStrip();
       return;
     }
     const { range, session, originMs } = state;
@@ -157,6 +160,18 @@
     valueNow = seconds(range.t0Ms);
     valueMax = Math.max(valueNow, seconds(session.lastMs - (range.t1Ms - range.t0Ms)));
     if (paintDue) paint(canvas, width, height, session, owarp);
+  }
+
+  /** Wipes the strip: no envelope, no breaks, no window text. */
+  function clearStrip(): void {
+    paintKey = "";
+    stripWarp = null;
+    stripBreaks = [];
+    onbreaks?.([]);
+    valueText = "";
+    valueNow = 0;
+    valueMax = 0;
+    canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
   }
 
   /** The strip's collapsed gaps, as drawn last. */

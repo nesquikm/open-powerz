@@ -644,12 +644,25 @@ test.describe("review fixes (FR FENCD9)", () => {
     // Learn the session start, then a 10 s view, so Home shows the first 10 s.
     await wholeSessionLive(page);
     await page.getByRole("button", { name: "10 s" }).click();
+    // A live view a couple of seconds wide first: Home keeps the span on screen, and a
+    // view a few ms after connecting is too narrow to click a playhead into.
+    await expect
+      .poll(
+        async () => {
+          // The 10 s window's own draw: the whole-session draw before it also starts at 0.
+          const d = await lastDraw(page);
+          return d.mode === "live" && d.t0Ms > 0 ? span(d) : 0;
+        },
+        { timeout: 10_000 },
+      )
+      .toBeGreaterThan(2_000);
     await blur(page);
     await page.keyboard.press("Home");
     await expectPaused(page);
     const p = await plotBox(page);
-    // The playhead a couple of hundred ms after the session start.
-    await page.mouse.click(p.x + p.width * 0.02, p.y + p.height / 2);
+    // The playhead a few hundred ms after the session start, whatever the view's span.
+    const home = await lastDraw(page);
+    await page.mouse.click(p.x + p.width * (300 / span(home)), p.y + p.height / 2);
     await page.mouse.move(p.x + p.width / 2, p.y - 200);
     await expect.poll(() => chartPlayhead(page)).not.toBeNull();
     await blur(page);

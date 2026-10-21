@@ -4,6 +4,8 @@ import { toUiError, type UiError } from "./backend";
 export interface StatsDeps {
   resetStats: () => Promise<void>;
   clearHistory: () => Promise<void>;
+  /** Empties what the chart shows; called only after the backend cleared its history. */
+  clearChart?: () => void;
 }
 
 /** Reset-stats and clear-history controls. Clearing the history throws data away, so
@@ -45,6 +47,8 @@ export class StatsControls {
       await deps.clearHistory();
     } catch (err) {
       this.error = toUiError(err);
+      return;
     }
+    deps.clearChart?.();
   }
 }

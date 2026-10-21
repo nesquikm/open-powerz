@@ -591,6 +591,7 @@
     buffer.clear();
     backfillArmed = false;
     backfillGeneration++;
+    historyGeneration++;
     hasData = false;
     sessionGaps.clear();
     sessionStartMs = null;
@@ -599,7 +600,23 @@
     view = { mode: "live", window: liveWindow };
     setShuttle(0);
     leaveHistory();
+    zoomText = "";
     scheduler.invalidate();
+  }
+
+  /** Bumped by {@link reset}, so gaps from a query sent before it are dropped. */
+  let historyGeneration = 0;
+
+  /** The backend history was cleared (FR 5X154V): drop the live buffer, the session start,
+   * the whole-session frame, the gaps, the overview envelope and any history answer in
+   * flight, and go back to the live window. The stream keeps feeding `push`. */
+  export function clearHistory(): void {
+    const wasLive = view.mode === "live";
+    reset();
+    announcement = wasLive ? "History cleared" : "History cleared, back to live";
+    // Draw the emptied chart now, not on a coming frame: nothing from before the clear
+    // stays on screen while the next batch is on its way.
+    draw();
   }
 
   /** One `history_range` call in flight at most; the newest view wins (AC-AH2AEM.4). */
@@ -607,12 +624,13 @@
     // The history also says where its runs break (an unplug, a disconnect before this
     // connection), which no stream event reports (AC-272WSN.3, AC-272WSN.4).
     fetch: async (req) => {
+      const generation = historyGeneration;
       const [buckets, gaps] = await Promise.all([
         historyRange(req.series, req.t0Ms, req.t1Ms, req.buckets),
         // A failed gap query leaves the gaps already known; the buckets still draw.
         historyGaps(req.t0Ms, req.t1Ms).catch(() => []),
       ]);
-      for (const g of gaps) sessionGaps.push(g);
+      if (generation === historyGeneration) for (const g of gaps) sessionGaps.push(g);
       return buckets;
     },
     onResult: (req, result) => {

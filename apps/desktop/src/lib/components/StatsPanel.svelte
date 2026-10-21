@@ -20,7 +20,7 @@
 
   let cancelButton = $state<HTMLButtonElement | null>(null);
   let clearButton = $state<HTMLButtonElement | null>(null);
-  /** The confirm was open, so focus goes back to "Clear history…" when it closes. */
+  /** The confirm was open, so focus goes back to "Clear chart history…" when it closes. */
   let confirmWasOpen = false;
 
   // A confirm left open when the stream ends must not fire into the next session.
@@ -71,7 +71,8 @@
       onclick={() => void controls.reset(deps)}
       disabled={!canReset}
       aria-keyshortcuts="r"
-      title="Reset statistics (R)">Reset</button
+      title="Zero the statistics (min, max, average, charge, energy). The chart history stays."
+      >Reset stats</button
     >
   </div>
 
@@ -122,7 +123,9 @@
   <div class="clear">
     {#if controls.clearPending}
       <span class="confirm" role="group" aria-labelledby="clear-question">
-        <span id="clear-question">Clear the whole history?</span>
+        <span id="clear-question"
+          >Clear the chart history? The meter stays connected and keeps measuring.</span
+        >
         <span class="choices">
           <button
             type="button"
@@ -139,7 +142,9 @@
         type="button"
         bind:this={clearButton}
         onclick={() => controls.requestClear()}
-        disabled={!canReset}>Clear history…</button
+        disabled={!canReset}
+        title="Erase the chart history and what Export saves. The meter stays connected; recordings are not affected."
+        >Clear chart history…</button
       >
     {/if}
   </div>
