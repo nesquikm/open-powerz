@@ -14,7 +14,8 @@
     "test": "vitest run",
     "e2e:ui": "playwright test -c e2e/ui/playwright.config.ts",
     "e2e:app": "wdio run e2e/app/wdio.conf.ts",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "icons": "bun run scripts/icons.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
