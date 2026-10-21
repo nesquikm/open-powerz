@@ -37,6 +37,7 @@ Add editor-style navigation to the chart: an overview strip with a draggable, re
 - AC-FENCD9.11: In the main chart and the overview strip, a gap longer than one minute is collapsed to a narrow break of at most 32 px labelled with its length; times on both sides stay true, and the time axis marks the break.
 - AC-FENCD9.12: With a 10-million-sample history in the mocked backend, a viewport drag, a wheel zoom and a shuttle step each render in at most 100 ms, and with the 1000 SPS demo device the chart still redraws 20 to 60 times a second with the overview strip shown.
 - AC-FENCD9.13: Every new control works from the keyboard and has an accessible name: the viewport window is a slider that arrow keys move and Shift+arrow keys resize, the zoom slider is a range input, and the shortcut overlay lists the new keys.
+- AC-FENCD9.14: Zooming by wheel or pinch, + and −, and the zoom slider works on the chart as drawn, with long gaps already collapsed: the point it zooms around stays put, each step scales the displayed time by the step's factor, and a collapsed break never takes more than 32 px of the plot after a zoom; the zoom readout still shows the true session span.
 
 ## Technical Design
 
