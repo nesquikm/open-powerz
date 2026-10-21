@@ -19,7 +19,7 @@ The stream, any recording and the chart carry on as if nothing happened.
 
 ## Requirement
 
-On load, the UI asks the backend for the running session, if any, and re-attaches to it: the stream moves to the new page, and the connection, rate, recording, chart and statistics show the session as it is.
+On load, the UI asks the backend for the running session, if any, and re-attaches to it: the stream moves to the new page, and the connection, rate, recording, chart (including the live windows) and statistics show the session as it is.
 
 ## Acceptance Criteria
 
@@ -28,14 +28,15 @@ On load, the UI asks the backend for the running session, if any, and re-attache
 - AC-VEDDFD.3: An open recording keeps running through the reload, and the UI shows it as recording, with its elapsed time and row count picked up from the backend.
 - AC-VEDDFD.4: The chart and the statistics refill from the session history and the backend's statistics, so "Whole session" shows everything recorded before the reload.
 - AC-VEDDFD.5: After a re-attach only the new page receives events, and Disconnect, Record, Stop, rate changes and Export work on the re-attached session as on a fresh one.
+- AC-VEDDFD.6: Straight after a re-attach, the live 10 s, 1 min and 10 min windows show the samples from before the reload, filled from the session history, and the zoom readout matches the span drawn.
 
 ## Technical Design
 
-The worker's event sink becomes swappable: the device manager keeps a handle to the current sink and replaces it on attach, so the old page's channel gets nothing more. A new attach command takes the page's channel and returns the running session's snapshot (device, model, firmware, serial, rate and lock, session id, recording state with elapsed time and rows), or nothing. The UI calls it on load before listing devices, rebuilds its session and recording state from the snapshot, and lets the chart refill from the history it already queries. The mock backend gains the same command so a page reload can be tested.
+The worker's event sink becomes swappable. On attach the device manager hands the new page's sink to the worker, which swaps it and reads the recording state on its own thread, so the old page gets nothing more and no recording event falls between the two. The attach command returns the running session's snapshot (device, model, firmware, serial, rate and lock, session id, recording with elapsed time and rows), or nothing. The UI holds events until it has applied the snapshot, then seeds the live chart buffer from one history query covering the longest live window before its first sample. The mock backend gains the same command so a reload can be tested.
 
 ## Testing
 
-Rust: attach on a manager with and without a running session, the sink swap (the old sink gets nothing after attach), and the recording snapshot. Vitest: session and recording state rebuilt from a snapshot, and the attach call in the backend seam and the mock. Playwright: reload the page while streaming, and while recording, then check the badge, the recording timer, the chart history and that Stop and Disconnect still work.
+Rust: attach on a manager with and without a running session, the sink swap (the old sink gets nothing after attach), and the recording snapshot. Vitest: session and recording state rebuilt from a snapshot, the attach call in the backend seam and the mock, events held until the snapshot is applied, and the live buffer seeded from history. Playwright: reload the page while streaming, and while recording, then check the badge, the recording timer, the chart history, that the 10 s window spans the full 10 s straight away, and that Stop and Disconnect still work.
 
 ## Notes
 
