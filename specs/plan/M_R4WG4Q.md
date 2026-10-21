@@ -26,6 +26,9 @@ codename: Live Wire
 | [AH2AEK](../frs/AH2AEK.md) | Desktop shell, live readout, themes and accessibility | n/a |
 | [AH2AEM](../frs/AH2AEM.md) | Live chart | n/a |
 | [AH2AEN](../frs/AH2AEN.md) | Desktop end-to-end tests | n/a |
+| [272WSN](../frs/272WSN.md) | Whole-session view: session time, gaps and axes | n/a |
+| [DDDYDJ](../frs/DDDYDJ.md) | Live and paused chart states | n/a |
+| [FENCD9](../frs/FENCD9.md) | Timeline navigation | n/a |
 
 **Tasks:**
 - [x] Extract `crates/powerz-record` from the CLI — 0P7HSJ (the `--include-demo` help text needed no fix)
@@ -46,6 +49,12 @@ codename: Live Wire
   verify: `bun run e2e:ui` passes locally; CI `e2e` job green on its matrix
 - [x] Desktop HIL backend test (`POWERZ_HIL=1`) against the KM003C — AH2AEN
   verify: `POWERZ_HIL=1 cargo test -p open-powerz-desktop --test hil` passes on the attached meter
+- [ ] Session-relative time, history gaps between runs, gap shading, axis width — 272WSN
+  verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `session.spec.ts`
+- [ ] Live/paused button, End to go live — DDDYDJ
+  verify: `bun run test` passes; `bun run e2e:ui` passes `live.spec.ts`
+- [ ] Timeline model, gap collapse, overview strip, playhead, shuttle, zoom slider, presets — FENCD9
+  verify: `bun run test` passes; `bun run e2e:ui` passes the timeline specs incl. the 10M-sample timings
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. 1000 SPS "—" temperature) and a recorded CSV listed in the report
 
@@ -55,7 +64,7 @@ codename: Live Wire
 **Acceptance Criteria:**
 - [x] Gating rule from CLAUDE.md passes locally on macOS
 - [x] CI is green on all three OSes, including the `e2e` job
-- [ ] Every AC of the six FRs above is traced to a test by `/spec-review`
+- [ ] Every AC of the nine FRs above is traced to a test by `/spec-review`
 - [x] Blocking visual check passed for every UI FR: light and dark, ~900 px and ~1600 px wide, demo device streaming and no device; screenshot paths listed in the report
 - [ ] The desktop app streams, charts and records from the real KM003C at 1000 SPS for 60 s with no host-side gaps
 

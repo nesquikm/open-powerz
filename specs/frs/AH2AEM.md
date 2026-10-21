@@ -43,6 +43,8 @@ Vitest for the ring buffer, client reduction, bucket-to-series mapping, request 
 
 ## Notes
 
+Later FRs of this milestone refine this chart: 272WSN (session time, gaps, axis width), DDDYDJ (the Live button pauses; End returns to live) and FENCD9 (timeline navigation, which gives L to the shuttle and plain drag to the playhead). Where they differ from AC-AH2AEM.3, they win.
+
 Decimation lives in Rust (FR AH2AEJ) because WebKitGTK is too slow to reduce millions of points in the page.
 
 AC-AH2AEM.9 came from the milestone visual review: auto-scaled axes made a ±2% IBUS ripple (1.94–2.06 A) look huge. The range is uPlot's usual padded range of min(0, data min) to max(0, data max), kept in session storage like the legend.
