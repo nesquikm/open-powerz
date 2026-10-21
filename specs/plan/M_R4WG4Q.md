@@ -39,6 +39,7 @@ codename: Live Wire
 | [4NSVC9](../frs/4NSVC9.md) | The live chart leaks memory in WebKit | n/a |
 | [X2SPDW](../frs/X2SPDW.md) | Real-meter fixes from the M2 QA run | n/a |
 | [CWWKJ6](../frs/CWWKJ6.md) | Honest gaps, quiet noise and fresh temperatures | n/a |
+| [SX3EDV](../frs/SX3EDV.md) | M2 final polish | n/a |
 
 **Tasks:**
 - [x] Extract `crates/powerz-record` from the CLI — 0P7HSJ (the `--include-demo` help text needed no fix)
@@ -85,8 +86,15 @@ codename: Live Wire
   verify: `cargo test --workspace --locked` and `bun run test` pass; real-meter checks of AC .3, .11, .13 recorded in the FR Notes
 - [x] Honest gaps, quiet noise and fresh temperatures — CWWKJ6
   verify: `bun run test` and `cargo test --workspace --locked` pass; light/dark ~900/~1600 shots reviewed
+- [ ] M2 final polish — SX3EDV: top bar, notices, range decimals, strip, banner, QoS
+  verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `final-polish.spec.ts`; light/dark ~900/~1200/~1600 shots reviewed
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. the 1000 SPS temperature tooltip) and a recorded CSV listed in the report
+
+**Deferred to M7 (Polish):**
+- Plot height at 900×900: the readout leaves the plot ~125 px tall (QA N5).
+- The ~71 ms hole a 50 → 1000 SPS switch leaves (expected queue restart) shows as a gap (QA R2).
+- Narrow gap bands (~40 px) in the chart get no "No data" label (QA R5).
 
 **Tests:**
 - Rust unit and property tests for batching, decimation, stats and recording; worker integration tests against `powerz-sim`; Vitest for UI logic; WebdriverIO real-app e2e (Linux, Windows); Playwright UI e2e with axe (Linux, macOS, Windows).
