@@ -53,7 +53,7 @@ codename: Live Wire
   verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `session.spec.ts`
 - [x] Live/paused button, End to go live — DDDYDJ
   verify: `bun run test` passes; `bun run e2e:ui` passes `live.spec.ts`
-- [ ] Timeline model, gap collapse, overview strip, playhead, shuttle, zoom slider, presets — FENCD9
+- [x] Timeline model, gap collapse, overview strip, playhead, shuttle, zoom slider, presets — FENCD9
   verify: `bun run test` passes; `bun run e2e:ui` passes the timeline specs incl. the 10M-sample timings
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. 1000 SPS "—" temperature) and a recorded CSV listed in the report

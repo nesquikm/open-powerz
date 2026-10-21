@@ -41,6 +41,6 @@ The CLI suite proves the extraction is behaviour-neutral. Golden-file tests comp
 
 ## Notes
 
-AC-0P7HSJ.1's "unchanged" applies to the CLI's snapshot and end-to-end tests: the CLI's record unit tests (CSV header, row formatting, integrator) moved with that code into `crates/powerz-record`, where they run as that crate's unit tests.
+The CLI's record unit tests moved with their code into `crates/powerz-record`; AC-0P7HSJ.1's "unchanged" covers the CLI snapshot and end-to-end tests.
 
-Confirmed in the milestone review (2026-10-21): the rate cannot change while a recording is open: a queue restart can restart the device clock, and one file keeps one rate. A user disconnect ends a recording as stopped, an unplug as unplugged.
+Milestone review (2026-10-21): the rate is locked while a recording is open, since one file keeps one rate. A user disconnect ends a recording as stopped, an unplug as unplugged.

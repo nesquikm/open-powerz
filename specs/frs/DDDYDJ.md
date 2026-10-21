@@ -40,4 +40,6 @@ Vitest: the pause gesture, End, the toggle and the button text (chartView), End 
 
 ## Notes
 
+Since FR FENCD9, the left and right arrow keys step the playhead and pause only when the view follows it; the up and down arrow keys still zoom and pause.
+
 From the milestone hardware review: "What does 'live' button do? Can't stop it". Timeline navigation (FENCD9) later gives L to the shuttle, so End is the key for going live.

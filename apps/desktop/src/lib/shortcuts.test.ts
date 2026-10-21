@@ -10,7 +10,7 @@ describe("shortcutFor (AC-AH2AEK.6)", () => {
     expect(shortcutFor(key(" "))).toEqual({ kind: "record" });
     expect(shortcutFor(key("c"))).toEqual({ kind: "connect" });
     expect(shortcutFor(key("r"))).toEqual({ kind: "reset_stats" });
-    expect(shortcutFor(key("l"))).toEqual({ kind: "live" });
+    expect(shortcutFor(key("End"))).toEqual({ kind: "live" });
     expect(shortcutFor(key("t"))).toEqual({ kind: "theme" });
     expect(shortcutFor(key("?", { shiftKey: true }))).toEqual({ kind: "help" });
   });
@@ -55,7 +55,7 @@ describe("shortcutFor (AC-AH2AEK.6)", () => {
     const button = { tagName: "BUTTON", isContentEditable: false };
     const checkbox = { tagName: "INPUT", type: "checkbox", isContentEditable: false };
     expect(shortcutFor(key("r", { target: button }))).toEqual({ kind: "reset_stats" });
-    expect(shortcutFor(key("l", { target: checkbox }))).toEqual({ kind: "live" });
+    expect(shortcutFor(key("l", { target: checkbox }))).toEqual({ kind: "shuttle", key: "L" });
   });
 });
 
@@ -73,7 +73,19 @@ describe("isTextInput (AC-AH2AEK.6)", () => {
 describe("SHORTCUTS overlay list (AC-AH2AEK.6)", () => {
   it("documents every shortcut", () => {
     const keys = SHORTCUTS.map((s) => s.keys);
-    expect(keys).toEqual(["Space", "C", "R", "1–4", "L / End", "T", "?"]);
+    expect(keys).toEqual([
+      "Space",
+      "C",
+      "R",
+      "1–4",
+      "J / K / L",
+      "← / →",
+      "+ / −",
+      "Home / End",
+      "Shift+Z",
+      "T",
+      "?",
+    ]);
     for (const s of SHORTCUTS) {
       expect(s.description.length).toBeGreaterThan(0);
     }
@@ -109,8 +121,10 @@ describe("End returns the chart to live (FR DDDYDJ)", () => {
     expect(shortcutFor(key("End", { target: button }))).toEqual({ kind: "live" });
   });
 
-  it("AC-DDDYDJ.5: the shortcut overlay lists End beside L", () => {
-    expect(SHORTCUTS).toContainEqual({ keys: "L / End", description: "Return the chart to live" });
+  it("AC-DDDYDJ.5: the shortcut overlay lists End for going live (L is the shuttle now)", () => {
+    const row = SHORTCUTS.find((s) => s.keys === "Home / End");
+    expect(row?.description).toMatch(/live/i);
+    expect(SHORTCUTS.find((s) => s.keys === "L / End")).toBeUndefined();
   });
 
   it("AC-DDDYDJ.5: a text field or a focused select keeps End for itself", () => {
@@ -118,5 +132,79 @@ describe("End returns the chart to live (FR DDDYDJ)", () => {
     const input = { tagName: "INPUT", isContentEditable: false };
     expect(shortcutFor(key("End", { target: select }))).toBeNull();
     expect(shortcutFor(key("End", { target: input }))).toBeNull();
+  });
+});
+
+describe("timeline keys (FR FENCD9)", () => {
+  const range = { tagName: "INPUT", type: "range", isContentEditable: false };
+  const text = { tagName: "INPUT", type: "text", isContentEditable: false };
+
+  it("AC-FENCD9.7: J / K / L drive the shuttle, in either case; L no longer goes live", () => {
+    for (const [k, K] of [
+      ["j", "J"],
+      ["k", "K"],
+      ["l", "L"],
+    ] as const) {
+      expect(shortcutFor(key(k))).toEqual({ kind: "shuttle", key: K });
+      expect(shortcutFor(key(K, { shiftKey: true }))).toEqual({ kind: "shuttle", key: K });
+    }
+    expect(shortcutFor(key("l"))).not.toEqual({ kind: "live" });
+  });
+
+  it("AC-FENCD9.6: ← / → step the playhead; Shift makes it a coarse step", () => {
+    expect(shortcutFor(key("ArrowLeft"))).toEqual({ kind: "step", direction: -1, coarse: false });
+    expect(shortcutFor(key("ArrowRight"))).toEqual({ kind: "step", direction: 1, coarse: false });
+    expect(shortcutFor(key("ArrowLeft", { shiftKey: true }))).toEqual({
+      kind: "step",
+      direction: -1,
+      coarse: true,
+    });
+    expect(shortcutFor(key("ArrowRight", { shiftKey: true }))).toEqual({
+      kind: "step",
+      direction: 1,
+      coarse: true,
+    });
+  });
+
+  it("AC-FENCD9.8: + or = zoom in, − zooms out", () => {
+    expect(shortcutFor(key("+", { shiftKey: true }))).toEqual({ kind: "zoom", direction: "in" });
+    expect(shortcutFor(key("="))).toEqual({ kind: "zoom", direction: "in" });
+    expect(shortcutFor(key("-"))).toEqual({ kind: "zoom", direction: "out" });
+  });
+
+  it("AC-FENCD9.8: Home goes to the session start, End goes live, Shift+Z fits the session", () => {
+    expect(shortcutFor(key("Home"))).toEqual({ kind: "home" });
+    expect(shortcutFor(key("End"))).toEqual({ kind: "live" });
+    expect(shortcutFor(key("Z", { shiftKey: true }))).toEqual({ kind: "fit" });
+  });
+
+  it("AC-FENCD9.13: a focused range input keeps ←, →, Home and End; other shortcuts still work", () => {
+    for (const k of ["ArrowLeft", "ArrowRight", "Home", "End"]) {
+      expect(shortcutFor(key(k, { target: range }))).toBeNull();
+      expect(shortcutFor(key(k, { target: range, shiftKey: true }))).toBeNull();
+    }
+    expect(shortcutFor(key("l", { target: range }))).toEqual({ kind: "shuttle", key: "L" });
+  });
+
+  it("AC-FENCD9.13: a text field keeps every new key", () => {
+    for (const k of ["j", "k", "l", "ArrowLeft", "ArrowRight", "+", "=", "-", "Home", "Z"]) {
+      expect(shortcutFor(key(k, { target: text }))).toBeNull();
+    }
+  });
+
+  it("AC-FENCD9.13: the overlay describes the new keys", () => {
+    const row = (keys: string) => SHORTCUTS.find((s) => s.keys === keys)?.description ?? "";
+    expect(row("J / K / L")).toMatch(/shuttle/i);
+    expect(row("J / K / L")).toMatch(/back/i);
+    expect(row("J / K / L")).toMatch(/stop/i);
+    expect(row("J / K / L")).toMatch(/forward/i);
+    expect(row("← / →")).toMatch(/playhead/i);
+    expect(row("← / →")).toMatch(/Shift/);
+    expect(row("← / →")).toMatch(/tenth of the view/i);
+    expect(row("+ / −")).toMatch(/zoom in/i);
+    expect(row("+ / −")).toMatch(/out/i);
+    expect(row("Home / End")).toMatch(/session start/i);
+    expect(row("Home / End")).toMatch(/live/i);
+    expect(row("Shift+Z")).toMatch(/whole session/i);
   });
 });

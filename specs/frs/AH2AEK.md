@@ -43,6 +43,8 @@ Vitest for formatting, shortcut dispatch (including the text-input guard), theme
 
 ## Notes
 
-Every negative the UI displays (readout, stats, hover readout, chart axes) uses the true minus sign U+2212 "−" (milestone review, 2026-10-21); CSV, JSON and clipboard output keep ASCII "-".
+FR FENCD9 gives L to the timeline shuttle and End to going live; it wins over AC-AH2AEK.6.
+
+Every displayed negative uses the true minus U+2212 "−"; CSV, JSON and clipboard keep ASCII "-" (milestone review, 2026-10-21).
 
 The look is our own: a calm, dense instrument panel, not the vendor's design.

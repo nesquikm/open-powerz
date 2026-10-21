@@ -4,7 +4,14 @@
  * {@link E2E_BUILD}, a build-time constant, so a production build drops this module.
  */
 
-import { HOOK, type ChartDraw, type ChartGapBand, type OpenPowerzE2E } from "../../e2e/hook";
+import {
+  HOOK,
+  type ChartBreak,
+  type ChartDraw,
+  type ChartGapBand,
+  type OpenPowerzE2E,
+  type OverviewWindowBox,
+} from "../../e2e/hook";
 import type { ChartFrame } from "./chartData";
 
 /** Whether this web build is a test build that exposes the hook. */
@@ -20,6 +27,36 @@ export class ChartProbe {
   #draws: ChartDraw[] = [];
   #ticks: string[] = [];
   #bands: ChartGapBand[] = [];
+  #playheadMs: number | null = null;
+  #shuttle = 0;
+  #breaks: ChartBreak[] = [];
+  #overview: OverviewWindowBox | null = null;
+  #overviewBreaks: { leftPx: number; widthPx: number; label: string }[] = [];
+
+  /** The overview strip's viewport window, CSS px from the strip's left edge (AC-FENCD9.1). */
+  overview(box: OverviewWindowBox | null): void {
+    this.#overview = box === null ? null : { ...box };
+  }
+
+  /** The collapsed gaps the overview strip drew (AC-FENCD9.11). */
+  overviewBreaks(breaks: readonly { leftPx: number; widthPx: number; label: string }[]): void {
+    this.#overviewBreaks = breaks.map((b) => ({ ...b }));
+  }
+
+  /** The collapsed gaps of the last draw and their on-screen width (AC-FENCD9.11). */
+  breaks(breaks: readonly ChartBreak[]): void {
+    this.#breaks = breaks.map((b) => ({ ...b }));
+  }
+
+  /** The J/K/L shuttle speed, 0 when stopped. */
+  shuttle(speed: number): void {
+    this.#shuttle = speed;
+  }
+
+  /** The playhead, session ms, or null when none is placed. */
+  playhead(ms: number | null): void {
+    this.#playheadMs = ms;
+  }
 
   /** One finished draw of `frame`. */
   record(frame: ChartFrame, draw: Omit<ChartDraw, "at">): void {
@@ -49,6 +86,11 @@ export class ChartProbe {
       chartDraws: () => this.#draws.map((d) => ({ ...d })),
       chartXTicks: () => [...this.#ticks],
       chartGapBands: () => this.#bands.map((b) => ({ ...b })),
+      chartPlayhead: () => this.#playheadMs,
+      chartShuttle: () => this.#shuttle,
+      chartBreaks: () => this.#breaks.map((b) => ({ ...b })),
+      overviewWindow: () => (this.#overview === null ? null : { ...this.#overview }),
+      overviewBreaks: () => this.#overviewBreaks.map((b) => ({ ...b })),
     };
   }
 }

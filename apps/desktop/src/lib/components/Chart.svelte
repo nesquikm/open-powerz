@@ -23,8 +23,11 @@
   } from "../chartData";
   import {
     CHART_SERIES,
+    type ChartSeriesKey,
+    type SeriesVisibility,
     chartOptions,
     formatSessionTime,
+    formatSpan,
     loadVisibility,
     loadZeroBased,
     saveVisibility,
@@ -32,15 +35,15 @@
     seriesDef,
     seriesStyles,
     sessionStore,
+    timeSplits,
     toggleSeries,
-    type ChartSeriesKey,
-    type SeriesVisibility,
   } from "../chartSeries";
   import {
     CHART_KEYS,
     HistoryRequester,
     RateGate,
     RedrawScheduler,
+    animationFrames,
     applyGesture,
     frameSource,
     historyRequestFor,
@@ -49,14 +52,26 @@
     rangeAnnouncement,
     sessionRequestFor,
     sessionStartOf,
-    wheelZooms,
     windowPressed,
     type ChartGesture,
     type ChartView,
+    type TimeRange,
   } from "../chartView";
+  import {
+    buildWarp,
+    followPlayhead,
+    presetRange,
+    shuttlePress,
+    shuttleStep,
+    sliderToSpan,
+    spanToSlider,
+    stepPlayhead,
+    type TimeWarp,
+  } from "../timeline";
   import { E2E_BUILD, ChartProbe, installChartProbe } from "../e2eHook";
   import { formatSigned, formatSignedNumber } from "../stats";
   import { THEME_COLORS, type MotionSettings, type ResolvedTheme } from "../theme";
+  import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
 
   let { theme }: { theme: ResolvedTheme } = $props();
 
@@ -94,21 +109,212 @@
   function originMs(): number {
     return sessionStartMs ?? buffer.firstMs ?? 0;
   }
+  /** The session's extent for a view on `[t0Ms, t1Ms]`: from its first known sample to
+   * the newest (or the view's end, if later). */
+  function sessionExtent(t0Ms: number, t1Ms: number): { firstMs: number; lastMs: number } {
+    return {
+      firstMs: sessionStartMs ?? buffer.firstMs ?? t0Ms,
+      lastMs: Math.max(buffer.lastMs ?? t1Ms, t1Ms),
+    };
+  }
+  /** A window button's span in ms; `null` for the whole session. */
+  function windowMs(id: LiveWindowId): number | null {
+    return LIVE_WINDOWS.find((w) => w.id === id)?.ms ?? null;
+  }
+  /** Where a keyboard zoom, a step or a preset anchors: the playhead, else the centre of
+   * `range`. */
+  function anchorMs(range: [number, number]): number {
+    return playheadMs ?? (range[0] + range[1]) / 2;
+  }
+  /** Shows exactly `r`, paused. */
+  function showRange(r: TimeRange): void {
+    gesture({ kind: "range", t0Ms: r.t0Ms, t1Ms: r.t1Ms });
+  }
+
+  /** Zoom slider steps (AC-FENCD9.9). */
+  const ZOOM_SLIDER_MAX = 1000;
+  /** The zoom slider's position: the span on screen, on a log scale up to the session. */
+  let zoomValue = $state(ZOOM_SLIDER_MAX);
+  /** The span on screen as the slider's value text: "10.0 s", "1:00". */
+  let zoomText = $state("");
+  /** The plot took focus from a mouse press: no focus ring until focus leaves it. */
+  let pointerFocus = $state(false);
+
+  /** Moves the slider to the span on screen within the session; live, the window's
+   * span (the buffer may not fill it yet). */
+  function updateZoomSlider(range: [number, number] | null): void {
+    if (range === null) return;
+    const { firstMs, lastMs } = sessionExtent(range[0], range[1]);
+    const sessionSpan = lastMs - firstMs;
+    const span =
+      view.mode === "live"
+        ? Math.min(windowMs(liveWindow) ?? sessionSpan, sessionSpan)
+        : range[1] - range[0];
+    const value = Math.round(spanToSlider(span, sessionSpan) * ZOOM_SLIDER_MAX);
+    if (value !== zoomValue) zoomValue = value;
+    const text = formatSpan(span);
+    if (text !== zoomText) zoomText = text;
+  }
+
+  /** The slider moved: that span around the view centre, paused. */
+  function onZoomInput(e: Event): void {
+    const range = currentRange();
+    if (range === null) return;
+    const value = Number((e.currentTarget as HTMLInputElement).value) / ZOOM_SLIDER_MAX;
+    const { firstMs, lastMs } = sessionExtent(range[0], range[1]);
+    const span = sliderToSpan(value, lastMs - firstMs);
+    const mid = (range[0] + range[1]) / 2;
+    gesture({ kind: "range", t0Ms: mid - span / 2, t1Ms: mid + span / 2 });
+  }
+
+  /** The playhead, session ms: placed by a click on the plot, moved by ← / →
+   * (AC-FENCD9.6); `null` until placed. */
+  let playheadMs: number | null = null;
+
+  /** Places the playhead and redraws. */
+  function setPlayhead(ms: number | null): void {
+    playheadMs = ms;
+    if (E2E_BUILD && probe !== null) probe.playhead(ms);
+    updateHover();
+    scheduler.invalidate();
+  }
+
+  /** Moves the playhead one pixel (or, coarse, a tenth of the view) and moves the view
+   * by the least amount that keeps it in sight (AC-FENCD9.6). */
+  export function stepPlayheadBy(direction: -1 | 1, coarse: boolean): void {
+    const range = currentRange();
+    if (range === null) return;
+    const shown = { t0Ms: range[0], t1Ms: range[1] };
+    const session = sessionExtent(range[0], range[1]);
+    const head = stepPlayhead(playheadMs, direction, shown, plotWidthPx(), coarse, session);
+    setPlayhead(head);
+    const next = followPlayhead(shown, head, session);
+    if (next !== shown) showRange(next);
+  }
+
+  /** The J/K/L shuttle's speed, a signed multiple of real time; 0 when stopped
+   * (AC-FENCD9.7). */
+  let shuttleSpeed = 0;
+  /** The pending shuttle animation frame, and the previous frame's timestamp. */
+  let shuttleFrame: number | null = null;
+  let shuttleLastTs: number | null = null;
+  /** The longest step one frame may take, so a stalled tab does not jump the playhead. */
+  const SHUTTLE_MAX_DT_MS = 100;
+
+  /** J / K / L: changes the shuttle speed (AC-FENCD9.7). */
+  export function shuttle(key: "J" | "K" | "L"): void {
+    setShuttle(shuttlePress(shuttleSpeed, key));
+  }
+
+  function setShuttle(speed: number): void {
+    shuttleSpeed = speed;
+    if (E2E_BUILD && probe !== null) probe.shuttle(speed);
+    if (speed === 0) {
+      if (shuttleFrame !== null) animationFrames.cancel(shuttleFrame);
+      shuttleFrame = null;
+      shuttleLastTs = null;
+      return;
+    }
+    if (shuttleFrame === null) {
+      shuttleLastTs = null;
+      shuttleFrame = animationFrames.request(onShuttleFrame);
+    }
+  }
+
+  /** One shuttle frame: moves the playhead by speed × elapsed time and keeps it in view;
+   * playing forwards into the newest data stops and returns to live, playing backwards
+   * into the session start stops there. */
+  function onShuttleFrame(ts: number): void {
+    shuttleFrame = null;
+    if (shuttleSpeed === 0) return;
+    const dt = shuttleLastTs === null ? 0 : Math.min(SHUTTLE_MAX_DT_MS, ts - shuttleLastTs);
+    shuttleLastTs = ts;
+    const range = currentRange();
+    if (range !== null) {
+      const shown = { t0Ms: range[0], t1Ms: range[1] };
+      const session = sessionExtent(range[0], range[1]);
+      const step = shuttleStep(anchorMs(range), shuttleSpeed, dt, session);
+      setPlayhead(step.playheadMs);
+      if (step.reachedEnd) {
+        setShuttle(0);
+        gesture({ kind: "live" });
+        return;
+      }
+      if (step.reachedStart) setShuttle(0);
+      // The view follows only once its last move is on screen: moving it every frame
+      // would supersede each history answer before it lands (AC-FENCD9.12).
+      if (viewSettled()) {
+        const next = followPlayhead(shown, step.playheadMs, session);
+        if (next !== shown) showRange(next);
+      }
+    }
+    if (shuttleSpeed !== 0) shuttleFrame = animationFrames.request(onShuttleFrame);
+  }
+  $effect(() => () => setShuttle(0));
+
+  /** The range drawn last came from the history answer for the view, or no answer is
+   * coming (live, or the request failed). */
+  let drawnFromHistory = false;
+  function viewSettled(): boolean {
+    if (view.mode !== "history") return true;
+    return drawnFromHistory || (requester.idle && historyError !== null);
+  }
+
+  /** Session time <-> x display coordinate for the view on screen: gaps longer than a
+   * minute squeezed to a narrow break (AC-FENCD9.11). Rebuilt before every draw. */
+  let warp: TimeWarp = buildWarp([], { t0Ms: 0, t1Ms: 1 }, 1);
+  /** uPlot's default minimum spacing of time-axis ticks, CSS px. */
+  const TIME_TICK_SPACE_PX = 50;
+
+  /** The warp for `[t0Ms, t1Ms]` drawn across `widthPx` with this session's gaps; the
+   * overview strip builds one for the whole session with it. */
+  function warpFor(t0Ms: number, t1Ms: number, widthPx: number): TimeWarp {
+    return buildWarp(sessionGaps.overlapping(t0Ms, t1Ms), { t0Ms, t1Ms }, widthPx);
+  }
+
+  /** Time-axis ticks every `incr` outside the collapsed gaps, dropping a tick that would
+   * crowd the previous one across a break. */
+  function warpedSplits(u: uPlot, min: number, max: number, incr: number): number[] {
+    const origin = originMs();
+    if (warp.breaks.length === 0) return timeSplits(min, max, incr, origin);
+    const out: number[] = [];
+    let from = min;
+    for (const b of warp.breaks) {
+      if (b.fromMs > from) out.push(...timeSplits(from, Math.min(b.fromMs, max), incr, origin));
+      from = Math.max(from, b.toMs);
+      if (from >= max) break;
+    }
+    if (from < max) out.push(...timeSplits(from, max, incr, origin));
+    const d0 = warp.fwd(min);
+    const pxPerD = (u.over.clientWidth || 1) / (warp.fwd(max) - d0 || 1);
+    const kept: number[] = [];
+    let lastPx = -Infinity;
+    for (const v of out) {
+      const px = (warp.fwd(v) - d0) * pxPerD;
+      if (px - lastPx < TIME_TICK_SPACE_PX * 0.75) continue;
+      if (kept[kept.length - 1] === v) continue;
+      kept.push(v);
+      lastPx = px;
+    }
+    return kept;
+  }
+
   /** The time-axis labels and gap bands of the last draw (for the e2e hook). */
   let drawnTicks: string[] = [];
   let drawnBands: GapBand[] = [];
-  /** What the cursor points at (AC-AH2AEM.6); `null` while it is off the plot. */
+  /** What the cursor points at (AC-AH2AEM.6), or the playhead while the cursor is off the
+   * plot (AC-FENCD9.5); `null` with neither. */
   let hover: HoverReadout | null = $state(null);
   /** Cursor position over the plot in CSS px, so the readout follows a scrolling window. */
   let hoverLeftPx: number | null = null;
   /** Cursor x in ms while it is over the plot. */
   let hoverAtMs: number | null = null;
 
+  /** The pointer's values while it is over the plot, else the playhead's (AC-FENCD9.5). */
   function updateHover(): void {
+    const atMs = hoverAtMs ?? playheadMs;
     hover =
-      hoverAtMs === null || shownFrame === null
-        ? null
-        : hoverReadout(shownFrame, hoverAtMs, visibility);
+      atMs === null || shownFrame === null ? null : hoverReadout(shownFrame, atMs, visibility);
   }
 
   /** `5.500 V`, or `4.800–5.200 V` for a decimated bucket. */
@@ -154,7 +360,7 @@
     if (liveWindow === "all") {
       return sessionStartMs !== null && source() === "session" ? [sessionStartMs, range[1]] : range;
     }
-    const ms = LIVE_WINDOWS.find((w) => w.id === liveWindow)?.ms ?? null;
+    const ms = windowMs(liveWindow);
     if (motion().chartScroll === "smooth" || ms === null) return range;
     return steppedRange(range, ms, buffer.firstMs ?? range[0]);
   }
@@ -189,7 +395,12 @@
     const last = buffer.lastMs;
     const first = buffer.firstMs;
     if (view.mode !== "live" || last === null || first === null) return;
-    const wanted = sessionStartMs === null || (liveWindow === "all" && sessionStartMs < first);
+    // The overview strip also wants it once the live buffer has moved past its end.
+    const sessionEnd = sessionFrame?.x[sessionFrame.x.length - 1];
+    const wanted =
+      sessionStartMs === null ||
+      (liveWindow === "all" && sessionStartMs < first) ||
+      (sessionEnd !== undefined && sessionEnd < first);
     if (wanted && sessionGate.ready(performance.now())) {
       requester.request(sessionRequestFor(last, plotWidthPx()));
     }
@@ -202,18 +413,21 @@
     const range = currentRange();
     const frame = frameFor(range);
     shownFrame = frame;
+    updateZoomSlider(range);
+    warp = range === null ? warpFor(0, 1, 0) : warpFor(range[0], range[1], plotWidthPx());
     u.batch(() => {
       // With no range yet, let uPlot fit the x scale to the (empty) data.
       u.setData(toAlignedData(frame), range === null);
       if (range !== null) u.setScale("x", { min: range[0], max: range[1] });
     });
+    const fromHistory =
+      frame === historyFrame &&
+      view.mode === "history" &&
+      historyFrameRange !== null &&
+      historyFrameRange[0] === view.t0Ms &&
+      historyFrameRange[1] === view.t1Ms;
+    drawnFromHistory = fromHistory;
     if (E2E_BUILD && probe !== null) {
-      const fromHistory =
-        frame === historyFrame &&
-        view.mode === "history" &&
-        historyFrameRange !== null &&
-        historyFrameRange[0] === view.t0Ms &&
-        historyFrameRange[1] === view.t1Ms;
       probe.record(frame, {
         mode: view.mode,
         t0Ms: range?.[0] ?? frame.x[0] ?? 0,
@@ -221,10 +435,46 @@
         fromHistory,
       });
       probe.overlay(drawnTicks, drawnBands);
+      const min = u.scales.x?.min;
+      const max = u.scales.x?.max;
+      probe.breaks(
+        min === undefined || max === undefined
+          ? []
+          : warp.breaks.map((b) => ({
+              ...b,
+              widthPx:
+                u.valToPos(Math.min(b.toMs, max), "x") - u.valToPos(Math.max(b.fromMs, min), "x"),
+            })),
+      );
     }
+    overview?.draw(range === null ? null : overviewState(range), String(sessionStartMs));
     // The cursor stays put while the window scrolls: read its time on the new scale.
     if (hoverLeftPx !== null) hoverAtMs = u.posToVal(hoverLeftPx, "x");
     updateHover();
+  }
+
+  /** The overview strip under the plot (AC-FENCD9.1). */
+  let overview: OverviewStrip | undefined = $state();
+
+  /** What the overview strip shows for `range`. */
+  function overviewState(range: [number, number]): OverviewState {
+    return {
+      range: { t0Ms: range[0], t1Ms: range[1] },
+      session: sessionExtent(range[0], range[1]),
+      originMs: originMs(),
+    };
+  }
+
+  /** The strip's envelope: the history answer up to where the live buffer starts, the
+   * buffer after it. */
+  function envelopeSources(cols: number): EnvelopeSource[] {
+    const out: EnvelopeSource[] = [];
+    const bufFirst = buffer.firstMs;
+    const bufLast = buffer.lastMs;
+    if (sessionFrame !== null) out.push({ frame: sessionFrame, beforeMs: bufFirst ?? Infinity });
+    if (bufFirst !== null && bufLast !== null)
+      out.push({ frame: buffer.window(bufFirst, bufLast, cols), beforeMs: Infinity });
+    return out;
   }
 
   /** Something has been drawn, so the Live button has a range to pause (AC-DDDYDJ.2). */
@@ -251,9 +501,12 @@
     scheduler.invalidate();
   }
 
-  /** A new session starts: forget the previous one's samples, gaps and start, and go
-   * back to the live window. */
+  /** A new session starts: forget the previous one's samples, gaps, start, playhead
+   * and hover, and go back to the live window. */
   export function reset(): void {
+    hoverLeftPx = null;
+    hoverAtMs = null;
+    setPlayhead(null);
     buffer.clear();
     hasData = false;
     sessionGaps.clear();
@@ -261,6 +514,7 @@
     sessionFrame = null;
     sessionGate.reset();
     view = { mode: "live", window: liveWindow };
+    setShuttle(0);
     leaveHistory();
     scheduler.invalidate();
   }
@@ -324,31 +578,64 @@
     const range = currentRange();
     if (range === null && g.kind !== "live") return;
     const [t0Ms, t1Ms] = range ?? [0, 0];
-    const session = {
-      firstMs: sessionStartMs ?? buffer.firstMs ?? t0Ms,
-      lastMs: Math.max(buffer.lastMs ?? t1Ms, t1Ms),
-    };
+    const session = sessionExtent(t0Ms, t1Ms);
     const next = applyGesture(view, g, { t0Ms, t1Ms }, session);
     if (next === view) return;
     const wasLive = view.mode === "live";
     view = next;
+    drawnFromHistory = false;
     if (view.mode === "history") {
       fetchHistory();
       if (wasLive)
         announcement = rangeAnnouncement(view, originMs(), { paused: g.kind === "pause" });
     } else {
+      setShuttle(0);
       leaveHistory();
       if (!wasLive) announcement = rangeAnnouncement(view, originMs());
     }
     scheduler.invalidate();
   }
 
-  /** L key: back to the scrolling live window (the Live button toggles via `liveToggle`). */
+  /** Home key: paused, same span, from the session start. */
+  export function goHome(): void {
+    gesture({ kind: "home" });
+  }
+
+  /** + / = / −: zooms in (or out) around the playhead, or the view centre without one
+   * (AC-FENCD9.8). */
+  export function zoomStep(direction: "in" | "out"): void {
+    const range = currentRange();
+    if (range === null) return;
+    gesture({ kind: "zoom", factor: direction === "in" ? 0.8 : 1 / 0.8, atMs: anchorMs(range) });
+  }
+
+  /** Shift+Z: the whole session, live (the "all" window) (AC-FENCD9.8). */
+  export function fitSession(): void {
+    gesture({ kind: "fit" });
+    if (view.mode === "live" && liveWindow !== view.window) {
+      liveWindow = view.window;
+      sessionGate.reset();
+    }
+  }
+
+  /** End key: back to the scrolling live window (the Live button toggles via `liveToggle`). */
   export function returnToLive(): void {
     gesture({ kind: "live" });
   }
 
+  /** A window button: live, that scrolling window; paused, that span around the playhead
+   * (or the view centre), still paused (AC-FENCD9.10). */
   function pickWindow(id: LiveWindowId): void {
+    if (view.mode === "history") {
+      const range = currentRange();
+      if (range === null) return;
+      const session = sessionExtent(range[0], range[1]);
+      const next = presetRange(windowMs(id), anchorMs(range), session);
+      liveWindow = id;
+      showRange(next);
+      if (view.mode === "history") view = { ...view, window: id };
+      return;
+    }
     const wasLive = view.mode === "live";
     liveWindow = id;
     view = { mode: "live", window: id };
@@ -357,9 +644,25 @@
     if (!wasLive) announcement = rangeAnnouncement(view, originMs());
   }
 
+  /** A window button is pressed while live on that window, or paused on that preset's
+   * span (Whole: the whole session) (AC-FENCD9.10). */
+  function presetPressed(v: ChartView, id: LiveWindowId): boolean {
+    if (v.mode === "live") return windowPressed(v, id);
+    if (v.window !== id) return false;
+    const session = sessionExtent(v.t0Ms, v.t1Ms);
+    const want = Math.min(windowMs(id) ?? Infinity, session.lastMs - session.firstMs);
+    return Math.abs(v.t1Ms - v.t0Ms - want) <= 1;
+  }
+
   function onKeydown(e: KeyboardEvent): void {
     if (e.ctrlKey || e.metaKey || e.altKey || !CHART_KEYS.includes(e.key)) return;
     e.preventDefault();
+    // ← / → step the playhead here; the app-wide shortcut must not step it again.
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.stopPropagation();
+      stepPlayheadBy(e.key === "ArrowLeft" ? -1 : 1, e.shiftKey);
+      return;
+    }
     // End is also an app-wide shortcut; the chart has handled it, so it stops here.
     if (e.key === "End") e.stopPropagation();
     gesture({ kind: "key", key: e.key });
@@ -378,6 +681,29 @@
     if (!el) return;
     const opts = chartOptions({ theme, visibility, zeroBased, originMs, ...sizeOf(el) });
     const timeAxis = opts.axes?.[0];
+    // Long gaps collapse to a narrow break: x is drawn through the warp (AC-FENCD9.11).
+    opts.scales = {
+      ...opts.scales,
+      x: {
+        ...opts.scales?.x,
+        distr: 100,
+        fwd: (v: number) => warp.fwd(v),
+        bwd: (v: number) => warp.bwd(v),
+      },
+    };
+    if (timeAxis) {
+      // Tick spacing follows the warped span, so the data beside a break gets its own
+      // ticks; none falls inside a collapsed gap.
+      timeAxis.space = (_u: uPlot, _i: number, min: number, max: number) =>
+        max > min
+          ? (TIME_TICK_SPACE_PX * (warp.fwd(max) - warp.fwd(min))) / (max - min)
+          : TIME_TICK_SPACE_PX;
+      timeAxis.splits = (self: uPlot, _i: number, min: number, max: number, incr: number) =>
+        warpedSplits(self, min, max, incr);
+      // uPlot's default filter treats any distr >= 3 as logarithmic and blanks the
+      // ticks; a warped time axis keeps them all.
+      timeAxis.filter = (_u: uPlot, splits: number[]) => splits;
+    }
     const timeValues = timeAxis?.values;
     if (timeAxis && typeof timeValues === "function") {
       timeAxis.values = (...args) => {
@@ -424,15 +750,81 @@
           ctx.textAlign = "center";
           ctx.textBaseline = "top";
           ctx.fillStyle = palette.muted;
+          // Bands and breaks are both in time order: one walk finds each band's break.
+          const breaks = warp.breaks;
+          let bi = 0;
           for (const band of drawnBands) {
+            while (bi < breaks.length && breaks[bi]!.toMs <= band.fromMs) bi++;
             const x0 = self.valToPos(band.fromMs, "x", true);
             const x1 = self.valToPos(band.toMs, "x", true);
+            // Narrower than a pixel: no label of any length fits.
+            if (x1 - x0 < ratio) continue;
+            const brk = breaks[bi];
+            const collapsed = brk !== undefined && brk.fromMs < band.toMs;
             // Most bands of a long session are too narrow for any label: skip measuring them.
-            if (x1 - x0 < 40 * ratio) continue;
-            if (gapLabelFits(ctx.measureText(band.label).width, x1 - x0, ratio)) {
-              ctx.fillText(band.label, (x0 + x1) / 2, top + 8 * ratio);
+            const wide = x1 - x0 >= 40 * ratio;
+            const label =
+              wide && gapLabelFits(ctx.measureText(band.label).width, x1 - x0, ratio)
+                ? band.label
+                : // A collapsed gap too narrow for its label still says how long it is, in
+                  // short form, over the break (AC-FENCD9.11).
+                  collapsed
+                  ? (band.label.split(" · ").pop() ?? band.label)
+                  : null;
+            if (label === null) continue;
+            // A label is drawn only where it fits inside the plot, never over an axis
+            // (a break cut by the edge of the view keeps its band, not its text).
+            const half = ctx.measureText(label).width / 2;
+            const mid = (x0 + x1) / 2;
+            const { left, width } = self.bbox;
+            if (mid - half < left || mid + half > left + width) continue;
+            ctx.fillText(label, mid, top + 8 * ratio);
+          }
+          ctx.restore();
+        },
+        // Each collapsed gap is marked on the time axis with a pair of slanted strokes.
+        (self: uPlot) => {
+          if (warp.breaks.length === 0) return;
+          const min = self.scales.x?.min;
+          const max = self.scales.x?.max;
+          if (min === undefined || max === undefined) return;
+          const ratio = globalThis.devicePixelRatio || 1;
+          const { top, height } = self.bbox;
+          const y = top + height;
+          const h = 5 * ratio;
+          const ctx = self.ctx;
+          ctx.save();
+          ctx.strokeStyle = palette.muted;
+          ctx.lineWidth = Math.max(1, ratio);
+          ctx.beginPath();
+          for (const b of warp.breaks) {
+            for (const t of [b.fromMs, b.toMs]) {
+              if (t <= min || t >= max) continue;
+              const x = self.valToPos(t, "x", true);
+              ctx.moveTo(x - h / 2, y + h);
+              ctx.lineTo(x + h / 2, y - h);
             }
           }
+          ctx.stroke();
+          ctx.restore();
+        },
+        // The playhead: a vertical line across the plot (AC-FENCD9.5).
+        (self: uPlot) => {
+          if (playheadMs === null) return;
+          const min = self.scales.x?.min;
+          const max = self.scales.x?.max;
+          if (min === undefined || max === undefined) return;
+          if (playheadMs < min || playheadMs > max) return;
+          const x = Math.round(self.valToPos(playheadMs, "x", true));
+          const { top, height } = self.bbox;
+          const ctx = self.ctx;
+          ctx.save();
+          ctx.strokeStyle = palette.text;
+          ctx.lineWidth = Math.max(1, globalThis.devicePixelRatio || 1);
+          ctx.beginPath();
+          ctx.moveTo(x, top);
+          ctx.lineTo(x, top + height);
+          ctx.stroke();
           ctx.restore();
         },
       ],
@@ -443,17 +835,6 @@
           hoverLeftPx = left === undefined || left < 0 ? null : left;
           hoverAtMs = hoverLeftPx === null ? null : self.posToVal(hoverLeftPx, "x");
           updateHover();
-        },
-      ],
-      setSelect: [
-        ...(opts.hooks?.setSelect ?? []),
-        (self: uPlot) => {
-          const { left, width } = self.select;
-          if (width <= 0) return;
-          const t0Ms = self.posToVal(left, "x");
-          const t1Ms = self.posToVal(left + width, "x");
-          self.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
-          gesture({ kind: "select", t0Ms, t1Ms });
         },
       ],
       // The plot area now has its real width: a history view asks again with one
@@ -470,19 +851,56 @@
     const u = new uPlot(opts, toAlignedData(emptyFrame()), el);
     plot = u;
     const over = u.over;
+    /** The plot x under a viewport x, clamped to the plot. */
+    const plotX = (clientX: number): number => {
+      const rect = over.getBoundingClientRect();
+      return Math.min(Math.max(clientX - rect.left, 0), rect.width);
+    };
+    /** The time under a viewport x, clamped to the plot. */
+    const timeAtClientX = (clientX: number): number => u.posToVal(plotX(clientX), "x");
 
-    // Wheel zooms around the pointer, but only when the chart is focused or Ctrl / ⌘
-    // is held (trackpad pinch); a plain wheel keeps scrolling the page.
+    // Over the plot the wheel (and a trackpad pinch, sent as Ctrl+wheel) zooms around
+    // the pointer; Shift+wheel and a horizontal scroll pan (AC-FENCD9.3).
     const onWheel = (e: WheelEvent): void => {
-      const focused = document.activeElement === el;
-      if (!wheelZooms({ focused, ctrlKey: e.ctrlKey, metaKey: e.metaKey })) return;
       e.preventDefault();
-      gesture({ kind: "wheel", atMs: u.posToVal(e.offsetX, "x"), deltaY: e.deltaY });
+      gesture({
+        kind: "wheel",
+        // By viewport x: the event may land on one of uPlot's cursor elements.
+        atMs: timeAtClientX(e.clientX),
+        deltaY: e.deltaY,
+        deltaX: e.deltaX,
+        shiftKey: e.shiftKey,
+      });
     };
 
-    // Shift-drag or middle-button drag pans (captured before uPlot's drag-select).
+    // Shift-drag or middle-button drag pans, a plain drag scrubs the playhead and an
+    // Alt-drag zooms to the dragged range (AC-FENCD9.4); all three are captured before
+    // uPlot sees them, so its own drag-select never starts.
     let panFromX: number | null = null;
-    const onPanMove = (e: MouseEvent): void => {
+    let scrubbing = false;
+    /** An Alt-drag in progress: the plot x it started at (handled here rather than by
+     * uPlot's own drag-select, which WebKit never reaches with Alt held). */
+    let selectFromX: number | null = null;
+    const onDragMove = (e: MouseEvent): void => {
+      // No button held: the mouseup went missing (released outside the window), so
+      // the drag ends here, nothing applied.
+      if (e.buttons === 0) {
+        onDragEnd();
+        return;
+      }
+      if (selectFromX !== null) {
+        const x = plotX(e.clientX);
+        const left = Math.min(selectFromX, x);
+        u.setSelect(
+          { left, top: 0, width: Math.abs(x - selectFromX), height: over.clientHeight },
+          false,
+        );
+        return;
+      }
+      if (scrubbing) {
+        setPlayhead(timeAtClientX(e.clientX));
+        return;
+      }
       if (panFromX === null) return;
       const width = over.clientWidth || 1;
       const range = currentRange();
@@ -491,22 +909,56 @@
       panFromX = e.clientX;
       if (deltaMs !== 0) gesture({ kind: "pan", deltaMs });
     };
-    const onPanEnd = (): void => {
+    const onDragEnd = (e?: MouseEvent): void => {
+      if (selectFromX !== null) {
+        const from = selectFromX;
+        selectFromX = null;
+        u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
+        const to = e ? plotX(e.clientX) : from;
+        if (Math.abs(to - from) > 0) {
+          const t0Ms = u.posToVal(Math.min(from, to), "x");
+          const t1Ms = u.posToVal(Math.max(from, to), "x");
+          gesture({ kind: "select", t0Ms, t1Ms });
+        }
+      }
       panFromX = null;
-      window.removeEventListener("mousemove", onPanMove);
-      window.removeEventListener("mouseup", onPanEnd);
+      scrubbing = false;
+      window.removeEventListener("mousemove", onDragMove);
+      window.removeEventListener("mouseup", onDragEnd);
+      window.removeEventListener("blur", onDragCancel);
     };
-    const onPanStart = (e: MouseEvent): void => {
-      if (!(e.button === 1 || (e.button === 0 && e.shiftKey))) return;
+    /** The window lost focus mid-drag: its mouseup may never come, so cancel. */
+    const onDragCancel = (): void => onDragEnd();
+    const onDragStart = (e: MouseEvent): void => {
       if (!over.contains(e.target as Node)) return;
+      const pan = e.button === 1 || (e.button === 0 && e.shiftKey);
+      const select = e.button === 0 && !e.shiftKey && e.altKey;
+      const scrub = e.button === 0 && !e.shiftKey && !e.altKey;
+      if (!pan && !scrub && !select) return;
       e.preventDefault();
       e.stopPropagation();
-      panFromX = e.clientX;
-      window.addEventListener("mousemove", onPanMove);
-      window.addEventListener("mouseup", onPanEnd);
+      // preventDefault keeps focus where it was: land the keyboard on the plot, without
+      // a focus ring (the focus came from the mouse).
+      pointerFocus = true;
+      el.focus({ preventScroll: true });
+      if (pan) panFromX = e.clientX;
+      else if (select) selectFromX = plotX(e.clientX);
+      else {
+        scrubbing = true;
+        setPlayhead(timeAtClientX(e.clientX));
+      }
+      window.addEventListener("mousemove", onDragMove);
+      window.addEventListener("mouseup", onDragEnd);
+      window.addEventListener("blur", onDragCancel);
+    };
+    // A double-click fits the whole session.
+    const onDblClick = (e: MouseEvent): void => {
+      e.preventDefault();
+      fitSession();
     };
     over.addEventListener("wheel", onWheel, { passive: false });
-    el.addEventListener("mousedown", onPanStart, true);
+    over.addEventListener("dblclick", onDblClick);
+    el.addEventListener("mousedown", onDragStart, true);
 
     const observer = new ResizeObserver(() => {
       u.setSize(sizeOf(el));
@@ -518,8 +970,9 @@
     untrack(draw);
     return () => {
       over.removeEventListener("wheel", onWheel);
-      el.removeEventListener("mousedown", onPanStart, true);
-      onPanEnd();
+      over.removeEventListener("dblclick", onDblClick);
+      el.removeEventListener("mousedown", onDragStart, true);
+      onDragEnd();
       observer.disconnect();
       u.destroy();
       if (plot === u) plot = null;
@@ -540,8 +993,8 @@
       {#each LIVE_WINDOWS as w (w.id)}
         <button
           type="button"
-          aria-pressed={windowPressed(view, w.id)}
-          class:primary={windowPressed(view, w.id)}
+          aria-pressed={presetPressed(view, w.id)}
+          class:primary={presetPressed(view, w.id)}
           onclick={() => pickWindow(w.id)}>{w.label}</button
         >
       {/each}
@@ -554,6 +1007,22 @@
       title="Start every value axis at zero, so small changes are drawn to scale"
       onclick={toggleZeroBased}>Zero-based axes</button
     >
+    <input
+      type="range"
+      class="zoom-slider"
+      aria-label="Zoom"
+      aria-valuetext={zoomText}
+      title="Zoom: visible span"
+      min="0"
+      max={ZOOM_SLIDER_MAX}
+      step="1"
+      value={zoomValue}
+      disabled={!hasData}
+      oninput={onZoomInput}
+    />
+    <!-- The span the slider sets, in the time axis's own format; screen readers hear it
+         as the slider's value text. -->
+    <span class="zoom-span" title="Zoom: visible span" aria-hidden="true">{zoomText}</span>
     <button
       type="button"
       class="live"
@@ -607,16 +1076,38 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="plot"
+    class:pointer-focus={pointerFocus}
     bind:this={host}
     role="application"
     tabindex="0"
-    aria-label="Chart. Drag to zoom, Shift-drag to pan; the wheel zooms when the chart is focused or with Ctrl or ⌘ held; arrow keys pan and zoom, L or End returns to live."
+    aria-label="Chart. Click or drag to move the playhead, Alt-drag to zoom to a range, middle-drag or Shift-drag to pan, double-click to fit the session; the wheel or a pinch zooms, Shift-wheel or a horizontal scroll pans; left and right arrows step the playhead, up and down arrows zoom, J, K and L shuttle the playhead, Home jumps to the session start, End returns to live."
     onkeydown={onKeydown}
+    onblur={() => (pointerFocus = false)}
   >
     {#if historyError !== null && view.mode === "history"}
       <p class="history-error" role="status">{historyError}</p>
     {/if}
   </div>
+  <!-- Overview strip: the whole session, with a window over the range on screen. -->
+  <OverviewStrip
+    bind:this={overview}
+    {theme}
+    current={() => {
+      const range = currentRange();
+      return range === null ? null : overviewState(range);
+    }}
+    {warpFor}
+    gapsVersion={() => sessionGaps.version}
+    sources={envelopeSources}
+    onrange={showRange}
+    onresize={() => scheduler.invalidate()}
+    onbox={(box) => {
+      if (E2E_BUILD && probe !== null) probe.overview(box);
+    }}
+    onbreaks={(breaks) => {
+      if (E2E_BUILD && probe !== null) probe.overviewBreaks(breaks);
+    }}
+  />
 </div>
 
 <style>
@@ -636,6 +1127,18 @@
   }
   .zero-based {
     margin-left: auto;
+  }
+  .zoom-slider {
+    width: 8rem;
+    align-self: center;
+  }
+  .zoom-span {
+    align-self: center;
+    min-width: 3.5em;
+    margin-left: -0.125rem;
+    font-size: 0.85em;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted, GrayText);
   }
   /* Paused: the accent colour says the chart is not following the stream (AC-DDDYDJ.4). */
   .live.paused {
@@ -681,7 +1184,12 @@
   .hover-label {
     margin-right: 0.25rem;
   }
-  .plot:focus-visible {
+  /* Keyboard focus only: a focus the mouse gave shows no ring until focus leaves (this
+     also overrides the app-wide :focus-visible ring keys would otherwise bring back). */
+  .plot.pointer-focus:focus-visible {
+    outline: none;
+  }
+  .plot:focus-visible:not(.pointer-focus) {
     outline: 2px solid currentColor;
     outline-offset: 2px;
   }

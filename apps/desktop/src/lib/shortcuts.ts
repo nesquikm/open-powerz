@@ -23,6 +23,11 @@ export type ShortcutAction =
   | { kind: "reset_stats" }
   | { kind: "rate"; sps: number }
   | { kind: "live" }
+  | { kind: "home" }
+  | { kind: "shuttle"; key: "J" | "K" | "L" }
+  | { kind: "step"; direction: -1 | 1; coarse: boolean }
+  | { kind: "zoom"; direction: "in" | "out" }
+  | { kind: "fit" }
   | { kind: "theme" }
   | { kind: "help" };
 
@@ -32,7 +37,11 @@ export const SHORTCUTS: readonly { keys: string; description: string }[] = [
   { keys: "C", description: "Connect or disconnect" },
   { keys: "R", description: "Reset statistics" },
   { keys: "1–4", description: "Sample rate: 2, 10, 50 or 1000 SPS" },
-  { keys: "L / End", description: "Return the chart to live" },
+  { keys: "J / K / L", description: "Shuttle the playhead back / stop / forward" },
+  { keys: "← / →", description: "Step the playhead (Shift: a tenth of the view)" },
+  { keys: "+ / −", description: "Zoom in / out" },
+  { keys: "Home / End", description: "Jump to the session start / return the chart to live" },
+  { keys: "Shift+Z", description: "Fit the whole session" },
   { keys: "T", description: "Cycle theme (System, Light, Dark)" },
   { keys: "?", description: "Show this shortcut list" },
 ];
@@ -65,11 +74,14 @@ export function isTextInput(target: TargetLike | null): boolean {
 }
 
 /** True when the focused control uses `key` itself: a select's type-ahead takes
- * every printable key (and Home / End move its choice), and Space activates a
- * button or a toggle input. */
+ * every printable key (and Home / End move its choice), a range input keeps
+ * ← / → / Home / End, and Space activates a button or a toggle input. */
 function controlOwnsKey(target: TargetLike | null, key: string): boolean {
   if (target === null) return false;
   const tag = target.tagName.toUpperCase();
+  const isRange = tag === "INPUT" && (target.type ?? "").toLowerCase() === "range";
+  if (key === "ArrowLeft" || key === "ArrowRight") return tag === "SELECT" || isRange;
+  if (isRange && (key === "Home" || key === "End")) return true;
   if (tag === "SELECT") return key.length === 1 || key === "Home" || key === "End";
   if (key !== " ") return false;
   return tag === "BUTTON" || (tag === "INPUT" && !isTextInput(target));
@@ -84,6 +96,13 @@ export function shortcutFor(event: KeyLike): ShortcutAction | null {
   if (key === " ") return { kind: "record" };
   if (key === "?") return { kind: "help" };
   if (key === "End") return { kind: "live" };
+  if (key === "Home") return { kind: "home" };
+  if (key === "ArrowLeft" || key === "ArrowRight") {
+    return { kind: "step", direction: key === "ArrowLeft" ? -1 : 1, coarse: !!event.shiftKey };
+  }
+  if (key === "+" || key === "=") return { kind: "zoom", direction: "in" };
+  if (key === "-" || key === "\u2212") return { kind: "zoom", direction: "out" };
+  if ((key === "Z" || key === "z") && event.shiftKey) return { kind: "fit" };
   const sps = RATE_KEYS[key];
   if (sps !== undefined) return { kind: "rate", sps };
   switch (key.toLowerCase()) {
@@ -91,8 +110,12 @@ export function shortcutFor(event: KeyLike): ShortcutAction | null {
       return { kind: "connect" };
     case "r":
       return { kind: "reset_stats" };
+    case "j":
+      return { kind: "shuttle", key: "J" };
+    case "k":
+      return { kind: "shuttle", key: "K" };
     case "l":
-      return { kind: "live" };
+      return { kind: "shuttle", key: "L" };
     case "t":
       return { kind: "theme" };
     default:

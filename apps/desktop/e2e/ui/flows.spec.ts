@@ -165,20 +165,23 @@ test.describe("keyboard shortcuts (AC-AH2AEN.5)", () => {
     await expect.poll(() => statsElapsedSeconds(page), { timeout: 2_000 }).toBeLessThan(2);
   });
 
-  test("L returns the chart to live; arrow keys pause it (AC-DDDYDJ.3)", async ({ page }) => {
+  test("End returns the chart to live; arrow-key zoom pauses it (AC-DDDYDJ.3, FR FENCD9)", async ({
+    page,
+  }) => {
     await open(page);
     await streamDemo(page);
     const live = page.locator(".chart-wrap button.live");
     await expect(live).toHaveText("Live");
     await expect(live).toHaveAttribute("aria-pressed", "true");
     await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(10);
-    // Arrow keys on the focused chart pan it into history.
+    // ArrowUp on the focused chart zooms it into history (← / → step the playhead now).
     await page.getByRole("application").focus();
-    await page.keyboard.press("ArrowLeft");
+    await page.keyboard.press("ArrowUp");
     await expect(live).toHaveAttribute("aria-pressed", "false");
     await expect(live).toHaveText("Paused · Go live");
+    // End goes live (L is the J/K/L shuttle now).
     await blur(page);
-    await page.keyboard.press("l");
+    await page.keyboard.press("End");
     await expect(live).toHaveAttribute("aria-pressed", "true");
   });
 

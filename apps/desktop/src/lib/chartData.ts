@@ -76,6 +76,7 @@ export class GapList {
   #gaps: GapSpan[] = [];
   /** The longest gap ever added, so a range query knows how far back one can start. */
   #longestMs = 0;
+  #version = 0;
 
   constructor(cap: number = MAX_GAPS) {
     this.cap = Math.max(1, Math.floor(cap));
@@ -83,6 +84,11 @@ export class GapList {
 
   get length(): number {
     return this.#gaps.length;
+  }
+
+  /** Changes whenever the gaps do, so a caller can cache what it built from them. */
+  get version(): number {
+    return this.#version;
   }
 
   /** Adds `gap`, unless the list already has the same stretch: the stream and the
@@ -95,6 +101,9 @@ export class GapList {
     for (const i of [at - 1, at]) {
       const g = gaps[i];
       if (g && sameStretch(g, gap)) {
+        // A report the list already covers changes nothing.
+        if (g.from_ms <= gap.from_ms && g.to_ms >= gap.to_ms && (g.kind ?? gap.kind) === g.kind)
+          return;
         // The widened gap may sort earlier or reach another report: take it out and
         // add it again, so the list stays sorted and merges what it now covers.
         gaps.splice(i, 1);
@@ -108,6 +117,7 @@ export class GapList {
       }
     }
     this.#longestMs = Math.max(this.#longestMs, gap.to_ms - gap.from_ms);
+    this.#version++;
     // Gaps arrive in time order, so this is almost always an append.
     if (gaps.length === 0 || (gaps[gaps.length - 1]?.from_ms ?? -Infinity) <= gap.from_ms) {
       gaps.push(gap);
@@ -120,12 +130,16 @@ export class GapList {
   clear(): void {
     this.#gaps = [];
     this.#longestMs = 0;
+    this.#version++;
   }
 
   /** Forgets the gaps starting before `ms`. */
   dropBefore(ms: number): void {
     const i = this.#firstFrom(ms);
-    if (i > 0) this.#gaps.splice(0, i);
+    if (i > 0) {
+      this.#gaps.splice(0, i);
+      this.#version++;
+    }
   }
 
   /** The gaps starting in [t0Ms, t1Ms], oldest first. */

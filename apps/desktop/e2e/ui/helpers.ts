@@ -24,7 +24,14 @@
 
 import { expect, type Page } from "@playwright/test";
 import { LINUX_PERMISSION_DENIED } from "../../src/lib/mockBackend";
-import { HOOK, type ChartDraw, type ChartGapBand, type OpenPowerzE2E } from "../hook";
+import {
+  HOOK,
+  type ChartBreak,
+  type ChartDraw,
+  type ChartGapBand,
+  type OpenPowerzE2E,
+  type OverviewWindowBox,
+} from "../hook";
 
 export const DEMO_LOAD = "demo:load-5v-1a";
 export const DEMO_LOAD_LABEL = "Demo device — load-5v-1a";
@@ -153,6 +160,61 @@ export async function chartGapBands(page: Page): Promise<ChartGapBand[]> {
   await expectHook(page);
   return page.evaluate(
     (name) => (window as unknown as Record<string, OpenPowerzE2E>)[name]!.chartGapBands(),
+    HOOK,
+  );
+}
+
+/** Calls one accessor of the test hook in the page. */
+async function hookCall<K extends keyof OpenPowerzE2E>(
+  page: Page,
+  method: K,
+): Promise<ReturnType<OpenPowerzE2E[K]>> {
+  await expectHook(page);
+  return page.evaluate(
+    ([name, m]) => {
+      const h = (window as unknown as Record<string, OpenPowerzE2E>)[name]!;
+      const fn = h[m as keyof OpenPowerzE2E] as unknown;
+      if (typeof fn !== "function") throw new Error(`the test hook has no ${m}()`);
+      return (fn as () => unknown).call(h);
+    },
+    [HOOK, method] as const,
+  ) as Promise<ReturnType<OpenPowerzE2E[K]>>;
+}
+
+/** The chart's playhead (session ms) or null, read through the test hook (FR FENCD9). */
+export function chartPlayhead(page: Page): Promise<number | null> {
+  return hookCall(page, "chartPlayhead");
+}
+
+/** The J/K/L shuttle speed, read through the test hook (FR FENCD9). */
+export function chartShuttle(page: Page): Promise<number> {
+  return hookCall(page, "chartShuttle");
+}
+
+/** The collapsed gaps of the chart's last draw, read through the test hook (FR FENCD9). */
+export function chartBreaks(page: Page): Promise<ChartBreak[]> {
+  return hookCall(page, "chartBreaks");
+}
+
+/** The overview strip's viewport window, read through the test hook (FR FENCD9). */
+export function overviewWindow(page: Page): Promise<OverviewWindowBox | null> {
+  return hookCall(page, "overviewWindow");
+}
+
+/** The chart's last draw, read through the test hook. */
+export async function lastDraw(page: Page): Promise<ChartDraw> {
+  const d = (await chartDraws(page)).at(-1);
+  if (!d) throw new Error("the chart has not drawn yet");
+  return d;
+}
+
+/** The collapsed gaps the overview strip drew, read through the test hook. */
+export async function overviewBreaks(
+  page: Page,
+): Promise<{ leftPx: number; widthPx: number; label: string }[]> {
+  await expectHook(page);
+  return page.evaluate(
+    (name) => (window as unknown as Record<string, OpenPowerzE2E>)[name]!.overviewBreaks(),
     HOOK,
   );
 }

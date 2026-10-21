@@ -1,0 +1,399 @@
+import { describe, expect, it } from "vitest";
+import type { GapSpan } from "./chartData";
+import {
+  BREAK_PX,
+  COLLAPSE_MIN_GAP_MS,
+  MAX_BREAK_PX,
+  MIN_SPAN_MS,
+  SHUTTLE_SPEEDS,
+  buildWarp,
+  dragOverview,
+  followPlayhead,
+  overviewClick,
+  overviewWindow,
+  presetRange,
+  shuttlePress,
+  shuttleStep,
+  sliderToSpan,
+  spanToSlider,
+  stepPlayhead,
+  type TimeRange,
+  type TimeWarp,
+} from "./timeline";
+
+/** 20 s of data, a 40-minute outage, then 20 s more (the `?mock=outage` shape). */
+const GAP_FROM = 20_000;
+const GAP_TO = GAP_FROM + 2_400_000;
+const END = GAP_TO + 20_000;
+const OUTAGE: GapSpan[] = [{ from_ms: GAP_FROM, to_ms: GAP_TO }];
+const WIDTH = 1000;
+
+/** On-screen pixels between two session times for a view drawn across `widthPx`. */
+function px(w: TimeWarp, view: TimeRange, widthPx: number, a: number, b: number): number {
+  const span = w.fwd(view.t1Ms) - w.fwd(view.t0Ms);
+  return ((w.fwd(b) - w.fwd(a)) / span) * widthPx;
+}
+
+describe("buildWarp: collapsed long gaps (AC-FENCD9.11)", () => {
+  it("is the identity with no gap longer than a minute", () => {
+    expect(COLLAPSE_MIN_GAP_MS).toBe(60_000);
+    const short: GapSpan[] = [{ from_ms: 10_000, to_ms: 40_000 }];
+    for (const gaps of [[], short]) {
+      const w = buildWarp(gaps, { t0Ms: 0, t1Ms: 100_000 }, WIDTH);
+      expect(w.breaks).toEqual([]);
+      for (const t of [0, 12_345, 25_000, 99_999]) {
+        expect(w.fwd(t)).toBe(t);
+        expect(w.bwd(t)).toBe(t);
+      }
+    }
+  });
+
+  it("squeezes a 40-minute gap to BREAK_PX (never more than MAX_BREAK_PX) when fully in view", () => {
+    expect(BREAK_PX).toBe(24);
+    expect(MAX_BREAK_PX).toBe(32);
+    const view = { t0Ms: 0, t1Ms: END };
+    const w = buildWarp(OUTAGE, view, WIDTH);
+    expect(w.breaks).toEqual([{ fromMs: GAP_FROM, toMs: GAP_TO }]);
+    const breakPx = px(w, view, WIDTH, GAP_FROM, GAP_TO);
+    expect(breakPx).toBeLessThanOrEqual(MAX_BREAK_PX);
+    expect(breakPx).toBeCloseTo(BREAK_PX, 0);
+    // The 40 s of data fill the rest of the plot.
+    expect(px(w, view, WIDTH, 0, GAP_FROM) + px(w, view, WIDTH, GAP_TO, END)).toBeCloseTo(
+      WIDTH - BREAK_PX,
+      0,
+    );
+  });
+
+  it("keeps a narrow break on a narrow plot too", () => {
+    const view = { t0Ms: 0, t1Ms: END };
+    for (const width of [200, 600, 3000]) {
+      const w = buildWarp(OUTAGE, view, width);
+      expect(px(w, view, width, GAP_FROM, GAP_TO)).toBeLessThanOrEqual(MAX_BREAK_PX);
+      expect(px(w, view, width, GAP_FROM, GAP_TO)).toBeGreaterThan(0);
+    }
+  });
+
+  it("maps time monotonically", () => {
+    const w = buildWarp(OUTAGE, { t0Ms: 0, t1Ms: END }, WIDTH);
+    let prev = -Infinity;
+    for (let t = 0; t <= END; t += 7_919) {
+      const d = w.fwd(t);
+      expect(d).toBeGreaterThanOrEqual(prev);
+      prev = d;
+    }
+    expect(w.fwd(END)).toBeGreaterThan(w.fwd(0));
+  });
+
+  it("inverts outside the gap: bwd(fwd(t)) ≈ t on both sides", () => {
+    const w = buildWarp(OUTAGE, { t0Ms: 0, t1Ms: END }, WIDTH);
+    for (const t of [0, 1_234, 19_999, GAP_TO + 1, GAP_TO + 10_000, END]) {
+      expect(w.bwd(w.fwd(t))).toBeCloseTo(t, 3);
+    }
+  });
+
+  it("keeps times on both sides true: one second of data spans the same display time anywhere", () => {
+    const w = buildWarp(OUTAGE, { t0Ms: 0, t1Ms: END }, WIDTH);
+    expect(w.fwd(6_000) - w.fwd(5_000)).toBeCloseTo(1_000, 6);
+    expect(w.fwd(GAP_TO + 6_000) - w.fwd(GAP_TO + 5_000)).toBeCloseTo(1_000, 6);
+    // The data after the gap starts right after the break, not 40 minutes later.
+    expect(w.fwd(GAP_TO) - w.fwd(GAP_FROM)).toBeLessThan(2_400_000 / 10);
+  });
+
+  it("squeezes a gap only partly in view in proportion to the part in view", () => {
+    // Half the gap in view: its visible half gets about half a break.
+    const view = { t0Ms: 10_000, t1Ms: GAP_FROM + 1_200_000 };
+    const w = buildWarp(OUTAGE, view, WIDTH);
+    expect(w.breaks).toHaveLength(1);
+    const visiblePx = px(w, view, WIDTH, GAP_FROM, view.t1Ms);
+    expect(visiblePx).toBeLessThan(BREAK_PX);
+    expect(Math.abs(visiblePx - BREAK_PX / 2)).toBeLessThanOrEqual(1.5);
+  });
+
+  it("changes the mapping smoothly while panning across a gap", () => {
+    const span = 30_000 + 2_400_000;
+    let prevPx: number | null = null;
+    for (let t0 = 0; t0 <= 15_000; t0 += 500) {
+      const view = { t0Ms: t0, t1Ms: t0 + span };
+      const w = buildWarp(OUTAGE, view, WIDTH);
+      const at = px(w, view, WIDTH, t0, GAP_FROM);
+      if (prevPx !== null) expect(Math.abs(at - prevPx)).toBeLessThan(WIDTH / 10);
+      prevPx = at;
+    }
+  });
+
+  it("neither marks nor budgets a long gap shorter than its would-be break", () => {
+    // A 10-hour view: one break is worth ~14 minutes of display, so a 61 s gap stays
+    // at its true width and only the 40-minute outage collapses.
+    const short = { from_ms: 3_600_000, to_ms: 3_661_000 };
+    const outage = { from_ms: 7_200_000, to_ms: 9_600_000 };
+    const view = { t0Ms: 0, t1Ms: 36_000_000 };
+    const w = buildWarp([short, outage], view, WIDTH);
+    expect(w.breaks).toEqual([{ fromMs: outage.from_ms, toMs: outage.to_ms }]);
+    // The outage gets the whole break budget: BREAK_PX, not more.
+    expect(px(w, view, WIDTH, outage.from_ms, outage.to_ms)).toBeCloseTo(BREAK_PX, 1);
+    // The short gap keeps its true time.
+    expect(w.fwd(short.to_ms) - w.fwd(short.from_ms)).toBeCloseTo(61_000, 6);
+  });
+
+  it("maps many breaks in logarithmic time per point, the same as a linear walk", () => {
+    // 5000 two-minute gaps, one minute of data between them.
+    const gaps: GapSpan[] = [];
+    for (let i = 0; i < 5_000; i++) {
+      const from = i * 180_000 + 60_000;
+      gaps.push({ from_ms: from, to_ms: from + 120_000 });
+    }
+    const view = { t0Ms: 0, t1Ms: 5_000 * 180_000 };
+    const w = buildWarp(gaps, view, WIDTH);
+    expect(w.breaks).toHaveLength(5_000);
+    // Each gap is squeezed by the same factor: data before gap i is i minutes plus i
+    // squeezed gaps.
+    const squeezed = w.fwd(gaps[0]!.to_ms) - w.fwd(gaps[0]!.from_ms);
+    for (const i of [0, 1, 2_500, 4_999]) {
+      const g = gaps[i]!;
+      expect(w.fwd(g.from_ms)).toBeCloseTo(60_000 * (i + 1) + squeezed * i, 3);
+      expect(w.bwd(w.fwd(g.from_ms - 1_000))).toBeCloseTo(g.from_ms - 1_000, 3);
+      expect(w.bwd(w.fwd(g.to_ms + 1_000))).toBeCloseTo(g.to_ms + 1_000, 3);
+    }
+    // uPlot maps every point through fwd / bwd: 200 000 calls stay fast.
+    const n = 100_000;
+    const t0 = performance.now();
+    let sink = 0;
+    for (let k = 0; k < n; k++) {
+      const t = (k / n) * view.t1Ms;
+      sink += w.fwd(t) + w.bwd(t);
+    }
+    expect(Number.isFinite(sink)).toBe(true);
+    expect(performance.now() - t0).toBeLessThan(250);
+  });
+});
+
+describe("J/K/L shuttle (AC-FENCD9.7)", () => {
+  it("L plays forwards at 1×, 2×, 4×, 8× on repeated presses and stays at 8×", () => {
+    expect([...SHUTTLE_SPEEDS]).toEqual([1, 2, 4, 8]);
+    expect(shuttlePress(0, "L")).toBe(1);
+    expect(shuttlePress(1, "L")).toBe(2);
+    expect(shuttlePress(2, "L")).toBe(4);
+    expect(shuttlePress(4, "L")).toBe(8);
+    expect(shuttlePress(8, "L")).toBe(8);
+  });
+
+  it("J mirrors L backwards", () => {
+    expect(shuttlePress(0, "J")).toBe(-1);
+    expect(shuttlePress(-1, "J")).toBe(-2);
+    expect(shuttlePress(-2, "J")).toBe(-4);
+    expect(shuttlePress(-4, "J")).toBe(-8);
+    expect(shuttlePress(-8, "J")).toBe(-8);
+  });
+
+  it("a press in the other direction reverses at 1×", () => {
+    expect(shuttlePress(-4, "L")).toBe(1);
+    expect(shuttlePress(8, "J")).toBe(-1);
+  });
+
+  it("K stops", () => {
+    for (const s of [-8, -1, 0, 2, 8]) expect(shuttlePress(s, "K")).toBe(0);
+  });
+
+  it("moves the playhead by speed × elapsed time", () => {
+    const session = { firstMs: 0, lastMs: 10_000 };
+    const mid = { reachedEnd: false, reachedStart: false };
+    expect(shuttleStep(1_000, 2, 100, session)).toEqual({ playheadMs: 1_200, ...mid });
+    expect(shuttleStep(1_000, -4, 100, session)).toEqual({ playheadMs: 600, ...mid });
+    expect(shuttleStep(1_000, 0, 100, session)).toEqual({ playheadMs: 1_000, ...mid });
+  });
+
+  it("stops at the session start, and reaching the newest data forwards says so", () => {
+    const session = { firstMs: 0, lastMs: 10_000 };
+    expect(shuttleStep(100, -8, 100, session)).toEqual({
+      playheadMs: 0,
+      reachedEnd: false,
+      reachedStart: true,
+    });
+    expect(shuttleStep(9_950, 1, 100, session)).toEqual({
+      playheadMs: 10_000,
+      reachedEnd: true,
+      reachedStart: false,
+    });
+    expect(shuttleStep(9_000, 8, 1_000, session)).toEqual({
+      playheadMs: 10_000,
+      reachedEnd: true,
+      reachedStart: false,
+    });
+  });
+
+  it("says so when moving backwards reaches the session start, never forwards", () => {
+    const session = { firstMs: 5_000, lastMs: 10_000 };
+    expect(shuttleStep(5_000, -1, 16, session).reachedStart).toBe(true);
+    expect(shuttleStep(5_000, -1, 0, session).reachedStart).toBe(true);
+    expect(shuttleStep(5_100, -1, 16, session).reachedStart).toBe(false);
+    expect(shuttleStep(5_000, 1, 0, session).reachedStart).toBe(false);
+  });
+});
+
+describe("arrow keys step the playhead (AC-FENCD9.6)", () => {
+  const view = { t0Ms: 10_000, t1Ms: 20_000 };
+  const session = { firstMs: 0, lastMs: 30_000 };
+
+  it("moves one pixel's worth of time, or a tenth of the view with Shift", () => {
+    // 10 s across 1000 px: 10 ms a pixel.
+    expect(stepPlayhead(15_000, 1, view, 1000, false, session)).toBeCloseTo(15_010, 6);
+    expect(stepPlayhead(15_000, -1, view, 1000, false, session)).toBeCloseTo(14_990, 6);
+    expect(stepPlayhead(15_000, 1, view, 1000, true, session)).toBeCloseTo(16_000, 6);
+    expect(stepPlayhead(15_000, -1, view, 1000, true, session)).toBeCloseTo(14_000, 6);
+  });
+
+  it("starts a missing playhead at the view centre", () => {
+    const r = stepPlayhead(null, 1, view, 1000, false, session);
+    expect(Math.abs(r - 15_000)).toBeLessThanOrEqual(10);
+    const c = stepPlayhead(null, -1, view, 1000, true, session);
+    expect(Math.abs(c - 15_000)).toBeLessThanOrEqual(1_000);
+  });
+
+  it("stays inside the session", () => {
+    expect(stepPlayhead(5, -1, { t0Ms: 0, t1Ms: 1_000 }, 100, true, session)).toBe(0);
+    expect(stepPlayhead(29_999, 1, { t0Ms: 20_000, t1Ms: 30_000 }, 100, true, session)).toBe(
+      30_000,
+    );
+  });
+
+  it("the view follows when the playhead would leave it, by the least amount", () => {
+    expect(followPlayhead(view, 15_000, session)).toEqual(view);
+    expect(followPlayhead(view, 21_000, session)).toEqual({ t0Ms: 11_000, t1Ms: 21_000 });
+    expect(followPlayhead(view, 8_000, session)).toEqual({ t0Ms: 8_000, t1Ms: 18_000 });
+    // Never past the session.
+    expect(followPlayhead({ t0Ms: 25_000, t1Ms: 35_000 }, 34_000, session)).toEqual({
+      t0Ms: 20_000,
+      t1Ms: 30_000,
+    });
+  });
+});
+
+describe("zoom slider scale (AC-FENCD9.9)", () => {
+  const max = 3_600_000;
+
+  it("runs from 10 ms to the whole session", () => {
+    expect(MIN_SPAN_MS).toBe(10);
+    expect(spanToSlider(10, max)).toBeCloseTo(0, 9);
+    expect(spanToSlider(max, max)).toBeCloseTo(1, 9);
+    expect(sliderToSpan(0, max)).toBeCloseTo(10, 6);
+    expect(sliderToSpan(1, max)).toBeCloseTo(max, 3);
+  });
+
+  it("is logarithmic: the geometric middle sits at the slider's middle", () => {
+    expect(spanToSlider(Math.sqrt(10 * max), max)).toBeCloseTo(0.5, 6);
+    expect(sliderToSpan(0.5, max)).toBeCloseTo(Math.sqrt(10 * max), 3);
+  });
+
+  it("round-trips a span", () => {
+    for (const s of [10, 100, 5_000, 60_000, 1_000_000, max]) {
+      expect(sliderToSpan(spanToSlider(s, max), max) / s).toBeCloseTo(1, 6);
+    }
+  });
+
+  it("clamps out-of-range spans and values", () => {
+    expect(spanToSlider(1, max)).toBe(0);
+    expect(spanToSlider(2 * max, max)).toBe(1);
+    expect(sliderToSpan(-1, max)).toBeCloseTo(10, 6);
+    expect(sliderToSpan(2, max)).toBeCloseTo(max, 3);
+  });
+});
+
+describe("paused presets (AC-FENCD9.10)", () => {
+  const session = { firstMs: 0, lastMs: 100_000 };
+
+  it("centres the preset span on the anchor", () => {
+    expect(presetRange(10_000, 50_000, session)).toEqual({ t0Ms: 45_000, t1Ms: 55_000 });
+  });
+
+  it("Whole is the session", () => {
+    expect(presetRange(null, 50_000, session)).toEqual({ t0Ms: 0, t1Ms: 100_000 });
+  });
+
+  it("stays inside the session, keeping the span", () => {
+    expect(presetRange(10_000, 2_000, session)).toEqual({ t0Ms: 0, t1Ms: 10_000 });
+    expect(presetRange(10_000, 99_000, session)).toEqual({ t0Ms: 90_000, t1Ms: 100_000 });
+    expect(presetRange(600_000, 50_000, session)).toEqual({ t0Ms: 0, t1Ms: 100_000 });
+  });
+});
+
+describe("overview strip window (AC-FENCD9.1 / AC-FENCD9.2)", () => {
+  const session = { firstMs: 0, lastMs: 100_000 };
+  const whole = { t0Ms: 0, t1Ms: 100_000 };
+  const flat = buildWarp([], whole, WIDTH); // 100 ms a pixel
+  const start = { t0Ms: 20_000, t1Ms: 30_000 };
+
+  it("places the window over the view's range", () => {
+    expect(overviewWindow(start, session, WIDTH, flat)).toEqual({ leftPx: 200, widthPx: 100 });
+    expect(overviewWindow(whole, session, WIDTH, flat)).toEqual({ leftPx: 0, widthPx: WIDTH });
+  });
+
+  it("uses the collapsed-gap map: the last 10 s after an outage is a wide window at the right", () => {
+    const s = { firstMs: 0, lastMs: END };
+    const w = buildWarp(OUTAGE, { t0Ms: 0, t1Ms: END }, WIDTH);
+    const box = overviewWindow({ t0Ms: END - 10_000, t1Ms: END }, s, WIDTH, w);
+    expect(box.leftPx + box.widthPx).toBeCloseTo(WIDTH, 0);
+    // 10 s of the 40 s of data in the 976 px left beside the break.
+    expect(box.widthPx).toBeCloseTo((WIDTH - BREAK_PX) / 4, -1);
+  });
+
+  it("dragging the window pans, keeping the span", () => {
+    expect(dragOverview(start, "move", 100, session, WIDTH, flat)).toEqual({
+      t0Ms: 30_000,
+      t1Ms: 40_000,
+    });
+    expect(dragOverview(start, "move", -50, session, WIDTH, flat)).toEqual({
+      t0Ms: 15_000,
+      t1Ms: 25_000,
+    });
+  });
+
+  it("a pan stops at either end of the session", () => {
+    expect(dragOverview(start, "move", -500, session, WIDTH, flat)).toEqual({
+      t0Ms: 0,
+      t1Ms: 10_000,
+    });
+    expect(dragOverview(start, "move", 1_000, session, WIDTH, flat)).toEqual({
+      t0Ms: 90_000,
+      t1Ms: 100_000,
+    });
+  });
+
+  it("dragging an edge resizes the range from that side", () => {
+    expect(dragOverview(start, "left", -50, session, WIDTH, flat)).toEqual({
+      t0Ms: 15_000,
+      t1Ms: 30_000,
+    });
+    expect(dragOverview(start, "right", 50, session, WIDTH, flat)).toEqual({
+      t0Ms: 20_000,
+      t1Ms: 35_000,
+    });
+    expect(dragOverview(start, "left", -1_000, session, WIDTH, flat)).toEqual({
+      t0Ms: 0,
+      t1Ms: 30_000,
+    });
+    expect(dragOverview(start, "right", 1_000, session, WIDTH, flat)).toEqual({
+      t0Ms: 20_000,
+      t1Ms: 100_000,
+    });
+  });
+
+  it("an edge dragged past the other never makes the range narrower than 10 ms", () => {
+    const l = dragOverview(start, "left", 300, session, WIDTH, flat);
+    expect(l.t1Ms).toBe(30_000);
+    expect(l.t1Ms - l.t0Ms).toBeGreaterThanOrEqual(MIN_SPAN_MS);
+    const r = dragOverview(start, "right", -300, session, WIDTH, flat);
+    expect(r.t0Ms).toBe(20_000);
+    expect(r.t1Ms - r.t0Ms).toBeGreaterThanOrEqual(MIN_SPAN_MS);
+  });
+
+  it("a click outside the window centres the same span on the clicked time", () => {
+    expect(overviewClick(700, start, session, WIDTH, flat)).toEqual({
+      t0Ms: 65_000,
+      t1Ms: 75_000,
+    });
+    expect(overviewClick(995, start, session, WIDTH, flat)).toEqual({
+      t0Ms: 90_000,
+      t1Ms: 100_000,
+    });
+  });
+});

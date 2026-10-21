@@ -83,6 +83,15 @@ export function formatSessionTime(ms: number, decimals: number): string {
   return formatTime(ms, decimals, styleFor(ms, decimals));
 }
 
+/** A visible span as the zoom readout writes it, in the time axis's format: `10 s`,
+ * `2:30`, `40:23`, `1:02:03`; shorter than 10 s with the decimals it needs (`2.5 s`,
+ * `0.25 s`). */
+export function formatSpan(ms: number): string {
+  if (!Number.isFinite(ms)) return DASH;
+  if (ms >= 9_999.5) return formatDuration(ms);
+  return formatSessionTime(ms, ms < 1_000 ? 2 : 1);
+}
+
 /** A length of time in whole seconds: `45 s`, `40:00`, `1:02:03`. */
 export function formatDuration(ms: number): string {
   return formatSessionTime(Math.round(ms / 1000) * 1000, 0);
@@ -364,7 +373,12 @@ export function chartOptions({
     },
     // The component draws its own legend (toggle buttons) and hover readout.
     legend: { show: false },
-    // Plain drag selects an x range; the component zooms to it (leaving live mode).
-    cursor: { drag: { x: true, y: false, setScale: false } },
+    // An Alt-drag selects an x range (the component zooms to it, paused); a plain drag
+    // scrubs the playhead and a double-click fits the session, both handled by the
+    // component, so uPlot's own double-click reset is off.
+    cursor: {
+      drag: { x: true, y: false, setScale: false },
+      bind: { dblclick: () => null },
+    },
   };
 }

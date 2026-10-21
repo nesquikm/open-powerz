@@ -2,8 +2,9 @@
  * AC-AH2AEM.4 (deferred to this suite by FR AH2AEN): with a 10-million-sample
  * history served by the mock backend (`?synthetic=10000000`, which the mock
  * production build must honour), each pan step renders in at most 100 ms:
- * from the arrow key press to the chart's draw of the new range from its
- * history response, read through the e2e test hook.
+ * from the Shift+wheel step (a pan since FR FENCD9, where ← / → step the
+ * playhead instead) to the chart's draw of the new range from its history
+ * response, read through the e2e test hook.
  *
  * Chromium only: the seed is ~320 MB of columns per page, and the bound is a
  * property of the app, not of the browser engine.
@@ -30,17 +31,33 @@ test("a pan step over a 10M-sample history renders in ≤ 100 ms (AC-AH2AEM.4)",
   await expectHook(page);
   await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(0);
 
+  // Panning back can only reach the seeded history once the chart knows where the
+  // session starts: wait for "Whole session" to draw from 0, then return to 10 s.
+  await page.getByRole("button", { name: "Whole session" }).click();
+  await expect.poll(async () => (await chartDraws(page)).at(-1)?.t0Ms, { timeout: 30_000 }).toBe(0);
+  await page.getByRole("button", { name: "10 s" }).click();
   const plot = page.getByRole("application");
   await plot.focus();
   const timings: number[] = [];
   let previous: ChartDraw | null = null;
   for (let step = 0; step < PAN_STEPS; step++) {
     const before = (await chartDraws(page)).length;
-    // Press inside the page so the start time and the draw time share a clock.
+    // Scroll inside the page so the start time and the draw time share a clock.
     const pressedAt = await page.evaluate(() => {
+      const over = document.querySelector(".plot .u-over");
+      if (!over) throw new Error("no plot area");
+      const r = over.getBoundingClientRect();
       const t = performance.now();
-      document.activeElement?.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }),
+      // Shift+wheel up pans back in time.
+      over.dispatchEvent(
+        new WheelEvent("wheel", {
+          deltaY: -100,
+          shiftKey: true,
+          clientX: r.left + r.width / 2,
+          clientY: r.top + r.height / 2,
+          bubbles: true,
+          cancelable: true,
+        }),
       );
       return t;
     });

@@ -1,6 +1,7 @@
 import type { Series, SeriesBuckets } from "./backend";
 import { LIVE_WINDOWS, type LiveWindowId } from "./chartData";
 import { formatSessionTime } from "./chartSeries";
+import { MIN_SPAN_MS } from "./timeline";
 
 /** The chart never redraws more often than this, whatever the display's refresh rate. */
 export const MAX_REDRAW_HZ = 60;
@@ -69,10 +70,20 @@ export class RedrawScheduler {
 /** A user gesture on the chart (AC-AH2AEM.3). */
 export type ChartGesture =
   | { kind: "select"; t0Ms: number; t1Ms: number }
-  | { kind: "wheel"; atMs: number; deltaY: number }
+  /** Show exactly this range, paused (zoom slider, overview, paused presets). */
+  | { kind: "range"; t0Ms: number; t1Ms: number }
+  /** Wheel over the plot: zooms around `atMs`; a horizontal scroll (`deltaX`) or
+   * Shift+wheel pans instead (AC-FENCD9.3). */
+  | { kind: "wheel"; atMs: number; deltaY: number; deltaX?: number; shiftKey?: boolean }
   | { kind: "pan"; deltaMs: number }
   | { kind: "key"; key: string }
   | { kind: "pause" }
+  /** Paused, same span, starting at the session start (Home). */
+  | { kind: "home" }
+  /** Zoom by `factor` keeping `atMs` in place; factor < 1 zooms in (+ / = / −). */
+  | { kind: "zoom"; factor: number; atMs: number }
+  /** The whole session, live (the "all" window): Shift+Z. */
+  | { kind: "fit" }
   | { kind: "live" };
 
 /** A time range in ms. */
@@ -91,8 +102,8 @@ export interface SessionExtent {
 const ZOOM_STEP = 0.8;
 /** One arrow-key pan step moves the view by this fraction of its span. */
 const PAN_STEP = 0.1;
-/** The narrowest view, in ms. */
-const MIN_SPAN_MS = 1;
+/** A wheel pan moves the view by (scroll delta / this) of its span: 100 px → a tenth. */
+const WHEEL_PAN_PX = 1000;
 
 /** Zooms `shown` by `factor` keeping `atMs` at the same fraction of the view; never
  * wider than the session. */
@@ -140,6 +151,13 @@ export function applyGesture(
       // Freezes exactly the range on screen (AC-DDDYDJ.2); already paused, unchanged.
       if (view.mode === "history") return view;
       return { mode: "history", window: view.window, t0Ms: shown.t0Ms, t1Ms: shown.t1Ms };
+    case "home":
+      return history({ t0Ms: session.firstMs, t1Ms: session.firstMs + span });
+    case "zoom":
+      if (!(gesture.factor > 0) || !Number.isFinite(gesture.factor)) return view;
+      return history(zoom(shown, gesture.atMs, gesture.factor, session));
+    case "fit":
+      return view.mode === "live" && view.window === "all" ? view : { mode: "live", window: "all" };
     case "select": {
       // A selection is clipped to the session, never shifted.
       const t0Ms = Math.max(session.firstMs, Math.min(gesture.t0Ms, gesture.t1Ms));
@@ -147,11 +165,32 @@ export function applyGesture(
       if (t1Ms - t0Ms < MIN_SPAN_MS) return view;
       return history({ t0Ms, t1Ms });
     }
-    case "wheel":
+    case "range": {
+      const t0Ms = Math.min(gesture.t0Ms, gesture.t1Ms);
+      const t1Ms = Math.max(gesture.t0Ms, gesture.t1Ms);
+      if (!(t1Ms - t0Ms >= MIN_SPAN_MS)) return view;
+      return history({ t0Ms, t1Ms });
+    }
+    case "wheel": {
+      const dx = gesture.deltaX ?? 0;
+      // Shift+wheel pans by the vertical delta (some engines report it as deltaX).
+      const panDelta = gesture.shiftKey
+        ? gesture.deltaY || dx
+        : Math.abs(dx) > Math.abs(gesture.deltaY)
+          ? dx
+          : 0;
+      if (gesture.shiftKey || panDelta !== 0) {
+        if (panDelta === 0 || !Number.isFinite(panDelta)) return view;
+        // A view is never narrower than MIN_SPAN_MS, so a pan always moves.
+        const width = Math.max(MIN_SPAN_MS, span);
+        const deltaMs = (panDelta / WHEEL_PAN_PX) * width;
+        return history({ t0Ms: shown.t0Ms + deltaMs, t1Ms: shown.t0Ms + deltaMs + width });
+      }
       if (gesture.deltaY === 0) return view;
       return history(
         zoom(shown, gesture.atMs, gesture.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP, session),
       );
+    }
     case "pan":
       return history({ t0Ms: shown.t0Ms + gesture.deltaMs, t1Ms: shown.t1Ms + gesture.deltaMs });
     case "key":
@@ -205,12 +244,6 @@ export function liveButton(view: ChartView): { label: string; pressed: boolean; 
  * (AC-DDDYDJ.2). */
 export function liveToggle(view: ChartView): ChartGesture {
   return view.mode === "live" ? { kind: "pause" } : { kind: "live" };
-}
-
-/** The wheel zooms only when the chart has focus or Ctrl / ⌘ is held (a trackpad pinch
- * sends Ctrl); otherwise it scrolls the page as usual. */
-export function wheelZooms(e: { focused: boolean; ctrlKey: boolean; metaKey: boolean }): boolean {
-  return e.focused || e.ctrlKey || e.metaKey;
 }
 
 /** What the screen-reader status says on entering history mode or returning to live;
@@ -365,6 +398,11 @@ export class HistoryRequester {
   request(req: HistoryRequest): void {
     this.#pending = req;
     this.#queue();
+  }
+
+  /** No request pending, queued or in flight. */
+  get idle(): boolean {
+    return this.#pending === null && !this.#inFlight && !this.#frameQueued;
   }
 
   /** Forgets the pending request and drops the answer of the one in flight. */

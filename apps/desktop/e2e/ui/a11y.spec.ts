@@ -57,3 +57,34 @@ for (const theme of THEMES) {
     }
   }
 }
+
+/** FR FENCD9: the new timeline controls pass axe and carry accessible names. */
+test("axe: the timeline controls (AC-FENCD9.13)", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await open(page, "?synthetic=200000");
+  await streamDemo(page);
+  await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(0);
+  const win = page.getByRole("slider", { name: "Visible range" });
+  await expect(win).toBeVisible();
+  await expect(win).toHaveAttribute("tabindex", "0");
+  await expect(win).toHaveAttribute("aria-valuetext", /\S+ to \S+/);
+  const zoom = page.getByRole("slider", { name: "Zoom" });
+  await expect(zoom).toBeVisible();
+  await expect(zoom).toHaveAttribute("type", "range");
+  // Both reachable from the keyboard.
+  await win.focus();
+  await expect(win).toBeFocused();
+  await zoom.focus();
+  await expect(zoom).toBeFocused();
+  const results = await new AxeBuilder({ page })
+    .include(".chart-wrap")
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"])
+    .analyze();
+  const blocking = results.violations.filter(
+    (v) => v.impact === "serious" || v.impact === "critical",
+  );
+  expect(
+    blocking.map((v) => `${v.impact} ${v.id}: ${v.help}`),
+    "no serious or critical axe violations in the chart",
+  ).toEqual([]);
+});

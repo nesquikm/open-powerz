@@ -149,7 +149,7 @@
     void statsControls.reset(statsDeps);
   }
 
-  /** L shortcut: the chart back to its live window. */
+  /** End shortcut: the chart back to its live window. */
   function returnChartToLive(): void {
     chart?.returnToLive();
   }
@@ -173,6 +173,21 @@
         break;
       case "live":
         returnChartToLive();
+        break;
+      case "home":
+        chart?.goHome();
+        break;
+      case "shuttle":
+        chart?.shuttle(action.key);
+        break;
+      case "zoom":
+        chart?.zoomStep(action.direction);
+        break;
+      case "fit":
+        chart?.fitSession();
+        break;
+      case "step":
+        chart?.stepPlayheadBy(action.direction, action.coarse);
         break;
       case "theme":
         cycleTheme();

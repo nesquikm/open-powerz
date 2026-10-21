@@ -28,6 +28,21 @@ export interface ChartGapBand {
   label: string;
 }
 
+/** A collapsed long gap of the last draw (FR FENCD9, AC-FENCD9.11). */
+export interface ChartBreak {
+  /** The collapsed gap, session ms. */
+  fromMs: number;
+  toMs: number;
+  /** Its width on screen, CSS px. */
+  widthPx: number;
+}
+
+/** The overview strip's viewport window, CSS px from the strip's left edge. */
+export interface OverviewWindowBox {
+  leftPx: number;
+  widthPx: number;
+}
+
 export interface OpenPowerzE2E {
   /** Points the chart currently has drawn (non-null y values) per series. */
   chartSeriesLengths(): { vbus: number; ibus: number };
@@ -37,6 +52,16 @@ export interface OpenPowerzE2E {
   chartXTicks(): string[];
   /** The gaps the last draw shaded. */
   chartGapBands(): ChartGapBand[];
+  /** The playhead, session ms, or null when none is placed (FR FENCD9). */
+  chartPlayhead(): number | null;
+  /** The J/K/L shuttle speed: a signed multiple of real time, 0 when stopped. */
+  chartShuttle(): number;
+  /** The collapsed gaps of the last draw and their on-screen width. */
+  chartBreaks(): ChartBreak[];
+  /** The overview strip's viewport window, or null before it is drawn. */
+  overviewWindow(): OverviewWindowBox | null;
+  /** The collapsed gaps the overview strip drew: on-screen box and length label. */
+  overviewBreaks(): { leftPx: number; widthPx: number; label: string }[];
 }
 
 export const HOOK = "__OPEN_POWERZ_E2E__";

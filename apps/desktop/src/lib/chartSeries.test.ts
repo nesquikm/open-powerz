@@ -473,3 +473,18 @@ describe("time formatting edge cases (AC-272WSN.1, AC-272WSN.2)", () => {
     expect(ctx.font).toBe("10px original");
   });
 });
+
+describe("the zoom readout's span (AC-FENCD9.9)", () => {
+  it("writes the visible span like the time axis: seconds, then m:ss, then h:mm:ss", async () => {
+    const { formatSpan } = await import("./chartSeries");
+    expect(formatSpan(10_000)).toBe("10 s");
+    expect(formatSpan(150_000)).toBe("2:30");
+    expect(formatSpan(2_423_000)).toBe("40:23");
+    expect(formatSpan(3_723_000)).toBe("1:02:03");
+    // Short spans keep the decimals they need.
+    expect(formatSpan(2_500)).toBe("2.5 s");
+    expect(formatSpan(250)).toBe("0.25 s");
+    expect(formatSpan(10)).toBe("0.01 s");
+    expect(formatSpan(Number.NaN)).toBe("—");
+  });
+});

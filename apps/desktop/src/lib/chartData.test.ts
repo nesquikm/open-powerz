@@ -453,6 +453,33 @@ describe("GapList", () => {
     list.clear();
     expect(list.length).toBe(0);
   });
+
+  it("changes its version whenever, and only when, the gaps change", () => {
+    const list = new GapList();
+    const v0 = list.version;
+    list.push({ kind: "stream", from_ms: 100, to_ms: 200 });
+    const v1 = list.version;
+    expect(v1).not.toBe(v0);
+    // The same stretch again (the stream and the history both report it): no change.
+    list.push({ kind: "stream", from_ms: 100, to_ms: 200 });
+    list.push({ kind: "stream", from_ms: 101, to_ms: 199 });
+    expect(list.version).toBe(v1);
+    // A wider report of it widens it.
+    list.push({ kind: "stream", from_ms: 95, to_ms: 205 });
+    const v2 = list.version;
+    expect(v2).not.toBe(v1);
+    expect(list.within(0, 1_000).map((g) => [g.from_ms, g.to_ms])).toEqual([[95, 205]]);
+    list.push(gap(300));
+    const v3 = list.version;
+    expect(v3).not.toBe(v2);
+    list.dropBefore(0);
+    expect(list.version).toBe(v3);
+    list.dropBefore(250);
+    const v4 = list.version;
+    expect(v4).not.toBe(v3);
+    list.clear();
+    expect(list.version).not.toBe(v4);
+  });
 });
 
 describe("single-pass reduction matches a straightforward one", () => {

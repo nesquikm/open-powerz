@@ -48,4 +48,4 @@ Vitest for every timeline transition, the gap-collapse map and its inverse, shut
 
 ## Notes
 
-From the milestone hardware review, which asked for DaVinci Resolve style navigation. The user chose editor-style scrubbing on plain drag, J/K/L for the shuttle with End for going live, and collapsing long gaps everywhere.
+From the milestone hardware review, which asked for DaVinci Resolve style navigation. The user chose editor-style scrubbing on plain drag, J/K/L for the shuttle with End for going live, and collapsing long gaps everywhere. Shuttling from live pauses the chart, since the playhead leaves the newest data.

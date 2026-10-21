@@ -12,7 +12,6 @@ import {
   rangeAnnouncement,
   sessionRequestFor,
   sessionStartOf,
-  wheelZooms,
   windowPressed,
   type ChartView,
   type FrameClock,
@@ -172,7 +171,7 @@ describe("gestures leave live mode (AC-AH2AEM.3)", () => {
     expect(applyGesture(LIVE, { kind: "key", key: "x" }, SHOWN, SESSION)).toEqual(LIVE);
   });
 
-  it("the Live gesture (button or L key) returns to the remembered live window", () => {
+  it("the Live gesture (button or End key) returns to the remembered live window", () => {
     const zoomed = applyGesture(
       { mode: "live", window: "1m" },
       { kind: "select", t0Ms: 1_000, t1Ms: 2_000 },
@@ -183,8 +182,9 @@ describe("gestures leave live mode (AC-AH2AEM.3)", () => {
       mode: "live",
       window: "1m",
     });
+    // L is the shuttle since FR FENCD9; End goes live.
     expect(
-      shortcutFor({ key: "l", ctrlKey: false, metaKey: false, altKey: false, target: null }),
+      shortcutFor({ key: "End", ctrlKey: false, metaKey: false, altKey: false, target: null }),
     ).toEqual({ kind: "live" });
   });
 
@@ -349,15 +349,6 @@ describe("window buttons", () => {
     expect(windowPressed({ mode: "live", window: "1m" }, "10s")).toBe(false);
     const zoomed: ChartView = { mode: "history", window: "1m", t0Ms: 0, t1Ms: 1 };
     expect(windowPressed(zoomed, "1m")).toBe(false);
-  });
-});
-
-describe("wheel zoom", () => {
-  it("zooms only when the chart has focus or Ctrl / ⌘ is held (pinch)", () => {
-    expect(wheelZooms({ focused: false, ctrlKey: false, metaKey: false })).toBe(false);
-    expect(wheelZooms({ focused: true, ctrlKey: false, metaKey: false })).toBe(true);
-    expect(wheelZooms({ focused: false, ctrlKey: true, metaKey: false })).toBe(true);
-    expect(wheelZooms({ focused: false, ctrlKey: false, metaKey: true })).toBe(true);
   });
 });
 
@@ -563,5 +554,122 @@ describe("going live while already live changes nothing (AC-DDDYDJ.5)", () => {
     const live: ChartView = { mode: "live", window: "1m" };
     expect(applyGesture(live, { kind: "live" }, SHOWN, SESSION)).toBe(live);
     expect(applyGesture(live, { kind: "key", key: "End" }, SHOWN, SESSION)).toBe(live);
+  });
+});
+
+describe("timeline gestures (FR FENCD9)", () => {
+  const live: ChartView = { mode: "live", window: "10s" };
+  /** Gestures the TS union may not know yet, applied as the contract defines them. */
+  const apply = (v: ChartView, g: Record<string, unknown>): ChartView =>
+    applyGesture(v, g as unknown as Parameters<typeof applyGesture>[1], SHOWN, SESSION);
+
+  it("AC-FENCD9.2: a range gesture shows exactly that range, paused", () => {
+    expect(apply(live, { kind: "range", t0Ms: 5_000, t1Ms: 8_000 })).toEqual({
+      mode: "history",
+      window: "10s",
+      t0Ms: 5_000,
+      t1Ms: 8_000,
+    });
+  });
+
+  it("AC-FENCD9.2: a range gesture stays inside the session", () => {
+    const v = apply(live, { kind: "range", t0Ms: 25_000, t1Ms: 35_000 });
+    expect(v.mode).toBe("history");
+    if (v.mode !== "history") return;
+    expect(v.t0Ms).toBeGreaterThanOrEqual(SESSION.firstMs);
+    expect(v.t1Ms).toBeLessThanOrEqual(SESSION.lastMs);
+    expect(v.t1Ms).toBe(SESSION.lastMs);
+  });
+
+  it("AC-FENCD9.8: a zoom gesture keeps atMs in place; factor < 1 zooms in", () => {
+    const zin = apply(live, { kind: "zoom", factor: 0.5, atMs: 12_500 });
+    expect(span(zin)).toBeCloseTo(5_000, 6);
+    if (zin.mode === "history") {
+      expect((12_500 - zin.t0Ms) / (zin.t1Ms - zin.t0Ms)).toBeCloseTo(0.25, 6);
+    }
+    const zout = apply(live, { kind: "zoom", factor: 1 / 0.8, atMs: 15_000 });
+    expect(span(zout)).toBeCloseTo(12_500, 6);
+  });
+
+  it("AC-FENCD9.8: fit shows the whole session, live", () => {
+    const paused: ChartView = { mode: "history", window: "1m", t0Ms: 10_000, t1Ms: 12_000 };
+    expect(apply(paused, { kind: "fit" })).toEqual({ mode: "live", window: "all" });
+    expect(apply(live, { kind: "fit" })).toEqual({ mode: "live", window: "all" });
+  });
+
+  it("AC-FENCD9.8: home jumps to the session start, same span, paused", () => {
+    expect(apply(live, { kind: "home" })).toEqual({
+      mode: "history",
+      window: "10s",
+      t0Ms: 0,
+      t1Ms: 10_000,
+    });
+  });
+
+  it("AC-FENCD9.3: a horizontal scroll pans by the scroll, keeping the span", () => {
+    const right = apply(live, { kind: "wheel", atMs: 15_000, deltaY: 0, deltaX: 100 });
+    expect(right.mode).toBe("history");
+    expect(span(right)).toBeCloseTo(10_000, 6);
+    if (right.mode === "history") expect(right.t0Ms).toBeGreaterThan(SHOWN.t0Ms);
+    const left = apply(live, { kind: "wheel", atMs: 15_000, deltaY: 0, deltaX: -100 });
+    expect(span(left)).toBeCloseTo(10_000, 6);
+    if (left.mode === "history") expect(left.t0Ms).toBeLessThan(SHOWN.t0Ms);
+  });
+
+  it("AC-FENCD9.3: Shift+wheel pans instead of zooming", () => {
+    const down = apply(live, { kind: "wheel", atMs: 15_000, deltaY: 100, shiftKey: true });
+    expect(down.mode).toBe("history");
+    expect(span(down)).toBeCloseTo(10_000, 6);
+    if (down.mode === "history") expect(down.t0Ms).toBeGreaterThan(SHOWN.t0Ms);
+    const up = apply(live, { kind: "wheel", atMs: 15_000, deltaY: -100, shiftKey: true });
+    expect(span(up)).toBeCloseTo(10_000, 6);
+    if (up.mode === "history") expect(up.t0Ms).toBeLessThan(SHOWN.t0Ms);
+  });
+
+  it("AC-FENCD9.3: a plain vertical wheel still zooms", () => {
+    const v = apply(live, {
+      kind: "wheel",
+      atMs: 15_000,
+      deltaY: -100,
+      deltaX: 0,
+      shiftKey: false,
+    });
+    expect(span(v)).toBeLessThan(10_000);
+  });
+
+  it("AC-FENCD9.2/.3/.8: every range change pauses the chart", async () => {
+    const { liveButton } = await import("./chartView");
+    const gestures = [
+      { kind: "range", t0Ms: 1_000, t1Ms: 4_000 },
+      { kind: "zoom", factor: 0.8, atMs: 15_000 },
+      { kind: "zoom", factor: 1 / 0.8, atMs: 15_000 },
+      { kind: "home" },
+      { kind: "wheel", atMs: 15_000, deltaY: 0, deltaX: 50 },
+      { kind: "wheel", atMs: 15_000, deltaY: 50, shiftKey: true },
+    ];
+    for (const g of gestures) {
+      const v = apply(live, g);
+      expect(v.mode, JSON.stringify(g)).toBe("history");
+      expect(liveButton(v)).toMatchObject({ label: "Paused · Go live", pressed: false });
+    }
+  });
+});
+
+describe("the narrowest view is the zoom slider's bottom (AC-FENCD9.9)", () => {
+  it("never zooms narrower than 10 ms, by wheel or key", async () => {
+    const { MIN_SPAN_MS } = await import("./timeline");
+    const narrow: ChartView = { mode: "history", window: "10s", t0Ms: 10_000, t1Ms: 10_012 };
+    const shown = { t0Ms: 10_000, t1Ms: 10_012 };
+    const wheel = applyGesture(
+      narrow,
+      { kind: "wheel", atMs: 10_006, deltaY: -100 },
+      shown,
+      SESSION,
+    );
+    const zoom = applyGesture(narrow, { kind: "zoom", factor: 0.01, atMs: 10_006 }, shown, SESSION);
+    for (const v of [wheel, zoom]) {
+      if (v.mode !== "history") throw new Error("expected a paused view");
+      expect(v.t1Ms - v.t0Ms).toBeGreaterThanOrEqual(MIN_SPAN_MS - 1e-9);
+    }
   });
 });

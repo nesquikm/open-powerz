@@ -35,7 +35,7 @@ Add a uPlot chart to the desktop UI with a live scrolling window, zoom and pan o
 
 ## Technical Design
 
-`Chart.svelte` wraps uPlot with a `ResizeObserver`. `src/lib/chartData.ts` keeps the live window in a typed-array ring buffer fed by batches and reduced on the client to at most two points per pixel, and turns `history_range` buckets (min and max per bucket) into uPlot series. "Whole session" beyond the live buffer is drawn from `history_range` (refreshed at most 4 times a second), which also tells the session's true start; views are clamped to the session. Drag zooms, Shift/middle-drag pans, and the wheel zooms when the chart is focused or with Ctrl/⌘. Zoom and pan requests go through a single in-flight token scheduled on `requestAnimationFrame`, so stale answers are dropped. Gaps become `null` points after the gap's last sample. Axis and series styles read the theme tokens from `theme.ts` (`THEME_COLORS`, the same source as the CSS custom properties) and re-apply on theme change.
+`Chart.svelte` wraps uPlot with a `ResizeObserver`. `src/lib/chartData.ts` keeps the live window in a typed-array ring buffer, reduced to at most two points per pixel, and turns `history_range` min/max buckets into uPlot series. "Whole session" beyond the buffer comes from `history_range`, refreshed at most 4 times a second, which also gives the session's true start; views stay inside the session. Navigation follows FR FENCD9. Zoom and pan requests share one in-flight token on `requestAnimationFrame`, so stale answers drop. Gaps become `null` points after their last sample. Axis and series styles read `THEME_COLORS` from `theme.ts` and re-apply on theme change.
 
 ## Testing
 
@@ -43,8 +43,8 @@ Vitest for the ring buffer, client reduction, bucket-to-series mapping, request 
 
 ## Notes
 
-Later FRs of this milestone refine this chart: 272WSN (session time, gaps, axis width), DDDYDJ (the Live button pauses; End returns to live) and FENCD9 (timeline navigation, which gives L to the shuttle and plain drag to the playhead). Where they differ from AC-AH2AEM.3, they win.
+FRs 272WSN, DDDYDJ and FENCD9 refine this chart and win over AC-AH2AEM.3: session time and gaps, a Live button that pauses, and editor-style navigation.
 
-Decimation lives in Rust (FR AH2AEJ) because WebKitGTK is too slow to reduce millions of points in the page.
+Decimation lives in Rust (FR AH2AEJ): WebKitGTK is too slow to reduce millions of points in the page.
 
-AC-AH2AEM.9 came from the milestone visual review: auto-scaled axes made a ±2% IBUS ripple (1.94–2.06 A) look huge. The range is uPlot's usual padded range of min(0, data min) to max(0, data max), kept in session storage like the legend.
+AC-AH2AEM.9 came from the visual review: auto-scaled axes made a ±2% IBUS ripple look huge.

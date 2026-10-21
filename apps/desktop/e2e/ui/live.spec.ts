@@ -3,7 +3,7 @@
  * button do? Can't stop it"). FR DDDYDJ: Live follows the newest data;
  * clicking it while live pauses the chart (the stream and the recording keep
  * running), any pan or zoom pauses it too, and while paused the button reads
- * "Paused · Go live" — clicking it, L or End jumps back.
+ * "Paused · Go live" — clicking it or End jumps back (L is the shuttle since FR FENCD9).
  */
 
 import { expect, test } from "@playwright/test";
