@@ -25,7 +25,7 @@ use crate::stats::StatsSnapshot;
 use crate::store::SessionStore;
 use crate::ui_error::UiError;
 use crate::worker::{
-    self, BackendEvent, EventSink, Gap, GapKind, Status, WorkerConfig, WorkerHandle,
+    self, BackendEvent, ConnectedInfo, EventSink, Gap, GapKind, Status, WorkerConfig, WorkerHandle,
 };
 
 /// One entry of the device picker.
@@ -96,6 +96,36 @@ pub fn list_devices_from(
         .map(usb_listing)
         .chain(Scenario::ALL.into_iter().map(demo_listing))
         .collect()
+}
+
+/// An open recording as a re-attached page picks it up (FR VEDDFD).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RecordingSnapshot {
+    /// Rows written so far.
+    pub rows: u64,
+    /// Time since the recording started, ms.
+    pub elapsed_ms: u64,
+}
+
+/// The running session as a new page (after a reload) picks it up (FR VEDDFD).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AttachedSession {
+    /// The picker id the session was connected with.
+    pub device_id: String,
+    /// Model name, e.g. `KM003C`.
+    pub model: String,
+    /// Firmware version the meter reported.
+    pub firmware_version: String,
+    /// Serial number, if known.
+    pub serial: Option<String>,
+    /// Current queue rate, once the queue runs.
+    pub rate_sps: Option<u32>,
+    /// The meter refused the asked rate and runs at its own.
+    pub rate_locked: bool,
+    /// Session id, as in the `connected` status.
+    pub session_id: u64,
+    /// The open recording, if any.
+    pub recording: Option<RecordingSnapshot>,
 }
 
 /// Opens the pipe for a picked device.
@@ -204,6 +234,105 @@ pub struct DeviceManager<O, C> {
     histories: HashMap<String, (Arc<Mutex<History>>, SessionStore)>,
     /// The data of the most recent session, kept readable after it ends.
     last_store: Option<SessionStore>,
+    /// The open session's page: where its events go now, and what a new
+    /// page needs to pick it up.
+    live: Option<Arc<Mutex<Live>>>,
+    /// The open session's stop flag.
+    stop: Option<Arc<AtomicBool>>,
+}
+
+/// The page the running session streams to, and what it has reported.
+struct Live {
+    device_id: String,
+    info: Option<ConnectedInfo>,
+    sink: Box<dyn FnMut(BackendEvent) + Send>,
+}
+
+/// A sink that forwards to the session's current page sink (replaced on
+/// attach) and remembers what the session reported for a later snapshot.
+fn live_sink(live: Arc<Mutex<Live>>) -> impl EventSink {
+    move |event: BackendEvent| {
+        let mut l = live.lock().unwrap_or_else(PoisonError::into_inner);
+        match &event {
+            BackendEvent::Status(Status::Connected(info)) => l.info = Some(info.clone()),
+            BackendEvent::Status(Status::Rate {
+                rate_sps,
+                rate_locked,
+            }) => {
+                if let Some(info) = l.info.as_mut() {
+                    info.rate_sps = Some(*rate_sps);
+                    info.rate_locked = *rate_locked;
+                }
+            }
+            _ => {}
+        }
+        (l.sink)(event);
+    }
+}
+
+/// Hands a running session to a new page (FR VEDDFD); taken from the
+/// [`DeviceManager`] by [`DeviceManager::attacher`].
+pub struct Attacher {
+    control: worker::WorkerControl,
+    live: Arc<Mutex<Live>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Attacher {
+    /// The running session's stop flag, so the new page's sink can end the
+    /// session once that page is gone.
+    pub fn stop(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop)
+    }
+
+    /// Send the session's later events to `sink` and describe it. The old
+    /// page's sink gets nothing once this returns. A session still opening
+    /// the meter takes `sink` too but answers `None`: its `connected`
+    /// status reaches the new page later.
+    pub fn attach(self, sink: impl EventSink) -> Option<AttachedSession> {
+        let mut sink: Option<Box<dyn FnMut(BackendEvent) + Send>> = Some(Box::new(sink));
+        {
+            let mut l = self.live.lock().unwrap_or_else(PoisonError::into_inner);
+            if l.info.is_none() {
+                // The worker is opening the meter and reads no requests
+                // yet; there is no recording to read either.
+                l.sink = sink.take()?;
+                return None;
+            }
+        }
+        let live = Arc::clone(&self.live);
+        let taken = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&taken);
+        // The swap and the reads run on the worker thread, which sends every
+        // session and recording event, so the answer matches what the new
+        // page receives from here on.
+        let recording = self
+            .control
+            .hand_over(Box::new(move || {
+                let mut l = live.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(sink) = sink.take() {
+                    l.sink = sink;
+                }
+                *slot.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some((l.device_id.clone(), l.info.clone()));
+            }))
+            .ok()?;
+        let (device_id, info) = taken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()?;
+        let info = info?;
+        Some(AttachedSession {
+            device_id,
+            model: info.model,
+            firmware_version: info.firmware_version,
+            serial: Some(info.serial),
+            rate_sps: info.rate_sps,
+            rate_locked: info.rate_locked,
+            session_id: info.session_id,
+            recording: recording.map(|(rows, elapsed_ms)| RecordingSnapshot { rows, elapsed_ms }),
+        })
+    }
 }
 
 /// What a session history remembers between connections.
@@ -275,6 +404,8 @@ where
             next_session_id: 1,
             histories: HashMap::new(),
             last_store: None,
+            live: None,
+            stop: None,
         }
     }
 
@@ -303,7 +434,7 @@ where
         sink: impl EventSink,
         stop: Arc<AtomicBool>,
     ) -> Result<(), UiError> {
-        if self.worker.as_ref().is_some_and(|w| !w.is_finished()) {
+        if self.running_worker().is_some() {
             return Err(UiError::usage(
                 "A meter is already connected. Disconnect it first.",
             ));
@@ -337,12 +468,19 @@ where
             .session_id;
         let opener = Arc::clone(&self.opener);
         let config = WorkerConfig { rate, session_id };
+        let live = Arc::new(Mutex::new(Live {
+            device_id: device.id.clone(),
+            info: None,
+            sink: Box::new(sink),
+        }));
+        self.live = Some(Arc::clone(&live));
+        self.stop = Some(Arc::clone(&stop));
         self.worker = Some(worker::spawn_with_store(
             move || opener.open(&device),
             self.clock.clone(),
             config,
             store,
-            history_sink(history, sink),
+            history_sink(history, live_sink(live)),
             stop,
         ));
         Ok(())
@@ -364,10 +502,14 @@ where
     /// Recording and export control of the open session, so a caller can
     /// wait for the worker's answer after releasing its lock on the manager.
     pub fn control(&self) -> Result<worker::WorkerControl, UiError> {
-        match &self.worker {
-            Some(worker) if !worker.is_finished() => Ok(worker.control()),
-            _ => Err(UiError::usage("No meter is connected.")),
-        }
+        self.running_worker()
+            .map(WorkerHandle::control)
+            .ok_or_else(|| UiError::usage("No meter is connected."))
+    }
+
+    /// The open session's worker, unless it has ended by itself.
+    fn running_worker(&self) -> Option<&WorkerHandle> {
+        self.worker.as_ref().filter(|w| !w.is_finished())
     }
 
     /// Record the open session's stream to a new file at `path`.
@@ -484,6 +626,26 @@ where
             stop,
             thread: Some(thread),
         }
+    }
+
+    /// Hand the running session to a new page: its later events go to
+    /// `sink`, and the answer describes it. `None` when no session is
+    /// running (never connected, disconnected or ended by itself); nothing
+    /// is opened then and `sink` is dropped unused.
+    pub fn attach(&mut self, sink: impl EventSink) -> Option<AttachedSession> {
+        self.attacher()?.attach(sink)
+    }
+
+    /// What an attach needs of the running session, so the caller can hand
+    /// it over without holding the manager. `None` when no session is
+    /// running.
+    pub fn attacher(&self) -> Option<Attacher> {
+        let worker = self.running_worker()?;
+        Some(Attacher {
+            control: worker.control(),
+            live: Arc::clone(self.live.as_ref()?),
+            stop: self.stop.clone().unwrap_or_default(),
+        })
     }
 
     /// Stop the queue and close the open session.

@@ -1,5 +1,7 @@
 <script lang="ts">
   import {
+    attach,
+    backendAvailable,
     clearHistory,
     connect,
     disconnect,
@@ -9,7 +11,9 @@
     startRecording,
     stopRecording,
     toUiError,
+    type BackendEvent,
   } from "./lib/backend";
+  import { attachSession } from "./lib/attach";
   import About from "./lib/components/About.svelte";
   import Chart from "./lib/components/Chart.svelte";
   import ErrorBanner from "./lib/components/ErrorBanner.svelte";
@@ -18,7 +22,7 @@
   import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
   import StatsPanel from "./lib/components/StatsPanel.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
-  import { setContext } from "svelte";
+  import { onMount, setContext } from "svelte";
   import { ExportJob, Recording } from "./lib/recording.svelte";
   import { Session } from "./lib/session.svelte";
   import { StatsControls } from "./lib/stats.svelte";
@@ -93,6 +97,33 @@
   /** A disconnect is on its way; a second press must not send another. */
   let disconnecting = false;
 
+  /** Every event of the session: to the chart, the session and the recording. */
+  function onBackendEvent(event: BackendEvent): void {
+    // Same guard as the session: a late batch after the end draws nothing.
+    if (event.type === "batch" && session.active) chart?.push(event.data.samples);
+    if (event.type === "gap" && session.active) chart?.markGap(event.data);
+    session.handleEvent(event);
+    if (event.type === "recording") recording.handleEvent(event.data);
+    if (event.type === "status" && event.data.state === "disconnected") {
+      recording.sessionEnded();
+    }
+  }
+
+  // On load, ask the backend whether a session is still running (a reload);
+  // with none, the app starts disconnected as on a first launch (FR VEDDFD).
+  onMount(() => {
+    if (!backendAvailable()) return;
+    void attachSession(attach, onBackendEvent, (snapshot) => {
+      session.adopt(snapshot);
+      // The new page's buffer is empty: fill the live windows from the history.
+      chart?.backfillFromHistory();
+      if (snapshot.recording) recording.adopt(snapshot.recording);
+      if (!snapshot.rate_locked && snapshot.rate_sps !== null) {
+        requestedRateSps = snapshot.rate_sps;
+      }
+    });
+  });
+
   async function toggleConnection(): Promise<void> {
     // A second press while a connect is still pending would race it.
     if (!session.canToggleConnect) return;
@@ -110,16 +141,7 @@
     session.beginConnect();
     chart?.reset();
     try {
-      await connect(id, requestedRateSps, (event) => {
-        // Same guard as the session: a late batch after the end draws nothing.
-        if (event.type === "batch" && session.active) chart?.push(event.data.samples);
-        if (event.type === "gap" && session.active) chart?.markGap(event.data);
-        session.handleEvent(event);
-        if (event.type === "recording") recording.handleEvent(event.data);
-        if (event.type === "status" && event.data.state === "disconnected") {
-          recording.sessionEnded();
-        }
-      });
+      await connect(id, requestedRateSps, onBackendEvent);
     } catch (err) {
       session.failConnect(toUiError(err));
     }

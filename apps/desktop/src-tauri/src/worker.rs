@@ -445,6 +445,12 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         }
     }
 
+    /// Rows written and elapsed ms of the open recording, if any.
+    pub fn recording_progress(&mut self) -> Option<(u64, u64)> {
+        let now = self.clock.now_ms();
+        self.recording.as_ref().map(|rec| rec.progress(now))
+    }
+
     /// The stream is being recorded.
     pub fn is_recording(&self) -> bool {
         self.recording.is_some()
@@ -691,6 +697,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::StopRecording(reply) => {
                 let _ = reply.send(self.stop_recording());
             }
+            Command::Handover(swap, reply) => {
+                swap();
+                let _ = reply.send(self.recording_progress());
+            }
         }
     }
 }
@@ -707,6 +717,10 @@ enum Command {
         mpsc::Sender<Result<ExportJob, UiError>>,
     ),
     StopRecording(mpsc::Sender<Result<RecordingSummary, UiError>>),
+    /// Run the sink swap of an attach, then answer the open recording's
+    /// progress: both on the worker thread, which sends every recording
+    /// event, so none can fall between them (FR VEDDFD).
+    Handover(Box<dyn FnOnce() + Send>, mpsc::Sender<Option<(u64, u64)>>),
 }
 
 impl std::fmt::Debug for Command {
@@ -716,6 +730,7 @@ impl std::fmt::Debug for Command {
             Command::RecordTo(path, _) => f.debug_tuple("RecordTo").field(path).finish(),
             Command::ExportTo(path, ..) => f.debug_tuple("ExportTo").field(path).finish(),
             Command::StopRecording(_) => f.write_str("StopRecording"),
+            Command::Handover(..) => f.write_str("Handover"),
         }
     }
 }
@@ -822,8 +837,18 @@ fn busy() -> UiError {
 impl WorkerControl {
     /// Send `command` and wait (up to [`COMMAND_TIMEOUT`]) for its answer.
     fn ask<R>(&self, command: Command, answer: &mpsc::Receiver<R>) -> Result<R, UiError> {
+        self.ask_within(command, answer, COMMAND_TIMEOUT)
+    }
+
+    /// Send `command` and wait up to `timeout` for its answer.
+    fn ask_within<R>(
+        &self,
+        command: Command,
+        answer: &mpsc::Receiver<R>,
+        timeout: Duration,
+    ) -> Result<R, UiError> {
         self.commands.send(command).map_err(|_| not_connected())?;
-        answer.recv_timeout(COMMAND_TIMEOUT).map_err(|e| match e {
+        answer.recv_timeout(timeout).map_err(|e| match e {
             mpsc::RecvTimeoutError::Timeout => busy(),
             mpsc::RecvTimeoutError::Disconnected => not_connected(),
         })
@@ -847,6 +872,46 @@ impl WorkerControl {
     pub fn stop_recording(&self) -> Result<RecordingSummary, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::StopRecording(reply), &answer)?
+    }
+
+    /// Run `swap` on the worker thread between its steps and answer the
+    /// open recording's rows and elapsed ms then (`None` when nothing is
+    /// being recorded): no recording event is sent between the two. On an
+    /// error `swap` has not run and never will.
+    pub fn hand_over(&self, swap: Box<dyn FnOnce() + Send>) -> Result<Option<(u64, u64)>, UiError> {
+        self.hand_over_within(swap, COMMAND_TIMEOUT)
+    }
+
+    fn hand_over_within(
+        &self,
+        swap: Box<dyn FnOnce() + Send>,
+        timeout: Duration,
+    ) -> Result<Option<(u64, u64)>, UiError> {
+        // `None` while waiting; `Some(true)` once the swap ran, `Some(false)`
+        // once the caller gave up, so a late command does nothing.
+        let gate = Arc::new(Mutex::new(None::<bool>));
+        let worker_gate = Arc::clone(&gate);
+        let guarded = Box::new(move || {
+            let mut state = worker_gate.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.is_none() {
+                swap();
+                *state = Some(true);
+            }
+        });
+        let (reply, answer) = mpsc::channel();
+        match self.ask_within(Command::Handover(guarded, reply), &answer, timeout) {
+            Err(e) if e.kind == ErrorKind::Timeout => {
+                let mut state = gate.lock().unwrap_or_else(PoisonError::into_inner);
+                if *state == Some(true) {
+                    drop(state);
+                    // The swap ran just as the wait ended: its answer follows at once.
+                    return answer.recv().map_err(|_| not_connected());
+                }
+                *state = Some(false);
+                Err(e)
+            }
+            other => other,
+        }
     }
 
     /// The session statistics so far.
@@ -1067,4 +1132,61 @@ fn run_worker<T, C, O>(
         }
     }
     worker.stop();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn control() -> (WorkerControl, mpsc::Receiver<Command>) {
+        let (commands, inbox) = mpsc::channel();
+        let control = WorkerControl {
+            commands,
+            store: SessionStore::new(),
+        };
+        (control, inbox)
+    }
+
+    fn run(command: Command) {
+        if let Command::Handover(swap, reply) = command {
+            swap();
+            let _ = reply.send(None);
+        }
+    }
+
+    #[test]
+    fn a_handover_given_up_never_swaps_later() {
+        let (control, inbox) = control();
+        let swaps = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&swaps);
+        let got = control.hand_over_within(
+            Box::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }),
+            Duration::from_millis(10),
+        );
+        assert_eq!(got.map_err(|e| e.kind), Err(ErrorKind::Timeout));
+        // The worker gets to the queued command only now.
+        run(inbox.recv().expect("the handover was not sent"));
+        assert_eq!(
+            swaps.load(Ordering::SeqCst),
+            0,
+            "a late handover swapped the sink"
+        );
+    }
+
+    #[test]
+    fn a_handover_answers_once_the_worker_ran_it() {
+        let (control, inbox) = control();
+        let worker = std::thread::spawn(move || run(inbox.recv().expect("no handover")));
+        let swaps = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&swaps);
+        let got = control.hand_over(Box::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(got, Ok(None));
+        assert_eq!(swaps.load(Ordering::SeqCst), 1);
+        worker.join().expect("worker thread");
+    }
 }

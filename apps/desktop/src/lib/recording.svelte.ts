@@ -3,6 +3,7 @@ import {
   type ExportProgress,
   type ExportResult,
   type RecordingEvent,
+  type RecordingSnapshot,
   type RecordingSummary,
   type UiError,
 } from "./backend";
@@ -149,6 +150,16 @@ export class Recording {
       this.error = toUiError(err);
       this.phase = "idle";
     }
+  }
+
+  /** Picks up a recording the backend kept running across a reload (FR VEDDFD):
+   * shown as recording, its timer and rows continuing from the backend's. */
+  adopt(snapshot: RecordingSnapshot): void {
+    this.notice = null;
+    this.error = null;
+    this.rows = snapshot.rows;
+    this.elapsedMs = snapshot.elapsed_ms;
+    this.phase = "recording";
   }
 
   handleEvent(event: RecordingEvent): void {

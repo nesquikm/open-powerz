@@ -24,6 +24,7 @@ import {
   toUiError,
   INTERNAL_MESSAGE,
   watchDevices,
+  type AttachedSession,
   type BackendEvent,
   type DeviceListing,
 } from "./backend";
@@ -244,5 +245,39 @@ describe("history and stats commands (AC-AH2AEJ.2, AC-AH2AEJ.4, AC-AH2AEJ.5)", (
     expect(invoke).toHaveBeenCalledWith("reset_stats");
     await clearHistory();
     expect(invoke).toHaveBeenCalledWith("clear_history");
+  });
+});
+
+// ---- FR VEDDFD: re-attach to the running session on load ----
+
+describe("attach (AC-VEDDFD.1, AC-VEDDFD.2)", () => {
+  it("asks the backend over attach with a channel and returns null when nothing runs", async () => {
+    const { attach } = await import("./backend");
+    invoke.mockResolvedValue(null);
+    await expect(attach(() => {})).resolves.toBeNull();
+    expect(invoke).toHaveBeenCalledWith("attach", { onEvent: channels[0] });
+  });
+
+  it("returns the running session's snapshot and forwards its events to the new page", async () => {
+    const { attach } = await import("./backend");
+    const snapshot: AttachedSession = {
+      device_id: "usb:1:4",
+      model: "KM003C",
+      firmware_version: "2.0.6",
+      serial: "12345678",
+      rate_sps: 50,
+      rate_locked: false,
+      session_id: 3,
+      recording: { rows: 120, elapsed_ms: 2400 },
+    };
+    invoke.mockResolvedValue(snapshot);
+    const events: BackendEvent[] = [];
+    await expect(attach((ev) => events.push(ev))).resolves.toEqual(snapshot);
+    const ev: BackendEvent = {
+      type: "batch",
+      data: { samples: [], temp_c: null, stats: NO_STATS },
+    };
+    channels[0]?.onmessage(ev);
+    expect(events).toEqual([ev]);
   });
 });

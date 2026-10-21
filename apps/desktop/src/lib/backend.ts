@@ -223,6 +223,35 @@ export async function connect(
   await invoke("connect", { deviceId, rateSps, onEvent: channel });
 }
 
+/** An open recording as a re-attached page picks it up (mirrors `devices.rs`). */
+export interface RecordingSnapshot {
+  rows: number;
+  elapsed_ms: number;
+}
+
+/** The running session as a new page picks it up after a reload (mirrors `devices.rs`). */
+export interface AttachedSession {
+  device_id: string;
+  model: string;
+  firmware_version: string;
+  serial: string | null;
+  rate_sps: number | null;
+  rate_locked: boolean;
+  session_id: number;
+  recording: RecordingSnapshot | null;
+}
+
+/** Asks the backend for the running session (after a reload); its later events go to
+ * `onEvent`. Resolves to `null` when no session is running. */
+export async function attach(
+  onEvent: (event: BackendEvent) => void,
+): Promise<AttachedSession | null> {
+  if (mock) return mock.attach(onEvent);
+  const channel = new Channel<BackendEvent>();
+  channel.onmessage = onEvent;
+  return invoke<AttachedSession | null>("attach", { onEvent: channel });
+}
+
 /** Ends the current session. */
 export async function disconnect(): Promise<void> {
   if (mock) return mock.disconnect();

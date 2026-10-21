@@ -266,17 +266,37 @@ export class LiveBuffer {
         slot = this.#head;
         this.#head = (this.#head + 1) % cap;
       }
-      this.#t[slot] = s.t_ms;
-      this.#ch.vbus[slot] = s.vbus_v;
-      this.#ch.ibus[slot] = s.ibus_a;
-      this.#ch.dp[slot] = s.dp_v;
-      this.#ch.dm[slot] = s.dm_v;
-      this.#ch.cc1[slot] = s.cc1_v;
-      this.#ch.cc2[slot] = s.cc2_v;
+      this.#write(slot, s);
     }
     // Gaps that start before the oldest sample no longer sit between two samples.
     const first = this.firstMs;
     if (first !== null) this.#gaps.dropBefore(first);
+  }
+
+  /** Puts `samples` (time-ordered) before the oldest buffered sample, keeping only those
+   * older than it and only as many as still fit: the buffered samples are newer, so
+   * they always stay (FR VEDDFD backfill). */
+  prepend(samples: readonly Sample[]): void {
+    const first = this.firstMs;
+    const older = first === null ? samples : samples.filter((s) => s.t_ms < first);
+    const room = this.capacity - this.#len;
+    const take = older.slice(Math.max(0, older.length - room));
+    if (take.length === 0) return;
+    const cap = this.capacity;
+    this.#head = (((this.#head - take.length) % cap) + cap) % cap;
+    this.#len += take.length;
+    for (const [k, s] of take.entries()) this.#write(this.#slot(k), s);
+  }
+
+  /** Stores one sample's time and channels in ring slot `slot`. */
+  #write(slot: number, s: Sample): void {
+    this.#t[slot] = s.t_ms;
+    this.#ch.vbus[slot] = s.vbus_v;
+    this.#ch.ibus[slot] = s.ibus_a;
+    this.#ch.dp[slot] = s.dp_v;
+    this.#ch.dm[slot] = s.dm_v;
+    this.#ch.cc1[slot] = s.cc1_v;
+    this.#ch.cc2[slot] = s.cc2_v;
   }
 
   /** Samples in [t0Ms, t1Ms], reduced to at most two points per pixel of `widthPx`

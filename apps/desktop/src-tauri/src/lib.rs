@@ -18,7 +18,7 @@ use powerz_protocol::transport::discovery;
 use tauri::ipc::Channel;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::devices::{AppOpener, DeviceListing, DeviceManager, WatchHandle};
+use crate::devices::{AppOpener, AttachedSession, DeviceListing, DeviceManager, WatchHandle};
 use crate::recording::{ExportProgress, RecordingSummary};
 use crate::ui_error::UiError;
 use crate::worker::BackendEvent;
@@ -117,8 +117,8 @@ async fn watch_devices(
 }
 
 /// Connect to the picked device; every session event goes over `on_event`.
-/// The session ends by itself once that channel is gone (window closed or
-/// reloaded).
+/// The session ends by itself once that channel is gone (window closed);
+/// a reloaded page takes the session over with `attach` instead.
 #[tauri::command]
 async fn connect(
     state: Shared<'_>,
@@ -133,6 +133,27 @@ async fn connect(
         state
             .manager()
             .connect_with_stop(&device_id, rate_sps, sink, stop)
+    })
+    .await
+}
+
+/// Pick up the running session from a new page (after a reload): its later
+/// events go over `on_event`. `null` when no session is running.
+#[tauri::command]
+async fn attach(
+    state: Shared<'_>,
+    on_event: Channel<BackendEvent>,
+) -> Result<Option<AttachedSession>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        // Taken under the lock; the handover waits for the worker without it.
+        let Some(attacher) = state.manager().attacher() else {
+            return Ok(None);
+        };
+        // The new page's channel ends the session once it is gone, as the
+        // connecting page's did.
+        let sink = channel_sink(on_event, attacher.stop());
+        Ok(attacher.attach(sink))
     })
     .await
 }
@@ -388,6 +409,7 @@ pub fn run() {
             list_devices,
             watch_devices,
             connect,
+            attach,
             disconnect,
             set_rate,
             start_recording,

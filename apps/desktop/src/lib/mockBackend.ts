@@ -8,6 +8,7 @@
 
 import type {
   AppInfo,
+  AttachedSession,
   BackendEvent,
   BucketsFor,
   DeviceListing,
@@ -267,8 +268,12 @@ export function syntheticFromUrl(search: string | undefined, dev: boolean): numb
 }
 
 interface Running {
+  /** The picker id the session was connected with. */
+  deviceId: string;
   scenario: Scenario;
   rateSps: number;
+  /** The meter refused the asked rate and runs at its own. */
+  rateLocked: boolean;
   /** Device time of the next sample, ms. */
   nextMs: number;
   /** Fractional samples owed to the next batch. */
@@ -387,8 +392,10 @@ export class MockBackend {
       });
     }
     const session: Running = {
+      deviceId,
       scenario,
       rateSps: locked ? LOCKED_RATE_SPS : rateSps,
+      rateLocked: locked,
       nextMs: 0,
       carry: 0,
       onEvent,
@@ -458,6 +465,25 @@ export class MockBackend {
         });
       }
     }
+  }
+
+  /** A new page asks for the running session; `null` when none is running.
+   * Later events go to `onEvent` only. */
+  async attach(onEvent: (event: BackendEvent) => void): Promise<AttachedSession | null> {
+    const s = this.#session;
+    if (!s) return null;
+    s.onEvent = onEvent;
+    const rec = s.recording;
+    return {
+      device_id: s.deviceId,
+      model: "KM003C",
+      firmware_version: "2.0.6",
+      serial: "123456",
+      rate_sps: s.rateSps,
+      rate_locked: s.rateLocked,
+      session_id: 1,
+      recording: rec ? { rows: rec.rows, elapsed_ms: rec.elapsedMs } : null,
+    };
   }
 
   /** The open session; refuses like the backend when none is. */

@@ -491,3 +491,328 @@ fn history_stats_and_export_still_answer_after_a_disconnect() {
     let range = m.history_range(&[Series::Vbus], 0, u64::MAX, 100).unwrap();
     assert!(range[0].buckets.is_empty());
 }
+
+// ---- FR VEDDFD: re-attach a new page to the running session ----
+
+use open_powerz_desktop_lib::devices::AttachedSession;
+use open_powerz_desktop_lib::recording::RecordingEvent;
+
+/// The `connected` info the worker sent first.
+fn connected_info(events: &[BackendEvent]) -> open_powerz_desktop_lib::worker::ConnectedInfo {
+    events
+        .iter()
+        .find_map(|e| match e {
+            BackendEvent::Status(Status::Connected(i)) => Some(i.clone()),
+            _ => None,
+        })
+        .expect("the session never connected")
+}
+
+/// Everything already waiting in `rx`.
+fn drain(rx: &mpsc::Receiver<BackendEvent>) -> Vec<BackendEvent> {
+    let mut got = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        got.push(e);
+    }
+    got
+}
+
+fn temp_csv(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("powerz-attach-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("powerz-attach.csv");
+    (dir, path)
+}
+
+/// AC-VEDDFD.1: with no session running, attach answers nothing.
+#[test]
+fn attach_without_a_running_session_returns_none() {
+    let (mut m, opens, _) = manager(vec![]);
+    let (rx, sink) = channel_sink();
+    assert_eq!(m.attach(sink), None, "a session before any connect");
+    assert_eq!(opens.load(Ordering::SeqCst), 0, "attach opened a device");
+    assert!(drain(&rx).is_empty(), "the unused sink got events");
+
+    // Nor after the session ended.
+    let (rx1, sink1) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink1).unwrap();
+    recv_until(
+        &rx1,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    m.disconnect().unwrap();
+    let (_rx2, sink2) = channel_sink();
+    assert_eq!(m.attach(sink2), None, "a session after disconnect");
+}
+
+/// AC-VEDDFD.1: a session that ended by itself (unplug) is not running either.
+#[test]
+fn attach_after_an_unplug_returns_none() {
+    let (mut m, _opens, _) = manager(vec![FaultPlan::new().disconnect_after_polls(20)]);
+    let (rx, sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink).unwrap();
+    recv_until(&rx, |e| {
+        matches!(e, BackendEvent::Status(Status::Disconnected { .. }))
+    });
+    // The worker thread may still be winding down; give it a moment.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_rx2, sink2) = channel_sink();
+        let got = m.attach(sink2);
+        if got.is_none() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "an unplugged session still attaches: {got:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// AC-VEDDFD.2: the snapshot describes the running session as connect reported it.
+#[test]
+fn attach_returns_the_running_session_snapshot() {
+    let (mut m, opens, _) = manager(vec![]);
+    let (rx, sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink).unwrap();
+    let before = recv_until(
+        &rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    let info = connected_info(&before);
+
+    let (_rx2, sink2) = channel_sink();
+    let snap: AttachedSession = m.attach(sink2).expect("no snapshot of a running session");
+    assert_eq!(opens.load(Ordering::SeqCst), 1, "attach reopened the meter");
+    assert_eq!(snap.device_id, "demo:load-5v-1a");
+    assert_eq!(snap.model, info.model);
+    assert_eq!(snap.firmware_version, info.firmware_version);
+    assert_eq!(snap.serial.as_deref(), Some(info.serial.as_str()));
+    assert_eq!(snap.rate_sps, Some(50));
+    assert!(!snap.rate_locked);
+    assert_eq!(snap.session_id, info.session_id);
+    assert_eq!(snap.recording, None, "no recording is open");
+
+    let v = serde_json::to_value(&snap).unwrap();
+    assert_eq!(v["device_id"], "demo:load-5v-1a");
+    assert_eq!(
+        v["firmware_version"],
+        serde_json::json!(info.firmware_version)
+    );
+    assert_eq!(v["rate_sps"], 50);
+    assert_eq!(v["rate_locked"], false);
+    assert_eq!(v["session_id"], serde_json::json!(info.session_id));
+    assert!(v["recording"].is_null());
+    m.disconnect().unwrap();
+}
+
+/// AC-VEDDFD.2 / AC-VEDDFD.5: after attach the stream goes to the new sink only,
+/// and the session is not restarted.
+#[test]
+fn attach_moves_the_stream_to_the_new_sink_only() {
+    let (mut m, opens, _) = manager(vec![]);
+    let (old_rx, old_sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, old_sink).unwrap();
+    let before = recv_until(
+        &old_rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    let (new_rx, new_sink) = channel_sink();
+    m.attach(new_sink).expect("attach to the running session");
+    // What the old page got before the swap is fine; nothing may follow.
+    let mut old_seen = before;
+    old_seen.extend(drain(&old_rx));
+
+    let after = recv_until(&new_rx, {
+        let mut n = 0;
+        move |e| {
+            if matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()) {
+                n += 1;
+            }
+            n >= 5
+        }
+    });
+    assert!(
+        !after
+            .iter()
+            .any(|e| matches!(e, BackendEvent::Status(Status::Connected(_)))),
+        "the session reconnected"
+    );
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        1,
+        "the meter was opened again"
+    );
+    // The stream continues: the new page's samples follow the old page's.
+    let old_times = sample_times(&old_seen);
+    let new_times = sample_times(&after);
+    assert!(
+        new_times[0] > *old_times.last().unwrap(),
+        "the new sink starts at {} before the old one ended at {}",
+        new_times[0],
+        old_times.last().unwrap()
+    );
+
+    m.disconnect().unwrap();
+    recv_until(&new_rx, |e| {
+        matches!(e, BackendEvent::Status(Status::Disconnected { .. }))
+    });
+    let late = drain(&old_rx);
+    assert!(
+        late.is_empty(),
+        "the old sink still got {} events after attach",
+        late.len()
+    );
+}
+
+/// AC-VEDDFD.3: an open recording keeps running and the snapshot carries its rows
+/// and elapsed time; its progress goes to the new sink.
+#[test]
+fn attach_snapshot_carries_the_open_recording() {
+    let (dir, path) = temp_csv("recording");
+    let (mut m, _opens, _) = manager(vec![]);
+    let (old_rx, old_sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, old_sink).unwrap();
+    recv_until(
+        &old_rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    m.start_recording(&path).expect("start recording");
+    // Wait for a progress event, so rows and time have accumulated.
+    let progress = recv_until(&old_rx, |e| {
+        matches!(
+            e,
+            BackendEvent::Recording(RecordingEvent::Progress { rows, .. }) if *rows > 0
+        )
+    });
+    let (rows_before, elapsed_before) = progress
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            BackendEvent::Recording(RecordingEvent::Progress { rows, elapsed_ms }) => {
+                Some((*rows, *elapsed_ms))
+            }
+            _ => None,
+        })
+        .unwrap();
+
+    let (new_rx, new_sink) = channel_sink();
+    let snap = m.attach(new_sink).expect("attach while recording");
+    let rec = snap
+        .recording
+        .expect("the snapshot lost the open recording");
+    assert!(
+        rec.rows >= rows_before,
+        "snapshot rows {} < {rows_before} already reported",
+        rec.rows
+    );
+    assert!(
+        rec.elapsed_ms >= elapsed_before && rec.elapsed_ms > 0,
+        "snapshot elapsed {} ms < {elapsed_before} ms already reported",
+        rec.elapsed_ms
+    );
+    let v = serde_json::to_value(snap.recording).unwrap();
+    assert_eq!(v["rows"], serde_json::json!(rec.rows));
+    assert_eq!(v["elapsed_ms"], serde_json::json!(rec.elapsed_ms));
+
+    // The recording goes on, reporting to the new page.
+    recv_until(&new_rx, |e| {
+        matches!(
+            e,
+            BackendEvent::Recording(RecordingEvent::Progress { rows, .. }) if *rows > rec.rows
+        )
+    });
+    // AC-VEDDFD.5: Stop works on the re-attached session.
+    let summary = m.stop_recording().expect("stop after attach");
+    assert!(summary.rows > rec.rows);
+    m.disconnect().unwrap();
+    let lines = std::fs::read_to_string(&path).unwrap().lines().count() as u64;
+    assert_eq!(
+        lines,
+        summary.rows + 1,
+        "the file lost rows across the attach"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// AC-VEDDFD.4: history and statistics still hold everything from before the attach.
+#[test]
+fn history_and_stats_reach_back_before_the_attach() {
+    use open_powerz_desktop_lib::history::Series;
+    let (mut m, _opens, _) = manager(vec![]);
+    let (old_rx, old_sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, old_sink).unwrap();
+    let before = recv_until(
+        &old_rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    let first = sample_times(&before)[0];
+    let (new_rx, new_sink) = channel_sink();
+    m.attach(new_sink).expect("attach");
+    let after = recv_until(
+        &new_rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    let stats = m.stats().expect("stats after attach");
+    let range = m
+        .history_range(&[Series::Vbus], 0, u64::MAX, 8_192)
+        .expect("history after attach");
+    m.disconnect().unwrap();
+    assert_eq!(
+        range[0].buckets.first().map(|b| b.t_ms),
+        Some(u64::from(first)),
+        "the history lost the samples from before the attach"
+    );
+    assert!(stats.samples as usize >= sample_times(&before).len() + sample_times(&after).len());
+}
+
+/// AC-VEDDFD.5: rate changes, Record and Export work on a re-attached session.
+#[test]
+fn rate_record_and_export_work_after_attach() {
+    let (dir, path) = temp_csv("controls");
+    let (mut m, _opens, _) = manager(vec![]);
+    let (old_rx, old_sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, old_sink).unwrap();
+    recv_until(
+        &old_rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    let (new_rx, new_sink) = channel_sink();
+    m.attach(new_sink).expect("attach");
+
+    m.set_rate(10).expect("rate change after attach");
+    recv_until(&new_rx, |e| {
+        matches!(e, BackendEvent::Status(Status::Rate { rate_sps: 10, .. }))
+    });
+    let (_rx3, sink3) = channel_sink();
+    let snap = m.attach(sink3).expect("attach again");
+    assert_eq!(
+        snap.rate_sps,
+        Some(10),
+        "the snapshot missed the rate change"
+    );
+    // The third sink is the live one now; move back to a receiver we hold.
+    let (rx4, sink4) = channel_sink();
+    m.attach(sink4).expect("attach once more");
+
+    m.start_recording(&path).expect("record after attach");
+    recv_until(&rx4, |e| {
+        matches!(e, BackendEvent::Recording(RecordingEvent::Started))
+    });
+    m.stop_recording().expect("stop after attach");
+    let export = dir.join("export.csv");
+    let rows = m
+        .export_session(&export, |_| {})
+        .expect("export after attach")
+        .join()
+        .unwrap()
+        .expect("export");
+    assert!(rows > 0);
+    m.disconnect().unwrap();
+    recv_until(&rx4, |e| {
+        matches!(e, BackendEvent::Status(Status::Disconnected { .. }))
+    });
+    let _ = std::fs::remove_dir_all(dir);
+}

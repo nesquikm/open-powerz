@@ -31,6 +31,8 @@ import {
   type ChartGapBand,
   type OpenPowerzE2E,
   type OverviewWindowBox,
+  RELOAD_HOOK,
+  type ReloadHook,
 } from "../hook";
 
 export const DEMO_LOAD = "demo:load-5v-1a";
@@ -217,4 +219,46 @@ export async function overviewBreaks(
     (name) => (window as unknown as Record<string, OpenPowerzE2E>)[name]!.overviewBreaks(),
     HOOK,
   );
+}
+
+/** Reload the app the way the window reload does (FR VEDDFD): a fresh app on the same
+ * page while the backend, here the in-page mock, keeps running (see `RELOAD_HOOK`).
+ * Waits until the new app is on screen and its picker lists the demo devices. */
+export async function reloadApp(page: Page): Promise<void> {
+  const installed = await page.evaluate(
+    (name) => typeof (window as unknown as Record<string, unknown>)[name] === "function",
+    RELOAD_HOOK,
+  );
+  expect(installed, `window.${RELOAD_HOOK} is installed in the mock build`).toBe(true);
+  // Remember the old app's top bar, to tell the fresh one apart from it.
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__preReloadBadge =
+      document.querySelector(".badge");
+  });
+  await page.evaluate(
+    (name) => (window as unknown as Record<string, ReloadHook>)[name]!(),
+    RELOAD_HOOK,
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const now = document.querySelector(".badge");
+        return (
+          now !== null && now !== (window as unknown as Record<string, unknown>).__preReloadBadge
+        );
+      }),
+    )
+    .toBe(true);
+  await expect(
+    page.getByLabel("Device", { exact: true }).locator(`option[value="${DEMO_LOAD}"]`),
+  ).toHaveCount(1);
+}
+
+/** The recording timer's elapsed time in seconds (`REC h:mm:ss`), or NaN when hidden. */
+export async function recordingElapsedSeconds(page: Page): Promise<number> {
+  const timer = page.getByRole("timer");
+  if ((await timer.count()) === 0) return NaN;
+  const m = /REC (\d+):(\d{2}):(\d{2})/.exec(await timer.innerText());
+  if (!m) return NaN;
+  return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
 }

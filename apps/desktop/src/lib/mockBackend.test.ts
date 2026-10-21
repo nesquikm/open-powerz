@@ -442,3 +442,119 @@ describe("MockBackend ?mock=outage (AC-272WSN.3, AC-272WSN.4)", () => {
     await backend.disconnect();
   });
 });
+
+// ---- FR VEDDFD: a new page re-attaches to the running session ----
+
+describe("MockBackend attach (AC-VEDDFD.1–AC-VEDDFD.5)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("answers null with no session running (AC-VEDDFD.1)", async () => {
+    const backend = new MockBackend(null);
+    const events: BackendEvent[] = [];
+    await expect(backend.attach((e) => events.push(e))).resolves.toBeNull();
+    vi.advanceTimersByTime(500);
+    expect(events).toEqual([]);
+    // Nor once the session has ended.
+    await backend.connect("demo:load-5v-1a", 50, () => {});
+    await backend.disconnect();
+    await expect(backend.attach(() => {})).resolves.toBeNull();
+  });
+
+  it("returns the running session's snapshot without reconnecting (AC-VEDDFD.2)", async () => {
+    const backend = new MockBackend(null);
+    await backend.connect("demo:load-5v-1a", 50, () => {});
+    vi.advanceTimersByTime(500);
+    const events: BackendEvent[] = [];
+    await expect(backend.attach((e) => events.push(e))).resolves.toEqual({
+      device_id: "demo:load-5v-1a",
+      model: "KM003C",
+      firmware_version: "2.0.6",
+      serial: "123456",
+      rate_sps: 50,
+      rate_locked: false,
+      session_id: 1,
+      recording: null,
+    });
+    vi.advanceTimersByTime(500);
+    await backend.disconnect();
+    expect(events.some((e) => e.type === "status" && e.data.state === "connected")).toBe(false);
+    expect(batches(events).flatMap((b) => b.samples).length).toBeGreaterThan(0);
+  });
+
+  it("sends every later event to the new page only (AC-VEDDFD.5)", async () => {
+    const backend = new MockBackend(null);
+    const old: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 50, (e) => old.push(e));
+    vi.advanceTimersByTime(500);
+    const fresh: BackendEvent[] = [];
+    await backend.attach((e) => fresh.push(e));
+    const oldCount = old.length;
+    vi.advanceTimersByTime(1000);
+    await backend.setRate(10);
+    await backend.disconnect();
+    expect(old.length, "the old page still got events").toBe(oldCount);
+    // The stream goes on from where it was: the new page's first sample follows the old page's last.
+    const oldLast =
+      batches(old)
+        .flatMap((b) => b.samples)
+        .at(-1)?.t_ms ?? -1;
+    const freshFirst = batches(fresh).flatMap((b) => b.samples)[0]?.t_ms ?? -1;
+    expect(freshFirst).toBeGreaterThan(oldLast);
+    expect(fresh).toContainEqual({
+      type: "status",
+      data: { state: "rate", rate_sps: 10, rate_locked: false },
+    });
+    expect(fresh.at(-1)).toEqual({
+      type: "status",
+      data: { state: "disconnected", error: null },
+    });
+  });
+
+  it("carries the open recording's rows and elapsed time (AC-VEDDFD.3)", async () => {
+    const backend = new MockBackend(null);
+    await backend.connect("demo:load-5v-1a", 50, () => {});
+    await backend.startRecording("powerz-x.csv");
+    vi.advanceTimersByTime(2000);
+    const fresh: BackendEvent[] = [];
+    const snap = await backend.attach((e) => fresh.push(e));
+    expect(snap?.recording?.elapsed_ms).toBe(2000);
+    expect(snap?.recording?.rows).toBe(100);
+    // The recording runs on and Stop ends it on the re-attached session.
+    vi.advanceTimersByTime(1000);
+    const progress = fresh.flatMap((e) =>
+      e.type === "recording" && e.data.state === "progress" ? [e.data] : [],
+    );
+    expect(progress.at(-1)?.elapsed_ms).toBeGreaterThan(2000);
+    const summary = await backend.stopRecording();
+    expect(summary.rows).toBe(150);
+    await backend.disconnect();
+  });
+
+  it("reports a changed rate and a locked rate as they are (AC-VEDDFD.2)", async () => {
+    const backend = new MockBackend(null);
+    await backend.connect("demo:pd-9v-2a", 50, () => {});
+    await backend.setRate(1000);
+    const snap = await backend.attach(() => {});
+    expect(snap).toMatchObject({ device_id: "demo:pd-9v-2a", rate_sps: 1000, rate_locked: false });
+    await backend.disconnect();
+
+    const locked = new MockBackend("rate-locked");
+    await locked.connect("demo:load-5v-1a", 1000, () => {});
+    const lockedSnap = await locked.attach(() => {});
+    expect(lockedSnap).toMatchObject({ rate_sps: 50, rate_locked: true });
+    await locked.disconnect();
+  });
+
+  it("keeps the history and stats from before the attach (AC-VEDDFD.4)", async () => {
+    const backend = new MockBackend(null);
+    await backend.connect("demo:load-5v-1a", 50, () => {});
+    vi.advanceTimersByTime(1000);
+    await backend.attach(() => {});
+    vi.advanceTimersByTime(1000);
+    const [vbus] = await backend.historyRange(["vbus"] as const, 0, 1e12, 10_000);
+    expect(vbus.buckets[0]?.t_ms).toBe(0);
+    expect((await backend.stats()).samples).toBe(100);
+    await backend.disconnect();
+  });
+});

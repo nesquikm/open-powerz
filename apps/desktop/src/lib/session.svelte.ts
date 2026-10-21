@@ -1,4 +1,11 @@
-import type { BackendEvent, DeviceListing, Sample, StatsSnapshot, UiError } from "./backend";
+import type {
+  AttachedSession,
+  BackendEvent,
+  DeviceListing,
+  Sample,
+  StatsSnapshot,
+  UiError,
+} from "./backend";
 import { sortDevices, type ConnectionState } from "./format";
 
 /** Reactive UI state of the live session. */
@@ -48,6 +55,15 @@ export class Session {
 
   select(id: string): void {
     this.selectedId = id;
+  }
+
+  /** Takes over a session that was already running when this page loaded (a reload):
+   * its device stays picked, even when the device list arrives later. */
+  adopt(snapshot: AttachedSession): void {
+    this.error = null;
+    this.selectedId = snapshot.device_id;
+    this.rateSps = snapshot.rate_sps;
+    this.state = snapshot.rate_locked ? "rate_locked" : "streaming";
   }
 
   beginConnect(): void {

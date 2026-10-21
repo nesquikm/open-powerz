@@ -65,3 +65,17 @@ export interface OpenPowerzE2E {
 }
 
 export const HOOK = "__OPEN_POWERZ_E2E__";
+
+/**
+ * A simulated page reload for the Playwright UI suite (FR VEDDFD), as
+ * `window.__OPEN_POWERZ_RELOAD__`, installed only in the mock build
+ * (`VITE_BACKEND=mock`). A real `page.reload()` would take the in-page mock
+ * backend with it, while the real backend outlives a webview reload; so the
+ * hook unmounts the app and mounts a fresh one on the same page: new UI state
+ * (session, recording, chart, statistics), the mock backend and its running
+ * session untouched, and the old app's event callback left registered until
+ * the new app re-attaches. Resolves once the new app is mounted.
+ */
+export const RELOAD_HOOK = "__OPEN_POWERZ_RELOAD__";
+
+export type ReloadHook = () => Promise<void>;

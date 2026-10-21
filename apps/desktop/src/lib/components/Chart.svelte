@@ -3,6 +3,7 @@
   import "uplot/dist/uPlot.min.css";
   import { getContext, untrack } from "svelte";
   import { historyGaps, historyRange, type Gap, type Sample } from "../backend";
+  import { backfillRange, fetchBackfill } from "../backfill";
   import {
     GapList,
     LIVE_CAPACITY,
@@ -535,7 +536,43 @@
   export function push(samples: readonly Sample[]): void {
     buffer.push(samples);
     if (!hasData && buffer.length > 0) hasData = true;
+    if (backfillArmed) startBackfill();
     scheduler.invalidate();
+  }
+
+  /** A re-attach adopted a running session: once the buffer has its first sample, fill
+   * it from one history query covering the longest live window before it (FR VEDDFD). */
+  let backfillArmed = false;
+  /** Bumped by {@link reset}, so a backfill answer for an earlier session is dropped. */
+  let backfillGeneration = 0;
+
+  /** Backfills the live buffer from the history once it has a sample (FR VEDDFD). */
+  export function backfillFromHistory(): void {
+    backfillArmed = true;
+    startBackfill();
+  }
+
+  function startBackfill(): void {
+    const first = buffer.firstMs;
+    if (!backfillArmed || first === null) return;
+    // Once per re-attach: a session whose first live sample is at its start has
+    // nothing before it to fill.
+    backfillArmed = false;
+    const generation = backfillGeneration;
+    const [t0Ms, t1Ms] = backfillRange(first);
+    if (!(t1Ms > t0Ms)) return;
+    fetchBackfill(first, { historyRange, historyGaps })
+      .then(({ samples, gaps }) => {
+        if (generation !== backfillGeneration) return;
+        buffer.prepend(samples);
+        // After the prepend, so each break sits between two buffered samples.
+        for (const g of gaps) {
+          buffer.markGap(g);
+          sessionGaps.push(g);
+        }
+        scheduler.invalidate();
+      })
+      .catch((e: unknown) => console.warn("open-powerz: backfill failed", e));
   }
 
   /** The stream stopped for a while: the lines break there, never bridge it. */
@@ -552,6 +589,8 @@
     hoverAtMs = null;
     setPlayhead(null);
     buffer.clear();
+    backfillArmed = false;
+    backfillGeneration++;
     hasData = false;
     sessionGaps.clear();
     sessionStartMs = null;

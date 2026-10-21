@@ -32,7 +32,7 @@ On load, the UI asks the backend for the running session, if any, and re-attache
 
 ## Technical Design
 
-The worker's event sink becomes swappable. On attach the device manager hands the new page's sink to the worker, which swaps it and reads the recording state on its own thread, so the old page gets nothing more and no recording event falls between the two. The attach command returns the running session's snapshot (device, model, firmware, serial, rate and lock, session id, recording with elapsed time and rows), or nothing. The UI holds events until it has applied the snapshot, then seeds the live chart buffer from one history query covering the longest live window before its first sample. The mock backend gains the same command so a reload can be tested.
+The worker's event sink becomes swappable. On attach the device manager hands the new page's sink to the worker, which swaps it and reads the recording state on its own thread, so the old page gets nothing more and no recording event falls between the two. The attach command returns the running session's snapshot (device, rate and lock, session id, recording progress), or nothing. The UI holds events until it has applied the snapshot, then seeds the live chart buffer from the history and its run breaks over the longest live window before its first sample, the last minute at a finer resolution. The mock backend gains the same command so a reload can be tested.
 
 ## Testing
 
@@ -40,4 +40,4 @@ Rust: attach on a manager with and without a running session, the sink swap (the
 
 ## Notes
 
-From the hardware review: a webview reload, in development or in a release build, left a stuck "already connected" state. The user chose to re-attach seamlessly rather than stop the session. An export running during a reload still completes; its progress is not shown again.
+From the hardware review, a webview reload left a stuck "already connected" state; the user chose to re-attach seamlessly. An export running during a reload completes unseen. Backfilled points are history buckets: their power is the product of the channel extremes, and hover shows one extreme.

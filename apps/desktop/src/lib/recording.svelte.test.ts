@@ -291,3 +291,42 @@ describe("Recording races with the session (review round 2)", () => {
     expect(rec.phase).toBe("idle");
   });
 });
+
+// ---- FR VEDDFD: a recording that kept running through a reload ----
+
+describe("Recording adopts a running recording on load (AC-VEDDFD.3, AC-VEDDFD.5)", () => {
+  it("shows it as recording with the backend's elapsed time and rows", () => {
+    const r = new Recording();
+    r.adopt({ rows: 1_234, elapsed_ms: 65_000 });
+    expect(r.phase).toBe("recording");
+    expect(r.rows).toBe(1_234);
+    expect(r.elapsedMs).toBe(65_000);
+    expect(r.indicator).toBe("REC 0:01:05 · 1,234 rows");
+  });
+
+  it("follows the progress that comes after", () => {
+    const r = new Recording();
+    r.adopt({ rows: 100, elapsed_ms: 2_000 });
+    r.handleEvent({ state: "progress", rows: 125, elapsed_ms: 2_500 });
+    expect(r.indicator).toBe("REC 0:00:02 · 125 rows");
+  });
+
+  it("stops through the usual toggle", async () => {
+    const r = new Recording();
+    r.adopt({ rows: 100, elapsed_ms: 2_000 });
+    const d = deps();
+    await r.toggle(d);
+    expect(d.stopRecording).toHaveBeenCalledTimes(1);
+    expect(d.startRecording).not.toHaveBeenCalled();
+    expect(r.phase).toBe("idle");
+    expect(r.notice).toBe(recordingSummaryText(summary(5)));
+  });
+
+  it("ends with the session like one started on this page", () => {
+    const r = new Recording();
+    r.adopt({ rows: 100, elapsed_ms: 2_000 });
+    r.handleEvent({ state: "stopped", rows: 140, gaps: [], disconnected: true });
+    expect(r.phase).toBe("idle");
+    expect(r.indicator).toBeNull();
+  });
+});

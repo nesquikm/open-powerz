@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { BackendEvent, DeviceListing, Sample, StatsSnapshot, UiError } from "./backend";
+import type {
+  AttachedSession,
+  BackendEvent,
+  DeviceListing,
+  Sample,
+  StatsSnapshot,
+  UiError,
+} from "./backend";
 import { Session } from "./session.svelte";
 
 const NO_STATS: StatsSnapshot = {
@@ -293,5 +300,64 @@ describe("Session stats after a reset (review round 1)", () => {
     expect(s.stats).toBeNull();
     s.handleEvent({ type: "batch", data: { samples: [sample(2)], temp_c: 30, stats: NO_STATS } });
     expect(s.stats).toEqual(NO_STATS);
+  });
+});
+
+// ---- FR VEDDFD: the new page adopts the running session ----
+
+describe("Session adopts a running session on load (AC-VEDDFD.2, AC-VEDDFD.5)", () => {
+  const snapshot = (over: Partial<AttachedSession> = {}): AttachedSession => ({
+    device_id: "usb:1:4",
+    model: "KM003C",
+    firmware_version: "2.0.6",
+    serial: "12345678",
+    rate_sps: 50,
+    rate_locked: false,
+    session_id: 2,
+    recording: null,
+    ...over,
+  });
+
+  it("shows the session as streaming on the picked device, with its rate", () => {
+    const s = new Session();
+    s.setDevices([listing("usb:1:2"), listing("usb:1:4")]);
+    s.adopt(snapshot());
+    expect(s.state).toBe("streaming");
+    expect(s.selectedId).toBe("usb:1:4");
+    expect(s.rateSps).toBe(50);
+    expect(s.error).toBeNull();
+    expect(s.active).toBe(true);
+    // Disconnect is offered, as for a session connected on this page.
+    expect(s.canToggleConnect).toBe(true);
+  });
+
+  it("keeps the adopted device picked when the device list arrives afterwards", () => {
+    const s = new Session();
+    s.adopt(snapshot());
+    s.setDevices([listing("usb:1:2"), listing("usb:1:4")]);
+    expect(s.selectedId).toBe("usb:1:4");
+  });
+
+  it("shows a locked rate as rate locked", () => {
+    const s = new Session();
+    s.adopt(snapshot({ rate_locked: true, rate_sps: 50 }));
+    expect(s.state).toBe("rate_locked");
+    expect(s.rateSps).toBe(50);
+  });
+
+  it("takes the batches that follow and ends like any session", () => {
+    const s = new Session();
+    s.adopt(snapshot());
+    s.handleEvent({
+      type: "batch",
+      data: { samples: [sample(10, 5.1)], temp_c: 31, stats: { ...NO_STATS, samples: 900 } },
+    });
+    expect(s.latest?.vbus_v).toBe(5.1);
+    expect(s.stats?.samples).toBe(900);
+    s.handleEvent({ type: "status", data: { state: "rate", rate_sps: 10, rate_locked: false } });
+    expect(s.rateSps).toBe(10);
+    s.handleEvent({ type: "status", data: { state: "disconnected", error: null } });
+    expect(s.state).toBe("disconnected");
+    expect(s.latest).toBeNull();
   });
 });

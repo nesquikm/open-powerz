@@ -174,6 +174,11 @@ impl Recorder {
         self.gaps.push(gap);
     }
 
+    /// Rows written so far and time since the start, at `now_ms`.
+    pub(crate) fn progress(&self, now_ms: u64) -> (u64, u64) {
+        (self.csv.rows(), now_ms.saturating_sub(self.start_ms))
+    }
+
     /// Flush when due; returns a progress event when one is due.
     pub(crate) fn tick(&mut self, now_ms: u64) -> io::Result<Option<RecordingEvent>> {
         if now_ms.saturating_sub(self.last_flush_ms) >= FLUSH_PERIOD_MS {
