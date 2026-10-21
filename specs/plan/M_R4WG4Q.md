@@ -95,6 +95,8 @@ codename: Live Wire
 - Plot height at 900×900: the readout leaves the plot ~125 px tall (QA N5).
 - The ~71 ms hole a 50 → 1000 SPS switch leaves (expected queue restart) shows as a gap (QA R2).
 - Narrow gap bands (~40 px) in the chart get no "No data" label (QA R5).
+- A 10-minute WebContent memory soak after the plateau (4NSVC9 AC .4 measured 5 minutes).
+- Reword the M2 ACs that later FRs overrode (17 drift hints from the M2 spec review).
 
 **Tests:**
 - Rust unit and property tests for batching, decimation, stats and recording; worker integration tests against `powerz-sim`; Vitest for UI logic; WebdriverIO real-app e2e (Linux, Windows); Playwright UI e2e with axe (Linux, macOS, Windows).
@@ -102,8 +104,8 @@ codename: Live Wire
 **Acceptance Criteria:**
 - [x] Gating rule from CLAUDE.md passes locally on macOS
 - [x] CI is green on all three OSes, including the `e2e` job
-- [ ] Every AC of the FRs above is traced to a test by `/spec-review`
+- [x] Every AC of the FRs above is traced to a test by `/spec-review`
 - [x] Blocking visual check passed for every UI FR: light and dark, ~900 px and ~1600 px wide, demo device streaming and no device; screenshot paths listed in the report
-- [ ] The desktop app streams, charts and records from the real KM003C at 1000 SPS for 60 s with no host-side gaps
+- [x] The desktop app streams, charts and records from the real KM003C at 1000 SPS for 60 s with no host-side gaps
 
 **Gate:** `bun install --frozen-lockfile && bun run lint && bun run check && bun run test && bun run build:web && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`

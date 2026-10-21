@@ -41,3 +41,5 @@ Vitest: the generated icon files exist at the sizes each platform expects, and t
 ## Notes
 
 Requested after the hardware review: the old bolt did not say what the app does. The design must stay original; no vendor artwork is copied. Tauri bundle configuration keeps its existing icon paths.
+
+Renders and the Dock icon were reviewed at the commit (plan task); the final QA re-checked the Dock icon from the bundle.

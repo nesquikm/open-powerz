@@ -57,4 +57,4 @@ Vitest: the dash splitter keeps the pattern across points and gaps, and returns 
 
 Mock page, WebKit, 1000 SPS: 22.7 MB/s before the fix; after it, 0.5 MB/s with no plateau in 330 s, partly the mock's in-page history.
 
-AC .4, real meter at 1000 SPS (the demo picker is not settable by automation): 188 MB, plateau from ~6 min (warm-up), +21 MB over the last 5 min, 539 MB at 11 min.
+AC .4, real meter at 1000 SPS (automation cannot set the demo picker); warm-up lasts until the plateau: 188 → 539 MB by ~6 min, then +21 MB over the next 5 min.
