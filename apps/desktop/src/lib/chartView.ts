@@ -1,7 +1,7 @@
-import type { Series, SeriesBuckets } from "./backend";
+import type { HistorySeries, SeriesBuckets } from "./backend";
 import { LIVE_WINDOWS, type LiveWindowId } from "./chartData";
 import { formatSessionTime } from "./chartSeries";
-import { MIN_SPAN_MS, zoomInDisplay, type TimeWarp } from "./timeline";
+import { sessionMinSpan, zoomInDisplay, type TimeWarp } from "./timeline";
 
 /** The chart never redraws more often than this, whatever the display's refresh rate. */
 export const MAX_REDRAW_HZ = 60;
@@ -96,6 +96,9 @@ export interface TimeRange {
 export interface SessionExtent {
   firstMs: number;
   lastMs: number;
+  /** The narrowest view at the current rate (`minSpanMs`); MIN_SPAN_MS when absent
+   * (AC-9CFMD3.4). */
+  minSpanMs?: number;
 }
 
 /** One zoom step (wheel notch, arrow key) shrinks or grows the span by this factor. */
@@ -137,6 +140,7 @@ export function applyGesture(
     const { t0Ms, t1Ms } = clampToSession(r, session);
     return { mode: "history", window: view.window, t0Ms, t1Ms };
   };
+  const minSpan = sessionMinSpan(session);
   const span = shown.t1Ms - shown.t0Ms;
   const mid = shown.t0Ms + span / 2;
   switch (gesture.kind) {
@@ -158,13 +162,13 @@ export function applyGesture(
       // A selection is clipped to the session, never shifted.
       const t0Ms = Math.max(session.firstMs, Math.min(gesture.t0Ms, gesture.t1Ms));
       const t1Ms = Math.min(session.lastMs, Math.max(gesture.t0Ms, gesture.t1Ms));
-      if (t1Ms - t0Ms < MIN_SPAN_MS) return view;
+      if (t1Ms - t0Ms < minSpan) return view;
       return history({ t0Ms, t1Ms });
     }
     case "range": {
       const t0Ms = Math.min(gesture.t0Ms, gesture.t1Ms);
       const t1Ms = Math.max(gesture.t0Ms, gesture.t1Ms);
-      if (!(t1Ms - t0Ms >= MIN_SPAN_MS)) return view;
+      if (!(t1Ms - t0Ms >= minSpan)) return view;
       return history({ t0Ms, t1Ms });
     }
     case "wheel": {
@@ -177,8 +181,8 @@ export function applyGesture(
           : 0;
       if (gesture.shiftKey || panDelta !== 0) {
         if (panDelta === 0 || !Number.isFinite(panDelta)) return view;
-        // A view is never narrower than MIN_SPAN_MS, so a pan always moves.
-        const width = Math.max(MIN_SPAN_MS, span);
+        // A view is never narrower than the session's narrowest span, so a pan always moves.
+        const width = Math.max(sessionMinSpan(session), span);
         const deltaMs = (panDelta / WHEEL_PAN_PX) * width;
         return history({ t0Ms: shown.t0Ms + deltaMs, t1Ms: shown.t0Ms + deltaMs + width });
       }
@@ -268,7 +272,7 @@ export const CHART_KEYS: readonly string[] = [
 
 /** A `history_range` call. */
 export interface HistoryRequest {
-  series: Series[];
+  series: HistorySeries[];
   t0Ms: number;
   t1Ms: number;
   buckets: number;
@@ -276,8 +280,16 @@ export interface HistoryRequest {
   purpose?: "view" | "session";
 }
 
-/** Every stored series the chart draws (power is derived from VBUS and IBUS). */
-const HISTORY_SERIES: readonly Series[] = ["vbus", "ibus", "dp", "dm", "cc1", "cc2"];
+/** Every stored series the chart draws. */
+const HISTORY_SERIES: readonly HistorySeries[] = [
+  "vbus",
+  "ibus",
+  "dp",
+  "dm",
+  "cc1",
+  "cc2",
+  "power",
+];
 
 /** The `history_range` call for a history view: one bucket per pixel of plot width;
  * `null` in live mode or before the plot has a width. */

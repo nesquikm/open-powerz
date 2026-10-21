@@ -673,3 +673,59 @@ describe("the narrowest view is the zoom slider's bottom (AC-FENCD9.9)", () => {
     }
   });
 });
+
+describe("history views ask for Power (AC-JFD9XR.4)", () => {
+  it("requests the power series with the stored ones", () => {
+    const view: ChartView = { mode: "history", window: "10s", t0Ms: 1_000, t1Ms: 5_000 };
+    const req = historyRequestFor(view, 600);
+    expect(req?.series).toContain("power");
+    for (const s of ["vbus", "ibus", "dp", "dm", "cc1", "cc2"]) expect(req?.series).toContain(s);
+  });
+});
+
+describe("range announcement per view kind (AC-JFD9XR.6)", () => {
+  it("names each live window", () => {
+    expect(rangeAnnouncement({ mode: "live", window: "10s" })).toBe("Live: 10 s");
+    expect(rangeAnnouncement({ mode: "live", window: "1m" })).toBe("Live: 1 min");
+    expect(rangeAnnouncement({ mode: "live", window: "10m" })).toBe("Live: 10 min");
+    expect(rangeAnnouncement({ mode: "live", window: "all" })).toBe("Live: Whole session");
+  });
+
+  it("names a paused range from the session start", () => {
+    const paused: ChartView = { mode: "history", window: "1m", t0Ms: 12_500, t1Ms: 72_500 };
+    expect(rangeAnnouncement(paused, 2_500, { paused: true })).toBe("Paused: 10.0 s to 1:10.0");
+  });
+});
+
+describe("applyGesture never zooms past two sample periods (AC-9CFMD3.4)", () => {
+  const AT_50SPS = { ...SESSION, minSpanMs: 40 };
+
+  it("clamps wheel and key zooms to the rate's narrowest view", () => {
+    let view: ChartView = LIVE;
+    let shown = SHOWN;
+    for (let k = 0; k < 100; k++) {
+      view = applyGesture(view, { kind: "wheel", atMs: 15_000, deltaY: -100 }, shown, AT_50SPS);
+      if (view.mode === "history") shown = { t0Ms: view.t0Ms, t1Ms: view.t1Ms };
+    }
+    expect(span(view)).toBeCloseTo(40, 6);
+    for (let k = 0; k < 100; k++) {
+      view = applyGesture(view, { kind: "key", key: "ArrowUp" }, shown, AT_50SPS);
+      if (view.mode === "history") shown = { t0Ms: view.t0Ms, t1Ms: view.t1Ms };
+    }
+    expect(span(view)).toBeCloseTo(40, 6);
+  });
+
+  it("refuses a selection or range narrower than two sample periods", () => {
+    const sel = applyGesture(LIVE, { kind: "select", t0Ms: 12_000, t1Ms: 12_020 }, SHOWN, AT_50SPS);
+    expect(sel).toBe(LIVE);
+    const range = applyGesture(
+      LIVE,
+      { kind: "range", t0Ms: 12_000, t1Ms: 12_030 },
+      SHOWN,
+      AT_50SPS,
+    );
+    expect(range).toBe(LIVE);
+    const ok = applyGesture(LIVE, { kind: "select", t0Ms: 12_000, t1Ms: 12_040 }, SHOWN, AT_50SPS);
+    expect(span(ok)).toBeCloseTo(40, 6);
+  });
+});

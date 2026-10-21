@@ -16,6 +16,7 @@ import type {
   ExportResult,
   Gap,
   HistoryGap,
+  HistorySeries,
   MinMaxAvg,
   RecordingSummary,
   Sample,
@@ -24,6 +25,7 @@ import type {
   StatsSnapshot,
   UiError,
 } from "./backend";
+import { widenToNeighbours } from "./chartData";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
@@ -218,22 +220,41 @@ class HistoryColumns {
     return lo;
   }
 
-  /** Min / max buckets over `t0..=t1`, at most `buckets` per series. */
-  buckets(series: readonly Series[], t0: number, t1: number, buckets: number): SeriesBuckets[] {
-    const from = this.#search(t0, false);
-    const to = this.#search(t1, true);
+  /** Series `name` of sample `j`; Power is VBUS × IBUS of that sample, so it takes no
+   * column of its own. */
+  #value(name: HistorySeries, j: number): number {
+    if (name !== "power") return this.#cols[name][j] as number;
+    return (this.#cols.vbus[j] as number) * (this.#cols.ibus[j] as number);
+  }
+
+  /** Min / max buckets over `t0..=t1`, at most `buckets` per series, plus the sample
+   * just outside each edge that falls between samples, so lines run to the view's
+   * edges (AC-9CFMD3.4). */
+  buckets(
+    series: readonly HistorySeries[],
+    t0: number,
+    t1: number,
+    buckets: number,
+  ): SeriesBuckets[] {
+    const [from, to] = widenToNeighbours(
+      this.#search(t0, false),
+      this.#search(t1, true),
+      this.length,
+      (i) => this.#t[i] as number,
+      t0,
+      t1,
+    );
     const n = Math.max(0, to - from);
     const per = buckets > 0 ? Math.max(1, Math.ceil(n / buckets)) : 0;
     return series.map((name) => {
       const out: SeriesBuckets = { series: name, buckets: [] };
       if (per === 0) return out;
-      const col = this.#cols[name];
       for (let i = from; i < to; i += per) {
         const end = Math.min(to, i + per);
         let min = Infinity;
         let max = -Infinity;
         for (let j = i; j < end; j++) {
-          const v = col[j] as number;
+          const v = this.#value(name, j);
           if (v < min) min = v;
           if (v > max) max = v;
         }
@@ -338,6 +359,7 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
 export class MockBackend {
   #session: Running | null = null;
   #mode: MockMode | null;
+  #revealed: string[] = [];
 
   /** `mode` defaults to the page URL's `?mock=` parameter. */
   constructor(mode: MockMode | null = mockModeFromUrl(pageSearch())) {
@@ -513,6 +535,8 @@ export class MockBackend {
     if (this.#mode === "rate-locked") {
       throw usage("Changing the rate needs authentication, which the meter refused.");
     }
+    // One file, one rate: the real backend refuses a change mid-recording.
+    if (s.recording) throw usage("Stop the recording to change the rate.");
     s.rateSps = rateSps;
     s.carry = 0;
     s.onEvent({ type: "status", data: { state: "rate", rate_sps: rateSps, rate_locked: false } });
@@ -561,7 +585,7 @@ export class MockBackend {
     return s.stats.snapshot();
   }
 
-  async historyRange<const S extends readonly Series[]>(
+  async historyRange<const S extends readonly HistorySeries[]>(
     series: S,
     t0Ms: number,
     t1Ms: number,
@@ -604,5 +628,15 @@ export class MockBackend {
 
   async appInfo(): Promise<AppInfo> {
     return { appVersion: "0.1.0 (mock backend)", protocolVersion: "0.1.0" };
+  }
+
+  /** There is no file manager to open: the request is recorded instead. */
+  async revealPath(path: string): Promise<void> {
+    this.#revealed.push(path);
+  }
+
+  /** Every path `revealPath` was asked to show, oldest first. */
+  revealedPaths(): string[] {
+    return [...this.#revealed];
   }
 }

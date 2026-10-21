@@ -3,7 +3,8 @@
 //! Records are kept columnar in raw device units (time, VBUS, IBUS, CC1, CC2,
 //! D+, D−: 20 bytes a sample) in fixed-size chunks, so appending never copies
 //! what is already stored and capacity never doubles past what is needed:
-//! 10 million samples take about 200 MB. The rate (which sets the CC / D±
+//! 10 million samples take about 200 MB, plus a min/max pyramid over the
+//! six channels and the per-record power (VBUS × IBUS). The rate (which sets the CC / D±
 //! scale) is kept as runs, one entry per rate change. Chunks are shared, so
 //! an export snapshot costs a few pointers, not a copy of the samples.
 
@@ -116,6 +117,8 @@ pub enum Series {
     Dm,
     Cc1,
     Cc2,
+    /// VBUS × IBUS of each record, W.
+    Power,
 }
 
 /// The min and max of one series over one time bucket, in SI units.
@@ -243,7 +246,7 @@ pub struct History {
 /// Records per block at the finest pyramid level.
 const PYRAMID_BASE: usize = 64;
 /// Number of chart series.
-const SERIES: usize = 6;
+const SERIES: usize = 7;
 /// `(min, max)` of every series over one block.
 type Entry = [(f32, f32); SERIES];
 
@@ -389,6 +392,29 @@ impl History {
             })
             .filter(|g| g.to_ms > t0 && g.from_ms < t1)
             .collect()
+    }
+
+    /// `t0..=t1` widened to the record just outside each end that falls
+    /// between records, so a chart drawing the range runs its lines to the
+    /// edges at any zoom (AC-9CFMD3.4); an end on a record, or past the
+    /// first or newest record, stays as it is.
+    pub fn widen_to_neighbours(&self, t0: u64, t1: u64) -> (u64, u64) {
+        if t1 < t0 {
+            return (t0, t1);
+        }
+        let len = self.records.len;
+        let (i0, i1) = self.index_range(t0, t1);
+        let lo = if i0 > 0 && (i0 == len || self.time_at(i0) > t0) {
+            self.time_at(i0 - 1)
+        } else {
+            t0
+        };
+        let hi = if i1 < len && (i1 == 0 || self.time_at(i1 - 1) < t1) {
+            self.time_at(i1)
+        } else {
+            t1
+        };
+        (lo, hi)
     }
 
     /// Time of record `i`, ms.
@@ -537,6 +563,7 @@ fn series_index(series: Series) -> usize {
         Series::Dm => 3,
         Series::Cc1 => 4,
         Series::Cc2 => 5,
+        Series::Power => 6,
     }
 }
 
@@ -549,6 +576,7 @@ fn values(r: &QueueRecord) -> [f32; SERIES] {
         r.dm_v() as f32,
         r.cc1_v() as f32,
         r.cc2_v() as f32,
+        (r.vbus_v() * r.ibus_a()) as f32,
     ]
 }
 

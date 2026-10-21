@@ -747,3 +747,53 @@ describe("GapList ignores a gap without finite ends (AC-272WSN.4)", () => {
     expect(list.overlapping(0, 1_000)).toEqual([{ from_ms: 100, to_ms: 200 }]);
   });
 });
+
+describe("bucketsToFrame Power (AC-JFD9XR.4)", () => {
+  it("fills the power column from a power series, min then max per bucket", () => {
+    const frame = bucketsToFrame([
+      { series: "vbus", buckets: [{ t_ms: 0, min: 1, max: 20 }] },
+      { series: "power", buckets: [{ t_ms: 0, min: -5, max: 2 }] },
+    ] as unknown as Parameters<typeof bucketsToFrame>[0]);
+    expect(frame.x).toEqual([0, 0]);
+    expect(frame.y.power).toEqual([-5, 2]);
+    expect(frame.y.vbus).toEqual([1, 20]);
+  });
+
+  it("puts Power min-max in the hover readout of a decimated frame", () => {
+    const frame = bucketsToFrame([
+      { series: "power", buckets: [{ t_ms: 100, min: 4.5, max: 5.5 }] },
+    ] as unknown as Parameters<typeof bucketsToFrame>[0]);
+    const vis = { ...defaultVisibility(), power: true };
+    const power = hoverReadout(frame, 100, vis)?.values.find((v) => v.key === "power");
+    expect(power).toEqual({ key: "power", kind: "range", min: 4.5, max: 5.5 });
+  });
+});
+
+describe("LiveBuffer edge samples (AC-9CFMD3.4)", () => {
+  /** 50 SPS: one sample every 20 ms. */
+  function at50Sps(): LiveBuffer {
+    const buf = new LiveBuffer(1000);
+    buf.push(samples(0, 2_000, 20));
+    return buf;
+  }
+
+  it("draws a line through a view narrower than one sample period", () => {
+    // No sample lies inside [105, 115]: the ones just outside carry the line.
+    const frame = at50Sps().window(105, 115, 800);
+    expect(frame.x).toEqual([100, 120]);
+    expect(nonNull(frame.y.vbus)).toHaveLength(2);
+  });
+
+  it("adds the sample just before and just after the view", () => {
+    const frame = at50Sps().window(105.5, 144.5, 800);
+    expect(frame.x).toEqual([100, 120, 140, 160]);
+    expect(frame.y.vbus[0]).toBeCloseTo(5.1, 6);
+    expect(frame.y.vbus.at(-1)).toBeCloseTo(5.16, 6);
+  });
+
+  it("adds nothing past the first or newest sample", () => {
+    const buf = at50Sps();
+    expect(buf.window(-50, 30, 800).x).toEqual([0, 20, 40]);
+    expect(buf.window(1_985, 2_100, 800).x).toEqual([1_980, 2_000]);
+  });
+});

@@ -1,10 +1,16 @@
 /** Shapes the Tauri backend sends to the UI (mirrors `src-tauri/src/{batch,worker,devices,ui_error}.rs`). */
 
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { MockBackend } from "./mockBackend";
 
 /** The scripted demo backend, when the web build was made with `VITE_BACKEND=mock`. */
 const mock: MockBackend | null = import.meta.env.VITE_BACKEND === "mock" ? new MockBackend() : null;
+
+// The mock build exposes itself so the UI suite can read what it recorded (reveal requests).
+if (mock && typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__OPEN_POWERZ_MOCK__ = mock;
+}
 
 /** Whether a backend is there to talk to: the Tauri app, or the mock build. */
 export function backendAvailable(): boolean {
@@ -162,8 +168,12 @@ export interface StatsSnapshot {
   power: MinMaxAvg | null;
 }
 
-/** A chart series in the session history. */
+/** A stored channel of the session history. */
 export type Series = "vbus" | "ibus" | "dp" | "dm" | "cc1" | "cc2";
+
+/** A chart series the session history answers: the stored channels plus Power
+ * (VBUS × IBUS of each record). */
+export type HistorySeries = Series | "power";
 
 /** The min and max of one series over one time bucket (mirrors `src-tauri/src/history.rs`). */
 export interface Bucket {
@@ -174,12 +184,12 @@ export interface Bucket {
 
 /** The buckets of one series. */
 export interface SeriesBuckets {
-  series: Series;
+  series: HistorySeries;
   buckets: Bucket[];
 }
 
 /** One {@link SeriesBuckets} per requested series, in the requested order. */
-export type BucketsFor<S extends readonly Series[]> = { [K in keyof S]: SeriesBuckets };
+export type BucketsFor<S extends readonly HistorySeries[]> = { [K in keyof S]: SeriesBuckets };
 
 /** Every event the backend sends over the session channel. */
 export type BackendEvent =
@@ -295,23 +305,30 @@ export async function stats(): Promise<StatsSnapshot> {
   return invoke<StatsSnapshot>("stats");
 }
 
+/** `t0Ms..=t1Ms` widened to the whole ms around it, which the backend takes: a view
+ * narrower than a millisecond's precision (a deep zoom, AC-9CFMD3.4) widens rather than
+ * failing to parse. */
+function wholeMs(t0Ms: number, t1Ms: number): { t0Ms: number; t1Ms: number } {
+  return { t0Ms: Math.max(0, Math.floor(t0Ms)), t1Ms: Math.max(0, Math.ceil(t1Ms)) };
+}
+
 /** Min / max buckets of the open session's history over `t0Ms..=t1Ms`, at most
  * `buckets` per series. */
-export async function historyRange<const S extends readonly Series[]>(
+export async function historyRange<const S extends readonly HistorySeries[]>(
   series: S,
   t0Ms: number,
   t1Ms: number,
   buckets: number,
 ): Promise<BucketsFor<S>> {
   if (mock) return mock.historyRange(series, t0Ms, t1Ms, buckets);
-  return invoke<BucketsFor<S>>("history_range", { series, t0Ms, t1Ms, buckets });
+  return invoke<BucketsFor<S>>("history_range", { series, ...wholeMs(t0Ms, t1Ms), buckets });
 }
 
 /** The gaps between measuring runs of the open session's history that overlap
  * `t0Ms..=t1Ms`, oldest first. */
 export async function historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]> {
   if (mock) return mock.historyGaps(t0Ms, t1Ms);
-  return invoke<HistoryGap[]>("history_gaps", { t0Ms, t1Ms });
+  return invoke<HistoryGap[]>("history_gaps", wholeMs(t0Ms, t1Ms));
 }
 
 /** Zeroes the session statistics; they count again from the next sample. */
@@ -337,4 +354,10 @@ export async function appInfo(): Promise<AppInfo> {
   if (mock) return mock.appInfo();
   const info = await invoke<{ app_version: string; protocol_version: string }>("app_info");
   return { appVersion: info.app_version, protocolVersion: info.protocol_version };
+}
+
+/** Shows `path` selected in the system file manager (Finder, Explorer, …). */
+export async function revealPath(path: string): Promise<void> {
+  if (mock) return mock.revealPath(path);
+  await revealItemInDir(path);
 }

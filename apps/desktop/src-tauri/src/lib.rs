@@ -313,7 +313,8 @@ async fn clear_history(state: Shared<'_>) -> Result<(), UiError> {
 }
 
 /// Min / max buckets of the session's history (open or last) over `t0_ms..=t1_ms`,
-/// at most `buckets` per series.
+/// at most `buckets` per series, plus the record just outside each end that falls
+/// between records, so lines run to the view's edges at any zoom (AC-9CFMD3.4).
 #[tauri::command]
 async fn history_range(
     state: Shared<'_>,
@@ -323,7 +324,10 @@ async fn history_range(
     buckets: usize,
 ) -> Result<Vec<history::SeriesBuckets>, UiError> {
     let state = Arc::clone(&state);
-    blocking(move || Ok(session_store(&state)?.history_range(&series, t0_ms, t1_ms, buckets))).await
+    blocking(move || {
+        Ok(session_store(&state)?.history_range_to_edges(&series, t0_ms, t1_ms, buckets))
+    })
+    .await
 }
 
 /// The gaps between measuring runs of the session history over
@@ -403,6 +407,7 @@ pub fn channel_sink(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(AppState::new()))
         .invoke_handler(tauri::generate_handler![
             app_info,

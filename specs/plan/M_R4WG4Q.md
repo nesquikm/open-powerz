@@ -68,9 +68,9 @@ codename: Live Wire
   verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `clear.spec.ts`
 - [x] New app icon from one SVG source, all platform sizes generated — 5MTE4V
   verify: `bun run test` passes the icon asset test; renders and Dock screenshots reviewed
-- [ ] QA bugs: rate keys while recording, Power in history, range announcements — JFD9XR
+- [x] QA bugs: rate keys while recording, Power in history, range announcements — JFD9XR
   verify: `cargo test --workspace --locked` and `bun run test` pass; `bun run e2e:ui` passes `qa-bugs.spec.ts`
-- [ ] Export/recording notices with reveal, deep-zoom clamp and edge samples, empty state — 9CFMD3
+- [x] Export/recording notices with reveal, deep-zoom clamp and edge samples, empty state — 9CFMD3
   verify: `bun run test` passes; `bun run e2e:ui` passes the notice, zoom and empty-state specs
 - [ ] Clear-confirm Escape, menu pattern, About focus, wider shortcut overlay — M46CTX
   verify: `bun run e2e:ui` passes the keyboard and overlay specs incl. axe

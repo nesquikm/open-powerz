@@ -14,6 +14,24 @@ export interface GapSpan extends HistoryGap {
   kind?: Gap["kind"];
 }
 
+/** The index range `[lo, hi)` of the samples in `[t0Ms, t1Ms]`, widened by the sample
+ * just outside each end that falls between samples, so lines run to the view's edges at
+ * any zoom (AC-9CFMD3.4); an end on a sample, or past the first or last, stays put.
+ * `timeAt(i)` is sample `i`'s time, for `0 <= i < len`. */
+export function widenToNeighbours(
+  lo: number,
+  hi: number,
+  len: number,
+  timeAt: (i: number) => number,
+  t0Ms: number,
+  t1Ms: number,
+): [number, number] {
+  if (t1Ms < t0Ms) return [lo, hi];
+  if (lo > 0 && (lo === len || timeAt(lo) > t0Ms)) lo--;
+  if (hi < len && (hi === 0 || timeAt(hi - 1) < t1Ms)) hi++;
+  return [lo, hi];
+}
+
 /** Live ring capacity: 10 minutes at 1000 SPS. */
 export const LIVE_CAPACITY = 600_000;
 
@@ -299,18 +317,29 @@ export class LiveBuffer {
     this.#ch.cc2[slot] = s.cc2_v;
   }
 
-  /** Samples in [t0Ms, t1Ms], reduced to at most two points per pixel of `widthPx`
-   * (each pixel's min and max, in time order) when there are more than that. A gap
-   * breaks the line after its `from_ms` sample; non-finite values draw no point. */
+  /** Samples in [t0Ms, t1Ms], plus the one just outside each edge that falls between
+   * samples, so lines run to the view's edges at any zoom (AC-9CFMD3.4); reduced to at
+   * most two points per pixel of `widthPx` (each pixel's min and max, in time order)
+   * when there are more than that. A gap breaks the line after its `from_ms` sample;
+   * non-finite values draw no point. */
   window(t0Ms: number, t1Ms: number, widthPx: number): ChartFrame {
-    const lo = this.#lowerBound(t0Ms);
-    const hi = this.#upperBound(t1Ms); // exclusive
+    const t = this.#t;
+    const timeAt = (i: number): number => t[this.#slot(i)] ?? 0;
+    const [lo, hi] = widenToNeighbours(
+      this.#lowerBound(t0Ms),
+      this.#upperBound(t1Ms), // exclusive
+      this.#len,
+      timeAt,
+      t0Ms,
+      t1Ms,
+    );
     const count = Math.max(0, hi - lo);
     const pixels = Number.isFinite(widthPx) ? Math.max(1, Math.floor(widthPx)) : 1;
     const y = emptyY();
     const x: number[] = [];
-    const gaps = this.#gaps.within(t0Ms, t1Ms).filter((gap) => gap.from_ms < t1Ms);
-    const t = this.#t;
+    const g0 = count > 0 ? Math.min(t0Ms, timeAt(lo)) : t0Ms;
+    const g1 = count > 0 ? Math.max(t1Ms, timeAt(hi - 1)) : t1Ms;
+    const gaps = this.#gaps.within(g0, g1).filter((gap) => gap.from_ms < g1);
     const cap = this.capacity;
     let g = 0;
     /** Null points for every gap starting before `ms`: uPlot breaks the line there. */

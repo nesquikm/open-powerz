@@ -18,6 +18,9 @@ export interface RatePickerState {
   label: string | null;
 }
 
+/** Why the rate cannot change while a recording is open. */
+const RATE_LOCKED_WHILE_RECORDING = "Stop the recording to change the rate";
+
 /**
  * How the rate picker looks for a session state: disabled with an explanation
  * when the meter's rate is locked (no authentication), enabled otherwise.
@@ -38,8 +41,17 @@ export function ratePicker(
     };
   }
   // The backend refuses a rate change mid-recording: one file, one rate.
-  if (recording) return { disabled: true, label: "Stop the recording to change the rate" };
+  if (recording) return { disabled: true, label: RATE_LOCKED_WHILE_RECORDING };
   return { disabled: false, label: null };
+}
+
+/** What a rate key does: change the rate, or refuse while a recording is open. */
+export type RateChange = { kind: "set"; sps: number } | { kind: "refused"; notice: string };
+
+/** A rate key (1–4) follows the picker's lock: no rate change mid-recording. */
+export function rateChange(sps: number, { recording }: { recording: boolean }): RateChange {
+  if (recording) return { kind: "refused", notice: `${RATE_LOCKED_WHILE_RECORDING}.` };
+  return { kind: "set", sps };
 }
 
 const pad = (n: number): string => String(n).padStart(2, "0");
@@ -77,12 +89,26 @@ export function recordingRowsSuffix(rows: number): string {
   return ` · ${rowsText(rows)}`;
 }
 
-/** The notice shown once a recording has ended. */
-export function recordingSummaryText(summary: RecordingSummary): string {
+/** The notice shown once a recording has ended; names the file when `path` is known. */
+export function recordingSummaryText(
+  summary: RecordingSummary,
+  path: string | null = null,
+): string {
   const counts = `${rowsText(summary.rows)} written, ${gapsText(summary.gaps.length)}.`;
-  return summary.disconnected
+  const text = summary.disconnected
     ? `Recording stopped: the meter was unplugged. ${counts}`
     : `Recording saved: ${counts}`;
+  return path === null ? text : `${text} File: ${path}`;
+}
+
+/** The notice shown once an export has finished: rows written and the file. */
+export function exportNoticeText(result: ExportResult): string {
+  return `Exported ${rowsText(result.rows)} to ${result.path}`;
+}
+
+/** The file-manager action's label for a platform string (`navigator.platform`). */
+export function revealActionLabel(platform: string): string {
+  return /mac/i.test(platform) ? "Reveal in Finder" : "Show in folder";
 }
 
 /** What `Recording.toggle` needs from the app. */
@@ -106,6 +132,8 @@ export class Recording {
   elapsedMs = $state(0);
   /** Summary of the last recording, until the next one starts. */
   notice = $state<string | null>(null);
+  /** File the last recording was saved to, while its notice shows. */
+  savedPath = $state<string | null>(null);
   error = $state<UiError | null>(null);
 
   /** Elapsed time and rows while recording, `null` otherwise. */
@@ -119,7 +147,7 @@ export class Recording {
       this.phase = "stopping";
       try {
         const summary = await deps.stopRecording();
-        if (this.phase === "stopping") this.notice = recordingSummaryText(summary);
+        if (this.phase === "stopping") this.#saved(summary);
       } catch (err) {
         // An unplug can end the recording (with its own notice) while the stop
         // is on its way; the stop's "not connected" is then old news.
@@ -132,6 +160,7 @@ export class Recording {
     if (this.phase !== "idle" || !deps.canRecord) return;
     this.phase = "starting";
     this.notice = null;
+    this.savedPath = null;
     this.error = null;
     try {
       const path = await deps.startRecording(defaultRecordingName(deps.now()));
@@ -156,6 +185,7 @@ export class Recording {
    * shown as recording, its timer and rows continuing from the backend's. */
   adopt(snapshot: RecordingSnapshot): void {
     this.notice = null;
+    this.savedPath = null;
     this.error = null;
     this.rows = snapshot.rows;
     this.elapsedMs = snapshot.elapsed_ms;
@@ -169,12 +199,14 @@ export class Recording {
         this.elapsedMs = event.elapsed_ms;
         break;
       case "stopped":
-        this.notice = recordingSummaryText(event);
+        this.#saved(event);
         this.#end();
         break;
       case "failed":
         this.error = event.error;
         this.notice = `Recording stopped; ${rowsText(event.rows)} kept.`;
+        // The rows before the failure are in the file: keep its reveal and copy actions.
+        if (event.rows > 0) this.savedPath = this.path;
         this.#end();
         break;
       case "started":
@@ -187,13 +219,21 @@ export class Recording {
   sessionEnded(): void {
     if (this.phase === "idle") return;
     this.notice = "Recording ended with the session.";
+    if (this.rows > 0) this.savedPath = this.path;
     this.#end();
   }
 
   /** Hides the notice and the error. */
   dismiss(): void {
     this.notice = null;
+    this.savedPath = null;
     this.error = null;
+  }
+
+  /** The recording's file is complete: the summary names it. */
+  #saved(summary: RecordingSummary): void {
+    this.savedPath = this.path;
+    this.notice = recordingSummaryText(summary, this.path);
   }
 
   #end(): void {
@@ -231,6 +271,8 @@ export class ExportJob {
     if (this.running) return;
     this.running = true;
     this.error = null;
+    this.rows = null;
+    this.path = null;
     this.done = 0;
     this.total = 0;
     try {
@@ -247,5 +289,11 @@ export class ExportJob {
     } finally {
       this.running = false;
     }
+  }
+
+  /** Hides the last export's notice. */
+  dismissNotice(): void {
+    this.rows = null;
+    this.path = null;
   }
 }

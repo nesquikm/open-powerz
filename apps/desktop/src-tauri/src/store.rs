@@ -150,6 +150,21 @@ impl SessionStore {
         self.lock().history.range(series, t0, t1, buckets)
     }
 
+    /// [`Self::history_range`] widened to the record just outside each end
+    /// that falls between records, so the chart runs its lines to the view's
+    /// edges at any zoom (AC-9CFMD3.4).
+    pub fn history_range_to_edges(
+        &self,
+        series: &[Series],
+        t0: u64,
+        t1: u64,
+        buckets: usize,
+    ) -> Vec<SeriesBuckets> {
+        let store = self.lock();
+        let (t0, t1) = store.history.widen_to_neighbours(t0, t1);
+        store.history.range(series, t0, t1, buckets)
+    }
+
     /// The gaps between measuring runs overlapping the open range `t0..t1`
     /// (session time); a gap that only touches an end is left out.
     pub fn history_gaps(&self, t0: u64, t1: u64) -> Vec<HistoryGap> {

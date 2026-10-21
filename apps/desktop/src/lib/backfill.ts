@@ -1,4 +1,4 @@
-import type { HistoryGap, Sample, Series, SeriesBuckets } from "./backend";
+import type { HistoryGap, HistorySeries, Sample, Series, SeriesBuckets } from "./backend";
 import { LIVE_WINDOWS } from "./chartData";
 
 /**
@@ -32,7 +32,8 @@ export function backfillRange(firstLiveMs: number): [number, number] {
 
 type SampleKey = Exclude<keyof Sample, "t_ms">;
 
-const SAMPLE_KEY: Record<Series, SampleKey> = {
+/** Power has no sample field (the live buffer derives it). */
+const SAMPLE_KEY: Partial<Record<HistorySeries, SampleKey>> = {
   vbus: "vbus_v",
   ibus: "ibus_a",
   dp: "dp_v",

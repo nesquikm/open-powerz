@@ -16,6 +16,23 @@ export const BREAK_PX = 24;
 export const MAX_BREAK_PX = 32;
 /** The narrowest view (the zoom slider's bottom), in ms. */
 export const MIN_SPAN_MS = 10;
+/** The narrowest view at `rateSps`: two sample periods, never under MIN_SPAN_MS; the
+ * floor while the rate is unknown (AC-9CFMD3.4). */
+export function minSpanMs(rateSps: number | null | undefined): number {
+  if (rateSps == null || !(rateSps > 0)) return MIN_SPAN_MS;
+  return Math.max(MIN_SPAN_MS, 2000 / rateSps);
+}
+
+/** `m`, never under MIN_SPAN_MS (absent or not a number: MIN_SPAN_MS). */
+function atLeastMinSpan(m: number | undefined): number {
+  return m !== undefined && m > MIN_SPAN_MS ? m : MIN_SPAN_MS;
+}
+
+/** The session's narrowest view: its `minSpanMs`, never under MIN_SPAN_MS. */
+export function sessionMinSpan(session: SessionExtent): number {
+  return atLeastMinSpan(session.minSpanMs);
+}
+
 /** The shuttle's speeds, as multiples of real time. */
 export const SHUTTLE_SPEEDS = [1, 2, 4, 8] as const;
 
@@ -191,18 +208,21 @@ function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
 
-/** Zoom slider position (0..1) for a span: logarithmic, 0 ↔ MIN_SPAN_MS, 1 ↔
- * `maxSpanMs` (the whole session); clamped (AC-FENCD9.9). */
-export function spanToSlider(spanMs: number, maxSpanMs: number): number {
-  if (!(maxSpanMs > MIN_SPAN_MS) || !(spanMs > 0)) return spanMs >= maxSpanMs ? 1 : 0;
-  return clamp01(Math.log(spanMs / MIN_SPAN_MS) / Math.log(maxSpanMs / MIN_SPAN_MS));
+/** Zoom slider position (0..1) for a span: logarithmic, 0 ↔ `minSpan` (the rate's
+ * narrowest view, MIN_SPAN_MS by default), 1 ↔ `maxSpanMs` (the whole session);
+ * clamped (AC-FENCD9.9, AC-9CFMD3.4). */
+export function spanToSlider(spanMs: number, maxSpanMs: number, minSpan = MIN_SPAN_MS): number {
+  const lo = atLeastMinSpan(minSpan);
+  if (!(maxSpanMs > lo) || !(spanMs > 0)) return spanMs >= maxSpanMs ? 1 : 0;
+  return clamp01(Math.log(spanMs / lo) / Math.log(maxSpanMs / lo));
 }
 
-/** The span for a zoom slider position (0..1, clamped) (AC-FENCD9.9). */
-export function sliderToSpan(value: number, maxSpanMs: number): number {
-  if (!(maxSpanMs > MIN_SPAN_MS)) return Math.max(MIN_SPAN_MS, maxSpanMs);
+/** The span for a zoom slider position (0..1, clamped) (AC-FENCD9.9, AC-9CFMD3.4). */
+export function sliderToSpan(value: number, maxSpanMs: number, minSpan = MIN_SPAN_MS): number {
+  const lo = atLeastMinSpan(minSpan);
+  if (!(maxSpanMs > lo)) return Math.max(lo, maxSpanMs);
   const v = Number.isFinite(value) ? clamp01(value) : 0;
-  return MIN_SPAN_MS * Math.pow(maxSpanMs / MIN_SPAN_MS, v);
+  return lo * Math.pow(maxSpanMs / lo, v);
 }
 
 /** `span` placed from `t0`, kept inside the session (the whole session when wider). */
@@ -273,10 +293,16 @@ export function dragOverview(
   const shift = (ms: number): number => warp.bwd(warp.fwd(ms) + deltaPx * k);
   if (kind === "move") return fitSpan(shift(start.t0Ms), start.t1Ms - start.t0Ms, session);
   if (kind === "left") {
-    const t0 = Math.max(session.firstMs, Math.min(start.t1Ms - MIN_SPAN_MS, shift(start.t0Ms)));
+    const t0 = Math.max(
+      session.firstMs,
+      Math.min(start.t1Ms - sessionMinSpan(session), shift(start.t0Ms)),
+    );
     return { t0Ms: t0, t1Ms: start.t1Ms };
   }
-  const t1 = Math.min(session.lastMs, Math.max(start.t0Ms + MIN_SPAN_MS, shift(start.t1Ms)));
+  const t1 = Math.min(
+    session.lastMs,
+    Math.max(start.t0Ms + sessionMinSpan(session), shift(start.t1Ms)),
+  );
   return { t0Ms: start.t0Ms, t1Ms: t1 };
 }
 
@@ -296,7 +322,8 @@ export function overviewClick(
 }
 
 /** Zooms `view` by `factor` on the chart as drawn with `warp` (long gaps collapsed):
- * the displayed time scales by `factor` (never below MIN_SPAN_MS, never past the whole
+ * the displayed time scales by `factor` (never below the session's narrowest view
+ * (`minSpanMs`, AC-9CFMD3.4), never past the whole
  * session as drawn), `atMs` keeps its place on screen, and the result is moved, not
  * resized, to lie inside the session (AC-FENCD9.14). */
 export function zoomInDisplay(
@@ -315,8 +342,9 @@ export function zoomInDisplay(
   const span = d1 - d0;
   const s0 = warp.fwd(session.firstMs);
   const s1 = warp.fwd(session.lastMs);
-  const maxSpan = Math.max(MIN_SPAN_MS, s1 - s0);
-  const next = Math.min(maxSpan, Math.max(MIN_SPAN_MS, span * factor));
+  const minSpan = sessionMinSpan(session);
+  const maxSpan = Math.max(minSpan, s1 - s0);
+  const next = Math.min(maxSpan, Math.max(minSpan, span * factor));
   if (s1 > s0 && next >= s1 - s0) return { t0Ms: session.firstMs, t1Ms: session.lastMs };
   const frac = span > 0 ? (warp.fwd(atMs) - d0) / span : 0.5;
   let n0 = warp.fwd(atMs) - frac * next;

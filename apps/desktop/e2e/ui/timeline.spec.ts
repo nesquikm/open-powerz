@@ -14,7 +14,7 @@ import { expect, test, type Page } from "@playwright/test";
 import type { ChartDraw } from "../hook";
 import { formatSpan } from "../../src/lib/chartSeries";
 import { MOCK_OUTAGE } from "../../src/lib/mockBackend";
-import { sliderToSpan } from "../../src/lib/timeline";
+import { minSpanMs, sliderToSpan } from "../../src/lib/timeline";
 import {
   blur,
   chartBreaks,
@@ -535,15 +535,17 @@ test.describe("zoom slider and presets (AC-FENCD9.9 / AC-FENCD9.10)", () => {
     await page.getByRole("button", { name: "10 s" }).click();
     await expect.poll(async () => (await lastDraw(page)).t0Ms).toBeGreaterThan(0);
     const sessionMs = (await lastDraw(page)).t1Ms;
+    // The slider's bottom end: two sample periods at the demo's 50 SPS (AC-9CFMD3.4).
+    const floor = minSpanMs(50);
     // 10 s of a ~200 s session.
-    const expected = (1000 * Math.log(10_000 / 10)) / Math.log(sessionMs / 10);
+    const expected = (1000 * Math.log(10_000 / floor)) / Math.log(sessionMs / floor);
     expect(Math.abs(Number(await slider.inputValue()) - expected)).toBeLessThanOrEqual(15);
 
     const before = await lastDraw(page);
     await slider.fill("300");
     await expectPaused(page);
     const after = await nextRange(page, before);
-    const want = 10 * Math.pow(sessionMs / 10, 0.3);
+    const want = floor * Math.pow(sessionMs / floor, 0.3);
     expect(span(after) / want).toBeGreaterThan(0.9);
     expect(span(after) / want).toBeLessThan(1.1);
   });

@@ -7,6 +7,7 @@
     disconnect,
     exportSession,
     resetStats as resetStatsCommand,
+    revealPath,
     setRate,
     startRecording,
     stopRecording,
@@ -23,7 +24,13 @@
   import StatsPanel from "./lib/components/StatsPanel.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
   import { onMount, setContext } from "svelte";
-  import { ExportJob, Recording } from "./lib/recording.svelte";
+  import {
+    ExportJob,
+    exportNoticeText,
+    rateChange,
+    Recording,
+    revealActionLabel,
+  } from "./lib/recording.svelte";
   import { Session } from "./lib/session.svelte";
   import { StatsControls } from "./lib/stats.svelte";
   import { shortcutFor, type ShortcutAction } from "./lib/shortcuts";
@@ -150,6 +157,16 @@
   }
 
   async function selectRate(sps: number): Promise<void> {
+    // The picker is disabled while recording; the keys 1–4 follow the same lock.
+    // A meter that set its own rate stays locked after the recording too: the backend's
+    // own refusal says so instead.
+    const change = rateChange(sps, {
+      recording: recording.phase !== "idle" && session.state !== "rate_locked",
+    });
+    if (change.kind === "refused") {
+      recording.notice = change.notice;
+      return;
+    }
     requestedRateSps = sps;
     if (session.state !== "streaming" && session.state !== "rate_locked") return;
     // A failed rate change leaves the stream running; just surface the error.
@@ -160,6 +177,21 @@
   function exportHistory(): void {
     if (!canExport) return;
     void exportJob.run({ exportSession, now: () => new Date() });
+  }
+
+  /** "Reveal in Finder" on macOS, "Show in folder" elsewhere. */
+  const revealLabel = revealActionLabel(navigator.platform);
+
+  /** Shows a saved file in the system file manager. */
+  function revealFile(path: string): void {
+    void revealPath(path).catch((err: unknown) => session.reportError(toUiError(err)));
+  }
+
+  /** Puts a saved file's path on the clipboard. */
+  function copyPath(path: string): void {
+    void navigator.clipboard
+      ?.writeText(path)
+      .catch((err: unknown) => session.reportError(toUiError(err)));
   }
 
   /** Record button / Space: start (save dialog first) or stop the CSV recording. */
@@ -248,6 +280,13 @@
 
 <svelte:window onkeydown={onWindowKeydown} />
 
+{#snippet fileActions(path: string)}
+  <div class="file-actions">
+    <button type="button" onclick={() => revealFile(path)}>{revealLabel}</button>
+    <button type="button" onclick={() => copyPath(path)}>Copy path</button>
+  </div>
+{/snippet}
+
 <div class="shell">
   <TopBar
     {session}
@@ -272,6 +311,16 @@
       onDismiss={() => recording.dismiss()}
     >
       {#if recording.notice}<p>{recording.notice}</p>{/if}
+      {#if recording.savedPath !== null}
+        {@render fileActions(recording.savedPath)}
+      {/if}
+    </Notice>
+  {/if}
+  {#if exportJob.path !== null && exportJob.rows !== null}
+    {@const path = exportJob.path}
+    <Notice tone="info" onDismiss={() => exportJob.dismissNotice()}>
+      <p>{exportNoticeText({ rows: exportJob.rows, path })}</p>
+      {@render fileActions(path)}
     </Notice>
   {/if}
   {#if exportJob.error !== null}
@@ -285,7 +334,12 @@
     <div class="main-area">
       <Readout {session} />
       <section class="chart panel" aria-label="Chart">
-        <Chart bind:this={chart} theme={resolvedTheme} />
+        <Chart
+          bind:this={chart}
+          theme={resolvedTheme}
+          rateSps={session.rateSps}
+          active={session.active}
+        />
       </section>
     </div>
     <div class="side-panel">
@@ -306,6 +360,12 @@
 </div>
 
 <style>
+  .file-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.375rem;
+  }
   .shell {
     display: flex;
     flex-direction: column;

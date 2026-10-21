@@ -63,6 +63,7 @@ fn value(r: &QueueRecord, series: Series) -> f32 {
         Series::Dm => r.dm_v(),
         Series::Cc1 => r.cc1_v(),
         Series::Cc2 => r.cc2_v(),
+        Series::Power => r.vbus_v() * r.ibus_a(),
     }) as f32
 }
 
@@ -357,6 +358,7 @@ fn range_types_serialize_for_the_ui() {
         ("dm", Series::Dm),
         ("cc1", Series::Cc1),
         ("cc2", Series::Cc2),
+        ("power", Series::Power),
     ] {
         let parsed: Series = serde_json::from_str(&format!("\"{name}\"")).unwrap();
         assert_eq!(parsed, series);
@@ -375,6 +377,82 @@ fn range_types_serialize_for_the_ui() {
             "series": "ibus",
             "buckets": [{"t_ms": 12, "min": -0.5, "max": 1.25}],
         })
+    );
+}
+
+// ---- AC-JFD9XR.4: the history stores Power (VBUS x IBUS) per record ----
+
+/// `got` within a relative 1e-6 (plus a tiny absolute floor) of `want`.
+fn power_close(got: f32, want: f32) -> bool {
+    (got - want).abs() <= 1e-6 * want.abs().max(1.0)
+}
+
+#[test]
+fn power_buckets_hold_the_true_extremes_of_the_per_record_product() {
+    // V and I extremes never fall on the same record, so no product of the
+    // per-bucket VBUS / IBUS extremes gives the true Power min or max:
+    // P = -5 W, 2 W, 2 W; min(V)*min(I) = -1, max(V)*max(I) = 40,
+    // max(V)*min(I) = -20, min(V)*max(I) = 2.
+    let records = [
+        rec(10, 5_000_000, -1_000_000, 0, 0, 0, 0, Rate::Sps1000),
+        rec(11, 20_000_000, 100_000, 0, 0, 0, 0, Rate::Sps1000),
+        rec(12, 1_000_000, 2_000_000, 0, 0, 0, 0, Rate::Sps1000),
+    ];
+    let h = history_of(&records);
+    let got = h.range(&[Series::Power], 0, u64::MAX, 1);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].series, Series::Power);
+    assert_eq!(got[0].buckets.len(), 1, "{:?}", got[0].buckets);
+    let b = got[0].buckets[0];
+    assert!(power_close(b.min, -5.0), "Power min {} != -5 W", b.min);
+    assert!(power_close(b.max, 2.0), "Power max {} != 2 W", b.max);
+}
+
+#[test]
+fn power_buckets_match_a_brute_force_scan_across_pyramid_levels() {
+    let records = random_records(11, 100_000, 1_000);
+    let h = history_of(&records);
+    let first = u64::from(records[0].time_ms());
+    let last = u64::from(records.last().unwrap().time_ms());
+    let mut rng = Rng(12);
+    let mut ranges = vec![(0, u64::MAX, 2_000), (first, last, 1), (first, last, 300)];
+    for _ in 0..30 {
+        let a = first + rng.below(last - first + 1);
+        let b = first + rng.below(last - first + 1);
+        ranges.push((a.min(b), a.max(b), 1 + rng.below(3_000) as usize));
+    }
+    for (t0, t1, buckets) in ranges {
+        let got = h.range(&[Series::Vbus, Series::Power], t0, t1, buckets);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1].series, Series::Power);
+        let b = &got[1].buckets;
+        // Power buckets sit on the same times as the other series' buckets.
+        let vt: Vec<u64> = got[0].buckets.iter().map(|x| x.t_ms).collect();
+        let pt: Vec<u64> = b.iter().map(|x| x.t_ms).collect();
+        assert_eq!(vt, pt, "Power bucket times over {t0}..={t1}");
+        match brute(&records, Series::Power, t0, t1) {
+            None => assert!(b.is_empty()),
+            Some((lo, hi)) => {
+                let got_lo = b.iter().map(|x| x.min).fold(f32::INFINITY, f32::min);
+                let got_hi = b.iter().map(|x| x.max).fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    power_close(got_lo, lo) && power_close(got_hi, hi),
+                    "Power over {t0}..={t1} in {buckets}: got ({got_lo}, {got_hi}), want ({lo}, {hi})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn power_serializes_as_power_for_the_ui() {
+    let answer = SeriesBuckets {
+        series: Series::Power,
+        buckets: vec![],
+    };
+    assert_eq!(
+        serde_json::to_value(&answer).unwrap(),
+        serde_json::json!({"series": "power", "buckets": []})
     );
 }
 
@@ -1074,6 +1152,7 @@ fn brute_samples(samples: &[Sample], series: Series, t0: u64, t1: u64) -> Option
                 Series::Dm => s.dm_v,
                 Series::Cc1 => s.cc1_v,
                 Series::Cc2 => s.cc2_v,
+                Series::Power => s.vbus_v * s.ibus_a,
             }) as f32
         })
         .fold(None, |acc, v| match acc {
@@ -1394,4 +1473,25 @@ fn a_rate_change_does_not_integrate_across_the_queue_restart() {
     let stats = worker.stats();
     assert_close("charge", stats.charge_ah, a.charge_ah + b.charge_ah);
     assert_close("energy", stats.energy_wh, a.energy_wh + b.energy_wh);
+}
+
+// ---- AC-9CFMD3.4: a range query reaches the records just outside its ends ----
+
+#[test]
+fn a_range_between_records_widens_to_the_neighbouring_records() {
+    let records: Vec<_> = [0u32, 100, 200, 300]
+        .into_iter()
+        .map(|t| rec(t, 5_000_000, 1_000_000, 0, 0, 0, 0, Rate::Sps10))
+        .collect();
+    let h = history_of(&records);
+    // Both ends strictly between records: one record beyond each.
+    assert_eq!(h.widen_to_neighbours(120, 180), (100, 200));
+    // Ends on records stay where they are.
+    assert_eq!(h.widen_to_neighbours(100, 200), (100, 200));
+    // Past the first and the newest record there is nothing to reach.
+    assert_eq!(h.widen_to_neighbours(0, 350), (0, 350));
+    // A view inside one gap between records still finds both neighbours.
+    let (lo, hi) = h.widen_to_neighbours(205, 210);
+    assert_eq!((lo, hi), (200, 300));
+    assert!(!h.range(&[Series::Vbus], lo, hi, 4)[0].buckets.is_empty());
 }

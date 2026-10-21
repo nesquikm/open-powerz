@@ -9,6 +9,7 @@ import {
   buildWarp,
   dragOverview,
   followPlayhead,
+  minSpanMs,
   overviewClick,
   overviewWindow,
   presetRange,
@@ -502,5 +503,39 @@ describe("zoomInDisplay edge cases (AC-FENCD9.14)", () => {
     const atStart = { t0Ms: 0, t1Ms: 10_000 };
     const back = zoomInDisplay(atStart, 1_000, 1.3, buildWarp([], atStart, 1000), session);
     expect(back.t0Ms).toBe(session.firstMs);
+  });
+});
+
+describe("narrowest view follows the rate (AC-9CFMD3.4)", () => {
+  const ID: TimeWarp = { fwd: (ms) => ms, bwd: (d) => d, breaks: [] };
+  const LONG = { firstMs: 0, lastMs: 600_000 };
+
+  it("is two sample periods at the current rate, never under the 10 ms floor", () => {
+    expect(minSpanMs(50)).toBe(40);
+    expect(minSpanMs(10)).toBe(200);
+    expect(minSpanMs(2)).toBe(1000);
+    // 2 ms at 1000 SPS is under the floor.
+    expect(minSpanMs(1000)).toBe(MIN_SPAN_MS);
+    expect(MIN_SPAN_MS).toBe(10);
+  });
+
+  it("falls back to the 10 ms floor while the rate is unknown", () => {
+    expect(minSpanMs(null)).toBe(MIN_SPAN_MS);
+    expect(minSpanMs(0)).toBe(MIN_SPAN_MS);
+    expect(minSpanMs(Number.NaN)).toBe(MIN_SPAN_MS);
+  });
+
+  it("puts the zoom slider's bottom end at the rate's narrowest view", () => {
+    expect(sliderToSpan(0, 600_000, minSpanMs(50))).toBeCloseTo(40, 6);
+    expect(sliderToSpan(1, 600_000, minSpanMs(50))).toBeCloseTo(600_000, 3);
+    expect(spanToSlider(40, 600_000, minSpanMs(50))).toBeCloseTo(0, 6);
+    expect(spanToSlider(10, 600_000, minSpanMs(50))).toBe(0);
+  });
+
+  it("stops zooming in at two sample periods", () => {
+    let view: TimeRange = { t0Ms: 100_000, t1Ms: 110_000 };
+    const session = { ...LONG, minSpanMs: minSpanMs(50) };
+    for (let k = 0; k < 200; k++) view = zoomInDisplay(view, 105_000, 0.5, ID, session);
+    expect(view.t1Ms - view.t0Ms).toBeCloseTo(40, 6);
   });
 });

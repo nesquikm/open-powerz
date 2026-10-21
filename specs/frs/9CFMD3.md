@@ -35,8 +35,8 @@ The export job and the recording stop already return rows and path; a notice com
 
 ## Testing
 
-Vitest: notice text, minimum span per rate, edge samples in frames. Playwright: export and stop notices with both actions, deep zoom at 50 SPS draws lines, the disconnected empty state. Rust: the opener capability file lists only the reveal permission.
+Vitest: notice text, minimum span per rate, edge samples in frames. Playwright: export and stop notices with both actions, deep zoom at 50 SPS draws lines, the disconnected empty state. Vitest also reads the capability file and the manifests: only the reveal permission, and a pinned plugin.
 
 ## Notes
 
-QA findings 4, 5 and 9 on build 9787adb. Design choices confirmed by the orchestrator: clamp plus edge samples for deep zoom, the opener plugin with a reveal-only scope, and a copy action as a fallback.
+QA findings 4, 5 and 9 on build 9787adb; deep zoom uses the clamp plus edge samples, as confirmed. The opener's reveal command accepts any path and offers no scope; it cannot read or run a file. After a disconnect the last session stays visible under a banner.

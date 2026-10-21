@@ -558,3 +558,92 @@ describe("MockBackend attach (AC-VEDDFD.1–AC-VEDDFD.5)", () => {
     await backend.disconnect();
   });
 });
+
+describe("MockBackend rate change during a recording (AC-JFD9XR.2)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("refuses a rate change while recording, as the real backend does, and keeps the rate", async () => {
+    const backend = new MockBackend();
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
+    await backend.startRecording("powerz-x.csv");
+    vi.advanceTimersByTime(500);
+    await expect(backend.setRate(1000)).rejects.toEqual({
+      kind: "usage",
+      message: "Stop the recording to change the rate.",
+      hint: null,
+    });
+    expect(events).not.toContainEqual({
+      type: "status",
+      data: { state: "rate", rate_sps: 1000, rate_locked: false },
+    });
+    // Still 50 SPS: about 50 samples a second.
+    const before = batches(events).flatMap((b) => b.samples).length;
+    vi.advanceTimersByTime(1000);
+    const perSecond = batches(events).flatMap((b) => b.samples).length - before;
+    expect(perSecond).toBeGreaterThanOrEqual(40);
+    expect(perSecond).toBeLessThanOrEqual(60);
+    // Once stopped, the rate changes again.
+    await backend.stopRecording();
+    await backend.setRate(1000);
+    expect(events).toContainEqual({
+      type: "status",
+      data: { state: "rate", rate_sps: 1000, rate_locked: false },
+    });
+    await backend.disconnect();
+  });
+});
+
+describe("MockBackend history Power (AC-JFD9XR.4)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("answers a power series with the per-sample VBUS x IBUS extremes", async () => {
+    const backend = new MockBackend();
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:noisy-negative", 50, (e) => events.push(e));
+    vi.advanceTimersByTime(2000);
+    const samples = batches(events).flatMap((b) => b.samples);
+    const [power] = await backend.historyRange(["power"], 0, Number.MAX_SAFE_INTEGER, 1);
+    await backend.disconnect();
+    expect(power.series).toBe("power");
+    expect(power.buckets).toHaveLength(1);
+    const products = samples.map((x) => x.vbus_v * x.ibus_a);
+    expect(power.buckets[0]?.min).toBeCloseTo(Math.min(...products), 3);
+    expect(power.buckets[0]?.max).toBeCloseTo(Math.max(...products), 3);
+  });
+});
+
+describe("MockBackend reveal (AC-9CFMD3.1, AC-9CFMD3.3)", () => {
+  it("records each reveal request, in order", async () => {
+    const backend = new MockBackend();
+    expect(backend.revealedPaths()).toEqual([]);
+    await backend.revealPath("/tmp/export.csv");
+    await backend.revealPath("powerz-20261021-090507.csv");
+    expect(backend.revealedPaths()).toEqual(["/tmp/export.csv", "powerz-20261021-090507.csv"]);
+  });
+});
+
+describe("MockBackend history edge samples (AC-9CFMD3.4)", () => {
+  it("answers a view between two samples with the samples just outside it", async () => {
+    const backend = new MockBackend();
+    await backend.connect("demo:load-5v-1a", 1000, () => {});
+    await backend.seedSyntheticHistory(5_000);
+    const [vbus] = await backend.historyRange(["vbus"], 1_234.3, 1_234.7, 800);
+    await backend.disconnect();
+    expect(vbus.buckets.map((b) => b.t_ms)).toEqual([1_234, 1_235]);
+  });
+
+  it("adds one sample beyond each edge of a wider view", async () => {
+    const backend = new MockBackend();
+    await backend.connect("demo:load-5v-1a", 1000, () => {});
+    await backend.seedSyntheticHistory(5_000);
+    const [vbus] = await backend.historyRange(["vbus"], 100.5, 109.5, 800);
+    await backend.disconnect();
+    const times = vbus.buckets.map((b) => b.t_ms);
+    expect(times[0]).toBe(100);
+    expect(times.at(-1)).toBe(110);
+    expect(times).toHaveLength(11);
+  });
+});

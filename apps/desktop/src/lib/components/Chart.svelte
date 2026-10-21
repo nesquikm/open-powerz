@@ -56,11 +56,13 @@
     windowPressed,
     type ChartGesture,
     type ChartView,
+    type SessionExtent,
     type TimeRange,
   } from "../chartView";
   import {
     buildWarp,
     followPlayhead,
+    minSpanMs,
     presetRange,
     shuttlePress,
     shuttleStep,
@@ -75,7 +77,16 @@
   import { THEME_COLORS, type MotionSettings, type ResolvedTheme } from "../theme";
   import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
 
-  let { theme }: { theme: ResolvedTheme } = $props();
+  let {
+    theme,
+    rateSps = null,
+    active = true,
+  }: {
+    theme: ResolvedTheme;
+    rateSps?: number | null;
+    /** A meter session is open; without one the chart shows how to start (AC-9CFMD3.5). */
+    active?: boolean;
+  } = $props();
 
   const motion = getContext<() => MotionSettings>("motion");
 
@@ -113,10 +124,12 @@
   }
   /** The session's extent for a view on `[t0Ms, t1Ms]`: from its first known sample to
    * the newest (or the view's end, if later). */
-  function sessionExtent(t0Ms: number, t1Ms: number): { firstMs: number; lastMs: number } {
+  function sessionExtent(t0Ms: number, t1Ms: number): SessionExtent {
     return {
       firstMs: sessionStartMs ?? buffer.firstMs ?? t0Ms,
       lastMs: Math.max(buffer.lastMs ?? t1Ms, t1Ms),
+      // The narrowest view: two sample periods at the current rate (AC-9CFMD3.4).
+      minSpanMs: minSpanMs(rateSps),
     };
   }
   /** A window button's span in ms; `null` for the whole session. */
@@ -128,6 +141,29 @@
   function anchorMs(range: [number, number]): number {
     return playheadMs ?? (range[0] + range[1]) / 2;
   }
+  /** View announcements: at most 4 per second, the last one always made (AC-JFD9XR.6). */
+  const ANNOUNCE_MS = 750;
+  const announceGate = new RateGate(ANNOUNCE_MS);
+  let announceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Announces the view now on screen: "Live: 1 min", or "Paused: a to b" for any
+   * non-live view; throttled, with a trailing update so the final view is announced. */
+  function announceView(): void {
+    if (announceTimer !== null) return;
+    if (announceGate.ready(performance.now())) {
+      announcement = rangeAnnouncement(view, originMs(), { paused: view.mode === "history" });
+      return;
+    }
+    announceTimer = setTimeout(() => {
+      announceTimer = null;
+      announceView();
+    }, ANNOUNCE_MS);
+  }
+  /** Drops a pending view announcement (a clear announces itself). */
+  function cancelAnnouncement(): void {
+    if (announceTimer !== null) clearTimeout(announceTimer);
+    announceTimer = null;
+  }
+  $effect(() => () => cancelAnnouncement());
   /** Shows exactly `r`, paused. */
   function showRange(r: TimeRange): void {
     gesture({ kind: "range", t0Ms: r.t0Ms, t1Ms: r.t1Ms });
@@ -146,7 +182,7 @@
    * span (the buffer may not fill it yet). */
   function updateZoomSlider(range: [number, number] | null): void {
     if (range === null) return;
-    const { firstMs, lastMs } = sessionExtent(range[0], range[1]);
+    const { firstMs, lastMs, minSpanMs: minSpan } = sessionExtent(range[0], range[1]);
     const sessionSpan = lastMs - firstMs;
     const span =
       view.mode === "live"
@@ -166,7 +202,7 @@
               wholeShown,
             )
         : whole.fwd(range[1]) - whole.fwd(range[0]);
-    const value = Math.round(spanToSlider(shownSpan, wholeShown) * ZOOM_SLIDER_MAX);
+    const value = Math.round(spanToSlider(shownSpan, wholeShown, minSpan) * ZOOM_SLIDER_MAX);
     if (value !== zoomValue) zoomValue = value;
     const text = formatSpan(span);
     if (text !== zoomText) zoomText = text;
@@ -183,7 +219,7 @@
     const { warp: whole, span: wholeShown } = wholeDisplay(session.firstMs, session.lastMs);
     const d0 = whole.fwd(range[0]);
     const d1 = whole.fwd(range[1]);
-    const target = sliderToSpan(value, wholeShown);
+    const target = sliderToSpan(value, wholeShown, session.minSpanMs);
     // A view with no width on the chart has nothing to scale.
     if (!(d1 > d0)) return;
     const r = zoomInDisplay(
@@ -373,6 +409,8 @@
   let visibility: SeriesVisibility = $state(loadVisibility(sessionStore()));
   const styles = $derived(seriesStyles(theme));
   const liveBtn = $derived(liveButton(view));
+  /** No session: the Live button reads "Live" but is not pressed (AC-9CFMD3.5). */
+  const livePressed = $derived(active && liveBtn.pressed);
 
   function toggle(key: ChartSeriesKey): void {
     visibility = toggleSeries(visibility, key);
@@ -585,6 +623,7 @@
   /** A new session starts: forget the previous one's samples, gaps, start, playhead
    * and hover, and go back to the live window. */
   export function reset(): void {
+    cancelAnnouncement();
     hoverLeftPx = null;
     hoverAtMs = null;
     setPlayhead(null);
@@ -613,6 +652,7 @@
   export function clearHistory(): void {
     const wasLive = view.mode === "live";
     reset();
+    cancelAnnouncement();
     announcement = wasLive ? "History cleared" : "History cleared, back to live";
     // Draw the emptied chart now, not on a coming frame: nothing from before the clear
     // stays on screen while the next batch is on its way.
@@ -682,18 +722,15 @@
     const session = sessionExtent(t0Ms, t1Ms);
     const next = applyGesture(view, g, { t0Ms, t1Ms }, session, warpFor(t0Ms, t1Ms, plotWidthPx()));
     if (next === view) return;
-    const wasLive = view.mode === "live";
     view = next;
     drawnFromHistory = false;
     if (view.mode === "history") {
       fetchHistory();
-      if (wasLive)
-        announcement = rangeAnnouncement(view, originMs(), { paused: g.kind === "pause" });
     } else {
       setShuttle(0);
       leaveHistory();
-      if (!wasLive) announcement = rangeAnnouncement(view, originMs());
     }
+    announceView();
     scheduler.invalidate();
   }
 
@@ -737,12 +774,11 @@
       if (view.mode === "history") view = { ...view, window: id };
       return;
     }
-    const wasLive = view.mode === "live";
     liveWindow = id;
     view = { mode: "live", window: id };
     leaveHistory();
     sessionGate.reset();
-    if (!wasLive) announcement = rangeAnnouncement(view, originMs());
+    announceView();
   }
 
   /** A window button is pressed while live on that window, or paused on that preset's
@@ -1123,13 +1159,15 @@
     />
     <!-- The span the slider sets, in the time axis's own format; screen readers hear it
          as the slider's value text. -->
-    <span class="zoom-span" title="Zoom: visible span" aria-hidden="true">{zoomText}</span>
+    <span class="zoom-span" title="Zoom: visible span" aria-hidden="true"
+      >{active ? zoomText : ""}</span
+    >
     <button
       type="button"
       class="live"
-      class:primary={liveBtn.pressed}
-      class:paused={!liveBtn.pressed}
-      aria-pressed={liveBtn.pressed}
+      class:primary={livePressed}
+      class:paused={active && !liveBtn.pressed}
+      aria-pressed={livePressed}
       disabled={view.mode === "live" && !hasData}
       title={liveBtn.title}
       onclick={() => gesture(liveToggle(view))}>{liveBtn.label}</button
@@ -1185,6 +1223,16 @@
     onkeydown={onKeydown}
     onblur={() => (pointerFocus = false)}
   >
+    {#if !active}
+      {#if hasData}
+        <!-- After a disconnect the last session stays on screen to look back at. -->
+        <p class="empty-state banner">
+          Meter disconnected, showing the last session. Connect a meter to start a new one.
+        </p>
+      {:else}
+        <p class="empty-state">Connect a meter to start</p>
+      {/if}
+    {/if}
     {#if historyError !== null && view.mode === "history"}
       <p class="history-error" role="status">{historyError}</p>
     {/if}
@@ -1306,6 +1354,25 @@
     color: var(--danger, CanvasText);
     font-size: 0.85em;
     pointer-events: none;
+  }
+  .empty-state {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    background: var(--surface, Canvas);
+    color: var(--muted, GrayText);
+    pointer-events: none;
+  }
+  .empty-state.banner {
+    inset: 0 0 auto 0;
+    padding: 0.35rem 0.75rem;
+    background: color-mix(in srgb, var(--surface, Canvas) 85%, transparent);
+    border-bottom: 1px solid var(--border, GrayText);
+    font-size: 0.9em;
   }
   .plot {
     flex: 1;

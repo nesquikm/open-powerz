@@ -11,10 +11,13 @@ import {
   RATE_OPTIONS,
   Recording,
   defaultRecordingName,
+  exportNoticeText,
   formatRecordingElapsed,
+  rateChange,
   ratePicker,
   recordingIndicator,
   recordingSummaryText,
+  revealActionLabel,
 } from "./recording.svelte";
 
 const CLOCK = new Date(2026, 9, 21, 9, 5, 7); // local time 2026-10-21 09:05:07
@@ -328,5 +331,103 @@ describe("Recording adopts a running recording on load (AC-VEDDFD.3, AC-VEDDFD.5
     r.handleEvent({ state: "stopped", rows: 140, gaps: [], disconnected: true });
     expect(r.phase).toBe("idle");
     expect(r.indicator).toBeNull();
+  });
+});
+
+describe("rate keys while recording (AC-JFD9XR.2)", () => {
+  it("refuses a rate change while a recording is open, with the picker's notice", () => {
+    for (const sps of [2, 10, 50, 1000]) {
+      expect(rateChange(sps, { recording: true })).toEqual({
+        kind: "refused",
+        notice: "Stop the recording to change the rate.",
+      });
+    }
+  });
+
+  it("lets the rate change through when nothing is recording", () => {
+    expect(rateChange(1000, { recording: false })).toEqual({ kind: "set", sps: 1000 });
+    expect(rateChange(2, { recording: false })).toEqual({ kind: "set", sps: 2 });
+  });
+});
+
+describe("export notice (AC-9CFMD3.1)", () => {
+  it("names the rows written and the file path", () => {
+    const text = exportNoticeText({ rows: 1234, path: "/Users/me/powerz-20261021-090507.csv" });
+    expect(text).toContain("1,234 rows");
+    expect(text).toContain("/Users/me/powerz-20261021-090507.csv");
+  });
+
+  it("says 1 row for a single row", () => {
+    expect(exportNoticeText({ rows: 1, path: "C:\\data\\x.csv" })).toMatch(/\b1 row\b/);
+    expect(exportNoticeText({ rows: 1, path: "C:\\data\\x.csv" })).toContain("C:\\data\\x.csv");
+  });
+
+  it("keeps the rows and path of a finished export for the notice", async () => {
+    const job = new ExportJob();
+    await job.run({
+      exportSession: vi.fn(async () => ({ path: "/tmp/export.csv", rows: 42 })),
+      now: () => CLOCK,
+    });
+    expect(job.rows).toBe(42);
+    expect(job.path).toBe("/tmp/export.csv");
+  });
+});
+
+describe("reveal action label (AC-9CFMD3.1)", () => {
+  it('reads "Reveal in Finder" on macOS', () => {
+    expect(revealActionLabel("MacIntel")).toBe("Reveal in Finder");
+    expect(revealActionLabel("macOS")).toBe("Reveal in Finder");
+  });
+
+  it('reads "Show in folder" on Windows and Linux', () => {
+    expect(revealActionLabel("Win32")).toBe("Show in folder");
+    expect(revealActionLabel("Windows")).toBe("Show in folder");
+    expect(revealActionLabel("Linux x86_64")).toBe("Show in folder");
+  });
+});
+
+describe("recording saved notice (AC-9CFMD3.2)", () => {
+  it("gives the rows, the gaps and the file path", () => {
+    const text = recordingSummaryText(summary(1500, 2), "/tmp/rec.csv");
+    expect(text).toContain("1,500 rows");
+    expect(text).toContain("2 gaps");
+    expect(text).toContain("/tmp/rec.csv");
+  });
+
+  it("keeps the saved file's path after a stop, for the reveal and copy actions", async () => {
+    const r = new Recording();
+    const d = deps();
+    await r.toggle(d);
+    await r.toggle(d);
+    expect(r.phase).toBe("idle");
+    expect(r.savedPath).toBe("/tmp/rec.csv");
+    expect(r.notice).toContain("/tmp/rec.csv");
+    expect(r.notice).toMatch(/5 rows/);
+  });
+
+  it("keeps the path when an unplug ends the recording", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    r.handleEvent({ state: "stopped", ...summary(300, 1, true) });
+    expect(r.savedPath).toBe("/tmp/rec.csv");
+    expect(r.notice).toContain("/tmp/rec.csv");
+    expect(r.notice).toMatch(/1 gap\b/);
+  });
+
+  it("forgets the path when the notice is dismissed or a new recording starts", async () => {
+    const r = new Recording();
+    const d = deps();
+    await r.toggle(d);
+    await r.toggle(d);
+    expect(r.savedPath).toBe("/tmp/rec.csv");
+    r.dismiss();
+    expect(r.savedPath).toBeNull();
+
+    await r.toggle(d);
+    await r.toggle(d);
+    expect(r.savedPath).toBe("/tmp/rec.csv");
+    await r.toggle(d);
+    expect(r.phase).toBe("recording");
+    expect(r.savedPath).toBeNull();
   });
 });
