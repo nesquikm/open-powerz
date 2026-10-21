@@ -15,6 +15,11 @@
  *
  * `?synthetic=<n>` seeds an n-sample history on connect, in dev builds and in
  * this mock production build alike (`syntheticFromUrl`).
+ *
+ * `E2E_WIDE_FONT=1` runs the suite with a wide font forced on the page
+ * (Verdana, else DejaVu Sans), wider than the defaults of CI Linux (DejaVu
+ * Sans) and Windows (Segoe UI), so layout problems those fonts cause show up
+ * on a Mac too.
  */
 
 import { expect, type Page } from "@playwright/test";
@@ -37,9 +42,15 @@ export async function useTheme(page: Page, theme: Theme): Promise<void> {
   await page.addInitScript((t) => localStorage.setItem("open-powerz.theme", t), theme);
 }
 
+/** Forced on every page when `E2E_WIDE_FONT=1`; font sizes stay as the app sets them. */
+const WIDE_FONT_CSS = `html, body, button, select, input, progress {
+  font-family: Verdana, "DejaVu Sans", sans-serif !important;
+}`;
+
 /** Load the app and wait until the picker lists the demo devices. */
 export async function open(page: Page, query = ""): Promise<void> {
   await page.goto(`/${query}`);
+  if (process.env.E2E_WIDE_FONT === "1") await page.addStyleTag({ content: WIDE_FONT_CSS });
   await expect(page.getByLabel("Device", { exact: true })).toBeEnabled();
   await expect(
     page.getByLabel("Device", { exact: true }).locator(`option[value="${DEMO_LOAD}"]`),

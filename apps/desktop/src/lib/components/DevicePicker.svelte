@@ -55,15 +55,15 @@
     gap: 0.375rem;
     min-width: 0;
   }
-  /* As wide as its longest entry where the bar has room, never so wide the bar wraps. */
+  /* As wide as its longest entry where the bar has room; when the top bar runs out of
+     room it may shrink, cut with an ellipsis (the full label stays in the tooltip). */
   select {
     width: auto;
-    min-width: 8rem;
-    max-width: 18rem;
-  }
-  @media (max-width: 999.98px) {
-    select {
-      max-width: 15rem;
-    }
+    min-width: 7rem;
+    max-width: 22rem;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

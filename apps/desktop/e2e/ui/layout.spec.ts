@@ -3,9 +3,13 @@
  * at 900 px (milestone visual review): no horizontal scroll, no readout value
  * wider than its cell or overlapping a neighbour, and a top bar that keeps all
  * its items on one row in every state, in both themes.
+ *
+ * Fonts differ by OS (DejaVu Sans on CI Linux, Segoe UI on Windows, SF on a
+ * Mac), so nothing here depends on one font's widths; `E2E_WIDE_FONT=1`
+ * (helpers.ts) runs the suite with a wide font to check that on any machine.
  */
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   blur,
   chartSeriesLengths,
@@ -84,8 +88,16 @@ for (const theme of THEMES) {
   }
 }
 
-/** Every visible item of the top bar: its vertical centre and its label. */
-function topBarItems(page: Page): Promise<{ label: string; top: number; centre: number }[]> {
+interface BarItem {
+  label: string;
+  top: number;
+  centre: number;
+  left: number;
+  right: number;
+}
+
+/** Every visible item of the top bar: its box, its vertical centre and its label. */
+function topBarItems(page: Page): Promise<BarItem[]> {
   return page.evaluate(() => {
     const bar = document.querySelector(".top-bar");
     if (!bar) return [];
@@ -96,9 +108,38 @@ function topBarItems(page: Page): Promise<{ label: string; top: number; centre: 
       .map((el) => {
         const r = el.getBoundingClientRect();
         const label = (el.getAttribute("aria-label") ?? el.innerText).replace(/\s+/g, " ").trim();
-        return { label, top: r.top, centre: r.top + r.height / 2 };
+        return { label, top: r.top, centre: r.top + r.height / 2, left: r.left, right: r.right };
       });
   });
+}
+
+/** Items of different heights (a short progress bar, taller buttons) share a row when
+ * their vertical centres line up; a wrapped item sits a whole control height lower. */
+function expectOneRow(items: BarItem[]): void {
+  const centres = items.map((i) => i.centre);
+  const spread = Math.max(...centres) - Math.min(...centres);
+  expect(
+    spread,
+    `items share one row: ${items.map((i) => `${i.label}@${i.centre.toFixed(0)}`).join(", ")}`,
+  ).toBeLessThanOrEqual(4);
+}
+
+/** Nothing sticks out of the bar, and no two items overlap side by side. */
+async function expectNoClipping(page: Page, items: BarItem[]): Promise<void> {
+  const bar = await page.locator(".top-bar").evaluate((el) => ({
+    scrollWidth: el.scrollWidth,
+    clientWidth: el.clientWidth,
+    right: el.getBoundingClientRect().right,
+  }));
+  expect(bar.scrollWidth, "nothing sticks out of the bar").toBeLessThanOrEqual(bar.clientWidth);
+  const sorted = [...items].sort((a, b) => a.left - b.left);
+  for (let i = 1; i < sorted.length; i++) {
+    const [a, b] = [sorted[i - 1]!, sorted[i]!];
+    expect(b.left, `"${a.label}" and "${b.label}" do not overlap`).toBeGreaterThanOrEqual(
+      a.right - 0.5,
+    );
+  }
+  expect(sorted.at(-1)!.right, "the last item is inside the bar").toBeLessThanOrEqual(bar.right);
 }
 
 async function barHeight(page: Page): Promise<number> {
@@ -157,23 +198,35 @@ for (const theme of THEMES) {
       await page.waitForTimeout(300);
       const items = await topBarItems(page);
       expect(items.length).toBeGreaterThan(4);
-      const centres = items.map((i) => i.centre);
-      const tops = items.map((i) => i.top);
-      const spread = Math.max(...centres) - Math.min(...centres);
-      expect(
-        spread,
-        `items share one row: ${items.map((i) => `${i.label}@${i.top.toFixed(0)}`).join(", ")}`,
-      ).toBeLessThanOrEqual(3);
-      // Items differ in height (a 13 px progress bar, 31 px buttons); a wrapped row
-      // would sit a whole control height (~38 px) lower.
-      expect(Math.max(...tops) - Math.min(...tops)).toBeLessThanOrEqual(12);
+      expectOneRow(items);
+      await expectNoClipping(page, items);
       expect(await barHeight(page), "the bar does not grow").toBeLessThanOrEqual(baseline + 1);
     });
   }
 }
 
+/** The picker's selected label, its tooltip, and whether the label fits visibly. */
+function pickerLabel(picker: Locator) {
+  return picker.evaluate((el: HTMLSelectElement) => {
+    const style = getComputedStyle(el);
+    const text = el.selectedOptions[0]?.text.trim() ?? "";
+    const ctx = document.createElement("canvas").getContext("2d");
+    let fits = false;
+    if (ctx) {
+      ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+      // At least as wide as its label's text plus its padding and arrow.
+      fits = el.getBoundingClientRect().width >= ctx.measureText(text).width + padding + 12;
+    }
+    return { text, title: el.title, fits };
+  });
+}
+
+// pz-ff's review: no scenario name cut short without a tooltip. Where room is short
+// (900 px, a wide font) the picker may shrink with an ellipsis, but its tooltip carries
+// the full label and its neighbours never cover it; from 1280 px the label fits whole.
 for (const width of [900, 1280, 1600] as const) {
-  test(`the device picker shows its full label and a tooltip at ${width} px`, async ({ page }) => {
+  test(`the device picker shows its full label or a tooltip at ${width} px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
     await open(page);
     const picker = page.getByLabel("Device", { exact: true });
@@ -182,16 +235,42 @@ for (const width of [900, 1280, 1600] as const) {
       const label = (await option.innerText()).trim();
       await picker.selectOption(value);
       await expect(picker).toHaveAttribute("title", label);
-      // The select is at least as wide as its label's text plus its padding and arrow.
-      const fits = await picker.evaluate((el: HTMLSelectElement, text) => {
-        const style = getComputedStyle(el);
-        const ctx = document.createElement("canvas").getContext("2d");
-        if (!ctx) return false;
-        ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-        const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
-        return el.getBoundingClientRect().width >= ctx.measureText(text).width + padding + 12;
-      }, label);
-      expect(fits, `"${label}" fits in the picker`).toBe(true);
+      const shown = await pickerLabel(picker);
+      expect(shown.text, "the selected option is the full label").toBe(label);
+      await expectNoClipping(page, await topBarItems(page));
+      if (width >= 1280) expect(shown.fits, `"${label}" fits in the picker`).toBe(true);
     }
   });
 }
+
+test("with very large control text the bar keeps one row and every control stays reachable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 600 });
+  await open(page);
+  await page.addStyleTag({
+    content: `.top-bar button, .top-bar select { font-size: 1.15rem !important; }`,
+  });
+  await streamDemo(page);
+  await startRecording(page);
+  await page.waitForTimeout(300);
+  const items = await topBarItems(page);
+  expectOneRow(items);
+  await expectNoClipping(page, items);
+  // Whatever moved into the "⋯" menu is there, and the keyboard reaches it.
+  const more = page.getByRole("button", { name: /^More:/ });
+  await more.focus();
+  await page.keyboard.press("Enter");
+  const menu = page.locator("#top-bar-menu");
+  await expect(menu).toBeVisible();
+  for (const name of ["Sample rate", "Export"] as const) {
+    const control =
+      name === "Sample rate"
+        ? page.getByRole("combobox", { name, exact: true })
+        : page.getByRole("button", { name, exact: true });
+    await expect(control, `${name} is in the bar or in the menu`).toBeVisible();
+  }
+  await expect(menu.getByRole("radiogroup", { name: "Theme" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+});

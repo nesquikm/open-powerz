@@ -1,3 +1,5 @@
+// First: a C/POSIX locale must be fixed before uPlot reads navigator.language.
+import "./lib/localeGuard";
 import { mount } from "svelte";
 import App from "./App.svelte";
 import "./app.css";

@@ -10,6 +10,17 @@
   } from "../recording.svelte";
   import type { Session } from "../session.svelte";
   import type { ThemeChoice } from "../theme";
+  import {
+    ALL_FIT_CLASSES,
+    chooseFit,
+    EXPORT_IN_MENU_LEVEL,
+    fitClasses,
+    moreMenuLabel,
+    RATE_IN_MENU_LEVEL,
+    SETTINGS_IN_MENU_LEVEL,
+    startLevel,
+    type Fit,
+  } from "../topBarFit";
   import DevicePicker from "./DevicePicker.svelte";
   import ThemeControl from "./ThemeControl.svelte";
 
@@ -49,6 +60,49 @@
   /** The "⋯" menu that holds theme and About (and the rate-locked note) on narrow windows. */
   let menuOpen = $state(false);
 
+  let bar: HTMLElement | undefined = $state();
+  /** The overflow level the bar is at (lib/topBarFit.ts); the menu shows what it moved. */
+  let level = $state(0);
+
+  function applyFit(el: HTMLElement, fit: Fit): void {
+    el.classList.remove(...ALL_FIT_CLASSES);
+    el.classList.add(...fitClasses(fit));
+  }
+
+  /** The bar is one row: nothing sticks out of it or out of its groups. */
+  function fitsOneRow(el: HTMLElement): boolean {
+    if (el.scrollWidth > el.clientWidth) return false;
+    for (const group of el.querySelectorAll<HTMLElement>(".group")) {
+      if (group.scrollWidth > group.clientWidth) return false;
+    }
+    return true;
+  }
+
+  /** Measure the bar at each level in turn (classes only, no re-render) and keep the first fit. */
+  function fit(): void {
+    const el = bar;
+    if (!el) return;
+    const chosen = chooseFit(startLevel(window.innerWidth), (f) => {
+      applyFit(el, f);
+      return fitsOneRow(el);
+    });
+    applyFit(el, chosen);
+    level = chosen.level;
+    if (level < SETTINGS_IN_MENU_LEVEL) menuOpen = false;
+  }
+
+  // Refit when the window or anything in the bar changes size (a label, the recording
+  // timer, export progress, a font that loads late).
+  $effect(() => {
+    const el = bar;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => fit());
+    observer.observe(el);
+    for (const group of el.querySelectorAll(".group")) observer.observe(group);
+    fit();
+    return () => observer.disconnect();
+  });
+
   const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
   /** The locked rate is news worth showing; "stop to change" is only a tooltip. */
   const rateNote = $derived(session.state === "rate_locked" ? picker.label : null);
@@ -65,9 +119,39 @@
   }}
 />
 
-<header class="top-bar" aria-label="Device controls">
-  <div class="group">
-    <span class="brand wide-only">open-powerz</span>
+{#snippet rateSelect()}
+  <select
+    aria-label="Sample rate"
+    title={picker.label ?? undefined}
+    disabled={picker.disabled}
+    value={rateSps}
+    onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
+  >
+    {#each RATE_OPTIONS as sps (sps)}
+      <option value={sps}>{sps} SPS</option>
+    {/each}
+  </select>
+{/snippet}
+
+{#snippet exportButton(inMenu: boolean)}
+  <button
+    type="button"
+    class={inMenu ? undefined : "export"}
+    class:busy={exportJob.running}
+    title="Export the session so far to CSV"
+    disabled={exportJob.running || !canExport}
+    onclick={() => {
+      if (inMenu) menuOpen = false;
+      onExport();
+    }}
+  >
+    Export
+  </button>
+{/snippet}
+
+<header class="top-bar" aria-label="Device controls" bind:this={bar}>
+  <div class="group start">
+    <span class="brand">open-powerz</span>
     <DevicePicker {session} />
     <button
       type="button"
@@ -83,20 +167,10 @@
   </div>
   <div class="group end">
     <span class="rate">
-      <select
-        aria-label="Sample rate"
-        title={picker.label ?? undefined}
-        disabled={picker.disabled}
-        value={rateSps}
-        onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
-      >
-        {#each RATE_OPTIONS as sps (sps)}
-          <option value={sps}>{sps} SPS</option>
-        {/each}
-      </select>
-      <!-- Narrow windows: the note moves into the "⋯" menu (the select keeps it as a tooltip). -->
+      <span class="rate-inline">{@render rateSelect()}</span>
+      <!-- Short of room: the note moves into the "⋯" menu (the select keeps it as a tooltip). -->
       {#if rateNote !== null}
-        <span class="rate-note wide-only">{rateNote}</span>
+        <span class="rate-note inline-note">{rateNote}</span>
       {/if}
     </span>
     {#if recording.indicator !== null}
@@ -132,17 +206,8 @@
         >
       </span>
     {/if}
-    <button
-      type="button"
-      class="export"
-      class:busy={exportJob.running}
-      title="Export the session so far to CSV"
-      disabled={exportJob.running || !canExport}
-      onclick={onExport}
-    >
-      Export
-    </button>
-    <!-- Wide windows: theme and About inline. Narrow: behind the "⋯" menu. -->
+    {@render exportButton(false)}
+    <!-- Room to spare: theme and About inline. Short of room: behind the "⋯" menu. -->
     <span class="settings-inline">
       <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
       <button type="button" onclick={onAbout}>About</button>
@@ -151,15 +216,21 @@
       <button
         type="button"
         class="more"
-        aria-label="More: theme and About"
+        aria-label={moreMenuLabel(level)}
         aria-expanded={menuOpen}
         aria-controls="top-bar-menu"
         onclick={() => (menuOpen = !menuOpen)}>⋯</button
       >
       {#if menuOpen}
         <div id="top-bar-menu" class="menu panel">
+          {#if level >= RATE_IN_MENU_LEVEL}
+            {@render rateSelect()}
+          {/if}
           {#if rateNote !== null}
             <p class="rate-note menu-note">{rateNote}</p>
+          {/if}
+          {#if level >= EXPORT_IN_MENU_LEVEL}
+            {@render exportButton(true)}
           {/if}
           <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
           <button
@@ -176,9 +247,12 @@
 </header>
 
 <style>
+  /* One row in every state (lib/topBarFit.ts): the bar never wraps on its own; `fit()`
+     adds level classes (hide-brand … export-in-menu) until the row fits, then lets the
+     device picker shrink (fit-shrink), and only then lets the bar wrap (fit-wrap). */
   .top-bar {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem 0.75rem;
@@ -191,25 +265,49 @@
     top: 0;
     z-index: 1;
   }
-  /* Each group wraps as a whole, so a narrow window gets two tidy rows. */
   .group {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
     align-items: center;
     gap: 0.5rem;
     min-width: 0;
   }
+  /* Items keep their width; an overflow shows up as overflow, which `fit()` measures. */
+  .group > * {
+    flex-shrink: 0;
+  }
+  /* The picker shrinks (ellipsis, full label in its tooltip) only once every level is used. */
+  .top-bar:global(.fit-shrink) .group.start,
+  .top-bar:global(.fit-shrink) .group.start > :global(.device-picker) {
+    flex-shrink: 1;
+  }
+  /* Last resort (a very narrow window): each group wraps as a whole. */
+  .top-bar:global(.fit-wrap),
+  .top-bar:global(.fit-wrap) .group,
+  .top-bar:global(.fit-wrap) .rate {
+    flex-wrap: wrap;
+  }
+  .top-bar:global(.fit-wrap) .group,
+  .top-bar:global(.fit-wrap) .group.start > :global(.device-picker) {
+    flex-shrink: 1;
+  }
   .rate {
     display: inline-flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     gap: 0.5rem;
     min-width: 0;
+  }
+  .rate-inline {
+    display: contents;
   }
   .rate-note {
     font-size: 0.8125rem;
     color: var(--muted);
-    overflow-wrap: anywhere;
+  }
+  .inline-note {
+    white-space: nowrap;
   }
   .rec-indicator {
     display: inline-flex;
@@ -243,6 +341,7 @@
     font-weight: 700;
     letter-spacing: 0.01em;
     margin-right: 0.5rem;
+    white-space: nowrap;
   }
   .badge {
     display: inline-flex;
@@ -252,6 +351,7 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     font-size: 0.8125rem;
+    white-space: nowrap;
     background: var(--bg);
   }
   .badge::before {
@@ -273,6 +373,9 @@
   .badge[data-state="error"]::before {
     background: var(--danger);
   }
+  .top-bar :global(button) {
+    white-space: nowrap;
+  }
   .settings-inline {
     display: inline-flex;
     align-items: center;
@@ -289,6 +392,7 @@
   .menu-note {
     margin: 0;
     max-width: 16rem;
+    overflow-wrap: anywhere;
   }
   .menu {
     position: absolute;
@@ -302,42 +406,48 @@
     padding: 0.75rem;
     box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
   }
-  /* Below ~1000 px the bar keeps one row in every state: the wordmark goes (the
-     window title names the app), theme, About and the rate-locked note move into
-     the menu, the recording indicator shows just its time, and a running export
-     shows just its progress bar in place of the (disabled) Export button; the
-     hidden text stays for screen readers. */
-  @media (max-width: 999.98px) {
-    .top-bar {
-      column-gap: 0.5rem;
-    }
-    .group {
-      gap: 0.375rem;
-    }
-    .top-bar :global(button),
-    .top-bar :global(select) {
-      padding-inline: 0.55rem;
-    }
-    .settings-inline,
-    .wide-only {
-      display: none;
-    }
-    .settings-menu {
-      display: inline-flex;
-    }
-    .export.busy {
-      display: none;
-    }
-    .export-progress progress {
-      width: 4.5rem;
-    }
-    .narrow-hidden {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip-path: inset(50%);
-      white-space: nowrap;
-    }
+  /* Level 1: the wordmark goes (the window title names the app). */
+  .top-bar:global(.hide-brand) .brand {
+    display: none;
+  }
+  /* Level 2: theme, About and the rate-locked note move into the menu. */
+  .top-bar:global(.settings-in-menu) .settings-inline,
+  .top-bar:global(.settings-in-menu) .inline-note {
+    display: none;
+  }
+  .top-bar:global(.settings-in-menu) .settings-menu {
+    display: inline-flex;
+  }
+  /* Level 3 (always below 1000 px): tighter spacing; the recording indicator shows just
+     its time, and a running export just its progress bar in place of the (disabled)
+     Export button; the hidden text stays for screen readers. */
+  .top-bar:global(.compact) {
+    column-gap: 0.5rem;
+  }
+  .top-bar:global(.compact) .group {
+    gap: 0.375rem;
+  }
+  .top-bar:global(.compact) :global(button),
+  .top-bar:global(.compact) :global(select) {
+    padding-inline: 0.55rem;
+  }
+  .top-bar:global(.compact) .export.busy {
+    display: none;
+  }
+  .top-bar:global(.compact) .export-progress progress {
+    width: 4.5rem;
+  }
+  .top-bar:global(.compact) .narrow-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* Levels 4 and 5: the sample rate, then Export, move into the menu. */
+  .top-bar:global(.rate-in-menu) .rate-inline,
+  .top-bar:global(.export-in-menu) .export {
+    display: none;
   }
 </style>

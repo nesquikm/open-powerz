@@ -32,7 +32,8 @@ const workspaceDir = path.resolve(desktopDir, "../..");
 const exe = process.platform === "win32" ? ".exe" : "";
 const application = path.join(workspaceDir, "target", "debug", `open-powerz-desktop${exe}`);
 
-/** Merged over `src-tauri/tauri.conf.json`: the web build goes to `dist-e2e-app/`. */
+/** Merged over `src-tauri/tauri.conf.json`: the web build goes to `dist-e2e-app/`, and on
+ * Windows WebView2 opens a DevTools port so msedgedriver can attach. */
 const e2eTauriConfig = path.join(here, "tauri.e2e.conf.json");
 /** WebdriverIO's and tauri-driver's logs (uploaded by CI on failure). */
 const logDir = path.join(desktopDir, "e2e-app-logs");
