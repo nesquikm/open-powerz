@@ -240,6 +240,8 @@ pub struct Worker<T: Transport, C: Clock> {
     snapshots: SnapshotCadence,
     /// Latest chip temperature, °C; `None` when invalid or not read yet.
     temp_c: Option<f64>,
+    /// Wall-clock time `temp_c` was read, ms.
+    temp_read_ms: Option<u64>,
     /// Groups records into UI batches flushed at 20–60 Hz.
     batcher: Batcher,
     /// Wall-clock time the next queue poll is due, ms.
@@ -317,6 +319,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             last_record_ms: None,
             snapshots: SnapshotCadence::default(),
             temp_c: None,
+            temp_read_ms: None,
             batcher: Batcher::new(now),
             next_poll_ms: now,
             store,
@@ -333,6 +336,15 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         (self.sink)(event);
     }
 
+    /// The temperature the live readout shows: the latest valid one while it
+    /// is current, as recordings and exports count it (AC-CWWKJ6.4).
+    fn live_temp(&mut self) -> Option<f64> {
+        let now = i64::try_from(self.clock.now_ms()).unwrap_or(i64::MAX);
+        let read = i64::try_from(self.temp_read_ms?).unwrap_or(i64::MAX);
+        self.temp_c
+            .filter(|_| now <= SnapshotCadence::expiry_ms(read))
+    }
+
     /// Read one ADC snapshot when the last one is due, after a queue poll
     /// so requests stay strictly one at a time.
     fn snapshot_if_due(&mut self) -> Result<(), session::Error> {
@@ -345,7 +357,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let adc = session.read_adc()?;
         self.temp_c = adc.temp_c();
         if let Some(temp) = self.temp_c {
-            self.store.set_temp(temp);
+            let now = self.clock.now_ms();
+            self.temp_read_ms = Some(now);
+            self.store.set_temp(temp, now);
         }
         Ok(())
     }
@@ -604,7 +618,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 u64::try_from(Streamer::poll_period(self.rate).as_millis()).unwrap_or(u64::MAX),
             );
         }
-        self.batcher.set_temp(self.temp_c);
+        let live = self.live_temp();
+        self.batcher.set_temp(live);
         let now = self.clock.now_ms();
         if let Some(batch) = self.batcher.poll(now) {
             self.emit_batch(batch);
@@ -773,10 +788,9 @@ fn export_store(
         let mut cursor = 0;
         recording::export_iter(
             history.len() as u64,
-            history
-                .iter_runs()
-                .enumerate()
-                .map(|(i, (r, new_run))| (r, new_run, temp_at(&temps, &mut cursor, i))),
+            history.iter_runs().enumerate().map(|(i, (r, new_run))| {
+                (r, new_run, temp_at(&temps, &mut cursor, i, r.time_ms()))
+            }),
             out,
             start_unix_ms,
             progress,

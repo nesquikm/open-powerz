@@ -66,14 +66,19 @@ pub fn stream<T: Transport, C: Clock>(
     let mut first_ms: Option<u32> = None;
     let mut write_err: Option<std::io::Error> = None;
     // The latest valid snapshot temperature (for the `TEMP` column), read
-    // on the same cadence as the desktop app (session clock).
-    let mut temp_c: Option<f64> = None;
+    // on the same cadence as the desktop app (session clock), with the
+    // session-clock time it was read at. Rows more than
+    // `SnapshotCadence::MAX_AGE` after it leave `TEMP` empty (AC-CWWKJ6.4).
+    let mut temp_c: Option<(f64, u64)> = None;
+    // Session-clock time minus device time, fixed by the first record.
+    let mut clock_offset: Option<i64> = None;
     let mut snapshots = SnapshotCadence::default();
     let polled = loop {
         let poll = match session.poll_stream() {
             Ok(poll) => poll,
             Err(e) => break Err(e),
         };
+        let poll_now = i64::try_from(session.now_ms()).unwrap_or(i64::MAX);
         let mut on_poll = |poll: &powerz_protocol::session::StreamPoll| -> bool {
             // The origin is the first record's device time; an empty poll (the
             // meter's first reply after 0x0E) must not fix it.
@@ -90,6 +95,8 @@ pub fn stream<T: Transport, C: Clock>(
             };
             empty_polls = 0;
             let start = *first_ms.get_or_insert(first.time_ms());
+            let offset =
+                *clock_offset.get_or_insert(poll_now.saturating_sub(i64::from(first.time_ms())));
             if poll.records.iter().any(|r| r.time_ms() < start) {
                 device_err = Some(CliError::Device(
                     "the meter's clock went backwards (did it reboot?); stream stopped".into(),
@@ -114,7 +121,16 @@ pub fn stream<T: Transport, C: Clock>(
                         .map_or(0, |d| d.as_millis() as u64),
                     fixed => fixed,
                 };
-                if let Err(e) = recorder.push_with_temp(r, now_ms, temp_c) {
+                let row_clock_ms = offset.saturating_add(i64::from(r.time_ms()));
+                let temp = temp_c
+                    .filter(|&(_, read_ms)| {
+                        row_clock_ms
+                            <= SnapshotCadence::expiry_ms(
+                                i64::try_from(read_ms).unwrap_or(i64::MAX),
+                            )
+                    })
+                    .map(|(t, _)| t);
+                if let Err(e) = recorder.push_with_temp(r, now_ms, temp) {
                     write_err = Some(e);
                     return false;
                 }
@@ -130,7 +146,7 @@ pub fn stream<T: Transport, C: Clock>(
         if snapshots.take(session.now_ms())
             && let Some(t) = session.read_adc().ok().and_then(|adc| adc.temp_c())
         {
-            temp_c = Some(t);
+            temp_c = Some((t, session.now_ms()));
         }
         session.sleep(Streamer::poll_period(opts.rate));
     };

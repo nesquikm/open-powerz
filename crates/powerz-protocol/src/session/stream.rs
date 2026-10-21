@@ -48,6 +48,16 @@ impl SnapshotCadence {
     /// for a fresh temperature.
     pub const PERIOD: Duration = Duration::from_millis(500);
 
+    /// How long a snapshot value (e.g. the temperature) stays current after
+    /// it was read; records later than that carry none.
+    pub const MAX_AGE: Duration = Duration::from_millis(2_000);
+
+    /// The last time, ms, a snapshot read at `read_ms` is still current
+    /// ([`Self::MAX_AGE`] after it, on the same clock).
+    pub fn expiry_ms(read_ms: i64) -> i64 {
+        read_ms.saturating_add(i64::try_from(Self::MAX_AGE.as_millis()).unwrap_or(i64::MAX))
+    }
+
     /// `true` when a snapshot is due at `now_ms`; it is then counted as
     /// taken, whether or not the read succeeds.
     pub fn take(&mut self, now_ms: u64) -> bool {

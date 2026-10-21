@@ -1,6 +1,7 @@
 <script lang="ts" module>
-  import type { ChartFrame } from "../chartData";
+  import type { ChartFrame, GapSpan } from "../chartData";
   import type { SessionExtent, TimeRange } from "../chartView";
+  import type { StripBreak } from "../timeline";
 
   /** What the strip shows: the range on screen within the session, and where session
    * time starts (for the slider's value text). */
@@ -22,23 +23,23 @@
     widthPx: number;
   }
 
-  /** A collapsed gap on the strip: its box (CSS px) and its length (AC-FENCD9.11). */
-  export interface OverviewBreak extends OverviewBox {
-    label: string;
-  }
+  /** A gap on the strip: its box (CSS px), its length, and whether it is collapsed to a
+   * break (AC-FENCD9.11, AC-CWWKJ6.1). */
+  export type OverviewBreak = StripBreak;
 </script>
 
 <script lang="ts">
+  import { envelopeRange } from "../chartSeries";
   import { RateGate } from "../chartView";
   import {
     dragOverview,
     overviewClick,
     overviewWindow,
+    stripBreaks as stripBreaksOf,
     type OverviewDrag,
     type TimeWarp,
   } from "../timeline";
   import { THEME_COLORS, type ResolvedTheme } from "../theme";
-  import { formatDuration } from "../chartSeries";
 
   /**
    * The overview strip under the plot: the whole session's VBUS / IBUS envelope and a
@@ -50,6 +51,7 @@
     current,
     warpFor,
     gapsVersion,
+    gaps,
     sources,
     onrange,
     onresize,
@@ -63,6 +65,8 @@
     warpFor: (t0Ms: number, t1Ms: number, widthPx: number) => TimeWarp;
     /** Changes whenever the session's gaps do (the strip's warp is cached on it). */
     gapsVersion: () => number;
+    /** The session's gaps overlapping `[t0Ms, t1Ms]`, the ones the chart shades. */
+    gaps: (t0Ms: number, t1Ms: number) => readonly GapSpan[];
     /** The frames the envelope is painted from, decimated to `cols` where it applies. */
     sources: (cols: number) => readonly EnvelopeSource[];
     /** The strip asks for this range on screen (paused). */
@@ -71,7 +75,7 @@
     onresize: () => void;
     /** The window after each draw, `null` with none (for the e2e hook). */
     onbox?: (box: OverviewBox | null) => void;
-    /** The collapsed gaps after each draw (for the e2e hook). */
+    /** The gaps marked after each draw, collapsed or not (for the e2e hook). */
     onbreaks?: (breaks: readonly OverviewBreak[]) => void;
   } = $props();
 
@@ -139,7 +143,7 @@
     }
     if (paintDue || stripWarp === null) {
       stripWarp = warpFor(session.firstMs, session.lastMs, width);
-      stripBreaks = breaksOn(stripWarp, session, width);
+      stripBreaks = stripBreaksOf(gaps(session.firstMs, session.lastMs), stripWarp, session, width);
       onbreaks?.(stripBreaks);
     }
     const owarp = stripWarp;
@@ -174,23 +178,11 @@
     canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
   }
 
-  /** The strip's collapsed gaps, as drawn last. */
+  /** The strip's gaps, as drawn last. */
   let stripBreaks: OverviewBreak[] = [];
 
-  /** Where each collapsed gap sits on a strip `width` CSS px wide, and its length. */
-  function breaksOn(owarp: TimeWarp, session: SessionExtent, width: number): OverviewBreak[] {
-    const d0 = owarp.fwd(session.firstMs);
-    const d1 = owarp.fwd(session.lastMs);
-    if (!(d1 > d0)) return [];
-    const x = (t: number): number => ((owarp.fwd(t) - d0) / (d1 - d0)) * width;
-    return owarp.breaks.map((b) => {
-      const leftPx = x(b.fromMs);
-      return { leftPx, widthPx: x(b.toMs) - leftPx, label: formatDuration(b.toMs - b.fromMs) };
-    });
-  }
-
-  /** Marks each collapsed gap: a faint band, two slanted strokes, and its length when it
-   * fits (AC-FENCD9.11). */
+  /** Marks each gap: a faint band and its length when it fits; a collapsed one also
+   * gets two slanted strokes (AC-FENCD9.11, AC-CWWKJ6.1). */
   function paintBreaks(ctx: CanvasRenderingContext2D, h: number, ratio: number): void {
     const palette = THEME_COLORS[theme];
     ctx.save();
@@ -204,13 +196,15 @@
       ctx.fillStyle = palette.muted;
       ctx.fillRect(x0, 0, Math.max(ratio, x1 - x0), h);
       ctx.globalAlpha = 1;
-      ctx.strokeStyle = palette.muted;
-      ctx.lineWidth = ratio;
-      for (const xs of [x0, x1]) {
-        ctx.beginPath();
-        ctx.moveTo(xs - 2 * ratio, h);
-        ctx.lineTo(xs + 2 * ratio, 0);
-        ctx.stroke();
+      if (b.collapsed) {
+        ctx.strokeStyle = palette.muted;
+        ctx.lineWidth = ratio;
+        for (const xs of [x0, x1]) {
+          ctx.beginPath();
+          ctx.moveTo(xs - 2 * ratio, h);
+          ctx.lineTo(xs + 2 * ratio, 0);
+          ctx.stroke();
+        }
       }
       ctx.fillStyle = palette.muted;
       if (ctx.measureText(b.label).width + 4 * ratio < x1 - x0) {
@@ -261,14 +255,15 @@
     }
     const palette = THEME_COLORS[theme];
     const colors = [palette.chart.voltage, palette.chart.current];
-    keys.forEach((_k, s) => {
-      let min = Infinity;
-      let max = -Infinity;
+    keys.forEach((k, s) => {
+      let dataMin = Infinity;
+      let dataMax = -Infinity;
       for (let c = 0; c < cols; c++) {
-        if (lo[s]![c]! < min) min = lo[s]![c]!;
-        if (hi[s]![c]! > max) max = hi[s]![c]!;
+        if (lo[s]![c]! < dataMin) dataMin = lo[s]![c]!;
+        if (hi[s]![c]! > dataMax) dataMax = hi[s]![c]!;
       }
-      if (!(max >= min)) return;
+      if (!(dataMax >= dataMin)) return;
+      const [min, max] = envelopeRange(k, dataMin, dataMax);
       const spanV = max - min || 1;
       const pad = 2 * ratio;
       const yOf = (v: number): number => h - pad - ((v - min) / spanV) * (h - 2 * pad);

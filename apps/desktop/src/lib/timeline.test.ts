@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GapSpan } from "./chartData";
+import { formatDuration } from "./chartSeries";
 import {
   BREAK_PX,
   COLLAPSE_MIN_GAP_MS,
@@ -18,6 +19,7 @@ import {
   sliderToSpan,
   spanToSlider,
   stepPlayhead,
+  stripBreaks,
   zoomInDisplay,
   type TimeRange,
   type TimeWarp,
@@ -537,5 +539,66 @@ describe("narrowest view follows the rate (AC-9CFMD3.4)", () => {
     const session = { ...LONG, minSpanMs: minSpanMs(50) };
     for (let k = 0; k < 200; k++) view = zoomInDisplay(view, 105_000, 0.5, ID, session);
     expect(view.t1Ms - view.t0Ms).toBeCloseTo(40, 6);
+  });
+});
+
+describe("stripBreaks (AC-CWWKJ6.1)", () => {
+  // 0..500 s: a 10 s blip at 20 s (shorter than the collapse threshold) and a
+  // 5-minute outage at 100 s (collapsed).
+  const BLIP: GapSpan = { from_ms: 20_000, to_ms: 30_000 };
+  const LONG: GapSpan = { from_ms: 100_000, to_ms: 400_000 };
+  const session = { firstMs: 0, lastMs: 500_000 };
+  const WIDTH = 1000;
+  const warpOf = (gaps: GapSpan[]): TimeWarp =>
+    buildWarp(gaps, { t0Ms: session.firstMs, t1Ms: session.lastMs }, WIDTH);
+  /** x of `ms` on the strip through `w`, CSS px. */
+  const xOf = (w: TimeWarp, ms: number): number =>
+    ((w.fwd(ms) - w.fwd(session.firstMs)) / (w.fwd(session.lastMs) - w.fwd(session.firstMs))) *
+    WIDTH;
+
+  it("marks a gap shorter than the collapse threshold as an uncollapsed band with its length", () => {
+    expect(BLIP.to_ms - BLIP.from_ms).toBeLessThan(COLLAPSE_MIN_GAP_MS);
+    const w = warpOf([BLIP]);
+    const breaks = stripBreaks([BLIP], w, session, WIDTH);
+    expect(breaks).toHaveLength(1);
+    const [b] = breaks;
+    expect(b!.collapsed).toBe(false);
+    expect(b!.label).toBe(formatDuration(10_000));
+    // Its true share of the strip: 10 s of 500 s across 1000 px.
+    expect(b!.leftPx).toBeCloseTo(40, 6);
+    expect(b!.widthPx).toBeCloseTo(20, 6);
+  });
+
+  it("keeps collapsed gaps as collapsed breaks next to the short ones, in time order", () => {
+    const w = warpOf([BLIP, LONG]);
+    const breaks = stripBreaks([LONG, BLIP], w, session, WIDTH);
+    expect(breaks.map((b) => b.collapsed)).toEqual([false, true]);
+    const [short, long] = breaks;
+    expect(short!.leftPx).toBeCloseTo(xOf(w, BLIP.from_ms), 6);
+    expect(short!.widthPx).toBeCloseTo(xOf(w, BLIP.to_ms) - xOf(w, BLIP.from_ms), 6);
+    expect(short!.label).toBe(formatDuration(10_000));
+    expect(long!.leftPx).toBeCloseTo(xOf(w, LONG.from_ms), 6);
+    expect(long!.widthPx).toBeGreaterThan(0);
+    expect(long!.widthPx).toBeLessThanOrEqual(MAX_BREAK_PX + 1e-9);
+    expect(long!.label).toBe(formatDuration(300_000));
+  });
+
+  it("marks exactly the collapsed breaks the warp has, collapsed", () => {
+    const w = warpOf([BLIP, LONG]);
+    const collapsed = stripBreaks([BLIP, LONG], w, session, WIDTH).filter((b) => b.collapsed);
+    expect(collapsed).toHaveLength(w.breaks.length);
+  });
+
+  it("leaves out gaps outside the session and draws nothing without gaps", () => {
+    const w = warpOf([]);
+    expect(stripBreaks([], w, session, WIDTH)).toEqual([]);
+    const outside: GapSpan = { from_ms: 600_000, to_ms: 610_000 };
+    expect(stripBreaks([outside], w, session, WIDTH)).toEqual([]);
+  });
+
+  it("draws nothing on an empty session", () => {
+    const empty = { firstMs: 1000, lastMs: 1000 };
+    const w = buildWarp([BLIP], { t0Ms: 1000, t1Ms: 1000 }, WIDTH);
+    expect(stripBreaks([BLIP], w, empty, WIDTH)).toEqual([]);
   });
 });

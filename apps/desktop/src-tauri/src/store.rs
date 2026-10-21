@@ -9,6 +9,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use powerz_protocol::decode::QueueRecord;
+use powerz_protocol::session::SnapshotCadence;
 
 use crate::history::{History, HistoryGap, Records, Series, SeriesBuckets};
 use crate::stats::{Stats, StatsSnapshot};
@@ -78,21 +79,28 @@ pub(crate) struct Appended {
 }
 
 /// Temperature changes over the history: `(index of the first record it
-/// applies to, °C)`. The temperature changes about twice a second, far less
-/// often than records arrive, so it is not stored per record.
+/// applies to, °C, last session time it applies to)`. The temperature
+/// changes about twice a second, far less often than records arrive, so it
+/// is not stored per record.
 /// The indexes count from the history's start, so it is valid only while
 /// the history is never trimmed from the front: a clear empties both.
-pub(crate) type TempLog = Vec<(usize, f64)>;
+pub(crate) type TempLog = Vec<(usize, f64, i64)>;
 
-/// The temperature at history index `i` in `log` (sorted by index), moving
-/// `cursor` forward; indexes must be asked for in increasing order.
-pub(crate) fn temp_at(log: &[(usize, f64)], cursor: &mut usize, i: usize) -> Option<f64> {
-    while log.get(*cursor + 1).is_some_and(|&(at, _)| at <= i) {
+/// The temperature at history index `i` (session time `t_ms`) in `log`
+/// (sorted by index), moving `cursor` forward; indexes must be asked for in
+/// increasing order. Empty once `t_ms` is past the snapshot's age limit.
+pub(crate) fn temp_at(
+    log: &[(usize, f64, i64)],
+    cursor: &mut usize,
+    i: usize,
+    t_ms: u32,
+) -> Option<f64> {
+    while log.get(*cursor + 1).is_some_and(|&(at, ..)| at <= i) {
         *cursor += 1;
     }
     log.get(*cursor)
-        .filter(|&&(at, _)| at <= i)
-        .map(|&(_, t)| t)
+        .filter(|&&(at, _, until)| at <= i && i64::from(t_ms) <= until)
+        .map(|&(_, t, _)| t)
 }
 
 /// What one session keeps across its connections.
@@ -108,8 +116,9 @@ pub(crate) struct SessionData {
     /// Wall-clock time at session time 0, ms, fixed by the session's first
     /// record; clearing the history keeps it.
     unix_anchor_ms: Option<i64>,
-    /// The latest valid snapshot temperature, °C.
-    temp_c: Option<f64>,
+    /// The latest valid snapshot temperature, °C, and the wall-clock time
+    /// it was read at, ms.
+    temp_c: Option<(f64, u64)>,
     /// Temperature changes over the history.
     temps: TempLog,
 }
@@ -133,10 +142,23 @@ impl SessionData {
             .get_or_insert(i64::try_from(now_ms).unwrap_or(i64::MAX) - i64::from(t));
         let unix_ms = u64::try_from(anchor.saturating_add(i64::from(t)).max(0)).unwrap_or(0);
         self.history_unix_ms.get_or_insert(unix_ms);
-        if let Some(temp) = self.temp_c
-            && self.temps.last().map(|&(_, t)| t) != Some(temp)
-        {
-            self.temps.push((self.history.len(), temp));
+        // The snapshot in session time, plus its age limit (AC-CWWKJ6.4).
+        let temp = self.temp_c.map(|(temp, read_ms)| {
+            let read_t = i64::try_from(read_ms)
+                .unwrap_or(i64::MAX)
+                .saturating_sub(anchor);
+            (temp, SnapshotCadence::expiry_ms(read_t))
+        });
+        if let Some((temp, until)) = temp {
+            // `until` is the read time plus the age limit.
+            let read_t = until.saturating_sub(SnapshotCadence::expiry_ms(0));
+            match self.temps.last_mut() {
+                // The same temperature, read again before the last reading
+                // expired: the entry stays current for longer, so the log
+                // grows with temperature changes, not with snapshots.
+                Some((_, t, u)) if *t == temp && read_t <= *u => *u = (*u).max(until),
+                _ => self.temps.push((self.history.len(), temp, until)),
+            }
         }
         self.history.push(&record);
         Appended {
@@ -144,7 +166,9 @@ impl SessionData {
             before_ms,
             new_run,
             unix_ms,
-            temp_c: self.temp_c,
+            temp_c: temp
+                .filter(|&(_, until)| i64::from(t) <= until)
+                .map(|(temp, _)| temp),
         }
     }
 
@@ -175,9 +199,10 @@ impl SessionStore {
         self.lock().timeline.restart = true;
     }
 
-    /// A valid snapshot read `temp_c` °C: the records from now on carry it.
-    pub(crate) fn set_temp(&self, temp_c: f64) {
-        self.lock().temp_c = Some(temp_c);
+    /// A valid snapshot read `temp_c` °C at wall-clock time `now_ms`: the
+    /// records from now on carry it, up to [`SnapshotCadence::MAX_AGE`] after it.
+    pub(crate) fn set_temp(&self, temp_c: f64, now_ms: u64) {
+        self.lock().temp_c = Some((temp_c, now_ms));
     }
 
     /// Number of records in the history.
@@ -307,5 +332,55 @@ mod tests {
         let mut t = Timeline::default();
         t.map(u32::MAX - 1, 0);
         assert_eq!(t.map(0, 10_000), (u32::MAX, true));
+    }
+
+    #[test]
+    fn the_temperature_log_grows_with_changes_not_with_snapshots() {
+        use powerz_protocol::decode::Rate;
+        let store = SessionStore::new();
+        let rec = |t: u32| QueueRecord::from_raw(t, 5_000_000, 0, [0; 4], Rate::Sps1000);
+        // One hour of snapshots every 500 ms, all reading 30 °C, one record each.
+        for i in 0..7_200u32 {
+            let t = i * 500;
+            store.set_temp(30.0, 1_000 + u64::from(t));
+            store.lock().append(&rec(t), 1_000 + u64::from(t));
+        }
+        let (records, _, temps) = store.export_source(0);
+        assert_eq!(temps.len(), 1, "one entry per temperature change");
+        let mut cursor = 0;
+        for (i, r) in records.iter().enumerate() {
+            assert_eq!(
+                temp_at(&temps, &mut cursor, i, r.time_ms()),
+                Some(30.0),
+                "row {i}"
+            );
+        }
+        // A pause longer than the age limit still empties the rows inside it.
+        store
+            .lock()
+            .append(&rec(7_200 * 500 + 2_500), 1_000 + 7_200 * 500 + 2_500);
+        store.set_temp(30.0, 1_000 + 7_200 * 500 + 3_000);
+        store
+            .lock()
+            .append(&rec(7_200 * 500 + 3_000), 1_000 + 7_200 * 500 + 3_000);
+        let (records, _, temps) = store.export_source(0);
+        let n = records.len();
+        let mut cursor = 0;
+        let got: Vec<_> = (0..n)
+            .map(|i| {
+                temp_at(
+                    &temps,
+                    &mut cursor,
+                    i,
+                    records.get(i).map_or(0, |r| r.time_ms()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got[n - 2],
+            None,
+            "the row in the pause kept a stale temperature"
+        );
+        assert_eq!(got[n - 1], Some(30.0));
     }
 }

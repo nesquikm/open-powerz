@@ -323,7 +323,13 @@ interface MockRecording {
 
 /** Scripted backend behaviours chosen with `?mock=<name>` in the page URL; the device
  * list stays the same in every one. */
-export const MOCK_MODES = ["permission-denied", "rate-locked", "slow-export", "outage"] as const;
+export const MOCK_MODES = [
+  "permission-denied",
+  "rate-locked",
+  "slow-export",
+  "outage",
+  "blip",
+] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
 /** The `?mock=` mode of the page URL, or null for the normal demo behaviour. */
@@ -336,6 +342,10 @@ export function mockModeFromUrl(search: string | undefined): MockMode | null {
  * `beforeMs`, is gone for `gapMs` (unplugged, then connected again), and the live stream
  * goes on after that; the history holds both runs and reports the gap between them. */
 export const MOCK_OUTAGE = { startMs: 30_400_000, beforeMs: 20_000, gapMs: 2_400_000 } as const;
+
+/** `blip`: as `outage`, but the meter is gone for only `gapMs`, shorter than the
+ * collapse threshold, so the gap keeps its true width on screen (AC-CWWKJ6.1). */
+export const MOCK_BLIP = { startMs: 30_400_000, beforeMs: 20_000, gapMs: 10_000 } as const;
 
 /** How long a `slow-export` export stays half done, so the UI suite can see its progress. */
 const SLOW_EXPORT_MS = 30_000;
@@ -430,7 +440,8 @@ export class MockBackend {
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
     this.#session = session;
-    if (this.#mode === "outage") this.#seedOutage(session);
+    if (this.#mode === "outage") this.#seedOutage(session, MOCK_OUTAGE);
+    if (this.#mode === "blip") this.#seedOutage(session, MOCK_BLIP);
     // The mock production build (the Playwright suite) honours it too.
     const synthetic = syntheticFromUrl(
       pageSearch(),
@@ -439,16 +450,16 @@ export class MockBackend {
     if (synthetic !== null) await this.seedSyntheticHistory(synthetic);
   }
 
-  /** `outage`: the run before the outage, then the live stream after it. */
-  #seedOutage(s: Running): void {
+  /** `outage` / `blip`: the run before the outage, then the live stream after it. */
+  #seedOutage(s: Running, outage: typeof MOCK_OUTAGE | typeof MOCK_BLIP): void {
     const step = 1000 / s.rateSps;
-    const end = MOCK_OUTAGE.startMs + MOCK_OUTAGE.beforeMs;
-    let last: number = MOCK_OUTAGE.startMs;
-    for (let t = MOCK_OUTAGE.startMs; t < end; t += step) {
+    const end = outage.startMs + outage.beforeMs;
+    let last: number = outage.startMs;
+    for (let t = outage.startMs; t < end; t += step) {
       last = Math.round(t);
       s.history.push(sampleAt(s.scenario, last));
     }
-    s.nextMs = end + MOCK_OUTAGE.gapMs;
+    s.nextMs = end + outage.gapMs;
     const gap = { from_ms: last, to_ms: s.nextMs };
     s.gaps.push(gap);
     s.pendingGap = { kind: "outage", ...gap };

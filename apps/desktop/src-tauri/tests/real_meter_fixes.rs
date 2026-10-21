@@ -363,7 +363,8 @@ fn an_invalid_snapshot_keeps_the_latest_valid_temperature() {
     );
     let file = SharedBuf::default();
     worker.start_recording(Box::new(file.clone())).unwrap();
-    run_for(&mut worker, &clock, 4_000);
+    // Within 2 s of the last valid snapshot (AC-CWWKJ6.4 empties TEMP later).
+    run_for(&mut worker, &clock, 2_000);
     worker.stop_recording().unwrap();
     assert_temp_filled(&file.rows(), "recording");
     assert_temp_filled(&export_rows(&mut worker), "export");
@@ -393,6 +394,82 @@ fn temp_stays_empty_while_the_meter_reports_none() {
         temps(&export).iter().all(Option::is_none),
         "TEMP without a valid snapshot"
     );
+}
+
+// ---- AC-CWWKJ6.4: TEMP is never older than 2 s ----
+
+/// Simulated times of the ADC snapshot requests the pipe saw, in order.
+fn snapshot_times(log: &Arc<Mutex<Log>>) -> Vec<u64> {
+    use powerz_protocol::frame::{self, Attribute};
+    log.lock()
+        .unwrap()
+        .frames
+        .iter()
+        .filter(|(_, f)| frame::get_data_mask(f).is_some_and(|m| m.bits() == Attribute::ADC.bits()))
+        .map(|&(t, _)| t)
+        .collect()
+}
+
+/// Rows up to 2 s after `last_valid_ms` (the last valid snapshot) keep its
+/// temperature; rows more than 2 s after it have an empty TEMP. `slack_ms`
+/// covers the queue latency between a record's time and its arrival.
+fn assert_temp_ages_out(rows: &[Vec<String>], first_valid_ms: u64, last_valid_ms: u64, what: &str) {
+    const SLACK_MS: u64 = 250;
+    let bound = last_valid_ms + 2_000;
+    let mut late = 0;
+    for row in rows {
+        let t = unix_ms(row);
+        let temp = row[TEMP].trim();
+        if t > bound + SLACK_MS {
+            late += 1;
+            assert!(
+                temp.is_empty(),
+                "{what}: TEMP {temp} at {} ms, more than 2 s after the last valid snapshot at {} ms",
+                t - T0,
+                last_valid_ms - T0
+            );
+        } else if t > first_valid_ms + SLACK_MS && t + SLACK_MS < bound {
+            assert!(
+                !temp.is_empty(),
+                "{what}: TEMP empty at {} ms, within 2 s of the valid snapshot at {} ms",
+                t - T0,
+                last_valid_ms - T0
+            );
+        }
+    }
+    assert!(late > 100, "{what}: only {late} rows after the 2 s bound");
+}
+
+#[test]
+fn temp_goes_empty_more_than_2_s_after_the_last_valid_snapshot() {
+    let (mut worker, clock, log, _events) = start(
+        Rate::Sps1000,
+        PipeOpts {
+            invalid_temp_from_snapshot: Some(3),
+            ..PipeOpts::default()
+        },
+    );
+    let file = SharedBuf::default();
+    worker.start_recording(Box::new(file.clone())).unwrap();
+    run_for(&mut worker, &clock, 6_000);
+    worker.stop_recording().unwrap();
+    let snaps = snapshot_times(&log);
+    assert!(snaps.len() >= 3, "only {} snapshots", snaps.len());
+    let (first_valid, last_valid) = (snaps[0], snaps[1]);
+    assert_temp_ages_out(&file.rows(), first_valid, last_valid, "recording");
+    assert_temp_ages_out(&export_rows(&mut worker), first_valid, last_valid, "export");
+}
+
+#[test]
+fn temp_stays_filled_while_valid_snapshots_keep_coming() {
+    // Fresh snapshots every half second: no row is ever 2 s past one.
+    let (mut worker, clock, _log, _events) = start(Rate::Sps1000, PipeOpts::default());
+    let file = SharedBuf::default();
+    worker.start_recording(Box::new(file.clone())).unwrap();
+    run_for(&mut worker, &clock, 6_000);
+    worker.stop_recording().unwrap();
+    assert_temp_filled(&file.rows(), "recording");
+    assert_temp_filled(&export_rows(&mut worker), "export");
 }
 
 // ---- AC-X2SPDW.8: commands and paths in hints are quoted for monospace ----

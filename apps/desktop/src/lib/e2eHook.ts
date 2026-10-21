@@ -13,6 +13,7 @@ import {
   type OverviewWindowBox,
 } from "../../e2e/hook";
 import type { ChartFrame } from "./chartData";
+import type { StripBreak } from "./timeline";
 
 /** Whether this web build is a test build that exposes the hook. */
 export const E2E_BUILD: boolean =
@@ -31,15 +32,15 @@ export class ChartProbe {
   #shuttle = 0;
   #breaks: ChartBreak[] = [];
   #overview: OverviewWindowBox | null = null;
-  #overviewBreaks: { leftPx: number; widthPx: number; label: string }[] = [];
+  #overviewBreaks: StripBreak[] = [];
 
   /** The overview strip's viewport window, CSS px from the strip's left edge (AC-FENCD9.1). */
   overview(box: OverviewWindowBox | null): void {
     this.#overview = box === null ? null : { ...box };
   }
 
-  /** The collapsed gaps the overview strip drew (AC-FENCD9.11). */
-  overviewBreaks(breaks: readonly { leftPx: number; widthPx: number; label: string }[]): void {
+  /** The gaps the overview strip drew, collapsed or not (AC-FENCD9.11, AC-CWWKJ6.1). */
+  overviewBreaks(breaks: readonly StripBreak[]): void {
     this.#overviewBreaks = breaks.map((b) => ({ ...b }));
   }
 

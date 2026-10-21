@@ -279,6 +279,44 @@ export function zeroBasedRange(dataMin: number | null, dataMax: number | null): 
   return [zero(min), zero(max)];
 }
 
+/** The narrowest span each value axis shows with zero-based axes off (AC-CWWKJ6.2), so
+ * noise around a flat signal stays small instead of filling the plot. */
+export const MIN_AXIS_SPAN: Readonly<Record<ChartAxisId, number>> = {
+  volts: 0.1,
+  amps: 0.02,
+  watts: 0.1,
+};
+
+/** An auto-scaled value axis range at least `minSpan` wide (AC-CWWKJ6.2): data that spans
+ * less is centred in a `minSpan` window; wider data autoscales as uPlot does. */
+export function minSpanRange(
+  dataMin: number | null,
+  dataMax: number | null,
+  minSpan: number,
+): [number, number] {
+  // uPlot passes null bounds for an axis with no data yet.
+  if (!Number.isFinite(dataMin) || !Number.isFinite(dataMax)) return [-minSpan / 2, minSpan / 2];
+  const lo = dataMin as number;
+  const hi = dataMax as number;
+  const centred = centredMinSpan(lo, hi, minSpan);
+  if (centred) return centred;
+  const [min, max] = uPlot.rangeNum(lo, hi, 0.1, true);
+  return [min ?? lo, max ?? hi];
+}
+
+/** The overview strip's per-series y-range (AC-CWWKJ6.3): at least the series' axis
+ * minimum span, centred, so an idle output reads flat; wider data keeps its raw extent. */
+export function envelopeRange(key: "vbus" | "ibus", min: number, max: number): [number, number] {
+  return centredMinSpan(min, max, MIN_AXIS_SPAN[key === "vbus" ? "volts" : "amps"]) ?? [min, max];
+}
+
+/** A `minSpan`-wide window centred on finite data spanning less than `minSpan`, else null. */
+function centredMinSpan(min: number, max: number, minSpan: number): [number, number] | null {
+  if (!(Number.isFinite(min) && Number.isFinite(max) && max - min < minSpan)) return null;
+  const mid = (min + max) / 2;
+  return [mid - minSpan / 2, mid + minSpan / 2];
+}
+
 /** The browser's session storage, if reachable. */
 export function sessionStore(): ThemeStorage | undefined {
   try {
@@ -500,7 +538,11 @@ export function chartOptions({
       ...Object.fromEntries(
         CHART_AXES.map((a): [string, uPlot.Scale] => [
           a.id,
-          zeroBased ? { range: (_u, min, max) => zeroBasedRange(min, max) } : {},
+          {
+            range: zeroBased
+              ? (_u, min, max) => zeroBasedRange(min, max)
+              : (_u, min, max) => minSpanRange(min, max, MIN_AXIS_SPAN[a.id]),
+          },
         ]),
       ),
     },

@@ -443,6 +443,66 @@ fn stream_writes_vendor_csv_until_duration_and_stops_queue() {
     );
 }
 
+/// AC-CWWKJ6.4: a row more than 2 s after the latest valid snapshot
+/// temperature gets an empty TEMP; an invalid snapshot does not refresh it.
+#[test]
+fn stream_leaves_temp_empty_more_than_2_s_after_the_last_valid_snapshot() {
+    // 10 SPS polls every 100 ms; a snapshot follows polls 0 and 5 (500 ms
+    // apart). Only the first is valid, read right after the rows at 0 and
+    // 100 ms; the second reads no temperature.
+    let script = [
+        start_steps(Rate::Sps10.code()),
+        vec![
+            poll_step(4, &ts(&[0, 100])),
+            snap_step(5),
+            poll_step(6, &ts(&[200, 1000])),
+            poll_step(7, &ts(&[1900])),
+            poll_step(8, &ts(&[2600])),
+            poll_step(9, &ts(&[3000])),
+            poll_step(10, &ts(&[3200])),
+            adc_step(
+                11,
+                Adc {
+                    temp_raw: i16::MIN,
+                    ..ADC_A
+                },
+            ),
+            poll_step(12, &ts(&[3500])),
+            Step::transact(stop_queue(13), accept(13)),
+        ],
+    ]
+    .concat();
+    let meter = Meter::new(script).stop_after_polls(7);
+    let stop = meter.stop.clone();
+    let mut s = session(meter);
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let opts = StreamOptions {
+        rate: Rate::Sps10,
+        duration: None,
+        start_unix_ms: START_UNIX_MS,
+    };
+    stream(&mut s, &opts, &stop, &mut csv, &mut err).unwrap();
+    assert_eq!(
+        s.transport().inner.remaining(),
+        0,
+        "every scripted step ran"
+    );
+    let (_, rows) = csv_rows(&csv);
+    let temps: Vec<&str> = rows.iter().map(|r| r[8].as_str()).collect();
+    assert_eq!(rows.len(), 9, "rows: {rows:?}");
+    // Rows at 0 and 100 ms come before the snapshot; 200..=1900 ms are
+    // within 2 s of it; 2600 ms on are more than 2 s after it.
+    assert_eq!(temps[..2], ["", ""], "{temps:?}");
+    for (k, t) in temps[2..5].iter().enumerate() {
+        assert!(approx(f(t), SNAP_TEMP_C), "row {}: TEMP {t:?}", k + 2);
+    }
+    assert_eq!(
+        temps[5..],
+        ["", "", "", ""],
+        "TEMP must be empty more than 2 s after the last valid snapshot: {temps:?}"
+    );
+}
+
 #[test]
 fn stream_stops_queue_on_ctrl_c_and_keeps_received_rows() {
     let script = [

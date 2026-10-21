@@ -4,6 +4,7 @@
  */
 
 import type { GapSpan } from "./chartData";
+import { formatDuration } from "./chartSeries";
 import type { SessionExtent, TimeRange } from "./chartView";
 
 export type { SessionExtent, TimeRange };
@@ -262,6 +263,50 @@ export function overviewWindow(
   };
   const left = toPx(view.t0Ms);
   return { leftPx: left, widthPx: Math.max(0, toPx(view.t1Ms) - left) };
+}
+
+/** A gap on the overview strip: its box (CSS px from the strip's left edge), its length,
+ * and whether the warp squeezes it to a break (AC-FENCD9.11, AC-CWWKJ6.1). */
+export interface StripBreak {
+  leftPx: number;
+  widthPx: number;
+  label: string;
+  collapsed: boolean;
+}
+
+/** Every gap the chart shades, as the strip `widthPx` wide drawn with `warp` (built for
+ * the whole session) shows it, in time order: the warp's collapsed breaks, and each
+ * other gap inside the session at its true width, clipped to the session
+ * (AC-CWWKJ6.1). Nothing on an empty session. */
+export function stripBreaks(
+  gaps: readonly GapSpan[],
+  warp: TimeWarp,
+  session: SessionExtent,
+  widthPx: number,
+): StripBreak[] {
+  const d0 = warp.fwd(session.firstMs);
+  const d1 = warp.fwd(session.lastMs);
+  if (!(d1 > d0) || !(widthPx > 0)) return [];
+  const x = (ms: number): number => {
+    const t = Math.min(session.lastMs, Math.max(session.firstMs, ms));
+    return ((warp.fwd(t) - d0) / (d1 - d0)) * widthPx;
+  };
+  const box = (fromMs: number, toMs: number, collapsed: boolean): StripBreak => {
+    const leftPx = x(fromMs);
+    return {
+      leftPx,
+      widthPx: x(toMs) - leftPx,
+      label: formatDuration(toMs - fromMs),
+      collapsed,
+    };
+  };
+  const out = warp.breaks.map((b) => ({ at: b.fromMs, brk: box(b.fromMs, b.toMs, true) }));
+  for (const g of gaps) {
+    if (!(g.to_ms > session.firstMs && g.from_ms < session.lastMs)) continue;
+    if (warp.breaks.some((b) => g.from_ms < b.toMs && g.to_ms > b.fromMs)) continue;
+    out.push({ at: g.from_ms, brk: box(g.from_ms, g.to_ms, false) });
+  }
+  return out.sort((a, b) => a.at - b.at).map((o) => o.brk);
 }
 
 /** What an overview drag moves: the window, or one of its edges. */

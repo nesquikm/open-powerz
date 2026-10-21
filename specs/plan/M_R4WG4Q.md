@@ -38,6 +38,7 @@ codename: Live Wire
 | [AKNVND](../frs/AKNVND.md) | Chart and layout polish | n/a |
 | [4NSVC9](../frs/4NSVC9.md) | The live chart leaks memory in WebKit | n/a |
 | [X2SPDW](../frs/X2SPDW.md) | Real-meter fixes from the M2 QA run | n/a |
+| [CWWKJ6](../frs/CWWKJ6.md) | Honest gaps, quiet noise and fresh temperatures | n/a |
 
 **Tasks:**
 - [x] Extract `crates/powerz-record` from the CLI — 0P7HSJ (the `--include-demo` help text needed no fix)
@@ -82,6 +83,8 @@ codename: Live Wire
   verify: `MEMORY_TEST=1 bun run e2e:ui memory.spec.ts --project=webkit` passes; app WebContent RSS grows <50 MB over 10 min at 1000 SPS
 - [x] Real-meter fixes: 1000 SPS loss under dialogs, gap count, Unix time, TEMP, hint font, stuck bulk, blank window — X2SPDW
   verify: `cargo test --workspace --locked` and `bun run test` pass; real-meter checks of AC .3, .11, .13 recorded in the FR Notes
+- [x] Honest gaps, quiet noise and fresh temperatures — CWWKJ6
+  verify: `bun run test` and `cargo test --workspace --locked` pass; light/dark ~900/~1600 shots reviewed
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. the 1000 SPS temperature tooltip) and a recorded CSV listed in the report
 

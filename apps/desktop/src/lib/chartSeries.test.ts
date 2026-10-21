@@ -1,16 +1,20 @@
+import uPlot from "uplot";
 import { describe, expect, it } from "vitest";
 import { THEME_COLORS, type ResolvedTheme, type ThemeStorage } from "./theme";
 import {
   CHART_AXES,
   CHART_SERIES,
   LIVE_WINDOW_KEY,
+  MIN_AXIS_SPAN,
   SERIES_VISIBILITY_KEY,
   ZERO_BASED_KEY,
   chartOptions,
   defaultVisibility,
+  envelopeRange,
   loadLiveWindow,
   loadVisibility,
   loadZeroBased,
+  minSpanRange,
   saveLiveWindow,
   saveVisibility,
   saveZeroBased,
@@ -289,7 +293,16 @@ describe("zero-based axes (AC-AH2AEM.9)", () => {
     const off = chartOptions({ ...base, zeroBased: false });
     const on = chartOptions({ ...base, zeroBased: true });
     for (const a of CHART_AXES) {
-      expect(off.scales?.[a.id]?.range).toBeUndefined();
+      // Off: auto-scale with the axis's minimum span (AC-CWWKJ6.2).
+      const offRange = off.scales?.[a.id]?.range;
+      expect(typeof offRange).toBe("function");
+      const offFn = offRange as (
+        u: unknown,
+        min: number,
+        max: number,
+        key: string,
+      ) => [number, number];
+      expect(offFn(null, 0, 20, a.id)).toEqual(uPlot.rangeNum(0, 20, 0.1, true));
       const range = on.scales?.[a.id]?.range;
       expect(typeof range).toBe("function");
       const fn = range as (u: unknown, min: number, max: number, key: string) => [number, number];
@@ -625,5 +638,105 @@ describe("live window preference (AC-AKNVND.5)", () => {
   it("is stored apart from the legend choice", () => {
     expect(LIVE_WINDOW_KEY).not.toBe(SERIES_VISIBILITY_KEY);
     expect(LIVE_WINDOW_KEY).toMatch(/^open-powerz\.chart\./);
+  });
+});
+
+type RangeFn = (
+  u: unknown,
+  min: number | null,
+  max: number | null,
+  key: string,
+) => [number, number];
+
+function span([lo, hi]: [number, number]): number {
+  return hi - lo;
+}
+function mid([lo, hi]: [number, number]): number {
+  return (lo + hi) / 2;
+}
+
+describe("minimum axis span (AC-CWWKJ6.2)", () => {
+  it("is 0.1 V, 0.02 A and 0.1 W", () => {
+    expect(MIN_AXIS_SPAN).toEqual({ volts: 0.1, amps: 0.02, watts: 0.1 });
+  });
+
+  it("widens a flat or noisy signal to the minimum span, centred on the data", () => {
+    const amps = minSpanRange(0.0005, 0.0015, 0.02);
+    expect(span(amps)).toBeGreaterThanOrEqual(0.02 - 1e-12);
+    expect(mid(amps)).toBeCloseTo(0.001, 9);
+    const volts = minSpanRange(5, 5, 0.1);
+    expect(span(volts)).toBeGreaterThanOrEqual(0.1 - 1e-12);
+    expect(mid(volts)).toBeCloseTo(5, 9);
+  });
+
+  it("keeps the noise small on screen: a 1 mA ripple fills at most a tenth of the amps axis", () => {
+    const r = minSpanRange(0.0005, 0.0015, MIN_AXIS_SPAN.amps);
+    expect(0.001 / span(r)).toBeLessThanOrEqual(0.1);
+  });
+
+  it("autoscales larger swings as before", () => {
+    expect(minSpanRange(0, 3, 0.02)).toEqual(uPlot.rangeNum(0, 3, 0.1, true));
+    expect(minSpanRange(4.8, 20.2, 0.1)).toEqual(uPlot.rangeNum(4.8, 20.2, 0.1, true));
+  });
+
+  it("is each value axis's range when zero-based axes are off", () => {
+    const opts = chartOptions({
+      theme: "light",
+      visibility: defaultVisibility(),
+      width: 500,
+      height: 200,
+      zeroBased: false,
+    });
+    const fn = (id: string): RangeFn => opts.scales?.[id]?.range as unknown as RangeFn;
+    // An idle output: ~1 mA of noise on the amps axis, a flat 5 V, ~5 mW.
+    const amps = fn("amps")(null, 0.0005, 0.0015, "amps");
+    expect(span(amps)).toBeGreaterThanOrEqual(0.02 - 1e-12);
+    expect(mid(amps)).toBeCloseTo(0.001, 9);
+    const volts = fn("volts")(null, 5.001, 5.003, "volts");
+    expect(span(volts)).toBeGreaterThanOrEqual(0.1 - 1e-12);
+    expect(mid(volts)).toBeCloseTo(5.002, 9);
+    const watts = fn("watts")(null, 0.004, 0.006, "watts");
+    expect(span(watts)).toBeGreaterThanOrEqual(0.1 - 1e-12);
+    expect(mid(watts)).toBeCloseTo(0.005, 9);
+    // A real load swings wider and autoscales as before.
+    expect(fn("amps")(null, 0, 3, "amps")).toEqual(uPlot.rangeNum(0, 3, 0.1, true));
+  });
+
+  it("leaves the zero-based range alone when zero-based axes are on", () => {
+    const opts = chartOptions({
+      theme: "light",
+      visibility: defaultVisibility(),
+      width: 500,
+      height: 200,
+      zeroBased: true,
+    });
+    const amps = (opts.scales?.amps?.range as unknown as RangeFn)(null, 0.0005, 0.0015, "amps");
+    expect(amps).toEqual(zeroBasedRange(0.0005, 0.0015));
+  });
+});
+
+describe("overview envelope range (AC-CWWKJ6.3)", () => {
+  it("gives IBUS at least the amps axis's minimum span, centred, so idle noise reads flat", () => {
+    const r = envelopeRange("ibus", 0.0005, 0.0015);
+    expect(span(r)).toBeGreaterThanOrEqual(MIN_AXIS_SPAN.amps - 1e-12);
+    expect(mid(r)).toBeCloseTo(0.001, 9);
+  });
+
+  it("gives VBUS at least the volts axis's minimum span, centred", () => {
+    const r = envelopeRange("vbus", 4.999, 5.001);
+    expect(span(r)).toBeGreaterThanOrEqual(MIN_AXIS_SPAN.volts - 1e-12);
+    expect(mid(r)).toBeCloseTo(5, 9);
+  });
+
+  it("keeps the data's own extent when it already spans more", () => {
+    expect(envelopeRange("vbus", 0, 20)).toEqual([0, 20]);
+    expect(envelopeRange("ibus", -1, 3)).toEqual([-1, 3]);
+  });
+});
+
+describe("minSpanRange with no data (AC-CWWKJ6.2)", () => {
+  it("gives an empty axis a centred minimum span instead of null bounds", () => {
+    expect(minSpanRange(null, null, 0.02)).toEqual([-0.01, 0.01]);
+    expect(minSpanRange(Number.NaN, 1, 0.1)).toEqual([-0.05, 0.05]);
   });
 });

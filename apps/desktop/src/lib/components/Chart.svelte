@@ -1285,6 +1285,7 @@
     }}
     {warpFor}
     gapsVersion={() => sessionGaps.version}
+    gaps={(t0Ms, t1Ms) => sessionGaps.overlapping(t0Ms, t1Ms)}
     sources={envelopeSources}
     onrange={showRange}
     onresize={() => scheduler.invalidate()}
