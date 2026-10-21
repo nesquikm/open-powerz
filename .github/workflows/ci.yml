@@ -171,6 +171,20 @@ jobs:
         if: runner.os == 'Windows'
         run: bun run e2e:app
 
+      - name: Start-up diagnostics (Windows, on failure)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        working-directory: apps/desktop
+        run: |
+          New-Item -ItemType Directory -Force e2e-app-logs | Out-Null
+          $env:RUST_BACKTRACE = "1"
+          $exe = Resolve-Path ..\..\target\debug\open-powerz-desktop.exe
+          $p = Start-Process -FilePath $exe -PassThru -NoNewWindow `
+            -RedirectStandardOutput e2e-app-logs\app-stdout.txt -RedirectStandardError e2e-app-logs\app-stderr.txt
+          if (-not $p.WaitForExit(20000)) { "still running after 20 s (start-up ok)" | Tee-Object e2e-app-logs\app-exit.txt; Stop-Process -Id $p.Id -Force }
+          else { "exited early with code $($p.ExitCode)" | Tee-Object e2e-app-logs\app-exit.txt }
+          Get-Content e2e-app-logs\app-stderr.txt -ErrorAction SilentlyContinue | Select-Object -Last 60
+
       # wdio writes its own and tauri-driver's logs to apps/desktop/e2e-app-logs/ (wdio.conf.ts).
       - name: Upload WebdriverIO and tauri-driver logs
         if: failure()

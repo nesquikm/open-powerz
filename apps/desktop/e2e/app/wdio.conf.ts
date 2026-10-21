@@ -151,12 +151,37 @@ export const config: WebdriverIO.Config = {
     const name = test.title.replace(/[^\w.-]+/g, "_").slice(0, 80);
     try {
       await browser.saveScreenshot(path.join(logDir, `${name}.png`));
-      const state = await browser.execute(() => ({
-        href: location.href,
-        tauri: "__TAURI_INTERNALS__" in window,
-        hook: "__OPEN_POWERZ_E2E__" in window,
-        text: document.body.innerText.slice(0, 4000),
-      }));
+      const state = await browser.execute(async () => {
+        // Re-import the page's own module to surface a load or start-up error.
+        const scripts = [...document.querySelectorAll("script")].map((el) => ({
+          src: el.getAttribute("src"),
+          type: el.getAttribute("type"),
+        }));
+        const base = {
+          href: location.href,
+          userAgent: navigator.userAgent,
+          tauri: "__TAURI_INTERNALS__" in window,
+          hook: "__OPEN_POWERZ_E2E__" in window,
+          text: document.body.innerText.slice(0, 4000),
+          html: document.documentElement.outerHTML.slice(0, 4000),
+          scripts,
+        };
+        const src = scripts.find((x) => x.type === "module")?.src;
+        if (!src) return { ...base, importError: "no module script" };
+        try {
+          await import(/* @vite-ignore */ `${src}?diag=${Date.now()}`);
+          return { ...base, importError: null };
+        } catch (e) {
+          return {
+            ...base,
+            importError:
+              e instanceof Error
+                ? `${e.name}: ${e.message}
+${e.stack}`
+                : String(e),
+          };
+        }
+      });
       writeFileSync(path.join(logDir, `${name}.json`), JSON.stringify(state, null, 2));
     } catch (e) {
       console.error("could not capture the failed page:", e);
