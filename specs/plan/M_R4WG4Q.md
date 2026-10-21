@@ -42,7 +42,7 @@ codename: Live Wire
   verify: Vitest passes; visual-check screenshots of the panel reviewed in both themes
 - [x] uPlot chart with live window, zoom/pan via `history_range`, series toggles, hover readout — AH2AEM
   verify: Vitest passes; visual-check screenshots of live and zoomed views reviewed
-- [ ] WebdriverIO + tauri-driver real-app suite, Playwright + axe UI suite, CI `e2e` job — AH2AEN
+- [x] WebdriverIO + tauri-driver real-app suite, Playwright + axe UI suite, CI `e2e` job — AH2AEN
   verify: `bun run e2e:ui` passes locally; CI `e2e` job green on its matrix
 - [x] Desktop HIL backend test (`POWERZ_HIL=1`) against the KM003C — AH2AEN
   verify: `POWERZ_HIL=1 cargo test -p open-powerz-desktop --test hil` passes on the attached meter
@@ -53,10 +53,10 @@ codename: Live Wire
 - Rust unit and property tests for batching, decimation, stats and recording; worker integration tests against `powerz-sim`; Vitest for UI logic; WebdriverIO real-app e2e (Linux, Windows); Playwright UI e2e with axe (Linux, macOS, Windows).
 
 **Acceptance Criteria:**
-- [ ] Gating rule from CLAUDE.md passes locally on macOS
-- [ ] CI is green on all three OSes, including the `e2e` job
+- [x] Gating rule from CLAUDE.md passes locally on macOS
+- [x] CI is green on all three OSes, including the `e2e` job
 - [ ] Every AC of the six FRs above is traced to a test by `/spec-review`
-- [ ] Blocking visual check passed for every UI FR: light and dark, ~900 px and ~1600 px wide, demo device streaming and no device; screenshot paths listed in the report
+- [x] Blocking visual check passed for every UI FR: light and dark, ~900 px and ~1600 px wide, demo device streaming and no device; screenshot paths listed in the report
 - [ ] The desktop app streams, charts and records from the real KM003C at 1000 SPS for 60 s with no host-side gaps
 
 **Gate:** `bun install --frozen-lockfile && bun run lint && bun run check && bun run test && bun run build:web && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
