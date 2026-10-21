@@ -305,6 +305,18 @@ async fn history_range(
     blocking(move || Ok(session_store(&state)?.history_range(&series, t0_ms, t1_ms, buckets))).await
 }
 
+/// The gaps between measuring runs of the session history over
+/// `t0_ms..=t1_ms`, so the chart breaks its lines there (AC-272WSN.3).
+#[tauri::command]
+async fn history_gaps(
+    state: Shared<'_>,
+    t0_ms: u64,
+    t1_ms: u64,
+) -> Result<Vec<history::HistoryGap>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(session_store(&state)?.history_gaps(t0_ms, t1_ms))).await
+}
+
 /// Where an export went and how many rows it wrote.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExportResult {
@@ -382,6 +394,7 @@ pub fn run() {
             stop_recording,
             export_session,
             history_range,
+            history_gaps,
             stats,
             reset_stats,
             clear_history

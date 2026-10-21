@@ -4,7 +4,7 @@
  * {@link E2E_BUILD}, a build-time constant, so a production build drops this module.
  */
 
-import { HOOK, type ChartDraw, type OpenPowerzE2E } from "../../e2e/hook";
+import { HOOK, type ChartDraw, type ChartGapBand, type OpenPowerzE2E } from "../../e2e/hook";
 import type { ChartFrame } from "./chartData";
 
 /** Whether this web build is a test build that exposes the hook. */
@@ -18,12 +18,20 @@ const MAX_DRAWS = 1000;
 export class ChartProbe {
   #frame: ChartFrame | null = null;
   #draws: ChartDraw[] = [];
+  #ticks: string[] = [];
+  #bands: ChartGapBand[] = [];
 
   /** One finished draw of `frame`. */
   record(frame: ChartFrame, draw: Omit<ChartDraw, "at">): void {
     this.#frame = frame;
     this.#draws.push({ at: performance.now(), ...draw });
     if (this.#draws.length > MAX_DRAWS) this.#draws.splice(0, this.#draws.length - MAX_DRAWS);
+  }
+
+  /** The time-axis labels and shaded gaps of the last draw. */
+  overlay(ticks: readonly string[], bands: readonly ChartGapBand[]): void {
+    this.#ticks = [...ticks];
+    this.#bands = bands.map((b) => ({ ...b }));
   }
 
   /** Non-null points of one series in the frame on screen. */
@@ -39,6 +47,8 @@ export class ChartProbe {
     return {
       chartSeriesLengths: () => ({ vbus: this.#drawn("vbus"), ibus: this.#drawn("ibus") }),
       chartDraws: () => this.#draws.map((d) => ({ ...d })),
+      chartXTicks: () => [...this.#ticks],
+      chartGapBands: () => this.#bands.map((b) => ({ ...b })),
     };
   }
 }

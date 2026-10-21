@@ -2,18 +2,21 @@
   import uPlot from "uplot";
   import "uplot/dist/uPlot.min.css";
   import { getContext, untrack } from "svelte";
-  import { historyRange, type Gap, type Sample } from "../backend";
+  import { historyGaps, historyRange, type Gap, type Sample } from "../backend";
   import {
     GapList,
     LIVE_CAPACITY,
     LIVE_WINDOWS,
     LiveBuffer,
     bucketsToFrame,
+    gapBands,
+    gapLabelFits,
     hoverReadout,
     liveRange,
     steppedRange,
     toAlignedData,
     type ChartFrame,
+    type GapBand,
     type HoverReadout,
     type HoverValue,
     type LiveWindowId,
@@ -21,7 +24,7 @@
   import {
     CHART_SERIES,
     chartOptions,
-    formatSessionSeconds,
+    formatSessionTime,
     loadVisibility,
     loadZeroBased,
     saveVisibility,
@@ -51,7 +54,7 @@
   } from "../chartView";
   import { E2E_BUILD, ChartProbe, installChartProbe } from "../e2eHook";
   import { formatSigned, formatSignedNumber } from "../stats";
-  import type { MotionSettings, ResolvedTheme } from "../theme";
+  import { THEME_COLORS, type MotionSettings, type ResolvedTheme } from "../theme";
 
   let { theme }: { theme: ResolvedTheme } = $props();
 
@@ -84,6 +87,14 @@
   let plot: uPlot | null = null;
   /** The frame on screen, for the hover readout. */
   let shownFrame: ChartFrame | null = null;
+  /** Where session time starts, in x units: the time axis, the hover readout and the
+   * announcements count from it, never from the meter's own clock (AC-272WSN.1, AC-272WSN.2). */
+  function originMs(): number {
+    return sessionStartMs ?? buffer.firstMs ?? 0;
+  }
+  /** The time-axis labels and gap bands of the last draw (for the e2e hook). */
+  let drawnTicks: string[] = [];
+  let drawnBands: GapBand[] = [];
   /** What the cursor points at (AC-AH2AEM.6); `null` while it is off the plot. */
   let hover: HoverReadout | null = $state(null);
   /** Cursor position over the plot in CSS px, so the readout follows a scrolling window. */
@@ -206,6 +217,7 @@
         t1Ms: range?.[1] ?? frame.x[frame.x.length - 1] ?? 0,
         fromHistory,
       });
+      probe.overlay(drawnTicks, drawnBands);
     }
     // The cursor stays put while the window scrolls: read its time on the new scale.
     if (hoverLeftPx !== null) hoverAtMs = u.posToVal(hoverLeftPx, "x");
@@ -247,7 +259,17 @@
 
   /** One `history_range` call in flight at most; the newest view wins (AC-AH2AEM.4). */
   const requester = new HistoryRequester({
-    fetch: (req) => historyRange(req.series, req.t0Ms, req.t1Ms, req.buckets),
+    // The history also says where its runs break (an unplug, a disconnect before this
+    // connection), which no stream event reports (AC-272WSN.3, AC-272WSN.4).
+    fetch: async (req) => {
+      const [buckets, gaps] = await Promise.all([
+        historyRange(req.series, req.t0Ms, req.t1Ms, req.buckets),
+        // A failed gap query leaves the gaps already known; the buckets still draw.
+        historyGaps(req.t0Ms, req.t1Ms).catch(() => []),
+      ]);
+      for (const g of gaps) sessionGaps.push(g);
+      return buckets;
+    },
     onResult: (req, result) => {
       const gaps = sessionGaps.within(req.t0Ms, req.t1Ms);
       if (req.purpose === "session") {
@@ -304,10 +326,10 @@
     view = next;
     if (view.mode === "history") {
       fetchHistory();
-      if (wasLive) announcement = rangeAnnouncement(view);
+      if (wasLive) announcement = rangeAnnouncement(view, originMs());
     } else {
       leaveHistory();
-      if (!wasLive) announcement = rangeAnnouncement(view);
+      if (!wasLive) announcement = rangeAnnouncement(view, originMs());
     }
     scheduler.invalidate();
   }
@@ -323,7 +345,7 @@
     view = { mode: "live", window: id };
     leaveHistory();
     sessionGate.reset();
-    if (!wasLive) announcement = rangeAnnouncement(view);
+    if (!wasLive) announcement = rangeAnnouncement(view, originMs());
   }
 
   function onKeydown(e: KeyboardEvent): void {
@@ -343,9 +365,66 @@
   $effect(() => {
     const el = host;
     if (!el) return;
-    const opts = chartOptions({ theme, visibility, zeroBased, ...sizeOf(el) });
+    const opts = chartOptions({ theme, visibility, zeroBased, originMs, ...sizeOf(el) });
+    const timeAxis = opts.axes?.[0];
+    const timeValues = timeAxis?.values;
+    if (timeAxis && typeof timeValues === "function") {
+      timeAxis.values = (...args) => {
+        const labels = timeValues(...args);
+        drawnTicks = labels.map(String);
+        return labels;
+      };
+    }
+    const palette = THEME_COLORS[theme];
     opts.hooks = {
       ...opts.hooks,
+      // Stretches without data are shaded under the lines (drawClear) and say how long
+      // they last above the grid (draw), so no grid line crosses the label (AC-272WSN.5).
+      drawClear: [
+        ...(opts.hooks?.drawClear ?? []),
+        (self: uPlot) => {
+          const min = self.scales.x?.min;
+          const max = self.scales.x?.max;
+          drawnBands =
+            min === undefined || max === undefined ? [] : gapBands(sessionGaps, min, max);
+          if (drawnBands.length === 0) return;
+          const ctx = self.ctx;
+          const { top, height } = self.bbox;
+          ctx.save();
+          ctx.globalAlpha = 0.14;
+          ctx.fillStyle = palette.muted;
+          for (const band of drawnBands) {
+            const x0 = self.valToPos(band.fromMs, "x", true);
+            const x1 = self.valToPos(band.toMs, "x", true);
+            ctx.fillRect(x0, top, Math.max(1, x1 - x0), height);
+          }
+          ctx.restore();
+        },
+      ],
+      draw: [
+        ...(opts.hooks?.draw ?? []),
+        (self: uPlot) => {
+          if (drawnBands.length === 0) return;
+          const ctx = self.ctx;
+          const { top } = self.bbox;
+          const ratio = globalThis.devicePixelRatio || 1;
+          ctx.save();
+          ctx.font = `${Math.round(11 * ratio)}px system-ui, sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "top";
+          ctx.fillStyle = palette.muted;
+          for (const band of drawnBands) {
+            const x0 = self.valToPos(band.fromMs, "x", true);
+            const x1 = self.valToPos(band.toMs, "x", true);
+            // Most bands of a long session are too narrow for any label: skip measuring them.
+            if (x1 - x0 < 40 * ratio) continue;
+            if (gapLabelFits(ctx.measureText(band.label).width, x1 - x0, ratio)) {
+              ctx.fillText(band.label, (x0 + x1) / 2, top + 8 * ratio);
+            }
+          }
+          ctx.restore();
+        },
+      ],
       setCursor: [
         ...(opts.hooks?.setCursor ?? []),
         (self: uPlot) => {
@@ -501,7 +580,7 @@
   <!-- Hover readout: a strip above the plot so it never covers the cursor point. -->
   <div class="hover" aria-live="off">
     {#if hover !== null}
-      <span class="hover-time">{formatSessionSeconds(hover.t_ms, 3)}</span>
+      <span class="hover-time">{formatSessionTime(hover.t_ms - originMs(), 3)}</span>
       {#each hover.values as v (v.key)}
         <span class="hover-value">
           <span class="hover-label">{seriesDef(v.key)?.label ?? v.key}</span>

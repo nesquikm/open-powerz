@@ -400,6 +400,36 @@ fn reconnecting_the_same_serial_continues_the_history_and_the_stats() {
     );
 }
 
+/// AC-272WSN.3: a user disconnect and reconnect is a break between runs too.
+#[test]
+fn a_user_disconnect_and_reconnect_leaves_a_history_gap_too() {
+    let (mut m, _opens, _) = manager(vec![]);
+    let (rx, sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink).unwrap();
+    let first = recv_until(
+        &rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    m.disconnect().unwrap();
+    let kept = sample_times(&first);
+    assert!(m.history_gaps(0, u64::MAX).unwrap().is_empty(), "one run");
+
+    let (rx2, sink2) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink2).unwrap();
+    let second = recv_until(
+        &rx2,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    let seen = sample_times(&second);
+    let gaps = m.history_gaps(0, u64::MAX).expect("history_gaps");
+    m.disconnect().unwrap();
+    // No outage event says so (the user disconnected), but the chart must
+    // still break the line between the two connections.
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].from_ms >= u64::from(kept[kept.len() - 1]));
+    assert_eq!(gaps[0].to_ms, u64::from(seen[0]));
+}
+
 // ---- the data stays readable after the meter is gone ----
 
 #[test]

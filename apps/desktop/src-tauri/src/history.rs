@@ -127,6 +127,17 @@ pub struct Bucket {
     pub max: f32,
 }
 
+/// A stretch of session time with no records: the time between the last
+/// record of one measuring run and the first of the next (an unplug, a
+/// disconnect, a clock jump or a queue restart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HistoryGap {
+    /// Time of the last record before the gap, ms.
+    pub from_ms: u64,
+    /// Time of the first record after it, ms.
+    pub to_ms: u64,
+}
+
 /// The buckets of one series.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SeriesBuckets {
@@ -363,6 +374,21 @@ impl History {
             out.push(SeriesBuckets { series: s, buckets });
         }
         out
+    }
+
+    /// The gaps between measuring runs that overlap the open range `t0..t1`,
+    /// oldest first; a gap that only touches an end is left out.
+    pub fn gaps(&self, t0: u64, t1: u64) -> Vec<HistoryGap> {
+        self.records
+            .breaks
+            .iter()
+            .filter(|&&b| b > 0 && b < self.records.len)
+            .map(|&b| HistoryGap {
+                from_ms: self.time_at(b - 1),
+                to_ms: self.time_at(b),
+            })
+            .filter(|g| g.to_ms > t0 && g.from_ms < t1)
+            .collect()
     }
 
     /// Time of record `i`, ms.

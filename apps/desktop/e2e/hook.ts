@@ -20,11 +20,23 @@ export interface ChartDraw {
   fromHistory: boolean;
 }
 
+/** A shaded stretch without data, as the chart last drew it. */
+export interface ChartGapBand {
+  /** The shaded span on screen, session ms. */
+  fromMs: number;
+  toMs: number;
+  label: string;
+}
+
 export interface OpenPowerzE2E {
   /** Points the chart currently has drawn (non-null y values) per series. */
   chartSeriesLengths(): { vbus: number; ibus: number };
   /** Every chart draw so far, oldest first (the last 200 at least). */
   chartDraws(): ChartDraw[];
+  /** The time-axis labels of the last draw, left to right. */
+  chartXTicks(): string[];
+  /** The gaps the last draw shaded. */
+  chartGapBands(): ChartGapBand[];
 }
 
 export const HOOK = "__OPEN_POWERZ_E2E__";

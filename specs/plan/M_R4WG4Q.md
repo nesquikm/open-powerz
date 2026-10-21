@@ -49,7 +49,7 @@ codename: Live Wire
   verify: `bun run e2e:ui` passes locally; CI `e2e` job green on its matrix
 - [x] Desktop HIL backend test (`POWERZ_HIL=1`) against the KM003C — AH2AEN
   verify: `POWERZ_HIL=1 cargo test -p open-powerz-desktop --test hil` passes on the attached meter
-- [ ] Session-relative time, history gaps between runs, gap shading, axis width — 272WSN
+- [x] Session-relative time, history gaps between runs, gap shading, axis width — 272WSN
   verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `session.spec.ts`
 - [ ] Live/paused button, End to go live — DDDYDJ
   verify: `bun run test` passes; `bun run e2e:ui` passes `live.spec.ts`

@@ -1,5 +1,5 @@
 import uPlot from "uplot";
-import { formatFixed } from "./format";
+import { DASH, MINUS, formatFixed } from "./format";
 import { THEME_COLORS, type ResolvedTheme, type ThemeStorage } from "./theme";
 
 /** One plotted channel. */
@@ -47,9 +47,102 @@ export function seriesDef(key: ChartSeriesKey): ChartSeriesDef | undefined {
   return CHART_SERIES.find((s) => s.key === key);
 }
 
-/** A session-relative time (ms since the session start) in seconds, e.g. `12.5 s`. */
-export function formatSessionSeconds(ms: number, decimals: number): string {
-  return `${(ms / 1000).toFixed(decimals)} s`;
+/** How a session time is written: seconds, minutes and seconds, or hours too. */
+type TimeStyle = "s" | "m" | "h";
+
+/** `|ms|` in seconds, rounded to `decimals` places. */
+function roundedSeconds(ms: number, decimals: number): number {
+  const scale = 10 ** decimals;
+  return Math.round((Math.abs(ms) / 1000) * scale) / scale;
+}
+
+/** `ms` (session-relative) in `style` with `decimals` places on the seconds; true minus
+ * sign before the time. */
+function formatTime(ms: number, decimals: number, style: TimeStyle): string {
+  if (!Number.isFinite(ms)) return DASH;
+  const total = roundedSeconds(ms, decimals);
+  const sign = ms < 0 && total > 0 ? MINUS : "";
+  if (style === "s") return `${sign}${total.toFixed(decimals)} s`;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total - h * 3600) / 60);
+  const sec = (total - h * 3600 - m * 60)
+    .toFixed(decimals)
+    .padStart(decimals > 0 ? 3 + decimals : 2, "0");
+  return style === "h" ? `${sign}${h}:${String(m).padStart(2, "0")}:${sec}` : `${sign}${m}:${sec}`;
+}
+
+/** The style a time of `ms` (at `decimals`) needs: seconds under a minute, m:ss under an hour. */
+function styleFor(ms: number, decimals: number): TimeStyle {
+  const total = roundedSeconds(ms, decimals);
+  return total < 60 ? "s" : total < 3600 ? "m" : "h";
+}
+
+/** One session time (ms since the session start) in the unit its size needs:
+ * `12.345 s`, `1:02.345`, `1:02:03.456` (AC-272WSN.1). */
+export function formatSessionTime(ms: number, decimals: number): string {
+  return formatTime(ms, decimals, styleFor(ms, decimals));
+}
+
+/** A length of time in whole seconds: `45 s`, `40:00`, `1:02:03`. */
+export function formatDuration(ms: number): string {
+  return formatSessionTime(Math.round(ms / 1000) * 1000, 0);
+}
+
+/** Time-axis labels for session-relative `splits` spaced `incrMs`: one style for the
+ * whole axis, picked by its largest time (AC-272WSN.1). */
+export function timeTicks(splits: readonly number[], incrMs: number): string[] {
+  const decimals = tickDecimals(incrMs);
+  let widest = 0;
+  for (const v of splits) if (Number.isFinite(v)) widest = Math.max(widest, Math.abs(v));
+  const style = styleFor(widest, decimals);
+  return splits.map((v) => formatTime(v, decimals, style));
+}
+
+/** Most ticks one axis draws; a range that needs more gets none rather than a stall. */
+const MAX_TICKS = 1_000;
+
+/** Tick positions every `incrMs` counted from `originMs`, inside `[min, max]`. */
+export function timeSplits(min: number, max: number, incrMs: number, originMs: number): number[] {
+  if (!(incrMs > 0) || !Number.isFinite(min) || !Number.isFinite(max) || !(max >= min)) return [];
+  const first = Math.ceil((min - originMs) / incrMs);
+  const last = Math.floor((max - originMs) / incrMs);
+  if (last - first + 1 > MAX_TICKS) return [];
+  const out: number[] = [];
+  for (let k = first; k <= last; k++) out.push(originMs + k * incrMs);
+  return out;
+}
+
+/** Time-axis steps: decimal fractions of a second, then seconds, minutes and hours. */
+const TIME_INCRS: readonly number[] = [
+  1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 15_000, 30_000, 60_000, 120_000,
+  300_000, 600_000, 900_000, 1_800_000, 3_600_000, 7_200_000, 10_800_000, 21_600_000, 43_200_000,
+  86_400_000,
+];
+
+/** Width of a value axis in CSS px: its widest tick label plus the ticks and their gap,
+ * so the rotated title beside it never covers a label (AC-272WSN.6). uPlot measures
+ * with its own scaled font; later sizing passes keep the first pass's size. */
+export function axisSize(
+  self: uPlot,
+  values: readonly string[] | null,
+  axisIdx: number,
+  cycleNum: number,
+  pxRatio: number = globalThis.devicePixelRatio || 1,
+): number {
+  // `_size` and the scaled `font` are uPlot's own resolved fields (uplot 1.6, pinned in
+  // package.json); the "axis width" tests drive this function through them.
+  const axis = self.axes[axisIdx] as uPlot.Axis & { _size?: number; font?: string[] };
+  if (cycleNum > 1 && axis._size !== undefined) return axis._size;
+  let size = (axis.ticks?.size ?? 10) + (axis.gap ?? 5);
+  let longest = "";
+  for (const v of values ?? []) if (v.length > longest.length) longest = v;
+  if (longest !== "") {
+    const before = self.ctx.font;
+    self.ctx.font = axis.font?.[0] ?? before;
+    size += self.ctx.measureText(longest).width / pxRatio;
+    self.ctx.font = before;
+  }
+  return Math.ceil(size);
 }
 
 /** Decimals a seconds label needs for ticks `incrMs` apart (at most ms precision). */
@@ -200,6 +293,8 @@ export interface ChartOptionsInput {
   height: number;
   /** Every value axis includes zero (AC-AH2AEM.9); off means auto-scale. */
   zeroBased?: boolean;
+  /** The session start in x units (ms): the time axis counts from it (AC-272WSN.1). */
+  originMs?: () => number;
 }
 
 /** uPlot options: x = ms since the session start (labelled in seconds), then one series per CHART_SERIES entry on its axis scale. */
@@ -209,6 +304,7 @@ export function chartOptions({
   width,
   height,
   zeroBased = false,
+  originMs = () => 0,
 }: ChartOptionsInput): uPlot.Options {
   const p = THEME_COLORS[theme];
   const styles = seriesStyles(theme);
@@ -227,16 +323,27 @@ export function chartOptions({
   const axes: uPlot.Axis[] = [
     {
       stroke: p.muted,
-      values: (_u, splits, _axis, _space, incr) =>
-        splits.map((v) => formatSessionSeconds(v, tickDecimals(incr))),
+      incrs: [...TIME_INCRS],
+      splits: (_u, _axis, min, max, incr) => timeSplits(min, max, incr, originMs()),
+      values: (_u, splits, _axis, _space, incr) => {
+        const origin = originMs();
+        return timeTicks(
+          splits.map((v) => v - origin),
+          incr,
+        );
+      },
     },
     ...CHART_AXES.map((a) => ({
       scale: a.id,
       side: a.side === "left" ? 3 : 1,
       show: shown.includes(a.id),
       label: a.title,
+      // A little air between the rotated title and its tick labels.
+      labelGap: 6,
       values: (_u: uPlot, splits: number[], _axis: number, _space: number, incr: number) =>
         axisTicks(splits, incr),
+      size: (u: uPlot, values: string[] | null, axisIdx: number, cycleNum: number) =>
+        axisSize(u, values, axisIdx, cycleNum),
       stroke: p.muted,
       grid: { show: a.id === "volts", stroke: p.border },
     })),

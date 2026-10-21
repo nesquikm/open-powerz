@@ -19,7 +19,7 @@ use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{Persona, Scenario, SimDevice};
 use serde::Serialize;
 
-use crate::history::{Series, SeriesBuckets};
+use crate::history::{HistoryGap, Series, SeriesBuckets};
 use crate::recording::{ExportProgress, RecordingSummary};
 use crate::stats::StatsSnapshot;
 use crate::store::SessionStore;
@@ -414,6 +414,11 @@ where
     /// Statistics of the session.
     pub fn stats(&self) -> Result<StatsSnapshot, UiError> {
         Ok(self.session_store()?.stats())
+    }
+
+    /// The gaps between measuring runs of the session's history.
+    pub fn history_gaps(&self, t0: u64, t1: u64) -> Result<Vec<HistoryGap>, UiError> {
+        Ok(self.session_store()?.history_gaps(t0, t1))
     }
 
     /// Min / max buckets of the session's history.

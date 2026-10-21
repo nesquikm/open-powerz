@@ -543,6 +543,12 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         self.store.history_range(series, t0, t1, buckets)
     }
 
+    /// The gaps between measuring runs of the session history in the open
+    /// range `t0..t1`.
+    pub fn history_gaps(&self, t0: u64, t1: u64) -> Vec<crate::history::HistoryGap> {
+        self.store.history_gaps(t0, t1)
+    }
+
     /// Discard the session history. A running export works on its own copy
     /// and a recording writes its own file, so neither is affected.
     pub fn clear_history(&mut self) {

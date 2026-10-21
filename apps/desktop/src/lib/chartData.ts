@@ -1,6 +1,18 @@
 import type uPlot from "uplot";
-import type { Gap, Sample, SeriesBuckets } from "./backend";
-import { CHART_SERIES, type ChartSeriesKey, type SeriesVisibility } from "./chartSeries";
+import type { Gap, HistoryGap, Sample, SeriesBuckets } from "./backend";
+import {
+  CHART_SERIES,
+  formatDuration,
+  type ChartSeriesKey,
+  type SeriesVisibility,
+} from "./chartSeries";
+
+/** A stretch without samples: a stream gap, an outage, or a break between runs the
+ * history reports. */
+export interface GapSpan extends HistoryGap {
+  /** What a stream event says caused it; the history does not know. */
+  kind?: Gap["kind"];
+}
 
 /** Live ring capacity: 10 minutes at 1000 SPS. */
 export const LIVE_CAPACITY = 600_000;
@@ -42,11 +54,28 @@ function emptyY(): Record<ChartSeriesKey, (number | null)[]> {
 /** Most gaps a {@link GapList} keeps; older ones go first. */
 export const MAX_GAPS = 10_000;
 
+/** Share of each gap two reports of one stretch overlap by, at least. */
+const SAME_STRETCH = 0.9;
+
+/** `a` and `b` describe the same stretch without data: identical, or overlapping by at
+ * least {@link SAME_STRETCH} of each one's length. */
+function sameStretch(a: GapSpan, b: GapSpan): boolean {
+  if (a.from_ms === b.from_ms && a.to_ms === b.to_ms) return true;
+  const overlap = Math.min(a.to_ms, b.to_ms) - Math.max(a.from_ms, b.from_ms);
+  if (!(overlap > 0)) return false;
+  return (
+    overlap >= SAME_STRETCH * (a.to_ms - a.from_ms) &&
+    overlap >= SAME_STRETCH * (b.to_ms - b.from_ms)
+  );
+}
+
 /** A session's gaps sorted by start, capped at the newest `cap`; ranges are found by
  * binary search, so drawing never rescans the whole list. */
 export class GapList {
   readonly cap: number;
-  #gaps: Gap[] = [];
+  #gaps: GapSpan[] = [];
+  /** The longest gap ever added, so a range query knows how far back one can start. */
+  #longestMs = 0;
 
   constructor(cap: number = MAX_GAPS) {
     this.cap = Math.max(1, Math.floor(cap));
@@ -56,8 +85,29 @@ export class GapList {
     return this.#gaps.length;
   }
 
-  push(gap: Gap): void {
+  /** Adds `gap`, unless the list already has the same stretch: the stream and the
+   * history can both report one outage, a millisecond apart, and it gets one band. */
+  push(gap: GapSpan): void {
+    // A gap without finite ends has no place in a sorted list.
+    if (!Number.isFinite(gap.from_ms) || !Number.isFinite(gap.to_ms)) return;
     const gaps = this.#gaps;
+    const at = this.#firstFrom(gap.from_ms);
+    for (const i of [at - 1, at]) {
+      const g = gaps[i];
+      if (g && sameStretch(g, gap)) {
+        // The widened gap may sort earlier or reach another report: take it out and
+        // add it again, so the list stays sorted and merges what it now covers.
+        gaps.splice(i, 1);
+        this.push({
+          ...g,
+          kind: g.kind ?? gap.kind,
+          from_ms: Math.min(g.from_ms, gap.from_ms),
+          to_ms: Math.max(g.to_ms, gap.to_ms),
+        });
+        return;
+      }
+    }
+    this.#longestMs = Math.max(this.#longestMs, gap.to_ms - gap.from_ms);
     // Gaps arrive in time order, so this is almost always an append.
     if (gaps.length === 0 || (gaps[gaps.length - 1]?.from_ms ?? -Infinity) <= gap.from_ms) {
       gaps.push(gap);
@@ -69,6 +119,7 @@ export class GapList {
 
   clear(): void {
     this.#gaps = [];
+    this.#longestMs = 0;
   }
 
   /** Forgets the gaps starting before `ms`. */
@@ -78,13 +129,28 @@ export class GapList {
   }
 
   /** The gaps starting in [t0Ms, t1Ms], oldest first. */
-  within(t0Ms: number, t1Ms: number): Gap[] {
+  within(t0Ms: number, t1Ms: number): GapSpan[] {
     let i = this.#firstFrom(t0Ms);
-    const out: Gap[] = [];
+    const out: GapSpan[] = [];
     for (; i < this.#gaps.length; i++) {
       const g = this.#gaps[i];
       if (!g || g.from_ms > t1Ms) break;
       out.push(g);
+    }
+    return out;
+  }
+
+  /** The gaps with some of their span inside (t0Ms, t1Ms), oldest first; also one that
+   * began before t0Ms. */
+  overlapping(t0Ms: number, t1Ms: number): GapSpan[] {
+    // A gap overlapping the range starts at most the longest gap's length before it,
+    // even when reports of different lengths overlap one another.
+    let i = this.#firstFrom(t0Ms - this.#longestMs);
+    const out: GapSpan[] = [];
+    for (; i < this.#gaps.length; i++) {
+      const g = this.#gaps[i];
+      if (!g || g.from_ms >= t1Ms) break;
+      if (g.to_ms > t0Ms) out.push(g);
     }
     return out;
   }
@@ -104,7 +170,7 @@ export class GapList {
 
 /** Where a gap's break point sits: between its last sample before (`from_ms`) and the
  * first sample after (`nextMs`), so x stays sorted. */
-function breakAt(gap: Gap, nextMs: number): number {
+function breakAt(gap: GapSpan, nextMs: number): number {
   return (gap.from_ms + Math.max(gap.from_ms, Math.min(gap.to_ms, nextMs))) / 2;
 }
 
@@ -166,7 +232,7 @@ export class LiveBuffer {
 
   /** The stream stopped after the sample at `from_ms` and resumed at `to_ms`: the line
    * breaks there. */
-  markGap(gap: Gap): void {
+  markGap(gap: GapSpan): void {
     this.#gaps.push(gap);
   }
 
@@ -393,7 +459,7 @@ export function toAlignedData(frame: ChartFrame): uPlot.AlignedData {
  * its `from_ms`, so the line breaks there. */
 export function bucketsToFrame(
   result: readonly SeriesBuckets[],
-  gaps: readonly Gap[] = [],
+  gaps: readonly GapSpan[] = [],
 ): ChartFrame {
   const times = new Set<number>();
   for (const s of result) for (const b of s.buckets) times.add(b.t_ms);
@@ -430,6 +496,41 @@ export function bucketsToFrame(
     }
   }
   return { x, y, decimated: true };
+}
+
+/** A gap the chart shades: its span clipped to the view, and its whole length. */
+export interface GapBand {
+  fromMs: number;
+  toMs: number;
+  label: string;
+}
+
+/** The gaps of `gaps` visible in [minMs, maxMs], as shaded bands (AC-272WSN.5). */
+export function gapBands(gaps: GapList, minMs: number, maxMs: number): GapBand[] {
+  return gaps.overlapping(minMs, maxMs).map((g) => ({
+    fromMs: Math.max(g.from_ms, minMs),
+    toMs: Math.min(g.to_ms, maxMs),
+    label: gapLabel(g),
+  }));
+}
+
+/** Labels already written, per gap: the chart asks again on every redraw. */
+const GAP_LABELS = new WeakMap<GapSpan, string>();
+
+/** "No data · <length>" for `g`, written once. */
+function gapLabel(g: GapSpan): string {
+  let label = GAP_LABELS.get(g);
+  if (label === undefined) {
+    label = `No data · ${formatDuration(g.to_ms - g.from_ms)}`;
+    GAP_LABELS.set(g, label);
+  }
+  return label;
+}
+
+/** A band's label is drawn only when it fits inside the band with 8 CSS px to spare
+ * (`textPx` and `bandPx` in device pixels, `pxRatio` device pixels per CSS pixel). */
+export function gapLabelFits(textPx: number, bandPx: number, pxRatio: number): boolean {
+  return textPx + 8 * pxRatio < bandPx;
 }
 
 /** One series' value under the cursor: a sample's value, or a bucket's min–max range. */

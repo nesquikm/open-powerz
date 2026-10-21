@@ -557,3 +557,166 @@ describe("single-pass reduction matches a straightforward one", () => {
     }
   });
 });
+
+/** AC-272WSN.4 on the live-buffer path is proven by "gaps (AC-AH2AEM.7)" and
+ * "gap edges from the backend (AC-AH2AEM.7)" above; these cover the history side. */
+describe("gaps across connections (AC-272WSN.4, AC-272WSN.5)", () => {
+  it("a GapList keeps one copy of a gap it hears about twice (AC-272WSN.4)", () => {
+    const list = new GapList();
+    list.push({ kind: "outage", from_ms: 100, to_ms: 2_000 });
+    list.push({ from_ms: 100, to_ms: 2_000 });
+    expect(list.length).toBe(1);
+  });
+
+  it("finds the gaps that overlap a range, also one that began before it (AC-272WSN.5)", () => {
+    const list = new GapList();
+    list.push({ from_ms: 100, to_ms: 2_000 });
+    list.push({ from_ms: 5_000, to_ms: 6_000 });
+    expect(list.overlapping(1_000, 3_000)).toEqual([{ from_ms: 100, to_ms: 2_000 }]);
+    expect(list.overlapping(0, 10_000).map((g) => g.from_ms)).toEqual([100, 5_000]);
+    expect(list.overlapping(2_000, 5_000)).toEqual([]);
+    expect(list.overlapping(5_500, 5_600).map((g) => g.from_ms)).toEqual([5_000]);
+  });
+
+  it("shades each visible gap, clipped to the view, labelled with its whole length (AC-272WSN.5)", async () => {
+    const { gapBands } = await import("./chartData");
+    const list = new GapList();
+    list.push({ from_ms: 20_000, to_ms: 2_420_000 });
+    expect(gapBands(list, 0, 3_000_000)).toEqual([
+      { fromMs: 20_000, toMs: 2_420_000, label: "No data · 40:00" },
+    ]);
+    expect(gapBands(list, 1_000_000, 3_000_000)).toEqual([
+      { fromMs: 1_000_000, toMs: 2_420_000, label: "No data · 40:00" },
+    ]);
+    expect(gapBands(list, 2_500_000, 3_000_000)).toEqual([]);
+  });
+
+  it("a whole-session answer breaks at a gap the backend reports, never bridging it (AC-272WSN.4)", () => {
+    const buckets = (pairs: [number, number][]): SeriesBuckets[] => [
+      { series: "ibus", buckets: pairs.map(([t, v]) => ({ t_ms: t, min: v, max: v })) },
+    ];
+    const frame = bucketsToFrame(
+      buckets([
+        [30_400_000, 1],
+        [30_410_000, 1],
+        [32_810_000, 2],
+        [32_820_000, 2],
+      ]),
+      [{ from_ms: 30_419_000, to_ms: 32_810_000 }],
+    );
+    // Between the last point before the gap and the first after it sits a break.
+    const before = frame.x.lastIndexOf(30_410_000);
+    const after = frame.x.indexOf(32_810_000);
+    const between = frame.y.ibus.slice(before + 1, after);
+    expect(between.length).toBeGreaterThan(0);
+    expect(between.every((v) => v === null)).toBe(true);
+  });
+});
+
+describe("a single-sample spike survives every zoom (AC-272WSN.7)", () => {
+  it("LiveBuffer.window over far more samples than pixels keeps the spike as a point", () => {
+    const buf = new LiveBuffer(LIVE_CAPACITY);
+    // 10 minutes at 1000 SPS on a 300 px plot: about 2 000 samples per pixel column.
+    const data = samples(0, 599_999).map((s) => ({ ...s, vbus_v: 5, ibus_a: 1 }));
+    const spikeAt = 314_159;
+    data[spikeAt] = { ...sample(spikeAt), vbus_v: 20, ibus_a: 3.5 };
+    buf.push(data);
+    const frame = buf.window(0, 599_999, 300);
+    expect(frame.decimated).toBe(true);
+    expect(frame.x.length).toBeLessThanOrEqual(600);
+    expect(nonNull(frame.y.vbus)).toContain(20);
+    expect(nonNull(frame.y.ibus)).toContain(3.5);
+    // The spike's column also keeps its floor, so the envelope spans min to max.
+    const column = frame.x.findIndex((t) => t >= spikeAt - 2_000 && t <= spikeAt + 2_000);
+    expect(column).toBeGreaterThanOrEqual(0);
+    const near = frame.x
+      .map((t, i) => [t, frame.y.vbus[i]] as const)
+      .filter(([t]) => Math.abs(t - spikeAt) <= 2_000)
+      .map(([, v]) => v);
+    expect(near).toContain(5);
+    expect(near).toContain(20);
+  });
+
+  it("bucketsToFrame keeps a bucket's max, so a whole-session spike is drawn", () => {
+    const buckets: SeriesBuckets[] = [
+      {
+        series: "ibus",
+        buckets: Array.from({ length: 400 }, (_, i) => ({
+          t_ms: 30_400_000 + i * 5_000,
+          min: 1,
+          max: i === 217 ? 4.2 : 1,
+        })),
+      },
+    ];
+    const frame = bucketsToFrame(buckets);
+    const at = frame.x.indexOf(30_400_000 + 217 * 5_000);
+    expect(at).toBeGreaterThanOrEqual(0);
+    // The bucket's two points: its min, then its max.
+    expect(frame.y.ibus[at]).toBe(1);
+    expect(frame.y.ibus[at + 1]).toBe(4.2);
+    expect(Math.max(...nonNull(frame.y.ibus))).toBe(4.2);
+  });
+});
+
+describe("one band per stretch without data (AC-272WSN.5)", () => {
+  it("merges a gap that overlaps one it already has, instead of keeping both", () => {
+    const list = new GapList();
+    // The stream's outage event and the history's break for the same outage, 1 ms apart.
+    list.push({ kind: "outage", from_ms: 20_000, to_ms: 2_420_000 });
+    list.push({ from_ms: 19_999, to_ms: 2_420_001 });
+    expect(list.length).toBe(1);
+    expect(list.overlapping(0, 3_000_000)).toEqual([
+      { kind: "outage", from_ms: 19_999, to_ms: 2_420_001 },
+    ]);
+  });
+
+  it("keeps gaps that only touch, or stand apart, as separate stretches", () => {
+    const list = new GapList();
+    list.push({ from_ms: 100, to_ms: 200 });
+    list.push({ from_ms: 200, to_ms: 300 });
+    list.push({ from_ms: 500, to_ms: 600 });
+    expect(list.length).toBe(3);
+  });
+
+  it("labels a band only when the label fits inside it with room to spare", async () => {
+    const { gapLabelFits } = await import("./chartData");
+    expect(gapLabelFits(80, 100, 1)).toBe(true);
+    expect(gapLabelFits(92, 100, 1)).toBe(false);
+    // The margin scales with the display's pixel ratio.
+    expect(gapLabelFits(160, 180, 2)).toBe(true);
+    expect(gapLabelFits(170, 180, 2)).toBe(false);
+  });
+});
+
+describe("GapList stays sorted and finds every overlapping gap (AC-272WSN.4, AC-272WSN.5)", () => {
+  it("a merge that widens a gap re-sorts and coalesces it with the neighbours it now reaches", () => {
+    const list = new GapList();
+    list.push({ from_ms: 1_000, to_ms: 2_000 });
+    list.push({ from_ms: 2_050, to_ms: 2_100 });
+    // The same stretch as the first gap, a little wider on both ends: it now reaches the second.
+    list.push({ from_ms: 990, to_ms: 2_060 });
+    const all = list.overlapping(0, 10_000);
+    for (let i = 1; i < all.length; i++) {
+      expect(all[i]!.from_ms).toBeGreaterThanOrEqual(all[i - 1]!.from_ms);
+    }
+    expect(all.some((g) => g.from_ms === 990)).toBe(true);
+  });
+
+  it("a long earlier gap is found even behind a shorter later one", () => {
+    const list = new GapList();
+    list.push({ from_ms: 0, to_ms: 100 });
+    list.push({ from_ms: 10, to_ms: 20 });
+    expect(list.overlapping(50, 60).map((g) => g.from_ms)).toEqual([0]);
+  });
+});
+
+describe("GapList ignores a gap without finite ends (AC-272WSN.4)", () => {
+  it("keeps the list ordered and the range query exact", () => {
+    const list = new GapList();
+    list.push({ from_ms: 100, to_ms: 200 });
+    list.push({ from_ms: Number.NaN, to_ms: 300 });
+    list.push({ from_ms: 400, to_ms: Number.POSITIVE_INFINITY });
+    expect(list.length).toBe(1);
+    expect(list.overlapping(0, 1_000)).toEqual([{ from_ms: 100, to_ms: 200 }]);
+  });
+});

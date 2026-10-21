@@ -328,3 +328,148 @@ describe("value axis ticks (true minus sign)", () => {
     expect(axisTicks([-5, 0, 5], 5)).toEqual(["−5", "0", "5"]);
   });
 });
+
+describe("time since the session start (AC-272WSN.1, AC-272WSN.2)", () => {
+  it("labels ticks in seconds, then m:ss, then h:mm:ss as the range grows (AC-272WSN.1)", async () => {
+    const { timeTicks } = await import("./chartSeries");
+    expect(timeTicks([0, 5_000, 10_000], 5_000)).toEqual(["0 s", "5 s", "10 s"]);
+    expect(timeTicks([0, 500, 1_000], 500)).toEqual(["0.0 s", "0.5 s", "1.0 s"]);
+    expect(timeTicks([0, 30_000, 60_000, 90_000], 30_000)).toEqual([
+      "0:00",
+      "0:30",
+      "1:00",
+      "1:30",
+    ]);
+    expect(timeTicks([60_000, 60_500], 500)).toEqual(["1:00.0", "1:00.5"]);
+    expect(timeTicks([0, 1_800_000, 3_600_000], 1_800_000)).toEqual([
+      "0:00:00",
+      "0:30:00",
+      "1:00:00",
+    ]);
+    expect(timeTicks([-5_000, 0], 5_000)).toEqual(["−5 s", "0 s"]);
+  });
+
+  it("writes one time in the unit its size needs, as the hover readout shows it (AC-272WSN.2)", async () => {
+    const { formatSessionTime } = await import("./chartSeries");
+    expect(formatSessionTime(12_345, 3)).toBe("12.345 s");
+    expect(formatSessionTime(62_345, 3)).toBe("1:02.345");
+    expect(formatSessionTime(3_723_456, 3)).toBe("1:02:03.456");
+    expect(formatSessionTime(-1_500, 1)).toBe("−1.5 s");
+    expect(formatSessionTime(59_999.6, 0)).toBe("1:00");
+  });
+
+  it('writes a gap\'s length in whole seconds, for its "No data" label (AC-272WSN.5)', async () => {
+    const { formatDuration } = await import("./chartSeries");
+    expect(formatDuration(45_200)).toBe("45 s");
+    expect(formatDuration(2_400_000)).toBe("40:00");
+    expect(formatDuration(3_723_000)).toBe("1:02:03");
+  });
+
+  it("the x axis counts from the origin the chart gives it, not the meter's clock (AC-272WSN.1)", () => {
+    const opts = chartOptions({
+      theme: "dark",
+      visibility: defaultVisibility(),
+      width: 800,
+      height: 400,
+      originMs: () => 30_400_000,
+    });
+    const values = opts.axes?.[0]?.values as (
+      u: unknown,
+      splits: number[],
+      axis: number,
+      space: number,
+      incr: number,
+    ) => string[];
+    expect(values(null, [30_400_000, 30_460_000, 30_520_000], 0, 0, 60_000)).toEqual([
+      "0:00",
+      "1:00",
+      "2:00",
+    ]);
+  });
+});
+
+describe("axis width (AC-272WSN.6)", () => {
+  /** A uPlot stand-in whose font is 7 px per character at `dpr`. */
+  function fakePlot(dpr: number) {
+    return {
+      axes: [{ ticks: { size: 10 }, gap: 5, font: ["12px sans-serif"], _size: 50 }],
+      ctx: { font: "", measureText: (s: string) => ({ width: s.length * 7 * dpr }) },
+    };
+  }
+
+  it("is as wide as the widest tick label plus the ticks and their gap", async () => {
+    const { axisSize } = await import("./chartSeries");
+    const u = fakePlot(1);
+    // "−0.0015" is 7 characters: 49 px, plus 10 px of ticks and a 5 px gap.
+    expect(axisSize(u as never, ["0.0010", "−0.0015"], 0, 0, 1)).toBe(64);
+    // In CSS pixels, whatever the display's pixel ratio.
+    expect(axisSize(fakePlot(2) as never, ["0.0010", "−0.0015"], 0, 0, 2)).toBe(64);
+    // Later sizing passes keep the size of the first.
+    expect(axisSize(u as never, ["1"], 0, 2, 1)).toBe(50);
+    expect(axisSize(u as never, null, 0, 0, 1)).toBe(15);
+  });
+
+  it("sizes every value axis to its labels, so a title never covers them", async () => {
+    const { axisSize } = await import("./chartSeries");
+    const opts = chartOptions({
+      theme: "light",
+      visibility: defaultVisibility(),
+      width: 800,
+      height: 400,
+    });
+    for (const axis of (opts.axes ?? []).slice(1)) {
+      expect(typeof axis.size).toBe("function");
+      // The title keeps clear of the labels it sits beside.
+      expect(axis.labelGap).toBeGreaterThanOrEqual(4);
+    }
+    expect(axisSize).toBeTypeOf("function");
+  });
+});
+
+describe("time ticks sit on round session times (AC-272WSN.1)", () => {
+  it("places ticks every `incr` counted from the origin, inside the scale", async () => {
+    const { timeSplits } = await import("./chartSeries");
+    // Origin 30 400 123 ms; a 0:00–2:30 view; one-minute steps.
+    const o = 30_400_123;
+    expect(timeSplits(o, o + 150_000, 60_000, o)).toEqual([o, o + 60_000, o + 120_000]);
+    expect(timeSplits(o + 1, o + 150_000, 60_000, o)).toEqual([o + 60_000, o + 120_000]);
+  });
+
+  it("steps in seconds and minutes, not in plain powers of ten", () => {
+    const opts = chartOptions({
+      theme: "dark",
+      visibility: defaultVisibility(),
+      width: 800,
+      height: 400,
+    });
+    const incrs = opts.axes?.[0]?.incrs as number[];
+    for (const step of [1_000, 15_000, 30_000, 60_000, 300_000, 600_000, 1_800_000, 3_600_000]) {
+      expect(incrs).toContain(step);
+    }
+    expect(incrs).not.toContain(50_000);
+    expect(typeof opts.axes?.[0]?.splits).toBe("function");
+  });
+});
+
+describe("time formatting edge cases (AC-272WSN.1, AC-272WSN.2)", () => {
+  it("writes a missing or non-finite time as a dash", async () => {
+    const { formatSessionTime, timeTicks } = await import("./chartSeries");
+    expect(formatSessionTime(Number.NaN, 3)).toBe("—");
+    expect(formatSessionTime(Number.POSITIVE_INFINITY, 0)).toBe("—");
+    expect(timeTicks([Number.NaN, 0], 1_000)).toEqual(["—", "0 s"]);
+  });
+
+  it("never loops past a sane number of ticks, whatever the range", async () => {
+    const { timeSplits } = await import("./chartSeries");
+    expect(timeSplits(0, Number.POSITIVE_INFINITY, 1_000, 0)).toEqual([]);
+    expect(timeSplits(0, 1e12, 1, 0).length).toBeLessThanOrEqual(1_000);
+  });
+
+  it("measures labels without leaving its font on the shared canvas", async () => {
+    const { axisSize } = await import("./chartSeries");
+    const ctx = { font: "10px original", measureText: (s: string) => ({ width: s.length * 7 }) };
+    const u = { axes: [{ ticks: { size: 10 }, gap: 5, font: ["12px axis"] }], ctx };
+    axisSize(u as never, ["1.0"], 0, 0, 1);
+    expect(ctx.font).toBe("10px original");
+  });
+});

@@ -13,6 +13,8 @@ import type {
   DeviceListing,
   ExportProgress,
   ExportResult,
+  Gap,
+  HistoryGap,
   MinMaxAvg,
   RecordingSummary,
   Sample,
@@ -279,6 +281,10 @@ interface Running {
   recording: MockRecording | null;
   /** Every sample since the start or the last clear (what the chart zooms into). */
   history: HistoryColumns;
+  /** The gaps between the history's runs (`outage` only). */
+  gaps: HistoryGap[];
+  /** The outage gap the backend announces before the first samples after it. */
+  pendingGap: Gap | null;
   stats: MockStats;
 }
 
@@ -291,7 +297,7 @@ interface MockRecording {
 
 /** Scripted backend behaviours chosen with `?mock=<name>` in the page URL; the device
  * list stays the same in every one. */
-export const MOCK_MODES = ["permission-denied", "rate-locked", "slow-export"] as const;
+export const MOCK_MODES = ["permission-denied", "rate-locked", "slow-export", "outage"] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
 /** The `?mock=` mode of the page URL, or null for the normal demo behaviour. */
@@ -299,6 +305,11 @@ export function mockModeFromUrl(search: string | undefined): MockMode | null {
   const name = urlParam(search, "mock");
   return MOCK_MODES.find((m) => m === name) ?? null;
 }
+
+/** `outage`: the meter has been up for a while (its clock is far from zero), streams
+ * `beforeMs`, is gone for `gapMs` (unplugged, then connected again), and the live stream
+ * goes on after that; the history holds both runs and reports the gap between them. */
+export const MOCK_OUTAGE = { startMs: 30_400_000, beforeMs: 20_000, gapMs: 2_400_000 } as const;
 
 /** How long a `slow-export` export stays half done, so the UI suite can see its progress. */
 const SLOW_EXPORT_MS = 30_000;
@@ -384,16 +395,34 @@ export class MockBackend {
       streamed: 0,
       recording: null,
       history: new HistoryColumns(),
+      gaps: [],
+      pendingGap: null,
       stats: new MockStats(),
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
     this.#session = session;
+    if (this.#mode === "outage") this.#seedOutage(session);
     // The mock production build (the Playwright suite) honours it too.
     const synthetic = syntheticFromUrl(
       pageSearch(),
       import.meta.env.DEV || import.meta.env.VITE_BACKEND === "mock",
     );
     if (synthetic !== null) await this.seedSyntheticHistory(synthetic);
+  }
+
+  /** `outage`: the run before the outage, then the live stream after it. */
+  #seedOutage(s: Running): void {
+    const step = 1000 / s.rateSps;
+    const end = MOCK_OUTAGE.startMs + MOCK_OUTAGE.beforeMs;
+    let last: number = MOCK_OUTAGE.startMs;
+    for (let t = MOCK_OUTAGE.startMs; t < end; t += step) {
+      last = Math.round(t);
+      s.history.push(sampleAt(s.scenario, last));
+    }
+    s.nextMs = end + MOCK_OUTAGE.gapMs;
+    const gap = { from_ms: last, to_ms: s.nextMs };
+    s.gaps.push(gap);
+    s.pendingGap = { kind: "outage", ...gap };
   }
 
   #tick(s: Running): void {
@@ -408,6 +437,10 @@ export class MockBackend {
       s.history.push(sample);
       s.stats.push(sample);
       s.nextMs += step;
+    }
+    if (s.pendingGap !== null && n > 0) {
+      s.onEvent({ type: "gap", data: s.pendingGap });
+      s.pendingGap = null;
     }
     const tempC = s.rateSps === 1000 ? null : 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
     s.onEvent({ type: "batch", data: { samples, temp_c: tempC, stats: s.stats.snapshot() } });
@@ -513,6 +546,11 @@ export class MockBackend {
     return s.history.buckets(series, t0Ms, t1Ms, buckets) as BucketsFor<S>;
   }
 
+  async historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]> {
+    const s = this.#open();
+    return s.gaps.filter((g) => g.to_ms > t0Ms && g.from_ms < t1Ms).map((g) => ({ ...g }));
+  }
+
   /** Replaces the history with `n` (at most {@link MAX_SYNTHETIC_SAMPLES}) scenario
    * samples, one per millisecond from 0, and moves the live stream past them: a large
    * history for the pan check (AC-AH2AEM.4). */
@@ -535,6 +573,7 @@ export class MockBackend {
   async clearHistory(): Promise<void> {
     const s = this.#open();
     s.history = new HistoryColumns();
+    s.gaps = [];
   }
 
   async appInfo(): Promise<AppInfo> {

@@ -109,6 +109,14 @@ export interface Gap {
   to_ms: number;
 }
 
+/** A stretch of session time the history holds no samples for: between the last
+ * sample of one measuring run and the first of the next (an unplug, a disconnect, a
+ * clock jump). */
+export interface HistoryGap {
+  from_ms: number;
+  to_ms: number;
+}
+
 /** What a finished recording wrote. */
 export interface RecordingSummary {
   rows: number;
@@ -268,6 +276,13 @@ export async function historyRange<const S extends readonly Series[]>(
 ): Promise<BucketsFor<S>> {
   if (mock) return mock.historyRange(series, t0Ms, t1Ms, buckets);
   return invoke<BucketsFor<S>>("history_range", { series, t0Ms, t1Ms, buckets });
+}
+
+/** The gaps between measuring runs of the open session's history that overlap
+ * `t0Ms..=t1Ms`, oldest first. */
+export async function historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]> {
+  if (mock) return mock.historyGaps(t0Ms, t1Ms);
+  return invoke<HistoryGap[]>("history_gaps", { t0Ms, t1Ms });
 }
 
 /** Zeroes the session statistics; they count again from the next sample. */

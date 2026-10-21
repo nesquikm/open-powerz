@@ -418,6 +418,29 @@ describe("range announcement", () => {
   });
 });
 
+describe("range announcement counts from the session start (AC-272WSN.2)", () => {
+  it("reads the history range relative to the origin, never the meter's clock", () => {
+    const zoomed: ChartView = {
+      mode: "history",
+      window: "10s",
+      t0Ms: 30_401_500,
+      t1Ms: 30_404_250,
+    };
+    expect(rangeAnnouncement(zoomed, 30_400_000)).toBe("History: 1.5 s to 4.3 s");
+  });
+
+  it("switches to m:ss and h:mm:ss like the axis once the range passes a minute or an hour", () => {
+    const origin = 30_400_000;
+    const later: ChartView = {
+      mode: "history",
+      window: "10s",
+      t0Ms: origin + 62_000,
+      t1Ms: origin + 3_723_400,
+    };
+    expect(rangeAnnouncement(later, origin)).toBe("History: 1:02.0 to 1:02:03.4");
+  });
+});
+
 describe("HistoryRequester after cancel", () => {
   it("schedules nothing more once the cancelled request settles", async () => {
     let resolve: (r: SeriesBuckets[]) => void = () => {};

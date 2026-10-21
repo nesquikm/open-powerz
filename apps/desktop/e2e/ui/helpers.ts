@@ -24,7 +24,7 @@
 
 import { expect, type Page } from "@playwright/test";
 import { LINUX_PERMISSION_DENIED } from "../../src/lib/mockBackend";
-import { HOOK, type ChartDraw, type OpenPowerzE2E } from "../hook";
+import { HOOK, type ChartDraw, type ChartGapBand, type OpenPowerzE2E } from "../hook";
 
 export const DEMO_LOAD = "demo:load-5v-1a";
 export const DEMO_LOAD_LABEL = "Demo device — load-5v-1a";
@@ -135,6 +135,24 @@ export async function chartDraws(page: Page): Promise<ChartDraw[]> {
   await expectHook(page);
   return page.evaluate(
     (name) => (window as unknown as Record<string, OpenPowerzE2E>)[name]!.chartDraws(),
+    HOOK,
+  );
+}
+
+/** The time-axis labels of the chart's last draw, read through the test hook. */
+export async function chartXTicks(page: Page): Promise<string[]> {
+  await expectHook(page);
+  return page.evaluate(
+    (name) => (window as unknown as Record<string, OpenPowerzE2E>)[name]!.chartXTicks(),
+    HOOK,
+  );
+}
+
+/** The gaps the chart's last draw shaded, read through the test hook. */
+export async function chartGapBands(page: Page): Promise<ChartGapBand[]> {
+  await expectHook(page);
+  return page.evaluate(
+    (name) => (window as unknown as Record<string, OpenPowerzE2E>)[name]!.chartGapBands(),
     HOOK,
   );
 }

@@ -1,6 +1,6 @@
 import type { Series, SeriesBuckets } from "./backend";
 import { LIVE_WINDOWS, type LiveWindowId } from "./chartData";
-import { formatSessionSeconds } from "./chartSeries";
+import { formatSessionTime } from "./chartSeries";
 
 /** The chart never redraws more often than this, whatever the display's refresh rate. */
 export const MAX_REDRAW_HZ = 60;
@@ -181,10 +181,13 @@ export function wheelZooms(e: { focused: boolean; ctrlKey: boolean; metaKey: boo
   return e.focused || e.ctrlKey || e.metaKey;
 }
 
-/** What the screen-reader status says on entering history mode or returning to live. */
-export function rangeAnnouncement(view: ChartView): string {
+/** What the screen-reader status says on entering history mode or returning to live;
+ * times count from `originMs`, the session start (AC-272WSN.2). */
+export function rangeAnnouncement(view: ChartView, originMs = 0): string {
   if (view.mode === "history") {
-    return `History: ${formatSessionSeconds(view.t0Ms, 1)} to ${formatSessionSeconds(view.t1Ms, 1)}`;
+    const from = formatSessionTime(view.t0Ms - originMs, 1);
+    const to = formatSessionTime(view.t1Ms - originMs, 1);
+    return `History: ${from} to ${to}`;
   }
   const label = LIVE_WINDOWS.find((w) => w.id === view.window)?.label ?? view.window;
   return `Live: ${label}`;

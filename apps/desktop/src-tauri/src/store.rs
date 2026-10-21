@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use powerz_protocol::decode::QueueRecord;
 
-use crate::history::{History, Records, Series, SeriesBuckets};
+use crate::history::{History, HistoryGap, Records, Series, SeriesBuckets};
 use crate::stats::{Stats, StatsSnapshot};
 
 /// Maps device time onto a session time that never goes backwards.
@@ -145,6 +145,12 @@ impl SessionStore {
         buckets: usize,
     ) -> Vec<SeriesBuckets> {
         self.lock().history.range(series, t0, t1, buckets)
+    }
+
+    /// The gaps between measuring runs overlapping the open range `t0..t1`
+    /// (session time); a gap that only touches an end is left out.
+    pub fn history_gaps(&self, t0: u64, t1: u64) -> Vec<HistoryGap> {
+        self.lock().history.gaps(t0, t1)
     }
 
     /// The statistics so far.

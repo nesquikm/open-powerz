@@ -396,3 +396,49 @@ describe("stats start together (milestone review)", () => {
     expect(view.energy).toBe("0.000 Wh");
   });
 });
+
+describe("MockBackend ?mock=outage (AC-272WSN.3, AC-272WSN.4)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("is a known mode", () => {
+    expect(mockModeFromUrl("?mock=outage")).toBe("outage");
+  });
+
+  it("starts at a long meter uptime, keeps a stretch before a 40 min outage, and says where the gap is", async () => {
+    const { MOCK_OUTAGE } = await import("./mockBackend");
+    const backend = new MockBackend("outage");
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
+    vi.advanceTimersByTime(500);
+    const end = MOCK_OUTAGE.startMs + MOCK_OUTAGE.beforeMs;
+    const resumed = end + MOCK_OUTAGE.gapMs;
+    const gaps = await backend.historyGaps(0, Number.MAX_SAFE_INTEGER);
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]?.to_ms).toBe(resumed);
+    expect(gaps[0]?.from_ms).toBeLessThan(end);
+    expect(gaps[0]?.from_ms).toBeGreaterThanOrEqual(end - 20);
+    expect(MOCK_OUTAGE.gapMs).toBe(2_400_000);
+    expect(await backend.historyGaps(0, MOCK_OUTAGE.startMs)).toEqual([]);
+
+    const [vbus] = await backend.historyRange(["vbus"], 0, Number.MAX_SAFE_INTEGER, 100);
+    expect(vbus.buckets[0]?.t_ms).toBe(MOCK_OUTAGE.startMs);
+    // The live stream goes on after the gap, which the backend announced first.
+    const first = batches(events).find((b) => b.samples.length > 0)?.samples[0];
+    expect(first?.t_ms).toBe(resumed);
+    const gapAt = events.findIndex((e) => e.type === "gap");
+    const batchAt = events.findIndex((e) => e.type === "batch" && e.data.samples.length > 0);
+    expect(gapAt).toBeGreaterThanOrEqual(0);
+    expect(gapAt).toBeLessThan(batchAt);
+    expect(events[gapAt]).toEqual({ type: "gap", data: { kind: "outage", ...gaps[0] } });
+    await backend.disconnect();
+  });
+
+  it("other modes have no gap", async () => {
+    const backend = new MockBackend(null);
+    await backend.connect("demo:load-5v-1a", 50, () => {});
+    vi.advanceTimersByTime(500);
+    expect(await backend.historyGaps(0, Number.MAX_SAFE_INTEGER)).toEqual([]);
+    await backend.disconnect();
+  });
+});

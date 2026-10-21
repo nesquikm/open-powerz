@@ -227,6 +227,14 @@ describe("history and stats commands (AC-AH2AEJ.2, AC-AH2AEJ.4, AC-AH2AEJ.5)", (
     });
   });
 
+  it("history_gaps: asks for the breaks between runs in a range (AC-272WSN.3)", async () => {
+    const { historyGaps } = await import("./backend");
+    const answer = [{ from_ms: 990, to_ms: 2_400_990 }];
+    invoke.mockResolvedValue(answer);
+    await expect(historyGaps(0, 60_000)).resolves.toEqual(answer);
+    expect(invoke).toHaveBeenCalledWith("history_gaps", { t0Ms: 0, t1Ms: 60_000 });
+  });
+
   it("reads, resets and clears", async () => {
     invoke.mockResolvedValue(snap);
     await expect(stats()).resolves.toEqual(snap);

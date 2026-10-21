@@ -1067,6 +1067,13 @@ fn a_device_clock_that_jumps_back_keeps_the_session_timeline_and_ranges_exact() 
     assert_eq!(all.len(), raw.len());
     assert_eq!(worker.history_len(), all.len());
     assert_timeline(&all, |s, t0, t1, n| worker.history_range(s, t0, t1, n));
+    // The chart breaks its lines at the jump too (AC-272WSN.3).
+    let gaps = worker.history_gaps(0, u64::MAX);
+    assert_eq!(gaps.len(), 1, "one break at the clock jump: {gaps:?}");
+    assert!(
+        gaps[0].to_ms > gaps[0].from_ms,
+        "the break spans forward in session time: {gaps:?}"
+    );
 }
 
 // ---- one session across reconnects ----
@@ -1134,6 +1141,97 @@ fn a_reconnect_on_the_same_store_continues_history_and_stats_without_outage_char
     assert_eq!(csv.iter().filter(|&&b| b == b'\n').count(), all.len() + 1);
     // The export does not integrate over the outage either.
     assert_csv_totals(&csv, &stats);
+}
+
+// ---- the breaks between runs, for the chart (AC-272WSN.3) ----
+
+#[test]
+fn history_gaps_name_every_break_between_runs_inside_the_range() {
+    use open_powerz_desktop_lib::history::HistoryGap;
+    let mut h = History::new();
+    for t in 0..100u32 {
+        h.push(&rec(t * 10, 5_000_000, 1_000_000, 0, 0, 0, 0, Rate::Sps50));
+    }
+    // Unplugged for 40 minutes, then the next connection.
+    h.break_run();
+    for t in 0..100u32 {
+        h.push(&rec(
+            2_400_990 + t * 10,
+            5_000_000,
+            1_000_000,
+            0,
+            0,
+            0,
+            0,
+            Rate::Sps50,
+        ));
+    }
+    let gap = HistoryGap {
+        from_ms: 990,
+        to_ms: 2_400_990,
+    };
+    assert_eq!(h.gaps(0, u64::MAX), vec![gap]);
+    // A range that starts or ends inside the gap still overlaps it.
+    assert_eq!(h.gaps(1_000, 1_100), vec![gap]);
+    assert_eq!(h.gaps(500, 2_400_000), vec![gap]);
+    // Ranges on one side of it do not.
+    assert_eq!(h.gaps(0, 980), vec![]);
+    assert_eq!(h.gaps(2_401_000, u64::MAX), vec![]);
+    // One run has no gap; an empty history neither.
+    assert_eq!(
+        history_of(&random_records(7, 500, 0)).gaps(0, u64::MAX),
+        vec![]
+    );
+    assert_eq!(History::new().gaps(0, u64::MAX), vec![]);
+}
+
+#[test]
+fn a_reconnect_on_the_same_store_leaves_a_gap_the_chart_can_ask_for() {
+    use open_powerz_desktop_lib::history::HistoryGap;
+    use open_powerz_desktop_lib::store::SessionStore;
+    let clock = clock();
+    let store = SessionStore::new();
+    let connection = |store: &SessionStore| {
+        let pipe = Pipe::sim(
+            Scenario::Load5v1a,
+            FaultPlan::new(),
+            &clock,
+            PipeOpts::default(),
+        );
+        let (events, sink) = capture(&clock);
+        let mut worker = Worker::start_with_store(
+            pipe,
+            clock.clone(),
+            config(Rate::Sps1000),
+            store.clone(),
+            sink,
+        )
+        .unwrap();
+        run_for(&mut worker, &clock, 1_500);
+        worker.stop();
+        samples_of(&events)
+    };
+    let first = connection(&store);
+    assert!(
+        store.history_gaps(0, u64::MAX).is_empty(),
+        "one run, no gap"
+    );
+    clock.advance(Duration::from_secs(30));
+    let second = connection(&store);
+    let want = HistoryGap {
+        from_ms: u64::from(first[first.len() - 1].t_ms),
+        to_ms: u64::from(second[0].t_ms),
+    };
+    assert_eq!(store.history_gaps(0, u64::MAX), vec![want]);
+    assert!(
+        want.to_ms - want.from_ms >= 30_000,
+        "the gap spans the outage: {want:?}"
+    );
+    let json = serde_json::to_value(want).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({ "from_ms": want.from_ms, "to_ms": want.to_ms })
+    );
 }
 
 /// The CHARGE and ENERGY of the last row of `csv` (8 significant digits).
