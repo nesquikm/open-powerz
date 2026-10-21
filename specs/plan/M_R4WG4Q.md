@@ -29,6 +29,7 @@ codename: Live Wire
 | [272WSN](../frs/272WSN.md) | Whole-session view: session time, gaps and axes | n/a |
 | [DDDYDJ](../frs/DDDYDJ.md) | Live and paused chart states | n/a |
 | [FENCD9](../frs/FENCD9.md) | Timeline navigation | n/a |
+| [VEDDFD](../frs/VEDDFD.md) | Resync the UI with a running session on load | n/a |
 
 **Tasks:**
 - [x] Extract `crates/powerz-record` from the CLI — 0P7HSJ (the `--include-demo` help text needed no fix)
@@ -55,6 +56,8 @@ codename: Live Wire
   verify: `bun run test` passes; `bun run e2e:ui` passes `live.spec.ts`
 - [x] Timeline model, gap collapse, overview strip, playhead, shuttle, zoom slider, presets — FENCD9
   verify: `bun run test` passes; `bun run e2e:ui` passes the timeline specs incl. the 10M-sample timings
+- [ ] Resync with a running session on load: backend attach + swappable sink, UI rebuild, mock — VEDDFD
+  verify: `cargo test --workspace --locked` and `bun run test` pass; `bun run e2e:ui` passes the reload specs
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. 1000 SPS "—" temperature) and a recorded CSV listed in the report
 
@@ -64,7 +67,7 @@ codename: Live Wire
 **Acceptance Criteria:**
 - [x] Gating rule from CLAUDE.md passes locally on macOS
 - [x] CI is green on all three OSes, including the `e2e` job
-- [ ] Every AC of the nine FRs above is traced to a test by `/spec-review`
+- [ ] Every AC of the ten FRs above is traced to a test by `/spec-review`
 - [x] Blocking visual check passed for every UI FR: light and dark, ~900 px and ~1600 px wide, demo device streaming and no device; screenshot paths listed in the report
 - [ ] The desktop app streams, charts and records from the real KM003C at 1000 SPS for 60 s with no host-side gaps
 
