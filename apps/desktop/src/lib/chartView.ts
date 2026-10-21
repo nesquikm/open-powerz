@@ -244,6 +244,15 @@ export function liveToggle(view: ChartView): ChartGesture {
   return view.mode === "live" ? { kind: "pause" } : { kind: "live" };
 }
 
+/** The decimals the range status needs for a visible span of `spanMs`: one from 1 s up,
+ * two from 100 ms to 1 s, three below 100 ms, so both ends never read the same
+ * (AC-SX3EDV.5). */
+export function rangeDecimals(spanMs: number): number {
+  if (spanMs >= 1_000) return 1;
+  if (spanMs >= 100) return 2;
+  return 3;
+}
+
 /** What the screen-reader status says on entering history mode or returning to live;
  * times count from `originMs`, the session start (AC-272WSN.2). `paused` marks a
  * history view entered by the pause gesture (AC-DDDYDJ.6). */
@@ -253,8 +262,9 @@ export function rangeAnnouncement(
   { paused = false }: { paused?: boolean } = {},
 ): string {
   if (view.mode === "history") {
-    const from = formatSessionTime(view.t0Ms - originMs, 1);
-    const to = formatSessionTime(view.t1Ms - originMs, 1);
+    const decimals = rangeDecimals(view.t1Ms - view.t0Ms);
+    const from = formatSessionTime(view.t0Ms - originMs, decimals);
+    const to = formatSessionTime(view.t1Ms - originMs, decimals);
     return `${paused ? "Paused" : "History"}: ${from} to ${to}`;
   }
   const label = LIVE_WINDOWS.find((w) => w.id === view.window)?.label ?? view.window;

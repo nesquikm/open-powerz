@@ -149,7 +149,7 @@
   }
 
   // Refit when the window or anything in the bar changes size (a label, the recording
-  // timer, export progress, a font that loads late).
+  // timer, a font that loads late).
   $effect(() => {
     const el = bar;
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -245,22 +245,6 @@
     >
   </div>
   <div class="group end">
-    <!-- Left of the rate picker: the end group is flush right, so the progress grows it
-         leftwards and moves neither the rate picker nor Record. -->
-    {#if exportJob.running}
-      <span class="export-progress" role="status">
-        <progress
-          aria-label="Export progress"
-          max={exportJob.total || 1}
-          value={exportJob.total > 0 ? exportJob.done : undefined}
-        ></progress>
-        <span class="narrow-hidden"
-          >Exporting {exportJob.done.toLocaleString("en-US")} / {exportJob.total.toLocaleString(
-            "en-US",
-          )}</span
-        >
-      </span>
-    {/if}
     <span class="rate">
       <span class="rate-inline">{@render rateSelect()}</span>
       <!-- Short of room: the note moves into the "⋯" menu (the select keeps it as a tooltip). -->
@@ -287,7 +271,22 @@
     >
       {recording.phase === "recording" || recording.phase === "stopping" ? "Stop" : "Record"}
     </button>
-    {@render exportButton(false)}
+    <!-- The progress fills the disabled Export button's own box, so starting an export
+         moves no item and adds nothing to the row's width (lib/topBarFit.ts). -->
+    <span class="export-slot" class:exporting={exportJob.running}>
+      {@render exportButton(false)}
+      {#if exportJob.running}
+        {@const count = `Exporting ${exportJob.done.toLocaleString("en-US")} / ${exportJob.total.toLocaleString("en-US")}`}
+        <span class="export-progress" role="status" title={count}>
+          <progress
+            aria-label="Export progress"
+            max={exportJob.total || 1}
+            value={exportJob.total > 0 ? exportJob.done : undefined}
+          ></progress>
+          <span class="visually-hidden">{count}</span>
+        </span>
+      {/if}
+    </span>
     <!-- Room to spare: theme and About inline. Short of room: behind the "⋯" menu. -->
     <span class="settings-inline">
       <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
@@ -439,17 +438,26 @@
     border-radius: 50%;
     background: var(--danger);
   }
-  .export-progress progress {
-    width: 6rem;
-  }
-  .export-progress {
+  .export-slot {
+    position: relative;
     display: inline-flex;
-    white-space: nowrap;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.8125rem;
-    font-variant-numeric: tabular-nums;
-    color: var(--muted);
+  }
+  /* The label keeps the button's width (and its name) but does not show through the bar. */
+  .export-slot.exporting .export {
+    color: transparent;
+  }
+  /* A box-less wrapper (it carries the status role and the tooltip): the bar itself
+     sits over the disabled Export button, inside its box, and out of the flow, so the
+     row's width and every item's place stay as they were. */
+  .export-progress {
+    display: contents;
+  }
+  .export-progress progress {
+    position: absolute;
+    left: 0.4rem;
+    top: 50%;
+    width: calc(100% - 0.8rem);
+    transform: translateY(-50%);
   }
   .brand {
     font-weight: 700;
@@ -545,8 +553,7 @@
     display: inline-flex;
   }
   /* Level 3 (always below 1000 px): tighter spacing; the recording indicator shows just
-     its time, and a running export just its progress bar; the hidden text stays for
-     screen readers. */
+     its time; the hidden row count stays for screen readers. */
   .top-bar:global(.compact) {
     column-gap: 0.5rem;
   }
@@ -556,9 +563,6 @@
   .top-bar:global(.compact) :global(button),
   .top-bar:global(.compact) :global(select) {
     padding-inline: 0.55rem;
-  }
-  .top-bar:global(.compact) .export-progress progress {
-    width: 4rem;
   }
   .top-bar:global(.compact) .narrow-hidden {
     position: absolute;
@@ -572,5 +576,33 @@
   .top-bar:global(.rate-in-menu) .rate-inline,
   .top-bar:global(.export-in-menu) .export {
     display: none;
+  }
+  /* No button to fill: the progress is a thin line along the bar's bottom edge, out of
+     the flow, so it adds nothing to the measured row and moves no item. The slot keeps
+     no box either, so it takes no gap in the group. */
+  .top-bar:global(.export-in-menu) .export-slot {
+    display: contents;
+  }
+  .top-bar:global(.export-in-menu) .export-progress progress {
+    left: 0;
+    top: auto;
+    bottom: 0;
+    width: 100%;
+    height: 3px;
+    transform: none;
+    appearance: none;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    accent-color: var(--accent);
+  }
+  .top-bar:global(.export-in-menu) .export-progress progress::-webkit-progress-bar {
+    background: transparent;
+  }
+  .top-bar:global(.export-in-menu) .export-progress progress::-webkit-progress-value {
+    background: var(--accent);
+  }
+  .top-bar:global(.export-in-menu) .export-progress progress::-moz-progress-bar {
+    background: var(--accent);
   }
 </style>

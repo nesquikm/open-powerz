@@ -1246,6 +1246,12 @@
           {formatHoverValue(v)}
         </span>
       {/each}
+    {:else if !active && hasData}
+      <!-- After a disconnect the last session stays on screen to look back at; the note
+           takes the readout's line so it covers no axis or trace. -->
+      <p class="banner">
+        Meter disconnected, showing the last session. Connect a meter to start a new one.
+      </p>
     {/if}
   </div>
   <!-- The plot is a focusable keyboard-driven widget (arrow keys pan / zoom), which
@@ -1261,15 +1267,8 @@
     onkeydown={onKeydown}
     onblur={() => (pointerFocus = false)}
   >
-    {#if !active}
-      {#if hasData}
-        <!-- After a disconnect the last session stays on screen to look back at. -->
-        <p class="empty-state banner">
-          Meter disconnected, showing the last session. Connect a meter to start a new one.
-        </p>
-      {:else}
-        <p class="empty-state">Connect a meter to start</p>
-      {/if}
+    {#if !active && !hasData}
+      <p class="empty-state">Connect a meter to start</p>
     {/if}
     {#if historyError !== null && view.mode === "history"}
       <p class="history-error" role="status">{historyError}</p>
@@ -1417,12 +1416,9 @@
     color: var(--muted, GrayText);
     pointer-events: none;
   }
-  .empty-state.banner {
-    inset: 0 0 auto 0;
-    padding: 0.35rem 0.75rem;
-    background: color-mix(in srgb, var(--surface, Canvas) 85%, transparent);
-    border-bottom: 1px solid var(--border, GrayText);
-    font-size: 0.9em;
+  .banner {
+    margin: 0;
+    color: var(--muted, GrayText);
   }
   .plot {
     flex: 1;

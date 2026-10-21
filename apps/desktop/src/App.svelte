@@ -336,47 +336,6 @@
     rateSps={session.rateSps ?? requestedRateSps}
   />
   <ErrorBanner {session} />
-  <!-- Notices float in one compact stack over the side panel, so any number of them
-       never moves the main layout (AC-AKNVND.3). -->
-  <div
-    class="notice-stack"
-    role="presentation"
-    onpointerover={() => holdNotices("pointer", true)}
-    onpointerout={(e) => {
-      if (leftStack(e)) holdNotices("pointer", false);
-    }}
-    onfocusin={() => holdNotices("focus", true)}
-    onfocusout={(e) => {
-      if (leftStack(e)) holdNotices("focus", false);
-    }}
-  >
-    {#if recording.notice !== null || recording.error !== null}
-      <Notice
-        tone={recording.error ? "error" : "info"}
-        message={recording.error?.message ?? null}
-        onDismiss={() => recording.dismiss()}
-      >
-        {#if recording.notice}<p>{recording.notice}</p>{/if}
-        {#if recording.savedPath !== null}
-          {@render fileActions(recording.savedPath)}
-        {/if}
-      </Notice>
-    {/if}
-    {#if exportJob.path !== null && exportJob.rows !== null}
-      {@const path = exportJob.path}
-      <Notice tone="info" onDismiss={() => exportJob.dismissNotice()}>
-        <p>{exportNoticeText({ rows: exportJob.rows, path })}</p>
-        {@render fileActions(path)}
-      </Notice>
-    {/if}
-    {#if exportJob.error !== null}
-      <Notice
-        tone="error"
-        message={exportJob.error.message}
-        onDismiss={() => (exportJob.error = null)}
-      />
-    {/if}
-  </div>
   <main class="content">
     <div class="main-area">
       <Readout {session} />
@@ -388,6 +347,48 @@
           active={session.active}
         />
       </section>
+    </div>
+    <!-- Wide, notices float in one compact stack over the side panel, so any number of
+         them never moves the main layout (AC-AKNVND.3); stacked, they sit in the page
+         between the chart card and the Stats panel (AC-SX3EDV.3). -->
+    <div
+      class="notice-stack"
+      role="presentation"
+      onpointerover={() => holdNotices("pointer", true)}
+      onpointerout={(e) => {
+        if (leftStack(e)) holdNotices("pointer", false);
+      }}
+      onfocusin={() => holdNotices("focus", true)}
+      onfocusout={(e) => {
+        if (leftStack(e)) holdNotices("focus", false);
+      }}
+    >
+      {#if recording.notice !== null || recording.error !== null}
+        <Notice
+          tone={recording.error ? "error" : "info"}
+          message={recording.error?.message ?? null}
+          onDismiss={() => recording.dismiss()}
+        >
+          {#if recording.notice}<p>{recording.notice}</p>{/if}
+          {#if recording.savedPath !== null}
+            {@render fileActions(recording.savedPath)}
+          {/if}
+        </Notice>
+      {/if}
+      {#if exportJob.path !== null && exportJob.rows !== null}
+        {@const path = exportJob.path}
+        <Notice tone="info" onDismiss={() => exportJob.dismissNotice()}>
+          <p>{exportNoticeText({ rows: exportJob.rows, path })}</p>
+          {@render fileActions(path)}
+        </Notice>
+      {/if}
+      {#if exportJob.error !== null}
+        <Notice
+          tone="error"
+          message={exportJob.error.message}
+          onDismiss={() => (exportJob.error = null)}
+        />
+      {/if}
     </div>
     <div class="side-panel">
       <StatsPanel
@@ -469,16 +470,29 @@
     min-height: 0;
     padding: 0.75rem;
   }
-  /* Stacked (< 1200 px): stats panel moves under the chart. */
+  /* Stacked (< 1200 px): stats panel moves under the chart, notices sit in the page
+     between them (AC-SX3EDV.3). A column of boxes, not grid rows: the main area keeps
+     its own height and spare height goes to the side panel, so notices push Stats
+     down and never take height from the chart card. That height follows the window,
+     never the notices: a tall window still gets a tall chart. */
   @media (max-width: 1199.98px) {
     .content {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-areas:
-        "main"
-        "side";
+      display: flex;
+      flex-direction: column;
+    }
+    .main-area {
+      flex: none;
+      min-height: 60vh;
+    }
+    .side-panel {
+      flex: 1 0 auto;
     }
     .notice-stack {
-      width: 24rem;
+      position: static;
+      width: auto;
+      max-width: none;
+      max-height: none;
+      overflow: visible;
     }
   }
 </style>

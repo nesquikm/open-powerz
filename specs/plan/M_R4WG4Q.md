@@ -86,7 +86,7 @@ codename: Live Wire
   verify: `cargo test --workspace --locked` and `bun run test` pass; real-meter checks of AC .3, .11, .13 recorded in the FR Notes
 - [x] Honest gaps, quiet noise and fresh temperatures — CWWKJ6
   verify: `bun run test` and `cargo test --workspace --locked` pass; light/dark ~900/~1600 shots reviewed
-- [ ] M2 final polish — SX3EDV: top bar, notices, range decimals, strip, banner, QoS
+- [x] M2 final polish — SX3EDV: top bar, notices, range decimals, strip, banner, QoS
   verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `final-polish.spec.ts`; light/dark ~900/~1200/~1600 shots reviewed
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. the 1000 SPS temperature tooltip) and a recorded CSV listed in the report

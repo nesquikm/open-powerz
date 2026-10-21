@@ -2836,6 +2836,7 @@ dependencies = [
 name = "open-powerz-desktop"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "objc2",
  "objc2-foundation",
  "powerz-cli",

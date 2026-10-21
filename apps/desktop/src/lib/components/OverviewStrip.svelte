@@ -30,6 +30,7 @@
 
 <script lang="ts">
   import { envelopeRange } from "../chartSeries";
+  import { bridgeColumns } from "../stripEnvelope";
   import { RateGate } from "../chartView";
   import {
     dragOverview,
@@ -181,6 +182,18 @@
   /** The strip's gaps, as drawn last. */
   let stripBreaks: OverviewBreak[] = [];
 
+  /** Whether CSS-px column `c` lies under a marked gap or break: the envelope is neither
+   * filled nor bridged there (AC-SX3EDV.6). One function for every paint, no closure. */
+  function columnBlocked(c: number): boolean {
+    for (let i = 0; i < stripBreaks.length; i++) {
+      const b = stripBreaks[i]!;
+      const x0 = Math.floor(b.leftPx);
+      const x1 = b.leftPx + b.widthPx;
+      if (c >= x0 && c < Math.max(x0 + 1, x1)) return true;
+    }
+    return false;
+  }
+
   /** Marks each gap: a faint band and its length when it fits; a collapsed one also
    * gets two slanted strokes (AC-FENCD9.11, AC-CWWKJ6.1). */
   function paintBreaks(ctx: CanvasRenderingContext2D, h: number, ratio: number): void {
@@ -253,6 +266,8 @@
         });
       }
     }
+    // Sparse samples read as a line; marked gaps stay open (AC-SX3EDV.6).
+    for (let s = 0; s < keys.length; s++) bridgeColumns(lo[s]!, hi[s]!, columnBlocked);
     const palette = THEME_COLORS[theme];
     const colors = [palette.chart.voltage, palette.chart.current];
     keys.forEach((k, s) => {

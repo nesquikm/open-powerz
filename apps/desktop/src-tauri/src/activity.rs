@@ -42,6 +42,14 @@ impl Drop for Activity {
     }
 }
 
+/// Run the calling thread at the user-interactive quality-of-service class on
+/// macOS (AC-SX3EDV.8), so the scheduler keeps the poll loop on time; called
+/// first thing on the meter worker's poll thread. A no-op on other systems.
+pub fn raise_poll_thread_qos() {
+    #[cfg(target_os = "macos")]
+    macos::raise_thread_qos();
+}
+
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod macos {
@@ -66,6 +74,15 @@ mod macos {
         // once (the guard takes it out before ending it).
         unsafe { NSProcessInfo::processInfo().endActivity(token) };
     }
+
+    /// Best effort: a refused request leaves the thread at its default class.
+    pub(super) fn raise_thread_qos() {
+        // SAFETY: the call only changes the calling thread's own QoS class; it
+        // takes plain values and no pointers.
+        let _ = unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+        };
+    }
 }
 
 #[cfg(test)]
@@ -78,5 +95,41 @@ mod tests {
         let activity = hold("test");
         assert!(held() > before);
         drop(activity);
+    }
+
+    /// AC-SX3EDV.8: the poll thread asks for the user-interactive QoS class on
+    /// macOS; the class read back from the thread itself must be that one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(unsafe_code)]
+    fn the_poll_thread_runs_at_user_interactive_qos_on_macos() {
+        let class = std::thread::spawn(|| {
+            raise_poll_thread_qos();
+            let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+            let mut relative: libc::c_int = 0;
+            // SAFETY: both out-pointers point at live locals of the right types, and
+            // `pthread_self()` is the calling thread, alive for the whole call.
+            let rc = unsafe {
+                libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative)
+            };
+            assert_eq!(rc, 0, "pthread_get_qos_class_np failed");
+            class as u32
+        })
+        .join()
+        .expect("the probe thread panicked");
+        assert_eq!(
+            class,
+            libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE as u32,
+            "the poll thread's QoS class"
+        );
+    }
+
+    /// AC-SX3EDV.8: other systems keep their scheduling; the call exists and is a no-op.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn raising_the_poll_thread_qos_is_harmless_elsewhere() {
+        std::thread::spawn(raise_poll_thread_qos)
+            .join()
+            .expect("raise_poll_thread_qos panicked off macOS");
     }
 }

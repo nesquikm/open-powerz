@@ -10,6 +10,7 @@ import {
   frameSource,
   historyRequestFor,
   rangeAnnouncement,
+  rangeDecimals,
   sessionRequestFor,
   sessionStartOf,
   windowPressed,
@@ -727,5 +728,34 @@ describe("applyGesture never zooms past two sample periods (AC-9CFMD3.4)", () =>
     expect(range).toBe(LIVE);
     const ok = applyGesture(LIVE, { kind: "select", t0Ms: 12_000, t1Ms: 12_040 }, SHOWN, AT_50SPS);
     expect(span(ok)).toBeCloseTo(40, 6);
+  });
+});
+
+describe("range status decimals follow the visible span (AC-SX3EDV.5)", () => {
+  it("uses one decimal from 1 s up, two from 100 ms to 1 s, three below 100 ms", () => {
+    expect(rangeDecimals(3_600_000)).toBe(1);
+    expect(rangeDecimals(10_000)).toBe(1);
+    expect(rangeDecimals(1_000)).toBe(1);
+    expect(rangeDecimals(999)).toBe(2);
+    expect(rangeDecimals(250)).toBe(2);
+    expect(rangeDecimals(100)).toBe(2);
+    expect(rangeDecimals(99)).toBe(3);
+    expect(rangeDecimals(40)).toBe(3);
+    expect(rangeDecimals(1)).toBe(3);
+  });
+
+  it('reads "Paused: 11.200 s to 11.240 s" for a 40 ms pause, two different times', () => {
+    const narrow: ChartView = { mode: "history", window: "10s", t0Ms: 11_200, t1Ms: 11_240 };
+    expect(rangeAnnouncement(narrow, 0, { paused: true })).toBe("Paused: 11.200 s to 11.240 s");
+  });
+
+  it("writes two decimals for a span between 100 ms and 1 s", () => {
+    const view: ChartView = { mode: "history", window: "10s", t0Ms: 11_200, t1Ms: 11_450 };
+    expect(rangeAnnouncement(view)).toBe("History: 11.20 s to 11.45 s");
+  });
+
+  it("keeps one decimal from 1 s up, counting from the session start", () => {
+    const view: ChartView = { mode: "history", window: "10s", t0Ms: 30_401_500, t1Ms: 30_402_500 };
+    expect(rangeAnnouncement(view, 30_400_000)).toBe("History: 1.5 s to 2.5 s");
   });
 });

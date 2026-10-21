@@ -15,12 +15,12 @@ export const FIT_LEVELS = [
   "hide-brand",
   /** 2: theme, About and the rate-locked note move into the "⋯" menu. */
   "settings-in-menu",
-  /** 3: tighter spacing; the recording indicator shows just its time and a running
-   * export just its progress bar in place of the (disabled) Export button. */
+  /** 3: tighter spacing; the recording indicator shows just its time. */
   "compact",
   /** 4: the sample-rate picker moves into the menu. */
   "rate-in-menu",
-  /** 5: the Export button moves into the menu. */
+  /** 5: the Export button moves into the menu; a running export shows as a thin line
+   * along the bar's bottom edge. */
   "export-in-menu",
 ] as const;
 

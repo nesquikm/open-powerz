@@ -1152,6 +1152,7 @@ where
     let worker_sink = forward;
     let worker_store = store.clone();
     let thread = std::thread::spawn(move || {
+        crate::activity::raise_poll_thread_qos();
         let ran = catch_unwind(AssertUnwindSafe(|| {
             run_worker(
                 open,
