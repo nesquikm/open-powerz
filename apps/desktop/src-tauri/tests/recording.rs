@@ -784,6 +784,9 @@ fn the_manager_records_to_a_file_on_disk() {
     let mut m = manager();
     let rx = connect(&mut m);
     m.start_recording(&path).expect("start recording");
+    // Batches queued before the recording began carry unrecorded samples; skip them,
+    // so a slow runner's backlog cannot satisfy the wait with zero rows written.
+    while rx.try_recv().is_ok() {}
     wait_samples(&rx, 200);
     let summary = m.stop_recording().expect("stop recording");
     m.disconnect().unwrap();
