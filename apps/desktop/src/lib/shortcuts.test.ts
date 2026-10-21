@@ -85,6 +85,7 @@ describe("SHORTCUTS overlay list (AC-AH2AEK.6)", () => {
       "Shift+Z",
       "T",
       "?",
+      "Esc",
     ]);
     for (const s of SHORTCUTS) {
       expect(s.description.length).toBeGreaterThan(0);
@@ -206,5 +207,13 @@ describe("timeline keys (FR FENCD9)", () => {
     expect(row("Home / End")).toMatch(/session start/i);
     expect(row("Home / End")).toMatch(/live/i);
     expect(row("Shift+Z")).toMatch(/whole session/i);
+  });
+});
+
+describe("the overlay lists Escape (FR M46CTX)", () => {
+  it("AC-M46CTX.4: a row for Escape says it closes or cancels what is open", () => {
+    const row = SHORTCUTS.find((s) => /^Esc(ape)?$/.test(s.keys));
+    expect(row, "an Esc / Escape row").toBeDefined();
+    expect(row?.description ?? "").toMatch(/close|cancel/i);
   });
 });

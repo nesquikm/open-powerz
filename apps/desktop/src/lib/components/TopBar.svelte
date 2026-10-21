@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { badgeLabel } from "../format";
+  import { menuIndexAfter } from "../menuNav";
   import {
     RATE_OPTIONS,
     formatRecordingElapsed,
@@ -43,7 +45,8 @@
     themeChoice: ThemeChoice;
     onSetTheme: (choice: ThemeChoice) => void;
     onToggleConnect: () => void;
-    onAbout: () => void;
+    /** Open About; `opener` is the control focus returns to when it closes. */
+    onAbout: (opener: HTMLElement | null) => void;
     onSelectRate: (sps: number) => void;
     /** The rate the next connect asks for, or the session's current rate. */
     rateSps: number;
@@ -59,6 +62,60 @@
 
   /** The "⋯" menu that holds theme and About (and the rate-locked note) on narrow windows. */
   let menuOpen = $state(false);
+  let moreButton: HTMLButtonElement | undefined = $state();
+  /** The open menu's panel (the menu items plus, when they moved there, the rate picker and note). */
+  let menuPanel: HTMLElement | undefined = $state();
+  let menuList: HTMLElement | undefined = $state();
+
+  /** The menu's items in order (disabled ones cannot take focus, so they are skipped). */
+  function menuItems(): HTMLElement[] {
+    if (!menuList) return [];
+    return [
+      ...menuList.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemradio"]'),
+    ].filter((el) => !(el as HTMLButtonElement).disabled);
+  }
+
+  /** Roving tabindex: only `index` is in the Tab order; `focus` also moves focus there. */
+  function setActiveItem(index: number, focus: boolean): void {
+    const items = menuItems();
+    items.forEach((el, i) => (el.tabIndex = i === index ? 0 : -1));
+    if (focus) items[index]?.focus();
+  }
+
+  /** Open the menu; from the keyboard, focus lands on its first item. */
+  async function openMenu(fromKeyboard: boolean): Promise<void> {
+    menuOpen = true;
+    await tick();
+    setActiveItem(0, fromKeyboard);
+  }
+
+  /** Close the menu; `refocus` puts focus back on ⋯ (after a pick or Escape). */
+  function closeMenu(refocus: boolean): void {
+    menuOpen = false;
+    if (refocus) moreButton?.focus();
+  }
+
+  /** A pick from the menu: it closes, focus goes back to ⋯, then the action runs. */
+  function pick(action: () => void): void {
+    closeMenu(true);
+    action();
+  }
+
+  function onMenuKeydown(e: KeyboardEvent): void {
+    const items = menuItems();
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    // Inside the menu no key reaches the window shortcuts (R would reset the stats).
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeMenu(true);
+      return;
+    }
+    const next = menuIndexAfter(e.key, current, items.length);
+    if (next === null) return;
+    e.preventDefault();
+    setActiveItem(next, true);
+  }
 
   let bar: HTMLElement | undefined = $state();
   /** The overflow level the bar is at (lib/topBarFit.ts); the menu shows what it moved. */
@@ -115,7 +172,18 @@
 
 <svelte:window
   onkeydown={(e) => {
-    if (menuOpen && e.key === "Escape") menuOpen = false;
+    if (menuOpen && e.key === "Escape" && !e.defaultPrevented) {
+      // One Escape closes one thing: the menu, not also a dialog under it.
+      e.preventDefault();
+      const focusInMenu = menuPanel?.contains(document.activeElement) ?? false;
+      closeMenu(focusInMenu);
+    }
+  }}
+  onpointerdown={(e) => {
+    if (!menuOpen) return;
+    const target = e.target instanceof Node ? e.target : null;
+    if (target && (menuPanel?.contains(target) || moreButton?.contains(target))) return;
+    closeMenu(false);
   }}
 />
 
@@ -138,12 +206,11 @@
     type="button"
     class={inMenu ? undefined : "export"}
     class:busy={exportJob.running}
+    role={inMenu ? "menuitem" : undefined}
+    tabindex={inMenu ? -1 : undefined}
     title="Export the session so far to CSV"
     disabled={exportJob.running || !canExport}
-    onclick={() => {
-      if (inMenu) menuOpen = false;
-      onExport();
-    }}
+    onclick={() => (inMenu ? pick(onExport) : onExport())}
   >
     Export
   </button>
@@ -210,36 +277,69 @@
     <!-- Room to spare: theme and About inline. Short of room: behind the "⋯" menu. -->
     <span class="settings-inline">
       <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
-      <button type="button" onclick={onAbout}>About</button>
+      <button type="button" id="top-bar-about" onclick={(e) => onAbout(e.currentTarget)}
+        >About</button
+      >
     </span>
     <span class="settings-menu">
       <button
         type="button"
         class="more"
+        id="top-bar-more"
+        bind:this={moreButton}
         aria-label={moreMenuLabel(level)}
+        aria-haspopup="menu"
         aria-expanded={menuOpen}
         aria-controls="top-bar-menu"
-        onclick={() => (menuOpen = !menuOpen)}>⋯</button
+        onclick={(e) => {
+          // A click with no pointer (detail 0) came from Enter or Space.
+          if (menuOpen) closeMenu(false);
+          else void openMenu(e.detail === 0);
+        }}>⋯</button
       >
       {#if menuOpen}
-        <div id="top-bar-menu" class="menu panel">
-          {#if level >= RATE_IN_MENU_LEVEL}
-            {@render rateSelect()}
+        <div class="menu panel" bind:this={menuPanel}>
+          <!-- The rate picker and its note are not menu items, so they sit beside the menu. -->
+          {#if level >= RATE_IN_MENU_LEVEL || rateNote !== null}
+            <div class="menu-extra">
+              {#if level >= RATE_IN_MENU_LEVEL}
+                {@render rateSelect()}
+              {/if}
+              {#if rateNote !== null}
+                <p class="rate-note menu-note">{rateNote}</p>
+              {/if}
+            </div>
           {/if}
-          {#if rateNote !== null}
-            <p class="rate-note menu-note">{rateNote}</p>
-          {/if}
-          {#if level >= EXPORT_IN_MENU_LEVEL}
-            {@render exportButton(true)}
-          {/if}
-          <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
-          <button
-            type="button"
-            onclick={() => {
-              menuOpen = false;
-              onAbout();
-            }}>About</button
+          <div
+            id="top-bar-menu"
+            class="menu-list"
+            role="menu"
+            tabindex="-1"
+            aria-labelledby="top-bar-more"
+            bind:this={menuList}
+            onkeydown={onMenuKeydown}
+            onfocusout={(e) => {
+              // Tab out of the menu closes it (menu pattern); a move between items doesn't.
+              const to = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+              if (to && (menuPanel?.contains(to) || moreButton?.contains(to))) return;
+              if (to) closeMenu(false);
+            }}
           >
+            {#if level >= EXPORT_IN_MENU_LEVEL}
+              {@render exportButton(true)}
+            {/if}
+            <ThemeControl
+              choice={themeChoice}
+              onChoose={(choice) => pick(() => onSetTheme(choice))}
+              inMenu
+            />
+            <button
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              onclick={() => pick(() => onAbout(moreButton ?? null))}>About</button
+            >
+          </div>
         </div>
       {/if}
     </span>
@@ -403,8 +503,20 @@
     z-index: 10;
     display: grid;
     gap: 0.5rem;
-    padding: 0.75rem;
+    padding: 0.5rem;
     box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
+  }
+  .menu-extra,
+  .menu-list {
+    display: grid;
+    gap: 0.5rem;
+  }
+  /* Room around the items: a click there is inside the menu but on no item. */
+  .menu-list {
+    padding: 0.25rem;
+  }
+  .menu-list:focus {
+    outline: none;
   }
   /* Level 1: the wordmark goes (the window title names the app). */
   .top-bar:global(.hide-brand) .brand {

@@ -212,6 +212,8 @@
 
   let helpOpen = $state(false);
   let aboutOpen = $state(false);
+  /** The control that opened About (focus goes back to it on close). */
+  let aboutOpener: HTMLElement | null = $state(null);
 
   function dispatchShortcut(action: ShortcutAction): void {
     switch (action.kind) {
@@ -293,7 +295,10 @@
     {themeChoice}
     onSetTheme={setTheme}
     onToggleConnect={() => void toggleConnection()}
-    onAbout={() => (aboutOpen = true)}
+    onAbout={(opener) => {
+      aboutOpener = opener;
+      aboutOpen = true;
+    }}
     onSelectRate={(sps) => void selectRate(sps)}
     {recording}
     {canRecord}
@@ -355,7 +360,7 @@
     <ShortcutHelp onClose={() => (helpOpen = false)} />
   {/if}
   {#if aboutOpen}
-    <About onClose={() => (aboutOpen = false)} />
+    <About opener={aboutOpener} onClose={() => (aboutOpen = false)} />
   {/if}
 </div>
 

@@ -267,10 +267,13 @@ test("with very large control text the bar keeps one row and every control stays
     const control =
       name === "Sample rate"
         ? page.getByRole("combobox", { name, exact: true })
-        : page.getByRole("button", { name, exact: true });
+        : // A menu item when it sits in the menu (FR M46CTX).
+          page
+            .getByRole("button", { name, exact: true })
+            .or(page.getByRole("menuitem", { name, exact: true }));
     await expect(control, `${name} is in the bar or in the menu`).toBeVisible();
   }
-  await expect(menu.getByRole("radiogroup", { name: "Theme" })).toBeVisible();
+  await expect(menu.getByRole("group", { name: "Theme" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
 });

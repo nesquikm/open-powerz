@@ -3,7 +3,23 @@
   import { appInfo, type AppInfo } from "../backend";
   import Panel from "./Panel.svelte";
 
-  let { onClose }: { onClose: () => void } = $props();
+  let {
+    onClose,
+    opener,
+  }: {
+    onClose: () => void;
+    /** The control that opened About; focus returns there on close (or to ⋯ when it is gone). */
+    opener?: HTMLElement | null;
+  } = $props();
+
+  /** The opener if it is still on screen, else the ⋯ button (e.g. the menu has closed). */
+  function returnFocus(): HTMLElement | null {
+    if (opener?.isConnected && opener.getClientRects().length > 0) return opener;
+    // The window may have widened since: ⋯ is hidden and About is inline again.
+    const more = document.getElementById("top-bar-more");
+    if (more && more.getClientRects().length > 0) return more;
+    return document.getElementById("top-bar-about") ?? more;
+  }
 
   let info: AppInfo | null = $state(null);
 
@@ -18,7 +34,7 @@
   });
 </script>
 
-<Panel id="about" title="About" closeLabel="Close About" placement="top" {onClose}>
+<Panel id="about" title="About" closeLabel="Close About" placement="top" {onClose} {returnFocus}>
   {#each lines as line (line)}
     <p>{line}</p>
   {/each}

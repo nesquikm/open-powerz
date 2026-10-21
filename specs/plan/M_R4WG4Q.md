@@ -72,7 +72,7 @@ codename: Live Wire
   verify: `cargo test --workspace --locked` and `bun run test` pass; `bun run e2e:ui` passes `qa-bugs.spec.ts`
 - [x] Export/recording notices with reveal, deep-zoom clamp and edge samples, empty state — 9CFMD3
   verify: `bun run test` passes; `bun run e2e:ui` passes the notice, zoom and empty-state specs
-- [ ] Clear-confirm Escape, menu pattern, About focus, wider shortcut overlay — M46CTX
+- [x] Clear-confirm Escape, menu pattern, About focus, wider shortcut overlay — M46CTX
   verify: `bun run e2e:ui` passes the keyboard and overlay specs incl. axe
 - [ ] DPR-1 line widths, stable top bar and notices, readout, window preset, narrow polish — AKNVND
   verify: `bun run test` passes; `bun run e2e:ui` passes the polish specs; light 900 / dark 1600 shots reviewed

@@ -40,6 +40,14 @@
     }
   });
 
+  // Escape on the confirm is Cancel; stop it here so the window shortcuts never see it.
+  function onConfirmKeydown(e: KeyboardEvent): void {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    controls.cancelClear();
+  }
+
   const view = $derived(statsView(stats));
   const rows = $derived([
     { name: "VBUS", values: view.vbus },
@@ -122,7 +130,14 @@
 
   <div class="clear">
     {#if controls.clearPending}
-      <span class="confirm" role="group" aria-labelledby="clear-question">
+      <!-- Escape bubbles up from the buttons inside; the group only listens. -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <span
+        class="confirm"
+        role="group"
+        aria-labelledby="clear-question"
+        onkeydown={onConfirmKeydown}
+      >
         <span id="clear-question"
           >Clear the chart history? The meter stays connected and keeps measuring.</span
         >

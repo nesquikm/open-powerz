@@ -44,6 +44,7 @@ export const SHORTCUTS: readonly { keys: string; description: string }[] = [
   { keys: "Shift+Z", description: "Fit the whole session" },
   { keys: "T", description: "Cycle theme (System, Light, Dark)" },
   { keys: "?", description: "Show this shortcut list" },
+  { keys: "Esc", description: "Close the open menu, dialog or confirmation" },
 ];
 
 /** Digit keys 1–4 to sample rates. */

@@ -11,6 +11,7 @@
     closeLabel,
     placement,
     onClose,
+    returnFocus,
     children,
   }: {
     /** Element id; the heading gets `<id>-title`. */
@@ -20,6 +21,11 @@
     /** Corner the panel floats in (right side, under the top bar or at the bottom). */
     placement: "top" | "bottom";
     onClose: () => void;
+    /**
+     * Where focus goes on close. Defaults to whatever had focus at open, which is
+     * unreliable for a mouse opener (WebKit does not focus buttons on click).
+     */
+    returnFocus?: () => HTMLElement | null | undefined;
     children: Snippet;
   } = $props();
 
@@ -32,7 +38,9 @@
     return () => {
       // Give focus back only if it is still ours: the user may have moved on.
       const now = document.activeElement;
-      if (now === null || now === document.body || own?.contains(now)) previous?.focus();
+      if (now === null || now === document.body || own?.contains(now)) {
+        (returnFocus?.() ?? previous)?.focus();
+      }
     };
   });
 

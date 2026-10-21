@@ -21,6 +21,10 @@
 </Panel>
 
 <style>
+  /* The shared panel caps at 24rem; this list needs room for one-line rows. */
+  :global(#shortcut-help) {
+    max-width: calc(100vw - 2rem);
+  }
   dl {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -30,6 +34,13 @@
   dt,
   dd {
     margin: 0;
+    white-space: nowrap;
+  }
+  /* Below the app's minimum width (a narrow browser view), wrap rather than spill. */
+  @media (max-width: 600px) {
+    dd {
+      white-space: normal;
+    }
   }
   kbd {
     font-family: inherit;

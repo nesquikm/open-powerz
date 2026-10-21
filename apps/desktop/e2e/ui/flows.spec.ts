@@ -261,7 +261,8 @@ test.describe("theme toggle (AC-AH2AEN.5)", () => {
     await page.setViewportSize({ width: 900, height: 700 });
     await open(page);
     await page.getByRole("button", { name: "More: theme and About" }).click();
-    await page.locator("#top-bar-menu").getByRole("radio", { name: "Dark" }).click();
+    // In the menu the theme options are menu items (FR M46CTX).
+    await page.locator("#top-bar-menu").getByRole("menuitemradio", { name: "Dark" }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   });
 });
