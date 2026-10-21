@@ -25,7 +25,7 @@ The chart and layout stay legible and stable at standard pixel density and in na
 
 - AC-AKNVND.1: At device pixel ratio 1, solid series are drawn at least 1.5 px wide and dashed series use whole-pixel dash patterns, so VBUS reads blue even on a grid line and the dashed series keep their colours.
 - AC-AKNVND.2: The export progress appears without moving the rate picker or the Record button in the top bar.
-- AC-AKNVND.3: At 1600 by 900 a notice never pushes the overview strip below the bottom of the window.
+- AC-AKNVND.3: At 1600 by 900, any number of notices together never push the overview strip below the bottom of the window: notices stack compactly in a layer that does not shift the main layout.
 - AC-AKNVND.4: The hover readout shows a single value when a range's minimum and maximum format to the same text.
 - AC-AKNVND.5: The chosen window (10 s, 1 min, 10 min or Whole session) is remembered for each viewer and restored after a reload, like the legend.
 - AC-AKNVND.6: WebKit logs no ResizeObserver loop error at 600 px.
@@ -33,7 +33,7 @@ The chart and layout stay legible and stable at standard pixel density and in na
 
 ## Technical Design
 
-Series widths and dash patterns come from the device pixel ratio when the plot is built and when it changes. Export progress takes a reserved, fixed-width slot. Notices sit in a layer that does not change the main layout's height. The readout formatter compares formatted strings. The window preset is saved next to the legend preference. The resize observer defers its redraw to the next animation frame. The picker gets a title and a shorter label at narrow widths, and the readout a no-wrap style.
+Series widths and dash patterns come from the device pixel ratio when the plot is built and when it changes. Export progress takes a reserved, fixed-width slot. Notices stack in one compact layer that does not change the main layout's height. The readout formatter compares formatted strings. The window preset is saved next to the legend preference. The resize observer defers its redraw to the next animation frame. The picker gets a title and a shorter label at narrow widths, and the readout a no-wrap style.
 
 ## Testing
 
