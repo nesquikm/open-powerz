@@ -44,6 +44,8 @@
     applyGesture,
     frameSource,
     historyRequestFor,
+    liveButton,
+    liveToggle,
     rangeAnnouncement,
     sessionRequestFor,
     sessionStartOf,
@@ -119,6 +121,7 @@
   /** Legend on/off choice, kept for the session (AC-AH2AEM.5). */
   let visibility: SeriesVisibility = $state(loadVisibility(sessionStore()));
   const styles = $derived(seriesStyles(theme));
+  const liveBtn = $derived(liveButton(view));
 
   function toggle(key: ChartSeriesKey): void {
     visibility = toggleSeries(visibility, key);
@@ -224,6 +227,9 @@
     updateHover();
   }
 
+  /** Something has been drawn, so the Live button has a range to pause (AC-DDDYDJ.2). */
+  let hasData = $state(false);
+
   /** Test builds only: what the e2e hook reports (FR AH2AEN). */
   const probe: ChartProbe | null = E2E_BUILD ? new ChartProbe() : null;
   if (E2E_BUILD && probe !== null) $effect(() => installChartProbe(probe));
@@ -234,6 +240,7 @@
   /** A batch arrived. */
   export function push(samples: readonly Sample[]): void {
     buffer.push(samples);
+    if (!hasData && buffer.length > 0) hasData = true;
     scheduler.invalidate();
   }
 
@@ -248,6 +255,7 @@
    * back to the live window. */
   export function reset(): void {
     buffer.clear();
+    hasData = false;
     sessionGaps.clear();
     sessionStartMs = null;
     sessionFrame = null;
@@ -326,7 +334,8 @@
     view = next;
     if (view.mode === "history") {
       fetchHistory();
-      if (wasLive) announcement = rangeAnnouncement(view, originMs());
+      if (wasLive)
+        announcement = rangeAnnouncement(view, originMs(), { paused: g.kind === "pause" });
     } else {
       leaveHistory();
       if (!wasLive) announcement = rangeAnnouncement(view, originMs());
@@ -334,7 +343,7 @@
     scheduler.invalidate();
   }
 
-  /** Live button / L key: back to the scrolling live window. */
+  /** L key: back to the scrolling live window (the Live button toggles via `liveToggle`). */
   export function returnToLive(): void {
     gesture({ kind: "live" });
   }
@@ -351,6 +360,8 @@
   function onKeydown(e: KeyboardEvent): void {
     if (e.ctrlKey || e.metaKey || e.altKey || !CHART_KEYS.includes(e.key)) return;
     e.preventDefault();
+    // End is also an app-wide shortcut; the chart has handled it, so it stops here.
+    if (e.key === "End") e.stopPropagation();
     gesture({ kind: "key", key: e.key });
   }
 
@@ -546,10 +557,12 @@
     <button
       type="button"
       class="live"
-      class:primary={view.mode === "live"}
-      aria-pressed={view.mode === "live"}
-      title="Return the chart to live (L)"
-      onclick={returnToLive}>Live</button
+      class:primary={liveBtn.pressed}
+      class:paused={!liveBtn.pressed}
+      aria-pressed={liveBtn.pressed}
+      disabled={view.mode === "live" && !hasData}
+      title={liveBtn.title}
+      onclick={() => gesture(liveToggle(view))}>{liveBtn.label}</button
     >
   </div>
   <div class="legend" role="group" aria-label="Series">
@@ -597,7 +610,7 @@
     bind:this={host}
     role="application"
     tabindex="0"
-    aria-label="Chart. Drag to zoom, Shift-drag to pan; the wheel zooms when the chart is focused or with Ctrl or ⌘ held; arrow keys pan and zoom, L returns to live."
+    aria-label="Chart. Drag to zoom, Shift-drag to pan; the wheel zooms when the chart is focused or with Ctrl or ⌘ held; arrow keys pan and zoom, L or End returns to live."
     onkeydown={onKeydown}
   >
     {#if historyError !== null && view.mode === "history"}
@@ -623,6 +636,12 @@
   }
   .zero-based {
     margin-left: auto;
+  }
+  /* Paused: the accent colour says the chart is not following the stream (AC-DDDYDJ.4). */
+  .live.paused {
+    border-color: var(--accent);
+    color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
   .legend {
     display: flex;

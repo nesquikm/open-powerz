@@ -73,7 +73,7 @@ describe("isTextInput (AC-AH2AEK.6)", () => {
 describe("SHORTCUTS overlay list (AC-AH2AEK.6)", () => {
   it("documents every shortcut", () => {
     const keys = SHORTCUTS.map((s) => s.keys);
-    expect(keys).toEqual(["Space", "C", "R", "1–4", "L", "T", "?"]);
+    expect(keys).toEqual(["Space", "C", "R", "1–4", "L / End", "T", "?"]);
     for (const s of SHORTCUTS) {
       expect(s.description.length).toBeGreaterThan(0);
     }
@@ -99,5 +99,24 @@ describe("focused controls keep their own keys (review round 1)", () => {
 
   it("still records with Space when nothing in particular has focus", () => {
     expect(shortcutFor({ ...base, key: " ", target: on("BODY") })).toEqual({ kind: "record" });
+  });
+});
+
+describe("End returns the chart to live (FR DDDYDJ)", () => {
+  it("AC-DDDYDJ.5: End anywhere outside a text field or a select returns to live", () => {
+    expect(shortcutFor(key("End"))).toEqual({ kind: "live" });
+    const button = { tagName: "BUTTON", isContentEditable: false };
+    expect(shortcutFor(key("End", { target: button }))).toEqual({ kind: "live" });
+  });
+
+  it("AC-DDDYDJ.5: the shortcut overlay lists End beside L", () => {
+    expect(SHORTCUTS).toContainEqual({ keys: "L / End", description: "Return the chart to live" });
+  });
+
+  it("AC-DDDYDJ.5: a text field or a focused select keeps End for itself", () => {
+    const select = { tagName: "SELECT", isContentEditable: false };
+    const input = { tagName: "INPUT", isContentEditable: false };
+    expect(shortcutFor(key("End", { target: select }))).toBeNull();
+    expect(shortcutFor(key("End", { target: input }))).toBeNull();
   });
 });

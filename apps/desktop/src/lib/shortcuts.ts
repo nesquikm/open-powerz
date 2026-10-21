@@ -32,7 +32,7 @@ export const SHORTCUTS: readonly { keys: string; description: string }[] = [
   { keys: "C", description: "Connect or disconnect" },
   { keys: "R", description: "Reset statistics" },
   { keys: "1–4", description: "Sample rate: 2, 10, 50 or 1000 SPS" },
-  { keys: "L", description: "Return the chart to live" },
+  { keys: "L / End", description: "Return the chart to live" },
   { keys: "T", description: "Cycle theme (System, Light, Dark)" },
   { keys: "?", description: "Show this shortcut list" },
 ];
@@ -65,11 +65,12 @@ export function isTextInput(target: TargetLike | null): boolean {
 }
 
 /** True when the focused control uses `key` itself: a select's type-ahead takes
- * every printable key, and Space activates a button or a toggle input. */
+ * every printable key (and Home / End move its choice), and Space activates a
+ * button or a toggle input. */
 function controlOwnsKey(target: TargetLike | null, key: string): boolean {
   if (target === null) return false;
   const tag = target.tagName.toUpperCase();
-  if (tag === "SELECT") return key.length === 1;
+  if (tag === "SELECT") return key.length === 1 || key === "Home" || key === "End";
   if (key !== " ") return false;
   return tag === "BUTTON" || (tag === "INPUT" && !isTextInput(target));
 }
@@ -82,6 +83,7 @@ export function shortcutFor(event: KeyLike): ShortcutAction | null {
   if (controlOwnsKey(event.target, key)) return null;
   if (key === " ") return { kind: "record" };
   if (key === "?") return { kind: "help" };
+  if (key === "End") return { kind: "live" };
   const sps = RATE_KEYS[key];
   if (sps !== undefined) return { kind: "rate", sps };
   switch (key.toLowerCase()) {

@@ -461,3 +461,107 @@ describe("HistoryRequester after cancel", () => {
     expect(scheduled).toBe(1);
   });
 });
+
+describe("live and paused chart states (FR DDDYDJ)", () => {
+  const live: ChartView = { mode: "live", window: "1m" };
+  const paused: ChartView = { mode: "history", window: "1m", t0Ms: 10_000, t1Ms: 20_000 };
+
+  it("AC-DDDYDJ.1: while live the button reads Live and is pressed", async () => {
+    const { liveButton } = await import("./chartView");
+    expect(liveButton(live)).toMatchObject({ label: "Live", pressed: true });
+    expect(liveButton({ mode: "live", window: "10s" })).toMatchObject({
+      label: "Live",
+      pressed: true,
+    });
+  });
+
+  it("AC-DDDYDJ.1: a live view draws the live frame (follows the newest data)", () => {
+    expect(
+      frameSource(live, {
+        sessionStartMs: 0,
+        bufferFirstMs: 0,
+        hasHistoryFrame: true,
+        hasSessionFrame: true,
+      }),
+    ).toBe("live");
+  });
+
+  it("AC-DDDYDJ.2: the button while live pauses on exactly the range on screen", async () => {
+    const { liveToggle } = await import("./chartView");
+    const gesture = liveToggle(live);
+    expect(gesture).toEqual({ kind: "pause" });
+    expect(applyGesture(live, gesture, SHOWN, SESSION)).toEqual({
+      mode: "history",
+      window: "1m",
+      t0Ms: SHOWN.t0Ms,
+      t1Ms: SHOWN.t1Ms,
+    });
+  });
+
+  it("AC-DDDYDJ.2: pausing a view that is already paused changes nothing", () => {
+    expect(applyGesture(paused, { kind: "pause" }, { t0Ms: 1, t1Ms: 2 }, SESSION)).toBe(paused);
+  });
+
+  it("AC-DDDYDJ.2: the live tooltip says the stream and any recording keep running", async () => {
+    const { liveButton } = await import("./chartView");
+    expect(liveButton(live).title).toMatch(/pause/i);
+    expect(liveButton(live).title).toMatch(/stream and any recording keep running/i);
+  });
+
+  it("AC-DDDYDJ.3: wheel, drag and arrow keys all pause the chart", async () => {
+    const { liveButton } = await import("./chartView");
+    const gestures = [
+      { kind: "wheel", atMs: 15_000, deltaY: -100 },
+      { kind: "pan", deltaMs: -2_000 },
+      { kind: "select", t0Ms: 12_000, t1Ms: 16_000 },
+      { kind: "key", key: "ArrowLeft" },
+      { kind: "key", key: "ArrowRight" },
+      { kind: "key", key: "ArrowUp" },
+      { kind: "key", key: "ArrowDown" },
+    ] as const;
+    for (const g of gestures) {
+      const v = applyGesture(live, g, SHOWN, SESSION);
+      expect(v.mode).toBe("history");
+      expect(liveButton(v)).toMatchObject({ label: "Paused · Go live", pressed: false });
+    }
+  });
+
+  it("AC-DDDYDJ.4: while paused the button reads Paused · Go live, unpressed, with a how-to tooltip", async () => {
+    const { liveButton } = await import("./chartView");
+    const b = liveButton(paused);
+    expect(b).toMatchObject({ label: "Paused · Go live", pressed: false });
+    expect(b.title).toMatch(/live/i);
+    expect(b.title).toMatch(/End/);
+  });
+
+  it("AC-DDDYDJ.5: the button while paused returns to live, keeping the window", async () => {
+    const { liveToggle } = await import("./chartView");
+    const gesture = liveToggle(paused);
+    expect(gesture).toEqual({ kind: "live" });
+    expect(applyGesture(paused, gesture, SHOWN, SESSION)).toEqual(live);
+  });
+
+  it("AC-DDDYDJ.5: End on the focused chart is a chart key and returns to live", async () => {
+    const { CHART_KEYS } = await import("./chartView");
+    expect(CHART_KEYS).toContain("End");
+    expect(applyGesture(paused, { kind: "key", key: "End" }, SHOWN, SESSION)).toEqual(live);
+  });
+
+  it("AC-DDDYDJ.6: the status says Paused: <from> to <to> when the button pauses", () => {
+    expect(rangeAnnouncement(paused, 0, { paused: true })).toBe("Paused: 10.0 s to 20.0 s");
+    expect(rangeAnnouncement(paused, 4_000, { paused: true })).toBe("Paused: 6.0 s to 16.0 s");
+  });
+
+  it("AC-DDDYDJ.6: a zoom or pan still announces History, going live announces Live: <window>", () => {
+    expect(rangeAnnouncement(paused, 0)).toBe("History: 10.0 s to 20.0 s");
+    expect(rangeAnnouncement(live, 0, { paused: false })).toBe("Live: 1 min");
+  });
+});
+
+describe("going live while already live changes nothing (AC-DDDYDJ.5)", () => {
+  it("returns the same view, so a repeated Live, L or End costs no redraw", () => {
+    const live: ChartView = { mode: "live", window: "1m" };
+    expect(applyGesture(live, { kind: "live" }, SHOWN, SESSION)).toBe(live);
+    expect(applyGesture(live, { kind: "key", key: "End" }, SHOWN, SESSION)).toBe(live);
+  });
+});

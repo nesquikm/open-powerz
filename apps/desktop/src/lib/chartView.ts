@@ -72,6 +72,7 @@ export type ChartGesture =
   | { kind: "wheel"; atMs: number; deltaY: number }
   | { kind: "pan"; deltaMs: number }
   | { kind: "key"; key: string }
+  | { kind: "pause" }
   | { kind: "live" };
 
 /** A time range in ms. */
@@ -133,7 +134,12 @@ export function applyGesture(
   const mid = shown.t0Ms + span / 2;
   switch (gesture.kind) {
     case "live":
-      return { mode: "live", window: view.window };
+      // Already live: the same view, so nothing redraws.
+      return view.mode === "live" ? view : { mode: "live", window: view.window };
+    case "pause":
+      // Freezes exactly the range on screen (AC-DDDYDJ.2); already paused, unchanged.
+      if (view.mode === "history") return view;
+      return { mode: "history", window: view.window, t0Ms: shown.t0Ms, t1Ms: shown.t1Ms };
     case "select": {
       // A selection is clipped to the session, never shifted.
       const t0Ms = Math.max(session.firstMs, Math.min(gesture.t0Ms, gesture.t1Ms));
@@ -164,6 +170,9 @@ export function applyGesture(
           return history(zoom(shown, mid, ZOOM_STEP, session));
         case "ArrowDown":
           return history(zoom(shown, mid, 1 / ZOOM_STEP, session));
+        case "End":
+          // End returns to live (AC-DDDYDJ.5); already live, unchanged.
+          return view.mode === "live" ? view : { mode: "live", window: view.window };
         default:
           return view;
       }
@@ -175,6 +184,29 @@ export function windowPressed(view: ChartView, id: LiveWindowId): boolean {
   return view.mode === "live" && view.window === id;
 }
 
+/** What the Live button shows for a view: pressed and reading "Live" while the chart
+ * follows the newest data (AC-DDDYDJ.1). */
+export function liveButton(view: ChartView): { label: string; pressed: boolean; title: string } {
+  if (view.mode === "live") {
+    return {
+      label: "Live",
+      pressed: true,
+      title: "Pause the chart on this range; the stream and any recording keep running",
+    };
+  }
+  return {
+    label: "Paused · Go live",
+    pressed: false,
+    title: "Return the chart to live: press this button or End",
+  };
+}
+
+/** The gesture the Live button sends: pause while live, go live while paused
+ * (AC-DDDYDJ.2). */
+export function liveToggle(view: ChartView): ChartGesture {
+  return view.mode === "live" ? { kind: "pause" } : { kind: "live" };
+}
+
 /** The wheel zooms only when the chart has focus or Ctrl / ⌘ is held (a trackpad pinch
  * sends Ctrl); otherwise it scrolls the page as usual. */
 export function wheelZooms(e: { focused: boolean; ctrlKey: boolean; metaKey: boolean }): boolean {
@@ -182,19 +214,30 @@ export function wheelZooms(e: { focused: boolean; ctrlKey: boolean; metaKey: boo
 }
 
 /** What the screen-reader status says on entering history mode or returning to live;
- * times count from `originMs`, the session start (AC-272WSN.2). */
-export function rangeAnnouncement(view: ChartView, originMs = 0): string {
+ * times count from `originMs`, the session start (AC-272WSN.2). `paused` marks a
+ * history view entered by the pause gesture (AC-DDDYDJ.6). */
+export function rangeAnnouncement(
+  view: ChartView,
+  originMs = 0,
+  { paused = false }: { paused?: boolean } = {},
+): string {
   if (view.mode === "history") {
     const from = formatSessionTime(view.t0Ms - originMs, 1);
     const to = formatSessionTime(view.t1Ms - originMs, 1);
-    return `History: ${from} to ${to}`;
+    return `${paused ? "Paused" : "History"}: ${from} to ${to}`;
   }
   const label = LIVE_WINDOWS.find((w) => w.id === view.window)?.label ?? view.window;
   return `Live: ${label}`;
 }
 
 /** The keys the focused chart handles itself. */
-export const CHART_KEYS: readonly string[] = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
+export const CHART_KEYS: readonly string[] = [
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "End",
+];
 
 /** A `history_range` call. */
 export interface HistoryRequest {
