@@ -4,13 +4,17 @@ import {
   CHART_AXES,
   CHART_SERIES,
   SERIES_VISIBILITY_KEY,
+  ZERO_BASED_KEY,
   chartOptions,
   defaultVisibility,
   loadVisibility,
+  loadZeroBased,
   saveVisibility,
+  saveZeroBased,
   seriesStyles,
   toggleSeries,
   visibleAxes,
+  zeroBasedRange,
   type ChartSeriesKey,
 } from "./chartSeries";
 
@@ -243,5 +247,74 @@ describe("time axis ticks (visual check)", () => {
     expect(tickDecimals(25)).toBe(3);
     expect(tickDecimals(1)).toBe(3);
     expect(tickDecimals(0)).toBe(0);
+  });
+});
+
+describe("zero-based axes (AC-AH2AEM.9)", () => {
+  it("stretches a positive-only range down to zero", () => {
+    const [min, max] = zeroBasedRange(1.94, 2.06);
+    expect(min).toBe(0);
+    expect(max).toBeGreaterThanOrEqual(2.06);
+  });
+
+  it("stretches a negative-only range up to zero, so negative currents stay visible", () => {
+    const [min, max] = zeroBasedRange(-1.2, -0.8);
+    expect(min).toBeLessThanOrEqual(-1.2);
+    expect(max).toBe(0);
+  });
+
+  it("keeps both signs of a range that crosses zero, with padding", () => {
+    const [min, max] = zeroBasedRange(-0.5, 2);
+    expect(min).toBeLessThan(-0.5);
+    expect(max).toBeGreaterThan(2);
+  });
+
+  it("gives a finite range that includes zero when there is no data", () => {
+    const [min, max] = zeroBasedRange(null, null);
+    expect(Number.isFinite(min) && Number.isFinite(max)).toBe(true);
+    expect(min).toBeLessThanOrEqual(0);
+    expect(max).toBeGreaterThan(min);
+  });
+
+  it("gives every value axis the zero-based range when on, and leaves auto-scale when off", () => {
+    const base = {
+      theme: "light",
+      visibility: defaultVisibility(),
+      width: 500,
+      height: 200,
+    } as const;
+    const off = chartOptions({ ...base, zeroBased: false });
+    const on = chartOptions({ ...base, zeroBased: true });
+    for (const a of CHART_AXES) {
+      expect(off.scales?.[a.id]?.range).toBeUndefined();
+      const range = on.scales?.[a.id]?.range;
+      expect(typeof range).toBe("function");
+      const fn = range as (u: unknown, min: number, max: number, key: string) => [number, number];
+      expect(fn(null, 1.94, 2.06, a.id)).toEqual(zeroBasedRange(1.94, 2.06));
+    }
+    expect(on.scales?.x?.range).toBeUndefined();
+  });
+
+  it("is off by default and persists the choice for the session", () => {
+    expect(loadZeroBased(undefined)).toBe(false);
+    const storage = new FakeStorage();
+    expect(loadZeroBased(storage)).toBe(false);
+    saveZeroBased(true, storage);
+    expect(storage.map.get(ZERO_BASED_KEY)).toBeDefined();
+    expect(loadZeroBased(storage)).toBe(true);
+    saveZeroBased(false, storage);
+    expect(loadZeroBased(storage)).toBe(false);
+    storage.setItem(ZERO_BASED_KEY, "{not json");
+    expect(loadZeroBased(storage)).toBe(false);
+    const throwing: ThemeStorage = {
+      getItem: () => {
+        throw new Error("denied");
+      },
+      setItem: () => {
+        throw new Error("denied");
+      },
+    };
+    expect(loadZeroBased(throwing)).toBe(false);
+    expect(() => saveZeroBased(true, throwing)).not.toThrow();
   });
 });

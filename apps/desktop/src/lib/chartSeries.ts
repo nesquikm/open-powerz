@@ -1,4 +1,4 @@
-import type uPlot from "uplot";
+import uPlot from "uplot";
 import { THEME_COLORS, type ResolvedTheme, type ThemeStorage } from "./theme";
 
 /** One plotted channel. */
@@ -106,6 +106,41 @@ export function saveVisibility(v: SeriesVisibility, storage: ThemeStorage | unde
   }
 }
 
+/** Storage key for the "Zero-based axes" choice (session storage, like the legend). */
+export const ZERO_BASED_KEY = "open-powerz.chart.zeroBased";
+
+/** The stored "Zero-based axes" choice; off when missing, corrupt or unreadable. */
+export function loadZeroBased(storage: ThemeStorage | undefined): boolean {
+  try {
+    const raw = storage?.getItem(ZERO_BASED_KEY);
+    return raw == null ? false : JSON.parse(raw) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Persist the "Zero-based axes" choice; storage failures are ignored. */
+export function saveZeroBased(on: boolean, storage: ThemeStorage | undefined): void {
+  try {
+    storage?.setItem(ZERO_BASED_KEY, JSON.stringify(on));
+  } catch {
+    // storage unavailable: keep the in-memory choice
+  }
+}
+
+/** A value axis range that always includes zero (AC-AH2AEM.9): from min(0, dataMin) to
+ * max(0, dataMax), padded the way uPlot pads an auto-scaled axis, so a small ripple is
+ * drawn to scale and negative values (reverse current) stay in view. */
+export function zeroBasedRange(dataMin: number | null, dataMax: number | null): [number, number] {
+  const lo = Math.min(0, Number.isFinite(dataMin) ? (dataMin as number) : 0);
+  const hi = Math.max(0, Number.isFinite(dataMax) ? (dataMax as number) : 0);
+  const [min, max] = uPlot.rangeNum(lo, hi, 0.1, true);
+  // `rangeNum` writes an exact zero as -0.
+  // Typed as nullable, but finite for finite input.
+  const zero = (v: number | null): number => (v === null || v === 0 ? 0 : v);
+  return [zero(min), zero(max)];
+}
+
 /** The browser's session storage, if reachable. */
 export function sessionStore(): ThemeStorage | undefined {
   try {
@@ -154,6 +189,8 @@ export interface ChartOptionsInput {
   visibility: SeriesVisibility;
   width: number;
   height: number;
+  /** Every value axis includes zero (AC-AH2AEM.9); off means auto-scale. */
+  zeroBased?: boolean;
 }
 
 /** uPlot options: x = ms since the session start (labelled in seconds), then one series per CHART_SERIES entry on its axis scale. */
@@ -162,6 +199,7 @@ export function chartOptions({
   visibility,
   width,
   height,
+  zeroBased = false,
 }: ChartOptionsInput): uPlot.Options {
   const p = THEME_COLORS[theme];
   const styles = seriesStyles(theme);
@@ -197,7 +235,15 @@ export function chartOptions({
     height,
     series,
     axes,
-    scales: { x: { time: false }, volts: {}, amps: {}, watts: {} },
+    scales: {
+      x: { time: false },
+      ...Object.fromEntries(
+        CHART_AXES.map((a): [string, uPlot.Scale] => [
+          a.id,
+          zeroBased ? { range: (_u, min, max) => zeroBasedRange(min, max) } : {},
+        ]),
+      ),
+    },
     // The component draws its own legend (toggle buttons) and hover readout.
     legend: { show: false },
     // Plain drag selects an x range; the component zooms to it (leaving live mode).

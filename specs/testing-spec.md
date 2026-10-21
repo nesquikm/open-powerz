@@ -60,9 +60,12 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
   failure the `e2e-app` job uploads the WebdriverIO and `tauri-driver` logs
   (`apps/desktop/e2e-app-logs/`).
 - **Desktop UI e2e:** Playwright runs the web build (`VITE_BACKEND=mock`, a scripted backend)
-  in Chromium and WebKit on all three OSes: UI flows, shortcuts, focus order, and an axe scan
-  (no serious or critical violations) in both themes at 900 and 1600 px. Runs in CI in the
-  `e2e-ui` job on ubuntu-24.04, macos-latest and windows-latest with Playwright's bundled
+  in Chromium and WebKit on all three OSes: UI flows and every shortcut; layout (no horizontal
+  scroll or readout overflow/overlap from 900×600 to 2560×1440, a one-row top bar at 900 px in
+  every state); Tab order and visible focus rings; live chart scrolling, the hover readout and
+  the zero-based axes toggle; a 100 ms pan bound over a 10M-sample history (Chromium only); and
+  an axe scan (no serious or critical violations) in both themes at 900 and 1600 px. Runs in
+  CI in the `e2e-ui` job on ubuntu-24.04, macos-latest and windows-latest with Playwright's bundled
   browsers (`bunx playwright install [--with-deps] chromium webkit`, never `channel: chrome`);
   the HTML report and traces are uploaded as an artifact when it fails.
 - **Required checks:** `e2e-app` and `e2e-ui` are separate from the `gate` job and have no

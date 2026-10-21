@@ -1,6 +1,13 @@
 <script lang="ts">
   import { badgeLabel } from "../format";
-  import { RATE_OPTIONS, ratePicker, type ExportJob, type Recording } from "../recording.svelte";
+  import {
+    RATE_OPTIONS,
+    formatRecordingElapsed,
+    ratePicker,
+    recordingRowsSuffix,
+    type ExportJob,
+    type Recording,
+  } from "../recording.svelte";
   import type { Session } from "../session.svelte";
   import type { ThemeChoice } from "../theme";
   import DevicePicker from "./DevicePicker.svelte";
@@ -39,10 +46,12 @@
     onExport: () => void;
   } = $props();
 
-  /** The "⋯" menu that holds theme and About on narrow windows. */
+  /** The "⋯" menu that holds theme and About (and the rate-locked note) on narrow windows. */
   let menuOpen = $state(false);
 
   const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
+  /** The locked rate is news worth showing; "stop to change" is only a tooltip. */
+  const rateNote = $derived(session.state === "rate_locked" ? picker.label : null);
   const recordDisabled = $derived(
     recording.phase === "starting" ||
       recording.phase === "stopping" ||
@@ -58,7 +67,7 @@
 
 <header class="top-bar" aria-label="Device controls">
   <div class="group">
-    <span class="brand">open-powerz</span>
+    <span class="brand wide-only">open-powerz</span>
     <DevicePicker {session} />
     <button
       type="button"
@@ -85,16 +94,19 @@
           <option value={sps}>{sps} SPS</option>
         {/each}
       </select>
-      <!-- The locked rate is news worth showing; "stop to change" is a tooltip. -->
-      {#if picker.label !== null && session.state === "rate_locked"}
-        <span class="rate-note">{picker.label}</span>
+      <!-- Narrow windows: the note moves into the "⋯" menu (the select keeps it as a tooltip). -->
+      {#if rateNote !== null}
+        <span class="rate-note wide-only">{rateNote}</span>
       {/if}
     </span>
     {#if recording.indicator !== null}
-      <span class="rec-indicator" role="timer" title="Recording to CSV"
+      <!-- Narrow windows show just the time; the row count stays for screen readers. -->
+      <span class="rec-indicator" role="timer" title={`Recording to CSV: ${recording.indicator}`}
         ><span class="rec-dot" aria-hidden="true"></span><span class="visually-hidden"
           >Recording:
-        </span>{recording.indicator}</span
+        </span>REC {formatRecordingElapsed(recording.elapsedMs)}<span class="narrow-hidden"
+          >{recordingRowsSuffix(recording.rows)}</span
+        ></span
       >
     {/if}
     <button
@@ -113,13 +125,17 @@
           max={exportJob.total || 1}
           value={exportJob.total > 0 ? exportJob.done : undefined}
         ></progress>
-        Exporting {exportJob.done.toLocaleString("en-US")} / {exportJob.total.toLocaleString(
-          "en-US",
-        )}
+        <span class="narrow-hidden"
+          >Exporting {exportJob.done.toLocaleString("en-US")} / {exportJob.total.toLocaleString(
+            "en-US",
+          )}</span
+        >
       </span>
     {/if}
     <button
       type="button"
+      class="export"
+      class:busy={exportJob.running}
       title="Export the session so far to CSV"
       disabled={exportJob.running || !canExport}
       onclick={onExport}
@@ -142,6 +158,9 @@
       >
       {#if menuOpen}
         <div id="top-bar-menu" class="menu panel">
+          {#if rateNote !== null}
+            <p class="rate-note menu-note">{rateNote}</p>
+          {/if}
           <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
           <button
             type="button"
@@ -194,6 +213,7 @@
   }
   .rec-indicator {
     display: inline-flex;
+    white-space: nowrap;
     align-items: center;
     gap: 0.35rem;
     font-size: 0.8125rem;
@@ -207,8 +227,12 @@
     border-radius: 50%;
     background: var(--danger);
   }
+  .export-progress progress {
+    width: 6rem;
+  }
   .export-progress {
     display: inline-flex;
+    white-space: nowrap;
     align-items: center;
     gap: 0.4rem;
     font-size: 0.8125rem;
@@ -262,6 +286,10 @@
     min-width: 2.25rem;
     font-weight: 700;
   }
+  .menu-note {
+    margin: 0;
+    max-width: 16rem;
+  }
   .menu {
     position: absolute;
     right: 0;
@@ -274,13 +302,42 @@
     padding: 0.75rem;
     box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
   }
-  /* Below ~1000 px the bar keeps one row: theme and About move into the menu. */
+  /* Below ~1000 px the bar keeps one row in every state: the wordmark goes (the
+     window title names the app), theme, About and the rate-locked note move into
+     the menu, the recording indicator shows just its time, and a running export
+     shows just its progress bar in place of the (disabled) Export button; the
+     hidden text stays for screen readers. */
   @media (max-width: 999.98px) {
-    .settings-inline {
+    .top-bar {
+      column-gap: 0.5rem;
+    }
+    .group {
+      gap: 0.375rem;
+    }
+    .top-bar :global(button),
+    .top-bar :global(select) {
+      padding-inline: 0.55rem;
+    }
+    .settings-inline,
+    .wide-only {
       display: none;
     }
     .settings-menu {
       display: inline-flex;
+    }
+    .export.busy {
+      display: none;
+    }
+    .export-progress progress {
+      width: 4.5rem;
+    }
+    .narrow-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
   }
 </style>

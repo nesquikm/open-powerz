@@ -322,6 +322,24 @@ describe("MockBackend ?mock= scenarios (AC-AH2AEN.5)", () => {
     await backend.disconnect();
     expect(batches(events).flatMap((b) => b.samples)).toHaveLength(50);
   });
+  it("slow-export: an export stays half done for a long while, then finishes", async () => {
+    expect(mockModeFromUrl("?mock=slow-export")).toBe("slow-export");
+    const backend = new MockBackend("slow-export");
+    await backend.connect("demo:idle", 50, () => {});
+    vi.advanceTimersByTime(1000);
+    const progress: { done: number; total: number }[] = [];
+    let finished = false;
+    const result = backend.exportSession("powerz-x.csv", (p) => progress.push(p));
+    void result.then(() => (finished = true));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(finished).toBe(false);
+    const half = progress.at(-1);
+    expect(half && half.total > 0 && half.done > 0 && half.done < half.total).toBe(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const done = await result;
+    expect(progress.at(-1)).toEqual({ done: done?.rows, total: done?.rows });
+    await backend.disconnect();
+  });
 });
 
 describe("LINUX_PERMISSION_DENIED (the mock's copy of the backend's Linux permission error)", () => {

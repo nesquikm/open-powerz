@@ -23,7 +23,9 @@
     chartOptions,
     formatSessionSeconds,
     loadVisibility,
+    loadZeroBased,
     saveVisibility,
+    saveZeroBased,
     seriesDef,
     seriesStyles,
     sessionStore,
@@ -110,6 +112,14 @@
   function toggle(key: ChartSeriesKey): void {
     visibility = toggleSeries(visibility, key);
     saveVisibility(visibility, sessionStore());
+  }
+
+  /** "Zero-based axes": every value axis includes 0, kept for the session (AC-AH2AEM.9). */
+  let zeroBased = $state(loadZeroBased(sessionStore()));
+
+  function toggleZeroBased(): void {
+    zeroBased = !zeroBased;
+    saveZeroBased(zeroBased, sessionStore());
   }
 
   /** What to draw from now: the history answer, the whole-session answer or the buffer. */
@@ -327,12 +337,13 @@
     return { width: Math.max(1, el.clientWidth), height: Math.max(1, el.clientHeight) };
   }
 
-  // (Re)build the plot when the host appears, the theme changes or a series is
-  // toggled (uPlot cannot show / hide an axis in place); a resize only resizes it.
+  // (Re)build the plot when the host appears, the theme changes, a series is toggled
+  // (uPlot cannot show / hide an axis in place) or the axes switch between auto-scale
+  // and zero-based; a resize only resizes it.
   $effect(() => {
     const el = host;
     if (!el) return;
-    const opts = chartOptions({ theme, visibility, ...sizeOf(el) });
+    const opts = chartOptions({ theme, visibility, zeroBased, ...sizeOf(el) });
     opts.hooks = {
       ...opts.hooks,
       setCursor: [
@@ -434,15 +445,25 @@
 </script>
 
 <div class="chart-wrap">
-  <div class="toolbar" role="group" aria-label="Live window">
-    {#each LIVE_WINDOWS as w (w.id)}
-      <button
-        type="button"
-        aria-pressed={windowPressed(view, w.id)}
-        class:primary={windowPressed(view, w.id)}
-        onclick={() => pickWindow(w.id)}>{w.label}</button
-      >
-    {/each}
+  <div class="toolbar">
+    <div class="windows" role="group" aria-label="Live window">
+      {#each LIVE_WINDOWS as w (w.id)}
+        <button
+          type="button"
+          aria-pressed={windowPressed(view, w.id)}
+          class:primary={windowPressed(view, w.id)}
+          onclick={() => pickWindow(w.id)}>{w.label}</button
+        >
+      {/each}
+    </div>
+    <button
+      type="button"
+      class="zero-based"
+      class:primary={zeroBased}
+      aria-pressed={zeroBased}
+      title="Start every value axis at zero, so small changes are drawn to scale"
+      onclick={toggleZeroBased}>Zero-based axes</button
+    >
     <button
       type="button"
       class="live"
@@ -515,12 +536,13 @@
     min-width: 0;
     min-height: 0;
   }
-  .toolbar {
+  .toolbar,
+  .windows {
     display: flex;
     gap: 0.25rem;
     flex-wrap: wrap;
   }
-  .live {
+  .zero-based {
     margin-left: auto;
   }
   .legend {

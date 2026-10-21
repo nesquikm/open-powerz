@@ -61,6 +61,12 @@ async function main(): Promise<void> {
       await shot("no-device");
       await streamDemo(page, "load-5v-1a");
       await shot("demo-streaming");
+      // Zero-based axes (AC-AH2AEM.9): the IBUS ripple drawn to scale, then back to auto.
+      const zeroBased = page.getByRole("button", { name: "Zero-based axes" });
+      await zeroBased.click();
+      await page.waitForTimeout(400);
+      await shot("zero-based");
+      await zeroBased.click();
       for (const cell of await overflowingValues(page)) {
         problems.push(`${theme}/${size.name}: readout overflows its cell: ${cell}`);
       }

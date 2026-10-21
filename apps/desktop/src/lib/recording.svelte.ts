@@ -56,7 +56,8 @@ export function formatRecordingElapsed(ms: number): string {
   return `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
 }
 
-function rowsText(rows: number): string {
+/** `1 row`, `1,234 rows`. */
+export function rowsText(rows: number): string {
   return `${rows.toLocaleString("en-US")} ${rows === 1 ? "row" : "rows"}`;
 }
 
@@ -67,7 +68,12 @@ function gapsText(gaps: number): string {
 
 /** What the top bar shows while recording: elapsed time and rows written. */
 export function recordingIndicator(elapsedMs: number, rows: number): string {
-  return `REC ${formatRecordingElapsed(elapsedMs)} · ${rowsText(rows)}`;
+  return `REC ${formatRecordingElapsed(elapsedMs)}${recordingRowsSuffix(rows)}`;
+}
+
+/** The rows part of the indicator, ` · 1,234 rows` (the top bar hides it visually when narrow). */
+export function recordingRowsSuffix(rows: number): string {
+  return ` · ${rowsText(rows)}`;
 }
 
 /** The notice shown once a recording has ended. */

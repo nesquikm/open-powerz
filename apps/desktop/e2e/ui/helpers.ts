@@ -10,6 +10,8 @@
  * - `rate-locked`: authentication fails, so the meter keeps its own rate: the
  *   `connected` status carries `rate_locked: true`, then a `rate` status
  *   reports 50 SPS with `rate_locked: true`; samples stream at 50 SPS.
+ * - `slow-export`: an export reports half its rows at once and finishes only
+ *   after 30 s, so the top bar's export progress can be checked.
  *
  * `?synthetic=<n>` seeds an n-sample history on connect, in dev builds and in
  * this mock production build alike (`syntheticFromUrl`).

@@ -31,6 +31,7 @@ Add a uPlot chart to the desktop UI with a live scrolling window, zoom and pan o
 - AC-AH2AEM.6: Hovering shows the time and each visible series' value at the nearest sample, or its min–max range when the view is decimated.
 - AC-AH2AEM.7: Stream gaps render as breaks in the lines, never as interpolated segments.
 - AC-AH2AEM.8: Series colours come from the theme tokens, and every series also has a distinct line dash, so series stay distinguishable without colour in both themes.
+- AC-AH2AEM.9: A "Zero-based axes" toggle makes every visible Y axis include zero (negative values stay visible); it is off by default and the choice persists for the session.
 
 ## Technical Design
 
@@ -38,8 +39,10 @@ Add a uPlot chart to the desktop UI with a live scrolling window, zoom and pan o
 
 ## Testing
 
-Vitest for the ring buffer, client reduction, bucket-to-series mapping, request superseding and gap handling. The Playwright suite times pan steps on a synthetic 10-million-sample mock and checks live scrolling and the hover readout.
+Vitest for the ring buffer, client reduction, bucket-to-series mapping, request superseding, gap handling and the zero-based axis range (`zeroBasedRange` in `chartSeries.ts`). The Playwright suite times pan steps on a synthetic 10-million-sample mock (`pan.spec.ts`) and checks live scrolling, the hover readout and the "Zero-based axes" toggle (`chart.spec.ts`).
 
 ## Notes
 
 Decimation lives in Rust (FR AH2AEJ) because WebKitGTK is too slow to reduce millions of points in the page.
+
+AC-AH2AEM.9 came from the milestone visual review: auto-scaled axes made a ±2% IBUS ripple (1.94–2.06 A) look huge. The range is uPlot's usual padded range of min(0, data min) to max(0, data max), kept in session storage like the legend.

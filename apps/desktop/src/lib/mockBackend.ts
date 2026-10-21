@@ -291,7 +291,7 @@ interface MockRecording {
 
 /** Scripted backend behaviours chosen with `?mock=<name>` in the page URL; the device
  * list stays the same in every one. */
-export const MOCK_MODES = ["permission-denied", "rate-locked"] as const;
+export const MOCK_MODES = ["permission-denied", "rate-locked", "slow-export"] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
 /** The `?mock=` mode of the page URL, or null for the normal demo behaviour. */
@@ -299,6 +299,9 @@ export function mockModeFromUrl(search: string | undefined): MockMode | null {
   const name = urlParam(search, "mock");
   return MOCK_MODES.find((m) => m === name) ?? null;
 }
+
+/** How long a `slow-export` export stays half done, so the UI suite can see its progress. */
+const SLOW_EXPORT_MS = 30_000;
 
 /** The meter's own rate when authentication fails (`rate-locked`). */
 const LOCKED_RATE_SPS = 50;
@@ -473,18 +476,24 @@ export class MockBackend {
     return { rows: rec.rows, gaps: [], disconnected: false };
   }
 
-  /** Exports every sample streamed so far, finishing on the next timer tick. */
+  /** Exports every sample streamed so far, finishing on the next timer tick (`slow-export`:
+   * reports half the rows at once and finishes after {@link SLOW_EXPORT_MS}). */
   async exportSession(
     suggestedName: string,
     onProgress: (progress: ExportProgress) => void,
   ): Promise<ExportResult | null> {
     const s = this.#open();
     const rows = s.streamed;
+    const slow = this.#mode === "slow-export";
+    if (slow) onProgress({ done: Math.floor(rows / 2), total: rows });
     return new Promise((resolve) =>
-      setTimeout(() => {
-        onProgress({ done: rows, total: rows });
-        resolve({ path: suggestedName, rows });
-      }, 0),
+      setTimeout(
+        () => {
+          onProgress({ done: rows, total: rows });
+          resolve({ path: suggestedName, rows });
+        },
+        slow ? SLOW_EXPORT_MS : 0,
+      ),
     );
   }
 

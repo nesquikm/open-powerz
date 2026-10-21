@@ -39,7 +39,7 @@ Svelte 5 runes components: `TopBar`, `DevicePicker`, `Readout`, `StatsPanel`, `E
 
 ## Testing
 
-Vitest for formatting, shortcut dispatch (including the text-input guard) and theme resolution. The Playwright suite (FR AH2AEN) covers layout, shortcuts, focus order and the accessibility scan. Visual checks per the milestone plan.
+Vitest for formatting, shortcut dispatch (including the text-input guard), theme resolution and the layout breakpoint. The Playwright suite (FR AH2AEN) covers the layout (`layout.spec.ts`: no horizontal scroll and no readout overflow or overlap at 900×600, 1280×800, 1600×900, 1920×1080 and 2560×1440, disconnected and streaming, plus a one-row top bar at 900×600 in every state and the device picker's width and tooltip), every shortcut (`flows.spec.ts`), Tab order and visible focus rings (`focus.spec.ts`) and the accessibility scan (`a11y.spec.ts`). Visual checks per the milestone plan.
 
 ## Notes
 
