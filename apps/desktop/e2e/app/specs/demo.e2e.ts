@@ -82,7 +82,10 @@ async function readout(name: string): Promise<number> {
 }
 
 async function statsElapsed(): Promise<number> {
-  const text = await $('[aria-label="Statistics"] .totals dd').getText();
+  // The Elapsed value, by its own label (the totals list also holds Charge and Energy).
+  const text = await $(
+    '//*[@aria-label="Statistics"]//dt[normalize-space()="Elapsed"]/following-sibling::dd[1]',
+  ).getText();
   const [h, m, s] = text.trim().split(":").map(Number);
   return (h ?? NaN) * 3600 + (m ?? NaN) * 60 + (s ?? NaN);
 }
@@ -95,8 +98,13 @@ async function seriesLengths(): Promise<{ vbus: number; ibus: number }> {
   }, HOOK);
 }
 
+/** The visible button labelled `label`: the top bar can also hold a copy in its "⋯" menu. */
 async function button(label: string) {
-  return $(`button=${label}`);
+  const all = await $$("button");
+  for (const el of all) {
+    if ((await el.getText()).trim() === label && (await el.isDisplayed())) return el;
+  }
+  throw new Error(`no visible "${label}" button`);
 }
 
 describe("open-powerz against the demo device", () => {
@@ -144,7 +152,17 @@ describe("open-powerz against the demo device", () => {
     await expect($('[role="timer"]')).toBeDisplayed({ wait: 5_000 });
     await browser.pause(RECORD_S * 1000);
     await (await button("Stop")).click();
-    await expect(await button("Record")).toBeDisplayed({ wait: 5_000 });
+    await browser.waitUntil(
+      () =>
+        button("Record").then(
+          () => true,
+          () => false,
+        ),
+      {
+        timeout: 5_000,
+        timeoutMsg: "Record did not come back after Stop",
+      },
+    );
     await browser.waitUntil(() => csvFiles().length === 1, {
       timeout: 5_000,
       timeoutMsg: "the recording was not written to the save directory",
