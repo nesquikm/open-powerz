@@ -38,8 +38,11 @@ impl Timeline {
         let device = i64::from(device_ms);
         let mut t = clamp_ms(device + self.offset);
         let mut jumped = false;
+        let restart = std::mem::take(&mut self.restart);
+        // A new run never starts at or before the last record, so the break before it
+        // always has a length (a clock that has not moved since the last run included).
         if let Some((last, wall)) = self.last
-            && t < last
+            && (t < last || (restart && t <= last))
         {
             let step = now_ms.saturating_sub(wall).max(1);
             let target = u64::from(last).saturating_add(step);
@@ -47,7 +50,7 @@ impl Timeline {
             self.offset = i64::from(t) - device;
             jumped = true;
         }
-        let new_run = std::mem::take(&mut self.restart) || jumped;
+        let new_run = restart || jumped;
         self.last = Some((t, now_ms));
         (t, new_run)
     }
@@ -208,6 +211,18 @@ mod tests {
         assert_eq!(t.map(30, 8_020), (93_020, false));
         // A jump inside one poll still moves forward by at least 1 ms.
         assert_eq!(t.map(5, 8_020), (93_021, true));
+    }
+
+    #[test]
+    fn a_new_run_never_starts_at_or_before_the_last_record() {
+        // A reconnect whose first record reads the very time the last run ended (a
+        // clock that has not moved) still starts strictly later, so the break between
+        // the runs has a length and the history reports it (AC-272WSN.3).
+        let mut t = Timeline::default();
+        t.map(500, 1_000);
+        t.restart = true;
+        assert_eq!(t.map(500, 1_000), (501, true));
+        assert_eq!(t.map(500, 1_000), (501, false));
     }
 
     #[test]
