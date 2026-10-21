@@ -961,7 +961,7 @@ impl transport::Transport for ClockJump {
             .unwrap_or_default();
         let mut log = self.device_times.lock().unwrap();
         for (start, len) in spans {
-            for rec in reply[start..start + len].chunks_exact_mut(20) {
+            for rec in reply[start..start + len].as_chunks_mut::<20>().0 {
                 let mut t = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
                 if self.polls >= self.from_poll {
                     t = t.saturating_sub(self.shift_ms);

@@ -21,7 +21,7 @@
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { createWriteStream, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createWriteStream, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -143,6 +143,24 @@ export const config: WebdriverIO.Config = {
         process.exit(1);
       }
     });
+  },
+
+  /** On a failed test, keep what the page looked like: a screenshot and the app's state. */
+  afterTest: async (test, _context, { passed }) => {
+    if (passed) return;
+    const name = test.title.replace(/[^\w.-]+/g, "_").slice(0, 80);
+    try {
+      await browser.saveScreenshot(path.join(logDir, `${name}.png`));
+      const state = await browser.execute(() => ({
+        href: location.href,
+        tauri: "__TAURI_INTERNALS__" in window,
+        hook: "__OPEN_POWERZ_E2E__" in window,
+        text: document.body.innerText.slice(0, 4000),
+      }));
+      writeFileSync(path.join(logDir, `${name}.json`), JSON.stringify(state, null, 2));
+    } catch (e) {
+      console.error("could not capture the failed page:", e);
+    }
   },
 
   afterSession: () => cleanUp(),
