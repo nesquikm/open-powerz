@@ -44,7 +44,7 @@ codename: Live Wire
   verify: Vitest passes; visual-check screenshots of live and zoomed views reviewed
 - [ ] WebdriverIO + tauri-driver real-app suite, Playwright + axe UI suite, CI `e2e` job — AH2AEN
   verify: `bun run e2e:ui` passes locally; CI `e2e` job green on its matrix
-- [ ] Desktop HIL backend test (`POWERZ_HIL=1`) against the KM003C — AH2AEN
+- [x] Desktop HIL backend test (`POWERZ_HIL=1`) against the KM003C — AH2AEN
   verify: `POWERZ_HIL=1 cargo test -p open-powerz-desktop --test hil` passes on the attached meter
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
   verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. 1000 SPS "—" temperature) and a recorded CSV listed in the report

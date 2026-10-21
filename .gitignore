@@ -4,6 +4,11 @@
 # JS / Vite
 node_modules/
 apps/desktop/dist/
+apps/desktop/dist-e2e-ui/
+apps/desktop/dist-e2e-app/
+apps/desktop/e2e-app-logs/
+apps/desktop/test-results/
+apps/desktop/playwright-report/
 *.tsbuildinfo
 
 # Tauri generated files

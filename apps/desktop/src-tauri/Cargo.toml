@@ -13,6 +13,11 @@ publish = false
 name = "open_powerz_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# The real-app end-to-end build (FR AH2AEN): saves recordings and exports into
+# `$OPEN_POWERZ_E2E_SAVE_DIR` instead of opening the save dialog.
+e2e = []
+
 [build-dependencies]
 tauri-build = { version = "2.7.3", features = [] }
 

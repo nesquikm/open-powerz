@@ -47,6 +47,7 @@
     type ChartGesture,
     type ChartView,
   } from "../chartView";
+  import { E2E_BUILD, ChartProbe, installChartProbe } from "../e2eHook";
   import { formatSigned, formatSignedNumber } from "../stats";
   import type { MotionSettings, ResolvedTheme } from "../theme";
 
@@ -63,6 +64,8 @@
   let view: ChartView = $state({ mode: "live", window: "10s" });
   /** The last `history_range` answer drawn in history mode. */
   let historyFrame: ChartFrame | null = null;
+  /** The range `historyFrame` answers. */
+  let historyFrameRange: [number, number] | null = null;
   /** The last whole-session answer, drawn by "Whole session" once the session is
    * older than the live buffer (AC-AH2AEM.2). */
   let sessionFrame: ChartFrame | null = null;
@@ -180,10 +183,28 @@
       u.setData(toAlignedData(frame), range === null);
       if (range !== null) u.setScale("x", { min: range[0], max: range[1] });
     });
+    if (E2E_BUILD && probe !== null) {
+      const fromHistory =
+        frame === historyFrame &&
+        view.mode === "history" &&
+        historyFrameRange !== null &&
+        historyFrameRange[0] === view.t0Ms &&
+        historyFrameRange[1] === view.t1Ms;
+      probe.record(frame, {
+        mode: view.mode,
+        t0Ms: range?.[0] ?? frame.x[0] ?? 0,
+        t1Ms: range?.[1] ?? frame.x[frame.x.length - 1] ?? 0,
+        fromHistory,
+      });
+    }
     // The cursor stays put while the window scrolls: read its time on the new scale.
     if (hoverLeftPx !== null) hoverAtMs = u.posToVal(hoverLeftPx, "x");
     updateHover();
   }
+
+  /** Test builds only: what the e2e hook reports (FR AH2AEN). */
+  const probe: ChartProbe | null = E2E_BUILD ? new ChartProbe() : null;
+  if (E2E_BUILD && probe !== null) $effect(() => installChartProbe(probe));
 
   const scheduler = new RedrawScheduler(draw);
   $effect(() => () => scheduler.stop());
@@ -228,6 +249,7 @@
       if (view.mode !== "history") return;
       historyError = null;
       historyFrame = bucketsToFrame(result, gaps);
+      historyFrameRange = [req.t0Ms, req.t1Ms];
       // A zoom that came before the session start was known still needs it for clamping.
       const last = buffer.lastMs;
       if (sessionStartMs === null && last !== null) {
@@ -253,6 +275,7 @@
   function leaveHistory(): void {
     requester.cancel();
     historyFrame = null;
+    historyFrameRange = null;
     historyError = null;
   }
 
@@ -510,12 +533,17 @@
     align-items: center;
     gap: 0.375rem;
   }
+  /* Off state: muted text (still ≥ 4.5:1), struck through, faded swatch. */
   .series[aria-pressed="false"] {
-    opacity: 0.5;
+    color: var(--muted);
+    border-style: dashed;
     text-decoration: line-through;
   }
+  .series[aria-pressed="false"] .swatch {
+    opacity: 0.35;
+  }
   .unit {
-    opacity: 0.7;
+    color: var(--muted);
   }
   .hover {
     display: flex;

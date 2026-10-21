@@ -12,6 +12,8 @@
     "check": "bun run --cwd apps/desktop check",
     "lint": "bun run --cwd apps/desktop lint",
     "format": "bun run --cwd apps/desktop format",
-    "test": "bun run --cwd apps/desktop test"
+    "test": "bun run --cwd apps/desktop test",
+    "e2e:ui": "bun run --cwd apps/desktop e2e:ui",
+    "e2e:app": "bun run --cwd apps/desktop e2e:app"
   }
 }

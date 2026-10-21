@@ -241,15 +241,26 @@ class HistoryColumns {
   }
 }
 
+/** The page URL's query string (`location.search`), if there is a page. */
+function pageSearch(): string | undefined {
+  return (globalThis as { location?: { search?: string } }).location?.search;
+}
+
+/** Parameter `name` of the query string `search`, or null when absent. */
+function urlParam(search: string | undefined, name: string): string | null {
+  return search ? new URLSearchParams(search).get(name) : null;
+}
+
 /** The largest synthetic seed (a 20M seed is already about 640 MB of columns). */
 export const MAX_SYNTHETIC_SAMPLES = 20_000_000;
 
 /** `?synthetic=<n>` in the page URL seeds an `n`-sample history (at most
  * {@link MAX_SYNTHETIC_SAMPLES}) on connect, for the Playwright pan-performance check
- * (AC-AH2AEM.4); dev builds only, and the device list is unchanged. */
+ * (AC-AH2AEM.4); dev and mock builds only, and the device list is unchanged. */
 export function syntheticFromUrl(search: string | undefined, dev: boolean): number | null {
-  if (!dev || !search) return null;
-  const n = Number(new URLSearchParams(search).get("synthetic"));
+  const raw = dev ? urlParam(search, "synthetic") : null;
+  if (raw === null) return null;
+  const n = Number(raw);
   return Number.isInteger(n) && n > 0 ? Math.min(n, MAX_SYNTHETIC_SAMPLES) : null;
 }
 
@@ -278,10 +289,41 @@ interface MockRecording {
   sinceProgressMs: number;
 }
 
+/** Scripted backend behaviours chosen with `?mock=<name>` in the page URL; the device
+ * list stays the same in every one. */
+export const MOCK_MODES = ["permission-denied", "rate-locked"] as const;
+export type MockMode = (typeof MOCK_MODES)[number];
+
+/** The `?mock=` mode of the page URL, or null for the normal demo behaviour. */
+export function mockModeFromUrl(search: string | undefined): MockMode | null {
+  const name = urlParam(search, "mock");
+  return MOCK_MODES.find((m) => m === name) ?? null;
+}
+
+/** The meter's own rate when authentication fails (`rate-locked`). */
+const LOCKED_RATE_SPS = 50;
+
+/** The Linux permission failure of `src-tauri/src/ui_error.rs` (the source of truth for the
+ * wording; `mockBackend.test.ts` checks this copy against it, and the UI suite reads it). */
+export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
+  kind: "permission_denied",
+  message: "The system did not allow the app to open the meter.",
+  hint:
+    "Install the udev rule: sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/, then run " +
+    "sudo udevadm control --reload-rules and sudo udevadm trigger, and replug the meter " +
+    "(see docs/linux.md).",
+};
+
 /** One page-lifetime instance; a running session's timer stops on `disconnect()` or
  * when the page goes away (it is a test and demo double, not a resource owner). */
 export class MockBackend {
   #session: Running | null = null;
+  #mode: MockMode | null;
+
+  /** `mode` defaults to the page URL's `?mock=` parameter. */
+  constructor(mode: MockMode | null = mockModeFromUrl(pageSearch())) {
+    this.#mode = mode;
+  }
 
   async listDevices(): Promise<DeviceListing[]> {
     return SCENARIOS.map((name) => ({
@@ -309,6 +351,9 @@ export class MockBackend {
     if (this.#session) throw usage("A meter is already connected. Disconnect it first.");
     const scenario = scenarioOf(deviceId);
     if (!scenario) throw usage("That meter is no longer attached.");
+    if (this.#mode === "permission-denied") throw { ...LINUX_PERMISSION_DENIED };
+    const locked = this.#mode === "rate-locked";
+    // Like the worker: a locked session's rate is unknown until measured.
     onEvent({
       type: "status",
       data: {
@@ -316,14 +361,20 @@ export class MockBackend {
         model: "KM003C",
         firmware_version: "2.0.6",
         serial: "123456",
-        rate_sps: rateSps,
-        rate_locked: false,
+        rate_sps: locked ? null : rateSps,
+        rate_locked: locked,
         session_id: 1,
       },
     });
+    if (locked) {
+      onEvent({
+        type: "status",
+        data: { state: "rate", rate_sps: LOCKED_RATE_SPS, rate_locked: true },
+      });
+    }
     const session: Running = {
       scenario,
-      rateSps,
+      rateSps: locked ? LOCKED_RATE_SPS : rateSps,
       nextMs: 0,
       carry: 0,
       onEvent,
@@ -334,8 +385,11 @@ export class MockBackend {
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
     this.#session = session;
-    const search = (globalThis as { location?: { search?: string } }).location?.search;
-    const synthetic = syntheticFromUrl(search, import.meta.env.DEV);
+    // The mock production build (the Playwright suite) honours it too.
+    const synthetic = syntheticFromUrl(
+      pageSearch(),
+      import.meta.env.DEV || import.meta.env.VITE_BACKEND === "mock",
+    );
     if (synthetic !== null) await this.seedSyntheticHistory(synthetic);
   }
 
@@ -394,6 +448,9 @@ export class MockBackend {
 
   async setRate(rateSps: number): Promise<void> {
     const s = this.#open();
+    if (this.#mode === "rate-locked") {
+      throw usage("Changing the rate needs authentication, which the meter refused.");
+    }
     s.rateSps = rateSps;
     s.carry = 0;
     s.onEvent({ type: "status", data: { state: "rate", rate_sps: rateSps, rate_locked: false } });

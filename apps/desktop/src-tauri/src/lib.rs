@@ -1,5 +1,7 @@
 pub mod batch;
 pub mod devices;
+#[cfg(feature = "e2e")]
+pub mod e2e;
 pub mod history;
 pub mod recording;
 pub mod stats;
@@ -7,7 +9,7 @@ pub mod store;
 pub mod ui_error;
 pub mod worker;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -173,6 +175,32 @@ fn ask_save_path(
         .blocking_save_file()
 }
 
+/// Where to save a file proposed as `suggested_name`: the dialog's choice,
+/// or `None` when it was cancelled. The e2e build saves into
+/// `$OPEN_POWERZ_E2E_SAVE_DIR` without asking when that is set.
+fn choose_save_path(
+    app: &tauri::AppHandle,
+    suggested_name: &str,
+) -> Result<Option<PathBuf>, UiError> {
+    #[cfg(feature = "e2e")]
+    if let Some(path) = e2e::save_path(
+        std::env::var_os(e2e::SAVE_DIR_ENV).as_deref(),
+        suggested_name,
+    ) {
+        return Ok(Some(path));
+    }
+    let Some(choice) = ask_save_path(app, suggested_name) else {
+        return Ok(None);
+    };
+    // A save dialog that answers with something other than a file path is a
+    // fault, not a cancel.
+    choice.into_path().map(Some).map_err(|_| {
+        UiError::usage(
+            "The save dialog did not return a file on disk; pick a folder on this computer.",
+        )
+    })
+}
+
 /// Refuse before the dialog when `prepare` does, ask where to save, then
 /// run `then` with what `prepare` gives and the chosen path; `None` when the
 /// dialog was cancelled (nothing runs). `prepare` runs again after the
@@ -185,16 +213,9 @@ fn with_save_path<P, R>(
     then: impl FnOnce(P, &Path) -> Result<R, UiError>,
 ) -> Result<Option<R>, UiError> {
     prepare(&state.manager())?;
-    let Some(choice) = ask_save_path(app, suggested_name) else {
+    let Some(path) = choose_save_path(app, suggested_name)? else {
         return Ok(None);
     };
-    // A save dialog that answers with something other than a file path is a
-    // fault, not a cancel.
-    let path = choice.into_path().map_err(|_| {
-        UiError::usage(
-            "The save dialog did not return a file on disk; pick a folder on this computer.",
-        )
-    })?;
     let prepared = prepare(&state.manager())?;
     then(prepared, &path).map(Some)
 }

@@ -1,6 +1,13 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BackendEvent, Batch } from "./backend";
-import { MAX_SYNTHETIC_SAMPLES, MockBackend, syntheticFromUrl } from "./mockBackend";
+import {
+  LINUX_PERMISSION_DENIED,
+  MAX_SYNTHETIC_SAMPLES,
+  MockBackend,
+  mockModeFromUrl,
+  syntheticFromUrl,
+} from "./mockBackend";
 
 function batches(events: BackendEvent[]): Batch[] {
   return events.flatMap((e) => (e.type === "batch" ? [e.data] : []));
@@ -262,5 +269,80 @@ describe("MockBackend synthetic seed limits (AC-AH2AEM.4)", () => {
     await backend.disconnect();
     expect(vbus.buckets[0]?.min).toBeCloseTo(9 + 0.02 * Math.sin(1.234 * 5), 5);
     expect(cc1.buckets[0]?.max).toBeCloseTo(1.05, 5);
+  });
+});
+
+describe("MockBackend ?mock= scenarios (AC-AH2AEN.5)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("reads the mode from the page URL and ignores unknown ones", () => {
+    expect(mockModeFromUrl("?mock=permission-denied")).toBe("permission-denied");
+    expect(mockModeFromUrl("?synthetic=10&mock=rate-locked")).toBe("rate-locked");
+    expect(mockModeFromUrl("?mock=nope")).toBeNull();
+    expect(mockModeFromUrl("")).toBeNull();
+    expect(mockModeFromUrl(undefined)).toBeNull();
+  });
+
+  it("keeps the normal device list in every mode", async () => {
+    const normal = await new MockBackend(null).listDevices();
+    expect(await new MockBackend("permission-denied").listDevices()).toEqual(normal);
+    expect(await new MockBackend("rate-locked").listDevices()).toEqual(normal);
+  });
+
+  it("permission-denied: connect rejects with the Linux permission error and udev hint", async () => {
+    const backend = new MockBackend("permission-denied");
+    const events: BackendEvent[] = [];
+    await expect(backend.connect("demo:load-5v-1a", 50, (e) => events.push(e))).rejects.toEqual({
+      kind: "permission_denied",
+      message: "The system did not allow the app to open the meter.",
+      hint:
+        "Install the udev rule: sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/, then run " +
+        "sudo udevadm control --reload-rules and sudo udevadm trigger, and replug the meter " +
+        "(see docs/linux.md).",
+    });
+    expect(events).toEqual([]);
+    await expect(backend.stats()).rejects.toMatchObject({ kind: "usage" });
+  });
+
+  it("rate-locked: reports a locked session at the meter's 50 SPS and refuses rate changes", async () => {
+    const backend = new MockBackend("rate-locked");
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 1000, (e) => events.push(e));
+    expect(events[0]).toMatchObject({
+      type: "status",
+      data: { state: "connected", rate_sps: null, rate_locked: true },
+    });
+    expect(events[1]).toEqual({
+      type: "status",
+      data: { state: "rate", rate_sps: 50, rate_locked: true },
+    });
+    await expect(backend.setRate(10)).rejects.toMatchObject({ kind: "usage" });
+    vi.advanceTimersByTime(1000);
+    await backend.disconnect();
+    expect(batches(events).flatMap((b) => b.samples)).toHaveLength(50);
+  });
+});
+
+describe("LINUX_PERMISSION_DENIED (the mock's copy of the backend's Linux permission error)", () => {
+  /** `src-tauri/src/ui_error.rs`, the source of truth for the wording. */
+  const rust = readFileSync(new URL("../../src-tauri/src/ui_error.rs", import.meta.url), "utf8");
+
+  /** A Rust string literal's value: `\` + newline continues the line, dropping the indent. */
+  function rustString(literal: string): string {
+    return literal.replace(/\\\r?\n\s*/g, "");
+  }
+
+  it("has the hint of ui_error.rs", () => {
+    const m = /const LINUX_PERMISSION_HINT: &str = "((?:[^"\\]|\\[\s\S])*)";/.exec(rust);
+    expect(m?.[1], "LINUX_PERMISSION_HINT in ui_error.rs").toBeDefined();
+    expect(LINUX_PERMISSION_DENIED.hint).toBe(rustString(m?.[1] ?? ""));
+  });
+
+  it("has the message and kind of ui_error.rs", () => {
+    const m = /fn permission_denied\([\s\S]*?message: "([^"]+)"/.exec(rust);
+    expect(m?.[1], "permission_denied() message in ui_error.rs").toBeDefined();
+    expect(LINUX_PERMISSION_DENIED.message).toBe(m?.[1]);
+    expect(LINUX_PERMISSION_DENIED.kind).toBe("permission_denied");
   });
 });

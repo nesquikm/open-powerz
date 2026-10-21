@@ -40,6 +40,8 @@ Add two end-to-end suites for the desktop app — WebdriverIO with tauri-driver 
 
 `apps/desktop/e2e/app/` holds the WebdriverIO config with the `tauri-driver` service and specs; the app is built with an `e2e` Cargo feature that exposes chart series lengths on `window` and reads a save directory from an environment variable. `apps/desktop/e2e/ui/` holds the Playwright config: its web server runs `vite preview` on a build made with `VITE_BACKEND=mock`, which swaps `backend.ts` for `mockBackend.ts`, a scripted backend driven by the simulator's scenario shapes. Scans use `@axe-core/playwright`. Workspace scripts: `e2e:app` and `e2e:ui`.
 
+The same `window.__OPEN_POWERZ_E2E__` test hook (`apps/desktop/e2e/hook.ts`) is also installed in the mocked UI build (`VITE_BACKEND=mock`), so both suites read chart state the same way; a normal production build has none.
+
 ## Testing
 
 The suites are the tests. CI runs them in a new `e2e` job matrix beside the existing gate job. The hardware test lives in the desktop crate's `tests/hil.rs`, gated like the CLI's.
