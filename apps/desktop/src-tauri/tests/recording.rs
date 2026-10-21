@@ -6,7 +6,7 @@ mod common;
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use open_powerz_desktop_lib::worker::{BackendEvent, GapKind, Status, Step, Worke
 use powerz_cli::StreamOptions;
 use powerz_protocol::decode::{QueueRecord, Rate};
 use powerz_protocol::frame::{self, Attribute};
-use powerz_protocol::session::Session;
+use powerz_protocol::session::{Clock, Session};
 use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::{self, Transport, discovery::DeviceEntry, discovery::Model};
 use powerz_record::{CSV_HEADER, CsvRecorder};
@@ -283,19 +283,40 @@ fn is_queue_poll(req: &[u8]) -> bool {
     frame::get_data_mask(req).is_some_and(|m| m.bits() & Attribute::ADC_QUEUE.bits() != 0)
 }
 
-/// Passes everything through and keeps every queue-poll reply.
+fn is_snapshot(req: &[u8]) -> bool {
+    frame::get_data_mask(req).is_some_and(|m| m.bits() == Attribute::ADC.bits())
+}
+
+/// The replies the desktop worker received, each kind in request order.
+#[derive(Default)]
+struct Captured {
+    /// Queue-poll replies.
+    polls: Vec<Vec<u8>>,
+    /// Simulated time right after each queue-poll reply, ms.
+    poll_times: Vec<u64>,
+    /// ADC snapshot replies (they carry the TEMP column's values).
+    snapshots: Vec<Vec<u8>>,
+}
+
+/// Passes everything through and keeps every queue-poll and ADC snapshot
+/// reply.
 struct Tee {
     inner: Pipe,
-    replies: Arc<Mutex<Vec<Vec<u8>>>>,
+    clock: SimClock,
+    replies: Arc<Mutex<Captured>>,
 }
 
 impl Transport for Tee {
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         let reply = self.inner.transact(request, timeout);
-        if is_queue_poll(request)
-            && let Ok(r) = &reply
-        {
-            self.replies.lock().unwrap().push(r.clone());
+        if let Ok(r) = &reply {
+            let mut c = self.replies.lock().unwrap();
+            if is_queue_poll(request) {
+                c.polls.push(r.clone());
+                c.poll_times.push(self.clock.now_ms());
+            } else if is_snapshot(request) {
+                c.snapshots.push(r.clone());
+            }
         }
         reply
     }
@@ -305,21 +326,62 @@ impl Transport for Tee {
     }
 }
 
-/// Answers the CLI's queue polls with the replies the desktop received
-/// (the same queue records), everything else from a fresh simulator. Raises
-/// `stop` once the last reply is served.
+/// Answers the CLI's queue polls and ADC snapshots with the replies the
+/// desktop received, in request order (the same queue records and the same
+/// temperatures), everything else from a fresh simulator. Raises `stop`
+/// once the last queue reply is served.
+///
+/// It also replays the desktop's poll timing on the CLI's clock
+/// ([`ReplayClock`]: a stall that held a desktop poll for 500 ms holds the
+/// CLI's too), so the CLI reads its snapshots after the same polls as the
+/// desktop did.
 struct Replay {
     sim: SimDevice,
     replies: VecDeque<Vec<u8>>,
+    /// Desktop time right after each reply in `replies`, ms.
+    poll_times: VecDeque<u64>,
+    snapshots: VecDeque<Vec<u8>>,
+    /// Shared with the CLI session's [`ReplayClock`].
+    poll_time: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+}
+
+/// The CLI session's clock: a [`SimClock`] until the first queue poll, then
+/// the desktop's time right after the latest replayed poll.
+struct ReplayClock {
+    inner: SimClock,
+    /// Desktop time of the latest replayed poll, ms; `0` = none yet.
+    poll_time: Arc<AtomicU64>,
+}
+
+impl Clock for ReplayClock {
+    fn now_ms(&mut self) -> u64 {
+        match self.poll_time.load(Ordering::SeqCst) {
+            0 => Clock::now_ms(&mut self.inner),
+            t => t,
+        }
+    }
+    fn random_u64(&mut self) -> u64 {
+        self.inner.random_u64()
+    }
+    fn sleep(&mut self, d: Duration) {
+        Clock::sleep(&mut self.inner, d);
+    }
 }
 
 impl Transport for Replay {
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
-        if !is_queue_poll(request) {
+        let queue = if is_queue_poll(request) {
+            if let Some(t) = self.poll_times.pop_front() {
+                self.poll_time.store(t, Ordering::SeqCst);
+            }
+            &mut self.replies
+        } else if is_snapshot(request) {
+            &mut self.snapshots
+        } else {
             return self.sim.transact(request, timeout);
-        }
-        let mut reply = self.replies.pop_front().ok_or(transport::Error::Timeout)?;
+        };
+        let mut reply = queue.pop_front().ok_or(transport::Error::Timeout)?;
         reply[1] = request[1];
         if self.replies.is_empty() {
             self.stop.store(true, Ordering::SeqCst);
@@ -332,8 +394,27 @@ impl Transport for Replay {
     }
 }
 
+/// Queue records in a captured queue-poll reply.
+fn records_in(reply: &[u8]) -> usize {
+    frame::parse_put_data(reply)
+        .expect("a PUT_DATA queue reply")
+        .iter()
+        .filter(|s| s.att == Attribute::ADC_QUEUE)
+        .map(|s| s.payload.len() / 20)
+        .sum()
+}
+
+/// `line` with its TEMP cell (column 8) emptied.
+fn without_temp(line: &str) -> String {
+    let mut c: Vec<&str> = line.split(',').collect();
+    assert_eq!(c.len(), 12, "row with {} columns: {line}", c.len());
+    c[8] = "";
+    c.join(",")
+}
+
 /// Record `record_ms` after `warmup_ms` of streaming in the desktop worker,
-/// then feed the same queue replies to `powerz stream` and compare files.
+/// then feed the same queue replies and ADC snapshots to `powerz stream`
+/// and compare files.
 fn assert_matches_cli(
     rate: Rate,
     scenario: Scenario,
@@ -342,20 +423,24 @@ fn assert_matches_cli(
     record_ms: u64,
 ) -> RecordingSummary {
     let clock = clock();
-    let replies = Arc::new(Mutex::new(Vec::new()));
+    let replies = Arc::new(Mutex::new(Captured::default()));
     let tee = Tee {
         inner: Pipe::sim(scenario, FaultPlan::new(), &clock, opts),
+        clock: clock.clone(),
         replies: Arc::clone(&replies),
     };
     let (_events, sink) = capture(&clock);
     let mut worker = Worker::start(tee, clock.clone(), config(rate), sink).unwrap();
     run_for(&mut worker, &clock, warmup_ms);
-    replies.lock().unwrap().clear();
+    *replies.lock().unwrap() = Captured::default();
     let file = FakeFile::new(&clock);
     worker.start_recording(file.writer()).unwrap();
     run_for(&mut worker, &clock, record_ms);
     let summary = worker.stop_recording().unwrap();
-    let captured: VecDeque<Vec<u8>> = replies.lock().unwrap().drain(..).collect();
+    let captured = std::mem::take(&mut *replies.lock().unwrap());
+    // The CLI reads its first snapshot after its first queue poll, so the
+    // rows of that poll carry no TEMP.
+    let first_poll_rows = captured.polls.first().map_or(0, |r| records_in(r));
     assert!(summary.rows > 0);
 
     let desktop = file.bytes();
@@ -368,12 +453,20 @@ fn assert_matches_cli(
     );
 
     let stop = Arc::new(AtomicBool::new(false));
+    let poll_time = Arc::new(AtomicU64::new(0));
     let replay = Replay {
         sim: SimDevice::with_clock(Persona::Bulk, scenario, SimClock::new(T0)),
-        replies: captured,
+        replies: captured.polls.into(),
+        poll_times: captured.poll_times.into(),
+        snapshots: captured.snapshots.into(),
+        poll_time: Arc::clone(&poll_time),
         stop: Arc::clone(&stop),
     };
-    let mut session = Session::with_clock(GuardedTransport::new(replay), SimClock::new(T0));
+    let cli_clock = ReplayClock {
+        inner: SimClock::new(T0),
+        poll_time,
+    };
+    let mut session = Session::with_clock(GuardedTransport::new(replay), cli_clock);
     session.connect().expect("CONNECT");
     let (mut csv, mut err) = (Vec::new(), Vec::new());
     let opts = StreamOptions {
@@ -384,10 +477,43 @@ fn assert_matches_cli(
     let cli = powerz_cli::stream(&mut session, &opts, &stop, &mut csv, &mut err)
         .expect("powerz stream over the replayed records");
     assert_eq!(cli.samples, summary.rows, "row counts differ");
-    assert_eq!(
+    let (desktop, cli_csv) = (
         String::from_utf8(desktop).unwrap(),
         String::from_utf8(csv).unwrap(),
-        "the desktop recording differs from `powerz stream`"
+    );
+    if warmup_ms > 0 {
+        // A recording started mid-session carries the warm-up snapshot's
+        // temperature in its first rows, which a fresh `powerz stream`
+        // cannot know before its first snapshot (after its first poll).
+        // Every other column of every row must still match byte for byte,
+        // and the TEMP column too from the CLI's first snapshot onward.
+        let (d, c): (Vec<&str>, Vec<&str>) = (desktop.lines().collect(), cli_csv.lines().collect());
+        assert_eq!(d.len(), c.len(), "line counts differ");
+        assert_eq!(d[0], c[0], "headers differ");
+        for (k, (dl, cl)) in d.iter().zip(&c).enumerate().skip(1) {
+            if k <= first_poll_rows {
+                assert_eq!(without_temp(dl), without_temp(cl), "row {k} differs");
+                assert_eq!(
+                    cl.split(',').nth(8),
+                    Some(""),
+                    "CLI row {k} TEMP before any snapshot"
+                );
+            } else {
+                assert_eq!(dl, cl, "row {k} differs (TEMP included)");
+            }
+        }
+        return summary;
+    }
+    assert!(
+        desktop == cli_csv,
+        "the desktop recording differs from `powerz stream` ({} vs {} lines); first differing line: {:?}",
+        desktop.lines().count(),
+        cli_csv.lines().count(),
+        desktop
+            .lines()
+            .zip(cli_csv.lines())
+            .enumerate()
+            .find(|(_, (a, b))| a != b)
     );
     summary
 }

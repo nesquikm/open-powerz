@@ -221,10 +221,10 @@ fn line_code(cell: &str, rate: Rate) -> u16 {
     (v * per_v).round() as u16
 }
 
-/// Every row of a recorder CSV as a queue record, plus the wall clock of the
-/// first row in ms. The columns are
-/// `ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR`.
-fn parse_csv(text: &str, rate: Rate) -> (Vec<QueueRecord>, u64) {
+/// Every row of a recorder CSV as a queue record with its TEMP (`None` when
+/// the cell is empty), plus the wall clock of the first row in ms. The
+/// columns are `ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR`.
+fn parse_csv(text: &str, rate: Rate) -> (Vec<(QueueRecord, Option<f64>)>, u64) {
     let mut lines = text.lines();
     assert_eq!(lines.next(), Some(CSV_HEADER), "not the vendor header");
     let mut unix0 = None;
@@ -235,7 +235,8 @@ fn parse_csv(text: &str, rate: Rate) -> (Vec<QueueRecord>, u64) {
             let unix: f64 = c[1].parse().expect("Unix seconds");
             unix0.get_or_insert((unix * 1000.0).round() as u64);
             let t = u32::try_from(parse_elapsed_ms(c[0])).expect("elapsed fits u32");
-            QueueRecord::from_raw(
+            let temp = (!c[8].is_empty()).then(|| c[8].parse::<f64>().expect("TEMP in °C"));
+            let record = QueueRecord::from_raw(
                 t,
                 micro(c[2]),
                 micro(c[3]),
@@ -246,7 +247,8 @@ fn parse_csv(text: &str, rate: Rate) -> (Vec<QueueRecord>, u64) {
                     line_code(c[5], rate),
                 ],
                 rate,
-            )
+            );
+            (record, temp)
         })
         .collect();
     (records, unix0.unwrap_or(0))
@@ -263,8 +265,8 @@ fn assert_rerenders_byte_for_byte(file: &Path, rate: Rate) -> usize {
     let (records, unix0) = parse_csv(&text, rate);
     assert!(!records.is_empty(), "{} has no rows", file.display());
     let mut csv = CsvRecorder::new(Vec::new()).unwrap();
-    for r in &records {
-        csv.push(r, unix0).unwrap();
+    for (r, temp) in &records {
+        csv.push_with_temp(r, unix0, *temp).unwrap();
     }
     let again = String::from_utf8(csv.finish().unwrap()).unwrap();
     assert!(

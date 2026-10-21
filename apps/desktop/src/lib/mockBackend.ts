@@ -2,8 +2,8 @@
  * A scripted stand-in for the Tauri backend, so the web build runs in a
  * plain browser (`VITE_BACKEND=mock`): the Playwright UI suite and the
  * visual checks drive it. Its scenarios follow the simulator's shapes in
- * `crates/powerz-sim`; like firmware 2.0.6, it reports no temperature
- * while the queue runs at 1000 SPS.
+ * `crates/powerz-sim`; like the worker, it reports the snapshot temperature
+ * at every rate, 1000 SPS included.
  */
 
 import type {
@@ -349,9 +349,9 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
   kind: "permission_denied",
   message: "The system did not allow the app to open the meter.",
   hint:
-    "Install the udev rule: sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/, then run " +
-    "sudo udevadm control --reload-rules and sudo udevadm trigger, and replug the meter " +
-    "(see docs/linux.md).",
+    "Install the udev rule: `sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/`, then run " +
+    "`sudo udevadm control --reload-rules` and `sudo udevadm trigger`, and replug the meter " +
+    "(see `docs/linux.md`).",
 };
 
 /** One page-lifetime instance; a running session's timer stops on `disconnect()` or
@@ -471,7 +471,7 @@ export class MockBackend {
       s.onEvent({ type: "gap", data: s.pendingGap });
       s.pendingGap = null;
     }
-    const tempC = s.rateSps === 1000 ? null : 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
+    const tempC = 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
     s.onEvent({ type: "batch", data: { samples, temp_c: tempC, stats: s.stats.snapshot() } });
     s.streamed += n;
     const rec = s.recording;

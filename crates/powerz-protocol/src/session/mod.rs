@@ -26,7 +26,7 @@ use crate::transport::{self, Transport};
 
 pub use auth::{auth_plaintext, auth_request};
 pub use memory::{DeviceInfo, memory_read_plaintext, memory_read_request};
-pub use stream::{Gap, StreamPoll, Streamer};
+pub use stream::{Gap, SnapshotCadence, StreamPoll, Streamer};
 
 /// Errors from a [`Session`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -154,6 +154,16 @@ impl<T: Transport, C: Clock> Session<T, C> {
         }
     }
 
+    /// The session clock's current time, ms since the Unix epoch.
+    pub fn now_ms(&mut self) -> u64 {
+        self.clock.now_ms()
+    }
+
+    /// Block for `duration` on the session clock.
+    pub fn sleep(&mut self, duration: Duration) {
+        self.clock.sleep(duration);
+    }
+
     /// The underlying transport.
     pub fn transport(&self) -> &T {
         &self.transport
@@ -173,7 +183,11 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// whose id matches the request id (id 0 for a 0x4C request). Up to
     /// [`MAX_STALE_REPLIES`] mismatched replies are discarded.
     fn exchange(&mut self, request: &[u8]) -> Result<Vec<u8>, Error> {
-        let timeout = transport::default_timeout(request);
+        self.exchange_within(request, transport::default_timeout(request))
+    }
+
+    /// [`exchange`](Self::exchange) waiting `timeout` for each transfer.
+    fn exchange_within(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         let expected_id = if request[0] == 0x4C { 0 } else { request[1] };
         let mut reply = self.transport.transact(request, timeout)?;
         let mut rereads = 0;
@@ -192,15 +206,46 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// Send a control request that must be answered with ACCEPT; `what`
     /// names the request in the error message.
     fn expect_accept(&mut self, request: &[u8], what: &str) -> Result<(), Error> {
-        let reply = self.exchange(request)?;
+        let timeout = transport::default_timeout(request);
+        self.expect_accept_within(request, what, timeout)
+    }
+
+    /// [`expect_accept`](Self::expect_accept) waiting `timeout` per transfer.
+    fn expect_accept_within(
+        &mut self,
+        request: &[u8],
+        what: &str,
+        timeout: Duration,
+    ) -> Result<(), Error> {
+        let reply = self.exchange_within(request, timeout)?;
         match frame::classify_reply(&reply)? {
             Reply::Accept(_) => Ok(()),
             other => Err(unexpected_reply(request, what, other)),
         }
     }
 
-    /// Send CONNECT; `Ok` only on ACCEPT.
+    /// Send CONNECT; `Ok` only on ACCEPT. Stale replies with another id
+    /// (e.g. a leftover DISCONNECT) are skipped. When no matching ACCEPT
+    /// arrives within [`transport::FIRST_CONNECT_TIMEOUT`], the transport is
+    /// recovered once ([`Transport::recover`]) and CONNECT is retried once.
+    /// A REJECT is returned at once.
     pub fn connect(&mut self) -> Result<(), Error> {
+        let request = frame::connect(self.counter.next());
+        let first = match self.expect_accept_within(
+            &request,
+            "CONNECT",
+            transport::FIRST_CONNECT_TIMEOUT,
+        ) {
+            Ok(()) => return Ok(()),
+            // No reply, or only stale frames: the pipe may be stuck.
+            Err(e @ (Error::Transport(transport::Error::Timeout) | Error::Protocol(_))) => e,
+            // A REJECT, an unplugged meter or an I/O failure: recovery cannot help.
+            Err(e) => return Err(e),
+        };
+        // A recovery that fails says less than the CONNECT that failed.
+        if self.transport.recover().is_err() {
+            return Err(first);
+        }
         let request = frame::connect(self.counter.next());
         self.expect_accept(&request, "CONNECT")
     }

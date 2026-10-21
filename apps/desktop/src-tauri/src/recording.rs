@@ -160,8 +160,14 @@ impl Recorder {
     }
 
     /// Add one row; `now_unix_ms` fixes the `Unix` origin on the first row.
-    pub(crate) fn push(&mut self, r: &QueueRecord, now_unix_ms: u64) -> io::Result<()> {
-        self.csv.push(r, now_unix_ms)
+    /// `temp_c` fills the `TEMP` column.
+    pub(crate) fn push(
+        &mut self,
+        r: &QueueRecord,
+        now_unix_ms: u64,
+        temp_c: Option<f64>,
+    ) -> io::Result<()> {
+        self.csv.push_with_temp(r, now_unix_ms, temp_c)
     }
 
     /// Nothing was measured up to the next row: it adds no charge or energy.
@@ -169,9 +175,12 @@ impl Recorder {
         self.csv.break_run();
     }
 
-    /// Remember a stream gap seen while recording.
+    /// Remember a stream gap seen while recording. A gap that ends at the
+    /// first row lies before the recording and is not counted.
     pub(crate) fn gap(&mut self, gap: Gap) {
-        self.gaps.push(gap);
+        if self.csv.rows() > 0 {
+            self.gaps.push(gap);
+        }
     }
 
     /// Rows written so far and time since the start, at `now_ms`.
@@ -226,7 +235,7 @@ pub fn export_records<W: Write>(
 ) -> Result<u64, UiError> {
     export_iter(
         records.len() as u64,
-        records.iter().map(|&r| (r, false)),
+        records.iter().map(|&r| (r, false, None)),
         out,
         start_unix_ms,
         progress,
@@ -235,10 +244,10 @@ pub fn export_records<W: Write>(
 
 /// [`export_records`] over `total` records read from an iterator, each with
 /// whether it starts a new measuring run (charge and energy then skip the
-/// interval before it, as the session statistics do).
+/// interval before it, as the session statistics do) and its `TEMP`.
 pub fn export_iter<W: Write>(
     total: u64,
-    records: impl IntoIterator<Item = (QueueRecord, bool)>,
+    records: impl IntoIterator<Item = (QueueRecord, bool, Option<f64>)>,
     out: W,
     start_unix_ms: u64,
     mut progress: impl FnMut(ExportProgress),
@@ -246,11 +255,12 @@ pub fn export_iter<W: Write>(
     let fail = |e: io::Error| io_error(&e);
     let every = EXPORT_PROGRESS_ROWS as u64;
     let mut csv = CsvRecorder::new(BufWriter::with_capacity(1 << 16, out)).map_err(fail)?;
-    for (r, new_run) in records {
+    for (r, new_run, temp_c) in records {
         if new_run {
             csv.break_run();
         }
-        csv.push(&r, start_unix_ms).map_err(fail)?;
+        csv.push_with_temp(&r, start_unix_ms, temp_c)
+            .map_err(fail)?;
         if csv.rows() % every == 0 {
             progress(ExportProgress {
                 done: csv.rows(),

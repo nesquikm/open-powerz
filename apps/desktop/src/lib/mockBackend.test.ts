@@ -43,13 +43,19 @@ describe("MockBackend (scripted demo backend for the browser build)", () => {
     expect(events.at(-1)).toEqual({ type: "status", data: { state: "disconnected", error: null } });
   });
 
-  it("reports no temperature while streaming at 1000 SPS, like the firmware", async () => {
+  it("reports the snapshot temperature while streaming at 1000 SPS, like the worker (AC-X2SPDW.6)", async () => {
     const backend = new MockBackend();
     const events: BackendEvent[] = [];
     await backend.connect("demo:idle", 1000, (e) => events.push(e));
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(1500);
     await backend.disconnect();
-    expect(batches(events).every((b) => b.temp_c === null)).toBe(true);
+    const temps = batches(events).map((b) => b.temp_c);
+    expect(temps.length).toBeGreaterThan(0);
+    expect(temps.at(-1)).toBeTypeOf("number");
+    for (const t of temps.filter((t): t is number => t !== null)) {
+      expect(t).toBeGreaterThan(25);
+      expect(t).toBeLessThan(35);
+    }
   });
 
   it("changes the rate of a running session and refuses a second connect", async () => {
@@ -297,9 +303,9 @@ describe("MockBackend ?mock= scenarios (AC-AH2AEN.5)", () => {
       kind: "permission_denied",
       message: "The system did not allow the app to open the meter.",
       hint:
-        "Install the udev rule: sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/, then run " +
-        "sudo udevadm control --reload-rules and sudo udevadm trigger, and replug the meter " +
-        "(see docs/linux.md).",
+        "Install the udev rule: `sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/`, then run " +
+        "`sudo udevadm control --reload-rules` and `sudo udevadm trigger`, and replug the meter " +
+        "(see `docs/linux.md`).",
     });
     expect(events).toEqual([]);
     await expect(backend.stats()).rejects.toMatchObject({ kind: "usage" });

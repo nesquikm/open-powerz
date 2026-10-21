@@ -78,9 +78,28 @@ describe("readoutView (AC-AH2AEK.2)", () => {
   });
 });
 
-describe("temperatureDisplay (AC-AH2AEK.9)", () => {
+describe("temperatureDisplay (AC-AH2AEK.9, AC-X2SPDW.6)", () => {
   it("shows the temperature with one decimal when reported", () => {
-    expect(temperatureDisplay(25.04, 1000)).toEqual({ text: "25.0", tooltip: null });
+    expect(temperatureDisplay(25.04, 50)).toEqual({ text: "25.0", tooltip: null });
+  });
+
+  it("shows the latest snapshot temperature at 1000 SPS, updated once a second", () => {
+    expect(temperatureDisplay(30.64, 1000)).toEqual({
+      text: "30.6",
+      tooltip: "Updated once a second at 1000 SPS",
+    });
+  });
+
+  it("shows the temperature in the readout at 1000 SPS", () => {
+    const view = readoutView(sample, 30.6, 1000);
+    expect(view.temp).toBe("30.6");
+    expect(view.tempTooltip).toBe("Updated once a second at 1000 SPS");
+  });
+
+  it("keeps no tooltip for a reported temperature at other rates", () => {
+    for (const rate of [2, 10, 50, null]) {
+      expect(temperatureDisplay(30.6, rate)).toEqual({ text: "30.6", tooltip: null });
+    }
   });
 
   it("explains the 1000 SPS gap when the meter reports no temperature", () => {

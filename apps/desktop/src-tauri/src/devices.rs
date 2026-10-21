@@ -161,6 +161,13 @@ impl Transport for AppTransport {
             AppTransport::Usb(t) => t.read(timeout),
         }
     }
+
+    fn recover(&mut self) -> Result<(), transport::Error> {
+        match self {
+            AppTransport::Demo(t) => t.recover(),
+            AppTransport::Usb(t) => t.recover(),
+        }
+    }
 }
 
 /// Opens what the picker lists: the demo device for a demo entry, the
@@ -653,7 +660,23 @@ where
         self.take_session()?.disconnect();
         Ok(())
     }
+
+    /// End the open session, if any, on quit or window close (FR X2SPDW):
+    /// stops the queue and releases the interface. Events go through the
+    /// forwarder thread, so a slow page never holds this up.
+    pub fn shutdown(&mut self) {
+        if let Some(stop) = &self.stop {
+            stop.store(true, Ordering::SeqCst);
+        }
+        if let Some(worker) = self.worker.take() {
+            // Called on the main thread at quit: never hold it past the AC's 1 s.
+            worker.disconnect_within(SHUTDOWN_WAIT);
+        }
+    }
 }
+
+/// How long a shutdown waits for the worker to stop the queue and close the pipe.
+const SHUTDOWN_WAIT: Duration = Duration::from_millis(900);
 
 /// How often the hotplug poller re-lists devices; well under the 2 s the UI
 /// needs to reflect a plug or unplug.

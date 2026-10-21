@@ -29,13 +29,19 @@ export function currentDirectionText(amps: number | null | undefined): string | 
   return null;
 }
 
-/** Temperature text with one decimal, plus a tooltip explaining a missing value. */
+/**
+ * Temperature text with one decimal, plus a tooltip: at 1000 SPS the value is
+ * the latest once-a-second snapshot; a missing value is explained.
+ */
 export function temperatureDisplay(
   tempC: number | null,
   rateSps: number | null,
 ): { text: string; tooltip: string | null } {
   if (tempC !== null && Number.isFinite(tempC))
-    return { text: formatFixed(tempC, 1), tooltip: null };
+    return {
+      text: formatFixed(tempC, 1),
+      tooltip: rateSps === 1000 ? "Updated once a second at 1000 SPS" : null,
+    };
   return {
     text: DASH,
     tooltip:

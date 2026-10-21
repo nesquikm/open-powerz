@@ -76,7 +76,11 @@ test.describe("errors and notices (AC-AH2AEN.5)", () => {
     await connectDemo(page);
     const alert = page.getByRole("alert");
     await expect(alert).toContainText(PERMISSION_MESSAGE);
-    await expect(alert.locator("code")).toHaveText(LINUX_PERMISSION_HINT);
+    // Prose in the body font, the quoted commands and paths in <code> (AC-X2SPDW.8).
+    await expect(alert.locator("p.hint")).toHaveText(LINUX_PERMISSION_HINT.replaceAll("`", ""));
+    await expect(alert.locator("p.hint code")).toHaveText(
+      [...LINUX_PERMISSION_HINT.matchAll(/`([^`]+)`/g)].map((m) => m[1]!),
+    );
     await expect(badge(page)).not.toHaveText("Streaming");
     await expect(page.getByRole("button", { name: "Connect" })).toBeEnabled();
     await alert.getByRole("button", { name: "Dismiss" }).click();

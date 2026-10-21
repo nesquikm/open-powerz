@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use powerz_protocol::decode::Rate;
-use powerz_protocol::session::{Clock, Gap, Session, Streamer};
+use powerz_protocol::session::{Clock, Gap, Session, SnapshotCadence, Streamer};
 use powerz_protocol::transport::Transport;
 
 use crate::error::CliError;
@@ -65,54 +65,75 @@ pub fn stream<T: Transport, C: Clock>(
     };
     let mut first_ms: Option<u32> = None;
     let mut write_err: Option<std::io::Error> = None;
-    let polled = Streamer::run(session, opts.rate, |poll| {
-        // The origin is the first record's device time; an empty poll (the
-        // meter's first reply after 0x0E) must not fix it.
-        let Some(first) = poll.records.first() else {
-            empty_polls += 1;
-            if empty_polls > no_data_limit {
-                device_err = Some(CliError::Device(format!(
-                    "no data from the meter for {} s",
-                    NO_DATA.as_secs()
-                )));
-                return false;
-            }
-            return !stop.load(Ordering::SeqCst);
+    // The latest valid snapshot temperature (for the `TEMP` column), read
+    // on the same cadence as the desktop app (session clock).
+    let mut temp_c: Option<f64> = None;
+    let mut snapshots = SnapshotCadence::default();
+    let polled = loop {
+        let poll = match session.poll_stream() {
+            Ok(poll) => poll,
+            Err(e) => break Err(e),
         };
-        empty_polls = 0;
-        let start = *first_ms.get_or_insert(first.time_ms());
-        if poll.records.iter().any(|r| r.time_ms() < start) {
-            device_err = Some(CliError::Device(
-                "the meter's clock went backwards (did it reboot?); stream stopped".into(),
-            ));
-            return false;
-        }
-        let elapsed = |t: u32| u64::from(t - start);
-        summary.gaps.extend(
-            poll.gaps
-                .iter()
-                .filter(|g| within_limit(elapsed(g.to_ms)))
-                .copied(),
-        );
-        for r in &poll.records {
-            if !within_limit(elapsed(r.time_ms())) {
-                return false;
-            }
-            // Only the first record's wall clock is used (the Unix origin).
-            let now_ms = match opts.start_unix_ms {
-                0 if recorder.rows() == 0 => std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64),
-                fixed => fixed,
+        let mut on_poll = |poll: &powerz_protocol::session::StreamPoll| -> bool {
+            // The origin is the first record's device time; an empty poll (the
+            // meter's first reply after 0x0E) must not fix it.
+            let Some(first) = poll.records.first() else {
+                empty_polls += 1;
+                if empty_polls > no_data_limit {
+                    device_err = Some(CliError::Device(format!(
+                        "no data from the meter for {} s",
+                        NO_DATA.as_secs()
+                    )));
+                    return false;
+                }
+                return !stop.load(Ordering::SeqCst);
             };
-            if let Err(e) = recorder.push(r, now_ms) {
-                write_err = Some(e);
+            empty_polls = 0;
+            let start = *first_ms.get_or_insert(first.time_ms());
+            if poll.records.iter().any(|r| r.time_ms() < start) {
+                device_err = Some(CliError::Device(
+                    "the meter's clock went backwards (did it reboot?); stream stopped".into(),
+                ));
                 return false;
             }
-            summary.samples += 1;
+            let elapsed = |t: u32| u64::from(t - start);
+            summary.gaps.extend(
+                poll.gaps
+                    .iter()
+                    .filter(|g| within_limit(elapsed(g.to_ms)))
+                    .copied(),
+            );
+            for r in &poll.records {
+                if !within_limit(elapsed(r.time_ms())) {
+                    return false;
+                }
+                // Only the first record's wall clock is used (the Unix origin).
+                let now_ms = match opts.start_unix_ms {
+                    0 if recorder.rows() == 0 => std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis() as u64),
+                    fixed => fixed,
+                };
+                if let Err(e) = recorder.push_with_temp(r, now_ms, temp_c) {
+                    write_err = Some(e);
+                    return false;
+                }
+                summary.samples += 1;
+            }
+            !stop.load(Ordering::SeqCst)
+        };
+        if !on_poll(&poll) {
+            break Ok(());
         }
-        !stop.load(Ordering::SeqCst)
-    });
+        // After the poll, so requests stay one at a time; a failed or
+        // invalid snapshot keeps the latest valid temperature.
+        if snapshots.take(session.now_ms())
+            && let Some(t) = session.read_adc().ok().and_then(|adc| adc.temp_c())
+        {
+            temp_c = Some(t);
+        }
+        session.sleep(Streamer::poll_period(opts.rate));
+    };
     // Always try to stop the queue, even after a failed poll or write.
     let stopped = session.stop_stream();
     polled?;

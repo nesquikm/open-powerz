@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod batch;
 pub mod devices;
 #[cfg(feature = "e2e")]
@@ -64,6 +65,25 @@ impl AppState {
 
     fn manager(&self) -> MutexGuard<'_, AppManager> {
         self.manager.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Quit or main-window close (FR X2SPDW): stop the queue, release the
+    /// interface and end the hotplug watcher. Safe to call more than once.
+    fn shutdown(&self) {
+        self.manager().shutdown();
+        let watch = self
+            .watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        drop(watch);
+    }
+}
+
+/// Shut the app state down, if it is managed.
+fn shutdown_app<R: tauri::Runtime>(app: &impl tauri::Manager<R>) {
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        state.shutdown();
     }
 }
 
@@ -405,7 +425,7 @@ pub fn channel_sink(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(AppState::new()))
@@ -426,8 +446,37 @@ pub fn run() {
             reset_stats,
             clear_history
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the open-powerz desktop app");
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+                )
+            {
+                shutdown_app(window);
+            }
+        });
+    // macOS can end the WebKit content process (memory pressure, a crash),
+    // leaving a blank window (FR X2SPDW). Reload the page: the backend session
+    // keeps running, and the new page re-attaches to it on load (FR VEDDFD).
+    // A reload fires no CloseRequested/Destroyed, so it never shuts down.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        if let Err(e) = webview.reload() {
+            eprintln!("open-powerz: reload after web content process end failed: {e}");
+        }
+    });
+    builder
+        .build(tauri::generate_context!())
+        .expect("error while building the open-powerz desktop app")
+        .run(|app, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                shutdown_app(app);
+            }
+        });
 }
 
 #[cfg(test)]

@@ -22,6 +22,9 @@ pub use mock::MockTransport;
 pub const REPLY_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Time to wait for the reply to CONNECT.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_millis(2000);
+/// Time to wait for the ACCEPT to the first CONNECT before the pipe is
+/// recovered and CONNECT is retried.
+pub const FIRST_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Errors from discovery and transports.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -74,6 +77,14 @@ pub trait Transport {
 
     /// Read one follow-up transfer without writing.
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error>;
+
+    /// Bring a pipe left mid-transfer back to a clean state (e.g. clear a
+    /// halted endpoint, drain stale data). Called once by
+    /// [`Session::connect`](crate::session::Session::connect) when CONNECT
+    /// gets no matching ACCEPT. Sends no device command. Default: nothing.
+    fn recover(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// Default reply timeout for `request`: [`CONNECT_TIMEOUT`] for CONNECT,

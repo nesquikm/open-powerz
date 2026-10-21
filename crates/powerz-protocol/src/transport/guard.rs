@@ -43,6 +43,10 @@ impl<T: Transport> Transport for GuardedTransport<T> {
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
         self.inner.read(timeout)
     }
+
+    fn recover(&mut self) -> Result<(), Error> {
+        self.inner.recover()
+    }
 }
 
 #[cfg(test)]

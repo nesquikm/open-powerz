@@ -134,6 +134,15 @@ impl Transport for BulkTransport {
         data.truncate(c.actual_len);
         Ok(data)
     }
+
+    /// Clear the halt on both bulk endpoints (a standard USB control request,
+    /// not a meter command), then drain stale IN data.
+    fn recover(&mut self) -> Result<(), Error> {
+        self.out_ep.clear_halt().wait().map_err(nusb_error)?;
+        self.in_ep.clear_halt().wait().map_err(nusb_error)?;
+        drain_stale(self, DRAIN_TIMEOUT)?;
+        Ok(())
+    }
 }
 
 fn nusb_error(e: nusb::Error) -> Error {

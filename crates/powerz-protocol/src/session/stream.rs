@@ -33,6 +33,36 @@ pub struct StreamPoll {
     pub gaps: Vec<Gap>,
 }
 
+/// When a streaming client reads an ADC snapshot ([`Session::read_adc`],
+/// e.g. for the chip temperature) between queue polls: at most once per
+/// [`SnapshotCadence::PERIOD`], the first one at once. The caller reads the
+/// snapshot after a poll so requests stay strictly one at a time.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SnapshotCadence {
+    /// Time of the last snapshot taken, ms.
+    last_ms: Option<u64>,
+}
+
+impl SnapshotCadence {
+    /// Minimum time between two snapshots; well under the 1 s a UI needs
+    /// for a fresh temperature.
+    pub const PERIOD: Duration = Duration::from_millis(500);
+
+    /// `true` when a snapshot is due at `now_ms`; it is then counted as
+    /// taken, whether or not the read succeeds.
+    pub fn take(&mut self, now_ms: u64) -> bool {
+        let period = u64::try_from(Self::PERIOD.as_millis()).unwrap_or(u64::MAX);
+        if self
+            .last_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) < period)
+        {
+            return false;
+        }
+        self.last_ms = Some(now_ms);
+        true
+    }
+}
+
 /// Helper that drives [`Session::poll_stream`] at a safe period.
 #[derive(Debug, Clone, Copy)]
 pub struct Streamer;

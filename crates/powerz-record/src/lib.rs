@@ -82,8 +82,9 @@ fn trim_zeros(s: &str) -> &str {
 ///
 /// Elapsed time and charge/energy count from the first pushed record; the
 /// `Unix` column is the wall clock passed with the first record plus the
-/// device time elapsed since it. `TEMP` stays empty (queue records carry no
-/// temperature).
+/// device time elapsed since it. `TEMP` is the temperature passed with the
+/// row ([`CsvRecorder::push_with_temp`]); queue records carry none, so
+/// [`CsvRecorder::push`] leaves it empty.
 #[derive(Debug)]
 pub struct CsvRecorder<W: Write> {
     out: W,
@@ -108,14 +109,26 @@ impl<W: Write> CsvRecorder<W> {
     /// Write one row for `r`. `now_unix_ms` (ms since the Unix epoch) is
     /// used only for the first record: it fixes the `Unix` origin.
     pub fn push(&mut self, r: &QueueRecord, now_unix_ms: u64) -> io::Result<()> {
+        self.push_with_temp(r, now_unix_ms, None)
+    }
+
+    /// [`Self::push`] with the `TEMP` column set to `temp_c` (°C), empty
+    /// when `None`.
+    pub fn push_with_temp(
+        &mut self,
+        r: &QueueRecord,
+        now_unix_ms: u64,
+        temp_c: Option<f64>,
+    ) -> io::Result<()> {
         let t = r.time_ms();
         let (t0, unix0) = *self.origin.get_or_insert((t, now_unix_ms));
         let elapsed_ms = u64::from(t.saturating_sub(t0));
         let (charge_ah, energy_wh) = self.integrator.push(t, r.vbus_v(), r.ibus_a());
         let unix = (unix0 + elapsed_ms) as f64 / 1000.0;
+        let temp = temp_c.map(sig8).unwrap_or_default();
         writeln!(
             self.out,
-            "{},{unix:.3},{},{},{},{},{},{},,{},{},{}",
+            "{},{unix:.3},{},{},{},{},{},{},{temp},{},{},{}",
             format_elapsed(elapsed_ms),
             sig8(r.vbus_v()),
             sig8(r.ibus_a()),

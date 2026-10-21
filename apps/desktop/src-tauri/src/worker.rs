@@ -4,14 +4,14 @@
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use powerz_protocol::decode::{QueueRecord, Rate};
-use powerz_protocol::session::{self, Clock, Session, Streamer};
+use powerz_protocol::session::{self, Clock, Session, SnapshotCadence, Streamer};
 use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
 use serde::Serialize;
 
@@ -19,7 +19,7 @@ use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Series, SeriesBuckets};
 use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
 use crate::stats::StatsSnapshot;
-use crate::store::SessionStore;
+use crate::store::{SessionStore, temp_at};
 use crate::ui_error::{self, ErrorKind, UiError};
 
 /// Worker start-up settings.
@@ -121,6 +121,17 @@ pub enum Step {
 
 type Sink = Box<dyn FnMut(BackendEvent) + Send>;
 
+/// Runs a task in order with the events sent so far: at once on a worker
+/// without a forwarder, on the forwarder thread behind every queued event
+/// otherwise.
+type InOrder = Box<dyn FnMut(Box<dyn FnOnce() + Send>) + Send>;
+
+/// What the worker thread hands its sink forwarder (FR X2SPDW).
+enum Forward {
+    Event(BackendEvent),
+    Run(Box<dyn FnOnce() + Send>),
+}
+
 /// A session error in plain language for the OS the app runs on.
 fn session_error(err: &session::Error) -> UiError {
     ui_error::from_session(err, std::env::consts::OS)
@@ -192,9 +203,17 @@ fn open_session<T: Transport, C: Clock>(
     let mut run = || -> Result<(session::DeviceInfo, bool), session::Error> {
         session.connect()?;
         let info = session.device_info()?;
-        let started = session
-            .authenticate(1)
-            .and_then(|_| session.start_stream(config.rate));
+        let started = session.authenticate(1).and_then(|_| {
+            match session.start_stream(config.rate) {
+                // A queue started by an earlier session still runs [device]:
+                // stop it and start again, once.
+                Err(session::Error::Rejected { .. }) => {
+                    session.stop_stream()?;
+                    session.start_stream(config.rate)
+                }
+                other => other,
+            }
+        });
         match started {
             Ok(()) => Ok((info, false)),
             Err(e) if is_rate_refusal(&e) => Ok((info, true)),
@@ -217,8 +236,8 @@ pub struct Worker<T: Transport, C: Clock> {
     measured_sps: Option<u32>,
     /// Device time of the last record seen, for measuring across polls.
     last_record_ms: Option<u32>,
-    /// Wall-clock time of the last ADC snapshot request, ms.
-    last_snapshot_ms: Option<u64>,
+    /// When the next ADC snapshot is due (wall clock).
+    snapshots: SnapshotCadence,
     /// Latest chip temperature, °C; `None` when invalid or not read yet.
     temp_c: Option<f64>,
     /// Groups records into UI batches flushed at 20–60 Hz.
@@ -233,11 +252,8 @@ pub struct Worker<T: Transport, C: Clock> {
     /// The file the open recording writes, when it was opened by path.
     recording_path: Option<PathBuf>,
     sink: Sink,
+    in_order: InOrder,
 }
-
-/// How often the worker reads an ADC snapshot between queue polls; well
-/// under the 1 s the UI needs for a fresh temperature.
-const SNAPSHOT_PERIOD_MS: u64 = 500;
 
 impl<T: Transport, C: Clock> std::fmt::Debug for Worker<T, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -276,6 +292,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             info,
             store,
             Box::new(sink),
+            Box::new(|task: Box<dyn FnOnce() + Send>| task()),
         ))
     }
 
@@ -287,6 +304,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         info: ConnectedInfo,
         store: SessionStore,
         sink: Sink,
+        in_order: InOrder,
     ) -> Worker<T, C> {
         let now = clock.now_ms();
         store.start_run();
@@ -297,7 +315,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             rate_locked: info.rate_locked,
             measured_sps: None,
             last_record_ms: None,
-            last_snapshot_ms: None,
+            snapshots: SnapshotCadence::default(),
             temp_c: None,
             batcher: Batcher::new(now),
             next_poll_ms: now,
@@ -305,6 +323,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             recording: None,
             recording_path: None,
             sink,
+            in_order,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -317,19 +336,17 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// Read one ADC snapshot when the last one is due, after a queue poll
     /// so requests stay strictly one at a time.
     fn snapshot_if_due(&mut self) -> Result<(), session::Error> {
-        let now = self.clock.now_ms();
-        if self
-            .last_snapshot_ms
-            .is_some_and(|t| now.saturating_sub(t) < SNAPSHOT_PERIOD_MS)
-        {
-            return Ok(());
-        }
         let Some(session) = self.session.as_mut() else {
             return Ok(());
         };
-        self.last_snapshot_ms = Some(now);
+        if !self.snapshots.take(self.clock.now_ms()) {
+            return Ok(());
+        }
         let adc = session.read_adc()?;
         self.temp_c = adc.temp_c();
+        if let Some(temp) = self.temp_c {
+            self.store.set_temp(temp);
+        }
         Ok(())
     }
 
@@ -395,7 +412,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 if added.new_run {
                     rec.break_run();
                 }
-                if let Err(e) = rec.push(&r, now) {
+                if let Err(e) = rec.push(&r, added.unix_ms, added.temp_c) {
                     write_err = Some(e);
                 }
             }
@@ -698,8 +715,13 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 let _ = reply.send(self.stop_recording());
             }
             Command::Handover(swap, reply) => {
-                swap();
-                let _ = reply.send(self.recording_progress());
+                // Read here and swapped behind the events already sent, so
+                // the new sink gets exactly the events after this answer.
+                let progress = self.recording_progress();
+                (self.in_order)(Box::new(move || {
+                    swap();
+                    let _ = reply.send(progress);
+                }));
             }
         }
     }
@@ -746,11 +768,15 @@ fn export_store(
     now_ms: u64,
     progress: impl FnMut(ExportProgress) + Send + 'static,
 ) -> ExportJob {
-    let (history, start_unix_ms) = store.export_source(now_ms);
+    let (history, start_unix_ms, temps) = store.export_source(now_ms);
     std::thread::spawn(move || {
+        let mut cursor = 0;
         recording::export_iter(
             history.len() as u64,
-            history.iter_runs(),
+            history
+                .iter_runs()
+                .enumerate()
+                .map(|(i, (r, new_run))| (r, new_run, temp_at(&temps, &mut cursor, i))),
             out,
             start_unix_ms,
             progress,
@@ -996,6 +1022,25 @@ impl WorkerHandle {
             let _ = thread.join();
         }
     }
+
+    /// Stop the worker and wait up to `timeout` for it to stop the queue and
+    /// close the pipe; past that it finishes on its own. `true` when it did
+    /// within the time.
+    pub fn disconnect_within(mut self, timeout: Duration) -> bool {
+        self.stop.store(true, Ordering::SeqCst);
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        while !thread.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = thread.join();
+        true
+    }
 }
 
 impl Drop for WorkerHandle {
@@ -1059,9 +1104,38 @@ where
         }
         sink(event);
     };
-    // Shared so a panicking worker can still report that the session ended.
-    let sink: Arc<Mutex<Sink>> = Arc::new(Mutex::new(Box::new(marking)));
-    let worker_sink = Arc::clone(&sink);
+    // A slow sink (a throttled UI) must never hold up the polls: the meter
+    // keeps only ~60 ms of records at 1000 SPS. The worker queues its
+    // events; a forwarder thread delivers them in order (FR X2SPDW).
+    let (forward, queued) = mpsc::channel::<Forward>();
+    let depth = Arc::new(AtomicUsize::new(0));
+    let delivered = Arc::clone(&depth);
+    let stop_by_forwarder = Arc::clone(&stop);
+    let ended_by_forwarder = Arc::clone(&ended);
+    let forwarder = std::thread::spawn(move || {
+        let mut marking = marking;
+        for item in queued {
+            let ran = catch_unwind(AssertUnwindSafe(|| match item {
+                Forward::Event(event) => {
+                    let batch = matches!(event, BackendEvent::Batch(_));
+                    marking(event);
+                    if batch {
+                        delivered.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                Forward::Run(task) => task(),
+            }));
+            if ran.is_err() {
+                // Nobody hears this session any more: end it.
+                ended_by_forwarder.store(true, Ordering::SeqCst);
+                stop_by_forwarder.store(true, Ordering::SeqCst);
+                return;
+            }
+        }
+    });
+    // Kept so a panicking worker can still report that the session ended.
+    let sink = forward.clone();
+    let worker_sink = forward;
     let worker_store = store.clone();
     let thread = std::thread::spawn(move || {
         let ran = catch_unwind(AssertUnwindSafe(|| {
@@ -1073,12 +1147,18 @@ where
                 &flag,
                 &inbox,
                 worker_sink,
+                depth,
             )
         }));
         if let Err(payload) = ran {
-            let mut sink = sink.lock().unwrap_or_else(PoisonError::into_inner);
-            sink(disconnected(Some(ui_error::from_panic(payload.as_ref()))));
+            let _ = sink.send(Forward::Event(disconnected(Some(ui_error::from_panic(
+                payload.as_ref(),
+            )))));
         }
+        // Every event is out before the thread ends, so a reconnect or an
+        // attach after `disconnect` never sees this session's last ones.
+        drop(sink);
+        let _ = forwarder.join();
     });
     WorkerHandle {
         stop,
@@ -1089,7 +1169,12 @@ where
     }
 }
 
+/// Most sample batches waiting for a slow sink (about 10 to 25 s of them);
+/// status, gap and recording events are always queued.
+const MAX_QUEUED_BATCHES: usize = 512;
+
 /// The worker thread's body: open, then step until stopped or ended.
+#[allow(clippy::too_many_arguments)]
 fn run_worker<T, C, O>(
     open: O,
     clock: C,
@@ -1097,21 +1182,40 @@ fn run_worker<T, C, O>(
     store: SessionStore,
     stop: &AtomicBool,
     inbox: &mpsc::Receiver<Command>,
-    sink: Arc<Mutex<Sink>>,
+    sink: mpsc::Sender<Forward>,
+    depth: Arc<AtomicUsize>,
 ) where
     T: Transport,
     C: Clock + Clone,
     O: FnOnce() -> Result<T, transport::Error>,
 {
+    let ordered = sink.clone();
+    let in_order: InOrder = Box::new(move |task| {
+        // The forwarder outlives every sender, so this cannot fail.
+        let _ = ordered.send(Forward::Run(task));
+    });
     let forward: Sink = Box::new(move |event| {
-        let mut sink = sink.lock().unwrap_or_else(PoisonError::into_inner);
-        sink(event);
+        if let BackendEvent::Batch(_) = event {
+            // A sink stalled for this long gets no more live batches until it
+            // catches up; the history and any recording keep every sample.
+            if depth.load(Ordering::SeqCst) >= MAX_QUEUED_BATCHES {
+                return;
+            }
+            depth.fetch_add(1, Ordering::SeqCst);
+        }
+        let _ = sink.send(Forward::Event(event));
     });
     let opened = open()
         .map_err(|e| ui_error::from_transport(&e, std::env::consts::OS))
         .and_then(|transport| open_session(transport, clock.clone(), config));
+    // Held until this thread is done with the meter (FR X2SPDW).
+    let _activity = opened
+        .is_ok()
+        .then(|| crate::activity::hold("Streaming from a POWER-Z meter"));
     let mut worker = match opened {
-        Ok((session, info)) => Worker::running(session, clock, config, info, store, forward),
+        Ok((session, info)) => {
+            Worker::running(session, clock, config, info, store, forward, in_order)
+        }
         Err(error) => {
             let mut forward = forward;
             forward(disconnected(Some(error)));
@@ -1137,7 +1241,6 @@ fn run_worker<T, C, O>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
 
     fn control() -> (WorkerControl, mpsc::Receiver<Command>) {
         let (commands, inbox) = mpsc::channel();

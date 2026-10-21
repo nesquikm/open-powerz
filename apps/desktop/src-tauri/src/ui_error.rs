@@ -57,14 +57,14 @@ impl UiError {
 
 /// Linux hint for a permission failure: the udev rule from `docs/linux.md`.
 const LINUX_PERMISSION_HINT: &str = "Install the udev rule: \
-sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/, then run \
-sudo udevadm control --reload-rules and sudo udevadm trigger, and replug the \
-meter (see docs/linux.md).";
+`sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/`, then run \
+`sudo udevadm control --reload-rules` and `sudo udevadm trigger`, and replug the \
+meter (see `docs/linux.md`).";
 
 /// Linux hint for a busy device: the kernel's `powerz` hwmon driver.
 const LINUX_BUSY_HINT: &str = "The kernel's powerz hwmon driver may be holding the \
-meter. Unload it with sudo modprobe -r powerz, then connect again (see \
-docs/linux.md).";
+meter. Unload it with `sudo modprobe -r powerz`, then connect again (see \
+`docs/linux.md`).";
 
 /// Whether an I/O error text says the device is busy or claimed.
 fn is_busy(detail: &str) -> bool {

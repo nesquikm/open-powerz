@@ -79,7 +79,8 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
 - **macOS real-device app e2e (manual):** with no `tauri-driver` on macOS, the real app is run
   by hand (`bun run dev`, or the debug build from `bun run --cwd apps/desktop tauri build --debug --no-bundle`)
   against an attached KM003C, safe command set only: connect, live values, 1000 SPS with
-  temperature "—" and its tooltip, record and export, light and dark at ~900 and ~1600 px.
+  the temperature (with its "Updated once a second" tooltip, or "—" when the firmware reports
+  none), record and export, light and dark at ~900 and ~1600 px.
   The screenshots are listed in the PR / milestone report next to the demo-device ones.
 - **Memory soak (manual, macOS):** the real app streams at 50 SPS for one hour with its window
   visible; the web content process RSS is noted after 2 minutes of warm-up and at the end, and

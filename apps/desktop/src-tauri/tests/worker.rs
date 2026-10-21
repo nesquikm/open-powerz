@@ -592,40 +592,70 @@ fn a_failed_snapshot_keeps_the_session_and_every_polled_record() {
 
 // ---- requests while the worker is busy ----
 
-/// Spawn a worker whose sink holds the worker thread inside its first
-/// non-empty batch until `release` is sent.
+/// A transport that, once `hold` is raised, blocks the worker thread in its
+/// next `transact` until `release` is sent (or 20 s pass).
+struct Held<T> {
+    inner: T,
+    hold: Arc<std::sync::atomic::AtomicBool>,
+    release: mpsc::Receiver<()>,
+}
+
+impl<T: powerz_protocol::transport::Transport> powerz_protocol::transport::Transport for Held<T> {
+    fn transact(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, powerz_protocol::transport::Error> {
+        if self.hold.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let _ = self.release.recv_timeout(Duration::from_secs(20));
+        }
+        self.inner.transact(request, timeout)
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, powerz_protocol::transport::Error> {
+        self.inner.read(timeout)
+    }
+}
+
+/// Spawn a worker that is held inside its meter transport, after its first
+/// non-empty batch, until `release` is sent. The sink never blocks: a slow
+/// sink no longer stalls the worker (AC-X2SPDW.1).
 fn spawn_held() -> (worker::WorkerHandle, mpsc::Sender<()>) {
     let clock = clock();
     let c = clock.clone();
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let held_hold = Arc::clone(&hold);
     let open = move || {
-        Ok(Pipe::sim(
-            Scenario::Load5v1a,
-            FaultPlan::new(),
-            &c,
-            PipeOpts::default(),
-        ))
+        Ok(Held {
+            inner: Pipe::sim(
+                Scenario::Load5v1a,
+                FaultPlan::new(),
+                &c,
+                PipeOpts::default(),
+            ),
+            hold: held_hold,
+            release: release_rx,
+        })
     };
     let (seen_tx, seen_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel::<()>();
-    let release_rx = Mutex::new(release_rx);
-    let mut held = false;
+    let mut seen = false;
     let sink = move |e: BackendEvent| {
         if let BackendEvent::Batch(b) = &e
             && !b.samples.is_empty()
-            && !held
+            && !seen
         {
-            held = true;
+            seen = true;
+            hold.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = seen_tx.send(());
-            let _ = release_rx
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(20));
         }
     };
     let handle = worker::spawn(open, clock, config(Rate::Sps50), sink);
     seen_rx
         .recv_timeout(Duration::from_secs(10))
         .expect("no samples");
+    // Let the worker reach its next poll and stop in the transport.
+    std::thread::sleep(Duration::from_millis(300));
     (handle, release_tx)
 }
 

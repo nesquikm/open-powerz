@@ -70,6 +70,29 @@ pub(crate) struct Appended {
     pub(crate) before_ms: Option<u32>,
     /// It starts a new measuring run.
     pub(crate) new_run: bool,
+    /// Wall-clock time of the record, ms: the session's one `Unix` anchor
+    /// plus its session time, so a recording and an export agree.
+    pub(crate) unix_ms: u64,
+    /// The latest valid snapshot temperature at the record, °C.
+    pub(crate) temp_c: Option<f64>,
+}
+
+/// Temperature changes over the history: `(index of the first record it
+/// applies to, °C)`. The temperature changes about twice a second, far less
+/// often than records arrive, so it is not stored per record.
+/// The indexes count from the history's start, so it is valid only while
+/// the history is never trimmed from the front: a clear empties both.
+pub(crate) type TempLog = Vec<(usize, f64)>;
+
+/// The temperature at history index `i` in `log` (sorted by index), moving
+/// `cursor` forward; indexes must be asked for in increasing order.
+pub(crate) fn temp_at(log: &[(usize, f64)], cursor: &mut usize, i: usize) -> Option<f64> {
+    while log.get(*cursor + 1).is_some_and(|&(at, _)| at <= i) {
+        *cursor += 1;
+    }
+    log.get(*cursor)
+        .filter(|&&(at, _)| at <= i)
+        .map(|&(_, t)| t)
 }
 
 /// What one session keeps across its connections.
@@ -82,6 +105,13 @@ pub(crate) struct SessionData {
     /// Statistics since the session start or the last reset.
     stats: Stats,
     timeline: Timeline,
+    /// Wall-clock time at session time 0, ms, fixed by the session's first
+    /// record; clearing the history keeps it.
+    unix_anchor_ms: Option<i64>,
+    /// The latest valid snapshot temperature, °C.
+    temp_c: Option<f64>,
+    /// Temperature changes over the history.
+    temps: TempLog,
 }
 
 impl SessionData {
@@ -98,12 +128,23 @@ impl SessionData {
             self.history.break_run();
         }
         self.stats.push(&record);
-        self.history_unix_ms.get_or_insert(now_ms);
+        let anchor = *self
+            .unix_anchor_ms
+            .get_or_insert(i64::try_from(now_ms).unwrap_or(i64::MAX) - i64::from(t));
+        let unix_ms = u64::try_from(anchor.saturating_add(i64::from(t)).max(0)).unwrap_or(0);
+        self.history_unix_ms.get_or_insert(unix_ms);
+        if let Some(temp) = self.temp_c
+            && self.temps.last().map(|&(_, t)| t) != Some(temp)
+        {
+            self.temps.push((self.history.len(), temp));
+        }
         self.history.push(&record);
         Appended {
             record,
             before_ms,
             new_run,
+            unix_ms,
+            temp_c: self.temp_c,
         }
     }
 
@@ -132,6 +173,11 @@ impl SessionStore {
     /// begins, so the interval before it was not measured.
     pub(crate) fn start_run(&self) {
         self.lock().timeline.restart = true;
+    }
+
+    /// A valid snapshot read `temp_c` °C: the records from now on carry it.
+    pub(crate) fn set_temp(&self, temp_c: f64) {
+        self.lock().temp_c = Some(temp_c);
     }
 
     /// Number of records in the history.
@@ -187,6 +233,7 @@ impl SessionStore {
         let mut data = self.lock();
         data.history.clear();
         data.history_unix_ms = None;
+        data.temps.clear();
     }
 
     /// The history so far, sharing its stored samples.
@@ -195,12 +242,14 @@ impl SessionStore {
     }
 
     /// What an export needs: the history so far and the wall-clock time at
-    /// its first record (`now_ms` when it is empty).
-    pub(crate) fn export_source(&self, now_ms: u64) -> (Records, u64) {
+    /// its first record (`now_ms` when it is empty) and its temperature
+    /// changes.
+    pub(crate) fn export_source(&self, now_ms: u64) -> (Records, u64, TempLog) {
         let data = self.lock();
         (
             data.history.snapshot(),
             data.history_unix_ms.unwrap_or(now_ms),
+            data.temps.clone(),
         )
     }
 }

@@ -43,6 +43,8 @@ Vitest for formatting, shortcut dispatch (including the text-input guard), theme
 
 ## Notes
 
+AC-X2SPDW.6 replaces AC .9's 1000 SPS rule.
+
 FR FENCD9 gives L to the timeline shuttle and End to going live; it wins over AC-AH2AEK.6.
 
 Every displayed negative uses the true minus U+2212 "−"; CSV, JSON and clipboard keep ASCII "-" (milestone review, 2026-10-21).

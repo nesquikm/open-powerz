@@ -72,6 +72,11 @@ pub struct PipeOpts {
     pub stall_at_poll: Option<(usize, u64)>,
     /// Fail ADC snapshot number `n` (from 1) with a timeout.
     pub fail_snapshot: Option<usize>,
+    /// From ADC snapshot number `n` (from 1) on, the temperature reads invalid.
+    pub invalid_temp_from_snapshot: Option<usize>,
+    /// A queue started by an earlier session still runs: 0x0E is REJECTed
+    /// until a 0x0F has stopped it (FR X2SPDW).
+    pub stale_stream: bool,
 }
 
 /// The simulated meter seen through a recording, fault-injecting pipe. It
@@ -82,6 +87,8 @@ pub struct Pipe {
     opts: PipeOpts,
     polls: usize,
     snapshots: usize,
+    /// The stale stream of [`PipeOpts::stale_stream`] has been stopped.
+    stale_stopped: bool,
     pub log: Arc<Mutex<Log>>,
 }
 
@@ -93,6 +100,7 @@ impl Pipe {
             opts,
             polls: 0,
             snapshots: 0,
+            stale_stopped: false,
             log: Arc::new(Mutex::new(Log::default())),
         }
     }
@@ -123,7 +131,9 @@ impl Transport for Pipe {
         let ty = request.first().map(|b| b & 0x7F);
         let result = if self.opts.reject_auth && ty == Some(0x4C) {
             Ok(vec![0x06, 0x00, 0x00, 0x00])
-        } else if self.opts.reject_queue_start && ty == Some(0x0E) {
+        } else if ty == Some(0x0E)
+            && (self.opts.reject_queue_start || (self.opts.stale_stream && !self.stale_stopped))
+        {
             Ok(vec![0x06, request[1], 0x00, 0x00])
         } else if is_snapshot(request) && {
             self.snapshots += 1;
@@ -140,7 +150,15 @@ impl Transport for Pipe {
                 }
             }
             let mut r = self.inner.transact(request, timeout);
-            if self.opts.invalid_temp
+            if ty == Some(0x0F) && r.as_ref().is_ok_and(|reply| reply.first() == Some(&0x05)) {
+                self.stale_stopped = true;
+            }
+            let invalid_now = self.opts.invalid_temp
+                || self
+                    .opts
+                    .invalid_temp_from_snapshot
+                    .is_some_and(|n| is_snapshot(request) && self.snapshots >= n);
+            if invalid_now
                 && is_snapshot(request)
                 && let Ok(reply) = &mut r
                 && reply.len() >= 8 + 0x1A

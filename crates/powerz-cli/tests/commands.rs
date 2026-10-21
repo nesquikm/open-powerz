@@ -347,7 +347,24 @@ fn f(s: &str) -> f64 {
     s.parse().unwrap_or_else(|_| panic!("not a number: {s:?}"))
 }
 
-fn check_row(row: &[String], k: u32) {
+/// The scripted snapshot temperature: 31.5 °C (raw 1/128 °C).
+const SNAP_TEMP_C: f64 = 31.5;
+
+/// Scripted ADC snapshot (GET_DATA ATT_ADC, id `id`) that `stream` reads
+/// after a queue poll whenever >= 500 ms passed since the last one (the
+/// first after the first poll), for the TEMP column.
+fn snap_step(id: u8) -> Step {
+    adc_step(
+        id,
+        Adc {
+            temp_raw: (SNAP_TEMP_C * 128.0) as i16,
+            ..ADC_A
+        },
+    )
+}
+
+/// `temp`: the TEMP the row must carry (`None` = empty).
+fn check_row(row: &[String], k: u32, temp: Option<f64>) {
     assert_eq!(row.len(), 12, "{row:?}");
     let elapsed_s = f64::from(k) * 0.1;
     assert_eq!(row[0], format!("0:00:00.{:03}", k * 100), "{row:?}");
@@ -361,7 +378,10 @@ fn check_row(row: &[String], k: u32) {
     assert!(approx(f(&row[5]), 0.009), "DM {row:?}");
     assert!(approx(f(&row[6]), 0.805), "CC1 {row:?}");
     assert!(approx(f(&row[7]), 0.007), "CC2 {row:?}");
-    assert_eq!(row[8], "", "TEMP must be empty: {row:?}");
+    match temp {
+        None => assert_eq!(row[8], "", "TEMP must be empty: {row:?}"),
+        Some(t) => assert!(approx(f(&row[8]), t), "TEMP {row:?}"),
+    }
     assert!(
         approx(f(&row[9]), -2.0 * elapsed_s / 3600.0),
         "CHARGE {row:?}"
@@ -378,9 +398,10 @@ fn stream_writes_vendor_csv_until_duration_and_stops_queue() {
     let script = [
         start_steps(Rate::Sps10.code()),
         vec![
-            poll_step(4, &ts(&[0, 100, 200])),
-            poll_step(5, &ts(&[300, 400])),
-            Step::transact(stop_queue(6), accept(6)),
+            poll_step(4, &ts(&[0, 100])),
+            snap_step(5),
+            poll_step(6, &ts(&[200, 300])),
+            Step::transact(stop_queue(7), accept(7)),
         ],
     ]
     .concat();
@@ -401,15 +422,18 @@ fn stream_writes_vendor_csv_until_duration_and_stops_queue() {
         "ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR"
     );
     assert_eq!(rows.len(), 3, "rows: {rows:?}");
+    // Rows before the first snapshot have no TEMP; later rows carry the
+    // snapshot's temperature.
     for (k, row) in rows.iter().enumerate() {
-        check_row(row, k as u32);
+        check_row(row, k as u32, (k >= 2).then_some(SNAP_TEMP_C));
     }
+    assert!(approx(f(&rows[2][8]), SNAP_TEMP_C), "TEMP {:?}", rows[2]);
     assert_eq!(summary.samples, 3);
     assert!(summary.gaps.is_empty(), "{:?}", summary.gaps);
     assert_eq!(s.transport().inner.remaining(), 0, "queue must be stopped");
     assert_eq!(
         s.transport().inner.written().last(),
-        Some(&stop_queue(6)),
+        Some(&stop_queue(7)),
         "last request must be STOP_QUEUE"
     );
     let err = text(&err);
@@ -425,8 +449,9 @@ fn stream_stops_queue_on_ctrl_c_and_keeps_received_rows() {
         start_steps(Rate::Sps10.code()),
         vec![
             poll_step(4, &ts(&[0, 100, 200])),
-            poll_step(5, &ts(&[300, 400])),
-            Step::transact(stop_queue(6), accept(6)),
+            snap_step(5),
+            poll_step(6, &ts(&[300, 400])),
+            Step::transact(stop_queue(7), accept(7)),
         ],
     ]
     .concat();
@@ -443,7 +468,7 @@ fn stream_stops_queue_on_ctrl_c_and_keeps_received_rows() {
     let (_, rows) = csv_rows(&csv);
     assert_eq!(rows.len(), 5, "rows: {rows:?}");
     for (k, row) in rows.iter().enumerate() {
-        check_row(row, k as u32);
+        check_row(row, k as u32, (k >= 3).then_some(SNAP_TEMP_C));
     }
     assert_eq!(summary.samples, 5);
     assert_eq!(s.transport().inner.remaining(), 0, "queue must be stopped");
@@ -456,8 +481,9 @@ fn stream_reports_gaps_on_stderr() {
         start_steps(Rate::Sps10.code()),
         vec![
             poll_step(4, &ts(&[0, 100, 200])),
-            poll_step(5, &ts(&[300, 600])),
-            Step::transact(stop_queue(6), accept(6)),
+            snap_step(5),
+            poll_step(6, &ts(&[300, 600])),
+            Step::transact(stop_queue(7), accept(7)),
         ],
     ]
     .concat();
@@ -777,9 +803,10 @@ fn stream_empty_first_poll_does_not_fix_the_time_origin() {
         start_steps(Rate::Sps10.code()),
         vec![
             Step::transact(get_data(4, 0x002), put_header(4, 1).to_vec()),
-            poll_step(5, &ts(&[0, 100, 200])),
-            poll_step(6, &ts(&[300, 400])),
-            Step::transact(stop_queue(7), accept(7)),
+            snap_step(5),
+            poll_step(6, &ts(&[0, 100, 200])),
+            poll_step(7, &ts(&[300, 400])),
+            Step::transact(stop_queue(8), accept(8)),
         ],
     ]
     .concat();
@@ -826,8 +853,9 @@ fn stream_backwards_device_time_is_a_device_error() {
         start_steps(Rate::Sps10.code()),
         vec![
             poll_step(4, &ts(&[0, 100])),
-            poll_step(5, &[BASE - 5_000]),
-            Step::transact(stop_queue(6), accept(6)),
+            snap_step(5),
+            poll_step(6, &[BASE - 5_000]),
+            Step::transact(stop_queue(7), accept(7)),
         ],
     ]
     .concat();
@@ -848,17 +876,24 @@ fn stream_backwards_device_time_is_a_device_error() {
 /// empty) ends the stream after 5 s of polls instead of hanging forever.
 #[test]
 fn stream_gives_up_after_five_seconds_without_data() {
-    let polls = (5_000 / Streamer::poll_period(Rate::Sps10).as_millis()) as u8;
+    let period = Streamer::poll_period(Rate::Sps10).as_millis() as u64;
+    let polls = (5_000 / period) as u8;
     let mut script = start_steps(Rate::Sps10.code());
+    let mut id = 4u8;
     for k in 0..=polls {
-        let id = 4 + k;
         script.push(Step::transact(
             get_data(id, 0x002),
             put_header(id, 1).to_vec(),
         ));
+        id += 1;
+        // A snapshot follows every poll that continues the stream once
+        // 500 ms passed since the last one; the last poll ends it.
+        if k < polls && (u64::from(k) * period).is_multiple_of(500) {
+            script.push(snap_step(id));
+            id += 1;
+        }
     }
-    let stop_id = 5 + polls;
-    script.push(Step::transact(stop_queue(stop_id), accept(stop_id)));
+    script.push(Step::transact(stop_queue(id), accept(id)));
     let mut s = session(Meter::new(script));
     let (mut csv, mut err) = (Vec::new(), Vec::new());
     let opts = StreamOptions {

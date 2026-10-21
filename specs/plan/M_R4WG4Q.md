@@ -37,6 +37,7 @@ codename: Live Wire
 | [M46CTX](../frs/M46CTX.md) | Keyboard and overlay behaviour | n/a |
 | [AKNVND](../frs/AKNVND.md) | Chart and layout polish | n/a |
 | [4NSVC9](../frs/4NSVC9.md) | The live chart leaks memory in WebKit | n/a |
+| [X2SPDW](../frs/X2SPDW.md) | Real-meter fixes from the M2 QA run | n/a |
 
 **Tasks:**
 - [x] Extract `crates/powerz-record` from the CLI — 0P7HSJ (the `--include-demo` help text needed no fix)
@@ -79,8 +80,10 @@ codename: Live Wire
   verify: `bun run test` passes; `bun run e2e:ui` passes the polish specs; light 900 / dark 1600 shots reviewed
 - [x] Dashed series drawn as solid pieces; WebKit memory slope test; real-app measurement — 4NSVC9
   verify: `MEMORY_TEST=1 bun run e2e:ui memory.spec.ts --project=webkit` passes; app WebContent RSS grows <50 MB over 10 min at 1000 SPS
+- [x] Real-meter fixes: 1000 SPS loss under dialogs, gap count, Unix time, TEMP, hint font, stuck bulk, blank window — X2SPDW
+  verify: `cargo test --workspace --locked` and `bun run test` pass; real-meter checks of AC .3, .11, .13 recorded in the FR Notes
 - [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
-  verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. 1000 SPS "—" temperature) and a recorded CSV listed in the report
+  verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. the 1000 SPS temperature tooltip) and a recorded CSV listed in the report
 
 **Tests:**
 - Rust unit and property tests for batching, decimation, stats and recording; worker integration tests against `powerz-sim`; Vitest for UI logic; WebdriverIO real-app e2e (Linux, Windows); Playwright UI e2e with axe (Linux, macOS, Windows).
@@ -88,7 +91,7 @@ codename: Live Wire
 **Acceptance Criteria:**
 - [x] Gating rule from CLAUDE.md passes locally on macOS
 - [x] CI is green on all three OSes, including the `e2e` job
-- [ ] Every AC of the ten FRs above is traced to a test by `/spec-review`
+- [ ] Every AC of the FRs above is traced to a test by `/spec-review`
 - [x] Blocking visual check passed for every UI FR: light and dark, ~900 px and ~1600 px wide, demo device streaming and no device; screenshot paths listed in the report
 - [ ] The desktop app streams, charts and records from the real KM003C at 1000 SPS for 60 s with no host-side gaps
 
