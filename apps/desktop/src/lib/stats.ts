@@ -1,13 +1,12 @@
 import type { MinMaxAvg, StatsSnapshot } from "./backend";
 import { DASH, formatFixed } from "./format";
 
-/** The true minus sign (U+2212), never the ASCII hyphen. */
-export const MINUS = "−";
+export { MINUS } from "./format";
 
 /** `value` with `decimals` places, a true minus sign for negatives and never a
  * negative zero; {@link DASH} when missing. */
 export function formatSignedNumber(value: number | null | undefined, decimals: number): string {
-  return formatFixed(value, decimals).replace(/^-/, MINUS);
+  return formatFixed(value, decimals);
 }
 
 /** `value` with `decimals` places and its unit, a true minus sign for negatives and

@@ -80,7 +80,8 @@ export async function readoutValue(page: Page, name: string): Promise<number> {
     .getByLabel(name, { exact: true })
     .locator(".digits")
     .innerText();
-  return Number.parseFloat(text.replace(/[^\d.+-]/g, ""));
+  // The UI shows negatives with U+2212; read it back as a plain minus.
+  return Number.parseFloat(text.replace(/\u2212/g, "-").replace(/[^\d.+-]/g, ""));
 }
 
 /** Wait until readout `name` is within `tolerance` (relative) of `target`. */

@@ -3,18 +3,22 @@ import type { DeviceListing, Sample } from "./backend";
 /** Shown in place of a value while there is none (e.g. disconnected). */
 export const DASH = "—";
 
-/** Formats `value` with `decimals` places, or {@link DASH} when missing. Never renders "-0.000". */
+/** The true minus sign for displayed negatives; files and clipboard keep ASCII "-". */
+export const MINUS = "\u2212";
+
+/** Formats `value` with `decimals` places, or {@link DASH} when missing. Never renders "−0.000". */
 export function formatFixed(value: number | null | undefined, decimals: number): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return DASH;
   const text = value.toFixed(decimals);
-  return Number(text) === 0 ? (0).toFixed(decimals) : text;
+  if (Number(text) === 0) return (0).toFixed(decimals);
+  return text.startsWith("-") ? MINUS + text.slice(1) : text;
 }
 
 /** Signed current with an arrow for its direction (→ positive, ← negative, none at zero). */
 export function formatCurrent(amps: number | null | undefined): { text: string; arrow: string } {
   const text = formatFixed(amps, 3);
   if (text === DASH || Number(text) === 0) return { text, arrow: "" };
-  return { text, arrow: text.startsWith("-") ? "←" : "→" };
+  return { text, arrow: (amps ?? 0) < 0 ? "←" : "→" };
 }
 
 /** What the IBUS arrow means, for its tooltip and screen readers; null when there is no arrow. */

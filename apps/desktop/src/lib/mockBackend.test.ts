@@ -364,3 +364,35 @@ describe("LINUX_PERMISSION_DENIED (the mock's copy of the backend's Linux permis
     expect(LINUX_PERMISSION_DENIED.kind).toBe("permission_denied");
   });
 });
+
+// ---- Review: totals and min/max/avg start together (screenshot timing, not a bug) ----
+
+describe("stats start together (milestone review)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("0.6 s into a session every field counts the same samples; the totals are just still tiny", async () => {
+    const { statsView } = await import("./stats");
+    const backend = new MockBackend();
+    await backend.connect("demo:noisy-negative", 1000, () => {});
+    // The capture script shoots demo-negative about 600 ms after Connect.
+    vi.advanceTimersByTime(600);
+    const s = await backend.stats();
+    await backend.disconnect();
+
+    // One sample stream feeds every field: min/max/avg are filled exactly when samples > 0,
+    // and elapsed spans those same samples.
+    expect(s.samples).toBeGreaterThan(500);
+    expect(s.vbus).not.toBeNull();
+    expect(s.elapsed_ms).toBeGreaterThan(500);
+    expect(s.elapsed_ms).toBeLessThan(1000);
+    // At about -0.2 A and -1 W, 0.6 s is ~-3e-5 Ah and ~-2e-4 Wh: below the 3-decimal display.
+    expect(Math.abs(s.charge_ah)).toBeLessThan(0.0005);
+    expect(s.charge_ah).toBeLessThan(0);
+    expect(s.energy_wh).toBeLessThan(0);
+    const view = statsView(s);
+    expect(view.elapsed).toBe("0:00:00");
+    expect(view.charge).toBe("0.000 Ah");
+    expect(view.energy).toBe("0.000 Wh");
+  });
+});

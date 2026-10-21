@@ -43,4 +43,6 @@ Vitest for formatting, shortcut dispatch (including the text-input guard), theme
 
 ## Notes
 
+Every negative the UI displays (readout, stats, hover readout, chart axes) uses the true minus sign U+2212 "−" (milestone review, 2026-10-21); CSV, JSON and clipboard output keep ASCII "-".
+
 The look is our own: a calm, dense instrument panel, not the vendor's design.

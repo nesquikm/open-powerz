@@ -78,7 +78,8 @@ function readCsv(file: string): { header: string; rows: string[][] } {
 
 async function readout(name: string): Promise<number> {
   const text = await $(`[aria-label="Live readout"] [aria-label="${name}"] .digits`).getText();
-  return Number.parseFloat(text.replace(/[^\d.+-]/g, ""));
+  // The UI shows negatives with U+2212; read it back as a plain minus.
+  return Number.parseFloat(text.replace(/\u2212/g, "-").replace(/[^\d.+-]/g, ""));
 }
 
 async function statsElapsed(): Promise<number> {

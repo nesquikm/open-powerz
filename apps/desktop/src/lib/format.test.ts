@@ -37,13 +37,15 @@ describe("formatFixed (AC-AH2AEK.2)", () => {
 
   it("never renders a negative zero", () => {
     expect(formatFixed(-0.0001, 3)).toBe("0.000");
+    // A displayed negative uses the true minus sign (U+2212), like the stats panel.
+    expect(formatFixed(-1.169, 3)).toBe("−1.169");
   });
 });
 
 describe("formatCurrent (AC-AH2AEK.2)", () => {
   it("keeps the sign and points the arrow in the current direction", () => {
     expect(formatCurrent(1.2346)).toEqual({ text: "1.235", arrow: "→" });
-    expect(formatCurrent(-0.5)).toEqual({ text: "-0.500", arrow: "←" });
+    expect(formatCurrent(-0.5)).toEqual({ text: "−0.500", arrow: "←" });
   });
 
   it("shows no arrow for zero and a dash when disconnected", () => {

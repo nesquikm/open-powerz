@@ -1,4 +1,5 @@
 import uPlot from "uplot";
+import { formatFixed } from "./format";
 import { THEME_COLORS, type ResolvedTheme, type ThemeStorage } from "./theme";
 
 /** One plotted channel. */
@@ -58,6 +59,14 @@ export function tickDecimals(incrMs: number): number {
   // Fewest decimals that write the step exactly (0.025 s needs 3, 0.5 s needs 1).
   while (d < 3 && Math.abs(Math.round(incrMs / 10 ** (3 - d)) - incrMs / 10 ** (3 - d)) > 1e-9) d++;
   return d;
+}
+
+/** Value-axis tick labels: as many decimals as the spacing `incr` needs (at most 6), with
+ * the true minus sign for negatives. */
+export function axisTicks(splits: readonly number[], incr: number): string[] {
+  let d = 0;
+  while (d < 6 && incr > 0 && Math.abs(Math.round(incr * 10 ** d) - incr * 10 ** d) > 1e-6) d++;
+  return splits.map((v) => formatFixed(v, d));
 }
 
 /** Per-series on/off choice. */
@@ -226,6 +235,8 @@ export function chartOptions({
       side: a.side === "left" ? 3 : 1,
       show: shown.includes(a.id),
       label: a.title,
+      values: (_u: uPlot, splits: number[], _axis: number, _space: number, incr: number) =>
+        axisTicks(splits, incr),
       stroke: p.muted,
       grid: { show: a.id === "volts", stroke: p.border },
     })),

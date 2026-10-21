@@ -318,3 +318,13 @@ describe("zero-based axes (AC-AH2AEM.9)", () => {
     expect(() => saveZeroBased(true, throwing)).not.toThrow();
   });
 });
+
+describe("value axis ticks (true minus sign)", () => {
+  it("writes every tick with the decimals its spacing needs and U+2212 for negatives", async () => {
+    const { axisTicks } = await import("./chartSeries");
+    expect(axisTicks([-0.2, -0.1, 0, 0.1], 0.1)).toEqual(["−0.2", "−0.1", "0.0", "0.1"]);
+    expect(axisTicks([0, 0.5, 1], 0.5)).toEqual(["0.0", "0.5", "1.0"]);
+    expect(axisTicks([1.94, 1.96], 0.02)).toEqual(["1.94", "1.96"]);
+    expect(axisTicks([-5, 0, 5], 5)).toEqual(["−5", "0", "5"]);
+  });
+});
