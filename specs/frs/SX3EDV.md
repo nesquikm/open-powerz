@@ -44,4 +44,4 @@ Vitest: the decimals helper, the column-bridging function (gaps left open), and 
 
 ## Notes
 
-QA findings N1–N4, N6, R1 and R3 on build 09aec0d. R1 was one 24 ms hole at 1000 SPS during a 30 s save sheet. The poll thread sleeps with plain nanosleep, so run-loop modes and timer coalescing do not apply to it. The real-meter check goes here once a slot is booked.
+QA findings N1–N4, N6, R1 and R3 on build 09aec0d. R1: a 24 ms hole at 1000 SPS during a 30 s save sheet. 2026-10-22, real meter, build 55c7b88: no hole while a save sheet was open 30 s (30,021 rows at 1 ms). Over 355 s at 1000 SPS, one 22 ms hole, while the window was off screen.
