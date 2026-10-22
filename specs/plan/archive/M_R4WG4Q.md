@@ -7,6 +7,7 @@ kickoff_branch: null
 frozen_at: null
 migration: none
 codename: Live Wire
+shipped_in: v0.2.0
 ---
 
 # Implementation Plan

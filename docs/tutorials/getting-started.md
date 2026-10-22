@@ -1,11 +1,15 @@
 # Getting started with open-powerz
 
-This tutorial builds the `powerz` command-line tool and takes a first reading.
-You don't need a meter: the built-in demo device stands in for one.
+This tutorial builds the `powerz` command-line tool and the desktop app, and
+takes a first reading with each. You don't need a meter: the built-in demo
+device stands in for one.
 
 ## Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.96 or newer.
+- For the desktop app: [Bun](https://bun.sh) and the
+  [Tauri 2 system prerequisites](https://v2.tauri.app/start/prerequisites/)
+  for your OS.
 - On Linux: `libudev-dev` and `libusb-1.0-0-dev` (or your distribution's
   equivalents) to build, and the udev rule from [Linux setup](../linux.md)
   to reach a real meter without root.
@@ -49,8 +53,28 @@ cargo run -p powerz-cli -- read
 `list` shows each attached meter with its model, serial and USB bus/address.
 With more than one attached, pick one with `--device SERIAL`.
 
+## The desktop app
+
+From the repository root:
+
+```bash
+bun install
+bun run dev
+```
+
+The app opens with an empty chart that says "Connect a meter to start". Pick
+"Demo device — <scenario>" (or your meter) in the device picker and press
+Connect: the big readout shows VBUS, IBUS, power and temperature, the chart
+follows the newest data, and the Stats panel counts charge and energy. Choose a
+sample rate in the rate picker, or press 1 to 4 (2, 10, 50 or 1000 samples per
+second).
+
+Press Record to write a CSV while you watch, or Export to save the whole
+session so far. Press ? for every keyboard shortcut.
+
 ## Where to next
 
-- Recipes: [record a high-rate CSV](../how-to/record-a-csv.md)
+- Recipes: [record a high-rate CSV](../how-to/record-a-csv.md),
+  [explore a session in the desktop app](../how-to/explore-a-session.md)
 - Every command and option: [CLI reference](../reference/cli.md)
 - Why it is built this way: [architecture](../explanation/architecture.md)

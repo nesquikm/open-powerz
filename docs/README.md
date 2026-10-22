@@ -8,13 +8,14 @@ want to do.
 
 Learn by doing. New to open-powerz? Start with
 [tutorials/getting-started.md](tutorials/getting-started.md): build the `powerz`
-CLI and take your first readings, with or without a meter.
+CLI and the desktop app and take your first readings, with or without a meter.
 
 ## How-to guides {#how-to}
 
 Recipes for one task each, in [how-to/](how-to/):
 
-- [Record a high-rate CSV](how-to/record-a-csv.md)
+- [Record a high-rate CSV](how-to/record-a-csv.md), from the CLI or the desktop app
+- [Explore a session in the desktop app](how-to/explore-a-session.md): pause, zoom, gaps, keyboard
 - [Set up Linux permissions](linux.md) (udev rule, `powerz` hwmon driver)
 
 ## Reference {#reference}
