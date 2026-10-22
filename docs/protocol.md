@@ -403,6 +403,12 @@ Recommended order for our library (bulk transport): [device] [static]
   GET_DATA per 10 ms tick. [static]
 - The vendor app never checks reply ids; we may, since the device echoes
   them (except the 0x4C reply). [static] [device]
+- Connect recovery: if CONNECT gets no ACCEPT within 500 ms, we clear the
+  halt on both bulk endpoints (0x01 OUT, 0x81 IN), drain IN, and repeat
+  CONNECT once; we never send RESET (0x04). [inferred] The vendor app does
+  much the same when its HEAD request after CONNECT fails: it clears the halt
+  on the bulk OUT endpoint, sends its own CLEAR_FEATURE ENDPOINT_HALT control
+  transfer, and repeats CONNECT once. [static]
 
 Error handling:
 
@@ -560,3 +566,13 @@ transport sends only the ADC snapshot. [device] [static]
 Separate from the guard, one rule applies on CDC: there SYNC / CONNECT /
 DISCONNECT (0x01..0x03) start or stop the ADCNEW stream, so the CDC transport
 refuses to send them (ADCNEW is not supported yet). [device] (firmware 2.0.6)
+
+Outside the guard, one USB-level operation is safe and allowed: clearing an
+endpoint halt. It is the standard USB control request CLEAR_FEATURE with
+selector ENDPOINT_HALT, handled by the USB stack rather than the meter's
+command set, and it resets the endpoint's data toggle. [static] We use it on
+both bulk endpoints (0x01 OUT, 0x81 IN) only during connect recovery (see
+Session flow and errors), when a stale DISCONNECT (`03 xx 00 00`, carrying a
+device-side id unrelated to our previous session) may sit in bulk IN at open
+[device] and CONNECT gets no ACCEPT within 500 ms. That it clears the stall
+without side effects on the meter is [inferred] until confirmed on the device.

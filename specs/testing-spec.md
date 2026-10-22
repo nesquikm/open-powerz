@@ -17,8 +17,8 @@
 crates/powerz-protocol/src/
 └── lib.rs              # + #[cfg(test)] mod tests (one per module as modules land)
 apps/desktop/src/lib/
-├── units.ts
-└── units.test.ts
+├── backend.ts, mockBackend.ts, session.svelte.ts, format.ts, theme.ts, shortcuts.ts, … (+ *.test.ts)
+└── components/          # Svelte components (covered by the Playwright UI suite)
 ```
 
 Planned: a `tests` directory inside the protocol crate holding integration tests and a
@@ -46,8 +46,51 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
   snapshot-tested with `insta`.
 - **HIL (opt-in):** the same flows against a real meter run only with `POWERZ_HIL=1`, using
   only the safe command set in `docs/protocol.md`; CI never sets it.
-- **Future (desktop, M_R4WG4Q):** Playwright e2e against the Tauri app wired to the demo
-  device (connect, live values, chart, record, export), plus visual-check screenshots.
+- **Desktop real-app e2e:** WebdriverIO + `tauri-driver` drives the built app (with the `e2e`
+  Cargo feature: test hooks, no save dialog) against the demo device — connect, live values,
+  chart, record, export, CSV checks. Runs in CI in the `e2e-app` job on ubuntu-24.04 (xvfb,
+  WebKitGTK WebDriver) and windows-latest (Edge WebDriver matching the installed WebView2).
+  **Not on macOS:** `tauri-driver` has no macOS support, because WKWebView offers no
+  WebDriver.
+- **`e2e` Cargo feature (in the gate):** the `gate` job on all three OSes also runs
+  `cargo clippy -p open-powerz-desktop --all-targets --features e2e --locked -- -D warnings` and
+  `cargo test -p open-powerz-desktop --features e2e --locked --lib --test e2e_save`, so the
+  e2e-only code is linted and its save-path tests run even where `e2e-app` does not (macOS).
+  The e2e app build writes its web UI to `apps/desktop/dist-e2e-app/` (never `dist/`); on a
+  failure the `e2e-app` job uploads the WebdriverIO and `tauri-driver` logs
+  (`apps/desktop/e2e-app-logs/`).
+- **Desktop UI e2e:** Playwright runs the web build (`VITE_BACKEND=mock`, a scripted backend)
+  in Chromium and WebKit on all three OSes: UI flows and every shortcut; layout (no horizontal
+  scroll or readout overflow/overlap from 900×600 to 2560×1440, a one-row top bar at 900 px in
+  every state); Tab order and visible focus rings; live chart scrolling, the hover readout and
+  the zero-based axes toggle; a 100 ms pan bound over a 10M-sample history (Chromium only); and
+  an axe scan (no serious or critical violations) in both themes at 900 and 1600 px. Runs in
+  CI in the `e2e-ui` job on ubuntu-24.04, macos-latest and windows-latest with Playwright's bundled
+  browsers (`bunx playwright install [--with-deps] chromium webkit`, never `channel: chrome`);
+  the HTML report and traces are uploaded as an artifact when it fails.
+- **Required checks:** `e2e-app` and `e2e-ui` are separate from the `gate` job and have no
+  `continue-on-error`, so a failure turns the pull request red. Branch protection on `main`
+  must list every `gate (*)`, `e2e-app (*)` and `e2e-ui (*)` check as required; that is a repo
+  setting, not something the workflow file can enforce.
+- **Desktop HIL:** with `POWERZ_HIL=1`, a backend test drives the app's session worker against
+  a real meter (connect, sane values, 50 and 1000 SPS with zero gaps, record, export, CSV byte
+  parity with `powerz stream`); never in CI. Unplug/replug on hardware is a manual checklist
+  item in `.github/pull_request_template.md` ("Manual hardware checks").
+- **macOS real-device app e2e (manual):** with no `tauri-driver` on macOS, the real app is run
+  by hand (`bun run dev`, or the debug build from `bun run --cwd apps/desktop tauri build --debug --no-bundle`)
+  against an attached KM003C, safe command set only: connect, live values, 1000 SPS with
+  the temperature (with its "Updated once a second" tooltip, or "—" when the firmware reports
+  none), record and export, light and dark at ~900 and ~1600 px.
+  The screenshots are listed in the PR / milestone report next to the demo-device ones.
+- **Memory soak (manual, macOS):** the real app streams at 50 SPS for one hour with its window
+  visible; the web content process RSS is noted after 2 minutes of warm-up and at the end, and
+  must grow by less than 50 MB (FR 4NSVC9). A 10-minute 1000 SPS demo run uses the same
+  measure. Both figures go in the PR's manual hardware checks.
+  In CI, the `e2e-ui` job runs the WebKit memory bound (`memory.spec.ts`, `MEMORY_TEST=1`) as a
+  step of its own with one worker, on Linux and macOS.
+- **Visual checks (blocking):** `/dev-process-toolkit:visual-check` screenshots for every UI
+  FR — light and dark, ~900 and ~1600 px wide, demo device streaming and no device — read
+  and fixed before the FR is done.
 - **Future (Linux CI):** expose the simulator as a real USB device (dummy_hcd + FunctionFS
   gadget, or USB/IP) so the nusb bulk path is tested end to end.
 
@@ -55,6 +98,7 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
 | Layer   | Target | Minimum |
 |---------|--------|---------|
 | `powerz-protocol` decode/framing | >=90%  | 80%     |
+| Desktop backend (batch, history, stats, recording) | >=85% | 75% |
 | Overall | >=75%  | 65%     |
 
 ## 5. Test Data

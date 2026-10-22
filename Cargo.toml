@@ -3,13 +3,14 @@ resolver = "3"
 members = [
     "crates/powerz-protocol",
     "crates/powerz-sim",
+    "crates/powerz-record",
     "crates/powerz-cli",
     "apps/desktop/src-tauri",
 ]
-default-members = ["crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-cli"]
+default-members = ["crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-record", "crates/powerz-cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -17,8 +18,9 @@ repository = "https://github.com/nesquikm/open-powerz"
 authors = ["Mikhail Drapoliuk"]
 
 [workspace.dependencies]
-powerz-protocol = { path = "crates/powerz-protocol", version = "0.1.0" }
-powerz-sim = { path = "crates/powerz-sim", version = "0.1.0" }
+powerz-protocol = { path = "crates/powerz-protocol", version = "0.2.0" }
+powerz-sim = { path = "crates/powerz-sim", version = "0.2.0" }
+powerz-record = { path = "crates/powerz-record", version = "0.2.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

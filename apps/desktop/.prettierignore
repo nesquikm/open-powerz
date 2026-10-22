@@ -1,3 +1,8 @@
 dist/
 src-tauri/
 node_modules/
+dist-e2e-ui/
+dist-e2e-app/
+e2e-app-logs/
+test-results/
+playwright-report/

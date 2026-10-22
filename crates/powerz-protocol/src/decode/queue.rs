@@ -35,6 +35,53 @@ impl QueueRecord {
         })
     }
 
+    /// A record from raw device units: device time (ms), VBUS (µV), IBUS
+    /// (µA, signed), the raw CC1, CC2, D+ and D− codes, and the rate they
+    /// were captured at (which sets the CC / D± scale).
+    pub fn from_raw(
+        time_ms: u32,
+        vbus_uv: i32,
+        ibus_ua: i32,
+        [cc1, cc2, dp, dm]: [u16; 4],
+        rate: Rate,
+    ) -> QueueRecord {
+        QueueRecord {
+            time_ms,
+            vbus_uv,
+            ibus_ua,
+            cc1,
+            cc2,
+            dp,
+            dm,
+            rate,
+        }
+    }
+
+    /// This record with its device time replaced by `time_ms`.
+    pub fn with_time_ms(self, time_ms: u32) -> QueueRecord {
+        QueueRecord { time_ms, ..self }
+    }
+
+    /// VBUS in raw device units (µV).
+    pub fn vbus_uv(&self) -> i32 {
+        self.vbus_uv
+    }
+
+    /// IBUS in raw device units (µA, signed).
+    pub fn ibus_ua(&self) -> i32 {
+        self.ibus_ua
+    }
+
+    /// The raw CC1, CC2, D+ and D− codes, in that order.
+    pub fn raw_lines(&self) -> [u16; 4] {
+        [self.cc1, self.cc2, self.dp, self.dm]
+    }
+
+    /// The rate the record was captured at.
+    pub fn rate(&self) -> Rate {
+        self.rate
+    }
+
     /// Volts per raw CC / D± unit: 0.1 mV at code 0, 1 mV at codes 1..3.
     fn line_v(&self, raw: u16) -> f64 {
         match self.rate {
@@ -170,6 +217,37 @@ mod tests {
         approx(r.dm_v(), 0.076);
         // Code 2 = 50 SPS: device time steps by 20 ms.
         assert_eq!(records[1].time_ms() - records[0].time_ms(), 20);
+    }
+
+    #[test]
+    fn raw_accessors_round_trip_through_from_raw() {
+        let rec = hex_bytes("1f4f0a00 b50f0000 c5ffffff 5200 1d00 4500 4400");
+        let r = QueueRecord::decode(&rec, Rate::Sps2).unwrap();
+        assert_eq!(r.vbus_uv(), 4_021);
+        assert_eq!(r.ibus_ua(), -59);
+        assert_eq!(r.raw_lines(), [0x52, 0x1d, 0x45, 0x44]);
+        assert_eq!(r.rate(), Rate::Sps2);
+        let back = QueueRecord::from_raw(
+            r.time_ms(),
+            r.vbus_uv(),
+            r.ibus_ua(),
+            r.raw_lines(),
+            r.rate(),
+        );
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn with_time_ms_changes_only_the_time() {
+        let rec = hex_bytes("1f4f0a00 b50f0000 c5ffffff 5200 1d00 4500 4400");
+        let r = QueueRecord::decode(&rec, Rate::Sps2).unwrap();
+        let moved = r.with_time_ms(42);
+        assert_eq!(moved.time_ms(), 42);
+        assert_eq!(moved.vbus_uv(), r.vbus_uv());
+        assert_eq!(moved.ibus_ua(), r.ibus_ua());
+        assert_eq!(moved.raw_lines(), r.raw_lines());
+        assert_eq!(moved.rate(), r.rate());
+        assert_eq!(moved.with_time_ms(r.time_ms()), r);
     }
 
     #[test]

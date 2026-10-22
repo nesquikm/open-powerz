@@ -1,0 +1,115 @@
+---
+milestone: M_R4WG4Q
+id: fr_01M5CYB12PNSTXG28YNTR4WG4Q
+status: archived
+archived_at: 2026-10-22T07:41:09Z
+kickoff_branch: null
+frozen_at: null
+migration: none
+codename: Live Wire
+shipped_in: v0.2.0
+---
+
+# Implementation Plan
+
+## M_R4WG4Q — Desktop Meter {#M_R4WG4Q}
+
+**Goal:** The Tauri desktop app becomes a polished live meter and recorder on macOS, Linux and Windows: a device picker with the demo device, a big live readout, a fast chart over the whole session, statistics, and CSV recording and export.
+**Prerequisites:** M_34BAXK (protocol core and CLI, shipped in v0.1.0).
+
+**FR list:**
+
+| FR | Title | Tracker |
+|----|-------|---------|
+| [0P7HSJ](../../frs/archive/0P7HSJ.md) | Recording and CSV export | n/a |
+| [VHY378](../../frs/archive/VHY378.md) | Desktop device backend: picker, session worker and live streaming | n/a |
+| [AH2AEJ](../../frs/archive/AH2AEJ.md) | Session history, decimation and statistics | n/a |
+| [AH2AEK](../../frs/archive/AH2AEK.md) | Desktop shell, live readout, themes and accessibility | n/a |
+| [AH2AEM](../../frs/archive/AH2AEM.md) | Live chart | n/a |
+| [AH2AEN](../../frs/archive/AH2AEN.md) | Desktop end-to-end tests | n/a |
+| [272WSN](../../frs/archive/272WSN.md) | Whole-session view: session time, gaps and axes | n/a |
+| [DDDYDJ](../../frs/archive/DDDYDJ.md) | Live and paused chart states | n/a |
+| [FENCD9](../../frs/archive/FENCD9.md) | Timeline navigation | n/a |
+| [VEDDFD](../../frs/archive/VEDDFD.md) | Resync the UI with a running session on load | n/a |
+| [5X154V](../../frs/archive/5X154V.md) | Clear chart history clears what the chart shows | n/a |
+| [5MTE4V](../../frs/archive/5MTE4V.md) | An app icon that says USB-C power meter | n/a |
+| [JFD9XR](../../frs/archive/JFD9XR.md) | Rate keys, paused Power and range announcements | n/a |
+| [9CFMD3](../../frs/archive/9CFMD3.md) | Export and recording feedback, deep zoom and empty states | n/a |
+| [M46CTX](../../frs/archive/M46CTX.md) | Keyboard and overlay behaviour | n/a |
+| [AKNVND](../../frs/archive/AKNVND.md) | Chart and layout polish | n/a |
+| [4NSVC9](../../frs/archive/4NSVC9.md) | The live chart leaks memory in WebKit | n/a |
+| [X2SPDW](../../frs/archive/X2SPDW.md) | Real-meter fixes from the M2 QA run | n/a |
+| [CWWKJ6](../../frs/archive/CWWKJ6.md) | Honest gaps, quiet noise and fresh temperatures | n/a |
+| [SX3EDV](../../frs/archive/SX3EDV.md) | M2 final polish | n/a |
+
+**Tasks:**
+- [x] Extract `crates/powerz-record` from the CLI — 0P7HSJ (the `--include-demo` help text needed no fix)
+  verify: `cargo test -p powerz-cli -p powerz-record --locked` passes with the CLI snapshots unchanged
+- [x] Device manager, session worker, batcher and error mapping in the desktop crate — VHY378
+  verify: worker integration tests against the simulator pass (batch count, ordering, fallback, disconnect, safe frames)
+- [x] Session history with min/max pyramid and statistics — AH2AEJ
+  verify: property tests and the release-mode 10M-sample timing test pass
+- [x] Recording to file, session export, rate picker backend — 0P7HSJ
+  verify: golden-file test matches `powerz stream` output for the same records
+- [x] UI shell: layout, picker, readout, error banner, themes, shortcuts, About — AH2AEK
+  verify: Vitest passes; visual-check screenshots reviewed (light/dark × ~900/~1600 px × demo streaming/no device)
+- [x] Stats panel and recording controls in the UI — AH2AEJ, 0P7HSJ
+  verify: Vitest passes; visual-check screenshots of the panel reviewed in both themes
+- [x] uPlot chart with live window, zoom/pan via `history_range`, series toggles, hover readout — AH2AEM
+  verify: Vitest passes; visual-check screenshots of live and zoomed views reviewed
+- [x] WebdriverIO + tauri-driver real-app suite, Playwright + axe UI suite, CI `e2e` job — AH2AEN
+  verify: `bun run e2e:ui` passes locally; CI `e2e` job green on its matrix
+- [x] Desktop HIL backend test (`POWERZ_HIL=1`) against the KM003C — AH2AEN
+  verify: `POWERZ_HIL=1 cargo test -p open-powerz-desktop --test hil` passes on the attached meter
+- [x] Session-relative time, history gaps between runs, gap shading, axis width — 272WSN
+  verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `session.spec.ts`
+- [x] Live/paused button, End to go live — DDDYDJ
+  verify: `bun run test` passes; `bun run e2e:ui` passes `live.spec.ts`
+- [x] Timeline model, gap collapse, overview strip, playhead, shuttle, zoom slider, presets — FENCD9
+  verify: `bun run test` passes; `bun run e2e:ui` passes the timeline specs incl. the 10M-sample timings
+- [x] Resync with a running session on load: backend attach + swappable sink, UI rebuild, mock — VEDDFD
+  verify: `cargo test --workspace --locked` and `bun run test` pass; `bun run e2e:ui` passes the reload specs
+- [x] Clear chart history clears the chart, overview and export; clearer stats labels — 5X154V
+  verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `clear.spec.ts`
+- [x] New app icon from one SVG source, all platform sizes generated — 5MTE4V
+  verify: `bun run test` passes the icon asset test; renders and Dock screenshots reviewed
+- [x] QA bugs: rate keys while recording, Power in history, range announcements — JFD9XR
+  verify: `cargo test --workspace --locked` and `bun run test` pass; `bun run e2e:ui` passes `qa-bugs.spec.ts`
+- [x] Export/recording notices with reveal, deep-zoom clamp and edge samples, empty state — 9CFMD3
+  verify: `bun run test` passes; `bun run e2e:ui` passes the notice, zoom and empty-state specs
+- [x] Clear-confirm Escape, menu pattern, About focus, wider shortcut overlay — M46CTX
+  verify: `bun run e2e:ui` passes the keyboard and overlay specs incl. axe
+- [x] DPR-1 line widths, stable top bar and notices, readout, window preset, narrow polish — AKNVND
+  verify: `bun run test` passes; `bun run e2e:ui` passes the polish specs; light 900 / dark 1600 shots reviewed
+- [x] Dashed series drawn as solid pieces; WebKit memory slope test; real-app measurement — 4NSVC9
+  verify: `MEMORY_TEST=1 bun run e2e:ui memory.spec.ts --project=webkit` passes; app WebContent RSS grows <50 MB over 10 min at 1000 SPS
+- [x] Real-meter fixes: 1000 SPS loss under dialogs, gap count, Unix time, TEMP, hint font, stuck bulk, blank window — X2SPDW
+  verify: `cargo test --workspace --locked` and `bun run test` pass; real-meter checks of AC .3, .11, .13 recorded in the FR Notes
+- [x] Honest gaps, quiet noise and fresh temperatures — CWWKJ6
+  verify: `bun run test` and `cargo test --workspace --locked` pass; light/dark ~900/~1600 shots reviewed
+- [x] M2 final polish — SX3EDV: top bar, notices, range decimals, strip, banner, QoS
+  verify: `bun run test` and `cargo test --workspace --locked` pass; `bun run e2e:ui` passes `final-polish.spec.ts`; light/dark ~900/~1200/~1600 shots reviewed
+- [ ] Real-device run of the desktop app on macOS against the KM003C (safe command set only), incl. unplug/replug — AH2AEN, AH2AEK
+  verify: real-device visual-check screenshots (light/dark × ~900/~1600 px, incl. the 1000 SPS temperature tooltip) and a recorded CSV listed in the report
+
+**Deferred to M7 (Polish):**
+- Plot height at 900×900: the readout leaves the plot ~125 px tall (QA N5).
+- The ~71 ms hole a 50 → 1000 SPS switch leaves (expected queue restart) shows as a gap (QA R2).
+- Narrow gap bands (~40 px) in the chart get no "No data" label (QA R5).
+- A 10-minute WebContent memory soak after the plateau (4NSVC9 AC .4 measured 5 minutes).
+- Reword the M2 ACs that later FRs overrode (17 drift hints from the M2 spec review).
+
+**Deferred to M3 (bug FR):**
+- Auto-resume on replug: after a real unplug/replug the session fell back to the demo device and the meter needed a manual reconnect (AH2AEN.10).
+
+**Tests:**
+- Rust unit and property tests for batching, decimation, stats and recording; worker integration tests against `powerz-sim`; Vitest for UI logic; WebdriverIO real-app e2e (Linux, Windows); Playwright UI e2e with axe (Linux, macOS, Windows).
+
+**Acceptance Criteria:**
+- [x] Gating rule from CLAUDE.md passes locally on macOS
+- [x] CI is green on all three OSes, including the `e2e` job
+- [x] Every AC of the FRs above is traced to a test by `/spec-review`
+- [x] Blocking visual check passed for every UI FR: light and dark, ~900 px and ~1600 px wide, demo device streaming and no device; screenshot paths listed in the report
+- [x] The desktop app streams, charts and records from the real KM003C at 1000 SPS for 60 s with no host-side gaps
+
+**Gate:** `bun install --frozen-lockfile && bun run lint && bun run check && bun run test && bun run build:web && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`

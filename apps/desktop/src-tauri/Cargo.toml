@@ -13,14 +13,43 @@ publish = false
 name = "open_powerz_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# The real-app end-to-end build (FR AH2AEN): saves recordings and exports into
+# `$OPEN_POWERZ_E2E_SAVE_DIR` instead of opening the save dialog.
+e2e = []
+
 [build-dependencies]
 tauri-build = { version = "2.7.3", features = [] }
 
 [dependencies]
 powerz-protocol.workspace = true
+powerz-record.workspace = true
+powerz-sim.workspace = true
 tauri = { version = "2.12.4", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tauri-plugin-dialog = "2.8.3"
+tauri-plugin-opener = "2.7.2"
 
-[lints]
-workspace = true
+# Holds a latency-critical NSProcessInfo activity while a meter session is
+# open, so App Nap and timer throttling stay off the worker (FR X2SPDW).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
+# The meter poll thread asks for the user-interactive QoS class (FR SX3EDV).
+libc = "0.2.191"
+
+[dev-dependencies]
+# The golden-file tests compare desktop recordings with `powerz stream`.
+powerz-cli = { path = "../../../crates/powerz-cli" }
+# Property tests for the history decimation (FR AH2AEJ).
+proptest = "1.12.0"
+
+# The workspace lints, except `unsafe_code` is `deny` rather than `forbid`:
+# the macOS activity (`src/activity.rs`) needs one audited `unsafe` call
+# (`endActivity:`), allowed in that module alone.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

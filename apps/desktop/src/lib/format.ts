@@ -1,0 +1,116 @@
+import type { DeviceListing, Sample } from "./backend";
+
+/** Shown in place of a value while there is none (e.g. disconnected). */
+export const DASH = "—";
+
+/** The true minus sign for displayed negatives; files and clipboard keep ASCII "-". */
+export const MINUS = "\u2212";
+
+/** Formats `value` with `decimals` places, or {@link DASH} when missing. Never renders "−0.000". */
+export function formatFixed(value: number | null | undefined, decimals: number): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return DASH;
+  const text = value.toFixed(decimals);
+  if (Number(text) === 0) return (0).toFixed(decimals);
+  return text.startsWith("-") ? MINUS + text.slice(1) : text;
+}
+
+/** Signed current with an arrow for its direction (→ positive, ← negative, none at zero). */
+export function formatCurrent(amps: number | null | undefined): { text: string; arrow: string } {
+  const text = formatFixed(amps, 3);
+  if (text === DASH || Number(text) === 0) return { text, arrow: "" };
+  return { text, arrow: (amps ?? 0) < 0 ? "←" : "→" };
+}
+
+/** What the IBUS arrow means, for its tooltip and screen readers; null when there is no arrow. */
+export function currentDirectionText(amps: number | null | undefined): string | null {
+  const { arrow } = formatCurrent(amps);
+  if (arrow === "→") return "Current flows source → sink";
+  if (arrow === "←") return "Current flows sink → source (reversed)";
+  return null;
+}
+
+/**
+ * Temperature text with one decimal, plus a tooltip: at 1000 SPS the value is
+ * the latest once-a-second snapshot; a missing value is explained.
+ */
+export function temperatureDisplay(
+  tempC: number | null,
+  rateSps: number | null,
+): { text: string; tooltip: string | null } {
+  if (tempC !== null && Number.isFinite(tempC))
+    return {
+      text: formatFixed(tempC, 1),
+      tooltip: rateSps === 1000 ? "Updated once a second at 1000 SPS" : null,
+    };
+  return {
+    text: DASH,
+    tooltip:
+      rateSps === 1000 ? "Not reported by the meter at 1000 SPS" : "Not reported by the meter",
+  };
+}
+
+/** Every string the live readout shows. */
+export interface ReadoutView {
+  vbus: string;
+  ibus: string;
+  ibusArrow: string;
+  power: string;
+  temp: string;
+  tempTooltip: string | null;
+  dp: string;
+  dm: string;
+  cc1: string;
+  cc2: string;
+}
+
+/** Formats the latest sample for the readout; every field is {@link DASH} when `sample` is null. */
+export function readoutView(
+  sample: Sample | null,
+  tempC: number | null,
+  rateSps: number | null,
+): ReadoutView {
+  const current = formatCurrent(sample?.ibus_a);
+  const temp = sample
+    ? temperatureDisplay(tempC, rateSps)
+    : { text: DASH, tooltip: null as string | null };
+  return {
+    vbus: formatFixed(sample?.vbus_v, 3),
+    ibus: current.text,
+    ibusArrow: current.arrow,
+    power: formatFixed(sample ? sample.vbus_v * sample.ibus_a : null, 3),
+    temp: temp.text,
+    tempTooltip: temp.tooltip,
+    dp: formatFixed(sample?.dp_v, 3),
+    dm: formatFixed(sample?.dm_v, 3),
+    cc1: formatFixed(sample?.cc1_v, 3),
+    cc2: formatFixed(sample?.cc2_v, 3),
+  };
+}
+
+/** Picker label: "Demo device — <scenario>" for demo entries, "<model> — <serial>" for meters. */
+export function deviceOptionLabel(device: DeviceListing): string {
+  if (device.demo_scenario !== null) return `Demo device — ${device.demo_scenario}`;
+  return device.serial ? `${device.model} — ${device.serial}` : device.model;
+}
+
+/** Real meters first, then demo devices; order within each group is kept. */
+export function sortDevices(devices: readonly DeviceListing[]): DeviceListing[] {
+  const isDemo = (d: DeviceListing) => (d.demo_scenario === null ? 0 : 1);
+  return [...devices].sort((a, b) => isDemo(a) - isDemo(b));
+}
+
+/** Connection state shown by the top-bar badge. */
+export type ConnectionState = "disconnected" | "connecting" | "streaming" | "rate_locked" | "error";
+
+const BADGE_LABELS: Record<ConnectionState, string> = {
+  disconnected: "Disconnected",
+  connecting: "Connecting",
+  streaming: "Streaming",
+  rate_locked: "Rate locked",
+  error: "Error",
+};
+
+/** Human label for a connection state. */
+export function badgeLabel(state: ConnectionState): string {
+  return BADGE_LABELS[state];
+}

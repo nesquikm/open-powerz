@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "bun run build --outDir dist-e2e-app --emptyOutDir",
+    "frontendDist": "../dist-e2e-app"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "open-powerz",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 560,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0"
+      }
+    ]
+  }
+}

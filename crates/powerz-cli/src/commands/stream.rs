@@ -1,16 +1,15 @@
 //! `powerz stream`.
 
-use crate::record::sig8;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use powerz_protocol::decode::{QueueRecord, Rate};
-use powerz_protocol::session::{Clock, Gap, Session, Streamer};
+use powerz_protocol::decode::Rate;
+use powerz_protocol::session::{Clock, Gap, Session, SnapshotCadence, Streamer};
 use powerz_protocol::transport::Transport;
 
 use crate::error::CliError;
-use crate::record;
+use crate::record::CsvRecorder;
 
 /// Options of `powerz stream`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,7 +39,7 @@ pub struct StreamSummary {
 const NO_DATA: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `powerz stream`: start the queue at `opts.rate`, poll it with
-/// [`Streamer`], write CSV rows to `csv` (header [`record::CSV_HEADER`]),
+/// [`Streamer`], write CSV rows to `csv` (header [`CSV_HEADER`](crate::record::CSV_HEADER)),
 /// stop the queue when the duration is reached or `stop` is set, and print
 /// the sample count and any gaps to `err`.
 pub fn stream<T: Transport, C: Clock>(
@@ -52,7 +51,7 @@ pub fn stream<T: Transport, C: Clock>(
 ) -> Result<StreamSummary, CliError> {
     session.start_stream(opts.rate)?;
     // Only now: a failed start must not leave a header-only file behind.
-    writeln!(csv, "{}", record::CSV_HEADER)?;
+    let mut recorder = CsvRecorder::new(csv)?;
     // Give up after this many polls in a row without a record.
     let no_data_limit = NO_DATA.as_millis() / Streamer::poll_period(opts.rate).as_millis().max(1);
     let mut empty_polls: u128 = 0;
@@ -65,100 +64,107 @@ pub fn stream<T: Transport, C: Clock>(
         gaps: Vec::new(),
     };
     let mut first_ms: Option<u32> = None;
-    let mut unix_origin: Option<u64> = None;
-    let mut integrator = record::Integrator::new();
     let mut write_err: Option<std::io::Error> = None;
-    let polled = Streamer::run(session, opts.rate, |poll| {
-        // The origin is the first record's device time; an empty poll (the
-        // meter's first reply after 0x0E) must not fix it.
-        let Some(first) = poll.records.first() else {
-            empty_polls += 1;
-            if empty_polls > no_data_limit {
-                device_err = Some(CliError::Device(format!(
-                    "no data from the meter for {} s",
-                    NO_DATA.as_secs()
-                )));
-                return false;
-            }
-            return !stop.load(Ordering::SeqCst);
+    // The latest valid snapshot temperature (for the `TEMP` column), read
+    // on the same cadence as the desktop app (session clock), with the
+    // session-clock time it was read at. Rows more than
+    // `SnapshotCadence::MAX_AGE` after it leave `TEMP` empty (AC-CWWKJ6.4).
+    let mut temp_c: Option<(f64, u64)> = None;
+    // Session-clock time minus device time, fixed by the first record.
+    let mut clock_offset: Option<i64> = None;
+    let mut snapshots = SnapshotCadence::default();
+    let polled = loop {
+        let poll = match session.poll_stream() {
+            Ok(poll) => poll,
+            Err(e) => break Err(e),
         };
-        empty_polls = 0;
-        let start = *first_ms.get_or_insert(first.time_ms());
-        if poll.records.iter().any(|r| r.time_ms() < start) {
-            device_err = Some(CliError::Device(
-                "the meter's clock went backwards (did it reboot?); stream stopped".into(),
-            ));
-            return false;
-        }
-        let elapsed = |t: u32| u64::from(t - start);
-        summary.gaps.extend(
-            poll.gaps
-                .iter()
-                .filter(|g| within_limit(elapsed(g.to_ms)))
-                .copied(),
-        );
-        for r in &poll.records {
-            let el = elapsed(r.time_ms());
-            if !within_limit(el) {
+        let poll_now = i64::try_from(session.now_ms()).unwrap_or(i64::MAX);
+        let mut on_poll = |poll: &powerz_protocol::session::StreamPoll| -> bool {
+            // The origin is the first record's device time; an empty poll (the
+            // meter's first reply after 0x0E) must not fix it.
+            let Some(first) = poll.records.first() else {
+                empty_polls += 1;
+                if empty_polls > no_data_limit {
+                    device_err = Some(CliError::Device(format!(
+                        "no data from the meter for {} s",
+                        NO_DATA.as_secs()
+                    )));
+                    return false;
+                }
+                return !stop.load(Ordering::SeqCst);
+            };
+            empty_polls = 0;
+            let start = *first_ms.get_or_insert(first.time_ms());
+            let offset =
+                *clock_offset.get_or_insert(poll_now.saturating_sub(i64::from(first.time_ms())));
+            if poll.records.iter().any(|r| r.time_ms() < start) {
+                device_err = Some(CliError::Device(
+                    "the meter's clock went backwards (did it reboot?); stream stopped".into(),
+                ));
                 return false;
             }
-            let (charge, energy) = integrator.push(r.time_ms(), r.vbus_v(), r.ibus_a());
-            let unix_ms = *unix_origin.get_or_insert_with(|| match opts.start_unix_ms {
-                0 => std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64),
-                fixed => fixed,
-            }) + el;
-            if let Err(e) = write_row(csv, r, el, unix_ms, charge, energy) {
-                write_err = Some(e);
-                return false;
+            let elapsed = |t: u32| u64::from(t - start);
+            summary.gaps.extend(
+                poll.gaps
+                    .iter()
+                    .filter(|g| within_limit(elapsed(g.to_ms)))
+                    .copied(),
+            );
+            for r in &poll.records {
+                if !within_limit(elapsed(r.time_ms())) {
+                    return false;
+                }
+                // Only the first record's wall clock is used (the Unix origin).
+                let now_ms = match opts.start_unix_ms {
+                    0 if recorder.rows() == 0 => std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis() as u64),
+                    fixed => fixed,
+                };
+                let row_clock_ms = offset.saturating_add(i64::from(r.time_ms()));
+                let temp = temp_c
+                    .filter(|&(_, read_ms)| {
+                        row_clock_ms
+                            <= SnapshotCadence::expiry_ms(
+                                i64::try_from(read_ms).unwrap_or(i64::MAX),
+                            )
+                    })
+                    .map(|(t, _)| t);
+                if let Err(e) = recorder.push_with_temp(r, now_ms, temp) {
+                    write_err = Some(e);
+                    return false;
+                }
+                summary.samples += 1;
             }
-            summary.samples += 1;
+            !stop.load(Ordering::SeqCst)
+        };
+        if !on_poll(&poll) {
+            break Ok(());
         }
-        !stop.load(Ordering::SeqCst)
-    });
+        // After the poll, so requests stay one at a time; a failed or
+        // invalid snapshot keeps the latest valid temperature.
+        if snapshots.take(session.now_ms())
+            && let Some(t) = session.read_adc().ok().and_then(|adc| adc.temp_c())
+        {
+            temp_c = Some((t, session.now_ms()));
+        }
+        session.sleep(Streamer::poll_period(opts.rate));
+    };
     // Always try to stop the queue, even after a failed poll or write.
     let stopped = session.stop_stream();
     polled?;
     if let Some(e) = device_err {
-        csv.flush()?;
+        recorder.flush()?;
         return Err(e);
     }
     if let Some(e) = write_err {
         return Err(e.into());
     }
     stopped?;
-    csv.flush()?;
+    recorder.finish()?;
 
     write_summary(err, &summary)?;
     Ok(summary)
-}
-
-/// One CSV row in [`record::CSV_HEADER`] column order; `TEMP` stays empty
-/// (queue records carry no temperature).
-fn write_row(
-    csv: &mut dyn Write,
-    r: &QueueRecord,
-    elapsed_ms: u64,
-    unix_ms: u64,
-    charge_ah: f64,
-    energy_wh: f64,
-) -> std::io::Result<()> {
-    let unix = unix_ms as f64 / 1000.0;
-    writeln!(
-        csv,
-        "{},{unix:.3},{},{},{},{},{},{},,{},{},{}",
-        record::format_elapsed(elapsed_ms),
-        sig8(r.vbus_v()),
-        sig8(r.ibus_a()),
-        sig8(r.dp_v()),
-        sig8(r.dm_v()),
-        sig8(r.cc1_v()),
-        sig8(r.cc2_v()),
-        sig8(charge_ah),
-        sig8(energy_wh),
-        sig8(r.vbus_v() * r.ibus_a()),
-    )
 }
 
 /// The sample count, then one line per gap.

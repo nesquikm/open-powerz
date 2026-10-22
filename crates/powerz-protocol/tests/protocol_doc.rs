@@ -589,3 +589,19 @@ fn ac7_readme_links_protocol_doc() {
         "README.md has no Markdown link to docs/protocol.md"
     );
 }
+
+// ------------------------------------------------- AC-X2SPDW.12 (FR X2SPDW)
+
+#[test]
+fn x2spdw_12_clearing_an_endpoint_halt_is_listed_as_safe_with_a_tag() {
+    let text = doc();
+    let found = units(&all_lines(&text)).into_iter().any(|u| {
+        let l = u.to_lowercase();
+        l.contains("halt") && l.contains("clear") && l.contains("safe") && has_any(&l, &TAGS)
+    });
+    assert!(
+        found,
+        "docs/protocol.md does not list clearing an endpoint halt among the safe \
+         operations with a confidence tag"
+    );
+}

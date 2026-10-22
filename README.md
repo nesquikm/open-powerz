@@ -25,6 +25,7 @@ modern UI.
 | path | what |
 |---|---|
 | `crates/powerz-protocol` | Rust protocol library: transports (vendor bulk, HID, CDC), framing, decoders |
+| `crates/powerz-record` | vendor-compatible CSV recorder shared by the CLI and the desktop app |
 | `crates/powerz-cli` | `powerz` command-line tool |
 | `apps/desktop` | Tauri 2 desktop app (Svelte 5 + TypeScript + Vite, uPlot charts) |
 | `specs/` | requirements, technical spec, plans |
