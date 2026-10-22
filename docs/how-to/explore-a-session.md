@@ -70,6 +70,24 @@ After a disconnect the chart keeps showing the last session, and the message
 where the hover readout appears while you point at the chart. With no meter
 connected at all, the chart says "Connect a meter to start".
 
+## When the meter is unplugged and plugged back in
+
+If the meter's cable comes out while a session is streaming, the app keeps that
+meter picked and the top bar reads **Waiting for meter**. It never switches to a
+demo device on its own.
+
+Plug the meter back in and the app reconnects to the same meter (matched by its
+serial number) within about 3 seconds, at the sample rate you had chosen. The
+session carries on along the same timeline, and the time the cable was out shows
+as a **No data** band in the live chart, in Whole session and in CSV exports.
+
+- A different meter plugged in meanwhile is listed but not connected.
+- Picking another device in the picker (a demo device, or another meter) stops the
+  wait; the unplugged meter is then only listed when it comes back.
+- A recording that was running at the unplug ends at that moment, its file is
+  complete, and a notice says the meter was unplugged. Start a new recording after
+  the reconnect if you need one.
+
 ## Axes
 
 With zero-based axes off, each value axis spans at least 0.1 V, 0.02 A or
@@ -107,9 +125,3 @@ progress line runs along the bottom edge of the top bar instead.
 Notices about a saved recording or a finished export never move the chart.
 Below 1200 px wide they appear in the page between the chart and the Stats
 panel; in wider windows they float over the side panel's bottom-right corner.
-
-## For scripts and other front ends
-
-The backend command `historyGaps` (a list of `HistoryGap` entries, each with a
-start and an end time) lists the breaks between measuring runs that overlap a
-time range.

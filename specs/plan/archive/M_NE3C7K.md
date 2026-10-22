@@ -7,6 +7,7 @@ kickoff_branch: null
 frozen_at: null
 migration: none
 codename: Packet Sleuth
+shipped_in: v0.3.0
 ---
 
 # Implementation Plan

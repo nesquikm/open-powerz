@@ -4,6 +4,21 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-10-23 — "Packet Sleuth"
+
+### Added
+- PD capture core: the meter's PD sniffer starts and stops safely, records are split and timed, and `powerz pd` streams them as text or JSON Lines, with the decoded name and summary of each message (TGE83A)
+- USB PD 3.2 message decoder in a new dependency-free `powerz-pd` crate: headers, power data objects, requests, VDMs, extended messages and chunk reassembly, each with a one-line summary and a field tree (TGE83B)
+- Desktop PD analyzer: start and stop a capture, a fast table with GoodCRC, type and SOP filters, a details pane with highlighted raw bytes, follow mode and Clear (TGE83C)
+- PD messages as coloured markers on the power chart, linked both ways with the packet table, plus the PD status VBUS, IBUS, CC1 and CC2 values (TGE83D)
+- Save and open PD captures in the documented `.pdcap` format, `powerz pd --save` and `powerz pd decode`, and a read-only import of the vendor's PD log database (TGE83E)
+
+### Fixed
+- After an unplug the app keeps the meter selected, waits, and reconnects to it on its own with the gap marked, instead of falling back to the demo device (TGE839)
+- CI is green on all eight jobs: real stalls fixed and timing races made deterministic (KQF5GM)
+
+Total test count at release: 1562 tests, 0 failures, 0 errors.
+
 ## [0.2.0] — 2026-10-22 — "Live Wire"
 
 ### Added

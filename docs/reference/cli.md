@@ -12,7 +12,7 @@ the built-in help.
 | `read` | One snapshot: VBUS (V), IBUS (A, signed), power (W), temperature (°C), D+, D−, CC1, CC2 (V). | `--json` (`vbus_v`, `ibus_a`, `power_w`, `temp_c` or null, `dp_v`, `dm_v`, `cc1_v`, `cc2_v`) |
 | `watch` | The `read` view, refreshed until Ctrl-C. Redraws in place on a terminal, one line per refresh otherwise. | `--interval MS` (default 200, minimum 50) |
 | `stream` | Records the ADC sample stream to CSV until Ctrl-C or `--duration`; prints the sample count and any gaps to stderr. | `--rate {2,10,50,1000}`, `--csv FILE` (created or overwritten), `--duration SECONDS` (device time, fractions allowed) |
-| `pd` | Captures USB PD traffic (messages and events) until Ctrl-C and prints one line per record: elapsed ms, sender, SOP, PD header and data objects in hex. Bulk pipe (or `sim`) only. | `--json` (one JSON object per record, JSON Lines), `--save FILE` (also save the capture as a [pdcap file](pdcap.md)) |
+| `pd` | Captures USB PD traffic (messages and events) until Ctrl-C and prints one line per record: elapsed ms, sender (`meter` or `line`), then for a message its SOP, PD header and data objects in hex and a one-line decoded summary that starts with the message name; for an event its name, with the CC line or a detail where it has one. Bulk pipe (or `sim`) only. | `--json` (one JSON object per record, JSON Lines), `--save FILE` (also save the capture as a [pdcap file](pdcap.md)) |
 | `pd decode` | Prints the records of a saved [pdcap file](pdcap.md) as `pd` would; no meter needed. On a damaged file it prints every record before the damage, then the line number where reading stopped, and exits 5. | `--json`, `FILE` |
 
 ## Global options

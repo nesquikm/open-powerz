@@ -12,7 +12,9 @@ down in [docs/protocol.md](../protocol.md), where each fact is tagged
 ## Modules
 
 ```
-powerz-protocol   library: framing, decoders, transports, session, crypto
+powerz-pd         library: USB PD r3.2 message decoder (no dependencies)
+powerz-protocol   library: framing, decoders, transports, session, crypto,
+                  PD capture, pdcap files     uses pd
 powerz-sim        demo device: a simulated KM003C behind the Transport trait
 powerz-record     vendor-compatible CSV writer
 
@@ -20,6 +22,10 @@ powerz-cli        the `powerz` binary         uses protocol, sim, record
 open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
 ```
 
+- **powerz-pd** turns PD message bytes into typed messages, a one-line
+  summary and a field tree. It has no dependencies and does no I/O, so it
+  builds for `wasm32-unknown-unknown` and a later web edition can share it.
+  `powerz-protocol` re-exports it as `powerz_protocol::pd`.
 - **powerz-protocol** holds everything that talks to the meter. Framing and
   decoding are pure functions over byte slices; transports sit behind one
   `Transport` trait; `Session` adds the request/reply rules on top.
@@ -54,6 +60,44 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
   unreliable on plain replies, so the parser walks the section chain and
   checks every length.
 
+## PD capture
+
+The meter can sniff the USB PD traffic on the cable that passes through it.
+The capture is passive: the meter keeps passing power and nothing is sent on
+the cable.
+
+The capture path has four steps:
+
+1. **Sniffer session.** `PdSniffer` (or the matching `Session` methods) starts
+   the meter's sniffer, polls it every 5 ms and stops it on every exit path,
+   drop included.
+2. **Record parser.** Each poll answers a PD_PACKET chunk: a status block
+   (meter time, VBUS, IBUS, CC1, CC2) and the captured records. The parser in
+   `decode::pd_packet` splits it into messages, big messages and events, and
+   gives each record its time since the capture start.
+3. **Decoder.** `powerz-pd` decodes each message. One `Capture` context per
+   capture remembers the last offer, so a Request decodes against the offer it
+   points at, and it reassembles chunked extended messages.
+4. **Rows to the UI.** In the desktop app, the backend decodes the records and
+   sends table rows to the UI in batches, at most 60 a second, on the same
+   channel as the measurements. The field tree of one record is fetched only
+   when the user selects it. The CLI's `pd` command prints the same records
+   directly.
+
+PD records and measurement samples share one session time base, so PD markers
+sit on the power chart at the moment they happened. In the desktop app the
+same worker thread polls the ADC queue and the sniffer, one after the other.
+
+**pdcap files.** A capture saves as a `.pdcap` file: JSON Lines, a header line
+and then one line per status sample or record, with the record's raw bytes in
+hex. Readers decode everything else from those bytes. The format has no serial number field, so files are
+safe to share. A damaged file loads up to the damaged line. See the
+[pdcap reference](../reference/pdcap.md).
+
+**Vendor logs.** The desktop app also imports the vendor app's PD log database
+(SQLite) read-only. The file is treated as untrusted: it is never written, and
+every value read from it is bounded.
+
 ## The desktop app
 
 - **The backend owns the session.** One worker thread per connected meter
@@ -67,6 +111,13 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
   the sample rate, any open recording with its elapsed time, and the chart and
   statistics, which refill from the session history. Closing the window still
   ends the session.
+- **Replug waits for the same meter.** When a streaming meter is unplugged,
+  the backend remembers its serial number and the app shows **Waiting for
+  meter**. The hotplug watcher matches new listings by serial. When the meter
+  comes back, the backend reconnects through the normal connect path at the
+  same rate, and the session goes on with the time away marked as a gap. A
+  manual pick of another device ends the wait. A recording ends at the unplug
+  with a complete file.
 - **A poll thread that keeps up at 1000 SPS.** On macOS the worker thread runs
   at the user-interactive quality of service, so a sheet or another app in
   front does not starve it.
