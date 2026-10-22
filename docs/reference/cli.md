@@ -35,7 +35,8 @@ the built-in help.
   ENERGY (Wh) are integrated from signed current; PWR = VBUS × IBUS.
 - `pd --json` and `pd decode --json` lines: `kind` (`message`, `big_message`
   or `event`), `elapsed_ms`, `from_meter`; messages add `sop`, `header` (as a
-  number) and `body` (hex); events add `event` (for example `attach`), `cc` for
+  number), `body` (hex), and the decoded `name` (for example
+  `Source_Capabilities`) and one-line `summary`; events add `event` (for example `attach`), `cc` for
   attach and detach, and `detail` for receive errors and monitor types.
 - `pd --save` files: the [pdcap format](pdcap.md), JSON Lines with a header
   line and one line per status sample or record. The serial number is never

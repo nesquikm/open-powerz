@@ -110,8 +110,11 @@ Line by line:
 5. Status at 300 ms: still 5 V on VBUS.
 6. A PD message: `b0` = `97` (message, 24 bytes), meter time 300 ms, SOP 0,
    PD header `a141` = 0x41A1, then four data objects. `powerz pd decode` prints
-   it as `280 ms  line  SOP  header 0x41a1 2c9181082cd102002cb10400f4410600`.
-7. and 8. Two more messages, 2 ms apart: PD headers 0x1082 and 0x03A3.
+   it as `280 ms  line  SOP  header 0x41a1 2c9181082cd102002cb10400f4410600`
+   followed by its decoded summary, `Source_Capabilities: Fixed 5.00 V 3.00 A,
+   Fixed 9.00 V 3.00 A, Fixed 15.00 V 3.00 A, Fixed 20.00 V 5.00 A`.
+7. and 8. Two more messages, 2 ms apart: a Request for that offer's first
+   position (`Request: #1 Fixed 5.00 V 3.00 A`) and the Accept.
 
 ## Damaged files
 

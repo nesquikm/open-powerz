@@ -408,12 +408,63 @@ fn hil_replug_reconnects_within_3_s_at_1000_sps_with_an_outage_gap() {
     let poll = Duration::from_millis(devices::HOTPLUG_PERIOD_MS);
 
     eprintln!("hil_replug: streaming at 1000 SPS. UNPLUG the meter's data cable now.");
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(180);
     let mut waiting = false;
+    let mut samples = 0usize;
+    let mut listed = true;
+    let mut last_batch = Instant::now();
+    let mut quiet_reported = false;
     while !waiting {
-        assert!(Instant::now() < deadline, "no unplug seen within 120 s");
+        assert!(Instant::now() < deadline, "no unplug seen within 180 s");
+        // What the OS lists, as the hotplug watcher would see it.
+        let now_listed = m
+            .list_devices()
+            .iter()
+            .any(|d| d.demo_scenario.is_none() && d.serial.as_deref() == Some(serial.as_str()));
+        if now_listed != listed {
+            listed = now_listed;
+            eprintln!(
+                "hil_replug: +{} ms the OS {} the meter",
+                started.elapsed().as_millis(),
+                if listed { "lists" } else { "no longer lists" }
+            );
+        }
+        if !quiet_reported && last_batch.elapsed() > Duration::from_secs(1) {
+            quiet_reported = true;
+            eprintln!(
+                "hil_replug: +{} ms no samples for over 1 s",
+                started.elapsed().as_millis()
+            );
+        }
         match rx.recv_timeout(poll) {
-            Ok(BackendEvent::Status(Status::Waiting { .. })) => waiting = true,
+            // Status kinds and error texts only: a connected status carries the serial.
+            Ok(BackendEvent::Status(Status::Disconnected { error })) => eprintln!(
+                "hil_replug: +{} ms disconnected ({})",
+                started.elapsed().as_millis(),
+                error.as_ref().map_or("no error", |e| e.message.as_str())
+            ),
+            Ok(BackendEvent::Error(e)) => eprintln!(
+                "hil_replug: +{} ms error: {}",
+                started.elapsed().as_millis(),
+                e.message
+            ),
+            Ok(BackendEvent::Batch(b)) => {
+                last_batch = Instant::now();
+                quiet_reported = false;
+                samples += b.samples.len();
+                if samples >= 10_000 {
+                    eprintln!(
+                        "hil_replug: +{} ms still streaming",
+                        started.elapsed().as_millis()
+                    );
+                    samples = 0;
+                }
+            }
+            Ok(BackendEvent::Status(Status::Waiting { .. })) => {
+                eprintln!("hil_replug: +{} ms waiting", started.elapsed().as_millis());
+                waiting = true;
+            }
             Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the session sink closed"),
         }
@@ -428,7 +479,7 @@ fn hil_replug_reconnects_within_3_s_at_1000_sps_with_an_outage_gap() {
     let mut outage = None;
     let mut first_after = None;
     while first_after.is_none() {
-        assert!(Instant::now() < deadline, "no reconnect within 120 s");
+        assert!(Instant::now() < deadline, "no reconnect within 180 s");
         let list = m.list_devices();
         if listed_at.is_none()
             && list

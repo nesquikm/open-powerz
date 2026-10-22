@@ -41,8 +41,8 @@ Build order: TGE839, then TGE83A → TGE83B → TGE83C → TGE83D → TGE83E. Th
 
 **Tasks:**
 - [x] CI green on all 8 jobs — KQF5GM (implemented and merged in v0.2.0)
-- [ ] Replug reconnects to the meter — TGE839
-- [ ] PD capture core and the powerz pd command — TGE83A
+- [x] Replug reconnects to the meter — TGE839
+- [x] PD capture core and the powerz pd command — TGE83A
 - [x] USB PD 3.2 message decoder — TGE83B
 - [x] Desktop PD analyzer view — TGE83C
 - [x] PD timeline linked to the power chart — TGE83D
@@ -58,6 +58,7 @@ Build order: TGE839, then TGE83A → TGE83B → TGE83C → TGE83D → TGE83E. Th
 - Demo device: the PD scenario negotiates 9 V while the meter stream stays at 5 V, so the chart and the PD table disagree. Link the simulator's PD and measurement streams.
 - PD files: count skipped vendor rows in the import notice; open a .pdcap damaged on its first entry as an empty capture with the damage notice; give `pd decode` a file-error exit code instead of 5; share `record_from` between pdcap and the vendor import.
 - PD files: an automatic reconnect after a replug does not release an opened capture's memory (only the Connect command does).
+- Replug HIL: a first real-meter run (2026-10-23) missed an unplug the user made inside its 120 s window (it logged nothing, so the cause is unknown; a hung transfer is the main suspect). Three instrumented runs that day all passed (unplug seen within 2 ms of the OS removal, reconnect 136–140 ms); keep re-running it and fix the miss if it recurs.
 - Gate probe `spawn_pattern_allowlist` fails on `main` too: `.claude/settings.json` lacks `Bash(claude:*)`. Widening the allow-list needs the user's OK.
 
 **Device checks:** pass-through PD capture (charger → meter → phone or laptop), passive only; replug at 1000 SPS. The user approved a short slot for each.

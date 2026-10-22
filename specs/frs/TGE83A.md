@@ -33,6 +33,7 @@ The protocol library and the command line tool capture PD traffic from the meter
 - AC-TGE83A.7: The session-2 vectors in the protocol notes decode to their annotated values in tests.
 - AC-TGE83A.8: The simulator offers a PD capture scenario with a full negotiation, an EPR entry and a reset, used by the tests and by the demo device.
 - AC-TGE83A.9: On the real meter, a pass-through capture with a charger on the input and a phone or laptop on the output records Source_Capabilities, Request, Accept and PS_RDY. The check is passive and recorded in the Notes.
+- AC-TGE83A.10: The pd command's text output shows each message's name and one-line summary from the PD decoder, and the JSON lines carry the decoded name and summary next to the raw bytes.
 
 ## Technical Design
 
@@ -45,3 +46,5 @@ Unit and property tests for the chunk and record parser, golden tests from the s
 ## Notes
 
 Passive sniffing only, per the device safety rules. The UFCS analyzer (attribute 0x40) is left for a later milestone.
+
+AC.9 on the real meter, 2026-10-23: charger on the input, sink plugged into the output; 26 records captured passively, including Source_Capabilities (5/9/15/20 V), Request (9 V 2.2 A), Accept and PS_RDY; stop sent on Ctrl-C; no serial in the files.

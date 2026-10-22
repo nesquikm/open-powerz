@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use powerz_protocol::decode::pd_packet::{
     CcLine, MonitorType, PdEvent, PdMessage, PdRecordKind, ReceiveErrorCause,
 };
+use powerz_protocol::pd::{Capture, Decoded};
 use powerz_protocol::pdcap;
 use powerz_protocol::session::{CapturedRecord, Clock, PdOptions, PdPoll, PdSniffer, Session};
 use powerz_protocol::transport::Transport;
@@ -72,11 +73,18 @@ pub fn pd_decode(
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     let mut reader = pdcap::Reader::new(input).map_err(|e| damaged(name, &e))?;
+    // One decoder context for the whole file, as for a live capture.
+    let mut decoder = Capture::new();
     for entry in reader.by_ref() {
         match entry {
             Ok(pdcap::Entry::Record {
                 elapsed_ms, record, ..
-            }) => write_record(out, &CapturedRecord { elapsed_ms, record }, json)?,
+            }) => write_record(
+                out,
+                &mut decoder,
+                &CapturedRecord { elapsed_ms, record },
+                json,
+            )?,
             Ok(pdcap::Entry::Status { .. }) => {}
             Err(e) => {
                 out.flush()?;
@@ -105,11 +113,14 @@ fn capture<T: Transport, C: Clock>(
     // Session time base of the records: meter time minus elapsed time,
     // fixed by the first record so session time keeps the meter's spacing.
     let mut base: Option<i64> = None;
+    // One decoder context per capture, so a Request decodes against the
+    // Source_Capabilities seen before it.
+    let mut decoder = Capture::new();
     let polled = sniffer.run(|poll| {
         let written = poll
             .records
             .iter()
-            .try_for_each(|r| write_record(out, r, json))
+            .try_for_each(|r| write_record(out, &mut decoder, r, json))
             .and_then(|()| out.flush())
             .and_then(|()| match save.as_deref_mut() {
                 // Flushed once per poll, like stdout, so the file on disk
@@ -159,12 +170,20 @@ fn save_poll(
     Ok(())
 }
 
-/// Print one record as a text line or a JSON object line.
-fn write_record(out: &mut dyn Write, r: &CapturedRecord, json: bool) -> std::io::Result<()> {
+/// Feed one record to the capture's PD decoder and print it as a text line
+/// or a JSON object line. Events (attach, detach, resets) are fed too, so
+/// the decoder's context follows the capture.
+fn write_record(
+    out: &mut dyn Write,
+    decoder: &mut Capture,
+    r: &CapturedRecord,
+    json: bool,
+) -> std::io::Result<()> {
+    let decoded = r.record.pd_input().and_then(|i| decoder.feed(i));
     if json {
-        writeln!(out, "{}", record_json(r))
+        writeln!(out, "{}", record_json(r, decoded.as_ref()))
     } else {
-        writeln!(out, "{}", record_text(r))
+        writeln!(out, "{}", record_text(r, decoded.as_ref()))
     }
 }
 
@@ -221,7 +240,7 @@ fn event_detail(e: &PdEvent) -> Option<String> {
     }
 }
 
-fn record_json(r: &CapturedRecord) -> serde_json::Value {
+fn record_json(r: &CapturedRecord, decoded: Option<&Decoded>) -> serde_json::Value {
     let base = |kind: &str| {
         json!({
             "elapsed_ms": r.elapsed_ms,
@@ -234,6 +253,10 @@ fn record_json(r: &CapturedRecord) -> serde_json::Value {
         v["sop"] = json!(m.sop);
         v["header"] = json!(m.header);
         v["body"] = json!(hex(&m.body));
+        if let Some(d) = decoded {
+            v["name"] = json!(d.header.message_type.name());
+            v["summary"] = json!(d.summary());
+        }
         v
     };
     match &r.record.kind {
@@ -263,17 +286,22 @@ fn sop_name(sop: u8) -> String {
     }
 }
 
-fn record_text(r: &CapturedRecord) -> String {
+fn record_text(r: &CapturedRecord, decoded: Option<&Decoded>) -> String {
     // b0 bit 6 marks what the meter sent [device]; anything else came from
     // the line, which in a pass-through capture is either port partner.
     let who = if r.record.from_meter { "meter" } else { "line" };
     let what = match &r.record.kind {
-        PdRecordKind::Message(m) | PdRecordKind::BigMessage(m) => format!(
-            "{:<5} header 0x{:04x} {}",
-            sop_name(m.sop),
-            m.header,
-            hex(&m.body)
-        ),
+        PdRecordKind::Message(m) | PdRecordKind::BigMessage(m) => {
+            // The summary starts with the message name.
+            let summary = decoded.map(Decoded::summary).unwrap_or_default();
+            format!(
+                "{:<5} header 0x{:04x} {:<24} {}",
+                sop_name(m.sop),
+                m.header,
+                hex(&m.body),
+                summary
+            )
+        }
         PdRecordKind::Event(e) => {
             let (name, cc) = event_name(e);
             let mut s = name.replace('_', " ");
@@ -309,10 +337,10 @@ mod tests {
     #[test]
     fn records_the_meter_did_not_send_are_not_called_charger() {
         // Pass-through capture: either port partner may have sent it.
-        let text = record_text(&attach(false));
+        let text = record_text(&attach(false), None);
         assert!(!text.contains("charger"), "{text}");
         assert!(text.contains("line"), "{text}");
-        assert!(record_text(&attach(true)).contains("meter"));
+        assert!(record_text(&attach(true), None).contains("meter"));
     }
 
     #[test]

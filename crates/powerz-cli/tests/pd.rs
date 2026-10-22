@@ -366,3 +366,60 @@ fn an_output_error_sends_stop_and_fails() {
     assert_eq!(s.transport().inner.written().last(), Some(&stop_req(4)));
     assert_eq!(s.transport().inner.remaining(), 0);
 }
+
+// ---- AC-TGE83A.10: decoded name and summary ----
+
+const CAPS_SUMMARY: &str = "Source_Capabilities: Fixed 5.00 V 3.00 A, Fixed 9.00 V 3.00 A";
+/// The Request decodes against the Source_Capabilities seen one poll
+/// earlier: position 1 is the 5 V PDO.
+const REQUEST_SUMMARY: &str = "Request: #1 Fixed 5.00 V 3.00 A";
+
+#[test]
+fn json_message_lines_carry_the_decoded_name_and_summary_next_to_the_raw_bytes() {
+    let (mut s, stop) = ctrl_c_session(two_poll_script(), 2);
+    let mut out = Vec::new();
+    pd(&mut s, true, &stop, &mut out).unwrap();
+    let text = text(&out);
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l:?}: {e}")))
+        .collect();
+    assert_eq!(lines.len(), 4, "{text}");
+
+    let caps = &lines[1];
+    assert_eq!(caps["name"], "Source_Capabilities", "{caps}");
+    assert_eq!(caps["summary"], CAPS_SUMMARY, "{caps}");
+    assert_eq!(caps["header"], 0x21A1, "raw header kept: {caps}");
+    assert_eq!(caps["body"], hex_of(&SRC_CAPS), "raw body kept: {caps}");
+
+    let req = &lines[2];
+    assert_eq!(req["name"], "Request", "{req}");
+    assert_eq!(
+        req["summary"], REQUEST_SUMMARY,
+        "decoded against the earlier Source_Capabilities: {req}"
+    );
+    assert_eq!(req["header"], 0x1082, "{req}");
+    assert_eq!(req["body"], "2cb14413", "{req}");
+
+    // Events keep their own fields.
+    assert_eq!(lines[0]["kind"], "event");
+    assert_eq!(lines[0]["event"], "attach");
+    assert_eq!(lines[3]["event"], "hard_reset");
+}
+
+#[test]
+fn text_message_lines_show_the_decoded_name_and_summary() {
+    let (mut s, stop) = ctrl_c_session(two_poll_script(), 2);
+    let mut out = Vec::new();
+    pd(&mut s, false, &stop, &mut out).unwrap();
+    let text = text(&out);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 4, "one line per record:\n{text}");
+    assert!(lines[1].contains(CAPS_SUMMARY), "{}", lines[1]);
+    assert!(lines[2].contains(REQUEST_SUMMARY), "{}", lines[2]);
+    assert!(
+        lines[0].to_lowercase().contains("attach"),
+        "events unchanged: {}",
+        lines[0]
+    );
+}
