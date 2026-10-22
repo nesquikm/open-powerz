@@ -1,8 +1,8 @@
 ---
 title: USB PD 3.2 message decoder
 milestone: M_NE3C7K
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T20:50:59Z
 id: fr_01M5HVWJ41WV7P8G50RPTGE83B
 created_at: 2026-10-22T13:12:57.217Z
 changelog_category: Added
@@ -46,3 +46,12 @@ Table-driven golden tests per message type, property tests that random bytes nev
 ## Notes
 
 The vendor's custom battery VDMs and a vendor ID to name table are optional and not required here.
+
+## Implementation notes
+
+- Pass 2: a chunk 0 arriving while a message is pending reports MissingChunk — by design and pinned by restarted_message_reports_the_lost_tail: the earlier message really lost its tail
+- public enums in powerz-pd (Message, Issue, Input, Sop, ...) are not #[non_exhaustive] — API polish before the web edition consumes the crate; M7 follow-up
+- Issue has no Display impl; sub-decoder visibility is mixed (some pub, some pub(crate)); Field::flagged takes an Option — API-shape polish, M7 follow-up together with non_exhaustive
+- Decoded::block() allocates on every summary()/fields() call — summaries are built once per record in the backend; revisit if the analyzer view profiles it
+- the wasm32 build of powerz-pd only runs in CI; the target is not installed locally — the no_io tests cover it structurally; CI is the first real wasm build
+- CLAUDE.md Architecture tree lists only powerz-protocol and powerz-cli (missing powerz-pd, powerz-sim, powerz-record) — project instruction file; flagged for the user rather than edited here

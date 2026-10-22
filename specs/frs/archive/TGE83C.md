@@ -1,8 +1,8 @@
 ---
 title: Desktop PD analyzer view
 milestone: M_NE3C7K
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T20:50:59Z
 id: fr_01M5HVWJ41WV7P8G50RPTGE83C
 created_at: 2026-10-22T13:12:57.217Z
 changelog_category: Added
@@ -44,3 +44,13 @@ Rust worker tests against the simulator's PD scenario, Vitest for the record sto
 ## Notes
 
 The real-meter view check rides on the capture core FR's pass-through session.
+
+## Implementation notes
+
+- backend PD record store and UI column store have no cap; each backend entry keeps a cloned Decoded — long captures grow without bound; cap or re-decode on demand is an M7 follow-up
+- every pd_rows batch re-runs messageTypes(), sops() and filter() as O(n) scans with a fresh Uint32Array — perf spec passes with ~3x headroom at 100k rows; incremental option lists and filtering are an M7 follow-up
+- PdClearDialog traps Tab only inside the dialog; the page behind is not inert — axe passes and Escape/Cancel work; adding inert is an M7 follow-up
+- the message-type filter also hides event rows while the SOP filter keeps them — by design: event names are selectable types in the same menu, pinned by the AC.3 test
+- stop_pd marks the capture stopped even if the 0x11 request errors on a live session — a dead pipe ends the session anyway; a live-session stop error is reported to the user
+- clear_pd returns Result although it cannot fail, adding a timeout path — kept for symmetry with the other worker commands
+- undecodable messages show as rows named 'Message' with no fields — the decoder returns a message for every valid header; untested edge, revisit with real captures

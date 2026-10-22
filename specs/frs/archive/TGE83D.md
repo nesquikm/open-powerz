@@ -1,8 +1,8 @@
 ---
 title: PD timeline linked to the power chart
 milestone: M_NE3C7K
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T20:50:59Z
 id: fr_01M5HVWJ41WV7P8G50RPTGE83D
 created_at: 2026-10-22T13:12:57.217Z
 changelog_category: Added
@@ -41,3 +41,11 @@ Vitest for time mapping and marker clustering, and Playwright on the mocked back
 ## Notes
 
 Depends on the capture core, decoder and analyzer view FRs.
+
+## Implementation notes
+
+- AC.5 badge splitting on zoom is covered by Vitest only, not by an e2e test on the real chart — the FR's Testing section asks for Vitest here; visual check confirmed badges render
+- a PD status batch already in flight when Clear is pressed can still add dots after the clear — status has no index to filter on; the effect is a few stale dots until the next clear or session
+- a count badge click selects its earliest record — documented in the FR's Technical Design
+- a PD poll that lands before the first queue record after a device-clock reset still uses the previous timeline offset — the marker scan falls back to a full scan when times go back, so placement self-corrects on the next records
+- the ARIA-role shortcut rule changes keyboard behaviour app-wide: arrows/Home/End on tabs, the PD table and the field tree no longer step the playhead — intended: those widgets own their navigation keys; keyboard, focus and timeline e2e specs pass

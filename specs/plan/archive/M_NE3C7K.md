@@ -1,8 +1,8 @@
 ---
 milestone: M_NE3C7K
 id: fr_01M5CYB12TRA906QEWFZNE3C7K
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T20:51:07Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -29,13 +29,13 @@ codename: Packet Sleuth
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [KQF5GM](../frs/KQF5GM.md) | CI green on all 8 jobs | n/a |
-| [TGE839](../frs/TGE839.md) | Replug reconnects to the meter | n/a |
-| [TGE83A](../frs/TGE83A.md) | PD capture core and the powerz pd command | n/a |
-| [TGE83B](../frs/TGE83B.md) | USB PD 3.2 message decoder | n/a |
-| [TGE83C](../frs/TGE83C.md) | Desktop PD analyzer view | n/a |
-| [TGE83D](../frs/TGE83D.md) | PD timeline linked to the power chart | n/a |
-| [TGE83E](../frs/TGE83E.md) | PD capture save and load | n/a |
+| [KQF5GM](../../frs/archive/KQF5GM.md) | CI green on all 8 jobs | n/a |
+| [TGE839](../../frs/archive/TGE839.md) | Replug reconnects to the meter | n/a |
+| [TGE83A](../../frs/archive/TGE83A.md) | PD capture core and the powerz pd command | n/a |
+| [TGE83B](../../frs/archive/TGE83B.md) | USB PD 3.2 message decoder | n/a |
+| [TGE83C](../../frs/archive/TGE83C.md) | Desktop PD analyzer view | n/a |
+| [TGE83D](../../frs/archive/TGE83D.md) | PD timeline linked to the power chart | n/a |
+| [TGE83E](../../frs/archive/TGE83E.md) | PD capture save and load | n/a |
 
 Build order: TGE839, then TGE83A → TGE83B → TGE83C → TGE83D → TGE83E. The UFCS analyzer moves to a later milestone.
 

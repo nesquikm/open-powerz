@@ -1,8 +1,8 @@
 ---
 title: PD capture save and load
 milestone: M_NE3C7K
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T20:50:59Z
 id: fr_01M5HVWJ41WV7P8G50RPTGE83E
 created_at: 2026-10-22T13:12:57.217Z
 changelog_category: Added
@@ -42,3 +42,13 @@ Round-trip property tests, truncation tests at every byte offset of a small file
 ## Notes
 
 A vendor pdStream import is out of scope.
+
+## Implementation notes
+
+- opening a large .pdcap collects every entry and sends it in one IPC message; no entry cap — lines are now capped at 64 KiB; a record-count cap for opened files is an M7 follow-up
+- `pd decode` reports a damaged file with exit code 5 (the device-error code) — the CLI has no file-error code yet; on the M7 follow-ups
+- record_from is written twice (pdcap and the vendor import) — on the M7 follow-ups
+- a .pdcap damaged on its first entry is refused instead of opening empty with the damage notice — the error names the line; on the M7 follow-ups
+- an automatic reconnect after a replug does not release an opened capture's memory — the Connect command does; on the M7 follow-ups
+- a CLI-saved and a desktop-saved file of the same capture differ by a constant session_ms offset — documented in docs/reference/pdcap.md
+- the desktop save's off-thread write has no timing test (a slow fsync during polling) — the worker only answers a snapshot command now, which a unit test pins

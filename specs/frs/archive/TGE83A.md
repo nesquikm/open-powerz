@@ -1,8 +1,8 @@
 ---
 title: PD capture core and the powerz pd command
 milestone: M_NE3C7K
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T20:50:59Z
 id: fr_01M5HVWJ41WV7P8G50RPTGE83A
 created_at: 2026-10-22T13:12:57.217Z
 changelog_category: Added
@@ -48,3 +48,11 @@ Unit and property tests for the chunk and record parser, golden tests from the s
 Passive sniffing only, per the device safety rules. The UFCS analyzer (attribute 0x40) is left for a later milestone.
 
 AC.9 on the real meter, 2026-10-23: charger on the input, sink plugged into the output; 26 records captured passively, including Source_Capabilities (5/9/15/20 V), Request (9 V 2.2 A), Accept and PS_RDY; stop sent on Ctrl-C; no serial in the files.
+
+## Implementation notes
+
+- Pass 2 said `pd` on HID/CDC is not refused in dispatch — false positive: validate() refuses it and pd_needs_the_bulk_pipe tests it
+- confidence tags on record offsets in pd_packet.rs are not all as strong as docs/protocol.md now says — docs/protocol.md is the reference; code comments to be aligned in a polish pass
+- CaptureClock treats a few-ms out-of-order record as a restart, so elapsed can run a few ms ahead — documented on elapsed_ms; never goes backwards, which is what the AC asks
+- under the CLI demo transport the sim runs on wall time, so poll chunk boundaries vary between runs — record content and order are fixed; tests use the sim clock
+- /docs --quick impact set does not cover Rust, so no fragment for the new powerz pd command — docs/reference/cli.md gets it in the /ship-milestone /docs --full pass
