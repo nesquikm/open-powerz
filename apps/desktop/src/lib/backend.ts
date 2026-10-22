@@ -107,7 +107,9 @@ export interface ConnectedInfo {
 export type Status =
   | ({ state: "connected" } & ConnectedInfo)
   | { state: "rate"; rate_sps: number; rate_locked: boolean }
-  | { state: "disconnected"; error: UiError | null };
+  | { state: "disconnected"; error: UiError | null }
+  /** The meter went away on its own; the app waits for this serial to come back. */
+  | { state: "waiting"; serial: string };
 
 export interface Gap {
   kind: "stream" | "outage";
@@ -266,6 +268,12 @@ export async function attach(
 export async function disconnect(): Promise<void> {
   if (mock) return mock.disconnect();
   await invoke("disconnect");
+}
+
+/** Stops waiting for an unplugged meter, after the user picked another device. */
+export async function cancelWait(): Promise<void> {
+  if (mock) return mock.cancelWait();
+  await invoke("cancel_wait");
 }
 
 /** Changes the queue rate of the current session. */

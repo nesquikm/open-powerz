@@ -322,13 +322,14 @@ interface MockRecording {
 }
 
 /** Scripted backend behaviours chosen with `?mock=<name>` in the page URL; the device
- * list stays the same in every one. */
+ * list stays the same in every one but `replug`. */
 export const MOCK_MODES = [
   "permission-denied",
   "rate-locked",
   "slow-export",
   "outage",
   "blip",
+  "replug",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -346,6 +347,41 @@ export const MOCK_OUTAGE = { startMs: 30_400_000, beforeMs: 20_000, gapMs: 2_400
 /** `blip`: as `outage`, but the meter is gone for only `gapMs`, shorter than the
  * collapse threshold, so the gap keeps its true width on screen (AC-CWWKJ6.1). */
 export const MOCK_BLIP = { startMs: 30_400_000, beforeMs: 20_000, gapMs: 10_000 } as const;
+
+/** `replug`: one real meter (`serial`) is listed next to the demo entries. A session on
+ * it streams `beforeMs`, then the meter is unplugged: the session ends with an unplug
+ * error, the backend waits for the serial, and the list loses the meter. After `awayMs`
+ * the OS lists it again at a new address and the backend reconnects on its own. */
+export const MOCK_REPLUG = { serial: "MOCK-REPLUG-0001", beforeMs: 3_000, awayMs: 3_000 } as const;
+
+/** The replug meter's picker entry at USB address `address`. */
+function replugMeter(address: number): DeviceListing {
+  return {
+    id: `usb:1:${address}`,
+    label: `KM003C — ${MOCK_REPLUG.serial}`,
+    model: "KM003C",
+    serial: MOCK_REPLUG.serial,
+    bus: "1",
+    address,
+    demo_scenario: null,
+  };
+}
+
+/** The status event of a mock session that just connected; a null rate is a locked one. */
+function connectedStatus(serial: string, rateSps: number | null): BackendEvent {
+  return {
+    type: "status",
+    data: {
+      state: "connected",
+      model: "KM003C",
+      firmware_version: "2.0.6",
+      serial,
+      rate_sps: rateSps,
+      rate_locked: rateSps === null,
+      session_id: 1,
+    },
+  };
+}
 
 /** How long a `slow-export` export stays half done, so the UI suite can see its progress. */
 const SLOW_EXPORT_MS = 30_000;
@@ -370,14 +406,31 @@ export class MockBackend {
   #session: Running | null = null;
   #mode: MockMode | null;
   #revealed: string[] = [];
+  /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
+  #meterAddress: number | null = 7;
+  /** `replug`: the session whose meter is away, which the backend waits for. */
+  #waiting: Running | null = null;
+  /** `replug`: the meter is unplugged only once per page. */
+  #unplugDone = false;
+  #replugTimer: ReturnType<typeof setTimeout> | null = null;
+  #watchers = new Set<(devices: DeviceListing[]) => void>();
 
   /** `mode` defaults to the page URL's `?mock=` parameter. */
   constructor(mode: MockMode | null = mockModeFromUrl(pageSearch())) {
     this.#mode = mode;
   }
 
+  /** `replug`: the real meter's listing while the OS lists it, else null. */
+  #listedMeter(): DeviceListing | null {
+    return this.#mode === "replug" && this.#meterAddress !== null
+      ? replugMeter(this.#meterAddress)
+      : null;
+  }
+
   async listDevices(): Promise<DeviceListing[]> {
-    return SCENARIOS.map((name) => ({
+    const meter = this.#listedMeter();
+    const meters = meter ? [meter] : [];
+    const demos = SCENARIOS.map((name) => ({
       id: `demo:${name}`,
       label: `Demo device — ${name}`,
       model: "KM003C",
@@ -386,12 +439,19 @@ export class MockBackend {
       address: null,
       demo_scenario: name,
     }));
+    return [...meters, ...demos];
   }
 
-  /** The demo list never changes, so there is nothing to unsubscribe from. */
+  /** The full list now and on every change (only `replug` changes it). */
   async watchDevices(onChange: (devices: DeviceListing[]) => void): Promise<() => void> {
+    this.#watchers.add(onChange);
     onChange(await this.listDevices());
-    return () => {};
+    return () => this.#watchers.delete(onChange);
+  }
+
+  async #notifyDevices(): Promise<void> {
+    const list = await this.listDevices();
+    for (const w of this.#watchers) w(list);
   }
 
   async connect(
@@ -400,23 +460,15 @@ export class MockBackend {
     onEvent: (event: BackendEvent) => void,
   ): Promise<void> {
     if (this.#session) throw usage("A meter is already connected. Disconnect it first.");
-    const scenario = scenarioOf(deviceId);
+    const isMeter = this.#listedMeter()?.id === deviceId;
+    // A connect by hand ends any wait for the unplugged meter.
+    this.#waiting = null;
+    const scenario = isMeter ? "load-5v-1a" : scenarioOf(deviceId);
     if (!scenario) throw usage("That meter is no longer attached.");
     if (this.#mode === "permission-denied") throw { ...LINUX_PERMISSION_DENIED };
     const locked = this.#mode === "rate-locked";
     // Like the worker: a locked session's rate is unknown until measured.
-    onEvent({
-      type: "status",
-      data: {
-        state: "connected",
-        model: "KM003C",
-        firmware_version: "2.0.6",
-        serial: "123456",
-        rate_sps: locked ? null : rateSps,
-        rate_locked: locked,
-        session_id: 1,
-      },
-    });
+    onEvent(connectedStatus(isMeter ? MOCK_REPLUG.serial : "123456", locked ? null : rateSps));
     if (locked) {
       onEvent({
         type: "status",
@@ -442,12 +494,55 @@ export class MockBackend {
     this.#session = session;
     if (this.#mode === "outage") this.#seedOutage(session, MOCK_OUTAGE);
     if (this.#mode === "blip") this.#seedOutage(session, MOCK_BLIP);
+    if (isMeter && !this.#unplugDone) {
+      this.#unplugDone = true;
+      this.#replugTimer = setTimeout(() => this.#unplug(session), MOCK_REPLUG.beforeMs);
+    }
     // The mock production build (the Playwright suite) honours it too.
     const synthetic = syntheticFromUrl(
       pageSearch(),
       import.meta.env.DEV || import.meta.env.VITE_BACKEND === "mock",
     );
     if (synthetic !== null) await this.seedSyntheticHistory(synthetic);
+  }
+
+  /** `replug`: the cable is pulled. Like the backend: an open recording ends, the
+   * session ends with an unplug error, the backend says it waits for the serial, and the
+   * list loses the meter; after `awayMs` the meter is back and the session goes on. */
+  #unplug(s: Running): void {
+    this.#replugTimer = null;
+    if (this.#session !== s) return;
+    this.#endSession(s, {
+      kind: "disconnected",
+      message: "The meter was unplugged.",
+      hint: null,
+    });
+    this.#waiting = s;
+    s.onEvent({ type: "status", data: { state: "waiting", serial: MOCK_REPLUG.serial } });
+    this.#meterAddress = null;
+    void this.#notifyDevices();
+    this.#replugTimer = setTimeout(() => this.#replug(s), MOCK_REPLUG.awayMs);
+  }
+
+  /** `replug`: the OS lists the meter again at a new address; a session still waiting
+   * for it reconnects on the same timeline, with an outage gap over the time away. */
+  #replug(s: Running): void {
+    this.#replugTimer = null;
+    this.#meterAddress = 9;
+    void this.#notifyDevices();
+    if (this.#waiting !== s || this.#session) return;
+    this.#waiting = null;
+    const step = 1000 / s.rateSps;
+    const from = Math.round(s.nextMs - step);
+    s.nextMs += MOCK_REPLUG.awayMs;
+    s.carry = 0;
+    s.deviceId = replugMeter(9).id;
+    const gap = { from_ms: from, to_ms: Math.round(s.nextMs) };
+    s.gaps.push(gap);
+    s.pendingGap = { kind: "outage", ...gap };
+    s.onEvent(connectedStatus(MOCK_REPLUG.serial, s.rateSps));
+    s.timer = setInterval(() => this.#tick(s), BATCH_MS);
+    this.#session = s;
   }
 
   /** `outage` / `blip`: the run before the outage, then the live stream after it. */
@@ -526,8 +621,21 @@ export class MockBackend {
     return s;
   }
 
+  /** Stops waiting for the unplugged meter: it is listed again later, not reconnected. */
+  async cancelWait(): Promise<void> {
+    this.#waiting = null;
+  }
+
   async disconnect(): Promise<void> {
     const s = this.#open();
+    if (this.#replugTimer !== null) clearTimeout(this.#replugTimer);
+    this.#replugTimer = null;
+    this.#endSession(s, null);
+  }
+
+  /** Stops `s`'s stream, ends an open recording, and reports the session over with
+   * `error` (null when it was asked for). */
+  #endSession(s: Running, error: UiError | null): void {
     clearInterval(s.timer);
     this.#session = null;
     if (s.recording) {
@@ -538,7 +646,7 @@ export class MockBackend {
         data: { state: "stopped", rows, gaps: [], disconnected: true },
       });
     }
-    s.onEvent({ type: "status", data: { state: "disconnected", error: null } });
+    s.onEvent({ type: "status", data: { state: "disconnected", error } });
   }
 
   async setRate(rateSps: number): Promise<void> {

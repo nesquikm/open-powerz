@@ -49,6 +49,7 @@ Build order: TGE839, then TGE83A → TGE83B → TGE83C → TGE83D → TGE83E. Th
 - [ ] PD capture save and load — TGE83E
 
 **M7 follow-ups:**
+- Replug (TGE839): a reconnect whose open keeps failing retries every 500 ms poll; add a back-off.
 - Gate probe `spawn_pattern_allowlist` fails on `main` too: `.claude/settings.json` lacks `Bash(claude:*)`. Widening the allow-list needs the user's OK.
 
 **Device checks:** pass-through PD capture (charger → meter → phone or laptop), passive only; replug at 1000 SPS. The user approved a short slot for each.

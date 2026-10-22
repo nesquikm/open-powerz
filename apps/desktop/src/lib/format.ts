@@ -100,7 +100,8 @@ export function sortDevices(devices: readonly DeviceListing[]): DeviceListing[] 
 }
 
 /** Connection state shown by the top-bar badge. */
-export type ConnectionState = "disconnected" | "connecting" | "streaming" | "rate_locked" | "error";
+export type ConnectionState =
+  "disconnected" | "connecting" | "streaming" | "rate_locked" | "error" | "waiting";
 
 const BADGE_LABELS: Record<ConnectionState, string> = {
   disconnected: "Disconnected",
@@ -108,6 +109,7 @@ const BADGE_LABELS: Record<ConnectionState, string> = {
   streaming: "Streaming",
   rate_locked: "Rate locked",
   error: "Error",
+  waiting: "Waiting for meter",
 };
 
 /** Human label for a connection state. */

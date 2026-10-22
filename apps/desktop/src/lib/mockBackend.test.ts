@@ -4,6 +4,7 @@ import type { BackendEvent, Batch } from "./backend";
 import {
   LINUX_PERMISSION_DENIED,
   MAX_SYNTHETIC_SAMPLES,
+  MOCK_REPLUG,
   MockBackend,
   mockModeFromUrl,
   syntheticFromUrl,
@@ -651,5 +652,28 @@ describe("MockBackend history edge samples (AC-9CFMD3.4)", () => {
     expect(times[0]).toBe(100);
     expect(times.at(-1)).toBe(110);
     expect(times).toHaveLength(11);
+  });
+});
+
+describe("MockBackend replug wait (FR TGE839)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("does not reconnect the meter once the wait is cancelled (AC-TGE839.5)", async () => {
+    const backend = new MockBackend("replug");
+    const events: BackendEvent[] = [];
+    const meter = (await backend.listDevices()).find((d) => d.demo_scenario === null);
+    expect(meter?.serial).toBe(MOCK_REPLUG.serial);
+    await backend.connect(meter!.id, 50, (e) => events.push(e));
+    vi.advanceTimersByTime(MOCK_REPLUG.beforeMs + 100);
+    expect(events.some((e) => e.type === "status" && e.data.state === "waiting")).toBe(true);
+
+    const before = events.length;
+    await backend.cancelWait();
+    vi.advanceTimersByTime(MOCK_REPLUG.awayMs + 500);
+    const later = events.slice(before);
+    expect(later.some((e) => e.type === "status" && e.data.state === "connected")).toBe(false);
+    // The meter is listed again, just not connected.
+    expect((await backend.listDevices()).some((d) => d.serial === MOCK_REPLUG.serial)).toBe(true);
   });
 });

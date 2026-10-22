@@ -66,6 +66,12 @@ pub enum Status {
         /// Why, when it was not asked for.
         error: Option<UiError>,
     },
+    /// The meter went away without being asked to; the app waits for the
+    /// meter with this serial to come back (FR TGE839).
+    Waiting {
+        /// Serial of the meter the app waits for.
+        serial: String,
+    },
 }
 
 /// Why samples are missing.
@@ -1086,6 +1092,14 @@ impl WorkerHandle {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+
+    /// Let go of a session that has already ended, without raising the stop
+    /// flag it shares with the page (a reconnect hands that flag on) and
+    /// without waiting for its thread, which finishes on its own.
+    pub fn retire(mut self) {
+        self.stop = Arc::new(AtomicBool::new(true));
+        self.thread = None;
     }
 
     /// Stop the worker and wait up to `timeout` for it to stop the queue and

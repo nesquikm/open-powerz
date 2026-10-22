@@ -27,6 +27,8 @@ export class Session {
   /** Statistics of the latest batch, null until the first one. They stay after a
    * disconnect, so the final totals remain readable. */
   stats = $state<StatsSnapshot | null>(null);
+  /** Serial of the unplugged meter the backend waits for, null when none. */
+  waitingSerial = $state<string | null>(null);
 
   /** The backend zeroed the statistics: show none until the next batch. */
   statsReset(): void {
@@ -35,7 +37,7 @@ export class Session {
 
   /** A session is open or opening (the picker is locked, the button reads Disconnect). */
   get active(): boolean {
-    return this.state !== "disconnected" && this.state !== "error";
+    return this.state !== "disconnected" && this.state !== "error" && this.state !== "waiting";
   }
 
   /** Connect / Disconnect is available: not while a connect is still pending, and
@@ -45,16 +47,42 @@ export class Session {
     return this.active || this.selectedId !== null;
   }
 
-  /** Replaces the device list; keeps the selection while it is still present. */
+  /** Replaces the device list; keeps the selection while it is still present. While the
+   * backend waits for an unplugged meter, that meter stays listed and picked, and follows
+   * it to its new listing when the OS lists it again. A picked meter that vanishes while
+   * its session runs or has just ended with an error stays too: the hotplug list can
+   * arrive before the waiting status, and the fallback must never pick a demo then. */
   setDevices(devices: readonly DeviceListing[]): void {
-    this.devices = sortDevices(devices);
+    let list = sortDevices(devices);
+    const away = this.waitingSerial;
+    const kept = this.devices.find((d) => d.id === this.selectedId);
+    if (away !== null) {
+      const back = list.find((d) => d.demo_scenario === null && d.serial === away);
+      if (back) this.selectedId = back.id;
+      else if (kept && !list.some((d) => d.id === kept.id)) list = sortDevices([kept, ...list]);
+    } else if (
+      kept?.demo_scenario === null &&
+      this.state !== "disconnected" &&
+      !list.some((d) => d.id === kept.id)
+    ) {
+      list = sortDevices([kept, ...list]);
+    }
+    this.devices = list;
     if (!this.devices.some((d) => d.id === this.selectedId)) {
       this.selectedId = this.devices[0]?.id ?? null;
     }
   }
 
-  select(id: string): void {
+  /** Picks a device. Picking another device while waiting for an unplugged meter
+   * cancels the wait for it; returns true then, so the caller tells the backend. */
+  select(id: string): boolean {
     this.selectedId = id;
+    if (this.waitingSerial === null) return false;
+    const picked = this.devices.find((d) => d.id === id);
+    if (picked?.demo_scenario === null && picked.serial === this.waitingSerial) return false;
+    this.waitingSerial = null;
+    if (this.state === "waiting") this.state = "disconnected";
+    return true;
   }
 
   /** Takes over a session that was already running when this page loaded (a reload):
@@ -104,7 +132,13 @@ export class Session {
           this.rateSps = null;
           this.error = event.data.error;
           this.state = event.data.error ? "error" : "disconnected";
+        } else if (event.data.state === "waiting") {
+          this.waitingSerial = event.data.serial;
+          this.state = "waiting";
         } else {
+          // A meter that came back takes its unplug message with it.
+          if (this.waitingSerial !== null && this.error?.kind === "disconnected") this.error = null;
+          this.waitingSerial = null;
           this.rateSps = event.data.rate_sps;
           this.state = event.data.rate_locked ? "rate_locked" : "streaming";
         }

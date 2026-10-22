@@ -7,6 +7,7 @@ import type {
   StatsSnapshot,
   UiError,
 } from "./backend";
+import { badgeLabel } from "./format";
 import { Session } from "./session.svelte";
 
 const NO_STATS: StatsSnapshot = {
@@ -359,5 +360,195 @@ describe("Session adopts a running session on load (AC-VEDDFD.2, AC-VEDDFD.5)", 
     s.handleEvent({ type: "status", data: { state: "disconnected", error: null } });
     expect(s.state).toBe("disconnected");
     expect(s.latest).toBeNull();
+  });
+});
+
+// ---- FR TGE839: replug reconnects to the meter ----
+
+describe("Session waits for an unplugged meter (AC-TGE839.1–AC-TGE839.5)", () => {
+  const SERIAL_A = "SERIAL-REPLUG-A";
+  const SERIAL_B = "SERIAL-REPLUG-B";
+
+  function meter(id: string, serial: string): DeviceListing {
+    return {
+      id,
+      label: `KM003C — ${serial}`,
+      model: "KM003C",
+      serial,
+      bus: "1",
+      address: Number(id.split(":").at(-1)),
+      demo_scenario: null,
+    };
+  }
+
+  function demo(name: string): DeviceListing {
+    return {
+      id: `demo:${name}`,
+      label: `Demo device — ${name}`,
+      model: "KM003C",
+      serial: "123456",
+      bus: null,
+      address: null,
+      demo_scenario: name,
+    };
+  }
+
+  const DEMOS = [demo("idle"), demo("load-5v-1a")];
+
+  function connectedTo(serial: string, rate_sps = 1000): BackendEvent {
+    return {
+      type: "status",
+      data: {
+        state: "connected",
+        model: "KM003C",
+        firmware_version: "2.0.6",
+        serial,
+        rate_sps,
+        rate_locked: false,
+        session_id: 7,
+      },
+    };
+  }
+
+  const unplugged: BackendEvent = {
+    type: "status",
+    data: {
+      state: "disconnected",
+      error: { kind: "disconnected", message: "The meter was unplugged.", hint: null },
+    },
+  };
+
+  const waitingForA: BackendEvent = {
+    type: "status",
+    data: { state: "waiting", serial: SERIAL_A },
+  };
+
+  /** Streaming from meter A at usb:1:7, then the cable is pulled. */
+  function awayMeter(): Session {
+    const s = new Session();
+    s.setDevices([meter("usb:1:7", SERIAL_A), ...DEMOS]);
+    s.select("usb:1:7");
+    s.beginConnect();
+    s.handleEvent(connectedTo(SERIAL_A));
+    s.handleEvent({
+      type: "batch",
+      data: { samples: [sample(1_000)], temp_c: null, stats: NO_STATS },
+    });
+    s.handleEvent(unplugged);
+    s.handleEvent(waitingForA);
+    // The OS no longer lists the meter.
+    s.setDevices(DEMOS);
+    return s;
+  }
+
+  it("keeps the unplugged meter picked and shows a waiting state (AC-TGE839.1)", () => {
+    const s = awayMeter();
+    expect(s.state).toBe("waiting");
+    expect(s.waitingSerial).toBe(SERIAL_A);
+    expect(s.selectedId).toBe("usb:1:7");
+    // The picker still shows the away meter, so the selection is visible.
+    const picked = s.devices.find((d) => d.id === s.selectedId);
+    expect(picked?.serial).toBe(SERIAL_A);
+    expect(picked?.demo_scenario).toBeNull();
+    expect(badgeLabel(s.state)).toMatch(/waiting/i);
+  });
+
+  it("never picks a demo device on its own while the meter is away (AC-TGE839.1)", () => {
+    const s = awayMeter();
+    s.setDevices([...DEMOS].reverse());
+    s.setDevices([]);
+    s.setDevices(DEMOS);
+    expect(s.selectedId).toBe("usb:1:7");
+    expect(s.state).toBe("waiting");
+  });
+
+  it("leaves the picker free while waiting, so another device can be chosen (AC-TGE839.5)", () => {
+    const s = awayMeter();
+    expect(s.active).toBe(false);
+  });
+
+  it("follows the meter to its new listing and streams again on reconnect (AC-TGE839.2)", () => {
+    const s = awayMeter();
+    // The meter comes back at a new USB address.
+    s.setDevices([meter("usb:1:9", SERIAL_A), ...DEMOS]);
+    expect(s.selectedId).toBe("usb:1:9");
+    s.handleEvent(connectedTo(SERIAL_A, 1000));
+    expect(s.state).toBe("streaming");
+    expect(s.rateSps).toBe(1000);
+    expect(s.waitingSerial).toBeNull();
+    expect(s.devices.filter((d) => d.serial === SERIAL_A)).toHaveLength(1);
+  });
+
+  it("lists a meter with another serial but keeps waiting for the unplugged one (AC-TGE839.4)", () => {
+    const s = awayMeter();
+    s.setDevices([meter("usb:1:8", SERIAL_B), ...DEMOS]);
+    expect(s.devices.some((d) => d.serial === SERIAL_B)).toBe(true);
+    expect(s.selectedId).toBe("usb:1:7");
+    expect(s.state).toBe("waiting");
+    expect(s.waitingSerial).toBe(SERIAL_A);
+  });
+
+  it("a demo chosen by hand cancels the wait for the meter (AC-TGE839.5)", () => {
+    const s = awayMeter();
+    s.select("demo:idle");
+    expect(s.selectedId).toBe("demo:idle");
+    expect(s.waitingSerial).toBeNull();
+    expect(s.state).not.toBe("waiting");
+    expect(s.canToggleConnect).toBe(true);
+    // The meter coming back does not take the selection from the demo.
+    s.setDevices([meter("usb:1:9", SERIAL_A), ...DEMOS]);
+    expect(s.selectedId).toBe("demo:idle");
+    s.beginConnect();
+    expect(s.state).toBe("connecting");
+  });
+
+  it("tells the caller when a pick cancels the wait, so the backend can stop waiting too (AC-TGE839.5)", () => {
+    expect(awayMeter().select("usb:1:7")).toBe(false);
+    expect(awayMeter().select("demo:idle")).toBe(true);
+    const idle = new Session();
+    idle.setDevices(DEMOS);
+    expect(idle.select("demo:load-5v-1a")).toBe(false);
+  });
+
+  it("clears the unplug message once the meter streams again (AC-TGE839.2)", () => {
+    const s = awayMeter();
+    expect(s.error?.kind).toBe("disconnected");
+    s.setDevices([meter("usb:1:9", SERIAL_A), ...DEMOS]);
+    s.handleEvent(connectedTo(SERIAL_A));
+    expect(s.error).toBeNull();
+  });
+
+  /** Streaming from meter A at usb:1:7, before the cable is pulled. */
+  function streamingMeter(): Session {
+    const s = new Session();
+    s.setDevices([meter("usb:1:7", SERIAL_A), ...DEMOS]);
+    s.select("usb:1:7");
+    s.beginConnect();
+    s.handleEvent(connectedTo(SERIAL_A));
+    return s;
+  }
+
+  it("keeps the meter picked when the new device list beats the status events (AC-TGE839.1)", () => {
+    const s = streamingMeter();
+    // The hotplug poller runs on its own thread: its list can arrive first.
+    s.setDevices(DEMOS);
+    expect(s.selectedId).toBe("usb:1:7");
+    s.handleEvent(unplugged);
+    s.handleEvent(waitingForA);
+    expect(s.selectedId).toBe("usb:1:7");
+    expect(s.state).toBe("waiting");
+    expect(s.devices.find((d) => d.id === s.selectedId)?.serial).toBe(SERIAL_A);
+  });
+
+  it("keeps the meter picked when the list lands between disconnect and waiting (AC-TGE839.1)", () => {
+    const s = streamingMeter();
+    s.handleEvent(unplugged);
+    s.setDevices(DEMOS);
+    s.handleEvent(waitingForA);
+    expect(s.selectedId).toBe("usb:1:7");
+    expect(s.state).toBe("waiting");
+    // The meter comes back and the selection follows it.
+    s.setDevices([meter("usb:1:9", SERIAL_A), ...DEMOS]);
+    expect(s.selectedId).toBe("usb:1:9");
   });
 });

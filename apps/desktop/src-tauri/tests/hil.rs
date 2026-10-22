@@ -22,7 +22,7 @@ use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use open_powerz_desktop_lib::devices::{AppOpener, DeviceListing, DeviceManager};
+use open_powerz_desktop_lib::devices::{self, AppOpener, DeviceListing, DeviceManager};
 use open_powerz_desktop_lib::worker::{BackendEvent, GapKind, Status};
 use powerz_protocol::decode::{QueueRecord, Rate};
 use powerz_protocol::session::SystemClock;
@@ -96,7 +96,9 @@ fn absorb(w: &mut Window, event: BackendEvent) {
     match event {
         BackendEvent::Batch(b) => w.samples.extend(b.samples),
         BackendEvent::Gap(g) if g.kind == GapKind::Stream => w.stream_gaps += 1,
-        BackendEvent::Gap(_) | BackendEvent::Recording(_) => {}
+        BackendEvent::Gap(_)
+        | BackendEvent::Recording(_)
+        | BackendEvent::Status(Status::Waiting { .. }) => {}
         BackendEvent::Error(e) => w.errors.push(e.message),
         // Only the fields needed: a connected status carries the serial.
         BackendEvent::Status(Status::Connected(info)) => {
@@ -371,6 +373,95 @@ fn hil_streams_30_s_at_50_and_1000_sps_without_gaps() {
     m.set_rate(1000)
         .unwrap_or_else(|e| panic!("set rate 1000: {}", e.message));
     assert_clean_stream(&rx, 1000, 30);
+    m.disconnect().unwrap();
+}
+
+// ---- AC-TGE839.7: a real unplug and replug at 1000 SPS ----
+
+/// Opt-in twice: needs a person to pull and replug the meter's data cable, so
+/// it runs only with `POWERZ_HIL=1` and `POWERZ_HIL_REPLUG=1`. The test polls
+/// the device list like the app's hotplug watcher and hands every list to
+/// `devices_changed`. It prints timings only, never the serial.
+#[test]
+fn hil_replug_reconnects_within_3_s_at_1000_sps_with_an_outage_gap() {
+    if !hil_or_skip("hil_replug_reconnects_within_3_s_at_1000_sps_with_an_outage_gap") {
+        return;
+    }
+    if std::env::var("POWERZ_HIL_REPLUG").as_deref() != Ok("1") {
+        eprintln!("hil_replug: skipped (set POWERZ_HIL_REPLUG=1 with a person at the cable)");
+        return;
+    }
+    let _meter = one_at_a_time();
+    let mut m = manager();
+    let id = meter_id(&m);
+    let serial = m
+        .list_devices()
+        .into_iter()
+        .find(|d| d.id == id)
+        .and_then(|d| d.serial)
+        .unwrap_or_else(|| panic!("the meter reported no serial"));
+    let rx = connect(&mut m, &id, 1000);
+    let _ = first_samples(&rx);
+    let poll = Duration::from_millis(devices::HOTPLUG_PERIOD_MS);
+
+    eprintln!("hil_replug: streaming at 1000 SPS. UNPLUG the meter's data cable now.");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut waiting = false;
+    while !waiting {
+        assert!(Instant::now() < deadline, "no unplug seen within 120 s");
+        match rx.recv_timeout(poll) {
+            Ok(BackendEvent::Status(Status::Waiting { .. })) => waiting = true,
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the session sink closed"),
+        }
+        let _ = m.devices_changed(&m.list_devices());
+    }
+    assert!(m.waiting_for().is_some(), "the manager is not waiting");
+    eprintln!("hil_replug: waiting for the meter. PLUG the data cable back in now.");
+
+    // Poll like the watcher; time from the first list that shows the meter
+    // again to the first samples of the reconnected session.
+    let mut listed_at = None;
+    let mut outage = None;
+    let mut first_after = None;
+    while first_after.is_none() {
+        assert!(Instant::now() < deadline, "no reconnect within 120 s");
+        let list = m.list_devices();
+        if listed_at.is_none()
+            && list
+                .iter()
+                .any(|d| d.demo_scenario.is_none() && d.serial.as_deref() == Some(serial.as_str()))
+        {
+            listed_at = Some(Instant::now());
+        }
+        let _ = m.devices_changed(&list);
+        let end = Instant::now() + poll;
+        while let Ok(e) = rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            match e {
+                BackendEvent::Gap(g) if g.kind == GapKind::Outage => outage = Some(g),
+                BackendEvent::Batch(b) if listed_at.is_some() && !b.samples.is_empty() => {
+                    first_after = Some(Instant::now());
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    let took = first_after.unwrap() - listed_at.unwrap();
+    eprintln!(
+        "hil_replug: listed again -> first samples in {} ms",
+        took.as_millis()
+    );
+    assert!(took <= Duration::from_secs(3), "reconnect took {took:?}");
+    let gap = outage.unwrap_or_else(|| panic!("no outage gap after the reconnect"));
+    eprintln!("hil_replug: outage gap {} ms", gap.to_ms - gap.from_ms);
+    assert!(gap.to_ms > gap.from_ms);
+    let w = collect_for(&rx, Duration::from_secs(3));
+    assert!(
+        w.samples.len() >= 2_000,
+        "only {} samples in 3 s at 1000 SPS",
+        w.samples.len()
+    );
     m.disconnect().unwrap();
 }
 

@@ -115,8 +115,15 @@ async fn watch_devices(
     blocking(move || {
         let stop = Arc::new(AtomicBool::new(false));
         let gone = Arc::clone(&stop);
+        // Weak: the state owns the watcher, which must not keep it alive.
+        let weak = Arc::downgrade(&state);
         let handle = state.manager().watch_devices_with_stop(
             move |list| {
+                // A meter the app waits for that is listed again reconnects
+                // (FR TGE839).
+                if let Some(state) = weak.upgrade() {
+                    state.manager().devices_changed(&list);
+                }
                 if on_change.send(list).is_err() {
                     gone.store(true, Ordering::SeqCst);
                 }
@@ -186,6 +193,17 @@ async fn disconnect(state: Shared<'_>) -> Result<(), UiError> {
         // Take the session under the lock; wait for the worker without it.
         let session = state.manager().take_session()?;
         session.disconnect();
+        Ok(())
+    })
+    .await
+}
+
+/// Stop waiting for an unplugged meter; the user picked another device.
+#[tauri::command]
+async fn cancel_wait(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        state.manager().cancel_wait();
         Ok(())
     })
     .await
@@ -436,6 +454,7 @@ pub fn run() {
             connect,
             attach,
             disconnect,
+            cancel_wait,
             set_rate,
             start_recording,
             stop_recording,

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { backendAvailable, listDevices, toUiError, watchDevices } from "../backend";
+  import { backendAvailable, cancelWait, listDevices, toUiError, watchDevices } from "../backend";
   import { deviceOptionLabel } from "../format";
   import type { Session } from "../session.svelte";
 
@@ -38,7 +38,11 @@
     title={selectedLabel}
     disabled={session.active || session.devices.length === 0}
     value={session.selectedId ?? ""}
-    onchange={(e) => session.select(e.currentTarget.value)}
+    onchange={(e) => {
+      if (session.select(e.currentTarget.value)) {
+        cancelWait().catch((err: unknown) => session.reportError(toUiError(err)));
+      }
+    }}
   >
     {#each session.devices as device (device.id)}
       <option value={device.id}>{deviceOptionLabel(device)}</option>

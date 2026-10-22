@@ -483,7 +483,8 @@
     border-radius: 50%;
     background: var(--control-border);
   }
-  .badge[data-state="connecting"]::before {
+  .badge[data-state="connecting"]::before,
+  .badge[data-state="waiting"]::before {
     background: var(--accent);
   }
   .badge[data-state="streaming"]::before {
