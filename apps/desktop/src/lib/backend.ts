@@ -203,6 +203,9 @@ export interface PdRow {
   index: number;
   /** Ms since the capture start. */
   elapsed_ms: number;
+  /** The record's time on the measurement samples' `t_ms` base (FR TGE83D), for the
+   * chart. Optional: rows of older fixtures lack it. */
+  session_ms?: number;
   kind: "message" | "event";
   sop: string | null;
   name: string;
@@ -232,6 +235,17 @@ export interface PdDetails {
   fields: PdField[];
 }
 
+/** One PD status block (FR TGE83D): VBUS, IBUS, CC1 and CC2 at `session_ms`, on the
+ * measurement samples' `t_ms` base. */
+export interface PdStatusSample {
+  session_ms: number;
+  vbus_v: number;
+  /** Signed. */
+  ibus_a: number;
+  cc1_v: number;
+  cc2_v: number;
+}
+
 /** Every event the backend sends over the session channel. */
 export type BackendEvent =
   | { type: "batch"; data: Batch }
@@ -240,7 +254,8 @@ export type BackendEvent =
   | { type: "error"; data: UiError }
   | { type: "recording"; data: RecordingEvent }
   | { type: "pd_state"; data: { capturing: boolean } }
-  | { type: "pd_rows"; data: { rows: PdRow[] } };
+  | { type: "pd_rows"; data: { rows: PdRow[] } }
+  | { type: "pd_status"; data: { samples: PdStatusSample[] } };
 
 /** Lists the meters and demo devices available right now. */
 export function listDevices(): Promise<DeviceListing[]> {

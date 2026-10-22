@@ -59,6 +59,8 @@ export class PdStore {
   #capacity: number;
   #index = new Float64Array(0);
   #elapsed = new Float64Array(0);
+  /** Session time (FR TGE83D); NaN when the row had none. */
+  #session = new Float64Array(0);
   #vbus = new Float64Array(0);
   #ibus = new Float64Array(0);
   /** Message ID, objects: -1 for null. */
@@ -71,6 +73,8 @@ export class PdStore {
   #revision = new Uint32Array(0);
   #summary: string[] = [];
   #strings = new Interner();
+  /** Session times never go back (and none is missing) since the last clear. */
+  #sessionSorted = true;
 
   constructor(capacity = 1024) {
     this.#capacity = Math.max(1, capacity);
@@ -88,6 +92,7 @@ export class PdStore {
     };
     this.#index = grow(this.#index, (n) => new Float64Array(n));
     this.#elapsed = grow(this.#elapsed, (n) => new Float64Array(n));
+    this.#session = grow(this.#session, (n) => new Float64Array(n));
     this.#vbus = grow(this.#vbus, (n) => new Float64Array(n));
     this.#ibus = grow(this.#ibus, (n) => new Float64Array(n));
     this.#messageId = grow(this.#messageId, (n) => new Int8Array(n));
@@ -109,6 +114,11 @@ export class PdStore {
       const i = this.length++;
       this.#index[i] = r.index;
       this.#elapsed[i] = r.elapsed_ms;
+      const session = r.session_ms ?? NaN;
+      const prev = i === 0 ? -Infinity : this.#session[i - 1]!;
+      // NaN compares false, so a missing time also ends the sorted order.
+      if (!(session >= prev)) this.#sessionSorted = false;
+      this.#session[i] = session;
       this.#vbus[i] = r.vbus_v;
       this.#ibus[i] = r.ibus_a;
       this.#messageId[i] = r.message_id ?? -1;
@@ -126,12 +136,14 @@ export class PdStore {
   row(i: number): PdRow {
     const id = this.#messageId[i] ?? -1;
     const objects = this.#objects[i] ?? -1;
+    const session = this.sessionMs(i);
     return {
       index: this.#index[i] ?? 0,
       elapsed_ms: this.#elapsed[i] ?? 0,
-      kind: this.#kind[i] === KIND_EVENT ? "event" : "message",
+      ...(Number.isNaN(session) ? {} : { session_ms: session }),
+      kind: this.isEvent(i) ? "event" : "message",
       sop: this.#strings.value(this.#sop[i] ?? NONE),
-      name: this.#strings.value(this.#name[i] ?? NONE) ?? "",
+      name: this.name(i),
       message_id: id < 0 ? null : id,
       direction: this.#strings.value(this.#direction[i] ?? NONE) as PdDirection | null,
       objects: objects < 0 ? null : objects,
@@ -142,10 +154,52 @@ export class PdStore {
     };
   }
 
+  /** The session time of store position `i` (NaN when unknown). */
+  sessionMs(i: number): number {
+    return this.#session[i] ?? NaN;
+  }
+
+  /** Whether session times never go back (and none is missing), so a time range can
+   * be binary-searched; a run on an earlier clock can break it until the next clear. */
+  get sessionSorted(): boolean {
+    return this.#sessionSorted;
+  }
+
+  /** Whether store position `i` holds an event. */
+  isEvent(i: number): boolean {
+    return this.#kind[i] === KIND_EVENT;
+  }
+
+  /** The message or event name at store position `i`. */
+  name(i: number): string {
+    return this.#strings.value(this.#name[i] ?? NONE) ?? "";
+  }
+
+  /** The record index at store position `i`. */
+  indexAt(i: number): number {
+    return this.#index[i] ?? -1;
+  }
+
+  /** The store position of record `index`, or -1 (FR TGE83D, AC .2). */
+  positionOf(index: number): number {
+    // Record indices ascend in capture order.
+    let lo = 0;
+    let hi = this.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const at = this.#index[mid] ?? -1;
+      if (at === index) return mid;
+      if (at < index) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return -1;
+  }
+
   /** Drops every row; the store starts over. */
   clear(): void {
     this.length = 0;
     this.#summary = [];
+    this.#sessionSorted = true;
   }
 
   /** The store positions `filter` lets through, in capture order. */

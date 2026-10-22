@@ -6,6 +6,7 @@
 
 import type { BackendEvent, PdRow } from "./backend";
 import { PdStore } from "./pdStore";
+import { PdStatusBuffer } from "./pdTimeline";
 
 /** Start and Stop availability. */
 export interface PdControls {
@@ -25,6 +26,11 @@ export class PdCapture {
   readonly store = new PdStore();
   /** Bumped on every change to the store. */
   version = $state(0);
+  /** The PD status blocks of the session (FR TGE83D; not reactive: watch
+   * {@link statusVersion}). */
+  readonly status = new PdStatusBuffer();
+  /** Bumped on every change to {@link status}. */
+  statusVersion = $state(0);
   /** Bumped when the store is emptied (a clear, a new session): row indices start
    * over, so a view drops its selection. */
   emptied = $state(0);
@@ -59,6 +65,11 @@ export class PdCapture {
         this.version++;
         break;
       }
+      case "pd_status":
+        if (event.data.samples.length === 0) break;
+        this.status.append(event.data.samples);
+        this.statusVersion++;
+        break;
       case "status":
         if (event.data.state === "disconnected" || event.data.state === "waiting") {
           this.capturing = false;
@@ -71,6 +82,8 @@ export class PdCapture {
           this.store.clear();
           this.emptied++;
           this.version++;
+          this.status.clear();
+          this.statusVersion++;
         }
         break;
       default:
@@ -89,6 +102,8 @@ export class PdCapture {
   beginClear(): number {
     this.#held = [];
     this.store.clear();
+    this.status.clear();
+    this.statusVersion++;
     this.emptied++;
     this.version++;
     return ++this.#ticket;

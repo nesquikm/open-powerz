@@ -27,11 +27,12 @@
   import Notice from "./lib/components/Notice.svelte";
   import PdAnalyzer from "./lib/components/PdAnalyzer.svelte";
   import { PdCapture } from "./lib/pdCapture.svelte";
+  import { PdSelection } from "./lib/pdSelection.svelte";
   import Readout from "./lib/components/Readout.svelte";
   import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
   import StatsPanel from "./lib/components/StatsPanel.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
-  import { onMount, setContext } from "svelte";
+  import { onMount, setContext, untrack } from "svelte";
   import {
     ExportJob,
     exportNoticeText,
@@ -66,6 +67,20 @@
   const exportJob = new ExportJob();
   /** The PD analyzer's capture (FR TGE83C). */
   const pd = new PdCapture();
+  /** The PD record selected in the chart or the packet table (FR TGE83D). */
+  const pdSelection = new PdSelection(pd);
+  // A row selected in the packet table moves the chart's playhead to its session time
+  // and brings it into view, also while the Meter tab is hidden (AC-TGE83D.3).
+  $effect(() => {
+    void pdSelection.seq;
+    const index = pdSelection.index;
+    if (pdSelection.origin !== "table" || index === null) return;
+    untrack(() => {
+      const at = pd.store.positionOf(index);
+      const ms = at < 0 ? NaN : pd.store.sessionMs(at);
+      if (Number.isFinite(ms)) chart?.revealPlayheadAt(ms);
+    });
+  });
   /** The view the tabs show. */
   let view: "meter" | "pd" = $state("meter");
   const VIEWS = ["meter", "pd"] as const;
@@ -365,6 +380,7 @@
               tagName: target.tagName,
               type: target instanceof HTMLInputElement ? target.type : undefined,
               isContentEditable: target.isContentEditable,
+              role: target.getAttribute("role"),
             },
     });
     if (action === null) return;
@@ -437,6 +453,11 @@
             theme={resolvedTheme}
             rateSps={session.rateSps}
             active={session.active}
+            {pd}
+            onPdMarker={(index) => {
+              pdSelection.select(index, "chart");
+              view = "pd";
+            }}
           />
         </section>
       </div>
@@ -500,6 +521,7 @@
           onStop={stopPd}
           onClear={clearPd}
           loadDetails={loadPdDetails}
+          selection={pdSelection}
         />
       </div>
     {/if}

@@ -100,6 +100,7 @@ fn absorb(w: &mut Window, event: BackendEvent) {
         | BackendEvent::Recording(_)
         | BackendEvent::PdState(_)
         | BackendEvent::PdRows(_)
+        | BackendEvent::PdStatus(_)
         | BackendEvent::Status(Status::Waiting { .. }) => {}
         BackendEvent::Error(e) => w.errors.push(e.message),
         // Only the fields needed: a connected status carries the serial.

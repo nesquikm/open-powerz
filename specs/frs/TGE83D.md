@@ -32,7 +32,7 @@ PD records and the power chart share one session time base, and selection is lin
 
 ## Technical Design
 
-PD records carry session time computed the same way as measurement samples, so both share the chart's x axis. Markers render in a separate canvas layer above the plot, and selection is shared state in the UI store.
+PD records carry session time computed the same way as measurement samples, so both share the chart's x axis. Markers render in a separate canvas layer above the plot, and selection is shared state in the UI store. Clicking a count badge selects its earliest record.
 
 ## Testing
 

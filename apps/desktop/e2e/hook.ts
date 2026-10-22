@@ -43,6 +43,31 @@ export interface OverviewWindowBox {
   widthPx: number;
 }
 
+/** A PD marker or count badge of the chart's last draw (FR TGE83D). */
+export interface ChartPdMarker {
+  /** The marker's centre, CSS px from the marker layer's top-left corner. */
+  leftPx: number;
+  topPx: number;
+  /** Records in it: 1 for a marker, more for a badge. */
+  count: number;
+  /** Marker kind (the first record's for a badge). */
+  kind: string;
+  /** The colour it was drawn in. */
+  color: string;
+  /** Session time, ms (the first record's for a badge). */
+  ms: number;
+  /** Its record indices. */
+  indices: number[];
+}
+
+/** Points drawn from the PD status blocks, per series (FR TGE83D). */
+export interface ChartPdStatusLengths {
+  vbus: number;
+  ibus: number;
+  cc1: number;
+  cc2: number;
+}
+
 export interface OpenPowerzE2E {
   /** Points the chart currently has drawn (non-null y values) per series. */
   chartSeriesLengths(): { vbus: number; ibus: number };
@@ -62,6 +87,10 @@ export interface OpenPowerzE2E {
   overviewWindow(): OverviewWindowBox | null;
   /** The collapsed gaps the overview strip drew: on-screen box and length label. */
   overviewBreaks(): { leftPx: number; widthPx: number; label: string }[];
+  /** The PD markers and count badges of the last draw (FR TGE83D). */
+  chartPdMarkers(): ChartPdMarker[];
+  /** The points drawn from the PD status blocks per series (FR TGE83D). */
+  chartPdStatusLengths(): ChartPdStatusLengths;
 }
 
 export const HOOK = "__OPEN_POWERZ_E2E__";

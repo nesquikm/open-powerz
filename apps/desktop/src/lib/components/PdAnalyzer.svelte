@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import type { PdDetails, PdField, PdRow } from "../backend";
   import type { PdCapture } from "../pdCapture.svelte";
+  import type { PdSelection } from "../pdSelection.svelte";
   import PdClearDialog from "./PdClearDialog.svelte";
   import { DEFAULT_PD_FILTER, type PdFilter } from "../pdStore";
   import {
@@ -24,6 +26,7 @@
     onStop,
     onClear,
     loadDetails,
+    selection = null,
   }: {
     pd: PdCapture;
     /** A meter (or the demo device) is connected and streaming. */
@@ -34,6 +37,8 @@
     onClear: () => void;
     /** The field tree and raw bytes of record `index`, or null when unavailable. */
     loadDetails: (index: number) => Promise<PdDetails | null>;
+    /** The selection shared with the chart (FR TGE83D). */
+    selection?: PdSelection | null;
   } = $props();
 
   const controls = $derived(pd.controls(connected));
@@ -197,6 +202,13 @@
     unavailable = d === null;
   }
 
+  /** The user selects record `index` in the table; the chart moves its playhead there
+   * (AC-TGE83D.3). */
+  function pickRow(index: number): void {
+    void selectRow(index);
+    selection?.select(index, "table");
+  }
+
   /** The filtered-list position of record `index`, or -1 (positions ascend with it). */
   function positionOf(index: number): number {
     let lo = 0;
@@ -227,6 +239,23 @@
       following = follow.following;
     }
   }
+
+  // A marker clicked on the chart selects its row and scrolls the table to it
+  // (AC-TGE83D.2), also when the view opens for it.
+  $effect(() => {
+    if (selection === null) return;
+    void selection.seq;
+    const index = selection.index;
+    if (selection.origin !== "chart" || index === null || !gridEl) return;
+    untrack(() => {
+      void selectRow(index);
+      const at = positionOf(index);
+      if (at < 0) return;
+      follow.following = false;
+      following = false;
+      revealRow(at);
+    });
+  });
 
   /** Keyboard in the table: arrows, Page Up/Down, Home and End move the selection. */
   function onGridKey(e: KeyboardEvent): void {
@@ -260,7 +289,7 @@
     e.preventDefault();
     if (document.activeElement !== gridEl) gridEl?.focus({ preventScroll: true });
     revealRow(at);
-    void selectRow(pd.store.row(positions[at] as number).index);
+    pickRow(pd.store.row(positions[at] as number).index);
   }
 
   /** The selected row's id while it is rendered (for `aria-activedescendant`). */
@@ -504,16 +533,17 @@
           class:event={row.kind === "event"}
           data-index={row.index}
           data-kind={row.kind}
+          data-session-ms={row.session_ms}
           aria-rowindex={at + 2}
           aria-selected={selected === row.index}
           tabindex="-1"
           aria-label={rowLabel(row)}
           style:top="{at * ROW_PX}px"
-          onclick={() => void selectRow(row.index)}
+          onclick={() => pickRow(row.index)}
           onkeydown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
-              void selectRow(row.index);
+              pickRow(row.index);
             }
           }}
         >

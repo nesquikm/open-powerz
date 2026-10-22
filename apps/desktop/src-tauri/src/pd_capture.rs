@@ -32,6 +32,34 @@ pub enum Direction {
     Cable,
 }
 
+/// One PD status block for the chart (FR TGE83D), on the measurement
+/// samples' session time base (like a sample's `t_ms`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct PdStatusSample {
+    /// Session time, ms (meter time until the capture moves it).
+    pub session_ms: u64,
+    /// VBUS, V.
+    pub vbus_v: f64,
+    /// IBUS, A, signed.
+    pub ibus_a: f64,
+    /// CC1, V.
+    pub cc1_v: f64,
+    /// CC2, V.
+    pub cc2_v: f64,
+}
+
+impl From<PdStatus> for PdStatusSample {
+    fn from(s: PdStatus) -> PdStatusSample {
+        PdStatusSample {
+            session_ms: u64::from(s.time_ms),
+            vbus_v: f64::from(s.vbus_mv) / 1000.0,
+            ibus_a: f64::from(s.ibus_ma) / 1000.0,
+            cc1_v: f64::from(s.cc1_mv) / 1000.0,
+            cc2_v: f64::from(s.cc2_mv) / 1000.0,
+        }
+    }
+}
+
 /// One row of the packet table.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PdRow {
@@ -39,6 +67,9 @@ pub struct PdRow {
     pub index: u64,
     /// Ms since the capture start.
     pub elapsed_ms: u64,
+    /// The record's time on the measurement samples' session time base
+    /// (like a sample's `t_ms`), for the chart.
+    pub session_ms: u64,
     /// Message or event.
     pub kind: RowKind,
     /// SOP name, messages only.
@@ -104,12 +135,74 @@ pub struct PdCapture {
     /// sent before it can never be mistaken for rows after it.
     base: u64,
     entries: Vec<Entry>,
-    pending: Vec<PdRow>,
-    last_flush_ms: Option<u64>,
+    rows_out: Outbox<PdRow>,
     /// Added to the elapsed time of the running sniffer run's records.
     run_offset_ms: u64,
     /// Elapsed time of the table's last record; 0 after a clear.
     last_elapsed_ms: u64,
+    /// Meter time at the running sniffer run's start (its elapsed time 0),
+    /// taken from its first record; `None` before that record.
+    run_session_base: Option<i64>,
+    /// Status blocks waiting to go out (FR TGE83D).
+    status_out: Outbox<PdStatusSample>,
+    /// Session time minus meter time: the samples' timeline offset, so PD
+    /// times land on the samples they belong to after a reconnect or a
+    /// device clock jump.
+    session_offset_ms: i64,
+}
+
+/// Items waiting to go out to the UI, sent in batches at most every
+/// `ROW_BATCH_MS` (about 60 a second).
+#[derive(Debug)]
+struct Outbox<T> {
+    pending: Vec<T>,
+    last_flush_ms: Option<u64>,
+}
+
+impl<T> Default for Outbox<T> {
+    fn default() -> Outbox<T> {
+        Outbox {
+            pending: Vec::new(),
+            last_flush_ms: None,
+        }
+    }
+}
+
+impl<T> Outbox<T> {
+    fn push(&mut self, item: T) {
+        self.pending.push(item);
+    }
+
+    /// The waiting items, when a batch is due at `now_ms`.
+    fn take_due(&mut self, now_ms: u64) -> Option<Vec<T>> {
+        if self.next_due_ms().is_none_or(|due| now_ms < due) {
+            return None;
+        }
+        self.last_flush_ms = Some(now_ms);
+        Some(std::mem::take(&mut self.pending))
+    }
+
+    /// When the next batch can go out, if items are waiting.
+    fn next_due_ms(&self) -> Option<u64> {
+        (!self.pending.is_empty()).then(|| {
+            self.last_flush_ms
+                .map_or(0, |l| l.saturating_add(ROW_BATCH_MS))
+        })
+    }
+
+    /// Every waiting item, now.
+    fn take_all(&mut self) -> Option<Vec<T>> {
+        (!self.pending.is_empty()).then(|| std::mem::take(&mut self.pending))
+    }
+
+    fn clear(&mut self) {
+        self.pending.clear();
+    }
+}
+
+/// Meter time `device_ms` moved by `offset_ms` onto session time.
+fn on_session(device_ms: i64, offset_ms: i64) -> u64 {
+    u64::try_from(device_ms.saturating_add(offset_ms)).unwrap_or(0)
 }
 
 fn sop_name(sop: Sop) -> String {
@@ -207,16 +300,38 @@ impl PdCapture {
     pub fn start_run(&mut self) {
         self.decoder = pd::Capture::new();
         self.run_offset_ms = self.last_elapsed_ms;
+        self.run_session_base = None;
+    }
+
+    /// The session timeline's current offset (session time minus meter
+    /// time), applied to the records and status blocks pushed from now on.
+    pub fn set_session_offset(&mut self, offset_ms: i64) {
+        self.session_offset_ms = offset_ms;
     }
 
     /// Decode `records` into rows, with VBUS and IBUS from `status`.
     pub fn push(&mut self, records: &[CapturedRecord], status: Option<PdStatus>) {
-        let (vbus_v, ibus_a) = status.map_or((0.0, 0.0), |s| {
-            (f64::from(s.vbus_mv) / 1000.0, f64::from(s.ibus_ma) / 1000.0)
+        let offset = self.session_offset_ms;
+        let status = status.map(|s| PdStatusSample {
+            session_ms: on_session(i64::from(s.time_ms), offset),
+            ..PdStatusSample::from(s)
         });
+        if let Some(s) = status {
+            self.status_out.push(s);
+        }
+        let (vbus_v, ibus_a) = status.map_or((0.0, 0.0), |s| (s.vbus_v, s.ibus_a));
         for r in records {
             let index = self.base + self.entries.len() as u64;
             let elapsed_ms = self.run_offset_ms.saturating_add(r.elapsed_ms);
+            // One base per run: the run's elapsed time never goes back, so
+            // session time keeps the meter's spacing at a constant offset.
+            let base = *self.run_session_base.get_or_insert_with(|| {
+                i64::from(r.record.time_ms) - i64::try_from(r.elapsed_ms).unwrap_or(i64::MAX)
+            });
+            let session_ms = on_session(
+                base.saturating_add(i64::try_from(r.elapsed_ms).unwrap_or(i64::MAX)),
+                offset,
+            );
             self.last_elapsed_ms = self.last_elapsed_ms.max(elapsed_ms);
             let decoded = r.record.pd_input().and_then(|i| self.decoder.feed(i));
             let row = match (&r.record.kind, &decoded) {
@@ -238,6 +353,7 @@ impl PdCapture {
                     PdRow {
                         index,
                         elapsed_ms,
+                        session_ms,
                         kind: RowKind::Message,
                         sop: Some(sop_name(h.sop)),
                         name: h.message_type.name().to_owned(),
@@ -262,6 +378,7 @@ impl PdCapture {
                     PdRow {
                         index,
                         elapsed_ms,
+                        session_ms,
                         kind: RowKind::Event,
                         sop: None,
                         name: name.clone(),
@@ -275,39 +392,39 @@ impl PdCapture {
                     }
                 }
             };
-            self.pending.push(row);
+            self.rows_out.push(row);
         }
     }
 
     /// The rows waiting to go out, when a batch is due at `now_ms`.
     pub fn take_due(&mut self, now_ms: u64) -> Option<Vec<PdRow>> {
-        if self.pending.is_empty() {
-            return None;
-        }
-        if self
-            .last_flush_ms
-            .is_some_and(|last| now_ms < last.saturating_add(ROW_BATCH_MS))
-        {
-            return None;
-        }
-        self.last_flush_ms = Some(now_ms);
-        Some(std::mem::take(&mut self.pending))
+        self.rows_out.take_due(now_ms)
     }
 
     /// When the next batch can go out, if rows are waiting.
     pub fn next_due_ms(&self) -> Option<u64> {
-        if self.pending.is_empty() {
-            return None;
-        }
-        Some(
-            self.last_flush_ms
-                .map_or(0, |l| l.saturating_add(ROW_BATCH_MS)),
-        )
+        self.rows_out.next_due_ms()
     }
 
     /// Every waiting row, now.
     pub fn take_all(&mut self) -> Option<Vec<PdRow>> {
-        (!self.pending.is_empty()).then(|| std::mem::take(&mut self.pending))
+        self.rows_out.take_all()
+    }
+
+    /// The status blocks waiting to go out, when a batch is due at `now_ms`
+    /// (at most 60 a second, like the rows).
+    pub fn take_status_due(&mut self, now_ms: u64) -> Option<Vec<PdStatusSample>> {
+        self.status_out.take_due(now_ms)
+    }
+
+    /// When the next status batch can go out, if blocks are waiting.
+    pub fn next_status_due_ms(&self) -> Option<u64> {
+        self.status_out.next_due_ms()
+    }
+
+    /// Every waiting status block, now.
+    pub fn take_all_status(&mut self) -> Option<Vec<PdStatusSample>> {
+        self.status_out.take_all()
     }
 
     /// The details of record `index`.
@@ -334,7 +451,8 @@ impl PdCapture {
         self.last_elapsed_ms = 0;
         self.base += self.entries.len() as u64;
         self.entries.clear();
-        self.pending.clear();
+        self.rows_out.clear();
+        self.status_out.clear();
         self.base
     }
 }
@@ -422,5 +540,21 @@ mod tests {
             .map(|r| r.elapsed_ms)
             .collect();
         assert_eq!(times, vec![3]);
+    }
+
+    #[test]
+    fn a_clear_drops_status_samples_still_waiting_to_go_out() {
+        let mut c = PdCapture::new();
+        let status = PdStatus {
+            time_ms: 10,
+            vbus_mv: 5_000,
+            ibus_ma: 100,
+            cc1_mv: 1_600,
+            cc2_mv: 0,
+        };
+        c.push(&[source_caps(0)], Some(status));
+        c.clear();
+        assert_eq!(c.take_all_status(), None);
+        assert_eq!(c.take_all(), None);
     }
 }

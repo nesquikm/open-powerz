@@ -199,6 +199,13 @@ impl SessionStore {
         self.lock().timeline.restart = true;
     }
 
+    /// The timeline's current offset, ms: session time minus device time.
+    /// Anything else timed by the meter's clock (PD records, PD status)
+    /// goes onto the samples' session time by adding it.
+    pub(crate) fn offset_ms(&self) -> i64 {
+        self.lock().timeline.offset
+    }
+
     /// A valid snapshot read `temp_c` °C at wall-clock time `now_ms`: the
     /// records from now on carry it, up to [`SnapshotCadence::MAX_AGE`] after it.
     pub(crate) fn set_temp(&self, temp_c: f64, now_ms: u64) {

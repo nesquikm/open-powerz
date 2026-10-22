@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Series, SeriesBuckets};
-use crate::pd_capture::{PdCapture, PdDetails, PdRow};
+use crate::pd_capture::{PdCapture, PdDetails, PdRow, PdStatusSample};
 use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
 use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, temp_at};
@@ -113,6 +113,13 @@ pub struct PdRows {
     pub rows: Vec<PdRow>,
 }
 
+/// A batch of PD status blocks for the chart (FR TGE83D).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PdStatusBatch {
+    /// Status blocks in time order.
+    pub samples: Vec<PdStatusSample>,
+}
+
 /// Every event the backend sends to the UI.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -131,6 +138,8 @@ pub enum BackendEvent {
     PdState(PdState),
     /// PD table rows.
     PdRows(PdRows),
+    /// PD status blocks.
+    PdStatus(PdStatusBatch),
 }
 
 /// Where the worker sends its events.
@@ -723,11 +732,17 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         if let Some(rows) = self.pd.take_due(now) {
             self.emit(BackendEvent::PdRows(PdRows { rows }));
         }
+        if let Some(samples) = self.pd.take_status_due(now) {
+            self.emit(BackendEvent::PdStatus(PdStatusBatch { samples }));
+        }
         let mut wake = self.next_poll_ms.min(self.batcher.next_due_ms());
         if let Some(run) = &self.pd_run {
             wake = wake.min(run.next_poll_ms);
         }
         if let Some(due) = self.pd.next_due_ms() {
+            wake = wake.min(due);
+        }
+        if let Some(due) = self.pd.next_status_due_ms() {
             wake = wake.min(due);
         }
         let wait = wake.saturating_sub(now).max(1);
@@ -753,6 +768,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         });
         match polled {
             Ok(poll) => {
+                // PD times go onto the samples' session time.
+                let store = &self.store;
+                let offset = blocked(self.meter.as_ref(), || store.offset_ms());
+                self.pd.set_session_offset(offset);
                 self.pd.push(&poll.records, poll.status);
                 Step::Continue
             }
@@ -777,6 +796,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     fn emit_pd_stopped(&mut self) {
         if let Some(rows) = self.pd.take_all() {
             self.emit(BackendEvent::PdRows(PdRows { rows }));
+        }
+        if let Some(samples) = self.pd.take_all_status() {
+            self.emit(BackendEvent::PdStatus(PdStatusBatch { samples }));
         }
         self.emit(BackendEvent::PdState(PdState { capturing: false }));
     }

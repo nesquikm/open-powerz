@@ -86,8 +86,9 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
   on demand) and `pd_clear` (answers the next record index; indices never restart, so rows sent
   before a clear are recognised and dropped); backend events `Batch`, `Gap`, `Status`
   (including `waiting`), `Error`, `Recording` (started / progress / stopped / failed),
-  `PdState` and `PdRows` (batched, at most 60 a second, decoded in the backend) over one
-  session channel, with export progress on its own channel. The UI reaches them only through `apps/desktop/src/lib/backend.ts`, the
+  `PdState`, `PdRows` (batched, at most 60 a second, decoded in the backend; each row carries
+  `session_ms` on the measurement samples' time base) and `PdStatus` (the PD status blocks'
+  VBUS / IBUS / CC1 / CC2, batched the same way) over one session channel, with export progress on its own channel. The UI reaches them only through `apps/desktop/src/lib/backend.ts`, the
   seam the Playwright mock replaces.
 - CLI: `powerz <subcommand>` with `clap` once the first command lands.
 

@@ -20,6 +20,7 @@ import type {
   MinMaxAvg,
   PdDetails,
   PdRow,
+  PdStatusSample,
   RecordingSummary,
   Sample,
   Series,
@@ -309,6 +310,9 @@ export interface MockOptions {
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
 const PD_SEED_BATCH = 10_000;
 
+/** The meter's PD status block period while the sniffer runs, ms (FR TGE83D). */
+const PD_STATUS_MS = 5;
+
 /** The PD capture of a mock session (FR TGE83C). */
 interface MockPdCapture {
   /** The PD sniffer runs. */
@@ -323,6 +327,8 @@ interface MockPdCapture {
   nowMs: number;
   /** The seed was played (once per session). */
   seeded: boolean;
+  /** Session time (sample `t_ms`) minus capture time for the running capture run. */
+  sessionOffsetMs: number;
 }
 
 interface Running {
@@ -533,7 +539,15 @@ export class MockBackend {
       gaps: [],
       pendingGap: null,
       stats: new MockStats(),
-      pd: { timer: null, base: 0, records: [], next: 0, nowMs: 0, seeded: false },
+      pd: {
+        timer: null,
+        base: 0,
+        records: [],
+        next: 0,
+        nowMs: 0,
+        seeded: false,
+        sessionOffsetMs: 0,
+      },
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
     this.#session = session;
@@ -801,7 +815,12 @@ export class MockBackend {
     pd.timer = setInterval(() => this.#pdTick(s), BATCH_MS);
     s.onEvent({ type: "pd_state", data: { capturing: true } });
     const seed = this.#options.pdSynthetic ?? 0;
-    if (!pd.seeded && seed > 0) {
+    const seeding = !pd.seeded && seed > 0;
+    // Like the backend: one run's records sit on the samples' time base at a constant
+    // offset, the run starting now (a seed ending now).
+    const startMs = seeding ? pdRecordTime(pd.next + seed) : pd.nowMs;
+    pd.sessionOffsetMs = Math.round(s.nextMs) - startMs;
+    if (seeding) {
       pd.seeded = true;
       for (let from = 0; from < seed; from += PD_SEED_BATCH) {
         const rows: PdRow[] = [];
@@ -817,15 +836,31 @@ export class MockBackend {
   #capture(pd: MockPdCapture): PdRow {
     const k = pd.next++;
     pd.records.push(k);
-    return pdRow(k, pd.base + pd.records.length - 1);
+    const row = pdRow(k, pd.base + pd.records.length - 1);
+    row.session_ms = row.elapsed_ms + pd.sessionOffsetMs;
+    return row;
   }
 
   #pdTick(s: Running): void {
     const pd = s.pd;
     const rows: PdRow[] = [];
     while (pdRecordTime(pd.next) <= pd.nowMs) rows.push(this.#capture(pd));
+    // The status blocks polled since the last tick, on the samples' time base.
+    const samples: PdStatusSample[] = [];
+    for (let t = pd.nowMs; t < pd.nowMs + BATCH_MS; t += PD_STATUS_MS) {
+      const ms = t + pd.sessionOffsetMs;
+      const m = sampleAt(s.scenario, ms);
+      samples.push({
+        session_ms: ms,
+        vbus_v: m.vbus_v,
+        ibus_a: m.ibus_a,
+        cc1_v: m.cc1_v,
+        cc2_v: m.cc2_v,
+      });
+    }
     pd.nowMs += BATCH_MS;
     if (rows.length > 0) s.onEvent({ type: "pd_rows", data: { rows } });
+    s.onEvent({ type: "pd_status", data: { samples } });
   }
 
   /** Stops `s`'s PD capture, if it runs. */

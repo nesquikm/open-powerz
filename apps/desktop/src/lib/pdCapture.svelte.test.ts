@@ -220,3 +220,18 @@ describe("emptied counter for the view's selection", () => {
     expect(pd.emptied).toBe(start + 2);
   });
 });
+
+describe("Clear and the PD status samples (AC-TGE83D.4)", () => {
+  it("a clear empties the status samples along with the rows", () => {
+    const pd = new PdCapture();
+    pd.handleEvent({
+      type: "pd_status",
+      data: { samples: [{ session_ms: 5, vbus_v: 5, ibus_a: 0.1, cc1_v: 1.6, cc2_v: 0 }] },
+    } as BackendEvent);
+    expect(pd.status.length).toBeGreaterThan(0);
+    const version = pd.statusVersion;
+    pd.clear(0);
+    expect(pd.status.length).toBe(0);
+    expect(pd.statusVersion).toBeGreaterThan(version);
+  });
+});
