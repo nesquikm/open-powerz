@@ -52,4 +52,4 @@ tauri-driver does not support macOS, so the real-device app run there is manual.
 
 2026-10-21: QA shot the real app, light/dark, ~900/~1600 px (.11), kept outside the repo.
 
-2026-10-22, build 55c7b88 (.10): unplugged mid-recording at 1000 SPS; the recording closed within 1 s of the last sample. The replug was then connected to the demo device, so append-with-gap is unverified.
+2026-10-22, build 55c7b88 (.10): unplug passed (recording closed within 1 s). Replug fell back to the demo device; the meter needed a manual reconnect. Gap band unverified; M3 bug.

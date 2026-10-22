@@ -98,6 +98,9 @@ codename: Live Wire
 - A 10-minute WebContent memory soak after the plateau (4NSVC9 AC .4 measured 5 minutes).
 - Reword the M2 ACs that later FRs overrode (17 drift hints from the M2 spec review).
 
+**Deferred to M3 (bug FR):**
+- Auto-resume on replug: after a real unplug/replug the session fell back to the demo device and the meter needed a manual reconnect (AH2AEN.10).
+
 **Tests:**
 - Rust unit and property tests for batching, decimation, stats and recording; worker integration tests against `powerz-sim`; Vitest for UI logic; WebdriverIO real-app e2e (Linux, Windows); Playwright UI e2e with axe (Linux, macOS, Windows).
 
