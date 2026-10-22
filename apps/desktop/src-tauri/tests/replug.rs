@@ -611,7 +611,12 @@ fn a_recording_ends_at_the_unplug_with_a_complete_file_and_does_not_resume() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rec.csv");
     rig.m.start_recording(&path).expect("recording refused");
-    let mut got = recv_until(&rx, is_samples);
+    // AC-2BF5G6.6: count the batches only once the recording has started, so rows are
+    // written before the unplug (on a slow runner they could all arrive before the start).
+    let mut got = recv_until(&rx, |e| {
+        matches!(e, BackendEvent::Recording(RecordingEvent::Started))
+    });
+    got.extend(recv_until(&rx, is_samples));
     got.extend(recv_until(&rx, is_samples));
 
     rig.unplug();

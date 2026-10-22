@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { historyPanBudget, renderReport } from "../../e2e/ui/budget";
 import type { BackendEvent, Batch } from "./backend";
 import {
   LINUX_PERMISSION_DENIED,
@@ -218,34 +219,43 @@ describe("MockBackend history and stats (AC-AH2AEJ.2, AC-AH2AEJ.4, AC-AH2AEJ.5, 
 });
 
 describe("MockBackend synthetic history (AC-AH2AEM.4)", () => {
-  it("serves a 10-million-sample history fast enough for a pan step", async () => {
-    const backend = new MockBackend();
-    await backend.connect("demo:load-5v-1a", 1000, () => {});
-    await backend.seedSyntheticHistory(10_000_000);
+  // AC-2BF5G6.5: 100 ms pan budget and 5 s timeout locally, both times the CI factor on CI.
+  const pan = historyPanBudget();
+  it(
+    "serves a 10-million-sample history fast enough for a pan step",
+    async () => {
+      const backend = new MockBackend();
+      await backend.connect("demo:load-5v-1a", 1000, () => {});
+      await backend.seedSyntheticHistory(10_000_000);
 
-    const [whole] = await backend.historyRange(["vbus"], 0, Number.MAX_SAFE_INTEGER, 1200);
-    expect(whole.buckets.length).toBeLessThanOrEqual(1200);
-    expect(whole.buckets.length).toBeGreaterThanOrEqual(1190);
-    expect(whole.buckets[0]?.t_ms).toBe(0);
-    expect(whole.buckets.at(-1)?.t_ms).toBeGreaterThan(9_990_000 - 10_000);
+      const [whole] = await backend.historyRange(["vbus"], 0, Number.MAX_SAFE_INTEGER, 1200);
+      expect(whole.buckets.length).toBeLessThanOrEqual(1200);
+      expect(whole.buckets.length).toBeGreaterThanOrEqual(1190);
+      expect(whole.buckets[0]?.t_ms).toBe(0);
+      expect(whole.buckets.at(-1)?.t_ms).toBeGreaterThan(9_990_000 - 10_000);
 
-    // A pan step over a tenth of the history (one million samples).
-    const started = performance.now();
-    const [vbus, ibus] = await backend.historyRange(["vbus", "ibus"], 4_000_000, 5_000_000, 1200);
-    const elapsed = performance.now() - started;
-    await backend.disconnect();
+      // A pan step over a tenth of the history (one million samples).
+      const started = performance.now();
+      const [vbus, ibus] = await backend.historyRange(["vbus", "ibus"], 4_000_000, 5_000_000, 1200);
+      const elapsed = performance.now() - started;
+      await backend.disconnect();
 
-    expect(elapsed).toBeLessThan(100);
-    expect(vbus.buckets.length).toBeGreaterThanOrEqual(1190);
-    expect(vbus.buckets.length).toBeLessThanOrEqual(1200);
-    expect(vbus.buckets[0]?.t_ms).toBeGreaterThanOrEqual(4_000_000);
-    expect(vbus.buckets.at(-1)?.t_ms).toBeLessThanOrEqual(5_000_000);
-    for (const b of vbus.buckets) {
-      expect(b.min).toBeLessThanOrEqual(b.max);
-      expect(b.min).toBeCloseTo(5, 0);
-    }
-    for (const b of ibus.buckets) expect(b.max).toBeCloseTo(1, 0);
-  });
+      expect(
+        elapsed,
+        renderReport("10-million-sample pan step", [elapsed], pan.panBudgetMs),
+      ).toBeLessThan(pan.panBudgetMs);
+      expect(vbus.buckets.length).toBeGreaterThanOrEqual(1190);
+      expect(vbus.buckets.length).toBeLessThanOrEqual(1200);
+      expect(vbus.buckets[0]?.t_ms).toBeGreaterThanOrEqual(4_000_000);
+      expect(vbus.buckets.at(-1)?.t_ms).toBeLessThanOrEqual(5_000_000);
+      for (const b of vbus.buckets) {
+        expect(b.min).toBeLessThanOrEqual(b.max);
+        expect(b.min).toBeCloseTo(5, 0);
+      }
+      for (const b of ibus.buckets) expect(b.max).toBeCloseTo(1, 0);
+    },
+    pan.timeoutMs,
+  );
 
   it("refuses to seed without a session, like every other history call", async () => {
     await expect(new MockBackend().seedSyntheticHistory(1_000)).rejects.toMatchObject({

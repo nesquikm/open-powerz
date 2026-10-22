@@ -7,11 +7,14 @@
 import { describe, expect, it } from "vitest";
 import {
   CI_FACTOR,
+  HISTORY_PAN_BUDGET_MS,
+  HISTORY_PAN_TIMEOUT_MS,
   LIVE_REDRAW_MAX_PER_S,
   LIVE_REDRAW_MIN_PER_S,
   RENDER_STEP_BUDGET_MS,
   ciLatencyBudgetMs,
   ciRateFloor,
+  historyPanBudget,
   liveRedrawBand,
   renderReport,
   renderStepBudgetMs,
@@ -112,5 +115,34 @@ describe("ciLatencyBudgetMs", () => {
       renderStepBudgetMs({ CI: "1" }),
     );
     expect(ciLatencyBudgetMs(RENDER_STEP_BUDGET_MS, {})).toBe(renderStepBudgetMs({}));
+  });
+});
+
+/**
+ * AC-2BF5G6.5: the 10-million-sample pan test keeps its 100 ms pan budget and 5 s test
+ * timeout locally; on CI both are widened by the CI factor.
+ */
+describe("historyPanBudget", () => {
+  it("keeps the 100 ms pan budget and the 5 s timeout without CI", () => {
+    expect(HISTORY_PAN_BUDGET_MS).toBe(100);
+    expect(HISTORY_PAN_TIMEOUT_MS).toBe(5_000);
+    expect(historyPanBudget({})).toEqual({ panBudgetMs: 100, timeoutMs: 5_000 });
+    expect(historyPanBudget({ CI: "" })).toEqual({ panBudgetMs: 100, timeoutMs: 5_000 });
+  });
+
+  it("widens both by the CI factor with CI", () => {
+    expect(historyPanBudget({ CI: "true" })).toEqual({
+      panBudgetMs: 100 * CI_FACTOR,
+      timeoutMs: 5_000 * CI_FACTOR,
+    });
+  });
+
+  it("is the shared CI latency rule", () => {
+    for (const env of [{}, { CI: "1" }]) {
+      expect(historyPanBudget(env)).toEqual({
+        panBudgetMs: ciLatencyBudgetMs(HISTORY_PAN_BUDGET_MS, env),
+        timeoutMs: ciLatencyBudgetMs(HISTORY_PAN_TIMEOUT_MS, env),
+      });
+    }
   });
 });

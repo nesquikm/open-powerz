@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# bash on every runner (Windows too): errexit + pipefail, so any failing command fails its step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   gate:
     name: gate (${{ matrix.os }})
@@ -122,7 +127,6 @@ jobs:
 
       - name: Install tauri-driver
         run: cargo install tauri-driver --version "$TAURI_DRIVER_VERSION" --locked
-        shell: bash
 
       # The Edge WebDriver must match the WebView2 runtime the app runs in, so download the
       # msedgedriver whose version equals the installed WebView2 (falling back to Edge). When
@@ -168,6 +172,7 @@ jobs:
             throw "msedgedriver.exe is not validly signed by Microsoft ($($sig.Status), '$signer')"
           }
           & $driver --version
+          if ($LASTEXITCODE -ne 0) { throw "msedgedriver --version exited with $LASTEXITCODE" }
           Add-Content -Path $env:GITHUB_PATH -Value $dir
 
       - name: Real-app e2e (Linux, xvfb)
@@ -183,6 +188,7 @@ jobs:
         shell: pwsh
         working-directory: apps/desktop
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force e2e-app-logs | Out-Null
           $env:RUST_BACKTRACE = "1"
           $exe = Resolve-Path ..\..\target\debug\open-powerz-desktop.exe
