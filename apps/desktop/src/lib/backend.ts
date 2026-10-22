@@ -193,13 +193,54 @@ export interface SeriesBuckets {
 /** One {@link SeriesBuckets} per requested series, in the requested order. */
 export type BucketsFor<S extends readonly HistorySeries[]> = { [K in keyof S]: SeriesBuckets };
 
+/** Who sent a PD message (mirrors `src-tauri/src/pd_capture.rs`). */
+export type PdDirection = "source_to_sink" | "sink_to_source" | "cable";
+
+/** One row of the PD packet table: a message or an event (FR TGE83C). The message
+ * fields are null on event rows. */
+export interface PdRow {
+  /** Record index from 0, in capture order. */
+  index: number;
+  /** Ms since the capture start. */
+  elapsed_ms: number;
+  kind: "message" | "event";
+  sop: string | null;
+  name: string;
+  message_id: number | null;
+  direction: PdDirection | null;
+  objects: number | null;
+  spec_revision: string | null;
+  vbus_v: number;
+  ibus_a: number;
+  summary: string;
+}
+
+/** One node of a PD record's field tree, with the `[start, end)` bytes of the record's
+ * raw bytes it covers. */
+export interface PdField {
+  name: string;
+  meaning: string;
+  raw: number;
+  bytes: [number, number];
+  children: PdField[];
+}
+
+/** The raw bytes and field tree of one PD record. */
+export interface PdDetails {
+  index: number;
+  raw: number[];
+  fields: PdField[];
+}
+
 /** Every event the backend sends over the session channel. */
 export type BackendEvent =
   | { type: "batch"; data: Batch }
   | { type: "gap"; data: Gap }
   | { type: "status"; data: Status }
   | { type: "error"; data: UiError }
-  | { type: "recording"; data: RecordingEvent };
+  | { type: "recording"; data: RecordingEvent }
+  | { type: "pd_state"; data: { capturing: boolean } }
+  | { type: "pd_rows"; data: { rows: PdRow[] } };
 
 /** Lists the meters and demo devices available right now. */
 export function listDevices(): Promise<DeviceListing[]> {
@@ -349,6 +390,32 @@ export async function resetStats(): Promise<void> {
 export async function clearHistory(): Promise<void> {
   if (mock) return mock.clearHistory();
   await invoke("clear_history");
+}
+
+/** Starts the PD capture on the open session; rows and the capture state arrive on the
+ * session channel (`pd_rows`, `pd_state`). */
+export async function pdStart(): Promise<void> {
+  if (mock) return mock.pdStart();
+  await invoke("pd_start");
+}
+
+/** Stops the PD capture; the captured records stay. */
+export async function pdStop(): Promise<void> {
+  if (mock) return mock.pdStop();
+  await invoke("pd_stop");
+}
+
+/** The raw bytes and field tree of captured PD record `index`. */
+export async function pdDetails(index: number): Promise<PdDetails> {
+  if (mock) return mock.pdDetails(index);
+  return invoke<PdDetails>("pd_details", { index });
+}
+
+/** Drops every captured PD record; resolves to the index of the next record. Rows
+ * numbered below it were sent before the clear and are stale. */
+export async function pdClear(): Promise<number> {
+  if (mock) return mock.pdClear();
+  return invoke<number>("pd_clear");
 }
 
 /** App and protocol-library versions for the About dialog. */

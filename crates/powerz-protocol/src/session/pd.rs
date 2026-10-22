@@ -55,11 +55,7 @@ impl<'a, T: Transport, C: Clock> PdSniffer<'a, T, C> {
     /// Start the PD sniffer, authenticating to level 1 first when needed.
     /// A REJECT is [`Error::Rejected`] and leaves nothing to stop.
     pub fn start(session: &'a mut Session<T, C>, options: PdOptions) -> Result<Self, Error> {
-        if session.auth_level == 0 {
-            session.authenticate(1)?;
-        }
-        let request = frame::start_pd_sniffer(session.counter.next());
-        session.expect_accept(&request, "PD sniffer start")?;
+        session.start_pd_sniffer()?;
         Ok(PdSniffer {
             session,
             options,
@@ -70,37 +66,7 @@ impl<'a, T: Transport, C: Clock> PdSniffer<'a, T, C> {
 
     /// Poll PD_PACKET once (with the ADC snapshot when asked for).
     pub fn poll(&mut self) -> Result<PdPoll, Error> {
-        let mut mask = Attribute::PD_PACKET;
-        if self.options.with_adc {
-            mask = mask | Attribute::ADC;
-        }
-        let mut poll = PdPoll {
-            status: None,
-            records: Vec::new(),
-            skipped: 0,
-            adc: None,
-        };
-        for section in self.session.get_data(mask)? {
-            if section.att == Attribute::PD_PACKET {
-                // A section too short for its status block is counted like a
-                // bad record; the capture goes on.
-                let Ok(chunk) = PdChunk::parse(&section.payload) else {
-                    poll.skipped += 1;
-                    continue;
-                };
-                poll.status = Some(chunk.status);
-                poll.skipped += chunk.skipped;
-                for record in chunk.records {
-                    poll.records.push(CapturedRecord {
-                        elapsed_ms: self.clock.elapsed_ms(record.time_ms),
-                        record,
-                    });
-                }
-            } else if section.att == Attribute::ADC {
-                poll.adc = Some(AdcSnapshot::decode(&section.payload)?);
-            }
-        }
-        Ok(poll)
+        self.session.poll_pd_sniffer(self.options, &mut self.clock)
     }
 
     /// Poll every [`POLL_PERIOD`](Self::POLL_PERIOD), handing each poll to
@@ -126,8 +92,68 @@ impl<'a, T: Transport, C: Clock> PdSniffer<'a, T, C> {
             return Ok(());
         }
         self.running = false;
-        let request = frame::stop_analyzer(self.session.counter.next());
-        self.session.expect_accept(&request, "PD sniffer stop")
+        self.session.stop_pd_sniffer()
+    }
+}
+
+/// The sniffer requests on their own, for a caller that keeps the session
+/// between polls (the desktop worker): no borrow is held, so stopping is the
+/// caller's job.
+impl<T: Transport, C: Clock> Session<T, C> {
+    /// Start the PD sniffer (0x10, mode 1), authenticating to level 1 first
+    /// when needed. A REJECT is [`Error::Rejected`].
+    pub fn start_pd_sniffer(&mut self) -> Result<(), Error> {
+        if self.auth_level == 0 {
+            self.authenticate(1)?;
+        }
+        let request = frame::start_pd_sniffer(self.counter.next());
+        self.expect_accept(&request, "PD sniffer start")
+    }
+
+    /// Stop the PD sniffer (0x11); a REJECT is [`Error::Rejected`].
+    pub fn stop_pd_sniffer(&mut self) -> Result<(), Error> {
+        let request = frame::stop_analyzer(self.counter.next());
+        self.expect_accept(&request, "PD sniffer stop")
+    }
+
+    /// Poll PD_PACKET once (with the ADC snapshot when `options` ask for
+    /// it); `clock` turns record times into ms since the capture start.
+    pub fn poll_pd_sniffer(
+        &mut self,
+        options: PdOptions,
+        clock: &mut CaptureClock,
+    ) -> Result<PdPoll, Error> {
+        let mut mask = Attribute::PD_PACKET;
+        if options.with_adc {
+            mask = mask | Attribute::ADC;
+        }
+        let mut poll = PdPoll {
+            status: None,
+            records: Vec::new(),
+            skipped: 0,
+            adc: None,
+        };
+        for section in self.get_data(mask)? {
+            if section.att == Attribute::PD_PACKET {
+                // A section too short for its status block is counted like a
+                // bad record; the capture goes on.
+                let Ok(chunk) = PdChunk::parse(&section.payload) else {
+                    poll.skipped += 1;
+                    continue;
+                };
+                poll.status = Some(chunk.status);
+                poll.skipped += chunk.skipped;
+                for record in chunk.records {
+                    poll.records.push(CapturedRecord {
+                        elapsed_ms: clock.elapsed_ms(record.time_ms),
+                        record,
+                    });
+                }
+            } else if section.att == Attribute::ADC {
+                poll.adc = Some(AdcSnapshot::decode(&section.payload)?);
+            }
+        }
+        Ok(poll)
     }
 }
 

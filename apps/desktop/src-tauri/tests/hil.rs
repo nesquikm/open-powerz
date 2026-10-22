@@ -98,6 +98,8 @@ fn absorb(w: &mut Window, event: BackendEvent) {
         BackendEvent::Gap(g) if g.kind == GapKind::Stream => w.stream_gaps += 1,
         BackendEvent::Gap(_)
         | BackendEvent::Recording(_)
+        | BackendEvent::PdState(_)
+        | BackendEvent::PdRows(_)
         | BackendEvent::Status(Status::Waiting { .. }) => {}
         BackendEvent::Error(e) => w.errors.push(e.message),
         // Only the fields needed: a connected status carries the serial.

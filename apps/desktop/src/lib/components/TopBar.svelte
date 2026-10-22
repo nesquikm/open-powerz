@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, type Snippet } from "svelte";
   import { badgeLabel } from "../format";
   import { menuIndexAfter } from "../menuNav";
   import {
@@ -40,6 +40,7 @@
     exportJob,
     canExport,
     onExport,
+    views,
   }: {
     session: Session;
     themeChoice: ThemeChoice;
@@ -58,6 +59,9 @@
     /** The session holds samples that can be exported. */
     canExport: boolean;
     onExport: () => void;
+    /** The view tabs, in a strip just under the bar that stays in view with it. They are
+     * out of the bar's row, so they never take its room (lib/topBarFit.ts). */
+    views?: Snippet;
   } = $props();
 
   /** The "⋯" menu that holds theme and About (and the rate-locked note) on narrow windows. */
@@ -357,6 +361,9 @@
       {/if}
     </span>
   </div>
+  {#if views}
+    <div class="views-strip">{@render views()}</div>
+  {/if}
 </header>
 
 <style>
@@ -377,6 +384,17 @@
     position: sticky;
     top: 0;
     z-index: 1;
+  }
+  .views-strip {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.375rem 1rem 0;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
   }
   .group {
     display: flex;

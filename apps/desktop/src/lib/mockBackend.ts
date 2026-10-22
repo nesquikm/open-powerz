@@ -18,6 +18,8 @@ import type {
   HistoryGap,
   HistorySeries,
   MinMaxAvg,
+  PdDetails,
+  PdRow,
   RecordingSummary,
   Sample,
   Series,
@@ -26,6 +28,7 @@ import type {
   UiError,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
+import { pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
@@ -288,6 +291,40 @@ export function syntheticFromUrl(search: string | undefined, dev: boolean): numb
   return Number.isInteger(n) && n > 0 ? Math.min(n, MAX_SYNTHETIC_SAMPLES) : null;
 }
 
+/** `?pdsynthetic=<n>` in the page URL seeds `n` PD records when the capture starts, for
+ * the PD table's performance check (AC-TGE83C.6); mock builds only. */
+export function pdSyntheticFromUrl(search: string | undefined): number | null {
+  const raw = urlParam(search, "pdsynthetic");
+  if (raw === null) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** Options of a {@link MockBackend}. */
+export interface MockOptions {
+  /** PD records to seed when the capture first starts. */
+  pdSynthetic?: number | null;
+}
+
+/** Rows per `pd_rows` event of a seed, so one event never gets huge. */
+const PD_SEED_BATCH = 10_000;
+
+/** The PD capture of a mock session (FR TGE83C). */
+interface MockPdCapture {
+  /** The PD sniffer runs. */
+  timer: ReturnType<typeof setInterval> | null;
+  /** Index of `records[0]`; it grows on a clear, so indices never restart. */
+  base: number;
+  /** Script record of every captured record, by record index minus `base`. */
+  records: number[];
+  /** The next script record. */
+  next: number;
+  /** Capture time reached, ms. */
+  nowMs: number;
+  /** The seed was played (once per session). */
+  seeded: boolean;
+}
+
 interface Running {
   /** The picker id the session was connected with. */
   deviceId: string;
@@ -312,6 +349,7 @@ interface Running {
   /** The outage gap the backend announces before the first samples after it. */
   pendingGap: Gap | null;
   stats: MockStats;
+  pd: MockPdCapture;
 }
 
 interface MockRecording {
@@ -405,6 +443,7 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
 export class MockBackend {
   #session: Running | null = null;
   #mode: MockMode | null;
+  #options: MockOptions;
   #revealed: string[] = [];
   /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
   #meterAddress: number | null = 7;
@@ -415,9 +454,14 @@ export class MockBackend {
   #replugTimer: ReturnType<typeof setTimeout> | null = null;
   #watchers = new Set<(devices: DeviceListing[]) => void>();
 
-  /** `mode` defaults to the page URL's `?mock=` parameter. */
-  constructor(mode: MockMode | null = mockModeFromUrl(pageSearch())) {
+  /** `mode` defaults to the page URL's `?mock=` parameter, the PD seed to its
+   * `?pdsynthetic=`. */
+  constructor(
+    mode: MockMode | null = mockModeFromUrl(pageSearch()),
+    options: MockOptions = { pdSynthetic: pdSyntheticFromUrl(pageSearch()) },
+  ) {
     this.#mode = mode;
+    this.#options = options;
   }
 
   /** `replug`: the real meter's listing while the OS lists it, else null. */
@@ -489,6 +533,7 @@ export class MockBackend {
       gaps: [],
       pendingGap: null,
       stats: new MockStats(),
+      pd: { timer: null, base: 0, records: [], next: 0, nowMs: 0, seeded: false },
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
     this.#session = session;
@@ -637,6 +682,8 @@ export class MockBackend {
    * `error` (null when it was asked for). */
   #endSession(s: Running, error: UiError | null): void {
     clearInterval(s.timer);
+    // Like the worker: the sniffer stops before the session ends.
+    this.#stopPd(s);
     this.#session = null;
     if (s.recording) {
       const rows = s.recording.rows;
@@ -743,6 +790,70 @@ export class MockBackend {
     const s = this.#open();
     s.history = new HistoryColumns();
     s.gaps = [];
+  }
+
+  /** Starts the scripted PD capture: rows go out with every batch tick, like the
+   * worker's at most 60 times a second. */
+  async pdStart(): Promise<void> {
+    const s = this.#open();
+    const pd = s.pd;
+    if (pd.timer !== null) return;
+    pd.timer = setInterval(() => this.#pdTick(s), BATCH_MS);
+    s.onEvent({ type: "pd_state", data: { capturing: true } });
+    const seed = this.#options.pdSynthetic ?? 0;
+    if (!pd.seeded && seed > 0) {
+      pd.seeded = true;
+      for (let from = 0; from < seed; from += PD_SEED_BATCH) {
+        const rows: PdRow[] = [];
+        for (let k = from; k < Math.min(seed, from + PD_SEED_BATCH); k++)
+          rows.push(this.#capture(pd));
+        s.onEvent({ type: "pd_rows", data: { rows } });
+      }
+      pd.nowMs = pdRecordTime(pd.next);
+    }
+  }
+
+  /** Captures the next script record; its row. */
+  #capture(pd: MockPdCapture): PdRow {
+    const k = pd.next++;
+    pd.records.push(k);
+    return pdRow(k, pd.base + pd.records.length - 1);
+  }
+
+  #pdTick(s: Running): void {
+    const pd = s.pd;
+    const rows: PdRow[] = [];
+    while (pdRecordTime(pd.next) <= pd.nowMs) rows.push(this.#capture(pd));
+    pd.nowMs += BATCH_MS;
+    if (rows.length > 0) s.onEvent({ type: "pd_rows", data: { rows } });
+  }
+
+  /** Stops `s`'s PD capture, if it runs. */
+  #stopPd(s: Running): void {
+    if (s.pd.timer === null) return;
+    clearInterval(s.pd.timer);
+    s.pd.timer = null;
+    s.onEvent({ type: "pd_state", data: { capturing: false } });
+  }
+
+  async pdStop(): Promise<void> {
+    this.#stopPd(this.#open());
+  }
+
+  async pdDetails(index: number): Promise<PdDetails> {
+    const s = this.#open();
+    const k = s.pd.records[index - s.pd.base];
+    if (k === undefined) throw usage("That PD record is not in the capture.");
+    return pdDetailsOf(k, index);
+  }
+
+  /** Drops every captured PD record; a running capture goes on. Like the backend,
+   * indices keep counting: resolves to the index of the next record. */
+  async pdClear(): Promise<number> {
+    const pd = this.#open().pd;
+    pd.base += pd.records.length;
+    pd.records = [];
+    return pd.base;
   }
 
   async appInfo(): Promise<AppInfo> {

@@ -43,7 +43,7 @@ Build order: TGE839, then TGE83A → TGE83B → TGE83C → TGE83D → TGE83E. Th
 - [x] CI green on all 8 jobs — KQF5GM (implemented and merged in v0.2.0)
 - [ ] Replug reconnects to the meter — TGE839
 - [ ] PD capture core and the powerz pd command — TGE83A
-- [ ] USB PD 3.2 message decoder — TGE83B
+- [x] USB PD 3.2 message decoder — TGE83B
 - [ ] Desktop PD analyzer view — TGE83C
 - [ ] PD timeline linked to the power chart — TGE83D
 - [ ] PD capture save and load — TGE83E
@@ -53,6 +53,7 @@ Build order: TGE839, then TGE83A → TGE83B → TGE83C → TGE83D → TGE83E. Th
 - CLI: a closed output pipe (`powerz watch | head`) prints `write failed: Broken pipe`; end quietly instead (watch and pd).
 - powerz-pd API polish before the web edition: `#[non_exhaustive]` public enums, `Display` for `Issue`, one visibility rule for sub-decoders.
 - CLAUDE.md Architecture tree lists only powerz-protocol and powerz-cli; add powerz-pd, powerz-sim and powerz-record (needs the user's OK to edit).
+- PD analyzer: cap the backend record store and the UI column store for long captures (or re-decode on demand); make the type/SOP option lists and filtering incremental; make the page behind the Clear dialog inert.
 - Gate probe `spawn_pattern_allowlist` fails on `main` too: `.claude/settings.json` lacks `Bash(claude:*)`. Widening the allow-list needs the user's OK.
 
 **Device checks:** pass-through PD capture (charger → meter → phone or laptop), passive only; replug at 1000 SPS. The user approved a short slot for each.

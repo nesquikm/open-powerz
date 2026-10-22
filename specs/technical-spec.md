@@ -81,9 +81,13 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
 - Tauri commands: `app_info`, `list_devices`, `watch_devices`, `connect`, `attach` (a reloaded page
   takes over the running session), `disconnect`, `set_rate`,
   `history_range`, `history_gaps`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
-  `stop_recording`, `export_session`; backend events `Batch`, `Gap`, `Status`, `Error` and
-  `Recording` (started / progress / stopped / failed) over one session channel, with export
-  progress on its own channel. The UI reaches them only through `apps/desktop/src/lib/backend.ts`, the
+  `stop_recording`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter), and
+  for the PD analyzer `pd_start`, `pd_stop`, `pd_details` (a record's raw bytes and field tree,
+  on demand) and `pd_clear` (answers the next record index; indices never restart, so rows sent
+  before a clear are recognised and dropped); backend events `Batch`, `Gap`, `Status`
+  (including `waiting`), `Error`, `Recording` (started / progress / stopped / failed),
+  `PdState` and `PdRows` (batched, at most 60 a second, decoded in the backend) over one
+  session channel, with export progress on its own channel. The UI reaches them only through `apps/desktop/src/lib/backend.ts`, the
   seam the Playwright mock replaces.
 - CLI: `powerz <subcommand>` with `clap` once the first command lands.
 

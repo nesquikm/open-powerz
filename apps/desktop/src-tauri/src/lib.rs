@@ -4,6 +4,7 @@ pub mod devices;
 #[cfg(feature = "e2e")]
 pub mod e2e;
 pub mod history;
+pub mod pd_capture;
 pub mod recording;
 pub mod stats;
 pub mod store;
@@ -217,6 +218,51 @@ async fn set_rate(state: Shared<'_>, rate_sps: u32) -> Result<(), UiError> {
         // Take the control under the lock; wait for the answer without it.
         let (control, rate) = state.manager().rate_control(rate_sps)?;
         control.set_rate(rate)
+    })
+    .await
+}
+
+/// Start the PD capture on the open session (FR TGE83C); rows and the
+/// capture state arrive on the session channel.
+#[tauri::command]
+async fn pd_start(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().control()?;
+        control.start_pd()
+    })
+    .await
+}
+
+/// Stop the PD capture; the captured records stay.
+#[tauri::command]
+async fn pd_stop(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().control()?;
+        control.stop_pd()
+    })
+    .await
+}
+
+/// The raw bytes and field tree of captured PD record `index`.
+#[tauri::command]
+async fn pd_details(state: Shared<'_>, index: u64) -> Result<pd_capture::PdDetails, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().control()?;
+        control.pd_details(index)
+    })
+    .await
+}
+
+/// Drop every captured PD record; the answer is the index of the next one.
+#[tauri::command]
+async fn pd_clear(state: Shared<'_>) -> Result<u64, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().control()?;
+        control.clear_pd()
     })
     .await
 }
@@ -463,7 +509,11 @@ pub fn run() {
             history_gaps,
             stats,
             reset_stats,
-            clear_history
+            clear_history,
+            pd_start,
+            pd_stop,
+            pd_details,
+            pd_clear
         ])
         .on_window_event(|window, event| {
             if window.label() == "main"

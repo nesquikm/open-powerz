@@ -16,7 +16,7 @@ use powerz_protocol::transport::bulk::BulkTransport;
 use powerz_protocol::transport::discovery::{self, DeviceEntry, Model};
 use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::{self, Transport};
-use powerz_sim::{Persona, Scenario, SimDevice};
+use powerz_sim::{PdScenario, Persona, Scenario, SimDevice};
 use serde::Serialize;
 
 use crate::history::{HistoryGap, Series, SeriesBuckets};
@@ -181,10 +181,10 @@ impl Opener for AppOpener {
     fn open(&self, device: &DeviceListing) -> Result<AppTransport, transport::Error> {
         if let Some(name) = &device.demo_scenario {
             let scenario = Scenario::from_name(name).ok_or(transport::Error::NotFound)?;
-            return Ok(AppTransport::Demo(Box::new(SimDevice::new(
-                Persona::Bulk,
-                scenario,
-            ))));
+            // The demo device also plays the simulator's PD capture (FR TGE83C).
+            return Ok(AppTransport::Demo(Box::new(
+                SimDevice::new(Persona::Bulk, scenario).with_pd_scenario(PdScenario::Negotiation),
+            )));
         }
         let (Some(bus), Some(address)) = (&device.bus, device.address) else {
             return Err(transport::Error::NotFound);

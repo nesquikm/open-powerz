@@ -35,7 +35,7 @@ The desktop app shows a live PD capture from the connected meter or the demo dev
 
 ## Technical Design
 
-The backend runs the sniffer session from the capture core FR in the device worker and sends batched records to the UI, like the measurement stream. The UI keeps records in a column store and renders a virtual table. Decoding happens in the backend with the PD decoder, and the UI receives summaries plus field trees on demand.
+The backend runs the sniffer session from the capture core FR in the device worker and sends batched records to the UI, like the measurement stream. The UI keeps records in a column store and renders a virtual table. Decoding happens in the backend with the PD decoder, and the UI receives summaries plus field trees on demand. Record indices never restart, not even on Clear, so rows sent before a Clear are recognised and dropped.
 
 ## Testing
 

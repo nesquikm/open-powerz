@@ -10,13 +10,17 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use powerz_protocol::decode::pd_packet::CaptureClock;
 use powerz_protocol::decode::{QueueRecord, Rate};
-use powerz_protocol::session::{self, Clock, Session, SnapshotCadence, Streamer};
+use powerz_protocol::session::{
+    self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer,
+};
 use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
 use serde::Serialize;
 
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Series, SeriesBuckets};
+use crate::pd_capture::{PdCapture, PdDetails, PdRow};
 use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
 use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, temp_at};
@@ -95,6 +99,20 @@ pub struct Gap {
     pub to_ms: u64,
 }
 
+/// The PD capture started or stopped (FR TGE83C).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PdState {
+    /// The PD sniffer runs.
+    pub capturing: bool,
+}
+
+/// A batch of PD table rows (FR TGE83C).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PdRows {
+    /// Rows in capture order.
+    pub rows: Vec<PdRow>,
+}
+
 /// Every event the backend sends to the UI.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -109,6 +127,10 @@ pub enum BackendEvent {
     Error(UiError),
     /// Recording state.
     Recording(RecordingEvent),
+    /// PD capture state.
+    PdState(PdState),
+    /// PD table rows.
+    PdRows(PdRows),
 }
 
 /// Where the worker sends its events.
@@ -300,6 +322,19 @@ pub struct Worker<T: Transport, C: Clock> {
     in_order: InOrder,
     /// Adds up the time blocked in the worker's own calls, when given.
     meter: Option<BlockedMeter>,
+    /// The running PD sniffer, if any.
+    pd_run: Option<PdRun>,
+    /// The PD records captured so far and the rows waiting to go out.
+    pd: PdCapture,
+}
+
+/// A running PD sniffer.
+#[derive(Debug)]
+struct PdRun {
+    /// Turns record times into ms since the capture start.
+    clock: CaptureClock,
+    /// Wall-clock time the next PD_PACKET poll is due, ms.
+    next_poll_ms: u64,
 }
 
 impl<T: Transport, C: Clock> std::fmt::Debug for Worker<T, C> {
@@ -376,6 +411,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             sink,
             in_order,
             meter,
+            pd_run: None,
+            pd: PdCapture::new(),
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -674,16 +711,121 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 u64::try_from(Streamer::poll_period(self.rate).as_millis()).unwrap_or(u64::MAX),
             );
         }
+        if let Step::Ended = self.poll_pd() {
+            return Step::Ended;
+        }
         let live = self.live_temp();
         self.batcher.set_temp(live);
         let now = self.clock.now_ms();
         if let Some(batch) = self.batcher.poll(now) {
             self.emit_batch(batch);
         }
-        let wake = self.next_poll_ms.min(self.batcher.next_due_ms());
+        if let Some(rows) = self.pd.take_due(now) {
+            self.emit(BackendEvent::PdRows(PdRows { rows }));
+        }
+        let mut wake = self.next_poll_ms.min(self.batcher.next_due_ms());
+        if let Some(run) = &self.pd_run {
+            wake = wake.min(run.next_poll_ms);
+        }
+        if let Some(due) = self.pd.next_due_ms() {
+            wake = wake.min(due);
+        }
         let wait = wake.saturating_sub(now).max(1);
         self.clock.sleep(Duration::from_millis(wait));
         Step::Continue
+    }
+
+    /// Poll PD_PACKET when the sniffer runs and a poll is due.
+    fn poll_pd(&mut self) -> Step {
+        let now = self.clock.now_ms();
+        let (Some(session), Some(run)) = (self.session.as_mut(), self.pd_run.as_mut()) else {
+            return Step::Continue;
+        };
+        if now < run.next_poll_ms {
+            return Step::Continue;
+        }
+        let period = PdSniffer::<GuardedTransport<T>, C>::POLL_PERIOD;
+        run.next_poll_ms =
+            now.saturating_add(u64::try_from(period.as_millis()).unwrap_or(u64::MAX));
+        let clock = &mut run.clock;
+        let polled = blocked(self.meter.as_ref(), || {
+            session.poll_pd_sniffer(PdOptions::default(), clock)
+        });
+        match polled {
+            Ok(poll) => {
+                self.pd.push(&poll.records, poll.status);
+                Step::Continue
+            }
+            Err(e) => self.lose_session(&e),
+        }
+    }
+
+    /// The pipe failed: drop the session, end the recording and a running
+    /// PD capture, then report the disconnect.
+    fn lose_session(&mut self, e: &session::Error) -> Step {
+        self.session = None;
+        self.end_recording(true);
+        self.flush_batch();
+        if self.pd_run.take().is_some() {
+            self.emit_pd_stopped();
+        }
+        self.emit(disconnected(Some(session_error(e))));
+        Step::Ended
+    }
+
+    /// Send every waiting PD row now, then report the capture stopped.
+    fn emit_pd_stopped(&mut self) {
+        if let Some(rows) = self.pd.take_all() {
+            self.emit(BackendEvent::PdRows(PdRows { rows }));
+        }
+        self.emit(BackendEvent::PdState(PdState { capturing: false }));
+    }
+
+    /// Start the PD sniffer (0x10, mode 1) and poll PD_PACKET from now on.
+    pub fn start_pd(&mut self) -> Result<(), UiError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        if self.pd_run.is_some() {
+            return Ok(());
+        }
+        blocked(self.meter.as_ref(), || session.start_pd_sniffer())
+            .map_err(|e| session_error(&e))?;
+        self.pd.start_run();
+        let now = self.clock.now_ms();
+        self.pd_run = Some(PdRun {
+            clock: CaptureClock::new(),
+            next_poll_ms: now,
+        });
+        self.emit(BackendEvent::PdState(PdState { capturing: true }));
+        Ok(())
+    }
+
+    /// Stop the PD sniffer (0x11); the captured records stay.
+    pub fn stop_pd(&mut self) -> Result<(), UiError> {
+        if self.pd_run.take().is_none() {
+            return Ok(());
+        }
+        let result = match self.session.as_mut() {
+            Some(session) => blocked(self.meter.as_ref(), || session.stop_pd_sniffer())
+                .map_err(|e| session_error(&e)),
+            None => Err(not_connected()),
+        };
+        self.emit_pd_stopped();
+        result
+    }
+
+    /// The raw bytes and field tree of captured record `index`.
+    pub fn pd_details(&mut self, index: u64) -> Result<PdDetails, UiError> {
+        self.pd
+            .details(index)
+            .ok_or_else(|| UiError::usage("That PD record is not in the capture."))
+    }
+
+    /// Drop every captured PD record; a running capture goes on. Returns
+    /// the index the next record gets.
+    pub fn clear_pd(&mut self) -> Result<u64, UiError> {
+        Ok(self.pd.clear())
     }
 
     /// Poll the queue (and the snapshot when due) once.
@@ -721,13 +863,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 }
                 Step::Continue
             }
-            Err(e) => {
-                self.session = None;
-                self.end_recording(true);
-                self.flush_batch();
-                self.emit(disconnected(Some(session_error(&e))));
-                Step::Ended
-            }
+            Err(e) => self.lose_session(&e),
         }
     }
 
@@ -760,6 +896,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
 
     /// Stop the queue and close the pipe.
     pub fn stop(&mut self) {
+        // The sniffer stops before the queue and the pipe close.
+        let _ = self.stop_pd();
         if let Some(mut session) = self.session.take() {
             // Best effort: the pipe closes either way.
             let _ = session.stop_stream();
@@ -786,6 +924,18 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::StopRecording(reply) => {
                 let _ = reply.send(self.stop_recording());
             }
+            Command::StartPd(reply) => {
+                let _ = reply.send(self.start_pd());
+            }
+            Command::StopPd(reply) => {
+                let _ = reply.send(self.stop_pd());
+            }
+            Command::PdDetails(index, reply) => {
+                let _ = reply.send(self.pd_details(index));
+            }
+            Command::ClearPd(reply) => {
+                let _ = reply.send(self.clear_pd());
+            }
             Command::Handover(swap, reply) => {
                 // Read here and swapped behind the events already sent, so
                 // the new sink gets exactly the events after this answer.
@@ -811,6 +961,10 @@ enum Command {
         mpsc::Sender<Result<ExportJob, UiError>>,
     ),
     StopRecording(mpsc::Sender<Result<RecordingSummary, UiError>>),
+    StartPd(mpsc::Sender<Result<(), UiError>>),
+    StopPd(mpsc::Sender<Result<(), UiError>>),
+    PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
+    ClearPd(mpsc::Sender<Result<u64, UiError>>),
     /// Run the sink swap of an attach, then answer the open recording's
     /// progress: both on the worker thread, which sends every recording
     /// event, so none can fall between them (FR VEDDFD).
@@ -824,6 +978,10 @@ impl std::fmt::Debug for Command {
             Command::RecordTo(path, _) => f.debug_tuple("RecordTo").field(path).finish(),
             Command::ExportTo(path, ..) => f.debug_tuple("ExportTo").field(path).finish(),
             Command::StopRecording(_) => f.write_str("StopRecording"),
+            Command::StartPd(_) => f.write_str("StartPd"),
+            Command::StopPd(_) => f.write_str("StopPd"),
+            Command::PdDetails(index, _) => f.debug_tuple("PdDetails").field(index).finish(),
+            Command::ClearPd(_) => f.write_str("ClearPd"),
             Command::Handover(..) => f.write_str("Handover"),
         }
     }
@@ -1009,6 +1167,30 @@ impl WorkerControl {
             }
             other => other,
         }
+    }
+
+    /// Start the PD capture.
+    pub fn start_pd(&self) -> Result<(), UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::StartPd(reply), &answer)?
+    }
+
+    /// Stop the PD capture.
+    pub fn stop_pd(&self) -> Result<(), UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::StopPd(reply), &answer)?
+    }
+
+    /// The raw bytes and field tree of captured PD record `index`.
+    pub fn pd_details(&self, index: u64) -> Result<PdDetails, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PdDetails(index, reply), &answer)?
+    }
+
+    /// Drop every captured PD record; returns the index the next one gets.
+    pub fn clear_pd(&self) -> Result<u64, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::ClearPd(reply), &answer)?
     }
 
     /// The session statistics so far.
