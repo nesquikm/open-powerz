@@ -145,6 +145,27 @@ pub struct PdRecord {
     pub kind: PdRecordKind,
 }
 
+impl PdRecord {
+    /// This record as PD decoder input: messages (big ones included) with
+    /// their SOP, header and body; attach, detach, hard reset and cable
+    /// reset as events. Other events give `None`.
+    pub fn pd_input(&self) -> Option<crate::pd::Input<'_>> {
+        use crate::pd::Input;
+        match &self.kind {
+            PdRecordKind::Message(m) | PdRecordKind::BigMessage(m) => Some(Input::Message {
+                sop: m.sop,
+                header: m.header,
+                body: &m.body,
+            }),
+            PdRecordKind::Event(PdEvent::Attach(_)) => Some(Input::Attach),
+            PdRecordKind::Event(PdEvent::Detach(_)) => Some(Input::Detach),
+            PdRecordKind::Event(PdEvent::HardReset) => Some(Input::HardReset),
+            PdRecordKind::Event(PdEvent::CableReset) => Some(Input::CableReset),
+            PdRecordKind::Event(_) => None,
+        }
+    }
+}
+
 /// A parsed PD_PACKET chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PdChunk {

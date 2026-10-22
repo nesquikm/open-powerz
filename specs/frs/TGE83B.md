@@ -37,7 +37,7 @@ A pure decoding library turns any PD message record into a typed message with a 
 
 ## Technical Design
 
-A new pd module in the protocol crate, or a small sibling crate if that keeps the protocol crate lean. Message types are enums generated from tables of the spec. Fields are described by a shared table of name, bit range and value formatter, which feeds both the typed decode and the field tree. A capture context object holds the last source capabilities and pending chunks.
+A new pd module in the protocol crate, or a small sibling crate if that keeps the protocol crate lean. Message types are enums generated from tables of the spec. Fields are described by a shared table of name, bit range and value formatter, which feeds both the typed decode and the field tree. A capture context object holds the last source capabilities and pending chunks; it is fed messages plus the capture's attach, detach, hard reset and cable reset events. Problems such as a body or chunk shorter than its header says are reported as issues on the decoded message.
 
 ## Testing
 

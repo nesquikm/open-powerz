@@ -73,6 +73,13 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # FR TGE83B (AC .9): the PD decoder does no I/O and builds for the web edition.
+      - name: PD decoder wasm32 build
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build -p powerz-pd --target wasm32-unknown-unknown --locked
+
   # Desktop end-to-end suites, separate from the gate. Both jobs are plain required jobs
   # (no continue-on-error): list them as required checks in branch protection.
   #

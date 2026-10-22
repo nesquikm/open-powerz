@@ -1,13 +1,14 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/powerz-pd",
     "crates/powerz-protocol",
     "crates/powerz-sim",
     "crates/powerz-record",
     "crates/powerz-cli",
     "apps/desktop/src-tauri",
 ]
-default-members = ["crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-record", "crates/powerz-cli"]
+default-members = ["crates/powerz-pd", "crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-record", "crates/powerz-cli"]
 
 [workspace.package]
 version = "0.2.0"
@@ -18,6 +19,7 @@ repository = "https://github.com/nesquikm/open-powerz"
 authors = ["Mikhail Drapoliuk"]
 
 [workspace.dependencies]
+powerz-pd = { path = "crates/powerz-pd", version = "0.2.0" }
 powerz-protocol = { path = "crates/powerz-protocol", version = "0.2.0" }
 powerz-sim = { path = "crates/powerz-sim", version = "0.2.0" }
 powerz-record = { path = "crates/powerz-record", version = "0.2.0" }

@@ -23,6 +23,10 @@ A Rust cargo workspace with three crates and one web UI:
 - `powerz-record` (library): the vendor-compatible CSV recorder shared by the CLI and the
   desktop app (header, plain-decimal formatting, time origin, signed charge/energy
   integration).
+- `powerz-pd` (library): the USB PD r3.2 message decoder (headers, PDOs/RDOs, VDMs,
+  extended messages and chunk reassembly, a one-line summary and a field tree per
+  message). It has no dependencies and does no I/O, so it also builds for wasm32 (checked
+  in CI) for the later web edition; `powerz-protocol` re-exports it as `powerz_protocol::pd`.
 - `powerz-sim` (library): a stateful simulated KM003C behind the same `Transport` trait, with
   bulk, CDC and HID personas, named scenarios and fault injection. It is both the e2e test
   device and a shipped "demo device" (`powerz --transport sim`, and the desktop picker in
@@ -41,6 +45,7 @@ package.json / bun.lock          # Bun workspace root (apps/desktop)
 crates/powerz-protocol/src/      # lib.rs (+ transport/, frame/, decode/, auth/ as they land)
 crates/powerz-cli/src/main.rs    # `powerz` binary
 crates/powerz-record/src/        # shared CSV recorder + charge/energy integrator
+crates/powerz-pd/src/            # USB PD message decoder (no deps, no I/O, wasm32-clean)
 crates/powerz-sim/src/           # simulated KM003C (demo device, e2e double)
 apps/desktop/src/                # App.svelte, main.ts, lib/*.ts (+ co-located *.test.ts)
 apps/desktop/src-tauri/          # Tauri crate: commands, devices, worker, batch, history, stats, recording

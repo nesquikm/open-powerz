@@ -1,0 +1,21 @@
+[package]
+name = "powerz-pd"
+description = "USB Power Delivery r3.2 message decoder (pure, no I/O, builds for WebAssembly) for open-powerz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["usb-c", "usb-pd", "power-delivery", "decoder", "power-z"]
+categories = ["hardware-support", "parser-implementations"]
+
+# No dependencies on purpose: the decoder must build for wasm32-unknown-unknown
+# (FR TGE83B, AC .9). Never add an I/O crate (nusb, hidapi, serialport) here.
+[dependencies]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12.0"
