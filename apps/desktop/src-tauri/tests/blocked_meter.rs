@@ -6,7 +6,14 @@
 //! worker's unit tests (`src/worker.rs`): the lock is crate-private.
 //!
 //! Real time, the demo simulator behind the transport. Every identifier is
-//! synthetic.
+//! synthetic. A CI runner may take the poll thread off the CPU for a long
+//! while, inside a wrapped call or not, so neither test runs for a fixed
+//! time: each streams until it has seen enough polls (under a generous wall
+//! cap), and the idle test checks the meter against the worker's own sleeps
+//! as the recording clock logged them, not against a fraction of the wall
+//! time.
+
+mod common;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,9 +23,10 @@ use open_powerz_desktop_lib::store::SessionStore;
 use open_powerz_desktop_lib::worker::{self, BackendEvent, BlockedMeter, WorkerConfig};
 use powerz_protocol::decode::Rate;
 use powerz_protocol::frame::{self, Attribute};
-use powerz_protocol::session::SystemClock;
 use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{Persona, Scenario, SimDevice};
+
+use common::slow_sink::RecordingClock;
 
 /// The demo meter, with every queue poll from number `slow_from` on taking
 /// `delay` longer to answer.
@@ -47,10 +55,25 @@ impl Transport for SlowMeter {
     }
 }
 
-/// Stream for `run` with a meter whose queue polls from `slow_from` on take
-/// `delay` longer; returns the meter's total, the queue polls made and the
-/// wall time the stream ran.
-fn stream(slow_from: usize, delay: Duration, run: Duration) -> (Duration, usize, Duration) {
+/// The most wall time a stream may take to reach its polls.
+const WALL_CAP: Duration = Duration::from_secs(20);
+
+/// What one metered stream measured.
+struct Run {
+    /// The meter's total.
+    total: Duration,
+    /// Queue polls made before the total was read.
+    polls: usize,
+    /// Wall time from the spawn to the read of the total.
+    ran: Duration,
+    /// Wall time the poll thread spent in the clock's sleeps that ended
+    /// before the total was read.
+    slept: Duration,
+}
+
+/// Stream with a meter whose queue polls from `slow_from` on take `delay`
+/// longer, until `want` queue polls have been made or [`WALL_CAP`] passed.
+fn stream(slow_from: usize, delay: Duration, want: usize) -> Run {
     let polls = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&polls);
     let open = move || {
@@ -65,10 +88,11 @@ fn stream(slow_from: usize, delay: Duration, run: Duration) -> (Duration, usize,
     let seen = Arc::clone(&events);
     let sink = move |_event: BackendEvent| *seen.lock().unwrap() += 1;
     let meter = BlockedMeter::new();
+    let clock = RecordingClock::new();
     let started = Instant::now();
     let handle = worker::spawn_metered(
         open,
-        SystemClock,
+        clock.clone(),
         WorkerConfig {
             rate: Rate::Sps1000,
             session_id: 1,
@@ -78,38 +102,72 @@ fn stream(slow_from: usize, delay: Duration, run: Duration) -> (Duration, usize,
         Arc::new(AtomicBool::new(false)),
         meter.clone(),
     );
-    std::thread::sleep(run);
+    while polls.load(Ordering::SeqCst) < want && started.elapsed() < WALL_CAP {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // In this order: every poll counted has begun, every sleep logged has
+    // ended, before the total is read; the wall time covers all of them.
+    let made = polls.load(Ordering::SeqCst);
+    let sleeps = clock.evidence();
     let total = meter.total();
     let ran = started.elapsed();
     handle.disconnect();
     assert!(*events.lock().unwrap() > 0, "the worker sent no event");
-    (total, polls.load(Ordering::SeqCst), ran)
+    assert!(made >= want, "only {made} of {want} queue polls in {ran:?}");
+    let slept = sleeps
+        .sleeps()
+        .iter()
+        .map(|s| s.woke.saturating_sub(s.started))
+        .sum();
+    Run {
+        total,
+        polls: made,
+        ran,
+        slept,
+    }
 }
 
 #[test]
 fn the_meter_adds_up_the_time_blocked_in_meter_io() {
-    // From the third queue poll on, each one blocks 30 ms in the transport.
-    let (total, polls, ran) = stream(3, Duration::from_millis(30), Duration::from_millis(600));
-    let slow = polls.saturating_sub(3);
-    assert!(slow >= 3, "too few slow polls to measure: {polls}");
-    let floor = Duration::from_millis(30) * u32::try_from(slow - 1).unwrap_or(u32::MAX);
+    // From the third queue poll on, each one blocks 30 ms in the transport;
+    // stream until six of them have begun.
+    let delay = Duration::from_millis(30);
+    let run = stream(3, delay, 2 + 6);
+    // The poll thread makes one poll at a time: all but the last slow poll
+    // counted had returned before the total was read.
+    let slow = run.polls - 2;
+    let floor = delay * u32::try_from(slow - 1).unwrap_or(u32::MAX);
     assert!(
-        total >= floor,
-        "{slow} polls blocked 30 ms each in meter I/O, but the meter read {total:?}"
+        run.total >= floor,
+        "{slow} polls blocked 30 ms each in meter I/O, but the meter read {:?}",
+        run.total
     );
     assert!(
-        total <= ran,
-        "the meter read {total:?} in {ran:?} of wall time"
+        run.total <= run.ran,
+        "the meter read {:?} in {:?} of wall time",
+        run.total,
+        run.ran
     );
 }
 
 #[test]
 fn the_meter_counts_blocked_time_not_wall_time() {
     // The demo meter answers at once: the stream is mostly asleep.
-    let (total, polls, ran) = stream(usize::MAX, Duration::ZERO, Duration::from_millis(600));
-    assert!(polls >= 5, "the worker barely polled: {polls}");
+    let run = stream(usize::MAX, Duration::ZERO, 10);
+    // The poll thread is never blocked in its own calls while it sleeps, so
+    // the meter and the sleeps fit in the wall time side by side. A meter
+    // that counted sleeping would add the sleeps twice.
     assert!(
-        total < ran / 4,
-        "an idle stream read {total:?} blocked in {ran:?}"
+        run.slept >= run.ran / 2,
+        "the idle worker slept only {:?} of {:?}: nothing to tell apart",
+        run.slept,
+        run.ran
+    );
+    assert!(
+        run.total + run.slept <= run.ran + Duration::from_millis(1),
+        "an idle stream read {:?} blocked beside {:?} asleep in {:?} of wall time",
+        run.total,
+        run.slept,
+        run.ran
     );
 }

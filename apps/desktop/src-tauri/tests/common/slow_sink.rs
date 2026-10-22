@@ -187,7 +187,7 @@ impl PollEvidence {
 /// The calling thread's CPU time.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn thread_cpu_time() -> Option<Duration> {
+pub fn thread_cpu_time() -> Option<Duration> {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -204,7 +204,7 @@ fn thread_cpu_time() -> Option<Duration> {
 
 /// Thread CPU time is read on macOS only.
 #[cfg(not(target_os = "macos"))]
-fn thread_cpu_time() -> Option<Duration> {
+pub fn thread_cpu_time() -> Option<Duration> {
     None
 }
 

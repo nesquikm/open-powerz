@@ -23,7 +23,8 @@ mod common;
 use std::time::Duration;
 
 use common::slow_sink::{
-    Cycle, CycleCost, Outcome, PollEvidence, RecordingClock, Sleep, check, tolerance, tolerance_for,
+    Cycle, CycleCost, Outcome, PollEvidence, RecordingClock, Sleep, check, thread_cpu_time,
+    tolerance, tolerance_for,
 };
 use open_powerz_desktop_lib::worker::BlockedMeter;
 use powerz_protocol::session::Clock;
@@ -699,10 +700,20 @@ fn on_ci_a_long_cycle_with_unknown_cpu_fails_as_a_stall() {
 }
 
 /// Spin on the CPU for `d`.
+/// Spins until the thread has spent at least `d` on the CPU (and at least
+/// `d` of wall time). A runner that deschedules the thread mid-spin only
+/// stretches the wall time; the CPU time still reaches `d`. Where thread CPU
+/// time is unreadable it spins for `d` of wall time. A 10 s wall cap keeps a
+/// stuck CPU clock from hanging the test.
 fn burn(d: Duration) {
     let start = std::time::Instant::now();
+    let cpu0 = thread_cpu_time();
+    let spent = || match (thread_cpu_time(), cpu0) {
+        (Some(now), Some(then)) => now.saturating_sub(then),
+        _ => start.elapsed(),
+    };
     let mut x = 0u64;
-    while start.elapsed() < d {
+    while (start.elapsed() < d || spent() < d) && start.elapsed() < Duration::from_secs(10) {
         x = std::hint::black_box(x.wrapping_add(1));
     }
 }
@@ -712,7 +723,8 @@ fn the_recording_clock_samples_cpu_and_blocked_time_per_cycle() {
     let meter = BlockedMeter::new();
     let mut clock = RecordingClock::with_meter(meter.clone());
     clock.sleep(ms(2));
-    // Cycle 1: 40 ms on the CPU, plus 15 ms the worker spent blocked.
+    // Cycle 1: at least 40 ms on the CPU (however long the runner keeps the
+    // thread off it), plus 15 ms the worker spent blocked.
     burn(ms(40));
     meter.add(ms(15));
     clock.sleep(ms(2));
