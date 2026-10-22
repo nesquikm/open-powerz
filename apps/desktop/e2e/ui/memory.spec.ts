@@ -17,24 +17,26 @@
  * page streaming at the same time would only add noise. The test opens its
  * own browser context and tracks the WebKit content processes that appear
  * when its page loads (on macOS `com.apple.WebKit.WebContent`, on Linux
- * `WebKitWebProcess`), taking the largest of them at each sample.
+ * `WPEWebProcess` headless or `WebKitWebProcess` headed), taking the largest of them at each sample.
  */
 
 import { expect, test } from "@playwright/test";
 import { blur, open, streamDemo } from "./helpers";
-import { listProcesses, noPageProcessReason, pageProcessMarker } from "./processes";
+import { listProcesses, noPageProcessReason, pageProcessMarkers } from "./processes";
 
 const WARM_UP_MS = 60_000;
 const MEASURE_MS = 120_000;
 const SAMPLE_EVERY_MS = 10_000;
 const MAX_GROWTH_MB = 120;
 
-/** Command-line marker of a WebKit page process on this OS. */
-const PAGE_PROCESS = pageProcessMarker(process.platform);
+/** Command-line markers of a WebKit page process on this OS (WPE and GTK on Linux). */
+const PAGE_MARKERS = pageProcessMarkers(process.platform);
+/** The page process names, for messages. */
+const PAGE_PROCESS = PAGE_MARKERS.join(" / ");
 
 /** RSS (KiB) of every running WebKit page process, by pid (AC-KQF5GM.4: full width). */
 function pageProcesses(): Map<number, number> {
-  return listProcesses(PAGE_PROCESS);
+  return listProcesses(PAGE_MARKERS);
 }
 
 /** Largest RSS, in MB, among `pids` (all page processes when `pids` is empty). */
@@ -68,7 +70,7 @@ test("a live session keeps the page's memory flat", async ({ browser, browserNam
     // This page's content process: the ones that appeared since the context opened.
     const ours = new Set([...pageProcesses().keys()].filter((pid) => !before.has(pid)));
     // AC-KQF5GM.4: no page process to measure is a skip with its reason, not a failure.
-    const missing = noPageProcessReason(ours, PAGE_PROCESS);
+    const missing = noPageProcessReason(ours, PAGE_MARKERS);
     test.skip(missing !== undefined, missing);
     expect(rssMb(ours), `a ${PAGE_PROCESS} process is running`).toBeGreaterThan(0);
 

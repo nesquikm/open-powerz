@@ -11,6 +11,7 @@ import {
   listProcesses,
   noPageProcessReason,
   pageProcessMarker,
+  pageProcessMarkers,
   parseProcesses,
 } from "./processes";
 
@@ -86,5 +87,28 @@ describe("noPageProcessReason", () => {
 
   it("gives none when this page's process was found", () => {
     expect(noPageProcessReason(new Set([4242]), "WebKitWebProcess")).toBeUndefined();
+  });
+});
+
+describe("pageProcessMarkers", () => {
+  it("counts the headless WPE and the headed GTK page process on Linux", () => {
+    expect(pageProcessMarkers("linux")).toEqual(["WPEWebProcess", "WebKitWebProcess"]);
+    expect(pageProcessMarkers("darwin")).toEqual(["com.apple.WebKit.WebContent"]);
+  });
+
+  it("finds the WPE page process Playwright runs headless on Linux", () => {
+    const out = [
+      "   30   3300 bash /ms-playwright/webkit-2370/pw_run.sh --inspector-pipe --headless",
+      "   36 138756 /ms-playwright/webkit-2370/minibrowser-wpe/bin/MiniBrowser --headless",
+      "   53  76856 /ms-playwright/webkit-2370/minibrowser-wpe/bin/WPENetworkProcess 2 10",
+      "   55 282716 /ms-playwright/webkit-2370/minibrowser-wpe/bin/WPEWebProcess 4 14",
+    ].join("\n");
+    expect(parseProcesses(out, pageProcessMarkers("linux"))).toEqual(new Map([[55, 282716]]));
+  });
+
+  it("names every marker in the skip reason", () => {
+    expect(noPageProcessReason(new Set(), pageProcessMarkers("linux"))).toMatch(
+      /no WPEWebProcess or WebKitWebProcess page process/,
+    );
   });
 });

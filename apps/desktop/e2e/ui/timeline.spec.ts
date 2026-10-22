@@ -29,6 +29,7 @@ import {
   overviewWindow,
   streamDemo,
 } from "./helpers";
+import { maxSpanGrowthMs } from "./spanGrowth";
 
 test.use({ viewport: { width: 1600, height: 900 } });
 
@@ -36,6 +37,11 @@ const SEEDED = 200_000;
 
 function span(d: { t0Ms: number; t1Ms: number }): number {
   return d.t1Ms - d.t0Ms;
+}
+
+/** The page's `performance.now()`, the clock `ChartDraw.at` is read on. */
+async function pageNow(page: Page): Promise<number> {
+  return page.evaluate(() => performance.now());
 }
 
 function liveButton(page: Page) {
@@ -150,13 +156,15 @@ test.describe("overview strip (AC-FENCD9.1 / AC-FENCD9.2)", () => {
     await page.mouse.down();
     await page.mouse.move(w.x + w.width / 2 - 300, w.y + w.height / 2, { steps: 5 });
     await page.mouse.up();
+    const pannedAt = await pageNow(page);
     await expectPaused(page);
     const after = await nextRange(page, before);
     expect(after.t1Ms).toBeLessThan(before.t1Ms - 10_000);
     // The span is the one on screen when the drag began: the live window may have
-    // grown a little since "before" was read, never shrunk.
+    // grown since "before" was drawn, by no more than the real time that passed, never
+    // shrunk (AC-KQF5GM.8).
     expect(span(after)).toBeGreaterThanOrEqual(span(before) - 1);
-    expect(span(after)).toBeLessThan(span(before) + 500);
+    expect(span(after) - span(before)).toBeLessThan(maxSpanGrowthMs(before.at, pannedAt));
   });
 
   test("AC-FENCD9.2: dragging either edge resizes the range", async ({ page }) => {
@@ -192,16 +200,18 @@ test.describe("overview strip (AC-FENCD9.1 / AC-FENCD9.2)", () => {
     const before = await lastDraw(page);
     const s = await box(page, ".chart-wrap .overview");
     await page.mouse.click(s.x + s.width * 0.25, s.y + s.height / 2);
+    const pannedAt = await pageNow(page);
     await expectPaused(page);
     const after = await nextRange(page, before);
     const centre = (after.t0Ms + after.t1Ms) / 2;
     const session = before.t1Ms;
     expect(centre / session).toBeGreaterThan(0.15);
     expect(centre / session).toBeLessThan(0.35);
-    // The span on screen when the click landed: the live window may have grown a
-    // little since "before" was read, never shrunk.
+    // The span on screen when the click landed: the live window may have grown since
+    // "before" was drawn, by no more than the real time that passed, never shrunk
+    // (AC-KQF5GM.8).
     expect(span(after)).toBeGreaterThanOrEqual(span(before) - 1);
-    expect(span(after)).toBeLessThan(span(before) + 500);
+    expect(span(after) - span(before)).toBeLessThan(maxSpanGrowthMs(before.at, pannedAt));
   });
 
   test("AC-FENCD9.13: the window is a keyboard slider: arrows move it, Shift+arrows resize it", async ({
@@ -214,13 +224,15 @@ test.describe("overview strip (AC-FENCD9.1 / AC-FENCD9.2)", () => {
     const before = await lastDraw(page);
     await win.focus();
     await page.keyboard.press("ArrowLeft");
+    const pannedAt = await pageNow(page);
     await expectPaused(page);
     const moved = await nextRange(page, before);
     expect(moved.t0Ms).toBeLessThan(before.t0Ms);
-    // The span on screen when the key landed: the live window may have grown a little
-    // since "before" was read, never shrunk.
+    // The span on screen when the key landed: the live window may have grown since
+    // "before" was drawn, by no more than the real time that passed, never shrunk
+    // (AC-KQF5GM.8).
     expect(span(moved)).toBeGreaterThanOrEqual(span(before) - 1);
-    expect(span(moved)).toBeLessThan(span(before) + 500);
+    expect(span(moved) - span(before)).toBeLessThan(maxSpanGrowthMs(before.at, pannedAt));
     const text = await win.getAttribute("aria-valuetext");
     await page.keyboard.press("Shift+ArrowRight");
     const resized = await nextRange(page, moved);
