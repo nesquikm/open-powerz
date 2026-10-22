@@ -221,13 +221,24 @@ test.describe("overview strip (AC-FENCD9.1 / AC-FENCD9.2)", () => {
     const win = page.getByRole("slider", { name: "Visible range" });
     await expect(win).toHaveAttribute("tabindex", "0");
     await expect(win).toHaveAttribute("aria-valuetext", /^\d+:\d{2}(\.\d+)? to \d+:\d{2}(\.\d+)?$/);
-    const before = await lastDraw(page);
+    // A live view a couple of seconds wide first, as `pause` waits for: a view a few ms
+    // after connecting is too narrow for the key to move.
+    await expect
+      .poll(async () => span(await lastDraw(page)), { timeout: 10_000 })
+      .toBeGreaterThan(2_000);
     await win.focus();
+    // The live view read just before the key: the window the key moves is this one, slid
+    // on by the real time that passed until the key landed (AC-KQF5GM.8).
+    const before = await lastDraw(page);
     await page.keyboard.press("ArrowLeft");
     const pannedAt = await pageNow(page);
     await expectPaused(page);
     const moved = await nextRange(page, before);
-    expect(moved.t0Ms).toBeLessThan(before.t0Ms);
+    // ← moves the window a tenth of its width left of where the live view stood when the
+    // key landed, which is at most `maxSpanGrowthMs` past "before": demand at least half
+    // that step, beyond the drift the elapsed real time explains.
+    const liveT0AtKeyMax = before.t0Ms + maxSpanGrowthMs(before.at, pannedAt);
+    expect(moved.t0Ms).toBeLessThan(liveT0AtKeyMax - span(before) / 20);
     // The span on screen when the key landed: the live window may have grown since
     // "before" was drawn, by no more than the real time that passed, never shrunk
     // (AC-KQF5GM.8).
