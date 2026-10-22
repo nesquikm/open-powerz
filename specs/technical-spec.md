@@ -83,7 +83,8 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
   `history_range`, `history_gaps`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
   `stop_recording`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter), and
   for the PD analyzer `pd_start`, `pd_stop`, `pd_details` (a record's raw bytes and field tree,
-  on demand) and `pd_clear` (answers the next record index; indices never restart, so rows sent
+  on demand, from the live capture or, with `opened`, from an opened file), `pd_save` / `pd_open`
+  (`.pdcap` files) and `pd_import` (read-only vendor PD log) and `pd_clear` (answers the next record index; indices never restart, so rows sent
   before a clear are recognised and dropped); backend events `Batch`, `Gap`, `Status`
   (including `waiting`), `Error`, `Recording` (started / progress / stopped / failed),
   `PdState`, `PdRows` (batched, at most 60 a second, decoded in the backend; each row carries
@@ -110,7 +111,8 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | Package | Version | Purpose |
 |---------|---------|---------|
 | tauri / tauri-build | 2.12.4 / 2.7.3 | Desktop shell |
-| serde / serde_json | 1.x | Tauri IPC payloads |
+| serde / serde_json | 1.x | Tauri IPC payloads; the `.pdcap` capture file format (`powerz-protocol`) |
+| rusqlite | 0.40.x, `bundled` | Read-only import of the vendor PD log database (desktop) |
 | nusb | 0.2.x (planned) | Vendor bulk transport, hotplug |
 | hidapi | 2.6.x (planned) | HID transport |
 | serialport | 4.10.x (planned) | CDC transport |
@@ -122,7 +124,7 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | vite / @sveltejs/vite-plugin-svelte | ^8.3.4 / ^7.3.1 | Bundler |
 | @tauri-apps/api / @tauri-apps/cli | ^2.12.4 / ^2.12.3 | Tauri JS bindings / CLI |
 | uplot | ^1.6.32 | Charts |
-| tauri-plugin-dialog | 2.8.x | Save dialog for recording and export |
+| tauri-plugin-dialog | 2.8.x | Save dialogs (recording, export, PD capture) and open dialogs (PD capture, vendor PD log) |
 | @wdio/cli + tauri-driver | latest (planned, dev) | Real-app e2e (Linux, Windows) |
 | @playwright/test + @axe-core/playwright | latest (planned, dev) | UI e2e and accessibility scan |
 | typescript | ~6.0.3 | Types (svelte-check and typescript-eslint do not support TS 7 yet) |

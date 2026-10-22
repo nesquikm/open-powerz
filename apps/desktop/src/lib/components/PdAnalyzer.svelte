@@ -25,6 +25,9 @@
     onStart,
     onStop,
     onClear,
+    onSave,
+    onOpen,
+    onImport,
     loadDetails,
     selection = null,
   }: {
@@ -35,6 +38,13 @@
     onStop: () => void;
     /** Empties the capture (asked after the user confirms). */
     onClear: () => void;
+    /** Saves the capture as a pdcap file (FR TGE83E). */
+    onSave: () => void;
+    /** Opens a pdcap file in place of the live capture; needs no meter (FR TGE83E). */
+    onOpen: () => void;
+    /** Imports a vendor PD log database read-only in place of the live capture; needs
+     * no meter (FR TGE83E, AC .6). */
+    onImport: () => void;
     /** The field tree and raw bytes of record `index`, or null when unavailable. */
     loadDetails: (index: number) => Promise<PdDetails | null>;
     /** The selection shared with the chart (FR TGE83D). */
@@ -114,7 +124,7 @@
   function cells(r: PdRow): string[] {
     const message = r.kind === "message";
     return [
-      String(r.index + 1),
+      String(r.index - pd.firstIndex + 1),
       timeLabel(r.elapsed_ms),
       r.sop ?? "",
       r.name,
@@ -475,11 +485,32 @@
       onclick={onStop}>Stop capture</button
     >
     <button type="button" bind:this={clearButton} onclick={askClear}>Clear capture</button>
+    <button
+      type="button"
+      disabled={!connected || pd.opened}
+      aria-describedby={controls.reason ? "pd-reason" : undefined}
+      onclick={onSave}>Save capture</button
+    >
+    <button
+      type="button"
+      disabled={!controls.canOpen}
+      aria-describedby={controls.openReason ? "pd-open-reason" : undefined}
+      onclick={onOpen}>Open capture</button
+    >
+    <button
+      type="button"
+      disabled={!controls.canOpen}
+      aria-describedby={controls.openReason ? "pd-open-reason" : undefined}
+      onclick={onImport}>Import vendor log</button
+    >
     <button type="button" aria-pressed={following} onclick={resumeFollow}>Follow</button>
     {#if controls.reason}
       <p id="pd-reason" class="reason">{controls.reason}</p>
     {:else if pd.capturing}
       <p class="reason" aria-live="polite">Capturing…</p>
+    {/if}
+    {#if controls.openReason}
+      <p id="pd-open-reason" class="reason">{controls.openReason}</p>
     {/if}
   </div>
 
@@ -537,7 +568,7 @@
           aria-rowindex={at + 2}
           aria-selected={selected === row.index}
           tabindex="-1"
-          aria-label={rowLabel(row)}
+          aria-label={rowLabel(row, pd.firstIndex)}
           style:top="{at * ROW_PX}px"
           onclick={() => pickRow(row.index)}
           onkeydown={(e) => {

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use powerz_protocol::decode::pd_packet::CaptureClock;
 use powerz_protocol::decode::{QueueRecord, Rate};
+use powerz_protocol::pdcap;
 use powerz_protocol::session::{
     self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer,
 };
@@ -335,6 +336,9 @@ pub struct Worker<T: Transport, C: Clock> {
     pd_run: Option<PdRun>,
     /// The PD records captured so far and the rows waiting to go out.
     pd: PdCapture,
+    /// Meter model and firmware version for a saved PD capture's header;
+    /// never the serial number (FR TGE83E).
+    pd_meter: (String, String),
 }
 
 /// A running PD sniffer.
@@ -422,6 +426,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             meter,
             pd_run: None,
             pd: PdCapture::new(),
+            pd_meter: (info.model.clone(), info.firmware_version.clone()),
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -850,6 +855,16 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Ok(self.pd.clear())
     }
 
+    /// The PD capture so far, to be saved as a pdcap file (FR TGE83E) off
+    /// this thread.
+    pub fn pd_save(&self) -> PdSave {
+        let (model, firmware_version) = self.pd_meter.clone();
+        PdSave {
+            header: pdcap::Header::new(env!("CARGO_PKG_VERSION"), model, firmware_version),
+            entries: self.pd.to_pdcap(),
+        }
+    }
+
     /// Poll the queue (and the snapshot when due) once.
     fn poll_queue(&mut self) -> Step {
         let Some(session) = self.session.as_mut() else {
@@ -958,6 +973,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::ClearPd(reply) => {
                 let _ = reply.send(self.clear_pd());
             }
+            Command::PdSave(reply) => {
+                let _ = reply.send(self.pd_save());
+            }
             Command::Handover(swap, reply) => {
                 // Read here and swapped behind the events already sent, so
                 // the new sink gets exactly the events after this answer.
@@ -987,6 +1005,7 @@ enum Command {
     StopPd(mpsc::Sender<Result<(), UiError>>),
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
     ClearPd(mpsc::Sender<Result<u64, UiError>>),
+    PdSave(mpsc::Sender<PdSave>),
     /// Run the sink swap of an attach, then answer the open recording's
     /// progress: both on the worker thread, which sends every recording
     /// event, so none can fall between them (FR VEDDFD).
@@ -1004,6 +1023,7 @@ impl std::fmt::Debug for Command {
             Command::StopPd(_) => f.write_str("StopPd"),
             Command::PdDetails(index, _) => f.debug_tuple("PdDetails").field(index).finish(),
             Command::ClearPd(_) => f.write_str("ClearPd"),
+            Command::PdSave(_) => f.write_str("PdSave"),
             Command::Handover(..) => f.write_str("Handover"),
         }
     }
@@ -1077,6 +1097,103 @@ impl Exporter {
                 ))
             }
         }
+    }
+}
+
+/// Write the file at `path` through `write`, atomically: into a new temp
+/// file next to it, synced to disk, then renamed over `path`. On an error
+/// only the temp file is removed, so an existing file at `path` stays whole.
+pub(crate) fn write_file_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let (tmp, file) = create_temp_beside(path)?;
+    let attempt = || -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::new(file);
+        write(&mut out)?;
+        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        std::fs::rename(&tmp, path)
+    };
+    attempt().inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    sync_parent(path);
+    Ok(())
+}
+
+/// A new, empty hidden file in `path`'s folder (the rename into place must
+/// not cross file systems), named after `path`.
+fn create_temp_beside(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidFilename, "no file name"))?;
+    loop {
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(name);
+        tmp_name.push(format!(
+            ".{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let tmp = dir.join(tmp_name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            // Left over from a crashed run with the same pid: next number.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Best effort: sync `path`'s folder so the rename itself is on disk.
+fn sync_parent(path: &Path) {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
+        && let Ok(dir) = std::fs::File::open(dir)
+    {
+        let _ = dir.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// A PD capture to save (FR TGE83E): the copy the worker takes between two
+/// polls, written to disk on the caller's thread so polling never waits
+/// for the disk.
+#[derive(Debug, Clone)]
+pub struct PdSave {
+    header: pdcap::Header,
+    entries: Vec<pdcap::Entry>,
+}
+
+impl PdSave {
+    /// Write the capture to `path` as a pdcap file, atomically; returns the
+    /// number of records written. A failed save leaves an existing file at
+    /// `path` as it was.
+    pub fn write_to(&self, path: &Path) -> Result<u64, UiError> {
+        let records = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e, pdcap::Entry::Record { .. }))
+            .count() as u64;
+        write_file_atomically(path, |out| {
+            let mut w = pdcap::Writer::new(out, &self.header)?;
+            for e in &self.entries {
+                w.write(e)?;
+            }
+            w.finish().map(drop)
+        })
+        .map(|()| records)
+        .map_err(|e| recording::io_error(&e))
     }
 }
 
@@ -1213,6 +1330,14 @@ impl WorkerControl {
     pub fn clear_pd(&self) -> Result<u64, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::ClearPd(reply), &answer)?
+    }
+
+    /// Save the PD capture to `path` as a pdcap file; returns the number of
+    /// records written. The worker only copies the capture; the file is
+    /// written and synced on this thread.
+    pub fn save_pd(&self, path: &Path) -> Result<u64, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PdSave(reply), &answer)?.write_to(path)
     }
 
     /// The session statistics so far.
@@ -1577,6 +1702,93 @@ mod tests {
             store: SessionStore::new(),
         };
         (control, inbox)
+    }
+
+    /// A fresh scratch directory for one test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("open-powerz-worker-{}", std::process::id()))
+            .join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("list scratch dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_failed_overwrite_keeps_the_old_file_and_leaves_no_temp_file() {
+        let dir = scratch("atomic-fail");
+        let path = dir.join("capture.pdcap");
+        std::fs::write(&path, b"the good old capture").expect("old file");
+        let result = write_file_atomically(&path, |out| {
+            out.write_all(b"half a new cap")?;
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("the old file is still there"),
+            b"the good old capture"
+        );
+        assert_eq!(listing(&dir), ["capture.pdcap"], "no temp file left");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_good_overwrite_replaces_the_file_and_leaves_no_temp_file() {
+        let dir = scratch("atomic-ok");
+        let path = dir.join("capture.pdcap");
+        std::fs::write(&path, b"old").expect("old file");
+        write_file_atomically(&path, |out| out.write_all(b"new capture")).expect("saved");
+        assert_eq!(std::fs::read(&path).expect("file"), b"new capture");
+        assert_eq!(listing(&dir), ["capture.pdcap"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_new_file_leaves_nothing_behind() {
+        let dir = scratch("atomic-new");
+        let path = dir.join("capture.pdcap");
+        let result = write_file_atomically(&path, |_| Err(std::io::Error::other("nope")));
+        assert!(result.is_err());
+        assert!(listing(&dir).is_empty(), "{:?}", listing(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_takes_only_a_copy_from_the_worker_and_writes_on_the_callers_thread() {
+        let dir = scratch("save-off-worker");
+        let path = dir.join("capture.pdcap");
+        let (control, inbox) = control();
+        let caller = std::thread::current().id();
+        // The worker answers with the copy and is free at once; it never
+        // sees the path or touches the file.
+        let worker = std::thread::spawn(move || match inbox.recv().expect("a command") {
+            Command::PdSave(reply) => {
+                let save = PdSave {
+                    header: pdcap::Header::new("0.0.0", "KM003C".into(), "1.0".into()),
+                    entries: Vec::new(),
+                };
+                reply.send(save).expect("the caller waits");
+                std::thread::current().id()
+            }
+            other => panic!("the worker was asked for {other:?}"),
+        });
+        assert_eq!(control.save_pd(&path), Ok(0));
+        let worker_thread = worker.join().expect("worker thread");
+        assert_ne!(worker_thread, caller);
+        let loaded = pdcap::load(std::io::BufReader::new(
+            std::fs::File::open(&path).expect("the caller wrote the file"),
+        ));
+        assert!(loaded.header.is_some() && loaded.error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn run(command: Command) {

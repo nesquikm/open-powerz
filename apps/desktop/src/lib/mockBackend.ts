@@ -19,6 +19,7 @@ import type {
   HistorySeries,
   MinMaxAvg,
   PdDetails,
+  PdOpened,
   PdRow,
   PdStatusSample,
   RecordingSummary,
@@ -29,7 +30,7 @@ import type {
   UiError,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
-import { pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
+import { PD_CYCLE_MS, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
@@ -329,6 +330,15 @@ interface MockPdCapture {
   seeded: boolean;
   /** Session time (sample `t_ms`) minus capture time for the running capture run. */
   sessionOffsetMs: number;
+  /** The row of every captured record, by record index minus `base`. */
+  rows: PdRow[];
+}
+
+/** A PD capture saved, or opened, in the mock: script records and rows from index 0. */
+interface MockPdFile {
+  path: string;
+  records: number[];
+  rows: PdRow[];
 }
 
 interface Running {
@@ -448,6 +458,9 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
  * when the page goes away (it is a test and demo double, not a resource owner). */
 export class MockBackend {
   #session: Running | null = null;
+  /** The PD capture saved last in the page, and the one opened (FR TGE83E). */
+  #savedPd: MockPdFile | null = null;
+  #openedPd: MockPdFile | null = null;
   #mode: MockMode | null;
   #options: MockOptions;
   #revealed: string[] = [];
@@ -547,6 +560,7 @@ export class MockBackend {
         nowMs: 0,
         seeded: false,
         sessionOffsetMs: 0,
+        rows: [],
       },
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
@@ -838,6 +852,7 @@ export class MockBackend {
     pd.records.push(k);
     const row = pdRow(k, pd.base + pd.records.length - 1);
     row.session_ms = row.elapsed_ms + pd.sessionOffsetMs;
+    pd.rows.push(row);
     return row;
   }
 
@@ -875,7 +890,12 @@ export class MockBackend {
     this.#stopPd(this.#open());
   }
 
-  async pdDetails(index: number): Promise<PdDetails> {
+  async pdDetails(index: number, opened = false): Promise<PdDetails> {
+    if (opened) {
+      const k = this.#openedPd?.records[index];
+      if (k === undefined) throw usage("That PD record is not in the opened capture.");
+      return pdDetailsOf(k, index);
+    }
     const s = this.#open();
     const k = s.pd.records[index - s.pd.base];
     if (k === undefined) throw usage("That PD record is not in the capture.");
@@ -885,10 +905,59 @@ export class MockBackend {
   /** Drops every captured PD record; a running capture goes on. Like the backend,
    * indices keep counting: resolves to the index of the next record. */
   async pdClear(): Promise<number> {
+    const hadOpened = this.#openedPd !== null;
+    this.#openedPd = null;
+    if (hadOpened && this.#session === null) return 0;
     const pd = this.#open().pd;
     pd.base += pd.records.length;
     pd.records = [];
+    pd.rows = [];
     return pd.base;
+  }
+
+  /** There is no save dialog: the proposed name is the path. Resolves to the number of
+   * records captured so far; the capture is kept for {@link pdOpen}. */
+  async pdSave(suggestedName: string): Promise<ExportResult | null> {
+    const pd = this.#open().pd;
+    this.#savedPd = {
+      path: suggestedName,
+      records: [...pd.records],
+      rows: pd.rows.map((r, i) => ({ ...r, index: i })),
+    };
+    return { path: suggestedName, rows: pd.records.length };
+  }
+
+  /** There is no open dialog: opens the capture saved last in the page (`null` when
+   * none was). Needs no meter, like the backend. */
+  async pdOpen(): Promise<PdOpened | null> {
+    const saved = this.#savedPd;
+    if (saved === null) return null;
+    this.#openedPd = saved;
+    return {
+      path: saved.path,
+      rows: saved.rows.map((r) => ({ ...r })),
+      status: [],
+      damaged_line: null,
+      oversized: 0,
+      truncated: false,
+    };
+  }
+
+  /** There is no open dialog: imports a vendor log of one cycle of the demo PD
+   * script. Needs no meter, like the backend. */
+  async pdImport(): Promise<PdOpened | null> {
+    const records: number[] = [];
+    for (let k = 0; pdRecordTime(k) < PD_CYCLE_MS; k++) records.push(k);
+    const rows = records.map((k, i) => pdRow(k, i));
+    this.#openedPd = { path: "vendor-pd-log.sqlite", records, rows };
+    return {
+      path: "vendor-pd-log.sqlite",
+      rows: rows.map((r) => ({ ...r })),
+      status: [],
+      damaged_line: null,
+      oversized: 0,
+      truncated: false,
+    };
   }
 
   async appInfo(): Promise<AppInfo> {

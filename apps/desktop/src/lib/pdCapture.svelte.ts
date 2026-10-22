@@ -1,10 +1,11 @@
 /**
  * The PD view's capture state (FR TGE83C): takes the backend's `pd_state` / `pd_rows`
  * events off the session channel, keeps the rows in a {@link PdStore}, and says when
- * Start and Stop are available and, when they are not, why.
+ * Start and Stop (and Open capture / Import vendor log) are available and, when they
+ * are not, why.
  */
 
-import type { BackendEvent, PdRow } from "./backend";
+import type { BackendEvent, PdRow, PdStatusSample } from "./backend";
 import { PdStore } from "./pdStore";
 import { PdStatusBuffer } from "./pdTimeline";
 
@@ -14,10 +15,18 @@ export interface PdControls {
   canStop: boolean;
   /** Why both are unavailable, or null. */
   reason: string | null;
+  /** Open capture and Import vendor log are available (FR TGE83E). */
+  canOpen: boolean;
+  /** Why they are not, or null. */
+  openReason: string | null;
 }
 
 /** Why Start and Stop are disabled without a meter. */
 export const PD_NO_METER_REASON = "Connect a meter to capture PD traffic.";
+
+/** Why Open capture and Import vendor log are disabled while capturing: the live rows
+ * would go on arriving behind the opened file, unseen. */
+export const PD_STOP_FIRST_REASON = "Stop the capture first to open or import a file.";
 
 export class PdCapture {
   /** The PD sniffer runs. */
@@ -34,8 +43,17 @@ export class PdCapture {
   /** Bumped when the store is emptied (a clear, a new session): row indices start
    * over, so a view drops its selection. */
   emptied = $state(0);
+  /** The view shows a capture opened from a file (FR TGE83E): the live capture's rows
+   * and status blocks stay out of it until a clear or a new session. */
+  opened = $state(false);
   /** Rows numbered below this were sent before the last clear: dropped. */
   #from = 0;
+
+  /** Index of the table's first row: an opened file numbers its rows from 0, the live
+   * capture from its last clear. Rows are numbered on screen from here. */
+  get firstIndex(): number {
+    return this.opened ? 0 : this.#from;
+  }
   /** Rows that arrived while a clear waits for the backend's answer, or null. */
   #held: PdRow[] | null = null;
   /** Numbers the clears, so a late answer to an abandoned one changes nothing. */
@@ -43,8 +61,10 @@ export class PdCapture {
 
   /** Start / Stop availability with the meter `connected` or not. */
   controls(connected: boolean): PdControls {
-    if (!connected) return { canStart: false, canStop: false, reason: PD_NO_METER_REASON };
-    return { canStart: !this.capturing, canStop: this.capturing, reason: null };
+    const live = connected && this.capturing;
+    const open = { canOpen: !live, openReason: live ? PD_STOP_FIRST_REASON : null };
+    if (!connected) return { canStart: false, canStop: false, reason: PD_NO_METER_REASON, ...open };
+    return { canStart: !this.capturing, canStop: this.capturing, reason: null, ...open };
   }
 
   /** Takes the PD events of the session channel; a session that ends stops the capture. */
@@ -54,6 +74,7 @@ export class PdCapture {
         this.capturing = event.data.capturing;
         break;
       case "pd_rows": {
+        if (this.opened) break;
         const from = this.#from;
         const rows = event.data.rows.filter((r) => r.index >= from);
         if (rows.length === 0) break;
@@ -66,7 +87,7 @@ export class PdCapture {
         break;
       }
       case "pd_status":
-        if (event.data.samples.length === 0) break;
+        if (this.opened || event.data.samples.length === 0) break;
         this.status.append(event.data.samples);
         this.statusVersion++;
         break;
@@ -79,6 +100,7 @@ export class PdCapture {
           this.#ticket++;
           this.#held = null;
           this.#from = 0;
+          this.opened = false;
           this.store.clear();
           this.emptied++;
           this.version++;
@@ -91,6 +113,21 @@ export class PdCapture {
     }
   }
 
+  /** Shows a capture opened from a file in place of the live one: its `rows` (numbered
+   * from 0) and `status` samples. A pending clear is abandoned. */
+  open(rows: PdRow[], status: PdStatusSample[]): void {
+    this.#ticket++;
+    this.#held = null;
+    this.opened = true;
+    this.store.clear();
+    this.store.append(rows);
+    this.emptied++;
+    this.version++;
+    this.status.clear();
+    this.status.append(status);
+    this.statusVersion++;
+  }
+
   /** Empties the store; a running capture goes on. `from` is the backend's next
    * record index: rows numbered below it that arrive later are stale. */
   clear(from = 0): void {
@@ -100,6 +137,7 @@ export class PdCapture {
   /** First half of a clear, as it is asked of the backend: empties the store now and
    * holds the rows that arrive until {@link endClear}. Returns the clear's ticket. */
   beginClear(): number {
+    this.opened = false;
     this.#held = [];
     this.store.clear();
     this.status.clear();

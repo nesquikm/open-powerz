@@ -5,6 +5,7 @@ pub mod devices;
 pub mod e2e;
 pub mod history;
 pub mod pd_capture;
+pub mod pd_import;
 pub mod recording;
 pub mod stats;
 pub mod store;
@@ -50,18 +51,70 @@ type AppManager = DeviceManager<AppOpener, SystemClock>;
 struct AppState {
     manager: Mutex<AppManager>,
     watch: Mutex<Option<WatchHandle>>,
+    /// The PD capture opened from a file (FR TGE83E): outside the
+    /// per-connection worker, so it opens without a meter and never mixes
+    /// with a live capture.
+    opened_pd: Mutex<Option<pd_capture::PdCapture>>,
 }
 
 impl AppState {
     fn new() -> AppState {
+        AppState::with_manager(DeviceManager::new(
+            discovery::list_devices,
+            AppOpener,
+            SystemClock,
+        ))
+    }
+
+    fn with_manager(manager: AppManager) -> AppState {
         AppState {
-            manager: Mutex::new(DeviceManager::new(
-                discovery::list_devices,
-                AppOpener,
-                SystemClock,
-            )),
+            manager: Mutex::new(manager),
             watch: Mutex::new(None),
+            opened_pd: Mutex::new(None),
         }
+    }
+
+    /// Connect to `device_id` at `rate_sps`; events go to `sink`. The UI
+    /// drops a capture opened from a file when a session connects, so its
+    /// memory is released here too.
+    fn connect_session(
+        &self,
+        device_id: &str,
+        rate_sps: u32,
+        sink: impl worker::EventSink,
+        stop: Arc<AtomicBool>,
+    ) -> Result<(), UiError> {
+        self.manager()
+            .connect_with_stop(device_id, rate_sps, sink, stop)?;
+        *self.opened_pd() = None;
+        Ok(())
+    }
+
+    fn opened_pd(&self) -> MutexGuard<'_, Option<pd_capture::PdCapture>> {
+        self.opened_pd
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Put `pd`, opened from the file at `path`, in the opened-capture slot
+    /// and answer its rows and status samples for the UI.
+    fn show_opened(
+        &self,
+        path: &Path,
+        mut pd: pd_capture::PdCapture,
+        damaged_line: Option<usize>,
+        left_out: LeftOut,
+    ) -> PdOpened {
+        let opened = PdOpened {
+            path: path.to_string_lossy().into_owned(),
+            rows: pd.take_all().unwrap_or_default(),
+            status: pd.take_all_status().unwrap_or_default(),
+            damaged_line,
+            oversized: left_out.oversized,
+            truncated: left_out.truncated,
+        };
+        *self.opened_pd() = Some(pd);
+        opened
     }
 
     fn manager(&self) -> MutexGuard<'_, AppManager> {
@@ -158,9 +211,7 @@ async fn connect(
     blocking(move || {
         let stop = Arc::new(AtomicBool::new(false));
         let sink = channel_sink(on_event, Arc::clone(&stop));
-        state
-            .manager()
-            .connect_with_stop(&device_id, rate_sps, sink, stop)
+        state.connect_session(&device_id, rate_sps, sink, stop)
     })
     .await
 }
@@ -245,11 +296,23 @@ async fn pd_stop(state: Shared<'_>) -> Result<(), UiError> {
     .await
 }
 
-/// The raw bytes and field tree of captured PD record `index`.
+/// The raw bytes and field tree of PD record `index`: of the capture
+/// opened from a file when `opened` is true, of the live capture otherwise.
 #[tauri::command]
-async fn pd_details(state: Shared<'_>, index: u64) -> Result<pd_capture::PdDetails, UiError> {
+async fn pd_details(
+    state: Shared<'_>,
+    index: u64,
+    opened: Option<bool>,
+) -> Result<pd_capture::PdDetails, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
+        if opened == Some(true) {
+            return state
+                .opened_pd()
+                .as_ref()
+                .and_then(|pd| pd.details(index))
+                .ok_or_else(|| UiError::usage("That PD record is not in the opened capture."));
+        }
         let control = state.manager().control()?;
         control.pd_details(index)
     })
@@ -257,26 +320,150 @@ async fn pd_details(state: Shared<'_>, index: u64) -> Result<pd_capture::PdDetai
 }
 
 /// Drop every captured PD record; the answer is the index of the next one.
+/// A capture opened from a file is dropped too; with only that one and no
+/// meter, the answer is 0.
 #[tauri::command]
 async fn pd_clear(state: Shared<'_>) -> Result<u64, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().control()?;
+        let had_opened = state.opened_pd().take().is_some();
+        let control = match state.manager().control() {
+            Ok(control) => control,
+            Err(_) if had_opened => return Ok(0),
+            Err(e) => return Err(e),
+        };
         control.clear_pd()
     })
     .await
 }
 
-/// Ask where to save a CSV file, proposing `suggested_name`; `None` when
-/// the dialog is cancelled. Blocks: call it on a blocking thread.
+/// A PD capture opened from a pdcap file (FR TGE83E): its rows and status
+/// samples, numbered from 0.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PdOpened {
+    /// The file opened.
+    pub path: String,
+    /// Every row of the capture.
+    pub rows: Vec<pd_capture::PdRow>,
+    /// Every status sample of the capture.
+    pub status: Vec<pd_capture::PdStatusSample>,
+    /// The 1-based line where reading stopped when the file is truncated or
+    /// corrupt (AC-TGE83E.3); every valid line before it was loaded.
+    pub damaged_line: Option<usize>,
+    /// Vendor log rows skipped because their record bytes are oversized.
+    pub oversized: u64,
+    /// The vendor log has more rows than the import takes; only the first
+    /// ones were imported.
+    pub truncated: bool,
+}
+
+/// What an import left out of the opened capture (none for a pdcap file).
+#[derive(Debug, Clone, Copy, Default)]
+struct LeftOut {
+    oversized: u64,
+    truncated: bool,
+}
+
+/// Ask which file of type `name` (`extensions`) to open; `None` when the
+/// dialog is cancelled. Blocks: call it on a blocking thread.
+fn choose_open_path(
+    app: &tauri::AppHandle,
+    name: &str,
+    extensions: &[&str],
+) -> Result<Option<PathBuf>, UiError> {
+    let Some(choice) = app
+        .dialog()
+        .file()
+        .add_filter(name, extensions)
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    choice.into_path().map(Some).map_err(|_| {
+        UiError::usage(
+            "The open dialog did not return a file on disk; pick a file on this computer.",
+        )
+    })
+}
+
+/// Open a pdcap file into the PD analyzer (FR TGE83E); needs no meter.
+/// Resolves to its rows and status samples, or `null` when the dialog was
+/// cancelled. Record details then come from `pd_details` with `opened`.
+#[tauri::command]
+async fn pd_open(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<PdOpened>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let Some(path) = choose_open_path(&app, "PD capture", &["pdcap"])? else {
+            return Ok(None);
+        };
+        let file = std::fs::File::open(&path)
+            .map_err(|e| UiError::usage(format!("Could not open the PD capture: {e}")))?;
+        let loaded = powerz_protocol::pdcap::load(std::io::BufReader::new(file));
+        if let (Some(e), true) = (&loaded.error, loaded.entries.is_empty()) {
+            return Err(UiError::usage(format!(
+                "Could not open the PD capture: {e}"
+            )));
+        }
+        let pd = pd_capture::PdCapture::from_pdcap(&loaded.entries);
+        let damaged_line = loaded.error.as_ref().map(|e| e.line());
+        Ok(Some(state.show_opened(
+            &path,
+            pd,
+            damaged_line,
+            LeftOut::default(),
+        )))
+    })
+    .await
+}
+
+/// Import a vendor PD log database into the PD analyzer, read-only (FR
+/// TGE83E, AC .6); needs no meter. Resolves like `pd_open`: the capture lands
+/// in the opened-capture slot, or `null` when the dialog was cancelled.
+#[tauri::command]
+async fn pd_import(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<PdOpened>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let Some(path) = choose_open_path(&app, "Vendor PD log", &["sqlite"])? else {
+            return Ok(None);
+        };
+        let imported =
+            pd_import::import_vendor_pd_log_with(&path, &pd_import::ImportLimits::DEFAULT)
+                .map_err(|e| UiError::usage(format!("Could not import the vendor PD log: {e}")))?;
+        let left_out = LeftOut {
+            oversized: imported.oversized,
+            truncated: imported.truncated,
+        };
+        Ok(Some(state.show_opened(
+            &path,
+            imported.capture,
+            None,
+            left_out,
+        )))
+    })
+    .await
+}
+
+/// The save dialog's file type for a proposed file name: a PD capture for
+/// `.pdcap`, CSV otherwise.
+fn save_filter(suggested_name: &str) -> (&'static str, &'static [&'static str]) {
+    if suggested_name.ends_with(".pdcap") {
+        ("PD capture", &["pdcap"])
+    } else {
+        ("CSV", &["csv"])
+    }
+}
+
+/// Ask where to save a file, proposing `suggested_name`; `None` when the
+/// dialog is cancelled. Blocks: call it on a blocking thread.
 fn ask_save_path(
     app: &tauri::AppHandle,
     suggested_name: &str,
 ) -> Option<tauri_plugin_dialog::FilePath> {
+    let (name, extensions) = save_filter(suggested_name);
     app.dialog()
         .file()
         .set_file_name(suggested_name)
-        .add_filter("CSV", &["csv"])
+        .add_filter(name, extensions)
         .blocking_save_file()
 }
 
@@ -472,6 +659,34 @@ async fn export_session(
     .await
 }
 
+/// Open the save dialog with `suggested_name` and save the PD capture so
+/// far to the chosen file as a pdcap file (FR TGE83E). Resolves to the path
+/// and the number of records, or `null` when the dialog was cancelled.
+#[tauri::command]
+async fn pd_save(
+    app: tauri::AppHandle,
+    state: Shared<'_>,
+    suggested_name: String,
+) -> Result<Option<ExportResult>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        with_save_path(
+            &state,
+            &app,
+            &suggested_name,
+            AppManager::control,
+            |control, path| {
+                let rows = control.save_pd(path)?;
+                Ok(ExportResult {
+                    path: path.to_string_lossy().into_owned(),
+                    rows,
+                })
+            },
+        )
+    })
+    .await
+}
+
 /// The worker's event sink over one `tauri::ipc::Channel`: batches, gaps,
 /// status and errors all reach the UI through it. A failed send means the
 /// window is gone: the event is dropped and `stop` is raised so the worker
@@ -513,7 +728,10 @@ pub fn run() {
             pd_start,
             pd_stop,
             pd_details,
-            pd_clear
+            pd_clear,
+            pd_save,
+            pd_open,
+            pd_import
         ])
         .on_window_event(|window, event| {
             if window.label() == "main"
@@ -551,6 +769,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_save_dialog_offers_the_file_type_of_the_proposed_name() {
+        assert_eq!(save_filter("powerz-pd-20261022-101500.pdcap").1, ["pdcap"]);
+        assert_eq!(save_filter("powerz-20261022-101500.csv").1, ["csv"]);
+    }
 
     #[test]
     fn app_info_reports_the_protocol_library_version() {
@@ -595,5 +819,29 @@ mod tests {
         let state = AppState::new();
         let list = state.manager().list_devices();
         assert!(list.iter().any(|d| d.id == "demo:idle"), "{list:?}");
+    }
+
+    #[test]
+    fn connecting_a_meter_releases_the_opened_capture() {
+        // No USB discovery: only the demo device is listed.
+        let state = AppState::with_manager(DeviceManager::new(
+            || Ok(Vec::new()),
+            AppOpener,
+            SystemClock,
+        ));
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        state
+            .connect_session(
+                "demo:idle",
+                1000,
+                |_: BackendEvent| {},
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the demo device connects");
+        let still_opened = state.opened_pd().is_some();
+        if let Ok(session) = state.manager().take_session() {
+            session.disconnect();
+        }
+        assert!(!still_opened, "the opened capture outlived the new session");
     }
 }

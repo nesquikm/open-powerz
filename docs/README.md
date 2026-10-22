@@ -23,6 +23,7 @@ Recipes for one task each, in [how-to/](how-to/):
 Facts to look up, in [reference/](reference/):
 
 - [`powerz` CLI](reference/cli.md): commands, options, output formats, exit codes
+- [pdcap file format](reference/pdcap.md): saved PD captures, with a worked example
 - [`powerz-protocol` API](reference/api/powerz-protocol.md): the library's public modules
 - [USB protocol](protocol.md): the meter's wire protocol, with confidence tags
 

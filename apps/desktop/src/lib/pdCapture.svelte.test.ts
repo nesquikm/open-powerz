@@ -235,3 +235,44 @@ describe("Clear and the PD status samples (AC-TGE83D.4)", () => {
     expect(pd.statusVersion).toBeGreaterThan(version);
   });
 });
+
+describe("the table's first index (FR TGE83E, AC .2)", () => {
+  it("follows the clear point and goes back to 0 on a new session", () => {
+    const pd = new PdCapture();
+    expect(pd.firstIndex).toBe(0);
+    pd.clear(34);
+    expect(pd.firstIndex).toBe(34);
+    pd.handleEvent({
+      type: "status",
+      data: {
+        state: "connected",
+        model: "KM003C",
+        firmware_version: "2.0.6",
+        serial: "SIM",
+        rate_sps: 50,
+        rate_locked: false,
+        session_id: 1,
+      },
+    } as BackendEvent);
+    expect(pd.firstIndex).toBe(0);
+  });
+});
+
+describe("Open capture and Import vendor log (FR TGE83E)", () => {
+  it("are available without a meter and on a meter that is not capturing", () => {
+    const pd = new PdCapture();
+    expect(pd.controls(false).canOpen).toBe(true);
+    expect(pd.controls(false).openReason).toBeNull();
+    expect(pd.controls(true).canOpen).toBe(true);
+  });
+
+  it("are disabled with a reason while a live capture runs", () => {
+    const pd = new PdCapture();
+    pd.handleEvent(started);
+    const c = pd.controls(true);
+    expect(c.canOpen).toBe(false);
+    expect(c.openReason).toMatch(/stop the capture first/i);
+    pd.handleEvent(stopped);
+    expect(pd.controls(true).canOpen).toBe(true);
+  });
+});

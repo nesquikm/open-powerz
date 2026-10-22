@@ -8,6 +8,9 @@
     exportSession,
     pdClear,
     pdDetails,
+    pdImport,
+    pdOpen,
+    pdSave,
     pdStart,
     pdStop,
     resetStats as resetStatsCommand,
@@ -17,8 +20,17 @@
     stopRecording,
     toUiError,
     type BackendEvent,
+    type ExportResult,
     type PdDetails,
+    type PdOpened,
+    type UiError,
   } from "./lib/backend";
+  import {
+    defaultPdCaptureName,
+    pdImportNoticeText,
+    pdOpenDamageText,
+    pdSaveNoticeText,
+  } from "./lib/pdSave";
   import { attachSession } from "./lib/attach";
   import { AutoDismiss, type HoldReason } from "./lib/autoDismiss";
   import About from "./lib/components/About.svelte";
@@ -110,8 +122,10 @@
     document.getElementById(`tab-${view}`)?.focus();
   }
 
+  /** A capture opened from a file leaves the view first: the live one starts empty. */
   function startPd(): void {
-    void pdStart().catch((err: unknown) => session.reportError(toUiError(err)));
+    const cleared = pd.opened ? clearPdNow() : Promise.resolve();
+    void cleared.then(() => pdStart()).catch((err: unknown) => session.reportError(toUiError(err)));
   }
 
   function stopPd(): void {
@@ -122,17 +136,85 @@
    * meanwhile wait for its answer, and those numbered below the index it answers (sent
    * before it cleared) are dropped. A failed clear keeps them all. */
   function clearPd(): void {
+    void clearPdNow().catch((err: unknown) => session.reportError(toUiError(err)));
+  }
+
+  function clearPdNow(): Promise<void> {
     const ticket = pd.beginClear();
-    void pdClear()
-      .then((from) => pd.endClear(from, ticket))
-      .catch((err: unknown) => {
+    return pdClear().then(
+      (from) => pd.endClear(from, ticket),
+      (err: unknown) => {
         pd.endClear(0, ticket);
-        session.reportError(toUiError(err));
-      });
+        throw err;
+      },
+    );
+  }
+
+  /** The last PD capture save (FR TGE83E), while its notice shows. */
+  let pdSaved = $state<ExportResult | null>(null);
+  let pdSaveError = $state<UiError | null>(null);
+  let pdSaving = false;
+
+  /** Save capture: save dialog, then the PD capture so far as a pdcap file. */
+  async function savePd(): Promise<void> {
+    if (pdSaving) return;
+    pdSaving = true;
+    pdSaveError = null;
+    try {
+      const result = await pdSave(defaultPdCaptureName(new Date()));
+      if (result !== null) pdSaved = result;
+    } catch (err) {
+      pdSaveError = toUiError(err);
+    } finally {
+      pdSaving = false;
+    }
+  }
+
+  let pdOpening = false;
+  /** Why the last opened PD capture file stopped loading early, while its notice shows. */
+  let pdOpenDamage = $state<string | null>(null);
+  /** The last vendor PD log import (FR TGE83E, AC .6), while its notice shows. */
+  let pdImported = $state<PdOpened | null>(null);
+
+  /** Open capture: open dialog, then the chosen pdcap file in place of the live capture
+   * (FR TGE83E); needs no meter. */
+  function openPd(): Promise<void> {
+    return showPdFile(pdOpen, false);
+  }
+
+  /** Import vendor log: open dialog, then the chosen vendor PD log database, read-only,
+   * in place of the live capture (FR TGE83E, AC .6); needs no meter. */
+  function importPd(): Promise<void> {
+    return showPdFile(pdImport, true);
+  }
+
+  /** Shows the capture `load` resolves to in place of the live one; `imported` marks a
+   * vendor log, which gets its own notice. */
+  async function showPdFile(
+    load: () => Promise<PdOpened | null>,
+    imported: boolean,
+  ): Promise<void> {
+    // A running capture's rows would arrive unseen behind the opened file.
+    if (pdOpening || pd.capturing) return;
+    pdOpening = true;
+    pdSaveError = null;
+    pdOpenDamage = null;
+    try {
+      const opened = await load();
+      if (opened !== null) {
+        pd.open(opened.rows, opened.status);
+        pdImported = imported ? opened : null;
+        pdOpenDamage = pdOpenDamageText(opened);
+      }
+    } catch (err) {
+      pdSaveError = toUiError(err);
+    } finally {
+      pdOpening = false;
+    }
   }
 
   function loadPdDetails(index: number): Promise<PdDetails | null> {
-    return pdDetails(index).catch((err: unknown) => {
+    return pdDetails(index, pd.opened).catch((err: unknown) => {
       session.reportError(toUiError(err));
       return null;
     });
@@ -140,6 +222,18 @@
   // Information notices leave by themselves; errors stay until dismissed (AC-AKNVND.8).
   const recordingNoticeTimer = new AutoDismiss(() => recording.dismiss());
   const exportNoticeTimer = new AutoDismiss(() => exportJob.dismissNotice());
+  const pdSaveNoticeTimer = new AutoDismiss(() => (pdSaved = null));
+  const pdImportNoticeTimer = new AutoDismiss(() => (pdImported = null));
+  $effect(() => {
+    if (pdSaved !== null) pdSaveNoticeTimer.start();
+    else pdSaveNoticeTimer.stop();
+    return () => pdSaveNoticeTimer.stop();
+  });
+  $effect(() => {
+    if (pdImported !== null) pdImportNoticeTimer.start();
+    else pdImportNoticeTimer.stop();
+    return () => pdImportNoticeTimer.stop();
+  });
   $effect(() => {
     if (recording.notice !== null && recording.error === null) recordingNoticeTimer.start();
     else recordingNoticeTimer.stop();
@@ -152,7 +246,12 @@
   });
   /** The pointer over the notices, or focus in them, holds both countdowns. */
   function holdNotices(reason: HoldReason, held: boolean): void {
-    for (const t of [recordingNoticeTimer, exportNoticeTimer]) {
+    for (const t of [
+      recordingNoticeTimer,
+      exportNoticeTimer,
+      pdSaveNoticeTimer,
+      pdImportNoticeTimer,
+    ]) {
       if (held) t.hold(reason);
       else t.release(reason);
     }
@@ -520,9 +619,49 @@
           onStart={startPd}
           onStop={stopPd}
           onClear={clearPd}
+          onSave={() => void savePd()}
+          onOpen={() => void openPd()}
+          onImport={() => void importPd()}
           loadDetails={loadPdDetails}
           selection={pdSelection}
         />
+        <div
+          class="notice-stack pd-notices"
+          role="presentation"
+          onpointerover={() => holdNotices("pointer", true)}
+          onpointerout={(e) => {
+            if (leftStack(e)) holdNotices("pointer", false);
+          }}
+          onfocusin={() => holdNotices("focus", true)}
+          onfocusout={(e) => {
+            if (leftStack(e)) holdNotices("focus", false);
+          }}
+        >
+          {#if pdSaved !== null}
+            {@const path = pdSaved.path}
+            <Notice tone="info" onDismiss={() => (pdSaved = null)}>
+              <p>{pdSaveNoticeText(pdSaved)}</p>
+              {@render fileActions(path)}
+            </Notice>
+          {/if}
+          {#if pdImported !== null}
+            <Notice
+              tone="info"
+              message={pdImportNoticeText(pdImported)}
+              onDismiss={() => (pdImported = null)}
+            />
+          {/if}
+          {#if pdSaveError !== null}
+            <Notice
+              tone="error"
+              message={pdSaveError.message}
+              onDismiss={() => (pdSaveError = null)}
+            />
+          {/if}
+          {#if pdOpenDamage !== null}
+            <Notice tone="error" message={pdOpenDamage} onDismiss={() => (pdOpenDamage = null)} />
+          {/if}
+        </div>
       </div>
     {/if}
   </main>
@@ -654,7 +793,7 @@
     .side-panel {
       flex: 1 0 auto;
     }
-    .notice-stack {
+    .notice-stack:not(.pd-notices) {
       position: static;
       width: auto;
       max-width: none;

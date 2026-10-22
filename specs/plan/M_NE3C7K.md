@@ -45,8 +45,8 @@ Build order: TGE839, then TGE83A → TGE83B → TGE83C → TGE83D → TGE83E. Th
 - [ ] PD capture core and the powerz pd command — TGE83A
 - [x] USB PD 3.2 message decoder — TGE83B
 - [x] Desktop PD analyzer view — TGE83C
-- [ ] PD timeline linked to the power chart — TGE83D
-- [ ] PD capture save and load — TGE83E
+- [x] PD timeline linked to the power chart — TGE83D
+- [x] PD capture save and load — TGE83E
 
 **M7 follow-ups:**
 - Replug (TGE839): a reconnect whose open keeps failing retries every 500 ms poll; add a back-off.
@@ -55,6 +55,9 @@ Build order: TGE839, then TGE83A → TGE83B → TGE83C → TGE83D → TGE83E. Th
 - CLAUDE.md Architecture tree lists only powerz-protocol and powerz-cli; add powerz-pd, powerz-sim and powerz-record (needs the user's OK to edit).
 - PD analyzer: cap the backend record store and the UI column store for long captures (or re-decode on demand); make the type/SOP option lists and filtering incremental; make the page behind the Clear dialog inert.
 - PD timeline: drop PD status samples that were in flight at a Clear; add an e2e check that a badge splits on zoom.
+- Demo device: the PD scenario negotiates 9 V while the meter stream stays at 5 V, so the chart and the PD table disagree. Link the simulator's PD and measurement streams.
+- PD files: count skipped vendor rows in the import notice; open a .pdcap damaged on its first entry as an empty capture with the damage notice; give `pd decode` a file-error exit code instead of 5; share `record_from` between pdcap and the vendor import.
+- PD files: an automatic reconnect after a replug does not release an opened capture's memory (only the Connect command does).
 - Gate probe `spawn_pattern_allowlist` fails on `main` too: `.claude/settings.json` lacks `Bash(claude:*)`. Widening the allow-list needs the user's OK.
 
 **Device checks:** pass-through PD capture (charger → meter → phone or laptop), passive only; replug at 1000 SPS. The user approved a short slot for each.

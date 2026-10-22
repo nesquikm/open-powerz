@@ -420,10 +420,43 @@ export async function pdStop(): Promise<void> {
   await invoke("pd_stop");
 }
 
-/** The raw bytes and field tree of captured PD record `index`. */
-export async function pdDetails(index: number): Promise<PdDetails> {
-  if (mock) return mock.pdDetails(index);
-  return invoke<PdDetails>("pd_details", { index });
+/** The raw bytes and field tree of PD record `index`: of the capture opened from a file
+ * when `opened`, of the live capture otherwise. */
+export async function pdDetails(index: number, opened = false): Promise<PdDetails> {
+  if (mock) return mock.pdDetails(index, opened);
+  return invoke<PdDetails>("pd_details", opened ? { index, opened } : { index });
+}
+
+/** A PD capture opened from a pdcap file (FR TGE83E): its rows and status samples,
+ * numbered from 0. */
+export interface PdOpened {
+  path: string;
+  rows: PdRow[];
+  status: PdStatusSample[];
+  /** The 1-based line where reading stopped when the file is truncated or corrupt
+   * (AC-TGE83E.3); every valid line before it was loaded. `null` for a whole file. */
+  damaged_line: number | null;
+  /** Vendor log rows skipped because their record bytes are oversized (0 for a pdcap
+   * file). */
+  oversized: number;
+  /** The vendor log has more rows than the import takes: only the first ones were
+   * imported (false for a pdcap file). */
+  truncated: boolean;
+}
+
+/** Opens the open dialog and loads the chosen pdcap file (FR TGE83E); needs no meter.
+ * Resolves to the capture, or `null` when the dialog was cancelled. */
+export async function pdOpen(): Promise<PdOpened | null> {
+  if (mock) return mock.pdOpen();
+  return invoke<PdOpened | null>("pd_open");
+}
+
+/** Opens the open dialog and imports the chosen vendor PD log database (`.sqlite`)
+ * read-only (FR TGE83E, AC .6); needs no meter. Resolves like {@link pdOpen}: the
+ * imported capture, or `null` when the dialog was cancelled. */
+export async function pdImport(): Promise<PdOpened | null> {
+  if (mock) return mock.pdImport();
+  return invoke<PdOpened | null>("pd_import");
 }
 
 /** Drops every captured PD record; resolves to the index of the next record. Rows
@@ -431,6 +464,14 @@ export async function pdDetails(index: number): Promise<PdDetails> {
 export async function pdClear(): Promise<number> {
   if (mock) return mock.pdClear();
   return invoke<number>("pd_clear");
+}
+
+/** Opens the save dialog proposing `suggestedName` and saves the PD capture so far as a
+ * pdcap file (FR TGE83E). Resolves to the path and the number of records (`rows`), or
+ * `null` when the dialog was cancelled. */
+export async function pdSave(suggestedName: string): Promise<ExportResult | null> {
+  if (mock) return mock.pdSave(suggestedName);
+  return invoke<ExportResult | null>("pd_save", { suggestedName });
 }
 
 /** App and protocol-library versions for the About dialog. */

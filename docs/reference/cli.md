@@ -12,13 +12,15 @@ the built-in help.
 | `read` | One snapshot: VBUS (V), IBUS (A, signed), power (W), temperature (°C), D+, D−, CC1, CC2 (V). | `--json` (`vbus_v`, `ibus_a`, `power_w`, `temp_c` or null, `dp_v`, `dm_v`, `cc1_v`, `cc2_v`) |
 | `watch` | The `read` view, refreshed until Ctrl-C. Redraws in place on a terminal, one line per refresh otherwise. | `--interval MS` (default 200, minimum 50) |
 | `stream` | Records the ADC sample stream to CSV until Ctrl-C or `--duration`; prints the sample count and any gaps to stderr. | `--rate {2,10,50,1000}`, `--csv FILE` (created or overwritten), `--duration SECONDS` (device time, fractions allowed) |
+| `pd` | Captures USB PD traffic (messages and events) until Ctrl-C and prints one line per record: elapsed ms, sender, SOP, PD header and data objects in hex. Bulk pipe (or `sim`) only. | `--json` (one JSON object per record, JSON Lines), `--save FILE` (also save the capture as a [pdcap file](pdcap.md)) |
+| `pd decode` | Prints the records of a saved [pdcap file](pdcap.md) as `pd` would; no meter needed. On a damaged file it prints every record before the damage, then the line number where reading stopped, and exits 5. | `--json`, `FILE` |
 
 ## Global options
 
 | option | meaning |
 |---|---|
 | `--device SERIAL` | The meter to use. Required when several are attached. |
-| `--transport bulk\|cdc\|hid\|sim` | The USB pipe. `bulk` (default) supports every command; `cdc` and `hid` support only `read` and `watch`; `sim` is the demo device. |
+| `--transport bulk\|cdc\|hid\|sim` | The USB pipe. `bulk` (default) supports every command; `cdc` and `hid` support only `read` and `watch` (and `pd decode`, which needs no meter); `sim` is the demo device. |
 | `--scenario NAME` | What the demo device plays: `idle` (default), `load-5v-1a`, `pd-9v-2a`, `noisy-negative`. |
 | `--trace` | Logs every frame to stderr as hex: `>` sent, `<` received, `x` refused by the safety guard before sending. |
 
@@ -31,6 +33,13 @@ the built-in help.
   the first sample. Numeric columns have at most 8 significant digits as plain
   decimals. TEMP is empty (the queue carries no temperature). CHARGE (Ah) and
   ENERGY (Wh) are integrated from signed current; PWR = VBUS × IBUS.
+- `pd --json` and `pd decode --json` lines: `kind` (`message`, `big_message`
+  or `event`), `elapsed_ms`, `from_meter`; messages add `sop`, `header` (as a
+  number) and `body` (hex); events add `event` (for example `attach`), `cc` for
+  attach and detach, and `detail` for receive errors and monitor types.
+- `pd --save` files: the [pdcap format](pdcap.md), JSON Lines with a header
+  line and one line per status sample or record. The serial number is never
+  written.
 
 ## Exit codes
 

@@ -87,9 +87,10 @@ export function timeLabel(ms: number): string {
   return `${(ms / 1000).toFixed(3)} s`;
 }
 
-/** The screen reader label of a row; rows are numbered from 1 for people. */
-export function rowLabel(r: PdRow): string {
-  const head = `Row ${r.index + 1}, ${timeLabel(r.elapsed_ms)}`;
+/** The screen reader label of a row; rows are numbered from 1 for people, counting
+ * from the table's first index `first` (the last clear). */
+export function rowLabel(r: PdRow, first = 0): string {
+  const head = `Row ${r.index - first + 1}, ${timeLabel(r.elapsed_ms)}`;
   if (r.kind === "event") return `${head}, event ${r.name}: ${r.summary}`;
   const dir = directionLabel(r.direction).replace("→", "to");
   return `${head}, ${r.sop ?? ""} ${r.name}, ${dir}: ${r.summary}`;

@@ -1,12 +1,13 @@
 //! `powerz pd`.
 
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use powerz_protocol::decode::pd_packet::{
     CcLine, MonitorType, PdEvent, PdMessage, PdRecordKind, ReceiveErrorCause,
 };
-use powerz_protocol::session::{CapturedRecord, Clock, PdOptions, PdSniffer, Session};
+use powerz_protocol::pdcap;
+use powerz_protocol::session::{CapturedRecord, Clock, PdOptions, PdPoll, PdSniffer, Session};
 use powerz_protocol::transport::Transport;
 use serde_json::json;
 
@@ -22,14 +23,100 @@ pub fn pd<T: Transport, C: Clock>(
     stop: &AtomicBool,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
+    capture(session, json, stop, out, None)
+}
+
+/// `powerz pd --save FILE`: [`pd`], and every status sample and record
+/// also written to `file` as a pdcap file (FR TGE83E). The header carries
+/// the meter's model and firmware version, never its serial number.
+pub fn pd_save<T: Transport, C: Clock>(
+    session: &mut Session<T, C>,
+    json: bool,
+    stop: &AtomicBool,
+    out: &mut dyn Write,
+    file: &mut dyn Write,
+) -> Result<(), CliError> {
+    let info = session.device_info()?;
+    let header = pdcap::Header::new(env!("CARGO_PKG_VERSION"), info.model, info.firmware_version);
+    let mut writer = pdcap::Writer::new(file, &header)?;
+    let captured = capture(session, json, stop, out, Some(&mut writer));
+    // The file is finished after a device error too: the polls before it
+    // are kept. The first error wins; a failed finish after it is told too.
+    let finished = writer.finish();
+    match (captured, finished) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Ok(()), Err(e)) => Err(e.into()),
+        (Err(e), Ok(_)) => Err(e),
+        (Err(e), Err(f)) => Err(also_unsaved(e, &f)),
+    }
+}
+
+/// `e`, with the note that the capture file could not be finished (`f`).
+fn also_unsaved(e: CliError, f: &std::io::Error) -> CliError {
+    let note = |m: String| format!("{m}; the capture file could not be finished: {f}");
+    match e {
+        CliError::Usage(m) => CliError::Usage(note(m)),
+        CliError::NoDevice(m) => CliError::NoDevice(note(m)),
+        CliError::Permission(m) => CliError::Permission(note(m)),
+        CliError::Device(m) => CliError::Device(note(m)),
+    }
+}
+
+/// `powerz pd decode FILE`: print the records of a pdcap file in the
+/// live `pd` format. No device is involved. On a damaged line the records
+/// before it are printed and the error names the line.
+pub fn pd_decode(
+    input: impl BufRead,
+    name: &str,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let mut reader = pdcap::Reader::new(input).map_err(|e| damaged(name, &e))?;
+    for entry in reader.by_ref() {
+        match entry {
+            Ok(pdcap::Entry::Record {
+                elapsed_ms, record, ..
+            }) => write_record(out, &CapturedRecord { elapsed_ms, record }, json)?,
+            Ok(pdcap::Entry::Status { .. }) => {}
+            Err(e) => {
+                out.flush()?;
+                return Err(damaged(name, &e));
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn damaged(name: &str, e: &pdcap::Error) -> CliError {
+    CliError::Device(format!("{name}: {e}"))
+}
+
+/// The live capture loop of [`pd`] and [`pd_save`].
+fn capture<T: Transport, C: Clock>(
+    session: &mut Session<T, C>,
+    json: bool,
+    stop: &AtomicBool,
+    out: &mut dyn Write,
+    mut save: Option<&mut pdcap::Writer<&mut dyn Write>>,
+) -> Result<(), CliError> {
     let mut sniffer = PdSniffer::start(session, PdOptions::default())?;
     let mut write_err: Option<std::io::Error> = None;
+    // Session time base of the records: meter time minus elapsed time,
+    // fixed by the first record so session time keeps the meter's spacing.
+    let mut base: Option<i64> = None;
     let polled = sniffer.run(|poll| {
         let written = poll
             .records
             .iter()
             .try_for_each(|r| write_record(out, r, json))
-            .and_then(|()| out.flush());
+            .and_then(|()| out.flush())
+            .and_then(|()| match save.as_deref_mut() {
+                // Flushed once per poll, like stdout, so the file on disk
+                // keeps up with the capture.
+                Some(w) => save_poll(w, poll, &mut base).and_then(|()| w.flush()),
+                None => Ok(()),
+            });
         if let Err(e) = written {
             write_err = Some(e);
             return false;
@@ -46,6 +133,30 @@ pub fn pd<T: Transport, C: Clock>(
         return Err(e.into());
     }
     stopped.map_err(CliError::from)
+}
+
+/// Write one poll's status block and records to the pdcap file.
+fn save_poll(
+    w: &mut pdcap::Writer<&mut dyn Write>,
+    poll: &PdPoll,
+    base: &mut Option<i64>,
+) -> std::io::Result<()> {
+    if let Some(status) = poll.status {
+        w.write(&pdcap::Entry::Status {
+            session_ms: u64::from(status.time_ms),
+            status,
+        })?;
+    }
+    for r in &poll.records {
+        let elapsed = i64::try_from(r.elapsed_ms).unwrap_or(i64::MAX);
+        let b = *base.get_or_insert_with(|| i64::from(r.record.time_ms) - elapsed);
+        w.write(&pdcap::Entry::Record {
+            session_ms: u64::try_from(b.saturating_add(elapsed)).unwrap_or(0),
+            elapsed_ms: r.elapsed_ms,
+            record: r.record.clone(),
+        })?;
+    }
+    Ok(())
 }
 
 /// Print one record as a text line or a JSON object line.
@@ -227,6 +338,108 @@ mod tests {
         assert_eq!(
             detail(PdEvent::MonitorType(MonitorType::Other(5))),
             "type_5"
+        );
+    }
+
+    // ------------------------------------------- --save durability (FR TGE83E)
+
+    use powerz_protocol::session::Session;
+    use powerz_sim::{FaultPlan, PdScenario, Persona, Scenario, SimClock, SimDevice};
+
+    /// A file that keeps what was written only once it is flushed, as a
+    /// buffered file on disk does; flush number `fail_at` (1-based) fails.
+    #[derive(Default)]
+    struct FlushedFile {
+        pending: Vec<u8>,
+        flushed: Vec<u8>,
+        flushes: usize,
+        fail_at: Option<usize>,
+    }
+
+    impl Write for FlushedFile {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.pending.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            if self.fail_at == Some(self.flushes) {
+                return Err(std::io::Error::other("disk full"));
+            }
+            self.flushed.append(&mut self.pending);
+            Ok(())
+        }
+    }
+
+    /// The demo device playing the PD negotiation on a simulated clock, with
+    /// the `POWERZ_SIM_FAULT` plan `faults`.
+    fn sim_session(faults: &str) -> Session<SimDevice, SimClock> {
+        let clock = SimClock::new(1_700_000_000_000);
+        let sim = SimDevice::with_clock(Persona::Bulk, Scenario::Load5v1a, clock.clone())
+            .with_pd_scenario(PdScenario::Negotiation)
+            .with_faults(FaultPlan::parse(faults).expect("fault plan"));
+        let mut session = Session::with_clock(sim, clock);
+        session.connect().expect("CONNECT");
+        session
+    }
+
+    /// `pd --save` until the device fails (request 40 times out).
+    fn save_until_device_error(file: &mut FlushedFile) -> Result<(), CliError> {
+        let mut session = sim_session("timeout@40");
+        let stop = AtomicBool::new(false);
+        let mut out = Vec::new();
+        pd_save(&mut session, true, &stop, &mut out, file)
+    }
+
+    #[test]
+    fn a_device_error_mid_capture_still_finishes_the_save_file() {
+        let mut file = FlushedFile::default();
+        let result = save_until_device_error(&mut file);
+        let err = result.expect_err("the device error is reported");
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(file.pending.is_empty(), "every line written is flushed");
+        let loaded = pdcap::load(std::io::Cursor::new(&file.flushed));
+        assert!(loaded.error.is_none(), "{:?}", loaded.error);
+        assert!(loaded.header.is_some());
+        assert!(!loaded.entries.is_empty(), "the polls before the error");
+    }
+
+    #[test]
+    fn the_save_file_is_flushed_once_per_poll() {
+        let mut file = FlushedFile::default();
+        let _ = save_until_device_error(&mut file);
+        let polls = pdcap::load(std::io::Cursor::new(&file.flushed))
+            .entries
+            .iter()
+            .filter(|e| matches!(e, pdcap::Entry::Status { .. }))
+            .count();
+        assert!(polls > 1, "several polls before the error: {polls}");
+        assert!(
+            file.flushes >= polls,
+            "{} flushes for {polls} polls",
+            file.flushes
+        );
+    }
+
+    #[test]
+    fn a_failed_finish_after_a_device_error_is_reported_with_it() {
+        // How many flushes the run takes; the last one is the finish.
+        let mut file = FlushedFile::default();
+        let _ = save_until_device_error(&mut file);
+        let mut failing = FlushedFile {
+            fail_at: Some(file.flushes),
+            ..FlushedFile::default()
+        };
+        let err = save_until_device_error(&mut failing).expect_err("fails");
+        let text = err.to_string();
+        assert!(
+            text.contains("timed out"),
+            "the first error is kept: {text}"
+        );
+        assert!(
+            text.contains("disk full"),
+            "the finish error is reported: {text}"
         );
     }
 }

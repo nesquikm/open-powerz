@@ -2,8 +2,9 @@
 //! table rows, the field tree of one record on demand, and the batching of
 //! rows to the UI (at most 60 batches a second).
 
-use powerz_protocol::decode::pd_packet::{PdEvent, PdRecordKind, PdStatus};
+use powerz_protocol::decode::pd_packet::{PdEvent, PdRecord, PdRecordKind, PdStatus};
 use powerz_protocol::pd::{self, Decoded, Field, PowerRole, Sop, SpecRevision};
+use powerz_protocol::pdcap;
 use powerz_protocol::session::CapturedRecord;
 use serde::Serialize;
 
@@ -149,6 +150,9 @@ pub struct PdCapture {
     /// times land on the samples they belong to after a reconnect or a
     /// device clock jump.
     session_offset_ms: i64,
+    /// Every status block and record kept so far, in capture order, as a
+    /// pdcap file saves them (FR TGE83E).
+    log: Vec<pdcap::Entry>,
 }
 
 /// Items waiting to go out to the UI, sent in batches at most every
@@ -312,6 +316,7 @@ impl PdCapture {
     /// Decode `records` into rows, with VBUS and IBUS from `status`.
     pub fn push(&mut self, records: &[CapturedRecord], status: Option<PdStatus>) {
         let offset = self.session_offset_ms;
+        let raw_status = status;
         let status = status.map(|s| PdStatusSample {
             session_ms: on_session(i64::from(s.time_ms), offset),
             ..PdStatusSample::from(s)
@@ -319,9 +324,14 @@ impl PdCapture {
         if let Some(s) = status {
             self.status_out.push(s);
         }
+        if let (Some(raw), Some(s)) = (raw_status, status) {
+            self.log.push(pdcap::Entry::Status {
+                session_ms: s.session_ms,
+                status: raw,
+            });
+        }
         let (vbus_v, ibus_a) = status.map_or((0.0, 0.0), |s| (s.vbus_v, s.ibus_a));
         for r in records {
-            let index = self.base + self.entries.len() as u64;
             let elapsed_ms = self.run_offset_ms.saturating_add(r.elapsed_ms);
             // One base per run: the run's elapsed time never goes back, so
             // session time keeps the meter's spacing at a constant offset.
@@ -333,67 +343,85 @@ impl PdCapture {
                 offset,
             );
             self.last_elapsed_ms = self.last_elapsed_ms.max(elapsed_ms);
-            let decoded = r.record.pd_input().and_then(|i| self.decoder.feed(i));
-            let row = match (&r.record.kind, &decoded) {
-                (PdRecordKind::Message(m) | PdRecordKind::BigMessage(m), Some(d)) => {
-                    let mut raw = m.header.to_le_bytes().to_vec();
-                    raw.extend_from_slice(&m.body);
-                    let h = &d.header;
-                    let direction = if h.sop.is_cable() {
-                        Direction::Cable
-                    } else if h.port_power_role == Some(PowerRole::Source) {
-                        Direction::SourceToSink
-                    } else {
-                        Direction::SinkToSource
-                    };
-                    self.entries.push(Entry {
-                        raw,
-                        decoded: decoded.clone(),
-                    });
-                    PdRow {
-                        index,
-                        elapsed_ms,
-                        session_ms,
-                        kind: RowKind::Message,
-                        sop: Some(sop_name(h.sop)),
-                        name: h.message_type.name().to_owned(),
-                        message_id: Some(h.message_id),
-                        direction: Some(direction),
-                        objects: Some(h.num_data_objects),
-                        spec_revision: Some(revision(h.spec_revision)),
-                        vbus_v,
-                        ibus_a,
-                        summary: d.summary(),
-                    }
-                }
-                (kind, _) => {
-                    let name = match kind {
-                        PdRecordKind::Event(e) => event_name(e),
-                        _ => "Message".to_owned(),
-                    };
-                    self.entries.push(Entry {
-                        raw: r.record.raw.clone(),
-                        decoded: None,
-                    });
-                    PdRow {
-                        index,
-                        elapsed_ms,
-                        session_ms,
-                        kind: RowKind::Event,
-                        sop: None,
-                        name: name.clone(),
-                        message_id: None,
-                        direction: None,
-                        objects: None,
-                        spec_revision: None,
-                        vbus_v,
-                        ibus_a,
-                        summary: name,
-                    }
-                }
-            };
-            self.rows_out.push(row);
+            self.log.push(pdcap::Entry::Record {
+                session_ms,
+                elapsed_ms,
+                record: r.record.clone(),
+            });
+            self.push_row(&r.record, elapsed_ms, session_ms, vbus_v, ibus_a);
         }
+    }
+
+    /// Decode `record` into the next row and keep it for its details.
+    fn push_row(
+        &mut self,
+        record: &PdRecord,
+        elapsed_ms: u64,
+        session_ms: u64,
+        vbus_v: f64,
+        ibus_a: f64,
+    ) {
+        let index = self.base + self.entries.len() as u64;
+        let decoded = record.pd_input().and_then(|i| self.decoder.feed(i));
+        let row = match (&record.kind, &decoded) {
+            (PdRecordKind::Message(m) | PdRecordKind::BigMessage(m), Some(d)) => {
+                let mut raw = m.header.to_le_bytes().to_vec();
+                raw.extend_from_slice(&m.body);
+                let h = &d.header;
+                let direction = if h.sop.is_cable() {
+                    Direction::Cable
+                } else if h.port_power_role == Some(PowerRole::Source) {
+                    Direction::SourceToSink
+                } else {
+                    Direction::SinkToSource
+                };
+                self.entries.push(Entry {
+                    raw,
+                    decoded: decoded.clone(),
+                });
+                PdRow {
+                    index,
+                    elapsed_ms,
+                    session_ms,
+                    kind: RowKind::Message,
+                    sop: Some(sop_name(h.sop)),
+                    name: h.message_type.name().to_owned(),
+                    message_id: Some(h.message_id),
+                    direction: Some(direction),
+                    objects: Some(h.num_data_objects),
+                    spec_revision: Some(revision(h.spec_revision)),
+                    vbus_v,
+                    ibus_a,
+                    summary: d.summary(),
+                }
+            }
+            (kind, _) => {
+                let name = match kind {
+                    PdRecordKind::Event(e) => event_name(e),
+                    _ => "Message".to_owned(),
+                };
+                self.entries.push(Entry {
+                    raw: record.raw.clone(),
+                    decoded: None,
+                });
+                PdRow {
+                    index,
+                    elapsed_ms,
+                    session_ms,
+                    kind: RowKind::Event,
+                    sop: None,
+                    name: name.clone(),
+                    message_id: None,
+                    direction: None,
+                    objects: None,
+                    spec_revision: None,
+                    vbus_v,
+                    ibus_a,
+                    summary: name,
+                }
+            }
+        };
+        self.rows_out.push(row);
     }
 
     /// The rows waiting to go out, when a batch is due at `now_ms`.
@@ -444,6 +472,68 @@ impl PdCapture {
         })
     }
 
+    /// Every status block and record kept so far, in capture order, on
+    /// session time: what a pdcap file saves. Rows already sent to the UI
+    /// are included; nothing waiting to go out is taken.
+    pub fn to_pdcap(&self) -> Vec<pdcap::Entry> {
+        self.log.clone()
+    }
+
+    /// A capture rebuilt from the entries of a pdcap file: every row and
+    /// status sample waiting to go out, every record's details answered.
+    /// A record takes VBUS and IBUS from the status block before it, as a
+    /// poll's records take them from the poll's status block.
+    pub fn from_pdcap(entries: &[pdcap::Entry]) -> PdCapture {
+        let mut pd = PdCapture::new();
+        let (mut vbus_v, mut ibus_a) = (0.0, 0.0);
+        for e in entries {
+            match e {
+                pdcap::Entry::Status { session_ms, status } => {
+                    let s = PdStatusSample {
+                        session_ms: *session_ms,
+                        ..PdStatusSample::from(*status)
+                    };
+                    (vbus_v, ibus_a) = (s.vbus_v, s.ibus_a);
+                    pd.status_out.push(s);
+                }
+                pdcap::Entry::Record {
+                    session_ms,
+                    elapsed_ms,
+                    record,
+                } => {
+                    pd.last_elapsed_ms = pd.last_elapsed_ms.max(*elapsed_ms);
+                    pd.push_row(record, *elapsed_ms, *session_ms, vbus_v, ibus_a);
+                }
+            }
+        }
+        pd.log = entries.to_vec();
+        pd
+    }
+
+    /// Add one imported record (FR TGE83E, AC .6) as the next row, at
+    /// `session_ms` from the log's start, with the row's own VBUS and IBUS.
+    pub(crate) fn push_imported(
+        &mut self,
+        record: PdRecord,
+        session_ms: u64,
+        vbus_v: f64,
+        ibus_a: f64,
+    ) {
+        let elapsed_ms = self.last_elapsed_ms.max(session_ms);
+        self.last_elapsed_ms = elapsed_ms;
+        self.push_row(&record, elapsed_ms, session_ms, vbus_v, ibus_a);
+        self.log.push(pdcap::Entry::Record {
+            session_ms,
+            elapsed_ms,
+            record,
+        });
+    }
+
+    /// Add one imported status sample for the timeline (FR TGE83E, AC .6).
+    pub(crate) fn push_imported_status(&mut self, sample: PdStatusSample) {
+        self.status_out.push(sample);
+    }
+
     /// Drop every record and return the index the next one gets; indices
     /// do not restart. The decoder keeps its context, so a capture that goes
     /// on decodes as before; the next run's time starts at 0 again.
@@ -451,6 +541,7 @@ impl PdCapture {
         self.last_elapsed_ms = 0;
         self.base += self.entries.len() as u64;
         self.entries.clear();
+        self.log.clear();
         self.rows_out.clear();
         self.status_out.clear();
         self.base

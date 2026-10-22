@@ -33,7 +33,7 @@ PD captures save to and load from a documented open format without loss, and ven
 
 ## Technical Design
 
-A small format module next to the capture core reads and writes the lines with a streaming reader. The desktop app's save and open dialogs reuse the existing export notices. The vendor import reads the database with an embedded SQLite library and maps its relative times to session time.
+A small format module next to the capture core reads and writes the lines with a streaming reader. The desktop app's save and open dialogs reuse the existing export notices. The vendor import opens the database read-only with an embedded SQLite library, maps its relative times to session time, takes pd_chart rows as status samples, and skips rows whose raw bytes are not exactly one record or exceed 4 KiB, counting them in its notice. An opened or imported capture is shown in place of the live one, without a meter; Save stays off while it is shown, and table rows are numbered from the last Clear.
 
 ## Testing
 

@@ -173,3 +173,11 @@ describe("row texts (AC-TGE83C.2, AC-TGE83C.7)", () => {
     expect(label).toContain("Hard Reset");
   });
 });
+
+describe("rows are numbered from the last clear (FR TGE83E, AC .2)", () => {
+  it("counts from the first index of the table", () => {
+    // caps has index 41: with the table starting at 41 it is row 1.
+    expect(rowLabel(caps, 41)).toMatch(/^Row 1,/);
+    expect(rowLabel(caps)).toMatch(/^Row 42,/);
+  });
+});

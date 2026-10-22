@@ -8,6 +8,7 @@
 pub mod crypto;
 pub mod decode;
 pub mod frame;
+pub mod pdcap;
 pub mod session;
 pub mod transport;
 

@@ -63,6 +63,9 @@ pub struct Cli {
     /// Log every frame sent (`>`), received (`<`) or refused by the safety guard (`x`) to stderr as hex.
     #[arg(long, global = true, help_heading = GLOBAL)]
     pub trace: bool,
+    /// `pd --save FILE` and `pd decode`, read from the `pd` subcommand.
+    #[command(flatten)]
+    pub pd_file: PdFile,
     /// Subcommand to run.
     #[command(subcommand)]
     pub command: Command,
@@ -116,6 +119,11 @@ pub enum Command {
         duration: Option<f64>,
     },
     /// Capture USB PD traffic (messages and events) until Ctrl-C; bulk pipe only.
+    #[command(
+        arg = save_arg(),
+        subcommands = [decode_command()],
+        args_conflicts_with_subcommands = true
+    )]
     Pd {
         /// Print one JSON object per record (JSON Lines) instead of text lines.
         #[arg(long)]
@@ -134,6 +142,91 @@ impl Command {
             Command::Stream { .. } => "stream",
             Command::Pd { .. } => "pd",
         }
+    }
+}
+
+/// `--save FILE` of `pd`.
+fn save_arg() -> clap::Arg {
+    clap::Arg::new(SAVE)
+        .long(SAVE)
+        .value_name("FILE")
+        .value_parser(clap::value_parser!(PathBuf))
+        .help("Also save the capture (status samples and records) to FILE as a pdcap file")
+}
+
+/// `pd decode [--json] FILE`.
+fn decode_command() -> clap::Command {
+    clap::Command::new(DECODE)
+        .about("Print the records of a saved pdcap file as `pd` would; no meter needed")
+        .arg(
+            clap::Arg::new("json")
+                .long("json")
+                .action(clap::ArgAction::SetTrue)
+                .help("Print one JSON object per record (JSON Lines) instead of text lines"),
+        )
+        .arg(
+            clap::Arg::new("file")
+                .value_name("FILE")
+                .required(true)
+                .value_parser(clap::value_parser!(PathBuf))
+                .help("pdcap file to decode"),
+        )
+}
+
+const SAVE: &str = "save";
+const DECODE: &str = "decode";
+
+/// What the `pd` subcommand does besides a plain live capture: `--save`
+/// and `decode` are declared on `pd` and read back here, so
+/// [`Command::Pd`] keeps only its `--json` flag.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PdFile {
+    /// `pd --save FILE`: also write the live capture to FILE.
+    pub save: Option<PathBuf>,
+    /// `pd decode [--json] FILE`: decode a saved file instead of capturing.
+    pub decode: Option<PdDecode>,
+}
+
+/// Arguments of `pd decode`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdDecode {
+    /// Print JSON Lines instead of text lines.
+    pub json: bool,
+    /// The pdcap file.
+    pub file: PathBuf,
+}
+
+impl clap::FromArgMatches for PdFile {
+    fn from_arg_matches(m: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let Some(pd) = m.subcommand_matches("pd") else {
+            return Ok(PdFile::default());
+        };
+        let decode = pd.subcommand_matches(DECODE).and_then(|d| {
+            d.get_one::<PathBuf>("file").map(|file| PdDecode {
+                json: d.get_flag("json"),
+                file: file.clone(),
+            })
+        });
+        Ok(PdFile {
+            save: pd.get_one::<PathBuf>(SAVE).cloned(),
+            decode,
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, m: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = PdFile::from_arg_matches(m)?;
+        Ok(())
+    }
+}
+
+/// Adds no arguments of its own: they sit on the `pd` subcommand.
+impl clap::Args for PdFile {
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        cmd
+    }
+
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        cmd
     }
 }
 
@@ -159,6 +252,10 @@ fn parse_rate(s: &str) -> Result<u32, String> {
 /// Check argument combinations clap cannot express (e.g. `--transport hid`
 /// is accepted only for `read` and `watch`). Runs before any device access.
 pub fn validate(cli: &Cli) -> Result<(), CliError> {
+    if cli.pd_file.decode.is_some() {
+        // `pd decode` reads a file and opens no device.
+        return Ok(());
+    }
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
     if cli.transport == TransportKind::Hid && !hid_ok {
         return Err(CliError::Usage(format!(
