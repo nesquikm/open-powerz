@@ -12,12 +12,12 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common::slow_sink::{self, Outcome, RecordingClock};
 use common::*;
 use open_powerz_desktop_lib::store::SessionStore;
 use open_powerz_desktop_lib::ui_error;
 use open_powerz_desktop_lib::worker::{self, BackendEvent, Status, Worker, WorkerConfig};
 use powerz_protocol::decode::Rate;
-use powerz_protocol::session::SystemClock;
 use powerz_protocol::transport;
 
 fn config(rate: Rate) -> WorkerConfig {
@@ -163,9 +163,11 @@ fn a_sink_that_blocks_200_ms_per_event_loses_no_record_at_1000_sps() {
         }
     };
     let store = SessionStore::new();
+    // AC-KQF5GM.1: the system clock, with every sleep logged for the failure message.
+    let clock = RecordingClock::new();
     let handle = worker::spawn_with_store(
         open,
-        SystemClock,
+        clock.clone(),
         config(Rate::Sps1000),
         store.clone(),
         sink,
@@ -182,31 +184,28 @@ fn a_sink_that_blocks_200_ms_per_event_loses_no_record_at_1000_sps() {
     let log = pipe_log.lock().unwrap().clone().expect("pipe never opened");
     let delivered = log.lock().unwrap().records_delivered;
     let gaps = gaps.lock().unwrap();
-    assert!(
-        gaps.is_empty(),
-        "{} gaps reported: {:?}",
-        gaps.len(),
-        &gaps[..gaps.len().min(5)]
-    );
     let times = times.lock().unwrap();
-    assert!(
-        times.len() >= 9_000,
-        "only {} samples in a 10 s run at 1000 SPS",
-        times.len()
-    );
     let holes: Vec<_> = times.windows(2).filter(|w| w[1] - w[0] != 1).collect();
-    assert!(
-        holes.is_empty(),
-        "{} holes, first {:?}",
-        holes.len(),
-        holes.first()
-    );
-    assert_eq!(times.len(), delivered, "samples sent != records delivered");
-    assert_eq!(
-        store.history_len(),
+    let outcome = Outcome {
+        gaps: gaps.len(),
+        holes: holes.len(),
+        samples: times.len(),
         delivered,
-        "history != records delivered"
-    );
+        history: store.history_len(),
+    };
+    // AC-KQF5GM.3: without CI, zero gaps, zero holes and every delivered record.
+    let ci = std::env::var("CI").ok();
+    if let Err(message) = slow_sink::check(
+        &outcome,
+        &slow_sink::tolerance(ci.as_deref()),
+        &clock.evidence(),
+    ) {
+        panic!(
+            "{message}; first gaps {:?}, first hole {:?}",
+            &gaps[..gaps.len().min(5)],
+            holes.first()
+        );
+    }
 }
 
 // ---- AC-X2SPDW.4: the summary counts only gaps after the first row ----

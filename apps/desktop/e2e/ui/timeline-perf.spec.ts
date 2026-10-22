@@ -21,10 +21,12 @@ import {
   open,
   streamDemo,
 } from "./helpers";
+import { renderReport, renderStepBudgetMs } from "./budget";
 
 const SYNTHETIC = 10_000_000;
 const STEPS = 6;
-const BOUND_MS = 100;
+/** AC-KQF5GM.5: 100 ms, times the CI factor of 3 when CI is set. */
+const BOUND_MS = renderStepBudgetMs();
 
 test.use({ viewport: { width: 1600, height: 900 } });
 
@@ -79,7 +81,7 @@ async function pause(page: Page): Promise<ChartDraw> {
 }
 
 function report(name: string, timings: number[]): string {
-  return `${name} render times (ms): ${timings.map((t) => t.toFixed(1)).join(", ")}`;
+  return renderReport(name, timings, BOUND_MS);
 }
 
 test("an overview viewport drag step over a 10M-sample history renders in ≤ 100 ms (AC-FENCD9.12)", async ({

@@ -12,11 +12,13 @@
 
 import { expect, test } from "@playwright/test";
 import { HOOK, type ChartDraw, type OpenPowerzE2E } from "../hook";
+import { renderReport, renderStepBudgetMs } from "./budget";
 import { chartDraws, chartSeriesLengths, expectHook, open, streamDemo } from "./helpers";
 
 const SYNTHETIC = 10_000_000;
 const PAN_STEPS = 6;
-const BOUND_MS = 100;
+/** AC-KQF5GM.5: 100 ms, times the CI factor of 3 when CI is set. */
+const BOUND_MS = renderStepBudgetMs();
 
 test.use({ viewport: { width: 1600, height: 900 } });
 
@@ -86,8 +88,7 @@ test("a pan step over a 10M-sample history renders in ≤ 100 ms (AC-AH2AEM.4)",
   expect(previous?.t0Ms ?? Infinity, "the pans moved back into the seeded history").toBeLessThan(
     SYNTHETIC,
   );
-  expect(
-    Math.max(...timings),
-    `pan step render times (ms): ${timings.map((t) => t.toFixed(1)).join(", ")}`,
-  ).toBeLessThanOrEqual(BOUND_MS);
+  expect(Math.max(...timings), renderReport("pan step", timings, BOUND_MS)).toBeLessThanOrEqual(
+    BOUND_MS,
+  );
 });

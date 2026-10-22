@@ -20,9 +20,9 @@
  * `WebKitWebProcess`), taking the largest of them at each sample.
  */
 
-import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 import { blur, open, streamDemo } from "./helpers";
+import { listProcesses, noPageProcessReason, pageProcessMarker } from "./processes";
 
 const WARM_UP_MS = 60_000;
 const MEASURE_MS = 120_000;
@@ -30,19 +30,11 @@ const SAMPLE_EVERY_MS = 10_000;
 const MAX_GROWTH_MB = 120;
 
 /** Command-line marker of a WebKit page process on this OS. */
-const PAGE_PROCESS =
-  process.platform === "darwin" ? "com.apple.WebKit.WebContent" : "WebKitWebProcess";
+const PAGE_PROCESS = pageProcessMarker(process.platform);
 
-/** RSS (KiB) of every running WebKit page process, by pid. */
+/** RSS (KiB) of every running WebKit page process, by pid (AC-KQF5GM.4: full width). */
 function pageProcesses(): Map<number, number> {
-  const out = execFileSync("ps", ["-eo", "pid=,rss=,command="], { encoding: "utf8" });
-  const found = new Map<number, number>();
-  for (const line of out.split("\n")) {
-    if (!line.includes(PAGE_PROCESS)) continue;
-    const [pid, rss] = line.trim().split(/\s+/, 2).map(Number);
-    if (Number.isFinite(pid) && Number.isFinite(rss)) found.set(pid!, rss!);
-  }
-  return found;
+  return listProcesses(PAGE_PROCESS);
 }
 
 /** Largest RSS, in MB, among `pids` (all page processes when `pids` is empty). */
@@ -75,6 +67,9 @@ test("a live session keeps the page's memory flat", async ({ browser, browserNam
 
     // This page's content process: the ones that appeared since the context opened.
     const ours = new Set([...pageProcesses().keys()].filter((pid) => !before.has(pid)));
+    // AC-KQF5GM.4: no page process to measure is a skip with its reason, not a failure.
+    const missing = noPageProcessReason(ours, PAGE_PROCESS);
+    test.skip(missing !== undefined, missing);
     expect(rssMb(ours), `a ${PAGE_PROCESS} process is running`).toBeGreaterThan(0);
 
     await page.waitForTimeout(WARM_UP_MS);

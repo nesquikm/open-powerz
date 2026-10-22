@@ -101,6 +101,8 @@ test("after a clear the chart shows only data recorded after it", async ({ page 
 test("a clear empties the overview strip at once, before the next sample (AC-5X154V.2)", async ({
   page,
 }) => {
+  // The page clock runs as usual until just before the clear, then holds still.
+  await page.clock.install();
   await open(page, "?mock=outage");
   await streamDemo(page);
   await expect.poll(() => overviewBreaks(page), { timeout: 5_000 }).toHaveLength(1);
@@ -108,10 +110,21 @@ test("a clear empties the overview strip at once, before the next sample (AC-5X1
   await page.getByLabel("Sample rate").selectOption("2");
   await expect(page.getByLabel("Sample rate")).toHaveValue("2");
   await page.waitForTimeout(1_200);
+  // Hold the clock: no stream tick, so no sample, until the checks below are done.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1));
   await clearHistory(page, "Clear chart history…");
   await expect.poll(() => overviewBreaks(page), { timeout: 150, intervals: [10] }).toEqual([]);
   // No window over an empty strip until the next sample arrives.
   await expect(page.locator(".chart-wrap .overview-window")).toHaveCount(0, { timeout: 150 });
+  // AC-KQF5GM.6: the page clock is held around the clear, so no sample can arrive
+  // between the clear and its checks however slow the runner is: a full second of
+  // real time later the strip is still empty and has no window.
+  await page.waitForTimeout(1_000);
+  expect(await overviewBreaks(page), "no sample reached the strip after the clear").toEqual([]);
+  expect(
+    await page.locator(".chart-wrap .overview-window").count(),
+    "no sample arrived between the clear and its checks",
+  ).toBe(0);
 });
 
 test("a clear empties every view of the chart and the meter keeps streaming (AC-5X154V.2)", async ({

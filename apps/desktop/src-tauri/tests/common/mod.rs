@@ -5,6 +5,8 @@
 
 #![allow(dead_code, unused_imports)]
 
+pub mod slow_sink;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
