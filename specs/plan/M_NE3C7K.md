@@ -25,6 +25,12 @@ codename: Packet Sleuth
 - Export (and import) of captures; vendor `.sqlite` compatibility as a stretch goal.
 - UFCS capture (att 0x040) noted for later.
 
-**FR list:** to be written.
+**FR list:**
+
+| FR | Title | Tracker |
+|----|-------|---------|
+| [KQF5GM](../frs/KQF5GM.md) | CI green on all 8 jobs | n/a |
+
+PD analyzer FRs: to be written.
 
 **Gate:** same gating rule as CLAUDE.md.
