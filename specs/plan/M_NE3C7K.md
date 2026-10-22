@@ -15,7 +15,7 @@ codename: Packet Sleuth
 
 **Goal:** Capture, decode and inspect USB Power Delivery traffic through the meter.
 **Prerequisites:** M_34BAXK (session, auth level 1 for sniffer start/stop); M_R4WG4Q (desktop shell and charts).
-**Status:** requirements level only — FRs and ACs are written with `/spec-write` before `/implement`. Needs a device session with a PD charger and sink to confirm record and event formats.
+**Status:** FRs written 2026-10-22; ready to implement.
 
 **Scope (requirements level):**
 - PD sniffer start/stop (0x10/0x11, auth level ≥ 1) and PD_PACKET polling at ~5 ms.
@@ -30,7 +30,27 @@ codename: Packet Sleuth
 | FR | Title | Tracker |
 |----|-------|---------|
 | [KQF5GM](../frs/KQF5GM.md) | CI green on all 8 jobs | n/a |
+| [TGE839](../frs/TGE839.md) | Replug reconnects to the meter | n/a |
+| [TGE83A](../frs/TGE83A.md) | PD capture core and the powerz pd command | n/a |
+| [TGE83B](../frs/TGE83B.md) | USB PD 3.2 message decoder | n/a |
+| [TGE83C](../frs/TGE83C.md) | Desktop PD analyzer view | n/a |
+| [TGE83D](../frs/TGE83D.md) | PD timeline linked to the power chart | n/a |
+| [TGE83E](../frs/TGE83E.md) | PD capture save and load | n/a |
 
-PD analyzer FRs: to be written.
+Build order: TGE839, then TGE83A → TGE83B → TGE83C → TGE83D → TGE83E. The UFCS analyzer moves to a later milestone.
+
+**Tasks:**
+- [x] CI green on all 8 jobs — KQF5GM (implemented and merged in v0.2.0)
+- [ ] Replug reconnects to the meter — TGE839
+- [ ] PD capture core and the powerz pd command — TGE83A
+- [ ] USB PD 3.2 message decoder — TGE83B
+- [ ] Desktop PD analyzer view — TGE83C
+- [ ] PD timeline linked to the power chart — TGE83D
+- [ ] PD capture save and load — TGE83E
+
+**M7 follow-ups:**
+- Gate probe `spawn_pattern_allowlist` fails on `main` too: `.claude/settings.json` lacks `Bash(claude:*)`. Widening the allow-list needs the user's OK.
+
+**Device checks:** pass-through PD capture (charger → meter → phone or laptop), passive only; replug at 1000 SPS. The user approved a short slot for each.
 
 **Gate:** same gating rule as CLAUDE.md.

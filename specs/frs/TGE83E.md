@@ -1,0 +1,44 @@
+---
+title: PD capture save and load
+milestone: M_NE3C7K
+status: active
+archived_at: null
+id: fr_01M5HVWJ41WV7P8G50RPTGE83E
+created_at: 2026-10-22T13:12:57.217Z
+changelog_category: Added
+---
+
+# PD capture save and load
+
+## Summary
+
+A capture is only useful later if it can be saved and opened again.
+This feature saves PD captures in an open, documented file format and loads them back exactly.
+The command line tool can save a live capture and decode a saved file.
+The meter's serial number is never written into the file.
+Opening the vendor's own PD log database is included as a read-only import.
+
+## Requirement
+
+PD captures save to and load from a documented open format without loss, and vendor PD log databases can be imported read-only.
+
+## Acceptance Criteria
+
+- AC-TGE83E.1: Save writes a pdcap file in JSON Lines: a header line with the format version, app version, meter model and firmware version, then one line per status sample or record with its session time and raw bytes in hex. The meter's serial number is never written.
+- AC-TGE83E.2: Loading a saved file restores the packet table, the details and the timeline exactly as they were, which a round-trip property test checks.
+- AC-TGE83E.3: A truncated or corrupt file loads every valid line before the damage and reports the line number where reading stopped.
+- AC-TGE83E.4: The command line tool saves a live capture with a save option on the pd command, and decodes a saved file with a decode subcommand.
+- AC-TGE83E.5: The format is documented in the reference docs with a worked example.
+- AC-TGE83E.6: A vendor PD log database with the pd_table layout from the protocol notes imports read-only into the analyzer view, tested with a database built from that layout.
+
+## Technical Design
+
+A small format module next to the capture core reads and writes the lines with a streaming reader. The desktop app's save and open dialogs reuse the existing export notices. The vendor import reads the database with an embedded SQLite library and maps its relative times to session time.
+
+## Testing
+
+Round-trip property tests, truncation tests at every byte offset of a small file, CLI tests for save and decode, and an import test with a generated database.
+
+## Notes
+
+A vendor pdStream import is out of scope.
