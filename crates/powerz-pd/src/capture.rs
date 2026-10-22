@@ -247,8 +247,10 @@ pub struct Capture {
 /// The whole little-endian 32-bit objects of `data` (a trailing partial
 /// object is dropped).
 fn objects(data: &[u8]) -> impl Iterator<Item = u32> + '_ {
-    data.chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+    data.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
 }
 
 /// Decode a complete extended data block (padding already cut for the

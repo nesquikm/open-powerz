@@ -45,8 +45,10 @@ fn event(r: &PdRecord) -> &PdEvent {
 }
 
 fn u32s(body: &[u8]) -> Vec<u32> {
-    body.chunks_exact(4)
-        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+    body.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|w| u32::from_le_bytes(*w))
         .collect()
 }
 
