@@ -46,4 +46,4 @@ Each change is its own regression test: the CI run that fails today must pass. L
 
 ## Notes
 
-Failing runs: 39651629627, 39672064832 and 39742831114. The macOS gate reported 75 gaps of 25–40 ms. The memory test failed its process-check step on Linux, the macOS render steps measured 102–216 ms, and the WebKit clear test raced the 2 SPS stream. The CHANGELOG 0.2.0 section is already released, so this fix goes in the next release.
+Failing runs: 39651629627, 39672064832, 39742831114. Evidence run 39747964247 (macOS gate, 10 s): 101 sleeps instead of about 500, max oversleep 265 ms, max loop work 6 ms, and every delivered record reached the sink. The runner oversleeps; the worker does not stall. The 0.2.0 CHANGELOG is released, so this fix ships next.

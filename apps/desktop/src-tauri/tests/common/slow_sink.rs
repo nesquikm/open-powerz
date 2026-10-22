@@ -160,13 +160,60 @@ pub struct Tolerance {
     pub min_samples: usize,
 }
 
-/// The budget for the value of `CI`. For now always strict.
+/// The strict budget: zero gaps, zero holes, every delivered record. The CI
+/// allowance lives in [`tolerance_for`].
 pub fn tolerance(_ci: Option<&str>) -> Tolerance {
     Tolerance {
         max_gaps: 0,
         max_holes: 0,
         every_record: true,
         min_samples: 9_000,
+    }
+}
+
+/// How often the worker polls the queue.
+pub const POLL_PERIOD: Duration = Duration::from_millis(20);
+
+/// How much of the record stream the meter keeps between polls.
+pub const METER_WINDOW: Duration = Duration::from_millis(63);
+
+/// Samples per millisecond at 1000 SPS.
+const SAMPLES_PER_MS: u128 = 1;
+
+/// Loop work between a wake and the next sleep outlasted the poll period: a
+/// stall in the worker, not the runner.
+fn stalled(evidence: &PollEvidence) -> bool {
+    evidence.max_work() > POLL_PERIOD
+}
+
+/// The budget for the value of `CI` and the run's sleep log (AC-KQF5GM.2).
+///
+/// Without `CI` it is [`tolerance`]. On CI, each poll gap that runs past the
+/// meter's window because the runner overslept buys one gap, one hole and
+/// the samples past the window (never more than the oversleep itself). A run
+/// whose own loop work outlasts the poll period gets no allowance: that is a
+/// stall in the worker, not the runner.
+pub fn tolerance_for(ci: Option<&str>, evidence: &PollEvidence) -> Tolerance {
+    let strict = tolerance(ci);
+    if ci.is_none_or(str::is_empty) || stalled(evidence) {
+        return strict;
+    }
+    let mut gaps = 0;
+    let mut lost = 0usize;
+    for w in evidence.sleeps().windows(2) {
+        let gap = w[1].woke.saturating_sub(w[0].woke);
+        let oversleep = w[1].woke.saturating_sub(w[1].started + w[1].requested);
+        let explained = gap.saturating_sub(METER_WINDOW).min(oversleep);
+        if !explained.is_zero() {
+            gaps += 1;
+            lost += usize::try_from(explained.as_millis() * SAMPLES_PER_MS).unwrap_or(usize::MAX);
+        }
+    }
+    Tolerance {
+        max_gaps: strict.max_gaps + gaps,
+        max_holes: strict.max_holes + gaps,
+        every_record: true,
+        min_samples: strict.min_samples.saturating_sub(lost),
     }
 }
 
@@ -194,6 +241,14 @@ pub fn check(
         breaches.push(format!(
             "only {} samples (need {})",
             outcome.samples, tolerance.min_samples
+        ));
+    }
+    let lossy = outcome.gaps > 0 || outcome.holes > 0 || outcome.samples < outcome.delivered;
+    if lossy && stalled(evidence) {
+        breaches.push(format!(
+            "the poll loop stalled: {} ms of work between a wake and the next sleep (poll period {} ms)",
+            evidence.max_work().as_millis(),
+            POLL_PERIOD.as_millis()
         ));
     }
     if tolerance.every_record {

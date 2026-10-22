@@ -194,11 +194,13 @@ fn a_sink_that_blocks_200_ms_per_event_loses_no_record_at_1000_sps() {
         history: store.history_len(),
     };
     // AC-KQF5GM.3: without CI, zero gaps, zero holes and every delivered record.
+    // AC-KQF5GM.2: on CI, only what the measured oversleep explains.
     let ci = std::env::var("CI").ok();
+    let evidence = clock.evidence();
     if let Err(message) = slow_sink::check(
         &outcome,
-        &slow_sink::tolerance(ci.as_deref()),
-        &clock.evidence(),
+        &slow_sink::tolerance_for(ci.as_deref(), &evidence),
+        &evidence,
     ) {
         panic!(
             "{message}; first gaps {:?}, first hole {:?}",

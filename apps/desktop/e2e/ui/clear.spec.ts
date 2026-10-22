@@ -68,6 +68,23 @@ async function clearHistory(page: Page, name: string | RegExp): Promise<void> {
   await expect(page.getByRole("alert")).toHaveCount(0);
 }
 
+/**
+ * Pauses the running page clock a moment ahead of its current time. The clock keeps
+ * running while the pause request travels to the page, so a target that close can be
+ * in the past by the time it lands; then retry with a wider lead.
+ */
+async function holdClock(page: Page): Promise<void> {
+  for (let leadMs = 50; ; leadMs *= 2) {
+    const target = (await page.evaluate(() => Date.now())) + leadMs;
+    try {
+      await page.clock.pauseAt(target);
+      return;
+    } catch (e) {
+      if (leadMs >= 3_200 || !String(e).includes("Cannot fast-forward to the past")) throw e;
+    }
+  }
+}
+
 /** "Whole session" and its first draw that ends after `afterMs`. */
 async function wholeSession(page: Page, afterMs: number): Promise<ChartDraw> {
   await page.getByRole("button", { name: "Whole session" }).click();
@@ -111,7 +128,7 @@ test("a clear empties the overview strip at once, before the next sample (AC-5X1
   await expect(page.getByLabel("Sample rate")).toHaveValue("2");
   await page.waitForTimeout(1_200);
   // Hold the clock: no stream tick, so no sample, until the checks below are done.
-  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1));
+  await holdClock(page);
   await clearHistory(page, "Clear chart history…");
   await expect.poll(() => overviewBreaks(page), { timeout: 150, intervals: [10] }).toEqual([]);
   // No window over an empty strip until the next sample arrives.
