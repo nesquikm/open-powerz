@@ -13,11 +13,11 @@ use powerz_protocol::transport::cdc::CdcTransport;
 use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C};
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
-use powerz_sim::{FaultPlan, Persona, SIM_SERIAL, SimClock, SimDevice};
+use powerz_sim::{FaultPlan, PdScenario, Persona, SIM_SERIAL, SimClock, SimDevice};
 
 use crate::args::{Cli, Command, TransportKind, needs_connect, rate_from_sps, validate};
 use crate::commands::{
-    StreamOptions, WatchOptions, info, list, read, select_device, stream, watch,
+    StreamOptions, WatchOptions, info, list, pd, read, select_device, stream, watch,
 };
 use crate::error::CliError;
 use crate::trace::TraceTransport;
@@ -94,12 +94,21 @@ fn run_sim(cli: &Cli) -> Result<(), CliError> {
     let demo = [demo_entry()];
     select_device(&demo, cli.device.as_deref())?;
     let faults = sim_faults()?;
+    // `pd` on the demo device plays the PD capture scenario.
+    let with_pd = |sim: SimDevice| match cli.command {
+        Command::Pd { .. } => sim.with_pd_scenario(PdScenario::Negotiation),
+        _ => sim,
+    };
     if std::env::var("POWERZ_SIM_CLOCK").as_deref() == Ok("fake") {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-        let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+        let sim = with_pd(SimDevice::with_clock(
+            Persona::Bulk,
+            cli.scenario,
+            clock.clone(),
+        ));
         with_ctrl_c_after(cli, sim.with_faults(faults), clock)
     } else {
-        let sim = SimDevice::new(Persona::Bulk, cli.scenario);
+        let sim = with_pd(SimDevice::new(Persona::Bulk, cli.scenario));
         with_ctrl_c_after(cli, sim.with_faults(faults), SystemClock)
     }
 }
@@ -234,6 +243,10 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
                 &mut std::io::stderr().lock(),
             )
             .map(|_| ())
+        }
+        Command::Pd { json } => {
+            let stop = ctrl_c_flag()?;
+            pd(&mut session, *json, &stop, &mut out)
         }
     }
 }

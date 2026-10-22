@@ -5,6 +5,7 @@
 
 pub mod adc;
 pub mod info;
+pub mod pd_packet;
 pub mod queue;
 pub mod rate;
 pub mod settings;

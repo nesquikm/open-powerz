@@ -1,0 +1,4 @@
+# 36-byte PUT_DATA reply to GET_DATA mask 0x010 (PD_PACKET): PS_RDY + GoodCRC
+# source: notes/device/vectors/s2_t3_pd_ladder.jsonl (session 2, firmware 2.0.6), JSON line #17 (0-based); PD poll reply only, no serial or UID
+413d8201100000079a0bf70247140000f905030087600bf70200a605c7600bf7
+02008104

@@ -11,6 +11,7 @@
 
 mod device;
 mod memory;
+mod pd;
 mod queue;
 
 use std::collections::VecDeque;
@@ -18,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+pub use pd::PdScenario;
 use powerz_protocol::session::Clock;
 use powerz_protocol::transport::{Error, Transport};
 
@@ -300,6 +302,8 @@ pub struct SimDevice {
     polls: usize,
     /// The meter was "unplugged" by a disconnect fault.
     unplugged: bool,
+    /// The PD sniffer (0x10 / 0x11) and its capture scenario.
+    pd: pd::PdSniffer,
 }
 
 impl SimDevice {
@@ -336,6 +340,7 @@ impl SimDevice {
             requests: 0,
             polls: 0,
             unplugged: false,
+            pd: pd::PdSniffer::default(),
         }
     }
 
@@ -345,6 +350,14 @@ impl SimDevice {
             TimeSource::Real(t0) => t0.elapsed().as_millis() as u64,
             TimeSource::Sim { clock, start } => clock.now_ms().saturating_sub(*start),
         }
+    }
+
+    /// Play `scenario` on the PD sniffer: from each sniffer start (0x10,
+    /// mode 1) PD_PACKET polls carry its records. Without a PD scenario the
+    /// sniffer captures nothing (status block only).
+    pub fn with_pd_scenario(mut self, scenario: PdScenario) -> SimDevice {
+        self.pd.set_scenario(scenario);
+        self
     }
 
     /// Inject `faults`.

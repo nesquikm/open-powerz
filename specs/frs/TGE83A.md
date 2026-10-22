@@ -36,7 +36,7 @@ The protocol library and the command line tool capture PD traffic from the meter
 
 ## Technical Design
 
-A sniffer session type in the protocol crate owns start, poll and stop, and stops on drop. A pure parser turns a chunk into a status sample plus records; message bodies stay raw bytes here and are decoded by the PD decoder FR. The CLI subcommand drives the session and prints records. The simulator answers 0x10, 0x11 and attribute 0x10 polls from a scripted capture.
+A sniffer session type in the protocol crate owns start, poll and stop, and stops on drop. A pure parser turns a chunk into a status sample plus records; message bodies stay raw bytes here and are decoded by the PD decoder FR. The CLI subcommand drives the session and prints records. Like the authenticated queue stream, it runs over the bulk pipe only: HID replies would span several reports, and sniffing with 0x10 started over CDC is unverified. The simulator answers 0x10, 0x11 and attribute 0x10 polls from a scripted capture.
 
 ## Testing
 

@@ -1,0 +1,3 @@
+# 26-byte PUT_DATA reply to GET_DATA mask 0x010 (PD_PACKET): Hard Reset (meter)
+# source: notes/device/vectors/s2_t6_session_ctl.jsonl (session 2, firmware 2.0.6), JSON line #232 (0-based); PD poll reply only, no serial or UID
+4137c20010008004f35bf8029a020000f705000045b45bf80204

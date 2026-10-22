@@ -115,6 +115,12 @@ pub enum Command {
         #[arg(long, value_name = "SECONDS")]
         duration: Option<f64>,
     },
+    /// Capture USB PD traffic (messages and events) until Ctrl-C; bulk pipe only.
+    Pd {
+        /// Print one JSON object per record (JSON Lines) instead of text lines.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl Command {
@@ -126,6 +132,7 @@ impl Command {
             Command::Read { .. } => "read",
             Command::Watch { .. } => "watch",
             Command::Stream { .. } => "stream",
+            Command::Pd { .. } => "pd",
         }
     }
 }

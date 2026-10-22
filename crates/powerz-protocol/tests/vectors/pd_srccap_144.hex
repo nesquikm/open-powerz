@@ -1,0 +1,7 @@
+# 144-byte PUT_DATA reply to GET_DATA mask 0x010 (PD_PACKET): SOP' Discover Identity, Source_Capabilities, Request, Accept
+# source: notes/device/vectors/s2_t3_pd_ladder.jsonl (session 2, firmware 2.0.6), JSON line #15 (0-based); PD poll reply only, no serial or UID
+413c0208100000225c0bf7023e140000f80503008b390bf702018f1001a000ff
+873a0bf7020141019b3c0bf702018f5141a800ff0d0560184d40000000005482
+40260a00873d0bf702014100973e0bf70200a1412c9181092cd102002cb10400
+d6410600c73f0bf702008100cb400bf7020082102cb1441387410bf702006101
+87420bf70200a303c7430bf702008102

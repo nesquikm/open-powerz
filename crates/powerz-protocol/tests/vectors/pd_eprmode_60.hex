@@ -1,0 +1,4 @@
+# 60-byte PUT_DATA reply to GET_DATA mask 0x010 (PD_PACKET): EPR_Mode Enter / Enter_Acknowledged
+# source: notes/device/vectors/s2_t3_pd_ladder.jsonl (session 2, firmware 2.0.6), JSON line #101 (0-based); PD poll reply only, no serial or UID
+416702031000000dc115f70246140000fc050400cb8915f702008a1800000001
+878a15f7020061098b8b15f70200aa1d00000002c78c15f70200810c

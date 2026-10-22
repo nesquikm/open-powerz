@@ -503,8 +503,13 @@ not yet tested on the device. [doc] [static]
 - [device] On firmware 2.0.6, 0x10 and 0x11 are REJECTed at auth level 0 and
   ACCEPTed at level 1. Polling PD_PACKET works at level 0 and returns the
   12-byte status. Prior art said capture works without auth; device overrides.
-- Whether records arrive without 0x10, and PD capture with a real charger,
-  are untested. [inferred]
+- [device] Records arrive without 0x10 too: polling PD_PACKET at level 0
+  returned the PD traffic the meter itself took part in (session 2, over
+  CDC). A section carries at most about 320 bytes; older records stay
+  queued and come with the next polls, so poll fast (every 5 ms) or until a
+  poll returns only the status block.
+- Capturing a negotiation that passes through the meter (charger on the
+  input, sink on the output) with 0x10 started is not yet checked. [inferred]
 - An open serial `pdm open` session reportedly holds the PD engine, so bulk
   PD queries get REJECT until `pdm close`. [inferred] (prior art)
 
@@ -522,16 +527,25 @@ Records follow, each starting with a flag / length byte `b0`: [static]
 
 | b0 | record length (incl. b0) | kind | tag |
 |---|---|---|---|
-| bit 7 set | `(b0 AND 0x3F) + 1` | PD message | [static] [inferred] (prior art) |
+| bit 7 set | `(b0 AND 0x3F) + 1` | PD message | [static] [device] |
 | bit 7 clear, bit 5 set | `(b0 AND 0x1F) + 1 + u16 at record offset 6` | long (extended) PD message | [static] |
-| bit 7 clear, bit 5 clear | `(b0 AND 0x1F) + 1` | event | [static] |
+| bit 7 clear, bit 5 clear | `(b0 AND 0x1F) + 1` | event | [static] [device] |
+
+- Bit 6 of `b0` marks a record the meter sent itself: its own requests,
+  GoodCRCs and resets, as opposed to traffic from the line. [device]
+- Bit 7 wins over bit 5: `0xA3` is a 36-byte PD message, not a long one.
+  [device]
+- A record whose length runs past the end of the section is skipped and
+  counted, and parsing of that section stops there; a record too short for
+  its kind is skipped and parsing goes on. No long record (bit 5) has been
+  seen on the device; EPR_Source_Capabilities arrived chunked. [device]
 
 Record body:
 
 | off | type | field | tag |
 |---|---|---|---|
 | +0 | u8 | `b0` | [static] |
-| +1 | u32 | timestamp, ms | [static] |
+| +1 | u32 | timestamp, ms; same clock as the status block. Our library reports it as ms since the capture start, never going backwards when the meter clock restarts | [static] [device] |
 | +5 | u8 | PD: SOP type (low 3 bits: 0 SOP, 1 SOP', 2 SOP'', 3 SOP'_Debug, 4 SOP''_Debug); event: code in the low nibble, parameter in the high nibble | [static] |
 | +6 | u16 | PD: message header (long messages: extra length here, header at +8) | [static] |
 | +8 | u32 x n | PD data objects, decoded per USB PD r3.2 | [static] |
