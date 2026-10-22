@@ -72,9 +72,26 @@ second).
 Press Record to write a CSV while you watch, or Export to save the whole
 session so far. Press ? for every keyboard shortcut.
 
+## Watch a PD negotiation
+
+Open the **PD analyzer** tab and press **Start capture**. With a demo device
+connected, the table fills with a scripted USB PD negotiation: one row per
+message or event, with a one-line summary. Select a row to see its decoded
+fields and raw bytes. Back on the **Meter** tab, the same messages show as
+markers above the chart.
+
+The CLI shows the same capture as text:
+
+```bash
+cargo run -p powerz-cli -- --transport sim pd
+```
+
+Press Ctrl-C to stop it.
+
 ## Where to next
 
 - Recipes: [record a high-rate CSV](../how-to/record-a-csv.md),
-  [explore a session in the desktop app](../how-to/explore-a-session.md)
+  [explore a session in the desktop app](../how-to/explore-a-session.md),
+  [analyze USB PD traffic](../how-to/analyze-pd-traffic.md)
 - Every command and option: [CLI reference](../reference/cli.md)
 - Why it is built this way: [architecture](../explanation/architecture.md)

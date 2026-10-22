@@ -1,3 +1,5 @@
+import type { PdMarkerKind } from "./pdTimeline";
+
 /** User theme choice; `system` follows `prefers-color-scheme`. */
 export type ThemeChoice = "system" | "light" | "dark";
 /** Theme actually painted. */
@@ -73,6 +75,8 @@ export interface ThemePalette {
   focus: string;
   accent: string;
   chart: Record<string, string>;
+  /** PD marker colours on the power chart, one per marker kind (FR TGE83D). */
+  pdMarker: Record<PdMarkerKind, string>;
 }
 
 export const THEME_COLORS: Record<ResolvedTheme, ThemePalette> = {
@@ -95,6 +99,13 @@ export const THEME_COLORS: Record<ResolvedTheme, ThemePalette> = {
       cc1: "#0e7490",
       cc2: "#be185d",
     },
+    pdMarker: {
+      negotiation: "#0f766e",
+      reset: "#c2410c",
+      error: "#b91c1c",
+      attach_detach: "#6d28d9",
+      other: "#4b5563",
+    },
   },
   dark: {
     bg: "#111317",
@@ -114,6 +125,13 @@ export const THEME_COLORS: Record<ResolvedTheme, ThemePalette> = {
       dMinus: "#fbbf24",
       cc1: "#22d3ee",
       cc2: "#f472b6",
+    },
+    pdMarker: {
+      negotiation: "#2dd4bf",
+      reset: "#fb923c",
+      error: "#f87171",
+      attach_detach: "#a78bfa",
+      other: "#9ca3af",
     },
   },
 };
@@ -160,6 +178,9 @@ export function themeVariables(theme: ResolvedTheme): Record<string, string> {
   }
   for (const [key, value] of Object.entries(p.chart)) {
     vars[`--chart-${kebab(key)}`] = value;
+  }
+  for (const [key, value] of Object.entries(p.pdMarker)) {
+    vars[`--pd-${key.replace(/_/g, "-")}`] = value;
   }
   return vars;
 }

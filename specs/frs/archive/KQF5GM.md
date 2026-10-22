@@ -1,8 +1,8 @@
 ---
 title: CI green on all 8 jobs
 milestone: M_NE3C7K
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T20:50:59Z
 id: fr_01M5HAGR722RHPWBP6Z6KQF5GM
 created_at: 2026-10-22T08:09:24.450Z
 changelog_category: Fixed
@@ -51,3 +51,7 @@ Each change is its own regression test: the CI run that fails today must pass. L
 ## Notes
 
 Evidence: 39747964247 (101 of ~500 sleeps, oversleep 265 ms, work 6 ms) and 39759034254 (one 61 ms cycle); delivered records always reached the sink. In run 39763805516 the macOS gate passed: descheduling, no stall. CI-factor budgets: render steps 100 ms, redraw floor 20 per second, reload backfill 1.5 s, clear latency 150 ms.
+
+## Implementation notes
+
+No advisory notes.

@@ -18,6 +18,10 @@ import type {
   HistoryGap,
   HistorySeries,
   MinMaxAvg,
+  PdDetails,
+  PdOpened,
+  PdRow,
+  PdStatusSample,
   RecordingSummary,
   Sample,
   Series,
@@ -26,6 +30,7 @@ import type {
   UiError,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
+import { PD_CYCLE_MS, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
@@ -288,6 +293,54 @@ export function syntheticFromUrl(search: string | undefined, dev: boolean): numb
   return Number.isInteger(n) && n > 0 ? Math.min(n, MAX_SYNTHETIC_SAMPLES) : null;
 }
 
+/** `?pdsynthetic=<n>` in the page URL seeds `n` PD records when the capture starts, for
+ * the PD table's performance check (AC-TGE83C.6); mock builds only. */
+export function pdSyntheticFromUrl(search: string | undefined): number | null {
+  const raw = urlParam(search, "pdsynthetic");
+  if (raw === null) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** Options of a {@link MockBackend}. */
+export interface MockOptions {
+  /** PD records to seed when the capture first starts. */
+  pdSynthetic?: number | null;
+}
+
+/** Rows per `pd_rows` event of a seed, so one event never gets huge. */
+const PD_SEED_BATCH = 10_000;
+
+/** The meter's PD status block period while the sniffer runs, ms (FR TGE83D). */
+const PD_STATUS_MS = 5;
+
+/** The PD capture of a mock session (FR TGE83C). */
+interface MockPdCapture {
+  /** The PD sniffer runs. */
+  timer: ReturnType<typeof setInterval> | null;
+  /** Index of `records[0]`; it grows on a clear, so indices never restart. */
+  base: number;
+  /** Script record of every captured record, by record index minus `base`. */
+  records: number[];
+  /** The next script record. */
+  next: number;
+  /** Capture time reached, ms. */
+  nowMs: number;
+  /** The seed was played (once per session). */
+  seeded: boolean;
+  /** Session time (sample `t_ms`) minus capture time for the running capture run. */
+  sessionOffsetMs: number;
+  /** The row of every captured record, by record index minus `base`. */
+  rows: PdRow[];
+}
+
+/** A PD capture saved, or opened, in the mock: script records and rows from index 0. */
+interface MockPdFile {
+  path: string;
+  records: number[];
+  rows: PdRow[];
+}
+
 interface Running {
   /** The picker id the session was connected with. */
   deviceId: string;
@@ -312,6 +365,7 @@ interface Running {
   /** The outage gap the backend announces before the first samples after it. */
   pendingGap: Gap | null;
   stats: MockStats;
+  pd: MockPdCapture;
 }
 
 interface MockRecording {
@@ -322,13 +376,14 @@ interface MockRecording {
 }
 
 /** Scripted backend behaviours chosen with `?mock=<name>` in the page URL; the device
- * list stays the same in every one. */
+ * list stays the same in every one but `replug`. */
 export const MOCK_MODES = [
   "permission-denied",
   "rate-locked",
   "slow-export",
   "outage",
   "blip",
+  "replug",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -346,6 +401,41 @@ export const MOCK_OUTAGE = { startMs: 30_400_000, beforeMs: 20_000, gapMs: 2_400
 /** `blip`: as `outage`, but the meter is gone for only `gapMs`, shorter than the
  * collapse threshold, so the gap keeps its true width on screen (AC-CWWKJ6.1). */
 export const MOCK_BLIP = { startMs: 30_400_000, beforeMs: 20_000, gapMs: 10_000 } as const;
+
+/** `replug`: one real meter (`serial`) is listed next to the demo entries. A session on
+ * it streams `beforeMs`, then the meter is unplugged: the session ends with an unplug
+ * error, the backend waits for the serial, and the list loses the meter. After `awayMs`
+ * the OS lists it again at a new address and the backend reconnects on its own. */
+export const MOCK_REPLUG = { serial: "MOCK-REPLUG-0001", beforeMs: 3_000, awayMs: 3_000 } as const;
+
+/** The replug meter's picker entry at USB address `address`. */
+function replugMeter(address: number): DeviceListing {
+  return {
+    id: `usb:1:${address}`,
+    label: `KM003C — ${MOCK_REPLUG.serial}`,
+    model: "KM003C",
+    serial: MOCK_REPLUG.serial,
+    bus: "1",
+    address,
+    demo_scenario: null,
+  };
+}
+
+/** The status event of a mock session that just connected; a null rate is a locked one. */
+function connectedStatus(serial: string, rateSps: number | null): BackendEvent {
+  return {
+    type: "status",
+    data: {
+      state: "connected",
+      model: "KM003C",
+      firmware_version: "2.0.6",
+      serial,
+      rate_sps: rateSps,
+      rate_locked: rateSps === null,
+      session_id: 1,
+    },
+  };
+}
 
 /** How long a `slow-export` export stays half done, so the UI suite can see its progress. */
 const SLOW_EXPORT_MS = 30_000;
@@ -368,16 +458,42 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
  * when the page goes away (it is a test and demo double, not a resource owner). */
 export class MockBackend {
   #session: Running | null = null;
+  /** The PD capture saved last in the page, and the one opened (FR TGE83E). */
+  #savedPd: MockPdFile | null = null;
+  #openedPd: MockPdFile | null = null;
   #mode: MockMode | null;
+  #options: MockOptions;
   #revealed: string[] = [];
+  /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
+  #meterAddress: number | null = 7;
+  /** `replug`: the session whose meter is away, which the backend waits for. */
+  #waiting: Running | null = null;
+  /** `replug`: the meter is unplugged only once per page. */
+  #unplugDone = false;
+  #replugTimer: ReturnType<typeof setTimeout> | null = null;
+  #watchers = new Set<(devices: DeviceListing[]) => void>();
 
-  /** `mode` defaults to the page URL's `?mock=` parameter. */
-  constructor(mode: MockMode | null = mockModeFromUrl(pageSearch())) {
+  /** `mode` defaults to the page URL's `?mock=` parameter, the PD seed to its
+   * `?pdsynthetic=`. */
+  constructor(
+    mode: MockMode | null = mockModeFromUrl(pageSearch()),
+    options: MockOptions = { pdSynthetic: pdSyntheticFromUrl(pageSearch()) },
+  ) {
     this.#mode = mode;
+    this.#options = options;
+  }
+
+  /** `replug`: the real meter's listing while the OS lists it, else null. */
+  #listedMeter(): DeviceListing | null {
+    return this.#mode === "replug" && this.#meterAddress !== null
+      ? replugMeter(this.#meterAddress)
+      : null;
   }
 
   async listDevices(): Promise<DeviceListing[]> {
-    return SCENARIOS.map((name) => ({
+    const meter = this.#listedMeter();
+    const meters = meter ? [meter] : [];
+    const demos = SCENARIOS.map((name) => ({
       id: `demo:${name}`,
       label: `Demo device — ${name}`,
       model: "KM003C",
@@ -386,12 +502,19 @@ export class MockBackend {
       address: null,
       demo_scenario: name,
     }));
+    return [...meters, ...demos];
   }
 
-  /** The demo list never changes, so there is nothing to unsubscribe from. */
+  /** The full list now and on every change (only `replug` changes it). */
   async watchDevices(onChange: (devices: DeviceListing[]) => void): Promise<() => void> {
+    this.#watchers.add(onChange);
     onChange(await this.listDevices());
-    return () => {};
+    return () => this.#watchers.delete(onChange);
+  }
+
+  async #notifyDevices(): Promise<void> {
+    const list = await this.listDevices();
+    for (const w of this.#watchers) w(list);
   }
 
   async connect(
@@ -400,23 +523,15 @@ export class MockBackend {
     onEvent: (event: BackendEvent) => void,
   ): Promise<void> {
     if (this.#session) throw usage("A meter is already connected. Disconnect it first.");
-    const scenario = scenarioOf(deviceId);
+    const isMeter = this.#listedMeter()?.id === deviceId;
+    // A connect by hand ends any wait for the unplugged meter.
+    this.#waiting = null;
+    const scenario = isMeter ? "load-5v-1a" : scenarioOf(deviceId);
     if (!scenario) throw usage("That meter is no longer attached.");
     if (this.#mode === "permission-denied") throw { ...LINUX_PERMISSION_DENIED };
     const locked = this.#mode === "rate-locked";
     // Like the worker: a locked session's rate is unknown until measured.
-    onEvent({
-      type: "status",
-      data: {
-        state: "connected",
-        model: "KM003C",
-        firmware_version: "2.0.6",
-        serial: "123456",
-        rate_sps: locked ? null : rateSps,
-        rate_locked: locked,
-        session_id: 1,
-      },
-    });
+    onEvent(connectedStatus(isMeter ? MOCK_REPLUG.serial : "123456", locked ? null : rateSps));
     if (locked) {
       onEvent({
         type: "status",
@@ -437,17 +552,70 @@ export class MockBackend {
       gaps: [],
       pendingGap: null,
       stats: new MockStats(),
+      pd: {
+        timer: null,
+        base: 0,
+        records: [],
+        next: 0,
+        nowMs: 0,
+        seeded: false,
+        sessionOffsetMs: 0,
+        rows: [],
+      },
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
     this.#session = session;
     if (this.#mode === "outage") this.#seedOutage(session, MOCK_OUTAGE);
     if (this.#mode === "blip") this.#seedOutage(session, MOCK_BLIP);
+    if (isMeter && !this.#unplugDone) {
+      this.#unplugDone = true;
+      this.#replugTimer = setTimeout(() => this.#unplug(session), MOCK_REPLUG.beforeMs);
+    }
     // The mock production build (the Playwright suite) honours it too.
     const synthetic = syntheticFromUrl(
       pageSearch(),
       import.meta.env.DEV || import.meta.env.VITE_BACKEND === "mock",
     );
     if (synthetic !== null) await this.seedSyntheticHistory(synthetic);
+  }
+
+  /** `replug`: the cable is pulled. Like the backend: an open recording ends, the
+   * session ends with an unplug error, the backend says it waits for the serial, and the
+   * list loses the meter; after `awayMs` the meter is back and the session goes on. */
+  #unplug(s: Running): void {
+    this.#replugTimer = null;
+    if (this.#session !== s) return;
+    this.#endSession(s, {
+      kind: "disconnected",
+      message: "The meter was unplugged.",
+      hint: null,
+    });
+    this.#waiting = s;
+    s.onEvent({ type: "status", data: { state: "waiting", serial: MOCK_REPLUG.serial } });
+    this.#meterAddress = null;
+    void this.#notifyDevices();
+    this.#replugTimer = setTimeout(() => this.#replug(s), MOCK_REPLUG.awayMs);
+  }
+
+  /** `replug`: the OS lists the meter again at a new address; a session still waiting
+   * for it reconnects on the same timeline, with an outage gap over the time away. */
+  #replug(s: Running): void {
+    this.#replugTimer = null;
+    this.#meterAddress = 9;
+    void this.#notifyDevices();
+    if (this.#waiting !== s || this.#session) return;
+    this.#waiting = null;
+    const step = 1000 / s.rateSps;
+    const from = Math.round(s.nextMs - step);
+    s.nextMs += MOCK_REPLUG.awayMs;
+    s.carry = 0;
+    s.deviceId = replugMeter(9).id;
+    const gap = { from_ms: from, to_ms: Math.round(s.nextMs) };
+    s.gaps.push(gap);
+    s.pendingGap = { kind: "outage", ...gap };
+    s.onEvent(connectedStatus(MOCK_REPLUG.serial, s.rateSps));
+    s.timer = setInterval(() => this.#tick(s), BATCH_MS);
+    this.#session = s;
   }
 
   /** `outage` / `blip`: the run before the outage, then the live stream after it. */
@@ -526,9 +694,24 @@ export class MockBackend {
     return s;
   }
 
+  /** Stops waiting for the unplugged meter: it is listed again later, not reconnected. */
+  async cancelWait(): Promise<void> {
+    this.#waiting = null;
+  }
+
   async disconnect(): Promise<void> {
     const s = this.#open();
+    if (this.#replugTimer !== null) clearTimeout(this.#replugTimer);
+    this.#replugTimer = null;
+    this.#endSession(s, null);
+  }
+
+  /** Stops `s`'s stream, ends an open recording, and reports the session over with
+   * `error` (null when it was asked for). */
+  #endSession(s: Running, error: UiError | null): void {
     clearInterval(s.timer);
+    // Like the worker: the sniffer stops before the session ends.
+    this.#stopPd(s);
     this.#session = null;
     if (s.recording) {
       const rows = s.recording.rows;
@@ -538,7 +721,7 @@ export class MockBackend {
         data: { state: "stopped", rows, gaps: [], disconnected: true },
       });
     }
-    s.onEvent({ type: "status", data: { state: "disconnected", error: null } });
+    s.onEvent({ type: "status", data: { state: "disconnected", error } });
   }
 
   async setRate(rateSps: number): Promise<void> {
@@ -635,6 +818,146 @@ export class MockBackend {
     const s = this.#open();
     s.history = new HistoryColumns();
     s.gaps = [];
+  }
+
+  /** Starts the scripted PD capture: rows go out with every batch tick, like the
+   * worker's at most 60 times a second. */
+  async pdStart(): Promise<void> {
+    const s = this.#open();
+    const pd = s.pd;
+    if (pd.timer !== null) return;
+    pd.timer = setInterval(() => this.#pdTick(s), BATCH_MS);
+    s.onEvent({ type: "pd_state", data: { capturing: true } });
+    const seed = this.#options.pdSynthetic ?? 0;
+    const seeding = !pd.seeded && seed > 0;
+    // Like the backend: one run's records sit on the samples' time base at a constant
+    // offset, the run starting now (a seed ending now).
+    const startMs = seeding ? pdRecordTime(pd.next + seed) : pd.nowMs;
+    pd.sessionOffsetMs = Math.round(s.nextMs) - startMs;
+    if (seeding) {
+      pd.seeded = true;
+      for (let from = 0; from < seed; from += PD_SEED_BATCH) {
+        const rows: PdRow[] = [];
+        for (let k = from; k < Math.min(seed, from + PD_SEED_BATCH); k++)
+          rows.push(this.#capture(pd));
+        s.onEvent({ type: "pd_rows", data: { rows } });
+      }
+      pd.nowMs = pdRecordTime(pd.next);
+    }
+  }
+
+  /** Captures the next script record; its row. */
+  #capture(pd: MockPdCapture): PdRow {
+    const k = pd.next++;
+    pd.records.push(k);
+    const row = pdRow(k, pd.base + pd.records.length - 1);
+    row.session_ms = row.elapsed_ms + pd.sessionOffsetMs;
+    pd.rows.push(row);
+    return row;
+  }
+
+  #pdTick(s: Running): void {
+    const pd = s.pd;
+    const rows: PdRow[] = [];
+    while (pdRecordTime(pd.next) <= pd.nowMs) rows.push(this.#capture(pd));
+    // The status blocks polled since the last tick, on the samples' time base.
+    const samples: PdStatusSample[] = [];
+    for (let t = pd.nowMs; t < pd.nowMs + BATCH_MS; t += PD_STATUS_MS) {
+      const ms = t + pd.sessionOffsetMs;
+      const m = sampleAt(s.scenario, ms);
+      samples.push({
+        session_ms: ms,
+        vbus_v: m.vbus_v,
+        ibus_a: m.ibus_a,
+        cc1_v: m.cc1_v,
+        cc2_v: m.cc2_v,
+      });
+    }
+    pd.nowMs += BATCH_MS;
+    if (rows.length > 0) s.onEvent({ type: "pd_rows", data: { rows } });
+    s.onEvent({ type: "pd_status", data: { samples } });
+  }
+
+  /** Stops `s`'s PD capture, if it runs. */
+  #stopPd(s: Running): void {
+    if (s.pd.timer === null) return;
+    clearInterval(s.pd.timer);
+    s.pd.timer = null;
+    s.onEvent({ type: "pd_state", data: { capturing: false } });
+  }
+
+  async pdStop(): Promise<void> {
+    this.#stopPd(this.#open());
+  }
+
+  async pdDetails(index: number, opened = false): Promise<PdDetails> {
+    if (opened) {
+      const k = this.#openedPd?.records[index];
+      if (k === undefined) throw usage("That PD record is not in the opened capture.");
+      return pdDetailsOf(k, index);
+    }
+    const s = this.#open();
+    const k = s.pd.records[index - s.pd.base];
+    if (k === undefined) throw usage("That PD record is not in the capture.");
+    return pdDetailsOf(k, index);
+  }
+
+  /** Drops every captured PD record; a running capture goes on. Like the backend,
+   * indices keep counting: resolves to the index of the next record. */
+  async pdClear(): Promise<number> {
+    const hadOpened = this.#openedPd !== null;
+    this.#openedPd = null;
+    if (hadOpened && this.#session === null) return 0;
+    const pd = this.#open().pd;
+    pd.base += pd.records.length;
+    pd.records = [];
+    pd.rows = [];
+    return pd.base;
+  }
+
+  /** There is no save dialog: the proposed name is the path. Resolves to the number of
+   * records captured so far; the capture is kept for {@link pdOpen}. */
+  async pdSave(suggestedName: string): Promise<ExportResult | null> {
+    const pd = this.#open().pd;
+    this.#savedPd = {
+      path: suggestedName,
+      records: [...pd.records],
+      rows: pd.rows.map((r, i) => ({ ...r, index: i })),
+    };
+    return { path: suggestedName, rows: pd.records.length };
+  }
+
+  /** There is no open dialog: opens the capture saved last in the page (`null` when
+   * none was). Needs no meter, like the backend. */
+  async pdOpen(): Promise<PdOpened | null> {
+    const saved = this.#savedPd;
+    if (saved === null) return null;
+    this.#openedPd = saved;
+    return {
+      path: saved.path,
+      rows: saved.rows.map((r) => ({ ...r })),
+      status: [],
+      damaged_line: null,
+      oversized: 0,
+      truncated: false,
+    };
+  }
+
+  /** There is no open dialog: imports a vendor log of one cycle of the demo PD
+   * script. Needs no meter, like the backend. */
+  async pdImport(): Promise<PdOpened | null> {
+    const records: number[] = [];
+    for (let k = 0; pdRecordTime(k) < PD_CYCLE_MS; k++) records.push(k);
+    const rows = records.map((k, i) => pdRow(k, i));
+    this.#openedPd = { path: "vendor-pd-log.sqlite", records, rows };
+    return {
+      path: "vendor-pd-log.sqlite",
+      rows: rows.map((r) => ({ ...r })),
+      status: [],
+      damaged_line: null,
+      oversized: 0,
+      truncated: false,
+    };
   }
 
   async appInfo(): Promise<AppInfo> {

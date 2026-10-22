@@ -217,3 +217,16 @@ describe("the overlay lists Escape (FR M46CTX)", () => {
     expect(row?.description ?? "").toMatch(/close|cancel/i);
   });
 });
+
+describe("ARIA widgets keep their own navigation keys (FR TGE83C / TGE83D)", () => {
+  it("a focused tab, grid row or tree item keeps the arrows, Home and End", () => {
+    for (const role of ["tab", "grid", "row", "tree", "treeitem"]) {
+      const target = { tagName: "DIV", isContentEditable: false, role };
+      for (const k of ["ArrowLeft", "ArrowRight", "Home", "End"]) {
+        expect(shortcutFor(key(k, { target })), `${role} ${k}`).toBeNull();
+      }
+      // Other shortcuts still work there.
+      expect(shortcutFor(key("?", { target }))).toEqual({ kind: "help" });
+    }
+  });
+});

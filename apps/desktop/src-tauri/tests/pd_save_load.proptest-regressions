@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 08d435e14824b1c77335a2d0986dfd6497287e2ff8c2dc18cb6aa9a07a8e1891 # shrinks to polls = [Poll { offset_ms: None, status: PdStatus { time_ms: 0, vbus_mv: 0, ibus_ma: 0, cc1_mv: 0, cc2_mv: 0 }, records: [] }]

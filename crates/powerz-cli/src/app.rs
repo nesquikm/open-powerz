@@ -13,11 +13,12 @@ use powerz_protocol::transport::cdc::CdcTransport;
 use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C};
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
-use powerz_sim::{FaultPlan, Persona, SIM_SERIAL, SimClock, SimDevice};
+use powerz_sim::{FaultPlan, PdScenario, Persona, SIM_SERIAL, SimClock, SimDevice};
 
-use crate::args::{Cli, Command, TransportKind, needs_connect, rate_from_sps, validate};
+use crate::args::{Cli, Command, PdDecode, TransportKind, needs_connect, rate_from_sps, validate};
 use crate::commands::{
-    StreamOptions, WatchOptions, info, list, read, select_device, stream, watch,
+    StreamOptions, WatchOptions, info, list, pd, pd_decode, pd_save, read, select_device, stream,
+    watch,
 };
 use crate::error::CliError;
 use crate::trace::TraceTransport;
@@ -50,6 +51,9 @@ fn demo_entry() -> DeviceEntry {
 
 /// Validate, discover, select the meter, open the chosen pipe and dispatch.
 fn try_run(cli: &Cli) -> Result<(), CliError> {
+    if let Some(d) = &cli.pd_file.decode {
+        return decode_file(d);
+    }
     validate(cli)?;
     if let Command::List { json, include_demo } = cli.command {
         let mut devices = if include_demo {
@@ -88,18 +92,40 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     }
 }
 
+/// `pd decode FILE`: decode a saved pdcap file; no device is opened.
+fn decode_file(d: &PdDecode) -> Result<(), CliError> {
+    let name = d.file.display().to_string();
+    let file = std::fs::File::open(&d.file)
+        .map_err(|e| CliError::Usage(format!("cannot open {name}: {e}")))?;
+    pd_decode(
+        std::io::BufReader::new(file),
+        &name,
+        d.json,
+        &mut std::io::stdout().lock(),
+    )
+}
+
 /// `--transport sim`: open the demo device (bulk persona, `--scenario`)
 /// without touching USB; `--device` must name its synthetic serial.
 fn run_sim(cli: &Cli) -> Result<(), CliError> {
     let demo = [demo_entry()];
     select_device(&demo, cli.device.as_deref())?;
     let faults = sim_faults()?;
+    // `pd` on the demo device plays the PD capture scenario.
+    let with_pd = |sim: SimDevice| match cli.command {
+        Command::Pd { .. } => sim.with_pd_scenario(PdScenario::Negotiation),
+        _ => sim,
+    };
     if std::env::var("POWERZ_SIM_CLOCK").as_deref() == Ok("fake") {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-        let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+        let sim = with_pd(SimDevice::with_clock(
+            Persona::Bulk,
+            cli.scenario,
+            clock.clone(),
+        ));
         with_ctrl_c_after(cli, sim.with_faults(faults), clock)
     } else {
-        let sim = SimDevice::new(Persona::Bulk, cli.scenario);
+        let sim = with_pd(SimDevice::new(Persona::Bulk, cli.scenario));
         with_ctrl_c_after(cli, sim.with_faults(faults), SystemClock)
     }
 }
@@ -234,6 +260,17 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
                 &mut std::io::stderr().lock(),
             )
             .map(|_| ())
+        }
+        Command::Pd { json } => {
+            let stop = ctrl_c_flag()?;
+            match &cli.pd_file.save {
+                Some(path) => {
+                    // Created on the first write, i.e. once the meter answered.
+                    let mut file = std::io::BufWriter::new(LazyFile::new(path.clone()));
+                    pd_save(&mut session, *json, &stop, &mut out, &mut file)
+                }
+                None => pd(&mut session, *json, &stop, &mut out),
+            }
         }
     }
 }

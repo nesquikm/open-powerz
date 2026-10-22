@@ -6,6 +6,13 @@
     connect,
     disconnect,
     exportSession,
+    pdClear,
+    pdDetails,
+    pdImport,
+    pdOpen,
+    pdSave,
+    pdStart,
+    pdStop,
     resetStats as resetStatsCommand,
     revealPath,
     setRate,
@@ -13,18 +20,31 @@
     stopRecording,
     toUiError,
     type BackendEvent,
+    type ExportResult,
+    type PdDetails,
+    type PdOpened,
+    type UiError,
   } from "./lib/backend";
+  import {
+    defaultPdCaptureName,
+    pdImportNoticeText,
+    pdOpenDamageText,
+    pdSaveNoticeText,
+  } from "./lib/pdSave";
   import { attachSession } from "./lib/attach";
   import { AutoDismiss, type HoldReason } from "./lib/autoDismiss";
   import About from "./lib/components/About.svelte";
   import Chart from "./lib/components/Chart.svelte";
   import ErrorBanner from "./lib/components/ErrorBanner.svelte";
   import Notice from "./lib/components/Notice.svelte";
+  import PdAnalyzer from "./lib/components/PdAnalyzer.svelte";
+  import { PdCapture } from "./lib/pdCapture.svelte";
+  import { PdSelection } from "./lib/pdSelection.svelte";
   import Readout from "./lib/components/Readout.svelte";
   import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
   import StatsPanel from "./lib/components/StatsPanel.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
-  import { onMount, setContext } from "svelte";
+  import { onMount, setContext, untrack } from "svelte";
   import {
     ExportJob,
     exportNoticeText,
@@ -57,9 +77,163 @@
   /** A stream is running that can be recorded. */
   const canRecord = $derived(session.state === "streaming" || session.state === "rate_locked");
   const exportJob = new ExportJob();
+  /** The PD analyzer's capture (FR TGE83C). */
+  const pd = new PdCapture();
+  /** The PD record selected in the chart or the packet table (FR TGE83D). */
+  const pdSelection = new PdSelection(pd);
+  // A row selected in the packet table moves the chart's playhead to its session time
+  // and brings it into view, also while the Meter tab is hidden (AC-TGE83D.3).
+  $effect(() => {
+    void pdSelection.seq;
+    const index = pdSelection.index;
+    if (pdSelection.origin !== "table" || index === null) return;
+    untrack(() => {
+      const at = pd.store.positionOf(index);
+      const ms = at < 0 ? NaN : pd.store.sessionMs(at);
+      if (Number.isFinite(ms)) chart?.revealPlayheadAt(ms);
+    });
+  });
+  /** The view the tabs show. */
+  let view: "meter" | "pd" = $state("meter");
+  const VIEWS = ["meter", "pd"] as const;
+  const VIEW_TABS = [
+    { id: "meter", label: "Meter" },
+    { id: "pd", label: "PD analyzer" },
+  ] as const;
+
+  /** Arrow keys, Home and End move between the view tabs. */
+  function onTabKeydown(e: KeyboardEvent): void {
+    const i = VIEWS.indexOf(view);
+    let next: number | null = null;
+    if (e.key === "Enter" || e.key === " ") {
+      // Space must not also start a recording.
+      e.preventDefault();
+      e.stopPropagation();
+      view = (e.currentTarget as HTMLElement).id === "tab-pd" ? "pd" : "meter";
+      return;
+    }
+    if (e.key === "ArrowRight") next = (i + 1) % VIEWS.length;
+    else if (e.key === "ArrowLeft") next = (i + VIEWS.length - 1) % VIEWS.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = VIEWS.length - 1;
+    if (next === null) return;
+    e.preventDefault();
+    view = VIEWS[next] ?? "meter";
+    document.getElementById(`tab-${view}`)?.focus();
+  }
+
+  /** A capture opened from a file leaves the view first: the live one starts empty. */
+  function startPd(): void {
+    const cleared = pd.opened ? clearPdNow() : Promise.resolve();
+    void cleared.then(() => pdStart()).catch((err: unknown) => session.reportError(toUiError(err)));
+  }
+
+  function stopPd(): void {
+    void pdStop().catch((err: unknown) => session.reportError(toUiError(err)));
+  }
+
+  /** The table empties at once and the backend drops its records; rows that arrive
+   * meanwhile wait for its answer, and those numbered below the index it answers (sent
+   * before it cleared) are dropped. A failed clear keeps them all. */
+  function clearPd(): void {
+    void clearPdNow().catch((err: unknown) => session.reportError(toUiError(err)));
+  }
+
+  function clearPdNow(): Promise<void> {
+    const ticket = pd.beginClear();
+    return pdClear().then(
+      (from) => pd.endClear(from, ticket),
+      (err: unknown) => {
+        pd.endClear(0, ticket);
+        throw err;
+      },
+    );
+  }
+
+  /** The last PD capture save (FR TGE83E), while its notice shows. */
+  let pdSaved = $state<ExportResult | null>(null);
+  let pdSaveError = $state<UiError | null>(null);
+  let pdSaving = false;
+
+  /** Save capture: save dialog, then the PD capture so far as a pdcap file. */
+  async function savePd(): Promise<void> {
+    if (pdSaving) return;
+    pdSaving = true;
+    pdSaveError = null;
+    try {
+      const result = await pdSave(defaultPdCaptureName(new Date()));
+      if (result !== null) pdSaved = result;
+    } catch (err) {
+      pdSaveError = toUiError(err);
+    } finally {
+      pdSaving = false;
+    }
+  }
+
+  let pdOpening = false;
+  /** Why the last opened PD capture file stopped loading early, while its notice shows. */
+  let pdOpenDamage = $state<string | null>(null);
+  /** The last vendor PD log import (FR TGE83E, AC .6), while its notice shows. */
+  let pdImported = $state<PdOpened | null>(null);
+
+  /** Open capture: open dialog, then the chosen pdcap file in place of the live capture
+   * (FR TGE83E); needs no meter. */
+  function openPd(): Promise<void> {
+    return showPdFile(pdOpen, false);
+  }
+
+  /** Import vendor log: open dialog, then the chosen vendor PD log database, read-only,
+   * in place of the live capture (FR TGE83E, AC .6); needs no meter. */
+  function importPd(): Promise<void> {
+    return showPdFile(pdImport, true);
+  }
+
+  /** Shows the capture `load` resolves to in place of the live one; `imported` marks a
+   * vendor log, which gets its own notice. */
+  async function showPdFile(
+    load: () => Promise<PdOpened | null>,
+    imported: boolean,
+  ): Promise<void> {
+    // A running capture's rows would arrive unseen behind the opened file.
+    if (pdOpening || pd.capturing) return;
+    pdOpening = true;
+    pdSaveError = null;
+    pdOpenDamage = null;
+    try {
+      const opened = await load();
+      if (opened !== null) {
+        pd.open(opened.rows, opened.status);
+        pdImported = imported ? opened : null;
+        pdOpenDamage = pdOpenDamageText(opened);
+      }
+    } catch (err) {
+      pdSaveError = toUiError(err);
+    } finally {
+      pdOpening = false;
+    }
+  }
+
+  function loadPdDetails(index: number): Promise<PdDetails | null> {
+    return pdDetails(index, pd.opened).catch((err: unknown) => {
+      session.reportError(toUiError(err));
+      return null;
+    });
+  }
   // Information notices leave by themselves; errors stay until dismissed (AC-AKNVND.8).
   const recordingNoticeTimer = new AutoDismiss(() => recording.dismiss());
   const exportNoticeTimer = new AutoDismiss(() => exportJob.dismissNotice());
+  const pdSaveNoticeTimer = new AutoDismiss(() => (pdSaved = null));
+  const pdImportNoticeTimer = new AutoDismiss(() => (pdImported = null));
+  $effect(() => {
+    if (pdSaved !== null) pdSaveNoticeTimer.start();
+    else pdSaveNoticeTimer.stop();
+    return () => pdSaveNoticeTimer.stop();
+  });
+  $effect(() => {
+    if (pdImported !== null) pdImportNoticeTimer.start();
+    else pdImportNoticeTimer.stop();
+    return () => pdImportNoticeTimer.stop();
+  });
   $effect(() => {
     if (recording.notice !== null && recording.error === null) recordingNoticeTimer.start();
     else recordingNoticeTimer.stop();
@@ -72,7 +246,12 @@
   });
   /** The pointer over the notices, or focus in them, holds both countdowns. */
   function holdNotices(reason: HoldReason, held: boolean): void {
-    for (const t of [recordingNoticeTimer, exportNoticeTimer]) {
+    for (const t of [
+      recordingNoticeTimer,
+      exportNoticeTimer,
+      pdSaveNoticeTimer,
+      pdImportNoticeTimer,
+    ]) {
       if (held) t.hold(reason);
       else t.release(reason);
     }
@@ -139,6 +318,7 @@
     if (event.type === "batch" && session.active) chart?.push(event.data.samples);
     if (event.type === "gap" && session.active) chart?.markGap(event.data);
     session.handleEvent(event);
+    pd.handleEvent(event);
     if (event.type === "recording") recording.handleEvent(event.data);
     if (event.type === "status" && event.data.state === "disconnected") {
       recording.sessionEnded();
@@ -299,6 +479,7 @@
               tagName: target.tagName,
               type: target instanceof HTMLInputElement ? target.type : undefined,
               isContentEditable: target.isContentEditable,
+              role: target.getAttribute("role"),
             },
     });
     if (action === null) return;
@@ -334,70 +515,155 @@
     {canExport}
     onExport={exportHistory}
     rateSps={session.rateSps ?? requestedRateSps}
-  />
+  >
+    {#snippet views()}
+      <div class="view-tabs" role="tablist" aria-label="Views">
+        {#each VIEW_TABS as tab (tab.id)}
+          <!-- Not <button>: the top bar's one-row layout counts its buttons. -->
+          <div
+            role="tab"
+            id="tab-{tab.id}"
+            aria-selected={view === tab.id}
+            aria-controls="view-{tab.id}"
+            tabindex={view === tab.id ? 0 : -1}
+            onclick={() => (view = tab.id)}
+            onkeydown={onTabKeydown}
+          >
+            {tab.label}
+          </div>
+        {/each}
+      </div>
+    {/snippet}
+  </TopBar>
   <ErrorBanner {session} />
-  <main class="content">
-    <div class="main-area">
-      <Readout {session} />
-      <section class="chart panel" aria-label="Chart">
-        <Chart
-          bind:this={chart}
-          theme={resolvedTheme}
-          rateSps={session.rateSps}
-          active={session.active}
-        />
-      </section>
-    </div>
-    <!-- Wide, notices float in one compact stack over the side panel, so any number of
+  <main class="views">
+    <div
+      class="content"
+      role="tabpanel"
+      id="view-meter"
+      aria-labelledby="tab-meter"
+      hidden={view !== "meter"}
+    >
+      <div class="main-area">
+        <Readout {session} />
+        <section class="chart panel" aria-label="Chart">
+          <Chart
+            bind:this={chart}
+            theme={resolvedTheme}
+            rateSps={session.rateSps}
+            active={session.active}
+            {pd}
+            onPdMarker={(index) => {
+              pdSelection.select(index, "chart");
+              view = "pd";
+            }}
+          />
+        </section>
+      </div>
+      <!-- Wide, notices float in one compact stack over the side panel, so any number of
          them never moves the main layout (AC-AKNVND.3); stacked, they sit in the page
          between the chart card and the Stats panel (AC-SX3EDV.3). -->
-    <div
-      class="notice-stack"
-      role="presentation"
-      onpointerover={() => holdNotices("pointer", true)}
-      onpointerout={(e) => {
-        if (leftStack(e)) holdNotices("pointer", false);
-      }}
-      onfocusin={() => holdNotices("focus", true)}
-      onfocusout={(e) => {
-        if (leftStack(e)) holdNotices("focus", false);
-      }}
-    >
-      {#if recording.notice !== null || recording.error !== null}
-        <Notice
-          tone={recording.error ? "error" : "info"}
-          message={recording.error?.message ?? null}
-          onDismiss={() => recording.dismiss()}
-        >
-          {#if recording.notice}<p>{recording.notice}</p>{/if}
-          {#if recording.savedPath !== null}
-            {@render fileActions(recording.savedPath)}
-          {/if}
-        </Notice>
-      {/if}
-      {#if exportJob.path !== null && exportJob.rows !== null}
-        {@const path = exportJob.path}
-        <Notice tone="info" onDismiss={() => exportJob.dismissNotice()}>
-          <p>{exportNoticeText({ rows: exportJob.rows, path })}</p>
-          {@render fileActions(path)}
-        </Notice>
-      {/if}
-      {#if exportJob.error !== null}
-        <Notice
-          tone="error"
-          message={exportJob.error.message}
-          onDismiss={() => (exportJob.error = null)}
+      <div
+        class="notice-stack"
+        role="presentation"
+        onpointerover={() => holdNotices("pointer", true)}
+        onpointerout={(e) => {
+          if (leftStack(e)) holdNotices("pointer", false);
+        }}
+        onfocusin={() => holdNotices("focus", true)}
+        onfocusout={(e) => {
+          if (leftStack(e)) holdNotices("focus", false);
+        }}
+      >
+        {#if recording.notice !== null || recording.error !== null}
+          <Notice
+            tone={recording.error ? "error" : "info"}
+            message={recording.error?.message ?? null}
+            onDismiss={() => recording.dismiss()}
+          >
+            {#if recording.notice}<p>{recording.notice}</p>{/if}
+            {#if recording.savedPath !== null}
+              {@render fileActions(recording.savedPath)}
+            {/if}
+          </Notice>
+        {/if}
+        {#if exportJob.path !== null && exportJob.rows !== null}
+          {@const path = exportJob.path}
+          <Notice tone="info" onDismiss={() => exportJob.dismissNotice()}>
+            <p>{exportNoticeText({ rows: exportJob.rows, path })}</p>
+            {@render fileActions(path)}
+          </Notice>
+        {/if}
+        {#if exportJob.error !== null}
+          <Notice
+            tone="error"
+            message={exportJob.error.message}
+            onDismiss={() => (exportJob.error = null)}
+          />
+        {/if}
+      </div>
+      <div class="side-panel">
+        <StatsPanel
+          stats={session.stats}
+          controls={statsControls}
+          deps={statsDeps}
+          canReset={canRecord}
         />
-      {/if}
+      </div>
     </div>
-    <div class="side-panel">
-      <StatsPanel
-        stats={session.stats}
-        controls={statsControls}
-        deps={statsDeps}
-        canReset={canRecord}
-      />
-    </div>
+    {#if view === "pd"}
+      <div class="pd-view" role="tabpanel" id="view-pd" aria-labelledby="tab-pd">
+        <PdAnalyzer
+          {pd}
+          connected={canRecord}
+          onStart={startPd}
+          onStop={stopPd}
+          onClear={clearPd}
+          onSave={() => void savePd()}
+          onOpen={() => void openPd()}
+          onImport={() => void importPd()}
+          loadDetails={loadPdDetails}
+          selection={pdSelection}
+        />
+        <div
+          class="notice-stack pd-notices"
+          role="presentation"
+          onpointerover={() => holdNotices("pointer", true)}
+          onpointerout={(e) => {
+            if (leftStack(e)) holdNotices("pointer", false);
+          }}
+          onfocusin={() => holdNotices("focus", true)}
+          onfocusout={(e) => {
+            if (leftStack(e)) holdNotices("focus", false);
+          }}
+        >
+          {#if pdSaved !== null}
+            {@const path = pdSaved.path}
+            <Notice tone="info" onDismiss={() => (pdSaved = null)}>
+              <p>{pdSaveNoticeText(pdSaved)}</p>
+              {@render fileActions(path)}
+            </Notice>
+          {/if}
+          {#if pdImported !== null}
+            <Notice
+              tone="info"
+              message={pdImportNoticeText(pdImported)}
+              onDismiss={() => (pdImported = null)}
+            />
+          {/if}
+          {#if pdSaveError !== null}
+            <Notice
+              tone="error"
+              message={pdSaveError.message}
+              onDismiss={() => (pdSaveError = null)}
+            />
+          {/if}
+          {#if pdOpenDamage !== null}
+            <Notice tone="error" message={pdOpenDamage} onDismiss={() => (pdOpenDamage = null)} />
+          {/if}
+        </div>
+      </div>
+    {/if}
   </main>
   {#if helpOpen}
     <ShortcutHelp onClose={() => (helpOpen = false)} />
@@ -437,6 +703,46 @@
     background: var(--surface);
     box-shadow: 0 0.25rem 1rem rgb(0 0 0 / 0.25);
     font-size: 0.875rem;
+  }
+  /* Room for the view tabs, which hang under the sticky top bar. */
+  .views {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding-top: 2.25rem;
+  }
+  .view-tabs {
+    display: flex;
+    gap: 0.25rem;
+  }
+  .view-tabs [role="tab"] {
+    font-size: 0.875rem;
+    padding: 0.3rem 0.8rem;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 0.375rem 0.375rem 0 0;
+    margin-bottom: -1px;
+    cursor: pointer;
+    color: var(--muted);
+  }
+  .view-tabs [role="tab"][aria-selected="true"] {
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--text);
+    font-weight: 600;
+  }
+  .content[hidden] {
+    display: none;
+  }
+  .pd-view {
+    /* A definite height, so the packet grid scrolls itself instead of the page. */
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 1rem;
+    height: calc(100vh - 8rem);
   }
   .shell {
     display: flex;
@@ -487,7 +793,7 @@
     .side-panel {
       flex: 1 0 auto;
     }
-    .notice-stack {
+    .notice-stack:not(.pd-notices) {
       position: static;
       width: auto;
       max-width: none;

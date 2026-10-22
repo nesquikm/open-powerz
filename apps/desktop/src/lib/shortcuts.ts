@@ -5,7 +5,12 @@ export interface TargetLike {
   tagName: string;
   type?: string;
   isContentEditable: boolean;
+  /** The element's ARIA role, when it has one. */
+  role?: string | null;
 }
+
+/** ARIA widgets that move through their items with the arrows, Home and End. */
+const NAVIGATING_ROLES = new Set(["tab", "tablist", "grid", "row", "gridcell", "tree", "treeitem"]);
 
 /** The parts of a KeyboardEvent the dispatcher reads. */
 export interface KeyLike {
@@ -75,10 +80,13 @@ export function isTextInput(target: TargetLike | null): boolean {
 }
 
 /** True when the focused control uses `key` itself: a select's type-ahead takes
- * every printable key (and Home / End move its choice), a range input keeps
- * ← / → / Home / End, and Space activates a button or a toggle input. */
+ * every printable key (and Home / End move its choice), a range input or an ARIA
+ * widget (tabs, the PD table, the field tree) keeps ← / → / Home / End, and Space
+ * activates a button or a toggle input. */
 function controlOwnsKey(target: TargetLike | null, key: string): boolean {
   if (target === null) return false;
+  const navigation = key === "ArrowLeft" || key === "ArrowRight" || key === "Home" || key === "End";
+  if (navigation && NAVIGATING_ROLES.has(target.role ?? "")) return true;
   const tag = target.tagName.toUpperCase();
   const isRange = tag === "INPUT" && (target.type ?? "").toLowerCase() === "range";
   if (key === "ArrowLeft" || key === "ArrowRight") return tag === "SELECT" || isRange;

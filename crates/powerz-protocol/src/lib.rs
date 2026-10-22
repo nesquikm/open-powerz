@@ -8,8 +8,12 @@
 pub mod crypto;
 pub mod decode;
 pub mod frame;
+pub mod pdcap;
 pub mod session;
 pub mod transport;
+
+/// USB PD r3.2 message decoder (the `powerz-pd` crate).
+pub use powerz_pd as pd;
 
 /// USB vendor ID shared by all POWER-Z meters.
 pub const VID: u16 = 0x5FC9;

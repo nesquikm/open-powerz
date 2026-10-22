@@ -79,6 +79,8 @@ pub struct PipeOpts {
     /// A queue started by an earlier session still runs: 0x0E is REJECTed
     /// until a 0x0F has stopped it (FR X2SPDW).
     pub stale_stream: bool,
+    /// Every PD_PACKET poll takes this many ms of the worker's time.
+    pub pd_poll_cost_ms: Option<u64>,
 }
 
 /// The simulated meter seen through a recording, fault-injecting pipe. It
@@ -118,6 +120,10 @@ fn is_queue_poll(req: &[u8]) -> bool {
     frame::get_data_mask(req).is_some_and(|m| m.bits() & Attribute::ADC_QUEUE.bits() != 0)
 }
 
+fn is_pd_poll(req: &[u8]) -> bool {
+    frame::get_data_mask(req).is_some_and(|m| m.bits() & Attribute::PD_PACKET.bits() != 0)
+}
+
 fn is_snapshot(req: &[u8]) -> bool {
     frame::get_data_mask(req).is_some_and(|m| m.bits() == Attribute::ADC.bits())
 }
@@ -143,6 +149,11 @@ impl Transport for Pipe {
         } {
             Err(transport::Error::Timeout)
         } else {
+            if let Some(ms) = self.opts.pd_poll_cost_ms
+                && is_pd_poll(request)
+            {
+                self.clock.advance(Duration::from_millis(ms));
+            }
             if is_queue_poll(request) {
                 self.polls += 1;
                 if let Some((n, ms)) = self.opts.stall_at_poll

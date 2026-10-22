@@ -76,18 +76,158 @@
   } from "../timeline";
   import { E2E_BUILD, ChartProbe, installChartProbe } from "../e2eHook";
   import { THEME_COLORS, type MotionSettings, type ResolvedTheme } from "../theme";
+  import type { PdCapture } from "../pdCapture.svelte";
+  import {
+    PD_LANE_PX,
+    PD_MARKER_KINDS,
+    PD_MARKER_R,
+    clusterMarkers,
+    pdClusterHalfWidth,
+    markerColors,
+    hitMarker,
+    markersInRange,
+    revealTime,
+    type PdMarkerCluster,
+  } from "../pdTimeline";
   import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
 
   let {
     theme,
     rateSps = null,
     active = true,
+    pd = null,
+    onPdMarker,
   }: {
     theme: ResolvedTheme;
     rateSps?: number | null;
     /** A meter session is open; without one the chart shows how to start (AC-9CFMD3.5). */
     active?: boolean;
+    /** The PD capture, drawn as markers over the plot (FR TGE83D). */
+    pd?: PdCapture | null;
+    /** A PD marker (or count badge) was clicked: its record index (AC-TGE83D.2). */
+    onPdMarker?: (index: number) => void;
   } = $props();
+
+  /** The PD marker layer: a canvas of its own over the top of the plot (FR TGE83D). */
+  let pdLayer: HTMLCanvasElement | null = null;
+  /** The marker clusters of the last draw, for hit tests. */
+  let pdClusters: PdMarkerCluster[] = [];
+  /** Some PD record is captured: the marker legend shows. */
+  const hasPd = $derived(pd !== null && pd.version >= 0 && pd.store.length > 0);
+
+  /** Draws the PD records inside the plot's x range as markers, dense ones merged into
+   * count badges (AC-TGE83D.1). */
+  function drawPdMarkers(u: uPlot): void {
+    const canvas = pdLayer;
+    if (canvas === null) return;
+    const ratio = globalThis.devicePixelRatio || 1;
+    const widthCss = u.over.clientWidth;
+    const w = Math.max(1, Math.round(widthCss * ratio));
+    const h = Math.round(PD_LANE_PX * ratio);
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (ctx === null) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const min = u.scales.x?.min;
+    const max = u.scales.x?.max;
+    const markers =
+      pd === null || min === undefined || max === undefined || widthCss <= 0
+        ? []
+        : markersInRange(pd.store, min, max);
+    const clusters: PdMarkerCluster[] = clusterMarkers(markers, (ms) => u.valToPos(ms, "x"));
+    pdClusters = clusters;
+    const colors = markerColors(theme);
+    const palette = THEME_COLORS[theme];
+    const y = PD_LANE_PX / 2;
+    ctx.save();
+    ctx.scale(ratio, ratio);
+    ctx.font = "bold 10px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const c of clusters) {
+      const color = colors[c.markers[0]!.kind];
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      if (c.count === 1) {
+        ctx.arc(c.px, y, PD_MARKER_R, 0, 2 * Math.PI);
+        ctx.fill();
+      } else {
+        const label = String(c.count);
+        const half = pdClusterHalfWidth(c);
+        ctx.roundRect(c.px - half, 1, 2 * half, PD_LANE_PX - 2, (PD_LANE_PX - 2) / 2);
+        ctx.fill();
+        ctx.fillStyle = palette.bg;
+        ctx.fillText(label, c.px, y);
+      }
+    }
+    ctx.restore();
+    if (E2E_BUILD && probe !== null) {
+      probe.pdMarkers(
+        clusters.map((c) => {
+          const first = c.markers[0]!;
+          return {
+            leftPx: c.px,
+            topPx: y,
+            count: c.count,
+            kind: first.kind,
+            color: colors[first.kind],
+            ms: first.ms,
+            indices: c.markers.map((m) => m.index),
+          };
+        }),
+      );
+    }
+  }
+
+  /** The PD status series, each drawn as dots on its measurement series' axis and
+   * colour, shown and hidden with that series' legend toggle (AC-TGE83D.4). */
+  const PD_STATUS_SERIES = ["vbus", "ibus", "cc1", "cc2"] as const;
+  /** Side of a PD status dot, CSS px. */
+  const PD_STATUS_DOT_PX = 2;
+
+  /** Draws the PD status blocks inside the plot's x range over the lines: at most about
+   * two dots per pixel column per series, so a long capture stays cheap to draw. */
+  function drawPdStatus(u: uPlot): void {
+    // What the e2e hook reads, counted only while it listens.
+    const lengths = E2E_BUILD && probe !== null ? { vbus: 0, ibus: 0, cc1: 0, cc2: 0 } : null;
+    const min = u.scales.x?.min;
+    const max = u.scales.x?.max;
+    const [lo, hi] =
+      pd === null || min === undefined || max === undefined || pd.status.length === 0
+        ? [0, 0]
+        : pd.status.bounds(min, max);
+    if (pd !== null && hi > lo) {
+      // The buffer's own columns, read between the bounds: nothing is copied per draw.
+      const cols = pd.status.columns;
+      const ratio = globalThis.devicePixelRatio || 1;
+      const stride = Math.max(1, Math.ceil((hi - lo) / Math.max(1, 2 * u.bbox.width)));
+      const size = PD_STATUS_DOT_PX * ratio;
+      const ctx = u.ctx;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
+      ctx.clip();
+      for (const key of PD_STATUS_SERIES) {
+        const def = seriesDef(key);
+        if (!visibility[key] || def === undefined || u.scales[def.axis] === undefined) continue;
+        const values = cols[key];
+        ctx.fillStyle = pdStatusColors[key];
+        let n = 0;
+        for (let i = lo; i < hi; i += stride) {
+          const v = values[i]!;
+          if (!Number.isFinite(v)) continue;
+          const x = u.valToPos(cols.t[i]!, "x", true);
+          const y = u.valToPos(v, def.axis, true);
+          ctx.fillRect(x - size / 2, y - size / 2, size, size);
+          n++;
+        }
+        if (lengths !== null) lengths[key] = n;
+      }
+      ctx.restore();
+    }
+    if (E2E_BUILD && probe !== null && lengths !== null) probe.pdStatus(lengths);
+  }
 
   const motion = getContext<() => MotionSettings>("motion");
 
@@ -276,6 +416,17 @@
     if (next !== shown) showRange(next);
   }
 
+  /** Places the playhead at `ms` and brings it into view: the view stays as it is when
+   * `ms` is visible, else the same span centres on it, paused (AC-TGE83D.3). */
+  export function revealPlayheadAt(ms: number): void {
+    setPlayhead(ms);
+    const range = currentRange();
+    if (range === null) return;
+    const shown = { t0Ms: range[0], t1Ms: range[1] };
+    const next = revealTime(shown, ms, sessionExtent(range[0], range[1]));
+    if (next !== shown) showRange(next);
+  }
+
   /** The J/K/L shuttle's speed, a signed multiple of real time; 0 when stopped
    * (AC-FENCD9.7). */
   let shuttleSpeed = 0;
@@ -404,6 +555,18 @@
   /** Legend on/off choice, kept for the session (AC-AH2AEM.5). */
   let visibility: SeriesVisibility = $state(loadVisibility(sessionStore()));
   const styles = $derived(seriesStyles(theme));
+  /** The PD status dots' colours: their measurement series' strokes, looked up once
+   * per theme, not per draw. */
+  const pdStatusColors = $derived.by(() => {
+    const stroke = (key: (typeof PD_STATUS_SERIES)[number]): string =>
+      styles.find((st) => st.key === key)?.stroke ?? THEME_COLORS[theme].text;
+    return {
+      vbus: stroke("vbus"),
+      ibus: stroke("ibus"),
+      cc1: stroke("cc1"),
+      cc2: stroke("cc2"),
+    };
+  });
   const liveBtn = $derived(liveButton(view));
   /** No session: the Live button reads "Live" but is not pressed (AC-9CFMD3.5). */
   const livePressed = $derived(active && liveBtn.pressed);
@@ -511,6 +674,7 @@
       historyFrameRange[0] === view.t0Ms &&
       historyFrameRange[1] === view.t1Ms;
     drawnFromHistory = fromHistory;
+    drawPdMarkers(u);
     if (E2E_BUILD && probe !== null) {
       probe.record(frame, {
         mode: view.mode,
@@ -975,6 +1139,8 @@
           ctx.stroke();
           ctx.restore();
         },
+        // The PD status blocks (AC-TGE83D.4).
+        (self: uPlot) => drawPdStatus(self),
         // The playhead: a vertical line across the plot (AC-FENCD9.5).
         (self: uPlot) => {
           if (playheadMs === null) return;
@@ -1018,10 +1184,32 @@
     const u = new uPlot(opts, toAlignedData(emptyFrame()), el);
     plot = u;
     const over = u.over;
+    // The PD marker lane rides on the plot area, so its x matches the plot's.
+    const layer = document.createElement("canvas");
+    layer.dataset.layer = "pd-markers";
+    layer.setAttribute("aria-hidden", "true");
+    Object.assign(layer.style, {
+      position: "absolute",
+      left: "0",
+      top: "0",
+      width: "100%",
+      height: `${PD_LANE_PX}px`,
+      pointerEvents: "none",
+      zIndex: "1",
+    });
+    over.appendChild(layer);
+    pdLayer = layer;
     /** The plot x under a viewport x, clamped to the plot. */
     const plotX = (clientX: number): number => {
       const rect = over.getBoundingClientRect();
       return Math.min(Math.max(clientX - rect.left, 0), rect.width);
+    };
+    /** The PD marker or badge under a viewport point, or null (AC-TGE83D.2). */
+    const markerAt = (clientX: number, clientY: number): PdMarkerCluster | null => {
+      const rect = over.getBoundingClientRect();
+      const y = clientY - rect.top;
+      if (y < 0 || y > PD_LANE_PX) return null;
+      return hitMarker(pdClusters, clientX - rect.left);
     };
     /** The time under a viewport x, clamped to the plot. */
     const timeAtClientX = (clientX: number): number => u.posToVal(plotX(clientX), "x");
@@ -1106,8 +1294,24 @@
       e.stopPropagation();
       // preventDefault keeps focus where it was: land the keyboard on the plot, without
       // a focus ring (the focus came from the mouse).
-      pointerFocus = true;
-      el.focus({ preventScroll: true });
+      const focusPlot = (): void => {
+        pointerFocus = true;
+        el.focus({ preventScroll: true });
+      };
+      // A plain click on a PD marker selects its record (a badge: its first one) rather
+      // than scrubbing. Ctrl and ⌘ are left out, as the keyboard does: Ctrl-click is the
+      // macOS context-menu gesture.
+      if (scrub && onPdMarker && !e.ctrlKey && !e.metaKey) {
+        const hit = markerAt(e.clientX, e.clientY);
+        const first = hit?.markers[0];
+        if (first !== undefined) {
+          // Like a scrub, the keyboard lands on the plot, so ← / → step the playhead.
+          focusPlot();
+          onPdMarker(first.index);
+          return;
+        }
+      }
+      focusPlot();
       if (pan) panFromX = e.clientX;
       else if (select) selectFromX = plotX(e.clientX);
       else {
@@ -1151,7 +1355,21 @@
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
       u.destroy();
       if (plot === u) plot = null;
+      if (pdLayer === layer) pdLayer = null;
     };
+  });
+
+  // New PD records redraw the markers, live or paused.
+  $effect(() => {
+    void pd?.version;
+    const u = untrack(() => plot);
+    if (u !== null) untrack(() => drawPdMarkers(u));
+  });
+
+  // New PD status blocks redraw the plot, live or paused.
+  $effect(() => {
+    void pd?.statusVersion;
+    scheduler.invalidate();
   });
 
   // A new window choice or motion setting redraws.
@@ -1235,6 +1453,16 @@
       </button>
     {/each}
   </div>
+  {#if hasPd}
+    <ul class="pd-legend" aria-label="PD markers">
+      {#each PD_MARKER_KINDS as k (k.kind)}
+        <li data-kind={k.kind}>
+          <span class="swatch" style:background-color={markerColors(theme)[k.kind]}></span>
+          {k.label}
+        </li>
+      {/each}
+    </ul>
+  {/if}
   <p class="visually-hidden" role="status" aria-live="polite">{announcement}</p>
   <!-- Hover readout: a strip above the plot so it never covers the cursor point. -->
   <div class="hover" aria-live="off">
@@ -1354,6 +1582,26 @@
   }
   .unit {
     color: var(--muted);
+  }
+  .pd-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.875rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 0.85em;
+    color: var(--muted, GrayText);
+  }
+  .pd-legend li {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+  }
+  .pd-legend .swatch {
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: 50%;
   }
   .hover {
     display: flex;

@@ -49,3 +49,23 @@ export function liveRedrawBand(env: NodeJS.ProcessEnv = process.env): {
 export function renderReport(step: string, timings: readonly number[], budgetMs: number): string {
   return `${step} render times (ms): ${timings.map((t) => t.toFixed(1)).join(", ")}; budget ${budgetMs} ms`;
 }
+
+/** AC-2BF5G6.5: local pan-step budget (ms) of the 10-million-sample history test. */
+export const HISTORY_PAN_BUDGET_MS = 100;
+
+/** AC-2BF5G6.5: local test timeout (ms) of the 10-million-sample history test. */
+export const HISTORY_PAN_TIMEOUT_MS = 5_000;
+
+/**
+ * AC-2BF5G6.5: pan budget and test timeout of the 10-million-sample history test for
+ * `env`; both kept locally and widened by `CI_FACTOR` when `CI` is set.
+ */
+export function historyPanBudget(env: NodeJS.ProcessEnv = process.env): {
+  panBudgetMs: number;
+  timeoutMs: number;
+} {
+  return {
+    panBudgetMs: ciLatencyBudgetMs(HISTORY_PAN_BUDGET_MS, env),
+    timeoutMs: ciLatencyBudgetMs(HISTORY_PAN_TIMEOUT_MS, env),
+  };
+}

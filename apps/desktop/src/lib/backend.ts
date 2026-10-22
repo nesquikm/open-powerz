@@ -107,7 +107,9 @@ export interface ConnectedInfo {
 export type Status =
   | ({ state: "connected" } & ConnectedInfo)
   | { state: "rate"; rate_sps: number; rate_locked: boolean }
-  | { state: "disconnected"; error: UiError | null };
+  | { state: "disconnected"; error: UiError | null }
+  /** The meter went away on its own; the app waits for this serial to come back. */
+  | { state: "waiting"; serial: string };
 
 export interface Gap {
   kind: "stream" | "outage";
@@ -191,13 +193,69 @@ export interface SeriesBuckets {
 /** One {@link SeriesBuckets} per requested series, in the requested order. */
 export type BucketsFor<S extends readonly HistorySeries[]> = { [K in keyof S]: SeriesBuckets };
 
+/** Who sent a PD message (mirrors `src-tauri/src/pd_capture.rs`). */
+export type PdDirection = "source_to_sink" | "sink_to_source" | "cable";
+
+/** One row of the PD packet table: a message or an event (FR TGE83C). The message
+ * fields are null on event rows. */
+export interface PdRow {
+  /** Record index from 0, in capture order. */
+  index: number;
+  /** Ms since the capture start. */
+  elapsed_ms: number;
+  /** The record's time on the measurement samples' `t_ms` base (FR TGE83D), for the
+   * chart. Optional: rows of older fixtures lack it. */
+  session_ms?: number;
+  kind: "message" | "event";
+  sop: string | null;
+  name: string;
+  message_id: number | null;
+  direction: PdDirection | null;
+  objects: number | null;
+  spec_revision: string | null;
+  vbus_v: number;
+  ibus_a: number;
+  summary: string;
+}
+
+/** One node of a PD record's field tree, with the `[start, end)` bytes of the record's
+ * raw bytes it covers. */
+export interface PdField {
+  name: string;
+  meaning: string;
+  raw: number;
+  bytes: [number, number];
+  children: PdField[];
+}
+
+/** The raw bytes and field tree of one PD record. */
+export interface PdDetails {
+  index: number;
+  raw: number[];
+  fields: PdField[];
+}
+
+/** One PD status block (FR TGE83D): VBUS, IBUS, CC1 and CC2 at `session_ms`, on the
+ * measurement samples' `t_ms` base. */
+export interface PdStatusSample {
+  session_ms: number;
+  vbus_v: number;
+  /** Signed. */
+  ibus_a: number;
+  cc1_v: number;
+  cc2_v: number;
+}
+
 /** Every event the backend sends over the session channel. */
 export type BackendEvent =
   | { type: "batch"; data: Batch }
   | { type: "gap"; data: Gap }
   | { type: "status"; data: Status }
   | { type: "error"; data: UiError }
-  | { type: "recording"; data: RecordingEvent };
+  | { type: "recording"; data: RecordingEvent }
+  | { type: "pd_state"; data: { capturing: boolean } }
+  | { type: "pd_rows"; data: { rows: PdRow[] } }
+  | { type: "pd_status"; data: { samples: PdStatusSample[] } };
 
 /** Lists the meters and demo devices available right now. */
 export function listDevices(): Promise<DeviceListing[]> {
@@ -266,6 +324,12 @@ export async function attach(
 export async function disconnect(): Promise<void> {
   if (mock) return mock.disconnect();
   await invoke("disconnect");
+}
+
+/** Stops waiting for an unplugged meter, after the user picked another device. */
+export async function cancelWait(): Promise<void> {
+  if (mock) return mock.cancelWait();
+  await invoke("cancel_wait");
 }
 
 /** Changes the queue rate of the current session. */
@@ -341,6 +405,73 @@ export async function resetStats(): Promise<void> {
 export async function clearHistory(): Promise<void> {
   if (mock) return mock.clearHistory();
   await invoke("clear_history");
+}
+
+/** Starts the PD capture on the open session; rows and the capture state arrive on the
+ * session channel (`pd_rows`, `pd_state`). */
+export async function pdStart(): Promise<void> {
+  if (mock) return mock.pdStart();
+  await invoke("pd_start");
+}
+
+/** Stops the PD capture; the captured records stay. */
+export async function pdStop(): Promise<void> {
+  if (mock) return mock.pdStop();
+  await invoke("pd_stop");
+}
+
+/** The raw bytes and field tree of PD record `index`: of the capture opened from a file
+ * when `opened`, of the live capture otherwise. */
+export async function pdDetails(index: number, opened = false): Promise<PdDetails> {
+  if (mock) return mock.pdDetails(index, opened);
+  return invoke<PdDetails>("pd_details", opened ? { index, opened } : { index });
+}
+
+/** A PD capture opened from a pdcap file (FR TGE83E): its rows and status samples,
+ * numbered from 0. */
+export interface PdOpened {
+  path: string;
+  rows: PdRow[];
+  status: PdStatusSample[];
+  /** The 1-based line where reading stopped when the file is truncated or corrupt
+   * (AC-TGE83E.3); every valid line before it was loaded. `null` for a whole file. */
+  damaged_line: number | null;
+  /** Vendor log rows skipped because their record bytes are oversized (0 for a pdcap
+   * file). */
+  oversized: number;
+  /** The vendor log has more rows than the import takes: only the first ones were
+   * imported (false for a pdcap file). */
+  truncated: boolean;
+}
+
+/** Opens the open dialog and loads the chosen pdcap file (FR TGE83E); needs no meter.
+ * Resolves to the capture, or `null` when the dialog was cancelled. */
+export async function pdOpen(): Promise<PdOpened | null> {
+  if (mock) return mock.pdOpen();
+  return invoke<PdOpened | null>("pd_open");
+}
+
+/** Opens the open dialog and imports the chosen vendor PD log database (`.sqlite`)
+ * read-only (FR TGE83E, AC .6); needs no meter. Resolves like {@link pdOpen}: the
+ * imported capture, or `null` when the dialog was cancelled. */
+export async function pdImport(): Promise<PdOpened | null> {
+  if (mock) return mock.pdImport();
+  return invoke<PdOpened | null>("pd_import");
+}
+
+/** Drops every captured PD record; resolves to the index of the next record. Rows
+ * numbered below it were sent before the clear and are stale. */
+export async function pdClear(): Promise<number> {
+  if (mock) return mock.pdClear();
+  return invoke<number>("pd_clear");
+}
+
+/** Opens the save dialog proposing `suggestedName` and saves the PD capture so far as a
+ * pdcap file (FR TGE83E). Resolves to the path and the number of records (`rows`), or
+ * `null` when the dialog was cancelled. */
+export async function pdSave(suggestedName: string): Promise<ExportResult | null> {
+  if (mock) return mock.pdSave(suggestedName);
+  return invoke<ExportResult | null>("pd_save", { suggestedName });
 }
 
 /** App and protocol-library versions for the About dialog. */

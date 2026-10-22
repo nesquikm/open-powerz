@@ -16,7 +16,7 @@ use powerz_protocol::transport::bulk::BulkTransport;
 use powerz_protocol::transport::discovery::{self, DeviceEntry, Model};
 use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::{self, Transport};
-use powerz_sim::{Persona, Scenario, SimDevice};
+use powerz_sim::{PdScenario, Persona, Scenario, SimDevice};
 use serde::Serialize;
 
 use crate::history::{HistoryGap, Series, SeriesBuckets};
@@ -181,10 +181,10 @@ impl Opener for AppOpener {
     fn open(&self, device: &DeviceListing) -> Result<AppTransport, transport::Error> {
         if let Some(name) = &device.demo_scenario {
             let scenario = Scenario::from_name(name).ok_or(transport::Error::NotFound)?;
-            return Ok(AppTransport::Demo(Box::new(SimDevice::new(
-                Persona::Bulk,
-                scenario,
-            ))));
+            // The demo device also plays the simulator's PD capture (FR TGE83C).
+            return Ok(AppTransport::Demo(Box::new(
+                SimDevice::new(Persona::Bulk, scenario).with_pd_scenario(PdScenario::Negotiation),
+            )));
         }
         let (Some(bus), Some(address)) = (&device.bus, device.address) else {
             return Err(transport::Error::NotFound);
@@ -246,6 +246,11 @@ pub struct DeviceManager<O, C> {
     live: Option<Arc<Mutex<Live>>>,
     /// The open session's stop flag.
     stop: Option<Arc<AtomicBool>>,
+    /// Serial of the meter whose session ended without being asked to, which
+    /// the app waits for (FR TGE839).
+    waiting: Arc<Mutex<Option<String>>>,
+    /// Rate the open (or awaited) session was connected at, SPS.
+    rate_sps: u32,
 }
 
 /// The page the running session streams to, and what it has reported.
@@ -392,6 +397,35 @@ fn history_sink(history: Arc<Mutex<History>>, mut sink: impl EventSink) -> impl 
     }
 }
 
+/// Wrap `sink` so a real meter's session that ends without being asked to,
+/// after it delivered samples, is followed by a waiting status for `serial`,
+/// and the manager remembers that serial (FR TGE839).
+fn waiting_sink(
+    waiting: Arc<Mutex<Option<String>>>,
+    serial: String,
+    history: Arc<Mutex<History>>,
+    mut sink: impl EventSink,
+) -> impl EventSink {
+    move |event: BackendEvent| {
+        let ended = matches!(event, BackendEvent::Status(Status::Disconnected { .. }));
+        sink(event);
+        if !ended {
+            return;
+        }
+        // The history sink has just marked an outage: the meter went away.
+        let outage = history
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .outage;
+        if outage {
+            *waiting.lock().unwrap_or_else(PoisonError::into_inner) = Some(serial.clone());
+            sink(BackendEvent::Status(Status::Waiting {
+                serial: serial.clone(),
+            }));
+        }
+    }
+}
+
 impl<O, C> DeviceManager<O, C>
 where
     O: Opener + Send + Sync + 'static,
@@ -413,7 +447,73 @@ where
             last_store: None,
             live: None,
             stop: None,
+            waiting: Arc::new(Mutex::new(None)),
+            rate_sps: 0,
         }
+    }
+
+    /// Serial of the unplugged meter the app waits for, if any.
+    pub fn waiting_for(&self) -> Option<String> {
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Stop waiting for the unplugged meter: the user picked another device,
+    /// so a meter that comes back later is listed but not reconnected.
+    pub fn cancel_wait(&mut self) {
+        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// The hotplug watcher's changed device list; returns whether it
+    /// started a connect. A list without the awaited meter starts nothing,
+    /// and nothing else is ever connected on its own.
+    pub fn devices_changed(&mut self, devices: &[DeviceListing]) -> bool {
+        let Some(serial) = self.waiting_for() else {
+            return false;
+        };
+        if self.running_worker().is_some() {
+            return false;
+        }
+        let (Some(live), Some(stop)) = (self.live.clone(), self.stop.clone()) else {
+            return false;
+        };
+        if stop.load(Ordering::SeqCst) {
+            // The page that waited is gone.
+            return false;
+        }
+        let Some(device) = devices
+            .iter()
+            .find(|d| d.demo_scenario.is_none() && d.serial.as_deref() == Some(serial.as_str()))
+            .cloned()
+        else {
+            return false;
+        };
+        // Resume at the rate the session last ran at. The ended session's info
+        // is only dropped once the reconnect is certain to start.
+        let (rate_sps, rate) = {
+            let mut l = live.lock().unwrap_or_else(PoisonError::into_inner);
+            let rate_sps = l
+                .info
+                .as_ref()
+                .and_then(|i| i.rate_sps)
+                .unwrap_or(self.rate_sps);
+            let Ok(rate) = supported_rate(rate_sps) else {
+                return false;
+            };
+            l.info = None;
+            l.device_id = device.id.clone();
+            (rate_sps, rate)
+        };
+        self.rate_sps = rate_sps;
+        // The ended worker shares the page's stop flag: let it go without
+        // raising that flag, and without joining it under the manager lock.
+        if let Some(old) = self.worker.take() {
+            old.retire();
+        }
+        self.open_session(device, rate, live, stop);
+        true
     }
 
     /// Every attached meter plus the demo entries; never opens a device.
@@ -447,14 +547,40 @@ where
             ));
         }
         let rate = supported_rate(rate_sps)?;
+        self.rate_sps = rate_sps;
         let device = self
             .list_devices()
             .into_iter()
             .find(|d| d.id == id)
             .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
+        let live = Arc::new(Mutex::new(Live {
+            device_id: device.id.clone(),
+            info: None,
+            sink: Box::new(sink),
+        }));
+        self.open_session(device, rate, live, stop);
+        Ok(())
+    }
+
+    /// Open `device` at `rate` on a new worker whose events go to `live`'s
+    /// page; the session id and data follow the meter's serial, so a
+    /// reconnect continues the same session.
+    fn open_session(
+        &mut self,
+        device: DeviceListing,
+        rate: Rate,
+        live: Arc<Mutex<Live>>,
+        stop: Arc<AtomicBool>,
+    ) {
         if let Some(old) = self.worker.take() {
             old.disconnect();
         }
+        // A new connection ends any wait for an unplugged meter.
+        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let waits_for = match (&device.demo_scenario, &device.serial) {
+            (None, Some(serial)) => Some(serial.clone()),
+            _ => None,
+        };
         let key = device.serial.clone().unwrap_or_else(|| device.id.clone());
         let next_session_id = &mut self.next_session_id;
         let (history, store) = self.histories.entry(key).or_insert_with(|| {
@@ -475,22 +601,26 @@ where
             .session_id;
         let opener = Arc::clone(&self.opener);
         let config = WorkerConfig { rate, session_id };
-        let live = Arc::new(Mutex::new(Live {
-            device_id: device.id.clone(),
-            info: None,
-            sink: Box::new(sink),
-        }));
         self.live = Some(Arc::clone(&live));
         self.stop = Some(Arc::clone(&stop));
+        let sink = history_sink(Arc::clone(&history), live_sink(live));
+        let sink: Box<dyn FnMut(BackendEvent) + Send> = match waits_for {
+            Some(serial) => Box::new(waiting_sink(
+                Arc::clone(&self.waiting),
+                serial,
+                history,
+                sink,
+            )),
+            None => Box::new(sink),
+        };
         self.worker = Some(worker::spawn_with_store(
             move || opener.open(&device),
             self.clock.clone(),
             config,
             store,
-            history_sink(history, live_sink(live)),
+            sink,
             stop,
         ));
-        Ok(())
     }
 
     /// Restart the open session's queue at `rate_sps`.
@@ -619,10 +749,21 @@ where
     ) -> WatchHandle {
         let flag = Arc::clone(&stop);
         let discover = Arc::clone(&self.discover);
+        let waiting = Arc::clone(&self.waiting);
         let mut clock = self.clock.clone();
         let thread = std::thread::spawn(move || {
             let mut hotplug = Hotplug::new();
             while !flag.load(Ordering::SeqCst) {
+                // While the app waits for a meter, report every poll, changed or
+                // not: a replug seen before the wait was armed, or a reconnect
+                // that failed to open, gets another try (FR TGE839).
+                if waiting
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_some()
+                {
+                    hotplug.forget();
+                }
                 if let Some(list) = hotplug.tick(clock.now_ms(), || discover()) {
                     sink(list);
                 }
@@ -717,6 +858,12 @@ impl Hotplug {
         }
         self.last = Some(list.clone());
         Some(list)
+    }
+
+    /// Forget the last list, so the next tick reports the list even when it
+    /// did not change.
+    pub fn forget(&mut self) {
+        self.last = None;
     }
 }
 

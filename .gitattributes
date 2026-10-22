@@ -1,0 +1,15 @@
+# Keep text files LF on every platform, so a Windows checkout matches the index
+# and the LF-only linters (prettier, cargo fmt) see the real code.
+* text=auto eol=lf
+
+# Binary assets: never convert.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary

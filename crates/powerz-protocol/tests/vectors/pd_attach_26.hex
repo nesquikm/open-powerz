@@ -1,0 +1,3 @@
+# 26-byte PUT_DATA reply to GET_DATA mask 0x010 (PD_PACKET): Attach CC1 (meter)
+# source: notes/device/vectors/s2_t3_pd_ladder.jsonl (session 2, firmware 2.0.6), JSON line #7 (0-based); PD poll reply only, no serial or UID
+4138c20010008004630af70204020000f505000045280af70211

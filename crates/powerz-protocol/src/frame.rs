@@ -18,6 +18,8 @@ pub(crate) mod msg {
     pub const GET_DATA: u8 = 0x0C;
     pub const START_QUEUE: u8 = 0x0E;
     pub const STOP_QUEUE: u8 = 0x0F;
+    pub const START_ANALYZER: u8 = 0x10;
+    pub const STOP_ANALYZER: u8 = 0x11;
     pub const PUT_DATA: u8 = 0x41;
     pub const MEM_READ_CONFIRM: u8 = 0x44;
     pub const AUTH_REPLY: u8 = 0x4C;
@@ -119,7 +121,10 @@ impl Attribute {
     pub const ADC_QUEUE: Attribute = Attribute(0x002);
     /// Device settings block.
     pub const SETTINGS: Attribute = Attribute(0x008);
-    /// PD status / PD packet stream.
+    /// PD sniffer packet stream (`ATT_PD_PACKET`): a 12-byte status block
+    /// plus captured records. \[device\]
+    pub const PD_PACKET: Attribute = Attribute(0x010);
+    /// PD status.
     pub const PD_STATUS: Attribute = Attribute(0x020);
 
     /// The raw mask bits.
@@ -448,6 +453,18 @@ pub fn start_queue(id: u8, code: u8) -> [u8; 4] {
 /// Stop ADC queue: `0F id 00 00`.
 pub fn stop_queue(id: u8) -> [u8; 4] {
     request(msg::STOP_QUEUE, id, 0, 0)
+}
+
+/// Start the PD sniffer: `10 id 02 00` (analyzer mode 1). Modes 2..5 start
+/// the UFCS analyzer, which this library does not send yet. Not in the
+/// vendor doc's control type list. \[static\] \[device\]
+pub fn start_pd_sniffer(id: u8) -> [u8; 4] {
+    request(msg::START_ANALYZER, id, 1 << 1, 0)
+}
+
+/// Stop the analyzer: `11 id 00 00`. \[static\]
+pub fn stop_analyzer(id: u8) -> [u8; 4] {
+    request(msg::STOP_ANALYZER, id, 0, 0)
 }
 
 /// Transaction id source: pre-incremented u8 that wraps at 256.

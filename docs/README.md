@@ -15,7 +15,8 @@ CLI and the desktop app and take your first readings, with or without a meter.
 Recipes for one task each, in [how-to/](how-to/):
 
 - [Record a high-rate CSV](how-to/record-a-csv.md), from the CLI or the desktop app
-- [Explore a session in the desktop app](how-to/explore-a-session.md): pause, zoom, gaps, keyboard
+- [Explore a session in the desktop app](how-to/explore-a-session.md): pause, zoom, gaps, replug, keyboard
+- [Analyze USB PD traffic](how-to/analyze-pd-traffic.md): capture, filter and read PD messages, see them on the power chart, save and open captures
 - [Set up Linux permissions](linux.md) (udev rule, `powerz` hwmon driver)
 
 ## Reference {#reference}
@@ -23,7 +24,10 @@ Recipes for one task each, in [how-to/](how-to/):
 Facts to look up, in [reference/](reference/):
 
 - [`powerz` CLI](reference/cli.md): commands, options, output formats, exit codes
-- [`powerz-protocol` API](reference/api/powerz-protocol.md): the library's public modules
+- [pdcap file format](reference/pdcap.md): saved PD captures, with a worked example
+- [`powerz-protocol` API](reference/api/powerz-protocol.md): the library's public modules, PD capture and pdcap included
+- [`powerz-pd` API](reference/api/powerz-pd.md): the USB PD message decoder
+- [Desktop backend seam](reference/desktop-backend.md): the commands and events between the desktop UI and its backend
 - [USB protocol](protocol.md): the meter's wire protocol, with confidence tags
 
 ## Explanation {#explanation}

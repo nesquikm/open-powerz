@@ -9,6 +9,8 @@ import {
   type ChartBreak,
   type ChartDraw,
   type ChartGapBand,
+  type ChartPdMarker,
+  type ChartPdStatusLengths,
   type OpenPowerzE2E,
   type OverviewWindowBox,
 } from "../../e2e/hook";
@@ -33,6 +35,18 @@ export class ChartProbe {
   #breaks: ChartBreak[] = [];
   #overview: OverviewWindowBox | null = null;
   #overviewBreaks: StripBreak[] = [];
+  #pdMarkers: ChartPdMarker[] = [];
+  #pdStatus: ChartPdStatusLengths = { vbus: 0, ibus: 0, cc1: 0, cc2: 0 };
+
+  /** The PD markers and badges of the last draw (FR TGE83D). */
+  pdMarkers(markers: readonly ChartPdMarker[]): void {
+    this.#pdMarkers = markers.map((m) => ({ ...m, indices: [...m.indices] }));
+  }
+
+  /** The points drawn from the PD status blocks per series (FR TGE83D). */
+  pdStatus(lengths: ChartPdStatusLengths): void {
+    this.#pdStatus = { ...lengths };
+  }
 
   /** The overview strip's viewport window, CSS px from the strip's left edge (AC-FENCD9.1). */
   overview(box: OverviewWindowBox | null): void {
@@ -92,6 +106,8 @@ export class ChartProbe {
       chartBreaks: () => this.#breaks.map((b) => ({ ...b })),
       overviewWindow: () => (this.#overview === null ? null : { ...this.#overview }),
       overviewBreaks: () => this.#overviewBreaks.map((b) => ({ ...b })),
+      chartPdMarkers: () => this.#pdMarkers.map((m) => ({ ...m, indices: [...m.indices] })),
+      chartPdStatusLengths: () => ({ ...this.#pdStatus }),
     };
   }
 }

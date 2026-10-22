@@ -17,8 +17,8 @@ mod msg {
     pub const GET_DATA: u8 = 0x0C;
     pub const START_QUEUE: u8 = 0x0E;
     pub const STOP_QUEUE: u8 = 0x0F;
-    pub const QUEUE_10: u8 = 0x10;
-    pub const QUEUE_11: u8 = 0x11;
+    pub const START_ANALYZER: u8 = 0x10;
+    pub const STOP_ANALYZER: u8 = 0x11;
     pub const PUT_DATA: u8 = 0x41;
     pub const MEM_READ: u8 = 0x44;
     pub const AUTH: u8 = 0x4C;
@@ -26,6 +26,9 @@ mod msg {
 
 /// The stale DISCONNECT that waits on the IN pipe right after open.
 pub(crate) const STALE_DISCONNECT: [u8; 4] = [msg::DISCONNECT, 0x00, 0x00, 0x00];
+
+/// Analyzer mode of the PD sniffer in the 0x10 start request.
+const PD_MODE: u8 = 1;
 
 /// Length of an ADC section payload.
 const ADC_LEN: usize = 44;
@@ -138,7 +141,8 @@ impl SimDevice {
                 vec![self.control(msg::ACCEPT, id)]
             }
             msg::GET_DATA => vec![self.get_data(req, id)],
-            ty @ (msg::START_QUEUE | msg::STOP_QUEUE | msg::QUEUE_10 | msg::QUEUE_11) => {
+            ty
+            @ (msg::START_QUEUE | msg::STOP_QUEUE | msg::START_ANALYZER | msg::STOP_ANALYZER) => {
                 let code = req.get(2).copied().unwrap_or(0) >> 1;
                 vec![self.queue_control(ty, id, code)]
             }
@@ -162,6 +166,13 @@ impl SimDevice {
             let records = self.queue.take();
             let n = records.len() as u8;
             sections.push((Attribute::ADC_QUEUE, n, records.concat()));
+        }
+        if mask & Attribute::PD_PACKET.bits() != 0 {
+            let s = self.scenario.sample(now);
+            let mv = |v: f64| (v * 1000.0).round().clamp(0.0, 65535.0) as u16;
+            let ma = (s.ibus_a * 1000.0).round().clamp(-32768.0, 32767.0) as i16;
+            let fallback = (mv(s.vbus_v), ma, mv(s.cc1_v), mv(s.cc2_v));
+            sections.push((Attribute::PD_PACKET, 0, self.pd.chunk(now, fallback)));
         }
         if mask & Attribute::SETTINGS.bits() != 0 {
             sections.push((Attribute::SETTINGS, 0, settings_payload(self.rate_code)));
@@ -194,6 +205,7 @@ impl SimDevice {
     }
 
     /// 0x0E..0x11: REJECT below level 1; 0x0E while streaming is REJECTed.
+    /// 0x10 mode 1 starts the PD sniffer, 0x11 stops it.
     fn queue_control(&mut self, ty: u8, id: u8, code: u8) -> Vec<u8> {
         if self.auth_level < 1 || (ty == msg::START_QUEUE && self.streaming) {
             return self.control(msg::REJECT, id);
@@ -208,6 +220,10 @@ impl SimDevice {
                 self.streaming = false;
                 self.queue.set_rate(self.rate_code, now);
             }
+            // Analyzer start: mode 1 is the PD sniffer.
+            msg::START_ANALYZER if code == PD_MODE => self.pd.start(now),
+            msg::START_ANALYZER => self.pd.stop(),
+            msg::STOP_ANALYZER => self.pd.stop(),
             _ => {}
         }
         self.control(msg::ACCEPT, id)

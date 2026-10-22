@@ -8,12 +8,14 @@
 
 mod info;
 mod list;
+mod pd;
 mod read;
 mod stream;
 mod watch;
 
 pub use info::info;
 pub use list::{list, select_device};
+pub use pd::{pd, pd_decode, pd_save};
 pub use read::read;
 pub use stream::{StreamOptions, StreamSummary, stream};
 pub use watch::{WatchOptions, watch};

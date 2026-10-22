@@ -23,6 +23,10 @@ A Rust cargo workspace with three crates and one web UI:
 - `powerz-record` (library): the vendor-compatible CSV recorder shared by the CLI and the
   desktop app (header, plain-decimal formatting, time origin, signed charge/energy
   integration).
+- `powerz-pd` (library): the USB PD r3.2 message decoder (headers, PDOs/RDOs, VDMs,
+  extended messages and chunk reassembly, a one-line summary and a field tree per
+  message). It has no dependencies and does no I/O, so it also builds for wasm32 (checked
+  in CI) for the later web edition; `powerz-protocol` re-exports it as `powerz_protocol::pd`.
 - `powerz-sim` (library): a stateful simulated KM003C behind the same `Transport` trait, with
   bulk, CDC and HID personas, named scenarios and fault injection. It is both the e2e test
   device and a shipped "demo device" (`powerz --transport sim`, and the desktop picker in
@@ -41,6 +45,7 @@ package.json / bun.lock          # Bun workspace root (apps/desktop)
 crates/powerz-protocol/src/      # lib.rs (+ transport/, frame/, decode/, auth/ as they land)
 crates/powerz-cli/src/main.rs    # `powerz` binary
 crates/powerz-record/src/        # shared CSV recorder + charge/energy integrator
+crates/powerz-pd/src/            # USB PD message decoder (no deps, no I/O, wasm32-clean)
 crates/powerz-sim/src/           # simulated KM003C (demo device, e2e double)
 apps/desktop/src/                # App.svelte, main.ts, lib/*.ts (+ co-located *.test.ts)
 apps/desktop/src-tauri/          # Tauri crate: commands, devices, worker, batch, history, stats, recording
@@ -76,9 +81,15 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
 - Tauri commands: `app_info`, `list_devices`, `watch_devices`, `connect`, `attach` (a reloaded page
   takes over the running session), `disconnect`, `set_rate`,
   `history_range`, `history_gaps`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
-  `stop_recording`, `export_session`; backend events `Batch`, `Gap`, `Status`, `Error` and
-  `Recording` (started / progress / stopped / failed) over one session channel, with export
-  progress on its own channel. The UI reaches them only through `apps/desktop/src/lib/backend.ts`, the
+  `stop_recording`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter), and
+  for the PD analyzer `pd_start`, `pd_stop`, `pd_details` (a record's raw bytes and field tree,
+  on demand, from the live capture or, with `opened`, from an opened file), `pd_save` / `pd_open`
+  (`.pdcap` files) and `pd_import` (read-only vendor PD log) and `pd_clear` (answers the next record index; indices never restart, so rows sent
+  before a clear are recognised and dropped); backend events `Batch`, `Gap`, `Status`
+  (including `waiting`), `Error`, `Recording` (started / progress / stopped / failed),
+  `PdState`, `PdRows` (batched, at most 60 a second, decoded in the backend; each row carries
+  `session_ms` on the measurement samples' time base) and `PdStatus` (the PD status blocks'
+  VBUS / IBUS / CC1 / CC2, batched the same way) over one session channel, with export progress on its own channel. The UI reaches them only through `apps/desktop/src/lib/backend.ts`, the
   seam the Playwright mock replaces.
 - CLI: `powerz <subcommand>` with `clap` once the first command lands.
 
@@ -100,7 +111,8 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | Package | Version | Purpose |
 |---------|---------|---------|
 | tauri / tauri-build | 2.12.4 / 2.7.3 | Desktop shell |
-| serde / serde_json | 1.x | Tauri IPC payloads |
+| serde / serde_json | 1.x | Tauri IPC payloads; the `.pdcap` capture file format (`powerz-protocol`) |
+| rusqlite | 0.40.x, `bundled` | Read-only import of the vendor PD log database (desktop) |
 | nusb | 0.2.x (planned) | Vendor bulk transport, hotplug |
 | hidapi | 2.6.x (planned) | HID transport |
 | serialport | 4.10.x (planned) | CDC transport |
@@ -112,7 +124,7 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | vite / @sveltejs/vite-plugin-svelte | ^8.3.4 / ^7.3.1 | Bundler |
 | @tauri-apps/api / @tauri-apps/cli | ^2.12.4 / ^2.12.3 | Tauri JS bindings / CLI |
 | uplot | ^1.6.32 | Charts |
-| tauri-plugin-dialog | 2.8.x | Save dialog for recording and export |
+| tauri-plugin-dialog | 2.8.x | Save dialogs (recording, export, PD capture) and open dialogs (PD capture, vendor PD log) |
 | @wdio/cli + tauri-driver | latest (planned, dev) | Real-app e2e (Linux, Windows) |
 | @playwright/test + @axe-core/playwright | latest (planned, dev) | UI e2e and accessibility scan |
 | typescript | ~6.0.3 | Types (svelte-check and typescript-eslint do not support TS 7 yet) |

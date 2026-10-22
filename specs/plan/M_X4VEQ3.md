@@ -27,6 +27,10 @@ codename: Trigger Happy
 
 **Out of scope here:** firmware update (risk of bricking; only if the user asks) and signed release packaging.
 
-**FR list:** to be written.
+**FR list:** the trigger, records, settings and multi-device FRs are still to be written.
+
+| FR | Title | Tracker |
+|---|---|---|
+| [2BF5G6](../frs/2BF5G6.md) | Windows CI fails on every failing command and runs green | n/a |
 
 **Gate:** same gating rule as CLAUDE.md.
