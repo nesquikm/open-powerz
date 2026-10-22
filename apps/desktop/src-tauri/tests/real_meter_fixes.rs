@@ -164,14 +164,18 @@ fn a_sink_that_blocks_200_ms_per_event_loses_no_record_at_1000_sps() {
     };
     let store = SessionStore::new();
     // AC-KQF5GM.1: the system clock, with every sleep logged for the failure message.
-    let clock = RecordingClock::new();
-    let handle = worker::spawn_with_store(
+    // AC-KQF5GM.2: each cycle also samples the poll thread's CPU time and the
+    // worker's blocked-time meter.
+    let meter = worker::BlockedMeter::new();
+    let clock = RecordingClock::with_meter(meter.clone());
+    let handle = worker::spawn_metered(
         open,
         clock.clone(),
         config(Rate::Sps1000),
         store.clone(),
         sink,
         Arc::new(AtomicBool::new(false)),
+        meter,
     );
     std::thread::sleep(Duration::from_secs(10));
     blocking.store(false, Ordering::SeqCst);
@@ -194,7 +198,7 @@ fn a_sink_that_blocks_200_ms_per_event_loses_no_record_at_1000_sps() {
         history: store.history_len(),
     };
     // AC-KQF5GM.3: without CI, zero gaps, zero holes and every delivered record.
-    // AC-KQF5GM.2: on CI, only what the measured oversleep explains.
+    // AC-KQF5GM.2: on CI, only what measured oversleep and descheduling explain.
     let ci = std::env::var("CI").ok();
     let evidence = clock.evidence();
     if let Err(message) = slow_sink::check(

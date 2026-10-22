@@ -8,7 +8,11 @@
 //!   only as far as the measured oversleep explains them (the meter keeps
 //!   63 ms of records, the worker polls every 20 ms); every delivered record
 //!   must still reach the sink and the history, and loop work longer than the
-//!   poll period still fails as a stall;
+//!   poll period still fails as a stall; every poll-loop cycle carries its
+//!   wall time, the poll thread's CPU time and the time blocked inside the
+//!   worker's own calls, and a long cycle is runner descheduling only when
+//!   both of those are short (otherwise, or when CPU time is unknown, it is
+//!   a stall);
 //! - AC-KQF5GM.3: without CI set, the test requires zero gaps, zero holes and
 //!   every delivered record.
 //!
@@ -19,8 +23,9 @@ mod common;
 use std::time::Duration;
 
 use common::slow_sink::{
-    Outcome, PollEvidence, RecordingClock, Sleep, check, tolerance, tolerance_for,
+    Cycle, CycleCost, Outcome, PollEvidence, RecordingClock, Sleep, check, tolerance, tolerance_for,
 };
+use open_powerz_desktop_lib::worker::BlockedMeter;
 use powerz_protocol::session::Clock;
 
 fn ms(v: u64) -> Duration {
@@ -425,4 +430,318 @@ fn on_ci_loop_work_longer_than_the_poll_period_fails_as_a_stall() {
         message.contains(&e.report()),
         "the poll-thread evidence is missing: {message}"
     );
+}
+
+// ---- AC-KQF5GM.2: per-cycle wall, CPU and blocked time ----
+
+/// What one cycle cost: `cpu` ms of poll-thread CPU time (`None`: unknown)
+/// and `blocked` ms inside the worker's own calls.
+fn cost(cpu: Option<u64>, blocked: u64) -> CycleCost {
+    CycleCost {
+        cpu: cpu.map(ms),
+        blocked: ms(blocked),
+    }
+}
+
+/// A 20 ms poll loop with one 61 ms cycle (wake at 42, next sleep at 103,
+/// poll gap 81 ms, 18 ms past the meter's 63 ms of records) and no
+/// oversleep, the shape of CI run 39759034254. `long` is that cycle's cost;
+/// every other cycle costs 1 ms of CPU and nothing blocked.
+fn long_cycle_evidence(long: CycleCost) -> PollEvidence {
+    PollEvidence::with_costs(
+        vec![
+            sleep(20, 0, 20),
+            sleep(20, 22, 42),   // work 2, gap 22
+            sleep(20, 103, 123), // work 61, gap 81
+            sleep(20, 125, 145), // work 2, gap 22
+        ],
+        vec![cost(Some(1), 0), long, cost(Some(1), 0)],
+    )
+}
+
+/// The long cycle with 2 ms of CPU and 1 ms blocked: the runner took the
+/// thread off the CPU for the other 58 ms.
+fn descheduled_evidence() -> PollEvidence {
+    long_cycle_evidence(cost(Some(2), 1))
+}
+
+/// The long cycle spent 55 ms on the CPU: the worker's own work.
+fn cpu_stall_evidence() -> PollEvidence {
+    long_cycle_evidence(cost(Some(55), 6))
+}
+
+/// The long cycle spent 53 ms blocked in the worker's own calls.
+fn blocked_stall_evidence() -> PollEvidence {
+    long_cycle_evidence(cost(Some(4), 53))
+}
+
+/// The long cycle on a platform where CPU time cannot be read.
+fn unknown_cpu_evidence() -> PollEvidence {
+    long_cycle_evidence(cost(None, 1))
+}
+
+/// Samples the descheduled cycle cost: its poll gap ran 18 ms past the window.
+const DESCHEDULED_LOSS: usize = 81 - 63;
+
+/// A CI run that lost exactly what the descheduling explains.
+fn descheduled_outcome() -> Outcome {
+    let n = 9_000 - DESCHEDULED_LOSS;
+    Outcome {
+        gaps: 1,
+        holes: 1,
+        samples: n,
+        delivered: n,
+        history: n,
+    }
+}
+
+#[test]
+fn every_cycle_holds_its_wall_cpu_and_blocked_time() {
+    let cycles = cpu_stall_evidence().cycles();
+    assert_eq!(
+        cycles,
+        vec![
+            Cycle {
+                wall: ms(2),
+                cpu: Some(ms(1)),
+                blocked: ms(0),
+            },
+            Cycle {
+                wall: ms(61),
+                cpu: Some(ms(55)),
+                blocked: ms(6),
+            },
+            Cycle {
+                wall: ms(2),
+                cpu: Some(ms(1)),
+                blocked: ms(0),
+            },
+        ],
+        "one cycle per wake-to-sleep stretch, with its wall time from the sleep log"
+    );
+}
+
+#[test]
+fn a_sleep_log_alone_has_unknown_cpu_and_nothing_blocked() {
+    let cycles = sample_evidence().cycles();
+    let walls: Vec<Duration> = cycles.iter().map(|c| c.wall).collect();
+    assert_eq!(walls, vec![ms(2), ms(2), ms(2), ms(61), ms(2)]);
+    assert!(
+        cycles
+            .iter()
+            .all(|c| c.cpu.is_none() && c.blocked.is_zero()),
+        "no CPU or blocked time was measured: {cycles:?}"
+    );
+}
+
+#[test]
+fn the_report_names_the_long_cycles_wall_cpu_and_blocked_time() {
+    let report = blocked_stall_evidence().report();
+    let lower = report.to_lowercase();
+    assert!(lower.contains("cpu"), "no CPU time in: {report}");
+    assert!(lower.contains("blocked"), "no blocked time in: {report}");
+    for figure in ["61 ms", "4 ms", "53 ms"] {
+        assert!(report.contains(figure), "{figure} missing from: {report}");
+    }
+    let report = cpu_stall_evidence().report();
+    for figure in ["61 ms", "55 ms", "6 ms"] {
+        assert!(report.contains(figure), "{figure} missing from: {report}");
+    }
+}
+
+#[test]
+fn the_report_says_when_cpu_time_is_unknown() {
+    let report = unknown_cpu_evidence().report();
+    let lower = report.to_lowercase();
+    assert!(lower.contains("cpu"), "no CPU time in: {report}");
+    assert!(
+        lower.contains("unknown"),
+        "an unread CPU time must read as unknown: {report}"
+    );
+}
+
+#[test]
+fn a_long_cycle_with_short_cpu_and_short_blocked_time_is_descheduling() {
+    assert_eq!(
+        descheduled_evidence().stalls(),
+        Vec::<Cycle>::new(),
+        "the runner, not the worker, lost those 58 ms"
+    );
+}
+
+#[test]
+fn a_short_cycle_is_never_a_stall() {
+    // 15 ms of CPU inside the 20 ms poll period: busy, not stalled.
+    let e = PollEvidence::with_costs(
+        vec![sleep(20, 0, 20), sleep(20, 35, 55), sleep(20, 57, 77)],
+        vec![cost(Some(15), 0), cost(None, 0)],
+    );
+    assert_eq!(e.stalls(), Vec::<Cycle>::new());
+}
+
+#[test]
+fn a_long_cycle_with_long_cpu_time_is_a_stall() {
+    assert_eq!(
+        cpu_stall_evidence().stalls(),
+        vec![Cycle {
+            wall: ms(61),
+            cpu: Some(ms(55)),
+            blocked: ms(6),
+        }]
+    );
+}
+
+#[test]
+fn a_long_cycle_with_long_blocked_time_is_a_stall() {
+    assert_eq!(
+        blocked_stall_evidence().stalls(),
+        vec![Cycle {
+            wall: ms(61),
+            cpu: Some(ms(4)),
+            blocked: ms(53),
+        }]
+    );
+}
+
+#[test]
+fn a_long_cycle_with_unknown_cpu_time_is_a_stall() {
+    assert_eq!(
+        unknown_cpu_evidence().stalls(),
+        vec![Cycle {
+            wall: ms(61),
+            cpu: None,
+            blocked: ms(1),
+        }]
+    );
+}
+
+#[test]
+fn on_ci_descheduling_buys_what_it_explains() {
+    let e = descheduled_evidence();
+    let t = tolerance_for(Some("true"), &e);
+    assert_eq!(t.max_gaps, 1, "one gap for the descheduled poll gap");
+    assert_eq!(t.max_holes, 1, "one hole for the descheduled poll gap");
+    assert!(
+        t.every_record,
+        "CI must still require every delivered record"
+    );
+    assert_eq!(
+        t.min_samples,
+        9_000 - DESCHEDULED_LOSS,
+        "the floor drops by the 18 ms the poll gap ran past the window"
+    );
+    assert_eq!(check(&descheduled_outcome(), &t, &e), Ok(()));
+}
+
+#[test]
+fn without_ci_descheduling_buys_nothing() {
+    let e = descheduled_evidence();
+    assert_eq!(tolerance_for(None, &e), tolerance(None));
+    assert!(check(&descheduled_outcome(), &tolerance_for(None, &e), &e).is_err());
+}
+
+#[test]
+fn on_ci_a_loss_beyond_the_descheduling_fails() {
+    let e = descheduled_evidence();
+    let t = tolerance_for(Some("true"), &e);
+    let mut outcome = descheduled_outcome();
+    outcome.gaps = 2;
+    assert!(
+        check(&outcome, &t, &e).is_err(),
+        "a second gap is unexplained"
+    );
+    let n = 9_000 - DESCHEDULED_LOSS - 1;
+    let outcome = Outcome {
+        samples: n,
+        delivered: n,
+        history: n,
+        ..descheduled_outcome()
+    };
+    assert!(check(&outcome, &t, &e).is_err(), "one sample too many lost");
+}
+
+/// On CI, a run with `e`'s stall gets the strict budget, and its lossy
+/// outcome fails naming the stall and the cycle's wall, CPU and blocked time.
+fn assert_fails_as_a_stall(e: &PollEvidence, figures: &[&str]) {
+    let t = tolerance_for(Some("true"), e);
+    assert_eq!(t, tolerance(None), "a stall buys no allowance");
+    let message =
+        check(&descheduled_outcome(), &t, e).expect_err("a lossy run whose loop stalled must fail");
+    let lower = message.to_lowercase();
+    assert!(
+        lower.contains("stall"),
+        "the failure does not name the stall: {message}"
+    );
+    assert!(lower.contains("cpu"), "no CPU time in: {message}");
+    assert!(lower.contains("blocked"), "no blocked time in: {message}");
+    for figure in figures {
+        assert!(message.contains(figure), "{figure} missing from: {message}");
+    }
+}
+
+#[test]
+fn on_ci_a_cpu_stall_fails_with_all_three_numbers() {
+    assert_fails_as_a_stall(&cpu_stall_evidence(), &["61 ms", "55 ms", "6 ms"]);
+}
+
+#[test]
+fn on_ci_a_blocked_stall_fails_with_all_three_numbers() {
+    assert_fails_as_a_stall(&blocked_stall_evidence(), &["61 ms", "4 ms", "53 ms"]);
+}
+
+#[test]
+fn on_ci_a_long_cycle_with_unknown_cpu_fails_as_a_stall() {
+    let e = unknown_cpu_evidence();
+    assert_fails_as_a_stall(&e, &["61 ms"]);
+    let message = check(&descheduled_outcome(), &tolerance_for(Some("true"), &e), &e)
+        .expect_err("unknown CPU time cannot clear a long cycle");
+    assert!(message.to_lowercase().contains("unknown"), "{message}");
+}
+
+/// Spin on the CPU for `d`.
+fn burn(d: Duration) {
+    let start = std::time::Instant::now();
+    let mut x = 0u64;
+    while start.elapsed() < d {
+        x = std::hint::black_box(x.wrapping_add(1));
+    }
+}
+
+#[test]
+fn the_recording_clock_samples_cpu_and_blocked_time_per_cycle() {
+    let meter = BlockedMeter::new();
+    let mut clock = RecordingClock::with_meter(meter.clone());
+    clock.sleep(ms(2));
+    // Cycle 1: 40 ms on the CPU, plus 15 ms the worker spent blocked.
+    burn(ms(40));
+    meter.add(ms(15));
+    clock.sleep(ms(2));
+    // Cycle 2: 40 ms off the CPU, nothing blocked (a descheduled thread).
+    std::thread::sleep(ms(40));
+    clock.sleep(ms(2));
+
+    let cycles = clock.evidence().cycles();
+    assert_eq!(cycles.len(), 2, "two wake-to-sleep cycles: {cycles:?}");
+    assert!(cycles[0].wall >= ms(40), "{cycles:?}");
+    assert_eq!(cycles[0].blocked, ms(15), "the meter's growth in cycle 1");
+    assert!(cycles[1].wall >= ms(40), "{cycles:?}");
+    assert_eq!(cycles[1].blocked, ms(0), "nothing blocked in cycle 2");
+    if cfg!(target_os = "macos") {
+        let busy = cycles[0].cpu.expect("thread CPU time is readable on macOS");
+        let idle = cycles[1].cpu.expect("thread CPU time is readable on macOS");
+        assert!(busy >= ms(30), "40 ms of spinning read as {busy:?} of CPU");
+        assert!(idle < ms(10), "40 ms of sleeping read as {idle:?} of CPU");
+    }
+}
+
+#[test]
+fn a_blocked_meter_is_shared_by_its_clones() {
+    let meter = BlockedMeter::new();
+    assert_eq!(meter.total(), ms(0));
+    let copy = meter.clone();
+    copy.add(ms(7));
+    meter.add(ms(5));
+    assert_eq!(meter.total(), ms(12));
+    assert_eq!(copy.total(), ms(12));
+    assert_eq!(BlockedMeter::default().total(), ms(0));
 }

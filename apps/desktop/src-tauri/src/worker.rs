@@ -4,11 +4,11 @@
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use powerz_protocol::decode::{QueueRecord, Rate};
 use powerz_protocol::session::{self, Clock, Session, SnapshotCadence, Streamer};
@@ -120,6 +120,43 @@ pub enum Step {
 }
 
 type Sink = Box<dyn FnMut(BackendEvent) + Send>;
+
+/// The wall time a worker spent blocked inside its own calls: the sink
+/// hand-off and channel send, the session store's lock, meter I/O and
+/// recording writes (FR KQF5GM). Clones share one total.
+#[derive(Debug, Clone, Default)]
+pub struct BlockedMeter(Arc<AtomicU64>);
+
+impl BlockedMeter {
+    /// A meter at zero.
+    pub fn new() -> BlockedMeter {
+        BlockedMeter::default()
+    }
+
+    /// Add `d` to the total.
+    pub fn add(&self, d: Duration) {
+        let nanos = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        self.0.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// The time added so far.
+    pub fn total(&self) -> Duration {
+        Duration::from_nanos(self.0.load(Ordering::Relaxed))
+    }
+}
+
+/// Run `f`, adding its wall time to `meter` when there is one.
+fn blocked<R>(meter: Option<&BlockedMeter>, f: impl FnOnce() -> R) -> R {
+    match meter {
+        Some(meter) => {
+            let started = Instant::now();
+            let r = f();
+            meter.add(started.elapsed());
+            r
+        }
+        None => f(),
+    }
+}
 
 /// Runs a task in order with the events sent so far: at once on a worker
 /// without a forwarder, on the forwarder thread behind every queued event
@@ -255,6 +292,8 @@ pub struct Worker<T: Transport, C: Clock> {
     recording_path: Option<PathBuf>,
     sink: Sink,
     in_order: InOrder,
+    /// Adds up the time blocked in the worker's own calls, when given.
+    meter: Option<BlockedMeter>,
 }
 
 impl<T: Transport, C: Clock> std::fmt::Debug for Worker<T, C> {
@@ -295,10 +334,12 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             store,
             Box::new(sink),
             Box::new(|task: Box<dyn FnOnce() + Send>| task()),
+            None,
         ))
     }
 
     /// A worker over an open session; emits the `connected` status.
+    #[allow(clippy::too_many_arguments)]
     fn running(
         session: Session<GuardedTransport<T>, C>,
         mut clock: C,
@@ -307,9 +348,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         store: SessionStore,
         sink: Sink,
         in_order: InOrder,
+        meter: Option<BlockedMeter>,
     ) -> Worker<T, C> {
         let now = clock.now_ms();
-        store.start_run();
+        blocked(meter.as_ref(), || store.start_run());
         let mut worker = Worker {
             session: Some(session),
             clock,
@@ -327,6 +369,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             recording_path: None,
             sink,
             in_order,
+            meter,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -354,19 +397,21 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         if !self.snapshots.take(self.clock.now_ms()) {
             return Ok(());
         }
-        let adc = session.read_adc()?;
+        let adc = blocked(self.meter.as_ref(), || session.read_adc())?;
         self.temp_c = adc.temp_c();
         if let Some(temp) = self.temp_c {
             let now = self.clock.now_ms();
             self.temp_read_ms = Some(now);
-            self.store.set_temp(temp, now);
+            let store = &self.store;
+            blocked(self.meter.as_ref(), || store.set_temp(temp, now));
         }
         Ok(())
     }
 
     /// Send `batch` with the statistics up to and including it.
     fn emit_batch(&mut self, mut batch: Batch) {
-        batch.stats = self.store.stats();
+        let store = &self.store;
+        batch.stats = blocked(self.meter.as_ref(), || store.stats());
         self.emit(BackendEvent::Batch(batch));
     }
 
@@ -386,6 +431,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     fn queue_records(&mut self, poll: &session::StreamPoll) {
         let now = self.clock.now_ms();
         let store = self.store.clone();
+        let meter = self.meter.clone();
         // Held across the records, let go whenever an event goes out.
         let mut data = None;
         let mut gaps = poll.gaps.iter().peekable();
@@ -402,7 +448,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 data = None;
                 self.flush_batch();
             }
-            let added = data.get_or_insert_with(|| store.lock()).append(r, now);
+            let added = data
+                .get_or_insert_with(|| blocked(meter.as_ref(), || store.lock()))
+                .append(r, now);
             let r = added.record;
             if gaps_due > 0 {
                 data = None;
@@ -426,7 +474,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 if added.new_run {
                     rec.break_run();
                 }
-                if let Err(e) = rec.push(&r, added.unix_ms, added.temp_c) {
+                if let Err(e) =
+                    blocked(meter.as_ref(), || rec.push(&r, added.unix_ms, added.temp_c))
+                {
                     write_err = Some(e);
                 }
             }
@@ -457,7 +507,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(rec) = self.recording.as_mut() else {
             return;
         };
-        match rec.tick(now) {
+        match blocked(self.meter.as_ref(), || rec.tick(now)) {
             Ok(Some(event)) => self.emit(BackendEvent::Recording(event)),
             Ok(None) => {}
             Err(e) => self.fail_recording(recording::io_error(&e)),
@@ -635,7 +685,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Step::Ended;
         };
-        let polled = session.poll_stream();
+        let polled = blocked(self.meter.as_ref(), || session.poll_stream());
         match polled {
             Ok(poll) => {
                 let times: Vec<u32> = self
@@ -692,7 +742,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         };
         session.start_stream(rate).map_err(|e| session_error(&e))?;
         // The interval across the restart was not measured.
-        self.store.start_run();
+        let store = &self.store;
+        blocked(self.meter.as_ref(), || store.start_run());
         self.rate = rate;
         self.emit(BackendEvent::Status(Status::Rate {
             rate_sps: rate.sps(),
@@ -1105,6 +1156,42 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
+    spawn_inner(open, clock, config, store, sink, stop, None)
+}
+
+/// [`spawn_with_store`] adding the wall time the worker spends blocked in
+/// its own calls to `meter` (FR KQF5GM).
+pub fn spawn_metered<T, C, O>(
+    open: O,
+    clock: C,
+    config: WorkerConfig,
+    store: SessionStore,
+    sink: impl EventSink,
+    stop: Arc<AtomicBool>,
+    meter: BlockedMeter,
+) -> WorkerHandle
+where
+    T: Transport,
+    C: Clock + Clone + Send + 'static,
+    O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
+{
+    spawn_inner(open, clock, config, store, sink, stop, Some(meter))
+}
+
+fn spawn_inner<T, C, O>(
+    open: O,
+    clock: C,
+    config: WorkerConfig,
+    store: SessionStore,
+    sink: impl EventSink,
+    stop: Arc<AtomicBool>,
+    meter: Option<BlockedMeter>,
+) -> WorkerHandle
+where
+    T: Transport,
+    C: Clock + Clone + Send + 'static,
+    O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
+{
     let flag = Arc::clone(&stop);
     let (commands, inbox) = mpsc::channel();
     let ended = Arc::new(AtomicBool::new(false));
@@ -1163,6 +1250,7 @@ where
                 &inbox,
                 worker_sink,
                 depth,
+                meter,
             )
         }));
         if let Err(payload) = ran {
@@ -1199,16 +1287,21 @@ fn run_worker<T, C, O>(
     inbox: &mpsc::Receiver<Command>,
     sink: mpsc::Sender<Forward>,
     depth: Arc<AtomicUsize>,
+    meter: Option<BlockedMeter>,
 ) where
     T: Transport,
     C: Clock + Clone,
     O: FnOnce() -> Result<T, transport::Error>,
 {
     let ordered = sink.clone();
+    let ordered_meter = meter.clone();
     let in_order: InOrder = Box::new(move |task| {
         // The forwarder outlives every sender, so this cannot fail.
-        let _ = ordered.send(Forward::Run(task));
+        blocked(ordered_meter.as_ref(), || {
+            let _ = ordered.send(Forward::Run(task));
+        });
     });
+    let forward_meter = meter.clone();
     let forward: Sink = Box::new(move |event| {
         if let BackendEvent::Batch(_) = event {
             // A sink stalled for this long gets no more live batches until it
@@ -1218,7 +1311,9 @@ fn run_worker<T, C, O>(
             }
             depth.fetch_add(1, Ordering::SeqCst);
         }
-        let _ = sink.send(Forward::Event(event));
+        blocked(forward_meter.as_ref(), || {
+            let _ = sink.send(Forward::Event(event));
+        });
     });
     let opened = open()
         .map_err(|e| ui_error::from_transport(&e, std::env::consts::OS))
@@ -1228,9 +1323,9 @@ fn run_worker<T, C, O>(
         .is_ok()
         .then(|| crate::activity::hold("Streaming from a POWER-Z meter"));
     let mut worker = match opened {
-        Ok((session, info)) => {
-            Worker::running(session, clock, config, info, store, forward, in_order)
-        }
+        Ok((session, info)) => Worker::running(
+            session, clock, config, info, store, forward, in_order, meter,
+        ),
         Err(error) => {
             let mut forward = forward;
             forward(disconnected(Some(error)));
@@ -1306,5 +1401,64 @@ mod tests {
         assert_eq!(got, Ok(None));
         assert_eq!(swaps.load(Ordering::SeqCst), 1);
         worker.join().expect("worker thread");
+    }
+
+    /// AC-KQF5GM.2: the time the worker waits for the session store's lock
+    /// goes into its blocked-time meter. Real time, the demo simulator.
+    #[test]
+    fn a_store_lock_held_elsewhere_adds_to_the_blocked_meter() {
+        use powerz_protocol::session::SystemClock;
+        use powerz_sim::{Persona, Scenario, SimDevice};
+
+        let store = SessionStore::new();
+        let meter = BlockedMeter::new();
+        let handle = spawn_metered(
+            || Ok(SimDevice::new(Persona::Bulk, Scenario::Load5v1a)),
+            SystemClock,
+            WorkerConfig {
+                rate: Rate::Sps1000,
+                session_id: 1,
+            },
+            store.clone(),
+            |_event: BackendEvent| {},
+            Arc::new(AtomicBool::new(false)),
+            meter.clone(),
+        );
+        // CI macOS runners have overslept a single sleep by up to 265 ms
+        // (FR Notes, run 39747964247). Hold the lock long enough that a
+        // worker waking that late still finds it held, and forgive at most
+        // that much of the hold.
+        const HOLD: Duration = Duration::from_millis(1000);
+        const TAIL: Duration = Duration::from_millis(150);
+        const MAX_OVERSLEEP: Duration = Duration::from_millis(300);
+
+        // Let the stream settle, then measure a window with the lock free.
+        std::thread::sleep(Duration::from_millis(300));
+        let before = meter.total();
+        std::thread::sleep(HOLD + TAIL);
+        let free = meter.total().saturating_sub(before);
+        assert!(store.history_len() > 0, "the worker never streamed");
+
+        // An equal window with the lock held for HOLD of it.
+        let before = meter.total();
+        let started = Instant::now();
+        {
+            let _held = store.lock();
+            std::thread::sleep(HOLD);
+        }
+        std::thread::sleep(TAIL);
+        let held = meter.total().saturating_sub(before);
+        let window = started.elapsed();
+        handle.disconnect();
+
+        assert!(
+            held >= free + HOLD.saturating_sub(MAX_OVERSLEEP),
+            "{HOLD:?} of a held store lock added only {:?} to the meter ({free:?} with the lock free)",
+            held.saturating_sub(free)
+        );
+        assert!(
+            held <= window + free,
+            "the meter grew {held:?} in a {window:?} window"
+        );
     }
 }
