@@ -653,13 +653,13 @@
   }
   .row {
     display: grid;
-    grid-template-columns: 4rem 5.5rem 3.5rem 12rem 2.5rem 8rem 5rem 4.5rem 5rem 5rem minmax(
+    grid-template-columns: 4rem 5.5rem 3.5rem 12rem 2.5rem 8rem 5rem 6rem 5rem 5rem minmax(
         16rem,
         1fr
       );
     align-items: center;
     height: 28px;
-    min-width: 72rem;
+    min-width: 72.5rem;
   }
   .head {
     position: sticky;

@@ -265,7 +265,18 @@ test("the table follows new rows; scrolling up pauses it and Follow resumes (AC-
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.wheel(0, -2_000);
   await expect(follow).toHaveAttribute("aria-pressed", "false");
-  const parked = await grid(page).evaluate((g) => g.scrollTop);
+  // WebKit animates the wheel scroll: following pauses on its first step, so
+  // wait for the view to come to rest before taking where the user left it.
+  let last = -1;
+  await expect
+    .poll(async () => {
+      const now = await grid(page).evaluate((g) => g.scrollTop);
+      const settled = now === last;
+      last = now;
+      return settled;
+    })
+    .toBe(true);
+  const parked = last;
   const count = await rowCount(page);
   await expect.poll(() => rowCount(page), { timeout: 10_000 }).toBeGreaterThan(count);
   expect(await grid(page).evaluate((g) => g.scrollTop)).toBeCloseTo(parked, -1);
@@ -429,10 +440,17 @@ test("at 900 px the header names fit and the header row stays opaque when scroll
   await capture(page);
   await stopCapture(page);
   const head = grid(page).locator('[role="columnheader"]');
-  const clipped = await head.evaluateAll((cells) =>
-    cells.filter((c) => c.scrollWidth > c.clientWidth).map((c) => c.textContent?.trim()),
-  );
-  expect(clipped).toEqual([]);
+  const clipped = () =>
+    head.evaluateAll((cells) =>
+      cells.filter((c) => c.scrollWidth > c.clientWidth).map((c) => c.textContent?.trim()),
+    );
+  expect(await clipped()).toEqual([]);
+  // Linux's default sans (DejaVu Sans) is much wider than the macOS and
+  // Windows ones; Verdana shares its metrics, so it stands in for it here.
+  await page.addStyleTag({
+    content: '[role="grid"] { font-family: Verdana, "DejaVu Sans", sans-serif !important; }',
+  });
+  expect(await clipped()).toEqual([]);
   // Scroll fully right: the header row must still hide the rows scrolled under it.
   await grid(page).evaluate((g) => (g.scrollLeft = g.scrollWidth));
   const headerRow = grid(page).locator('[role="row"][aria-rowindex="1"]');
