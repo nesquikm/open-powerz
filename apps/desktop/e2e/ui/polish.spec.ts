@@ -16,7 +16,15 @@
 import { expect, test, type Page } from "@playwright/test";
 import { CHART_SERIES, SERIES_VISIBILITY_KEY } from "../../src/lib/chartSeries";
 import { THEME_COLORS } from "../../src/lib/theme";
-import { blur, chartSeriesLengths, open, streamDemo, useTheme } from "./helpers";
+import {
+  blur,
+  chartDrawsAfterNow,
+  chartSeriesLengths,
+  open,
+  settled,
+  streamDemo,
+  useTheme,
+} from "./helpers";
 
 /** Show only `keys` in the legend before the app loads (session storage, as the app keeps it). */
 async function onlySeries(page: Page, keys: string[]): Promise<void> {
@@ -121,7 +129,8 @@ test.describe("at 1600×900", () => {
     await blur(page);
     await page.keyboard.press(" ");
     await expect(page.getByRole("timer")).toBeVisible();
-    await page.waitForTimeout(500);
+    // A recording with rows in it, so stopping it saves one.
+    await expect(page.getByRole("timer")).toContainText(/[1-9][\d,]* rows/);
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     await expect(page.locator(".notice").filter({ hasText: /Recording saved/ })).toBeVisible();
     await page.getByRole("button", { name: "Export", exact: true }).click();
@@ -172,10 +181,14 @@ test.describe("at 600 px", () => {
     await page.setViewportSize({ width: 900, height: 800 });
     await streamWithData(page);
     await page.setViewportSize({ width: 600, height: 800 });
-    await page.waitForTimeout(500);
+    // The resize has gone through layout and the chart has redrawn at the new width.
+    await settled(page, () => page.locator(".chart-wrap .plot").boundingBox());
+    await chartDrawsAfterNow(page, 5);
     await page.reload();
     await streamWithData(page);
-    await page.waitForTimeout(1_500);
+    // The reloaded page has laid out at 600 px and kept drawing for a while.
+    await settled(page, () => page.locator(".chart-wrap .plot").boundingBox());
+    await chartDrawsAfterNow(page, 20);
     expect(errors.filter((e) => /ResizeObserver/i.test(e))).toEqual([]);
   });
 

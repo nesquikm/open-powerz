@@ -12,7 +12,7 @@
 
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { blur, open, streamDemo } from "./helpers";
+import { blur, chartDrawsAfterNow, open, streamDemo } from "./helpers";
 
 const AXE_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
@@ -333,8 +333,9 @@ test.describe("review fixes (FR M46CTX)", () => {
     await expect.poll(async () => (await elapsed.textContent())?.trim()).not.toBe("0:00:00");
     await openMenuWithKeyboard(page);
     await page.keyboard.press("r");
-    // R resets the statistics; inside the menu it must do nothing (read once, no retry).
-    await page.waitForTimeout(150);
+    // R resets the statistics; inside the menu it must do nothing (read once, no retry)
+    // once the app has redrawn a few times since the key press.
+    await chartDrawsAfterNow(page, 3);
     expect((await elapsed.textContent())?.trim()).not.toBe("0:00:00");
     await expect(menu(page)).toBeVisible();
   });

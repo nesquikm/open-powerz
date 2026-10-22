@@ -12,7 +12,37 @@ export const CI_FACTOR = 3;
 
 /** Render-step budget (ms) for `env`: the local budget, times `CI_FACTOR` when `CI` is set. */
 export function renderStepBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
-  return env.CI ? RENDER_STEP_BUDGET_MS * CI_FACTOR : RENDER_STEP_BUDGET_MS;
+  return ciLatencyBudgetMs(RENDER_STEP_BUDGET_MS, env);
+}
+
+/** A latency budget (ms) for `env`: kept locally, times `CI_FACTOR` when `CI` is set. */
+export function ciLatencyBudgetMs(budgetMs: number, env: NodeJS.ProcessEnv = process.env): number {
+  return env.CI ? budgetMs * CI_FACTOR : budgetMs;
+}
+
+/** A rate floor (per second) for `env`: kept locally, divided by `CI_FACTOR` when `CI` is set. */
+export function ciRateFloor(floorPerSecond: number, env: NodeJS.ProcessEnv = process.env): number {
+  return env.CI ? floorPerSecond / CI_FACTOR : floorPerSecond;
+}
+
+/** AC-KQF5GM.9: lower bound (per second) of the 1000 SPS live redraw rate. */
+export const LIVE_REDRAW_MIN_PER_S = 20;
+
+/** AC-KQF5GM.9: upper bound (per second) of the 1000 SPS live redraw rate. */
+export const LIVE_REDRAW_MAX_PER_S = 60;
+
+/**
+ * AC-KQF5GM.9: the live redraw band for `env`. Locally 20–60 per second; on CI only the
+ * lower bound is divided by `CI_FACTOR`, the upper bound stays.
+ */
+export function liveRedrawBand(env: NodeJS.ProcessEnv = process.env): {
+  minPerSecond: number;
+  maxPerSecond: number;
+} {
+  return {
+    minPerSecond: ciRateFloor(LIVE_REDRAW_MIN_PER_S, env),
+    maxPerSecond: LIVE_REDRAW_MAX_PER_S,
+  };
 }
 
 /** Failure message naming the step, its render times and the budget it was held to. */

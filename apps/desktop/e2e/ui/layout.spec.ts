@@ -16,6 +16,7 @@ import {
   connectDemo,
   open,
   readoutValue,
+  settled,
   streamDemo,
   useTheme,
   type Theme,
@@ -151,6 +152,8 @@ async function startRecording(page: Page): Promise<void> {
   await blur(page);
   await page.keyboard.press(" ");
   await expect(page.getByRole("timer")).toBeVisible();
+  // The timer has ticked: it counts rows, so its text is at its usual width.
+  await expect(page.getByRole("timer")).toContainText(/[1-9][\d,]* rows/);
 }
 
 const BAR_STATES = {
@@ -194,9 +197,9 @@ for (const theme of THEMES) {
       await open(page, QUERY[state]);
       const baseline = await barHeight(page);
       await enter(page);
-      // Let the recording timer tick, so its text is at its usual width.
-      await page.waitForTimeout(300);
-      const items = await topBarItems(page);
+      // The bar has settled into its layout for this state (startRecording waits for
+      // the timer to tick, so its text is at its usual width).
+      const items = await settled(page, () => topBarItems(page));
       expect(items.length).toBeGreaterThan(4);
       expectOneRow(items);
       await expectNoClipping(page, items);
@@ -253,8 +256,7 @@ test("with very large control text the bar keeps one row and every control stays
   });
   await streamDemo(page);
   await startRecording(page);
-  await page.waitForTimeout(300);
-  const items = await topBarItems(page);
+  const items = await settled(page, () => topBarItems(page));
   expectOneRow(items);
   await expectNoClipping(page, items);
   // Whatever moved into the "⋯" menu is there, and the keyboard reaches it.

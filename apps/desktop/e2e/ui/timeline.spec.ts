@@ -11,7 +11,7 @@
  */
 
 import { expect, test, type Page } from "@playwright/test";
-import type { ChartDraw } from "../hook";
+import { HOOK, type ChartDraw, type OpenPowerzE2E } from "../hook";
 import { formatSpan } from "../../src/lib/chartSeries";
 import { MOCK_OUTAGE } from "../../src/lib/mockBackend";
 import { minSpanMs, sliderToSpan } from "../../src/lib/timeline";
@@ -24,6 +24,7 @@ import {
   chartSeriesLengths,
   chartShuttle,
   lastDraw,
+  animationFrames,
   open,
   overviewBreaks,
   overviewWindow,
@@ -117,6 +118,28 @@ async function nextRange(page: Page, prev: { t0Ms: number; t1Ms: number }): Prom
   return lastDraw(page);
 }
 
+/** AC-KQF5GM.11: the zoom slider's position and the session length (the last draw's
+ * end; the seeded session starts at 0), read in one page evaluation. */
+async function sliderWithSession(page: Page): Promise<{ value: number; sessionMs: number }> {
+  await expect.poll(async () => (await lastDraw(page)).mode).toBe("live");
+  return page.evaluate((name) => {
+    const el = document.querySelector<HTMLInputElement>(".chart-wrap input.zoom-slider");
+    const d = (window as unknown as Record<string, OpenPowerzE2E>)[name]!.chartDraws().at(-1);
+    return { value: Number(el?.value ?? NaN), sessionMs: d?.t1Ms ?? NaN };
+  }, HOOK);
+}
+
+/** The session length when the view paused: the end of the newest live draw after
+ * `sinceAt` that came before the first paused (history) draw. */
+async function sessionAtPause(page: Page, sinceAt: number): Promise<number> {
+  const draws = (await chartDraws(page)).filter((d) => d.at >= sinceAt);
+  const firstPaused = draws.findIndex((d) => d.mode === "history");
+  const live = draws.slice(0, firstPaused < 0 ? draws.length : firstPaused);
+  const last = live.filter((d) => d.mode === "live").at(-1);
+  if (!last) throw new Error("no live draw before the pause");
+  return last.t1Ms;
+}
+
 /** Session ms under a fraction of the plot width for a gap-free range. */
 function timeAt(d: { t0Ms: number; t1Ms: number }, frac: number): number {
   return d.t0Ms + frac * span(d);
@@ -197,8 +220,13 @@ test.describe("overview strip (AC-FENCD9.1 / AC-FENCD9.2)", () => {
     page,
   }) => {
     await streamSeeded(page);
-    const before = await lastDraw(page);
     const s = await box(page, ".chart-wrap .overview");
+    // The strip shows the seeded session, so the live window sits right of the click
+    // point: wait for that state rather than clicking before the session frame is in.
+    await expect
+      .poll(async () => (await overviewWindow(page))?.leftPx ?? 0, { timeout: 10_000 })
+      .toBeGreaterThan(s.width * 0.3);
+    const before = await lastDraw(page);
     await page.mouse.click(s.x + s.width * 0.25, s.y + s.height / 2);
     const pannedAt = await pageNow(page);
     await expectPaused(page);
@@ -464,7 +492,8 @@ test.describe("editor keys (AC-FENCD9.6 / .7 / .8)", () => {
     await page.keyboard.press("k");
     expect(await chartShuttle(page)).toBe(0);
     const stopped = await chartPlayhead(page);
-    await page.waitForTimeout(300);
+    // A playing playhead moves every frame; stopped, it stays put for as many frames.
+    await animationFrames(page, 10);
     expect(await chartPlayhead(page)).toBe(stopped);
     await expectPaused(page);
   });
@@ -485,8 +514,10 @@ test.describe("editor keys (AC-FENCD9.6 / .7 / .8)", () => {
     await expect.poll(() => chartPlayhead(page)).not.toBeNull();
     await blur(page);
     // At 1× the playhead keeps pace with the stream: still paused a moment later.
+    const p1 = (await chartPlayhead(page)) ?? 0;
     await page.keyboard.press("l");
-    await page.waitForTimeout(500);
+    // Half a second of 1× play, measured on the playhead itself, not on the runner's clock.
+    await expect.poll(async () => (await chartPlayhead(page)) ?? -1).toBeGreaterThan(p1 + 500);
     await expect(liveButton(page)).toHaveText("Paused · Go live");
     // At 8× it catches up with the newest data and the chart goes live.
     await page.keyboard.press("l");
@@ -557,20 +588,25 @@ test.describe("zoom slider and presets (AC-FENCD9.9 / AC-FENCD9.10)", () => {
     await wholeSessionLive(page);
     await page.getByRole("button", { name: "10 s" }).click();
     await expect.poll(async () => (await lastDraw(page)).t0Ms).toBeGreaterThan(0);
-    const sessionMs = (await lastDraw(page)).t1Ms;
     // The slider's bottom end: two sample periods at the demo's 50 SPS (AC-9CFMD3.4).
     const floor = minSpanMs(50);
+    // AC-KQF5GM.11: the session keeps growing, so its length and the slider's position
+    // are read together, in one page evaluation; the slider is set from the draw that
+    // read sees (it rounds to a whole step).
+    const shown = await sliderWithSession(page);
     // 10 s of a ~200 s session.
-    const expected = (1000 * Math.log(10_000 / floor)) / Math.log(sessionMs / floor);
-    expect(Math.abs(Number(await slider.inputValue()) - expected)).toBeLessThanOrEqual(15);
+    const expected = (1000 * Math.log(10_000 / floor)) / Math.log(shown.sessionMs / floor);
+    expect(Math.abs(shown.value - expected)).toBeLessThanOrEqual(1);
 
     const before = await lastDraw(page);
     await slider.fill("300");
     await expectPaused(page);
     const after = await nextRange(page, before);
+    // The span is set from the session as it was at the input: the newest live draw
+    // before the first paused one, not a length read earlier.
+    const sessionMs = await sessionAtPause(page, before.at);
     const want = floor * Math.pow(sessionMs / floor, 0.3);
-    expect(span(after) / want).toBeGreaterThan(0.9);
-    expect(span(after) / want).toBeLessThan(1.1);
+    expect(span(after) / want).toBeCloseTo(1, 2);
   });
 
   test("AC-FENCD9.10: live presets follow the newest data", async ({ page }) => {
@@ -744,7 +780,8 @@ test.describe("review fixes (FR FENCD9)", () => {
       [p.x + p.width * 0.31, y] as const,
     );
     await page.mouse.move(p.x + p.width * 0.6, y, { steps: 5 });
-    await page.waitForTimeout(300);
+    // A pan would redraw on the next frame; give it a few.
+    await animationFrames(page, 5);
     const after = await lastDraw(page);
     expect(after.t0Ms).toBe(before.t0Ms);
     expect(after.t1Ms).toBe(before.t1Ms);
@@ -862,15 +899,19 @@ test.describe("review fixes (FR FENCD9)", () => {
     await streamSeeded(page);
     const win = page.getByRole("slider", { name: "Visible range" });
     // Live, the window ends at the newest data: its start is as late as it can be.
-    const read = async () => ({
-      now: Number(await win.getAttribute("aria-valuenow")),
-      max: Number(await win.getAttribute("aria-valuemax")),
-    });
+    // AC-KQF5GM.11: both attributes in one page evaluation, so a live redraw between
+    // two separate reads cannot move one and not the other.
+    const read = () =>
+      win.evaluate((el) => ({
+        now: Number(el.getAttribute("aria-valuenow")),
+        max: Number(el.getAttribute("aria-valuemax")),
+      }));
     await expect
       .poll(async () => span(await lastDraw(page)), { timeout: 10_000 })
       .toBeGreaterThan(2_000);
     const live = await read();
-    expect(Math.abs(live.max - live.now)).toBeLessThanOrEqual(0.3);
+    // Both are rounded to a tenth of a second on their own: at most one step apart.
+    expect(Math.abs(live.max - live.now)).toBeLessThanOrEqual(0.1 + 1e-9);
     // Paused, the start in tenths of a second.
     const view = await pause(page);
     await expect

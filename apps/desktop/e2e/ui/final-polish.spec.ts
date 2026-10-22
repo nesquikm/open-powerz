@@ -22,9 +22,12 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   blur,
   chartSeriesLengths,
+  lastDraw,
   open,
   overviewBreaks,
+  settled,
   streamDemo,
+  streamOn,
   useTheme,
   type Theme,
 } from "./helpers";
@@ -44,6 +47,21 @@ async function streamWithData(page: Page, query = ""): Promise<void> {
   await open(page, query);
   await streamDemo(page);
   await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(20);
+}
+
+/** Waits until the export's status text gives a count of rows done, so the progress
+ * has rendered its first update. */
+async function expectExportCounting(page: Page): Promise<void> {
+  await expect
+    .poll(async () => /[1-9][\d,]*\s*\/\s*\d/.test((await exportTexts(page)).status), {
+      message: "the export status gives a count",
+    })
+    .toBe(true);
+}
+
+/** The drawn span of a chart draw, ms. */
+function span(d: { t0Ms: number; t1Ms: number }): number {
+  return d.t1Ms - d.t0Ms;
 }
 
 async function boxOf(locator: Locator, name: string): Promise<Box> {
@@ -118,8 +136,7 @@ for (const width of WIDTHS) {
     await page.setViewportSize({ width, height: 800 });
     await streamWithData(page, "?mock=slow-export");
     await expect(page.locator(".top-bar")).not.toHaveClass(/export-in-menu/);
-    await page.waitForTimeout(300);
-    const before = await topBarItems(page);
+    const before = await settled(page, () => topBarItems(page));
     expect(before.length).toBeGreaterThan(4);
     const exportButton = page.locator(".top-bar button.export");
     const buttonBefore = await boxOf(exportButton, "Export button");
@@ -127,8 +144,8 @@ for (const width of WIDTHS) {
     await exportButton.click();
     const progress = page.getByLabel("Export progress");
     await expect(progress).toBeVisible();
-    await page.waitForTimeout(300);
-    expectItemsUnmoved(before, await topBarItems(page));
+    await expectExportCounting(page);
+    expectItemsUnmoved(before, await settled(page, () => topBarItems(page)));
 
     // The progress fills the disabled Export button's own box.
     await expect(exportButton).toBeDisabled();
@@ -165,17 +182,16 @@ test("with Export in the menu, a running export is a thin line along the bar's b
   await streamWithData(page, "?mock=slow-export");
   const topBar = page.locator(".top-bar");
   await expect(topBar).toHaveClass(/export-in-menu/);
-  await page.waitForTimeout(300);
-  const before = await topBarItems(page);
+  const before = await settled(page, () => topBarItems(page));
 
   await page.getByRole("button", { name: /^More:/ }).click();
   await page.locator("#top-bar-menu").getByRole("menuitem", { name: "Export" }).click();
   const progress = page.getByLabel("Export progress");
   await expect(progress).toBeVisible();
   await expect(page.locator("#top-bar-menu")).toHaveCount(0);
-  await page.waitForTimeout(300);
+  await expectExportCounting(page);
 
-  expectItemsUnmoved(before, await topBarItems(page));
+  expectItemsUnmoved(before, await settled(page, () => topBarItems(page)));
   const bar = await boxOf(topBar, "top bar");
   const line = await boxOf(progress, "export progress");
   expect(line.height, "a thin line").toBeLessThanOrEqual(4);
@@ -191,7 +207,8 @@ async function showTwoNotices(page: Page): Promise<void> {
   await blur(page);
   await page.keyboard.press(" ");
   await expect(page.getByRole("timer")).toBeVisible();
-  await page.waitForTimeout(500);
+  // A recording with rows in it, so stopping it saves one.
+  await expect(page.getByRole("timer")).toContainText(/[1-9][\d,]* rows/);
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   await expect(page.locator(".notice").filter({ hasText: /Recording saved/ })).toBeVisible();
   await page.getByRole("button", { name: "Export", exact: true }).click();
@@ -212,11 +229,10 @@ for (const theme of THEMES) {
       const readout = page.getByRole("region", { name: "Live readout" });
       const chart = page.getByRole("region", { name: "Chart" });
       const stats = page.getByRole("complementary", { name: "Statistics" });
-      await page.waitForTimeout(300);
-      const chartBefore = await boxOf(chart, "chart card");
+      const chartBefore = await settled(page, () => boxOf(chart, "chart card"));
 
       await showTwoNotices(page);
-      await page.waitForTimeout(300);
+      await settled(page, () => boxOf(page.locator(".notice-stack"), "notice stack"));
       expectSameBox(chartBefore, await boxOf(chart, "chart card"), "chart card", 1);
 
       const covered = {
@@ -251,10 +267,10 @@ test("at 1600 px, notices float over the side panel and move nothing (AC-SX3EDV.
   await page.setViewportSize({ width: 1600, height: 900 });
   await streamWithData(page);
   const chart = page.getByRole("region", { name: "Chart" });
-  await page.waitForTimeout(300);
-  const chartBefore = await boxOf(chart, "chart card");
+  const chartBefore = await settled(page, () => boxOf(chart, "chart card"));
 
   await showTwoNotices(page);
+  await settled(page, () => boxOf(page.locator(".notice-stack"), "notice stack"));
   const stack = page.locator(".notice-stack");
   expect(await stack.evaluate((el) => getComputedStyle(el).position)).toBe("fixed");
   const s = await boxOf(stack, "notice stack");
@@ -322,9 +338,21 @@ async function expectContinuousStrip(page: Page): Promise<void> {
       { timeout: 10_000, message: "the strip spans many columns" },
     )
     .toBeGreaterThan(200);
-  // Let the strip repaint (at most 4 per second) with the newest samples.
-  await page.waitForTimeout(600);
-  const c = await stripCoverage(page);
+  // The strip repaints at most 4 times a second: wait for a repaint that shows the line
+  // whole, rather than sleeping and checking one frame.
+  let c = await stripCoverage(page);
+  await expect
+    .poll(
+      async () => {
+        c = await stripCoverage(page);
+        return c.eligible > 0 ? c.painted / c.eligible : 0;
+      },
+      {
+        timeout: 5_000,
+        message: "the strip draws a continuous line",
+      },
+    )
+    .toBeGreaterThanOrEqual(0.98);
   expect(
     c.painted / c.eligible,
     `painted ${c.painted} of ${c.eligible} columns from ${c.first} to ${c.last}`,
@@ -344,7 +372,8 @@ test.describe("the overview strip draws sparse series as a line (AC-SX3EDV.6)", 
   test("at 50 SPS", async ({ page }) => {
     await streamWithData(page);
     await expect(page.getByLabel("Sample rate")).toHaveValue("50");
-    await page.waitForTimeout(4_000);
+    // Four seconds of 50 SPS data, however long the runner takes to stream it.
+    await streamOn(page, 4_000);
     await expectContinuousStrip(page);
   });
 
@@ -354,16 +383,20 @@ test.describe("the overview strip draws sparse series as a line (AC-SX3EDV.6)", 
     await expect(page.getByLabel("Sample rate")).toHaveValue("10");
     // A session that holds 10 SPS samples only.
     await clearChartHistory(page);
-    await page.waitForTimeout(5_000);
+    // Five seconds of 10 SPS data since the clear.
+    await expect
+      .poll(async () => span(await lastDraw(page)), { timeout: 30_000 })
+      .toBeGreaterThanOrEqual(5_000);
     await expectContinuousStrip(page);
   });
 
   test("after a rate change from 50 to 10 SPS", async ({ page }) => {
     await streamWithData(page);
-    await page.waitForTimeout(2_000);
+    // Two seconds of 50 SPS data, then five of 10 SPS.
+    await streamOn(page, 2_000);
     await page.getByLabel("Sample rate").selectOption("10");
     await expect(page.getByLabel("Sample rate")).toHaveValue("10");
-    await page.waitForTimeout(5_000);
+    await streamOn(page, 5_000);
     await expectContinuousStrip(page);
   });
 });
@@ -375,9 +408,8 @@ test("the disconnect banner sits in the line above the plot (AC-SX3EDV.7)", asyn
   const chart = page.getByRole("region", { name: "Chart" });
   const banner = chart.getByText("showing the last session");
   await expect(banner).toBeVisible();
-  await page.waitForTimeout(300);
 
-  const b = await boxOf(banner, "banner");
+  const b = await settled(page, () => boxOf(banner, "banner"));
   const plotHost = await boxOf(page.locator(".chart-wrap .plot"), "plot");
   const over = await boxOf(page.locator(".plot .u-over"), "plot area");
   const legend = await boxOf(page.locator(".chart-wrap .legend"), "legend");

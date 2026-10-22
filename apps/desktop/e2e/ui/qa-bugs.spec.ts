@@ -13,7 +13,15 @@
 
 import { expect, test, type Page } from "@playwright/test";
 import type { ChartDraw } from "../hook";
-import { blur, chartDraws, chartSeriesLengths, expectHook, open, streamDemo } from "./helpers";
+import {
+  blur,
+  chartDraws,
+  chartSeriesLengths,
+  expectHook,
+  open,
+  streamDemo,
+  streamOn,
+} from "./helpers";
 
 test.use({ viewport: { width: 1600, height: 900 } });
 
@@ -45,8 +53,8 @@ test("rate keys do nothing while recording", async ({ page }) => {
   }
   // No error banner: the keys never reached the backend.
   await expect(page.getByRole("alert")).toHaveCount(0);
-  // The stream keeps its rate for a while after the presses.
-  await page.waitForTimeout(500);
+  // The stream keeps its rate for a while after the presses: half a second more of data.
+  await streamOn(page, 500);
   await expect(rate).toHaveValue("50");
   await expect(page.locator(".badge")).toHaveText("Streaming");
 });
@@ -111,7 +119,8 @@ async function lastHistoryDraw(page: Page): Promise<ChartDraw | undefined> {
   return (await chartDraws(page)).filter((d) => d.mode === "history" && d.fromHistory).at(-1);
 }
 
-/** Slack for the status's one-decimal rounding, s. */
+/** Slack for the status's one-decimal rounding, s. Not a timing allowance: the status
+ * and the draw are compared from the same poll, and the poll waits for them to agree. */
 const SLACK_S = 0.11;
 
 /**

@@ -17,6 +17,7 @@ import {
   chartSeriesLengths,
   connectDemo,
   expectReadoutNear,
+  holdClock,
   open,
   readoutValue,
   statsElapsedSeconds,
@@ -159,14 +160,19 @@ test.describe("keyboard shortcuts (AC-AH2AEN.5)", () => {
   });
 
   test("R resets the statistics", async ({ page }) => {
+    // The page clock runs as usual until the reset, then holds still, so the elapsed
+    // time cannot climb back past the threshold before the check however slow the
+    // runner is (AC-KQF5GM.11).
+    await page.clock.install();
     await open(page);
     await streamDemo(page);
     await expect
       .poll(() => statsElapsedSeconds(page), { timeout: 6_000 })
       .toBeGreaterThanOrEqual(2);
+    await holdClock(page);
     await blur(page);
     await page.keyboard.press("r");
-    await expect.poll(() => statsElapsedSeconds(page), { timeout: 2_000 }).toBeLessThan(2);
+    await expect.poll(() => statsElapsedSeconds(page), { timeout: 5_000 }).toBeLessThan(2);
   });
 
   test("End returns the chart to live; arrow-key zoom pauses it (AC-DDDYDJ.3, FR FENCD9)", async ({

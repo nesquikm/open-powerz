@@ -21,7 +21,7 @@ import {
   open,
   streamDemo,
 } from "./helpers";
-import { renderReport, renderStepBudgetMs } from "./budget";
+import { liveRedrawBand, renderReport, renderStepBudgetMs } from "./budget";
 
 const SYNTHETIC = 10_000_000;
 const STEPS = 6;
@@ -200,12 +200,16 @@ test("with the overview strip shown, 1000 SPS live redraws stay at 20–60 per s
   await expect(page.getByLabel("Sample rate")).toHaveValue("1000");
   await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(1000);
   const start = await page.evaluate(() => performance.now());
+  // The 2 s sleep is the measurement window of a throughput budget, not a settle wait.
   await page.waitForTimeout(2_000);
   const end = await page.evaluate(() => performance.now());
   const live = (await chartDraws(page)).filter(
     (d) => d.mode === "live" && d.at >= start && d.at <= end,
   );
   const perSecond = (live.length * 1000) / (end - start);
-  expect(perSecond, `live redraws per second: ${perSecond.toFixed(1)}`).toBeGreaterThanOrEqual(20);
-  expect(perSecond).toBeLessThanOrEqual(60);
+  // AC-KQF5GM.9: 20–60 per second locally; on CI only the floor is divided by the CI factor.
+  const { minPerSecond, maxPerSecond } = liveRedrawBand();
+  const report = `live redraws per second: ${perSecond.toFixed(1)}; band ${minPerSecond.toFixed(1)}–${maxPerSecond}`;
+  expect(perSecond, report).toBeGreaterThanOrEqual(minPerSecond);
+  expect(perSecond, report).toBeLessThanOrEqual(maxPerSecond);
 });

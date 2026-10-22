@@ -18,6 +18,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { formatSpan } from "../../src/lib/chartSeries";
 import { HOOK, type ChartDraw, type OpenPowerzE2E } from "../hook";
+import { ciLatencyBudgetMs } from "./budget";
+import { liveWindowProblem } from "./liveWindow";
 import {
   badge,
   chartDraws,
@@ -140,17 +142,43 @@ async function liveDrawAndZoom(page: Page): Promise<{ draw: ChartDraw | null; zo
   }, HOOK);
 }
 
-/** Within `timeoutMs`, the latest live draw starts at the session start (within one
- * backfill step) and spans at least `spanMs`, and the zoom readout names that span. */
-async function expectLiveBackfilled(page: Page, spanMs: number, timeoutMs: number): Promise<void> {
+/** Latency budget for a live window to show the backfilled history after a reload or a
+ * window change: 1.5 s locally, times the CI factor on CI. A window that filled only
+ * from new samples would need the whole pre-reload span (6 s or more) to get there. */
+const BACKFILL_BUDGET_MS = ciLatencyBudgetMs(1_500);
+
+/** The live windows' lengths by their button label. */
+const LIVE_WINDOW_MS: Record<string, number> = {
+  "10 s": 10_000,
+  "1 min": 60_000,
+  "10 min": 600_000,
+};
+
+/**
+ * Within `timeoutMs`, the latest live draw is in the state a backfilled `windowMs`
+ * window must be in (AC-KQF5GM.10): it starts at the session start, or, once the session
+ * is longer than the window, it is full and ends at the newest sample; it reaches back
+ * at least `reachBackMs` (capped at the window); and the zoom readout names its span.
+ * No bound depends on how long the runner took to get here.
+ */
+async function expectLiveBackfilled(
+  page: Page,
+  windowMs: number,
+  reachBackMs: number,
+  timeoutMs: number,
+): Promise<void> {
   await expect
     .poll(
       async () => {
         const { draw, zoom } = await liveDrawAndZoom(page);
         if (!draw) return "no live draw yet";
-        if (draw.t0Ms > 250) return `starts at ${draw.t0Ms} ms, not the session start`;
-        if (draw.t1Ms - draw.t0Ms < spanMs)
-          return `spans ${draw.t1Ms - draw.t0Ms} ms, less than ${spanMs} ms`;
+        const problem = liveWindowProblem({
+          t0Ms: draw.t0Ms,
+          t1Ms: draw.t1Ms,
+          windowMs,
+          reachBackMs,
+        });
+        if (problem !== null) return problem;
         if (zoom !== formatSpan(draw.t1Ms - draw.t0Ms))
           return `zoom readout ${zoom} for a ${draw.t1Ms - draw.t0Ms} ms draw`;
         return "ok";
@@ -172,14 +200,14 @@ test("straight after a reload the live windows show the samples from before it (
   await expect(badge(page)).toHaveText("Streaming");
 
   // The 10 s window (the default) fills from the history at once, not over 10 s.
-  await expectLiveBackfilled(page, spanBefore, 1_500);
+  await expectLiveBackfilled(page, LIVE_WINDOW_MS["10 s"], spanBefore, BACKFILL_BUDGET_MS);
   expect((await liveDrawAndZoom(page)).zoom).not.toBe("");
 
   // So do the 1 min and 10 min windows.
   for (const name of ["1 min", "10 min"]) {
     await page.getByRole("button", { name, exact: true }).click();
-    await expectLiveBackfilled(page, spanBefore, 1_500);
+    await expectLiveBackfilled(page, LIVE_WINDOW_MS[name], spanBefore, BACKFILL_BUDGET_MS);
   }
   await page.getByRole("button", { name: "10 s", exact: true }).click();
-  await expectLiveBackfilled(page, spanBefore, 1_500);
+  await expectLiveBackfilled(page, LIVE_WINDOW_MS["10 s"], spanBefore, BACKFILL_BUDGET_MS);
 });

@@ -203,10 +203,30 @@ export function overviewWindow(page: Page): Promise<OverviewWindowBox | null> {
   return hookCall(page, "overviewWindow");
 }
 
-/** The chart's last draw, read through the test hook. */
+/**
+ * The chart's last draw, read through the test hook.
+ *
+ * AC-KQF5GM.11: a paused (history) view keeps its range until input changes it, so a
+ * history draw is returned once its range has held for a few animation frames.
+ * Without that, a read right after a drag can catch a draw for one of the drag's
+ * intermediate steps while the later input and its `history_range` answer are still on
+ * their way. A live view redraws every frame and is returned as read.
+ */
 export async function lastDraw(page: Page): Promise<ChartDraw> {
-  const d = (await chartDraws(page)).at(-1);
+  let d = (await chartDraws(page)).at(-1);
   if (!d) throw new Error("the chart has not drawn yet");
+  for (let i = 0; i < 20 && d.mode === "history"; i++) {
+    await animationFrames(page, 3);
+    const next: ChartDraw | undefined = (await chartDraws(page)).at(-1);
+    if (!next) throw new Error("the chart has not drawn yet");
+    const same =
+      next.mode === d.mode &&
+      next.t0Ms === d.t0Ms &&
+      next.t1Ms === d.t1Ms &&
+      next.fromHistory === d.fromHistory;
+    d = next;
+    if (same) break;
+  }
   return d;
 }
 
@@ -261,4 +281,93 @@ export async function recordingElapsedSeconds(page: Page): Promise<number> {
   const m = /REC (\d+):(\d{2}):(\d{2})/.exec(await timer.innerText());
   if (!m) return NaN;
   return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+}
+
+/**
+ * AC-KQF5GM.11: waits for the page to have painted `count` more animation frames. A
+ * test that checks that something did *not* happen (a key that must do nothing, a
+ * stopped playhead) gives the app that many frames to react instead of a fixed sleep;
+ * the frames tick at the page's own pace, however slow the runner is.
+ */
+export async function animationFrames(page: Page, count = 5): Promise<void> {
+  await page.evaluate(
+    (n) =>
+      new Promise<void>((resolve) => {
+        let left = n;
+        const tick = (): void => {
+          left -= 1;
+          if (left <= 0) resolve();
+          else requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }),
+    count,
+  );
+}
+
+/**
+ * AC-KQF5GM.11: reads `read` until two reads in a row, a couple of animation frames
+ * apart, agree, and returns that value: a wait for layout to settle instead of a fixed
+ * "let it settle" sleep.
+ */
+export async function settled<T>(page: Page, read: () => Promise<T>, timeout = 10_000): Promise<T> {
+  let value = await read();
+  let previous = JSON.stringify(value);
+  await expect
+    .poll(
+      async () => {
+        await animationFrames(page, 2);
+        value = await read();
+        const now = JSON.stringify(value);
+        const same = now === previous;
+        previous = now;
+        return same;
+      },
+      { timeout, intervals: [0], message: "the layout settles" },
+    )
+    .toBe(true);
+  return value;
+}
+
+/** AC-KQF5GM.11: waits until the chart has drawn `count` times after this call, so the
+ * app has redrawn with whatever just changed. */
+export async function chartDrawsAfterNow(page: Page, count = 2): Promise<void> {
+  const since = await page.evaluate(() => performance.now());
+  await expect
+    .poll(async () => (await chartDraws(page)).filter((d) => d.at > since).length, {
+      message: `${count} chart draws`,
+    })
+    .toBeGreaterThanOrEqual(count);
+}
+
+/** The newest session ms of the chart's last live draw, or -1 before any. */
+export async function newestLiveMs(page: Page): Promise<number> {
+  const draws = await chartDraws(page);
+  return [...draws].reverse().find((d) => d.mode === "live")?.t1Ms ?? -1;
+}
+
+/** AC-KQF5GM.11: waits until the live stream has drawn `ms` more session ms of data
+ * than it had when this was called: a wait for data, not for wall time. */
+export async function streamOn(page: Page, ms: number, timeout = 30_000): Promise<void> {
+  const from = await newestLiveMs(page);
+  await expect
+    .poll(() => newestLiveMs(page), { timeout, message: `${ms} ms more of the stream` })
+    .toBeGreaterThanOrEqual(from + ms);
+}
+
+/**
+ * Pauses the running page clock a moment ahead of its current time. The clock keeps
+ * running while the pause request travels to the page, so a target that close can be
+ * in the past by the time it lands; then retry with a wider lead.
+ */
+export async function holdClock(page: Page): Promise<void> {
+  for (let leadMs = 50; ; leadMs *= 2) {
+    const target = (await page.evaluate(() => Date.now())) + leadMs;
+    try {
+      await page.clock.pauseAt(target);
+      return;
+    } catch (e) {
+      if (leadMs >= 3_200 || !String(e).includes("Cannot fast-forward to the past")) throw e;
+    }
+  }
 }

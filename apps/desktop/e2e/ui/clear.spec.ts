@@ -14,6 +14,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { MOCK_OUTAGE } from "../../src/lib/mockBackend";
 import type { ChartDraw } from "../hook";
+import { ciLatencyBudgetMs } from "./budget";
 import {
   badge,
   chartBreaks,
@@ -21,6 +22,7 @@ import {
   chartGapBands,
   chartPlayhead,
   chartSeriesLengths,
+  holdClock,
   lastDraw,
   open,
   overviewBreaks,
@@ -38,8 +40,14 @@ const CLEAR_TOOLTIP =
   "Erase the chart history and what Export saves. The meter stays connected; recordings are not affected.";
 const CLEAR_QUESTION = "Clear the chart history? The meter stays connected and keeps measuring.";
 
-/** A little slack for the batch in flight when the clear lands, in session ms. */
+/** A little slack for the batch in flight when the clear lands, in session ms. A data
+ * tolerance, not a timing one: `clearAt` is read before the clear, so a slow runner
+ * only moves the real clear later and widens the margin. */
 const SLACK_MS = 250;
+
+/** Latency budget for the strip to empty after the clear: 150 ms locally, times the CI
+ * factor on CI. The page clock is held, so no sample can land within it either way. */
+const CLEAR_LATENCY_MS = ciLatencyBudgetMs(150);
 
 function statsPanel(page: Page) {
   return page.getByRole("complementary", { name: "Statistics" });
@@ -66,23 +74,6 @@ async function clearHistory(page: Page, name: string | RegExp): Promise<void> {
   await panel.getByRole("button", { name: "Clear", exact: true }).click();
   await expect(panel.getByRole("button", { name: "Cancel", exact: true })).toHaveCount(0);
   await expect(page.getByRole("alert")).toHaveCount(0);
-}
-
-/**
- * Pauses the running page clock a moment ahead of its current time. The clock keeps
- * running while the pause request travels to the page, so a target that close can be
- * in the past by the time it lands; then retry with a wider lead.
- */
-async function holdClock(page: Page): Promise<void> {
-  for (let leadMs = 50; ; leadMs *= 2) {
-    const target = (await page.evaluate(() => Date.now())) + leadMs;
-    try {
-      await page.clock.pauseAt(target);
-      return;
-    } catch (e) {
-      if (leadMs >= 3_200 || !String(e).includes("Cannot fast-forward to the past")) throw e;
-    }
-  }
 }
 
 /** "Whole session" and its first draw that ends after `afterMs`. */
@@ -126,13 +117,21 @@ test("a clear empties the overview strip at once, before the next sample (AC-5X1
   // A slow stream: the next sample is up to half a second away when the clear lands.
   await page.getByLabel("Sample rate").selectOption("2");
   await expect(page.getByLabel("Sample rate")).toHaveValue("2");
-  await page.waitForTimeout(1_200);
+  // A sample at the new rate has reached the chart: the stream now ticks at 2 SPS.
+  const drawnAtNewRate = (await chartSeriesLengths(page)).vbus;
+  await expect
+    .poll(async () => (await chartSeriesLengths(page)).vbus, { timeout: 5_000 })
+    .toBeGreaterThan(drawnAtNewRate);
   // Hold the clock: no stream tick, so no sample, until the checks below are done.
   await holdClock(page);
   await clearHistory(page, "Clear chart history…");
-  await expect.poll(() => overviewBreaks(page), { timeout: 150, intervals: [10] }).toEqual([]);
+  await expect
+    .poll(() => overviewBreaks(page), { timeout: CLEAR_LATENCY_MS, intervals: [10] })
+    .toEqual([]);
   // No window over an empty strip until the next sample arrives.
-  await expect(page.locator(".chart-wrap .overview-window")).toHaveCount(0, { timeout: 150 });
+  await expect(page.locator(".chart-wrap .overview-window")).toHaveCount(0, {
+    timeout: CLEAR_LATENCY_MS,
+  });
   // AC-KQF5GM.6: the page clock is held around the clear, so no sample can arrive
   // between the clear and its checks however slow the runner is: a full second of
   // real time later the strip is still empty and has no window.

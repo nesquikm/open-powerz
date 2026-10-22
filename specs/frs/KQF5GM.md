@@ -33,6 +33,9 @@ The CI workflow passes all eight jobs on one commit, twice in a row, without wea
 - AC-KQF5GM.6: The test that a clear empties the overview strip before the next sample controls the page clock, so no sample can arrive between the clear and its checks. It passes in Chromium and WebKit regardless of runner speed.
 - AC-KQF5GM.7: CI is green on all eight jobs for one commit, on its first run and on a re-run.
 - AC-KQF5GM.8: The overview-strip drag, click and keyboard-slider tests bound how much the view's span may grow by the real time that passed between reading the view and the pan, not by a fixed 500 ms. They pass in Chromium and WebKit regardless of runner speed.
+- AC-KQF5GM.9: The 1000 SPS live redraw-rate test keeps its 20–60 per second band without CI. With CI set, only its lower bound is divided by the CI factor of 3.
+- AC-KQF5GM.10: The reload backfill test checks state, not timing. Each live window starts at the session start, or, once the session is longer than the window, the window is full and ends at the newest sample.
+- AC-KQF5GM.11: Every other UI test that depends on elapsed real time waits for the state it checks or controls the page clock, instead of a fixed sleep or slack. Any timing budget it keeps is a throughput or latency budget, uses the CI factor, and is named in the Notes.
 
 ## Technical Design
 
@@ -47,4 +50,4 @@ Each change is its own regression test: the CI run that fails today must pass. L
 
 ## Notes
 
-Failing runs: 39651629627, 39672064832, 39742831114. Evidence runs: 39747964247 (101 of about 500 sleeps, max oversleep 265 ms, max loop work 6 ms) and 39759034254 (one 61 ms loop cycle). Every delivered record reached the sink. The 0.2.0 CHANGELOG is released, so this fix ships next.
+Evidence: 39747964247 (101 of ~500 sleeps, oversleep 265 ms, work 6 ms) and 39759034254 (one 61 ms cycle); delivered records always reached the sink. In run 39763805516 the macOS gate passed: descheduling, no stall. CI-factor budgets: render steps 100 ms, redraw floor 20 per second, reload backfill 1.5 s, clear latency 150 ms.
