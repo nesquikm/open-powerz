@@ -1,8 +1,8 @@
 ---
 title: Real-meter fixes from the M2 QA run
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5FKRYX4X89X9EJ7WSX2SPDW
 created_at: 2026-10-21T16:12:41.000Z
 changelog_category: Fixed

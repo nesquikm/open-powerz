@@ -1,8 +1,8 @@
 ---
 title: Recording and CSV export
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5DDP0TVSC9Q6DHQ6C0P7HSJ
 created_at: 2026-10-20T20:07:53.038Z
 changelog_category: Added

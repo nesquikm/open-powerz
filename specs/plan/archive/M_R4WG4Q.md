@@ -1,8 +1,8 @@
 ---
 milestone: M_R4WG4Q
 id: fr_01M5CYB12PNSTXG28YNTR4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -20,26 +20,26 @@ codename: Live Wire
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [0P7HSJ](../frs/0P7HSJ.md) | Recording and CSV export | n/a |
-| [VHY378](../frs/VHY378.md) | Desktop device backend: picker, session worker and live streaming | n/a |
-| [AH2AEJ](../frs/AH2AEJ.md) | Session history, decimation and statistics | n/a |
-| [AH2AEK](../frs/AH2AEK.md) | Desktop shell, live readout, themes and accessibility | n/a |
-| [AH2AEM](../frs/AH2AEM.md) | Live chart | n/a |
-| [AH2AEN](../frs/AH2AEN.md) | Desktop end-to-end tests | n/a |
-| [272WSN](../frs/272WSN.md) | Whole-session view: session time, gaps and axes | n/a |
-| [DDDYDJ](../frs/DDDYDJ.md) | Live and paused chart states | n/a |
-| [FENCD9](../frs/FENCD9.md) | Timeline navigation | n/a |
-| [VEDDFD](../frs/VEDDFD.md) | Resync the UI with a running session on load | n/a |
-| [5X154V](../frs/5X154V.md) | Clear chart history clears what the chart shows | n/a |
-| [5MTE4V](../frs/5MTE4V.md) | An app icon that says USB-C power meter | n/a |
-| [JFD9XR](../frs/JFD9XR.md) | Rate keys, paused Power and range announcements | n/a |
-| [9CFMD3](../frs/9CFMD3.md) | Export and recording feedback, deep zoom and empty states | n/a |
-| [M46CTX](../frs/M46CTX.md) | Keyboard and overlay behaviour | n/a |
-| [AKNVND](../frs/AKNVND.md) | Chart and layout polish | n/a |
-| [4NSVC9](../frs/4NSVC9.md) | The live chart leaks memory in WebKit | n/a |
-| [X2SPDW](../frs/X2SPDW.md) | Real-meter fixes from the M2 QA run | n/a |
-| [CWWKJ6](../frs/CWWKJ6.md) | Honest gaps, quiet noise and fresh temperatures | n/a |
-| [SX3EDV](../frs/SX3EDV.md) | M2 final polish | n/a |
+| [0P7HSJ](../../frs/archive/0P7HSJ.md) | Recording and CSV export | n/a |
+| [VHY378](../../frs/archive/VHY378.md) | Desktop device backend: picker, session worker and live streaming | n/a |
+| [AH2AEJ](../../frs/archive/AH2AEJ.md) | Session history, decimation and statistics | n/a |
+| [AH2AEK](../../frs/archive/AH2AEK.md) | Desktop shell, live readout, themes and accessibility | n/a |
+| [AH2AEM](../../frs/archive/AH2AEM.md) | Live chart | n/a |
+| [AH2AEN](../../frs/archive/AH2AEN.md) | Desktop end-to-end tests | n/a |
+| [272WSN](../../frs/archive/272WSN.md) | Whole-session view: session time, gaps and axes | n/a |
+| [DDDYDJ](../../frs/archive/DDDYDJ.md) | Live and paused chart states | n/a |
+| [FENCD9](../../frs/archive/FENCD9.md) | Timeline navigation | n/a |
+| [VEDDFD](../../frs/archive/VEDDFD.md) | Resync the UI with a running session on load | n/a |
+| [5X154V](../../frs/archive/5X154V.md) | Clear chart history clears what the chart shows | n/a |
+| [5MTE4V](../../frs/archive/5MTE4V.md) | An app icon that says USB-C power meter | n/a |
+| [JFD9XR](../../frs/archive/JFD9XR.md) | Rate keys, paused Power and range announcements | n/a |
+| [9CFMD3](../../frs/archive/9CFMD3.md) | Export and recording feedback, deep zoom and empty states | n/a |
+| [M46CTX](../../frs/archive/M46CTX.md) | Keyboard and overlay behaviour | n/a |
+| [AKNVND](../../frs/archive/AKNVND.md) | Chart and layout polish | n/a |
+| [4NSVC9](../../frs/archive/4NSVC9.md) | The live chart leaks memory in WebKit | n/a |
+| [X2SPDW](../../frs/archive/X2SPDW.md) | Real-meter fixes from the M2 QA run | n/a |
+| [CWWKJ6](../../frs/archive/CWWKJ6.md) | Honest gaps, quiet noise and fresh temperatures | n/a |
+| [SX3EDV](../../frs/archive/SX3EDV.md) | M2 final polish | n/a |
 
 **Tasks:**
 - [x] Extract `crates/powerz-record` from the CLI — 0P7HSJ (the `--include-demo` help text needed no fix)

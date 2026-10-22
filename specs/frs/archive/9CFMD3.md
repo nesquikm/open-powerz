@@ -1,8 +1,8 @@
 ---
 title: Export and recording feedback, deep zoom and empty states
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5F1DHRMHJYHKJTN4V9CFMD3
 created_at: 2026-10-21T10:51:53.493Z
 changelog_category: Added

@@ -1,8 +1,8 @@
 ---
 title: Rate keys, paused Power and range announcements
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5F1DA961WMGRZ6QA9JFD9XR
 created_at: 2026-10-21T10:51:45.854Z
 changelog_category: Fixed

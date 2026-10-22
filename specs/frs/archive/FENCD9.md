@@ -1,8 +1,8 @@
 ---
 title: Timeline navigation
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5EFBG8FXCPFV2S8C2FENCD9
 created_at: 2026-10-21T05:36:22.371Z
 changelog_category: Added

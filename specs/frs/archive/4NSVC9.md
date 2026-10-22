@@ -1,8 +1,8 @@
 ---
 title: The live chart leaks memory in WebKit
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5FBT776XX9ZXVCXPX4NSVC9
 created_at: 2026-10-21T13:53:34.440Z
 changelog_category: Fixed

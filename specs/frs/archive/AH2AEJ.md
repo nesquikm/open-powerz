@@ -1,8 +1,8 @@
 ---
 title: Session history, decimation and statistics
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5DDP0TWKNS6QSV917AH2AEJ
 created_at: 2026-10-20T20:07:53.038Z
 changelog_category: Added

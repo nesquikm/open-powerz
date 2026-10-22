@@ -1,8 +1,8 @@
 ---
 title: An app icon that says USB-C power meter
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5EZA05H5B5YY1EKR05MTE4V
 created_at: 2026-10-21T10:15:00.020Z
 changelog_category: Changed

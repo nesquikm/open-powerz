@@ -1,8 +1,8 @@
 ---
 title: M2 final polish
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5FYVBBPGVSWXSV8TQSX3EDV
 created_at: 2026-10-21T19:26:25.712Z
 changelog_category: Fixed

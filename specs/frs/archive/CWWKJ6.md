@@ -1,8 +1,8 @@
 ---
 title: Honest gaps, quiet noise and fresh temperatures
 milestone: M_R4WG4Q
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-22T07:41:09Z
 id: fr_01M5FS9Q2MHBK7PA14RXCWWKJ6
 created_at: 2026-10-21T17:49:13.000Z
 changelog_category: Fixed
