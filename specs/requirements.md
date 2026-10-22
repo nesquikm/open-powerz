@@ -49,12 +49,13 @@ Rust crate, so other tools can talk to the meter too.
 
 Feature scope (from the research notes): **MVP** = discovery + live meter + recorder
 (ADC queue up to 1000 SPS) + live chart with statistics + vendor-compatible CSV + CLI.
-**Later** = PD sniffer, protocol trigger panel (CDC), offline recordings, multi-device,
-UFCS analyzer, vendor `.db`/`.sqlite` import/export. Each lands as its own FR in
-`specs/frs/`.
+**Shipped after the MVP** = PD sniffer and analyzer, read-only import of vendor
+`.db`/`.sqlite` PD logs (M_NE3C7K). **Later** = protocol trigger panel (CDC), offline
+recordings, multi-device, UFCS analyzer, vendor `.db`/`.sqlite` export. Each lands as
+its own FR in `specs/frs/`.
 
 Roadmap (one plan per milestone in `specs/plan/`; done ones move to `specs/plan/archive/`):
-M_34BAXK Protocol Core and CLI (done) → M_R4WG4Q Desktop Meter (done) → M_NE3C7K PD Analyzer → M_X4VEQ3 Triggers and Extras. Firmware
+M_34BAXK Protocol Core and CLI (done) → M_R4WG4Q Desktop Meter (done) → M_NE3C7K PD Analyzer (done) → M_X4VEQ3 Triggers and Extras. Firmware
 update and signed release packaging are not planned.
 
 ## 2. Functional Requirements (cross-cutting only)
