@@ -491,9 +491,56 @@ Frame header (4 bytes):
 - The note says auto-upload stops after one hour or on unplug unless
   refreshed. [doc]
 
-Text trigger commands (`pdm open`, `entry pd`, `pd req=`, `qc 9V`, ...) are
-lowercase ASCII with no line terminator; they are documented separately and
-not yet tested on the device. [doc] [static]
+## PDM text session (protocol triggering)
+
+The CDC port also carries the "PDM" text commands that make the meter act
+as a sink and ask a charger for a voltage. [doc] [static] [device]
+(firmware 2.0.6, session 2)
+
+- Commands are lowercase ASCII, one per write. The vendor tools send no
+  terminator; a trailing `\r\n` or extra bytes are tolerated because the
+  firmware matches by prefix. Matching is case-sensitive and unknown text
+  gets no reply. Keep at least 60 ms between commands. [static] [device]
+- Replies are text lines ending in `\n` (no `\r`). Some replies embed a
+  binary capability block after a tag (`pdo:`, `ufcs:`, `scp:`, `vfcp:`,
+  `tfcp:`), so the stream must be read as bytes. Binary PUT_DATA replies and
+  ADCNEW frames can arrive between text lines at any time. [device]
+- Session: `pdm open` → `pdm mode entry` (and a version line) and the meter
+  presents Rd, so VBUS comes up at 5 V. `reset` → `ok`, VBUS stays at 5 V.
+  `pdm close` → `ok`, Rd is removed. A `busy` reply to `pdm open` is
+  answered with `reset`. [device]; `busy` [static] [doc]
+- The text session is tied to the open port: after the port is closed and
+  reopened, nothing is answered until `pdm open` (and `entry <protocol>`)
+  is sent again. [device]
+- `entry pd` → `ok`, `cc1 attach`, then a `pdo:` block, `ready:<mV>mV,<mA>mA`,
+  and, when the meter enters EPR, a second `pdo:` block and `ready:`. The
+  blocks arrive unprompted. [device]
+- `pdo:` block: tag, one ASCII byte (`'4'` SPR, `'9'` EPR: probably the
+  highest position in use; do not depend on it), a slot count (11), that
+  many u32 LE PDOs (0 = unused slot), `\n`. `pd req=<slot>` uses the slot
+  position. [device]
+- `pd req=<slot>` → `req:<mV>mV,<mA>mA` then `ready:<mV>mV,<mA>mA` with VBUS
+  and IBUS at PS_RDY. `pd req=<slot>,volt=<mV>,cur=<mA>` requests a PPS or
+  AVS level. `pd hrst` sends a Hard Reset and the charger renegotiates from
+  5 V. `pdm parm` → `type=<n>,em=<n>,sink=<n>`; the default `em=2` (EPR cable
+  emulation) makes the meter enter EPR by itself. [device]
+- A protocol the charger lacks answers `ok` then `timeout` (UFCS: three
+  `timeout` lines). [device]
+- The `ufcs:`, `scp:`, `vfcp:` and `tfcp:` block layouts come from the vendor
+  app only. [static]
+
+How our library sends them safely:
+
+- Every text write passes the same frame-type guard as binary requests (the
+  first byte is read as a frame type), so for example a line starting with
+  `H` (0x48, SET_DATA) is refused, and so are the CDC ADCNEW types.
+- Every command is classified before it is sent: read-only, 5 V or less, or
+  above 5 V, using the charger's last known offers. Unknown or unparsable
+  text, a request for an offer we have not seen, and a range request below
+  the offer's minimum all count as above 5 V. A command above 5 V is sent
+  only with an explicit confirmation made for that one command. Offers are
+  forgotten when the port is reopened.
+- `pdm close` is always sent before the port is released.
 
 ## PD capture
 
@@ -576,6 +623,9 @@ transport sends only the ADC snapshot. [device] [static]
 | type 0x4A | memory / SPI-flash write | [static] |
 | memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
 | any HID request other than the ADC snapshot (GET_DATA mask 0x001) | replies over 64 bytes hang and reboot the meter; control commands are ignored | [device] (firmware 2.0.6) |
+
+PDM text commands go through the same guard, and a request that could raise
+VBUS above 5 V needs a per-command confirmation (see PDM text session).
 
 Separate from the guard, one rule applies on CDC: there SYNC / CONNECT /
 DISCONNECT (0x01..0x03) start or stop the ADCNEW stream, so the CDC transport

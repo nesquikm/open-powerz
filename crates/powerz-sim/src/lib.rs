@@ -12,6 +12,7 @@
 mod device;
 mod memory;
 mod pd;
+mod pdm;
 mod queue;
 
 use std::collections::VecDeque;
@@ -20,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub use pd::PdScenario;
+pub use pdm::{SimCharger, SimPdm, SimPdmPort};
 use powerz_protocol::session::Clock;
 use powerz_protocol::transport::{Error, Transport};
 

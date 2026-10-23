@@ -113,42 +113,53 @@ impl<P: Read + Write> CdcTransport<P> {
 
 /// Bytes requested per serial read.
 const READ_CHUNK: usize = 4096;
-/// Per-read timeout on the real port; the transport loops to its own deadline.
+/// Per-read timeout on the real port; callers loop to their own deadline.
 const PORT_READ_TIMEOUT: Duration = Duration::from_millis(20);
 /// Baud rate the vendor tools use (CDC ignores it).
 const BAUD: u32 = 2_000_000;
+
+/// The USB serial ports the OS reports.
+pub(crate) fn usb_ports() -> Result<Vec<PortCandidate>, serialport::Error> {
+    Ok(serialport::available_ports()?
+        .into_iter()
+        .filter_map(|p| match p.port_type {
+            serialport::SerialPortType::UsbPort(usb) => Some(PortCandidate {
+                name: p.port_name,
+                vid: usb.vid,
+                pid: usb.pid,
+                serial: usb.serial_number,
+            }),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Open port `name` at 2 Mbaud 8N1, no flow control, a short read timeout,
+/// with its input buffer cleared.
+pub(crate) fn open_serial(
+    name: String,
+) -> Result<Box<dyn serialport::SerialPort>, serialport::Error> {
+    let port = serialport::new(name, BAUD)
+        .data_bits(serialport::DataBits::Eight)
+        .parity(serialport::Parity::None)
+        .stop_bits(serialport::StopBits::One)
+        .flow_control(serialport::FlowControl::None)
+        .timeout(PORT_READ_TIMEOUT)
+        .open()?;
+    port.clear(serialport::ClearBuffer::Input)?;
+    Ok(port)
+}
 
 impl CdcTransport<Box<dyn serialport::SerialPort>> {
     /// Open the meter's port by serial number, clear input and wait
     /// [`FIRST_FRAME_DELAY`].
     pub fn open(serial: &str) -> Result<GuardedTransport<Self>, Error> {
-        let ports: Vec<PortCandidate> = serialport::available_ports()
-            .map_err(serial_error)?
-            .into_iter()
-            .filter_map(|p| match p.port_type {
-                serialport::SerialPortType::UsbPort(usb) => Some(PortCandidate {
-                    name: p.port_name,
-                    vid: usb.vid,
-                    pid: usb.pid,
-                    serial: usb.serial_number,
-                }),
-                _ => None,
-            })
-            .collect();
+        let ports = usb_ports().map_err(serial_error)?;
         let name = match_port(&ports, serial)
             .ok_or(Error::NotFound)?
             .name
             .clone();
-        let port = serialport::new(name, BAUD)
-            .data_bits(serialport::DataBits::Eight)
-            .parity(serialport::Parity::None)
-            .stop_bits(serialport::StopBits::One)
-            .flow_control(serialport::FlowControl::None)
-            .timeout(PORT_READ_TIMEOUT)
-            .open()
-            .map_err(serial_error)?;
-        port.clear(serialport::ClearBuffer::Input)
-            .map_err(serial_error)?;
+        let port = open_serial(name).map_err(serial_error)?;
         std::thread::sleep(FIRST_FRAME_DELAY);
         Ok(CdcTransport::with_port(port))
     }
