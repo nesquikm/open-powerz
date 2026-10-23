@@ -43,4 +43,4 @@ Simulator tests for every request type, the range validation, EPR entry failure 
 
 ## Notes
 
-Session 2 confirmed 9, 15, 20 and 28 V and AVS on the 140 W charger. PPS is untested on hardware until a PPS charger is available.
+Hardware 2026-10-23, nothing on the output, settled VBUS read over bulk: Apple 140 W 9 V 8.87, 15 V 14.99, 20 V 20.49, 28 V 28.01 (EPR only through the 240 W cable); EcoFlow EPR AVS 15 V 15.12, 21 V 21.10; Anker PPS 9 V 9.07, 12 V 12.10; hard reset 5.17 V.

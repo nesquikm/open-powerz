@@ -2,13 +2,13 @@
 //!
 //! - [`bc12`], [`apple`]: `entry bc` / `entry apple`, the reply mapped to a
 //!   [`Support`]. Doc: `true` / `false` \[doc\]; seen on the device:
-//!   `entry bc` → only `ok` (→ [`Support::Unknown`]), `entry apple` →
-//!   `fail` on a non-Apple charger (→ [`Support::NotSupported`]).
-//!   \[device\] (session 2)
-//! - [`list`]: `entry list` (or `entry list+`), each `<name>:<result>
-//!   [<mV>mV,<mA>mA]` line reported as it arrives; a stall longer than
-//!   [`ListOptions::stall_limit`] ends with `reset` and an incomplete result.
-//!   The end-of-list form is unknown. \[inferred\]
+//!   `entry bc` → only `ok` (→ [`Support::Unknown`]) or `fail`, `entry
+//!   apple` → `fail` on non-Apple chargers (→ [`Support::NotSupported`]).
+//!   \[device\]
+//! - [`list`]: `entry list` (or `entry list+`), each line reported as it
+//!   arrives. A full list ends with a blank line and `done` (complete);
+//!   a stall longer than [`ListOptions::stall_limit`], a cut-off or a stop
+//!   ends it with `reset` and an incomplete result. \[device\]
 //! - [`hint`]: a pure D+ / D- lookup of likely charging modes (a hint only).
 //!   Nominal levels from the vendor manual \[doc\]; the ±200 mV windows
 //!   (inclusive) are ours. \[inferred\]
@@ -102,6 +102,65 @@ pub struct ListEntry {
     pub vbus_mv: Option<u32>,
     /// IBUS reported with the line, mA.
     pub ibus_ma: Option<u32>,
+    /// What the device printed about it beyond the result: its voltages or
+    /// power (`5V,9V,12V`, `63.0W,`), indented capability lines, or the
+    /// PDOs of the `pd:` block. \[device\]
+    pub detail: Option<String>,
+}
+
+/// What one line of the automatic list adds.
+enum ListLine {
+    /// `done`: the list is complete. \[device\]
+    Done,
+    /// A new protocol or mode.
+    Entry(ListEntry),
+    /// More about the entry before it (indented lines, the `pd:` block).
+    Detail(String),
+    /// `starting`, blank lines and anything else.
+    Other,
+}
+
+/// Classify a list line [device]: `done` ends the list; indented lines and
+/// the lines of a `pd:` block (until a blank line) belong to the entry above;
+/// a bare mode line (`Apple 2.4A`) is a supported mode.
+fn list_line(in_pd: &mut bool, line: &str) -> ListLine {
+    let trimmed = line.trim();
+    if trimmed == "done" {
+        return ListLine::Done;
+    }
+    if trimmed.is_empty() {
+        *in_pd = false;
+        return ListLine::Other;
+    }
+    if line.starts_with(char::is_whitespace) || *in_pd {
+        return ListLine::Detail(trimmed.to_string());
+    }
+    if trimmed == "pd:" {
+        *in_pd = true;
+        return ListLine::Entry(ListEntry {
+            name: "pd".into(),
+            support: Support::Unknown,
+            vbus_mv: None,
+            ibus_ma: None,
+            detail: None,
+        });
+    }
+    if let Some(entry) = parse_list_line(trimmed) {
+        return ListLine::Entry(entry);
+    }
+    // A bare mode line (`Apple 2.4A`); `cc1 attach` / `cc2 detach` status
+    // lines are not modes. [device]
+    let status = trimmed.ends_with(" attach") || trimmed.ends_with(" detach");
+    if !status && !trimmed.contains(':') && trimmed.chars().any(|c| c.is_ascii_digit()) {
+        return ListLine::Entry(ListEntry {
+            name: trimmed.to_string(),
+            support: Support::Supported,
+            vbus_mv: None,
+            ibus_ma: None,
+            detail: None,
+        });
+    }
+    ListLine::Other
 }
 
 /// Parse one `<name>:<result>[ <mV>mV,<mA>mA]` line; `None` for anything
@@ -111,21 +170,33 @@ pub fn parse_list_line(line: &str) -> Option<ListEntry> {
     if name.is_empty() || name.contains(char::is_whitespace) {
         return None;
     }
+    let rest = rest.trim();
     let mut parts = rest.split_whitespace();
-    let support = match parts.next()? {
-        "true" => Support::Supported,
-        "null" | "false" => Support::NotSupported,
-        _ => Support::Unknown,
+    let first = parts.next().unwrap_or_default();
+    // A supported protocol is printed with what it offers (`5V,9V,12V`,
+    // `QC3+ 3.6-12V`, `63.0W,`) rather than `true`. [device]
+    let (support, detail) = match first {
+        "true" => (Support::Supported, None),
+        "null" | "false" => (Support::NotSupported, None),
+        "" => (Support::Unknown, None),
+        _ if rest.chars().any(|c| c.is_ascii_digit()) => {
+            (Support::Supported, Some(rest.to_string()))
+        }
+        _ => (Support::Unknown, Some(rest.to_string())),
     };
-    let (vbus_mv, ibus_ma) = parts
-        .next()
-        .and_then(parse_readings)
-        .map_or((None, None), |(v, i)| (Some(v), Some(i)));
+    let (vbus_mv, ibus_ma) = match first {
+        "true" => parts
+            .next()
+            .and_then(parse_readings)
+            .map_or((None, None), |(v, i)| (Some(v), Some(i))),
+        _ => (None, None),
+    };
     Some(ListEntry {
         name: name.to_string(),
         support,
         vbus_mv,
         ibus_ma,
+        detail,
     })
 }
 
@@ -143,7 +214,7 @@ pub struct ListOptions {
     /// Send `entry list+` (adds VOOC / MTK PE; needs a dummy load) instead
     /// of `entry list`.
     pub plus: bool,
-    /// Silence longer than this ends the list with `reset`.
+    /// Silence longer than this ends an unfinished list with `reset`.
     pub stall_limit: Duration,
 }
 
@@ -161,9 +232,8 @@ impl Default for ListOptions {
 pub struct ListResult {
     /// Every entry, in arrival order.
     pub entries: Vec<ListEntry>,
-    /// `false` when the list ended in a stall, a cut-off or a stop (and
-    /// `reset`). Always `false` for now: how a full list ends is not known
-    /// yet, so nothing can mark it complete. \[inferred\]
+    /// `true` when the device ended the list with `done` \[device\];
+    /// `false` when it ended in a stall, a cut-off or a stop (and `reset`).
     pub complete: bool,
 }
 
@@ -200,6 +270,8 @@ pub fn list_until<P: Read + Write, C: Clock>(
     };
     session.send(&Command::Entry(protocol))?;
     let mut entries = Vec::new();
+    let mut complete = false;
+    let mut in_pd = false;
     // A meter that never stops talking cannot hold the list open: after
     // MAX_LIST_ENTRIES entries (or MAX_LIST_ITEMS items of any kind) it is
     // ended with `reset` like a stall.
@@ -221,15 +293,37 @@ pub fn list_until<P: Read + Write, C: Clock>(
                 Err(e) => return Err(e),
             }
         };
-        if let ReplyItem::Line(line) = item
-            && let Some(entry) = parse_list_line(&line)
-        {
-            on_entry(&entry);
-            entries.push(entry);
+        let ReplyItem::Line(line) = item else {
+            continue;
+        };
+        match list_line(&mut in_pd, &line) {
+            ListLine::Done => {
+                complete = true;
+                break;
+            }
+            ListLine::Entry(entry) => {
+                on_entry(&entry);
+                entries.push(entry);
+            }
+            ListLine::Detail(text) => {
+                if let Some(last) = entries.last_mut() {
+                    let d = last.detail.get_or_insert_with(String::new);
+                    if !d.is_empty() {
+                        d.push_str("; ");
+                    }
+                    d.push_str(&text);
+                    if in_pd {
+                        last.support = Support::Supported;
+                    }
+                }
+            }
+            ListLine::Other => {}
         }
     }
-    // Stalled (or cut off): the end-of-list form is unknown, so `reset`
-    // ends it.
+    if complete {
+        return Ok(ListResult { entries, complete });
+    }
+    // Stalled, cut off or stopped: `reset` ends the unfinished list.
     session.send(&Command::Reset)?;
     // Keep the partial result even if `reset` gets no `ok`: it is marked
     // incomplete anyway, and the caller closes the session either way.
@@ -237,10 +331,7 @@ pub fn list_until<P: Read + Write, C: Clock>(
         Ok(_) | Err(Error::Timeout { .. }) => {}
         Err(e) => return Err(e),
     }
-    Ok(ListResult {
-        entries,
-        complete: false,
-    })
+    Ok(ListResult { entries, complete })
 }
 
 /// Likely charging modes for a D+ / D- pair.
@@ -402,6 +493,7 @@ mod tests {
                 support: Support::Supported,
                 vbus_mv: Some(5203),
                 ibus_ma: Some(0),
+                detail: None,
             })
         );
     }
@@ -415,12 +507,40 @@ mod tests {
                 support: Support::NotSupported,
                 vbus_mv: None,
                 ibus_ma: None,
+                detail: None,
             })
         );
         assert_eq!(
             parse_list_line("vfcp:null").map(|e| e.support),
             Some(Support::NotSupported)
         );
+    }
+
+    #[test]
+    fn status_lines_with_digits_are_not_modes() {
+        let mut in_pd = false;
+        assert!(matches!(
+            list_line(&mut in_pd, "cc1 attach"),
+            ListLine::Other
+        ));
+        assert!(matches!(
+            list_line(&mut in_pd, "cc2 detach"),
+            ListLine::Other
+        ));
+        assert!(matches!(
+            list_line(&mut in_pd, "Apple 2.4A"),
+            ListLine::Entry(_)
+        ));
+    }
+
+    #[test]
+    fn list_values_mean_supported() {
+        // Values the device printed on 2026-10-23 for supported protocols. [device]
+        for line in ["qc2.0:5V,9V,12V", "qc3.0:QC3+ 3.6-12V", "ufcs:63.0W,"] {
+            let e = parse_list_line(line).expect(line);
+            assert_eq!(e.support, Support::Supported, "{line}");
+            assert!(e.detail.is_some(), "{line}");
+        }
     }
 
     #[test]

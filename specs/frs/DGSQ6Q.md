@@ -43,4 +43,4 @@ Simulator tests per protocol, including capability parsing, range validation and
 
 ## Notes
 
-The user has an Apple 140 W charger, an Anker 4-port and an EcoFlow 4-port charger; which legacy protocols they support is found with the detection feature.
+Hardware 2026-10-23, nothing on the output: QC 2.0 9 V (9.07 and 9.14 V) and QC 3.0 7.0 V (7.20 V) verified. Not verified on hardware: QC 3.0 steps, FCP and AFC (no reply or VBUS unchanged), UFCS requests (VBUS unchanged), SCP, TFCP, VFCP and SFCP.

@@ -49,6 +49,22 @@ fn within_5_percent(got_mv: u32, want_mv: u32) -> bool {
 mod pdm_pd {
     use super::*;
 
+    // ---- AC-DGSQ6P.3: no extra wait once the EPR offers are in ----
+
+    #[test]
+    fn entry_pd_returns_as_soon_as_the_epr_offers_arrived() {
+        let (sim, clock) = sim(SimCharger::Epr140W);
+        let mut s = open(&sim, &clock);
+        let start = clock.now_ms();
+        let n = pd::enter(&mut s).expect("entry pd");
+        assert!(pd::epr_entered(&n.offers));
+        let waited = clock.now_ms() - start;
+        assert!(
+            waited < u64::try_from(pd::EPR_SETTLE.as_millis()).unwrap(),
+            "waited {waited} ms after the EPR list"
+        );
+    }
+
     // ---- AC-DGSQ6P.1: offers after entry pd ----
 
     #[test]

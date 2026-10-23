@@ -120,6 +120,28 @@ const BAUD: u32 = 2_000_000;
 
 /// The USB serial ports the OS reports.
 pub(crate) fn usb_ports() -> Result<Vec<PortCandidate>, serialport::Error> {
+    Ok(without_tty_twins(usb_port_list()?))
+}
+
+/// Drop every `/dev/tty.X` whose `/dev/cu.X` twin is also listed: macOS
+/// lists each USB serial port under both names \[device\], and the call-out
+/// `cu.` device is the one to open (`tty.` waits for carrier detect).
+pub fn without_tty_twins(ports: Vec<PortCandidate>) -> Vec<PortCandidate> {
+    let cu: Vec<String> = ports
+        .iter()
+        .filter_map(|p| p.name.strip_prefix("/dev/cu.").map(str::to_string))
+        .collect();
+    ports
+        .into_iter()
+        .filter(|p| {
+            p.name
+                .strip_prefix("/dev/tty.")
+                .is_none_or(|rest| !cu.iter().any(|c| c == rest))
+        })
+        .collect()
+}
+
+fn usb_port_list() -> Result<Vec<PortCandidate>, serialport::Error> {
     Ok(serialport::available_ports()?
         .into_iter()
         .filter_map(|p| match p.port_type {
@@ -317,6 +339,29 @@ mod tests {
             Some("/dev/cu.km-a")
         );
         assert_eq!(match_port(&ports, "SERIAL-9999"), None);
+    }
+
+    // ---- AC-PR41FT.1: macOS lists each port as cu.* and tty.* ----
+
+    #[test]
+    fn the_tty_twin_of_a_cu_port_is_dropped() {
+        let port = |name: &str| PortCandidate {
+            name: name.into(),
+            vid: 0x5FC9,
+            pid: 0x0063,
+            serial: Some("SERIAL-0001".into()),
+        };
+        let listed = vec![
+            port("/dev/tty.usbmodem1101"),
+            port("/dev/cu.usbmodem1101"),
+            port("/dev/tty.other"),
+            port("COM5"),
+        ];
+        let names: Vec<String> = without_tty_twins(listed)
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["/dev/cu.usbmodem1101", "/dev/tty.other", "COM5"]);
     }
 
     // ---- AC-SJGK7E.7: frame completion by section walk ----

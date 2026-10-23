@@ -37,6 +37,21 @@ pub struct ReplyReader {
 /// ADCNEW record frame type (first byte). \[device\]
 const ADCNEW: u8 = 0x02;
 
+/// Shortest text line that may start with 0x41 (`A`); shorter ones are taken
+/// as a PUT_DATA frame. \[inferred\]
+const PUT_DATA_TEXT_MIN: usize = 4;
+/// A tag (`ufcs:` etc.) starts a text line only with text after it: the tag
+/// itself plus at least one character. \[inferred\]
+const TAG_TEXT_MIN: usize = 6;
+
+/// See [`ReplyReader::shape`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Text,
+    Binary,
+    Undecided,
+}
+
 /// Most bytes kept while waiting for a line end, block end or frame end.
 /// Longer input is dropped up to the next `\n` with [`Error::LineTooLong`],
 /// so a device that never ends a line cannot grow the buffer forever.
@@ -78,7 +93,18 @@ impl ReplyReader {
                 }
             }
             // Binary protocol frames interleaved with the text: skip them.
-            if first & 0x7F == PUT_DATA {
+            // A printable line that merely starts with 0x41 (`Apple 2.4A`
+            // in `entry list` [device]) is text, not a frame.
+            let put_data = first & 0x7F == PUT_DATA;
+            let shape = if put_data {
+                self.shape(PUT_DATA_TEXT_MIN)
+            } else {
+                Shape::Binary
+            };
+            if put_data && shape == Shape::Undecided {
+                return self.need_more();
+            }
+            if put_data && shape == Shape::Binary {
                 let Some(len) = frame_complete(&self.buf) else {
                     return self.need_more();
                 };
@@ -96,7 +122,21 @@ impl ReplyReader {
                 self.consume(len);
                 continue;
             }
-            if caps::block_tag(&self.buf).is_some() {
+            // `pdo:` is always a block. The other tags also start text lines
+            // of `entry list` (`ufcs:63.0W,` [device]): followed by printable
+            // text up to the line end they are text, while their binary
+            // blocks carry a non-printable byte (the count) right after the tag.
+            let tag = caps::block_tag(&self.buf);
+            let block = match tag {
+                None => false,
+                Some(super::BlockTag::Pdo) => true,
+                Some(_) => match self.shape(TAG_TEXT_MIN) {
+                    Shape::Text => false,
+                    Shape::Binary => true,
+                    Shape::Undecided => return self.need_more(),
+                },
+            };
+            if block {
                 return match caps::parse(&self.buf) {
                     Ok(None) => self.need_more(),
                     Ok(Some((block, len))) => {
@@ -130,6 +170,22 @@ impl ReplyReader {
         self.buf.clear();
         self.skip_line = true;
         Some(Err(Error::LineTooLong { len }))
+    }
+
+    /// What the buffer starts with: a text line (printable ASCII up to a
+    /// `\n` at index `min` or later), binary (a non-printable byte first,
+    /// which frames and capability blocks carry early; a `\n` too early, like
+    /// a UFCS count of 10 or a PUT_DATA id of 0x0a, counts as binary), or
+    /// undecided (no line end yet). Scans at most [`MAX_LINE`] bytes.
+    fn shape(&self, min: usize) -> Shape {
+        for (i, &b) in self.buf.iter().enumerate().take(MAX_LINE + 1) {
+            match b {
+                b'\n' if i >= min => return Shape::Text,
+                0x20..=0x7e => {}
+                _ => return Shape::Binary,
+            }
+        }
+        Shape::Undecided
     }
 
     /// Bytes buffered but not yet returned.
@@ -286,6 +342,58 @@ mod tests {
         assert!(r.buffered() <= MAX_LINE, "buffered {}", r.buffered());
         r.push(b"more junk\nok\n");
         assert_eq!(drain(&mut r), vec![line("ok")]);
+    }
+
+    #[test]
+    fn printable_list_lines_that_look_like_tags_or_frames_stay_text() {
+        // `Apple 2.4A` starts with 0x41 (PUT_DATA) and `ufcs:63.0W,` with a
+        // block tag; both are text lines of `entry list` [device].
+        let mut r = ReplyReader::new();
+        r.push(b"Apple 2.4A\nufcs:63.0W,\n Num1: 3.40 - 5.50V 3.00A\nscp:null\n");
+        assert_eq!(
+            drain(&mut r),
+            vec![
+                line("Apple 2.4A"),
+                line("ufcs:63.0W,"),
+                line(" Num1: 3.40 - 5.50V 3.00A"),
+                line("scp:null"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_printable_prefix_waits_for_its_line_end() {
+        let mut r = ReplyReader::new();
+        r.push(b"Apple 2.");
+        assert_eq!(drain(&mut r), vec![]);
+        r.push(b"4A\n");
+        assert_eq!(drain(&mut r), vec![line("Apple 2.4A")]);
+    }
+
+    #[test]
+    fn an_endless_printable_line_after_a_tag_or_0x41_is_capped() {
+        for start in [&b"Apple"[..], &b"ufcs:"[..]] {
+            let mut r = ReplyReader::new();
+            r.push(start);
+            r.push(&vec![b'x'; MAX_LINE + 1]);
+            let items = drain(&mut r);
+            assert!(
+                matches!(items.as_slice(), [Err(Error::LineTooLong { .. })]),
+                "{items:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_end_right_after_a_tag_or_0x41_is_not_text() {
+        // A UFCS block with 10 entries has count 0x0a right after the tag; a
+        // PUT_DATA frame can have id 0x0a. Neither is the text line it looks like.
+        let mut r = ReplyReader::new();
+        r.push(b"ufcs:\n");
+        assert!(!matches!(drain(&mut r).first(), Some(Ok(ReplyItem::Line(l))) if l == "ufcs:"));
+        let mut r = ReplyReader::new();
+        r.push(b"A\n");
+        assert!(!matches!(drain(&mut r).first(), Some(Ok(ReplyItem::Line(l))) if l == "A"));
     }
 
     #[test]

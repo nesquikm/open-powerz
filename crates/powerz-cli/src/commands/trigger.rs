@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use powerz_protocol::pdm::legacy::{self, LegacyProtocol, Request as LegacyRequest};
 use powerz_protocol::pdm::pd::{
-    self, Emarker, Offer, OfferKind, PdSettings, PdType, Reading, Request, RequestOutcome, SinkCaps,
+    self, BackTo5V, Emarker, Offer, OfferKind, PdSettings, PdType, Reading, Request,
+    RequestOutcome, SinkCaps,
 };
 use powerz_protocol::pdm::{Command, HighVoltageConfirmation, PdmSession, Risk};
 use powerz_protocol::session::Clock;
@@ -172,33 +173,25 @@ pub fn trigger_pd_request<P: Read + Write, C: Clock>(
     close_after(session, result)
 }
 
-/// Back to 5 V whatever happened: `pd req=1` (a 5 V request needs no
-/// confirmation); if that fails, a Hard Reset, which also ends at 5 V.
-/// When both fail, say loudly that VBUS may still be high.
+/// Back to 5 V whatever happened ([`pd::return_to_5v`]: `pd req=1`, a
+/// Hard Reset as the fallback). When both fail, say loudly that VBUS may
+/// still be high.
 fn return_to_5v<P: Read + Write, C: Clock>(
     session: &mut PdmSession<P, C>,
     offers: &[Offer],
 ) -> Result<(), CliError> {
-    let to_5v = Request::Fixed {
-        position: 1,
-        current_ma: None,
-    };
-    let Err(first) = pd::request(session, offers, &to_5v, None) else {
-        return Ok(());
-    };
-    match pd::hard_reset(session) {
-        Ok(_) => {
-            eprintln!("warning: return to 5 V failed ({first}); sent a Hard Reset instead");
+    match pd::return_to_5v(session, offers) {
+        Ok(BackTo5V::Requested) => Ok(()),
+        Ok(BackTo5V::HardReset { request_error }) => {
+            eprintln!("warning: return to 5 V failed ({request_error}); sent a Hard Reset instead");
             Ok(())
         }
-        Err(second) => {
+        Err(e) => {
             eprintln!(
-                "WARNING: could not return the charger to 5 V ({first}; Hard Reset: {second}). \
-                 VBUS may still be above 5 V: unplug the charger from the meter."
+                "WARNING: {e}. VBUS may still be above 5 V: unplug the charger from the meter."
             );
             Err(CliError::Device(format!(
-                "could not return the charger to 5 V ({first}; Hard Reset: {second}); \
-                 VBUS may still be above 5 V"
+                "{e}; VBUS may still be above 5 V"
             )))
         }
     }

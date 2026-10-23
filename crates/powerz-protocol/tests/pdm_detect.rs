@@ -321,6 +321,59 @@ mod pdm_detect {
         assert!(reset - start < 2_000, "reset after {} ms", reset - start);
     }
 
+    /// A full list as two chargers printed it on 2026-10-23 [device]: values
+    /// for supported protocols, bare mode lines, indented UFCS capabilities,
+    /// a `pd:` block with its PDOs, a blank line and `done`.
+    const FULL_LIST: &[u8] = b"starting\nbc1.2:true 5151mV,0mA\nApple 2.4A\nSamsung 2A\n\
+ufcs:63.0W,\n Num1: 3.40 - 5.50V 3.00A\n Num2: 5.50 - 11.00V 3.00A\nvfcp:null\n\
+qc2.0:5V,9V,12V\nqc3.0:QC3+ 3.6-12V\nafc:null\npd:\nPD3.0:45W PDO:6\n\
+Fixed:     5.00V 3.00A\nPPS: 3.30-16.00V 3.00A\n\ndone\n";
+
+    #[test]
+    fn a_full_list_ends_with_done_and_is_complete() {
+        let now = clock();
+        let port = base(&now).on("entry list", FULL_LIST);
+        let mut s = open(&port, &now);
+        let r = detect::list(&mut s, &ListOptions::default(), &mut |_| {}).unwrap();
+        assert!(r.complete, "done ends a complete list");
+        let names: Vec<&str> = r.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "bc1.2",
+                "Apple 2.4A",
+                "Samsung 2A",
+                "ufcs",
+                "vfcp",
+                "qc2.0",
+                "qc3.0",
+                "afc",
+                "pd"
+            ]
+        );
+        let get = |n: &str| r.entries.iter().find(|e| e.name == n).unwrap();
+        for n in ["Apple 2.4A", "Samsung 2A", "ufcs", "qc2.0", "qc3.0", "pd"] {
+            assert_eq!(get(n).support, Support::Supported, "{n}");
+        }
+        assert_eq!(get("vfcp").support, Support::NotSupported);
+        let ufcs = get("ufcs").detail.as_deref().unwrap_or_default();
+        assert!(ufcs.contains("63.0W") && ufcs.contains("Num2"), "{ufcs}");
+        let pd = get("pd").detail.as_deref().unwrap_or_default();
+        assert!(
+            pd.contains("PD3.0:45W") && pd.contains("PPS: 3.30-16.00V"),
+            "{pd}"
+        );
+    }
+
+    #[test]
+    fn a_complete_list_needs_no_reset() {
+        let now = clock();
+        let port = base(&now).on("entry list", FULL_LIST);
+        let mut s = open(&port, &now);
+        detect::list(&mut s, &ListOptions::default(), &mut |_| {}).unwrap();
+        assert!(port.write_time("reset").is_none(), "reset after done");
+    }
+
     #[test]
     fn stall_limit_is_configurable() {
         let now = clock();

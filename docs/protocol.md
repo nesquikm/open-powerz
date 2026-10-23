@@ -547,6 +547,31 @@ as a sink and ask a charger for a voltage. [doc] [static] [device]
   answers have been seen on the device so far. `reset` is used to leave
   them; that it returns VBUS to 5 V is seen after PD [device] and assumed
   for the others. [inferred]
+- Seen on the device on 2026-10-23 (firmware 2.0.6) [device]:
+  - A new bulk CONNECT while a PDM session is open silences that session:
+    later commands get no reply. With the bulk session connected first and
+    polling, PDM and bulk work side by side.
+  - The EPR `pdo:` list follows the first `ready:` by about 2.7 s; a request
+    sent before it arrives is ignored. EPR needs the e-marked cable in the
+    path: with the meter's plug straight in the 140 W charger only the SPR
+    list came.
+  - `entry list` prints a full list ending in a blank line and `done`.
+    Supported protocols show what they offer instead of `true`
+    (`qc2.0:5V,9V,12V`, `qc3.0:QC3+ 3.6-12V`, `ufcs:63.0W,` with indented
+    `Num<n>:` lines), modes are bare lines (`Apple 2.4A`), and a `pd:` block
+    lists the PDOs. A list line may start with `A` (0x41) or a block tag,
+    so only a printable line up to `\n` is read as text. Cutting the list
+    short with `reset` while the meter probes left every later reply one
+    command late until the meter was power-cycled.
+  - `entry bc` / `entry apple` answered `fail` while the list reported
+    `bc1.2:true`. `entry fcp` / `entry afc` answered `ready` on chargers
+    whose list said `null`, and the requests that followed got no reply or
+    did not change VBUS: `ready` after an entry does not prove support.
+  - macOS lists the port twice (`/dev/cu.*` and `/dev/tty.*`); the `cu.`
+    one is used.
+- Verified on the device with nothing on the output: PD fixed 9/15/20/28 V,
+  PPS, EPR AVS, hard reset, QC 2.0 and QC 3.0 voltage requests. Not yet
+  verified: QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS requests.
 - Our limits: a request must fit the capability block's voltage, current
   and power; VFCP's two fixed modes are checked as one range plus the power
   limit. [inferred] `qc3 inc` and every `ufcs cmd=<n>` count as above 5 V,

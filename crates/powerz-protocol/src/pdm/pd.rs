@@ -23,8 +23,11 @@ use crate::session::Clock;
 /// How long `entry pd` may take to reach its first `ready:`. \[inferred\]
 pub const ENTRY_TIMEOUT: Duration = Duration::from_millis(3000);
 /// How long to keep listening after a `ready:` for another `pdo:` block
-/// (the EPR list follows the SPR one unprompted). \[inferred\]
-pub const EPR_SETTLE: Duration = Duration::from_millis(1000);
+/// (the EPR list follows the SPR one unprompted). On the 140 W charger the
+/// EPR list came about 2.7 s after the first `ready:`; with 1 s the meter
+/// was still entering EPR when the next request went out, and ignored it.
+/// \[device\]
+pub const EPR_SETTLE: Duration = Duration::from_millis(4000);
 /// Most `ready:` lines one negotiation (`entry pd`, `pd hrst`) reads.
 pub const MAX_READY_LINES: usize = 4;
 
@@ -411,8 +414,12 @@ fn negotiation<P: Read + Write, C: Clock>(
 ) -> Result<Negotiation, Error> {
     let mut vbus = reading(&session.wait_for(&["ready:"], ENTRY_TIMEOUT)?, "ready:")?;
     // SPR then EPR gives two `ready:` lines [device]; a few more are allowed,
-    // but a meter that keeps sending them cannot hold the call open.
+    // but a meter that keeps sending them cannot hold the call open. Once
+    // the EPR list is in there is nothing more to wait for.
     for _ in 1..MAX_READY_LINES {
+        if epr_entered(&offers(session.capabilities())) {
+            break;
+        }
         match session.wait_for(&["ready:"], EPR_SETTLE) {
             Ok(line) => vbus = reading(&line, "ready:")?,
             Err(super::Error::Timeout { .. }) => break,
@@ -467,6 +474,51 @@ pub fn hard_reset<P: Read + Write, C: Clock>(
 ) -> Result<Negotiation, Error> {
     session.send(&Command::PdHardReset)?;
     negotiation(session)
+}
+
+/// How [`return_to_5v`] got the charger back to 5 V.
+#[derive(Debug)]
+pub enum BackTo5V {
+    /// `pd req=1` was answered.
+    Requested,
+    /// `pd req=1` failed with `request_error`; a Hard Reset did it instead.
+    HardReset {
+        /// Why `pd req=1` failed.
+        request_error: Error,
+    },
+}
+
+/// Neither `pd req=1` nor the Hard Reset fallback worked: VBUS may still be
+/// above 5 V.
+#[derive(Debug, thiserror::Error)]
+#[error("could not return the charger to 5 V ({request}; Hard Reset: {hard_reset})")]
+pub struct ReturnTo5VError {
+    /// Why `pd req=1` failed.
+    pub request: Error,
+    /// Why the Hard Reset failed.
+    pub hard_reset: Error,
+}
+
+/// Back to 5 V: `pd req=1` (a 5 V request needs no confirmation); if that
+/// fails, `pd hrst`, which also ends at 5 V.
+pub fn return_to_5v<P: Read + Write, C: Clock>(
+    session: &mut PdmSession<P, C>,
+    offers: &[Offer],
+) -> Result<BackTo5V, ReturnTo5VError> {
+    let to_5v = Request::Fixed {
+        position: 1,
+        current_ma: None,
+    };
+    let Err(request_error) = request(session, offers, &to_5v, None) else {
+        return Ok(BackTo5V::Requested);
+    };
+    match hard_reset(session) {
+        Ok(_) => Ok(BackTo5V::HardReset { request_error }),
+        Err(hard_reset) => Err(ReturnTo5VError {
+            request: request_error,
+            hard_reset,
+        }),
+    }
 }
 
 /// `type=` of `pdm set`. \[doc\] \[static\]
@@ -628,6 +680,15 @@ pub fn write_settings<P: Read + Write, C: Clock>(
 mod tests {
     use super::super::caps::PdoBlock;
     use super::*;
+
+    // ---- AC-DGSQ6P.3: EPR offers arrive late [device] ----
+
+    #[test]
+    fn the_epr_wait_covers_the_device_timing() {
+        // The EPR list came ~2.7 s after the first `ready:` on the 140 W
+        // charger (2026-10-23); a shorter wait sends requests too early.
+        assert!(EPR_SETTLE >= Duration::from_millis(2700) + Duration::from_millis(1000));
+    }
 
     /// The 140 W charger's EPR list. \[device\]
     fn epr_caps() -> Capabilities {

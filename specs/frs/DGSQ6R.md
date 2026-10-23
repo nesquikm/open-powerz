@@ -41,4 +41,4 @@ Simulator tests for every reply form and the stall timeout, unit tests for the h
 
 ## Notes
 
-Session 2: entry bc replied only ok, entry apple replied fail on a non-Apple charger, and entry list stalled after vfcp:null until reset. How a full list ends is unknown, so a list is always reported incomplete until hardware shows its end.
+Hardware 2026-10-23: entry bc and entry apple answered fail on all three chargers. Auto-list: Apple 140 W bc1.2 only; Anker QC 2.0, QC 3.0 and PD 45 W; EcoFlow Apple 2.4A, Samsung 2A, UFCS 63 W, QC 2.0, QC3+, AFC, FCP and PD. A full list ends with done.
