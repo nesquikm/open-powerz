@@ -19,6 +19,13 @@
     startRecording,
     stopRecording,
     toUiError,
+    triggerBackTo5v,
+    triggerClose,
+    triggerDetect,
+    triggerList,
+    triggerOpen,
+    triggerRequest,
+    triggerRisk,
     type BackendEvent,
     type ExportResult,
     type PdDetails,
@@ -44,6 +51,8 @@
   import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
   import StatsPanel from "./lib/components/StatsPanel.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
+  import TriggerView from "./lib/components/TriggerView.svelte";
+  import { TriggerPanel } from "./lib/trigger.svelte";
   import { onMount, setContext, untrack } from "svelte";
   import {
     ExportJob,
@@ -94,12 +103,33 @@
     });
   });
   /** The view the tabs show. */
-  let view: "meter" | "pd" = $state("meter");
-  const VIEWS = ["meter", "pd"] as const;
+  let view: "meter" | "pd" | "trigger" = $state("meter");
+  const VIEWS = ["meter", "pd", "trigger"] as const;
   const VIEW_TABS = [
     { id: "meter", label: "Meter" },
     { id: "pd", label: "PD analyzer" },
+    { id: "trigger", label: "Trigger" },
   ] as const;
+  /** The trigger view's state (FR DGSQ6S). */
+  const trigger = new TriggerPanel({
+    open: triggerOpen,
+    detect: triggerDetect,
+    list: triggerList,
+    risk: triggerRisk,
+    request: triggerRequest,
+    backTo5v: triggerBackTo5v,
+    close: triggerClose,
+  });
+
+  // Leaving the Trigger tab returns to 5 V and closes the trigger session.
+  let lastView: (typeof VIEWS)[number] = "meter";
+  $effect(() => {
+    const now = view;
+    untrack(() => {
+      if (lastView === "trigger" && now !== "trigger") void trigger.leave();
+      lastView = now;
+    });
+  });
 
   /** Arrow keys, Home and End move between the view tabs. */
   function onTabKeydown(e: KeyboardEvent): void {
@@ -109,7 +139,8 @@
       // Space must not also start a recording.
       e.preventDefault();
       e.stopPropagation();
-      view = (e.currentTarget as HTMLElement).id === "tab-pd" ? "pd" : "meter";
+      const id = (e.currentTarget as HTMLElement).id.replace(/^tab-/, "");
+      view = VIEWS.find((v) => v === id) ?? "meter";
       return;
     }
     if (e.key === "ArrowRight") next = (i + 1) % VIEWS.length;
@@ -319,6 +350,7 @@
     if (event.type === "gap" && session.active) chart?.markGap(event.data);
     session.handleEvent(event);
     pd.handleEvent(event);
+    trigger.handleEvent(event);
     if (event.type === "recording") recording.handleEvent(event.data);
     if (event.type === "status" && event.data.state === "disconnected") {
       recording.sessionEnded();
@@ -611,6 +643,11 @@
         />
       </div>
     </div>
+    {#if view === "trigger"}
+      <div class="trigger-view" role="tabpanel" id="view-trigger" aria-labelledby="tab-trigger">
+        <TriggerView panel={trigger} connected={canRecord} />
+      </div>
+    {/if}
     {#if view === "pd"}
       <div class="pd-view" role="tabpanel" id="view-pd" aria-labelledby="tab-pd">
         <PdAnalyzer

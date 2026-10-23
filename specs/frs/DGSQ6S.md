@@ -35,7 +35,7 @@ The desktop app lets the user detect protocols, read offers and request voltages
 
 ## Technical Design
 
-The backend runs the PDM session in the device worker next to the measurement stream and exposes commands for detect, list, request and reset. The risk classifier decides when the UI must confirm, and the backend refuses unconfirmed high-voltage commands.
+The backend runs the PDM session in the device worker next to the measurement stream and exposes commands for detect, list, request and reset. The risk classifier decides when the UI must confirm, and the backend refuses unconfirmed high-voltage commands. While a session is open the queue stays at 50 samples per second or less and the PD capture is paused. A new bulk connect, a dropped meter or a reloaded page first returns to 5 V and closes the session, since a bulk connect silences an open PDM session. A held PD contract always ends through PD.
 
 ## Testing
 
@@ -43,4 +43,4 @@ Worker tests against the simulator, Vitest for the panel state, and Playwright w
 
 ## Notes
 
-The live voltage comes from the existing measurement stream; the queue is kept at 50 samples per second or less while triggering, as the vendor advises.
+Hardware 2026-10-23, Apple 140 W via the 240 W cable, output empty: the panel's backend drove the real meter (bulk first, then the trigger session). Unconfirmed 9 V was refused; 9 V read 8.869 V, 28 V 28.009 V; Back to 5 V 5.19 V. The UI ran on the mocked backend; a by-hand click-through is open.

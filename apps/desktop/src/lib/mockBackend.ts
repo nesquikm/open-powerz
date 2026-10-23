@@ -22,11 +22,18 @@ import type {
   PdOpened,
   PdRow,
   PdStatusSample,
+  ProtocolSection,
   RecordingSummary,
+  RiskClass,
   Sample,
   Series,
   SeriesBuckets,
   StatsSnapshot,
+  Detection,
+  TriggerOffer,
+  TriggerProtocol,
+  TriggerReply,
+  TriggerRequest,
   UiError,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
@@ -366,6 +373,8 @@ interface Running {
   pendingGap: Gap | null;
   stats: MockStats;
   pd: MockPdCapture;
+  /** The VBUS a trigger request moved the demo charger to, V; null at its own. */
+  triggerVbusV: number | null;
 }
 
 interface MockRecording {
@@ -384,6 +393,7 @@ export const MOCK_MODES = [
   "outage",
   "blip",
   "replug",
+  "trigger-sag",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -454,6 +464,83 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
     "(see `docs/linux.md`).",
 };
 
+/** The mock trigger session: what was entered last (how to get back to 5 V). */
+interface MockTrigger {
+  entered: "pd" | "legacy" | null;
+  /** The queue rate before the session capped it at 50 SPS, if it did. */
+  rateBefore: number | null;
+}
+
+/** The queue rate cap while a trigger session is open, SPS. [inferred] */
+const TRIGGER_MAX_SPS = 50;
+
+/** The scripted charger's PD offers: 5/9/15/20 V fixed, PPS 3.3-21 V, EPR 28 V and AVS. */
+const MOCK_TRIGGER_OFFERS: readonly TriggerOffer[] = [
+  {
+    position: 1,
+    kind: "fixed",
+    min_voltage_mv: 5000,
+    max_voltage_mv: 5000,
+    max_current_ma: 3000,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 2,
+    kind: "fixed",
+    min_voltage_mv: 9000,
+    max_voltage_mv: 9000,
+    max_current_ma: 3000,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 3,
+    kind: "fixed",
+    min_voltage_mv: 15000,
+    max_voltage_mv: 15000,
+    max_current_ma: 3000,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 4,
+    kind: "fixed",
+    min_voltage_mv: 20000,
+    max_voltage_mv: 20000,
+    max_current_ma: 5000,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 5,
+    kind: "pps",
+    min_voltage_mv: 3300,
+    max_voltage_mv: 21000,
+    max_current_ma: 3250,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 8,
+    kind: "fixed",
+    min_voltage_mv: 28000,
+    max_voltage_mv: 28000,
+    max_current_ma: 5000,
+    max_power_mw: null,
+    epr: true,
+  },
+  {
+    position: 9,
+    kind: "epr-avs",
+    min_voltage_mv: 15000,
+    max_voltage_mv: 28000,
+    max_current_ma: null,
+    max_power_mw: 140000,
+    epr: true,
+  },
+];
+
 /** One page-lifetime instance; a running session's timer stops on `disconnect()` or
  * when the page goes away (it is a test and demo double, not a resource owner). */
 export class MockBackend {
@@ -472,6 +559,10 @@ export class MockBackend {
   #unplugDone = false;
   #replugTimer: ReturnType<typeof setTimeout> | null = null;
   #watchers = new Set<(devices: DeviceListing[]) => void>();
+  /** The open trigger session (FR DGSQ6S), null when none. */
+  #trigger: MockTrigger | null = null;
+  /** Every command the scripted charger received. */
+  #triggerLog: string[] = [];
 
   /** `mode` defaults to the page URL's `?mock=` parameter, the PD seed to its
    * `?pdsynthetic=`. */
@@ -551,6 +642,7 @@ export class MockBackend {
       history: new HistoryColumns(),
       gaps: [],
       pendingGap: null,
+      triggerVbusV: null,
       stats: new MockStats(),
       pd: {
         timer: null,
@@ -641,6 +733,9 @@ export class MockBackend {
     const samples: Sample[] = [];
     for (let i = 0; i < n; i++) {
       const sample = sampleAt(s.scenario, Math.round(s.nextMs));
+      if (s.triggerVbusV !== null) {
+        sample.vbus_v = s.triggerVbusV + 0.01 * Math.sin(s.nextMs / 140);
+      }
       samples.push(sample);
       s.history.push(sample);
       s.stats.push(sample);
@@ -701,6 +796,8 @@ export class MockBackend {
 
   async disconnect(): Promise<void> {
     const s = this.#open();
+    // Like the backend: back to 5 V and `pdm close` before the queue stops.
+    this.#closeTrigger();
     if (this.#replugTimer !== null) clearTimeout(this.#replugTimer);
     this.#replugTimer = null;
     this.#endSession(s, null);
@@ -824,6 +921,8 @@ export class MockBackend {
    * worker's at most 60 times a second. */
   async pdStart(): Promise<void> {
     const s = this.#open();
+    // The PD capture waits while triggering. [inferred]
+    if (this.#trigger) throw usage("Close the trigger session to capture PD traffic.");
     const pd = s.pd;
     if (pd.timer !== null) return;
     pd.timer = setInterval(() => this.#pdTick(s), BATCH_MS);
@@ -972,5 +1071,192 @@ export class MockBackend {
   /** Every path `revealPath` was asked to show, oldest first. */
   revealedPaths(): string[] {
     return [...this.#revealed];
+  }
+
+  // ---- Trigger panel (FR DGSQ6S): a scripted charger behind the demo meter ----
+
+  /** Opens the trigger session on the connected demo meter. */
+  async triggerOpen(): Promise<void> {
+    if (!this.#session) throw usage("Connect a meter first.");
+    if (this.#trigger) return;
+    const s = this.#session;
+    // Like the backend: the PD capture pauses and the queue runs at 50 SPS or less.
+    this.#stopPd(s);
+    let rateBefore: number | null = null;
+    if (s.rateSps > TRIGGER_MAX_SPS && !s.recording && this.#mode !== "rate-locked") {
+      rateBefore = s.rateSps;
+      await this.setRate(TRIGGER_MAX_SPS);
+    }
+    this.#trigger = { entered: null, rateBefore };
+    this.#triggerLog.push("pdm open");
+  }
+
+  /** The open trigger session, or a usage error. */
+  #openTrigger(): MockTrigger {
+    if (!this.#trigger) throw usage("No trigger session is open.");
+    return this.#trigger;
+  }
+
+  /** Like the 140 W charger: Apple fails, the automatic list stalls and ends with `reset`. */
+  async triggerDetect(): Promise<Detection> {
+    const t = this.#openTrigger();
+    this.#triggerLog.push("entry bc", "entry apple", "entry list", "reset");
+    t.entered = null;
+    return {
+      bc12: "unknown",
+      apple: "not-supported",
+      entries: [
+        { name: "bc1.2", support: "supported", vbus_mv: 5203, ibus_ma: 0 },
+        { name: "ufcs", support: "not-supported", vbus_mv: null, ibus_ma: null },
+        { name: "vfcp", support: "not-supported", vbus_mv: null, ibus_ma: null },
+      ],
+      complete: false,
+    };
+  }
+
+  /** The scripted charger speaks PD and QC; every other protocol is not supported. */
+  async triggerList(protocol: TriggerProtocol): Promise<ProtocolSection> {
+    const t = this.#openTrigger();
+    this.#triggerLog.push(`entry ${protocol}`);
+    if (protocol === "pd") {
+      this.#triggerLog.push("pdm parm");
+      t.entered = "pd";
+      return {
+        protocol,
+        supported: true,
+        offers: MOCK_TRIGGER_OFFERS.map((o) => ({ ...o })),
+        limits: [],
+        settings: { pd_type: "auto", emarker: "50v-240w-epr", sink: "pps-3a" },
+      };
+    }
+    t.entered = "legacy";
+    return { protocol, supported: protocol === "qc", offers: [], limits: [], settings: null };
+  }
+
+  /** The voltage `request` asks for, mV; null for a PD position with no offer. */
+  #requestMv(request: TriggerRequest): number | null {
+    switch (request.protocol) {
+      case "pd": {
+        if (request.voltage_mv !== null) return request.voltage_mv;
+        const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === request.position);
+        return offer ? offer.max_voltage_mv : null;
+      }
+      case "qc":
+      case "fcp":
+      case "afc":
+      case "sfcp":
+        return request.volts * 1000;
+      default:
+        return request.voltage_mv;
+    }
+  }
+
+  /** Like the library classifier: above 5 V, or unknown, needs a confirmation. */
+  async triggerRisk(request: TriggerRequest): Promise<RiskClass> {
+    this.#openTrigger();
+    const mv = this.#requestMv(request);
+    return mv !== null && mv <= 5000 ? "at_most_5v" : "above_5v";
+  }
+
+  /** The command text the meter would receive for `request`. */
+  #commandText(request: TriggerRequest): string {
+    switch (request.protocol) {
+      case "pd":
+        if (request.voltage_mv !== null && request.current_ma !== null) {
+          return `pd req=${request.position},volt=${request.voltage_mv},cur=${request.current_ma}`;
+        }
+        return request.current_ma !== null
+          ? `pd req=${request.position},cur=${request.current_ma}`
+          : `pd req=${request.position}`;
+      case "qc":
+      case "fcp":
+      case "afc":
+      case "sfcp":
+        return `${request.protocol} ${request.volts}V`;
+      case "qc3":
+        return `qc3 volt=${request.voltage_mv}`;
+      case "ufcs":
+        return `ufcs req=${request.index},volt=${request.voltage_mv},cur=${request.current_ma}`;
+      default:
+        return `${request.protocol} volt=${request.voltage_mv},cur=${request.current_ma}`;
+    }
+  }
+
+  /** Refuses an unconfirmed above-5 V request before anything is sent. */
+  async triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply> {
+    this.#openTrigger();
+    const mv = this.#requestMv(request);
+    if (mv === null && request.protocol === "pd") {
+      throw usage(`The charger offers nothing at position ${request.position}.`);
+    }
+    if ((await this.triggerRisk(request)) === "above_5v" && !confirmed) {
+      throw usage("A request above 5 V needs your confirmation.");
+    }
+    const command = this.#commandText(request);
+    this.#triggerLog.push(command);
+    this.#openTrigger().entered = request.protocol === "pd" ? "pd" : "legacy";
+    if (this.#session && mv !== null) {
+      // The demo VBUS follows the request; `trigger-sag` keeps it 12 % below.
+      this.#session.triggerVbusV = (mv / 1000) * (this.#mode === "trigger-sag" ? 0.88 : 0.985);
+    }
+    if (request.protocol !== "pd") {
+      return {
+        command,
+        requested_mv: null,
+        requested_ma: null,
+        delivered_mv: null,
+        delivered_ma: null,
+        reply: "ready",
+      };
+    }
+    const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === request.position);
+    const requestedMv = mv ?? 5000;
+    return {
+      command,
+      requested_mv: requestedMv,
+      requested_ma: request.current_ma ?? offer?.max_current_ma ?? null,
+      delivered_mv: Math.round(requestedMv * 0.985),
+      delivered_ma: 0,
+      reply: null,
+    };
+  }
+
+  /** Back to 5 V: `pd req=1` after PD, `reset` after the others; the session stays. */
+  async triggerBackTo5v(): Promise<void> {
+    this.#returnTo5v(this.#openTrigger());
+  }
+
+  /** Back to 5 V, then `pdm close`; nothing when no session is open. */
+  async triggerClose(): Promise<void> {
+    this.#closeTrigger();
+  }
+
+  #returnTo5v(t: MockTrigger): void {
+    if (t.entered === "pd") this.#triggerLog.push("pd req=1");
+    else if (t.entered === "legacy") this.#triggerLog.push("reset");
+    if (this.#session) this.#session.triggerVbusV = null;
+  }
+
+  #closeTrigger(): void {
+    const t = this.#trigger;
+    if (!t) return;
+    this.#returnTo5v(t);
+    this.#triggerLog.push("pdm close");
+    this.#trigger = null;
+    const s = this.#session;
+    if (s && t.rateBefore !== null && !s.recording) {
+      s.rateSps = t.rateBefore;
+      s.carry = 0;
+      s.onEvent({
+        type: "status",
+        data: { state: "rate", rate_sps: t.rateBefore, rate_locked: false },
+      });
+    }
+  }
+
+  /** Every command the scripted charger received (`pd req=2`, `pd req=1`, `reset`,
+   * `pdm close`, ...), oldest first: what the UI suite checks Cancel against. */
+  triggerCommands(): string[] {
+    return [...this.#triggerLog];
   }
 }

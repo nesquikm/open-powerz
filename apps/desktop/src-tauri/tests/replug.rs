@@ -686,3 +686,48 @@ fn a_recording_ends_at_the_unplug_with_a_complete_file_and_does_not_resume() {
     let _ = std::fs::remove_dir_all(&dir);
     rig.m.disconnect().unwrap();
 }
+
+// ---- AC-DGSQ6S.5: a meter that drops out also ends the trigger session ----
+
+/// Unplugging while a trigger session holds the charger above 5 V must not
+/// leave that session open and invisible: the backend returns to 5 V and
+/// closes it, as the UI already assumes when the meter disconnects.
+#[test]
+fn an_unplug_while_triggering_returns_to_5v_and_closes_the_trigger_session() {
+    use open_powerz_desktop_lib::trigger::{TriggerProtocol, TriggerRequest, TriggerWorker};
+    use powerz_sim::{SimCharger, SimPdm};
+
+    let mut rig = Rig::new();
+    let (rx, _) = stream_meter_a(&mut rig, 50);
+    let pdm = SimPdm::new(SimCharger::Epr140W, SimClock::new(1_790_000_000_000));
+    let w = TriggerWorker::spawn(pdm.open_port(), SimClock::new(1_790_000_000_000))
+        .expect("the trigger session opens");
+    rig.m.install_trigger(w).expect("install");
+    let c = rig.m.trigger_control().expect("a trigger session is open");
+    c.list(TriggerProtocol::Pd).expect("list pd");
+    c.request(
+        TriggerRequest::Pd {
+            position: 2,
+            voltage_mv: None,
+            current_ma: None,
+        },
+        true,
+    )
+    .expect("9 V");
+    assert!(pdm.vbus_mv() > 8000, "the charger is at 9 V");
+
+    unplug_and_wait(&mut rig, &rx);
+
+    assert!(!rig.m.trigger_open(), "the trigger session is still open");
+    assert!(!pdm.pdm_active(), "pdm close was not sent");
+    let writes: Vec<String> = pdm.writes().iter().map(|w| w.trim().to_owned()).collect();
+    let close = writes
+        .iter()
+        .rposition(|w| w == "pdm close")
+        .expect("pdm close");
+    let back = writes
+        .iter()
+        .rposition(|w| w == "pd req=1" || w == "pd hrst")
+        .expect("back to 5 V");
+    assert!(back < close, "{writes:?}");
+}
