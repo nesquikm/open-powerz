@@ -47,6 +47,11 @@
     await pdConsole.sendMessage({ sop: target, msg_type: msgType, data_objects: dataObjects });
   }
 
+  /** Scroll a newly shown reason into view, so it is seen next to the console. */
+  function reveal(node: HTMLElement): void {
+    node.scrollIntoView?.({ block: "nearest" });
+  }
+
   async function sendLine(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     await pdConsole.sendLine(command);
@@ -149,6 +154,9 @@
       />
       <button type="submit" disabled={controlsOff}>Send</button>
     </form>
+    {#if pdConsole.error}
+      <p class="error" role="alert" {@attach reveal}>{pdConsole.error.message}</p>
+    {/if}
     <div class="transcript" role="log" aria-label="Console transcript">
       {#each pdConsole.lines as line, i (i)}
         <div class={line.direction}>{formatLine(line)}</div>
@@ -156,10 +164,6 @@
     </div>
   </section>
 </div>
-
-{#if pdConsole.error}
-  <p class="error" role="alert">{pdConsole.error.message}</p>
-{/if}
 
 {#if pdConsole.pending}
   <TriggerConfirmDialog

@@ -439,7 +439,23 @@ fn negotiation<P: Read + Write, C: Clock>(
     })
 }
 
-/// Validate, send (with `confirmation` when above 5 V) and read `req:` / `ready:`.
+/// `entry pd` unless PD is the protocol entered last
+/// ([`PdmSession::entered`]); the new negotiation when it was sent. Another
+/// protocol entered after PD leaves the meter answering `pd req=` with
+/// `req error 252`. \[device\] 2026-10-24
+pub fn ensure_entered<P: Read + Write, C: Clock>(
+    session: &mut PdmSession<P, C>,
+) -> Result<Option<Negotiation>, Error> {
+    if session.entered() == Some(Protocol::Pd) {
+        return Ok(None);
+    }
+    enter(session).map(Some)
+}
+
+/// Validate, enter PD again when another protocol (or none) was entered
+/// after it ([`ensure_entered`]; the request is then checked against the
+/// refreshed offers), send (with `confirmation` when above 5 V) and read
+/// `req:` / `ready:`.
 pub fn request<P: Read + Write, C: Clock>(
     session: &mut PdmSession<P, C>,
     offers: &[Offer],
@@ -447,7 +463,22 @@ pub fn request<P: Read + Write, C: Clock>(
     confirmation: Option<HighVoltageConfirmation>,
 ) -> Result<RequestOutcome, Error> {
     // Validation first: an invalid request writes nothing.
-    let command = validate(offers, request)?;
+    validate(offers, request)?;
+    let command = match ensure_entered(session)? {
+        // The charger may offer less now (SPR only): nothing is written
+        // for a position it no longer offers.
+        Some(negotiation) => validate(&negotiation.offers, request)?,
+        None => validate(offers, request)?,
+    };
+    send_request(session, command, confirmation)
+}
+
+/// Send a validated `pd req=` and read `req:` / `ready:`; no entry.
+fn send_request<P: Read + Write, C: Clock>(
+    session: &mut PdmSession<P, C>,
+    command: Command,
+    confirmation: Option<HighVoltageConfirmation>,
+) -> Result<RequestOutcome, Error> {
     match confirmation {
         Some(confirmation) if session.risk(&command) == Risk::Above5V => {
             session.send_confirmed(&command, confirmation)?;
@@ -539,7 +570,10 @@ pub fn return_to_5v<P: Read + Write, C: Clock>(
         position: 1,
         current_ma: None,
     };
-    let Err(request_error) = request(session, offers, &to_5v, None) else {
+    // No `entry pd` on the way back: the request (or the Hard Reset
+    // fallback) is sent as it is.
+    let sent = validate(offers, &to_5v).and_then(|command| send_request(session, command, None));
+    let Err(request_error) = sent else {
         return Ok(BackTo5V::Requested);
     };
     match hard_reset(session) {

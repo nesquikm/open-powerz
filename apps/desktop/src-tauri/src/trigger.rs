@@ -549,6 +549,16 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
         }
     }
 
+    /// `entry pd` unless PD is the protocol the meter entered last; the
+    /// refreshed offers replace the old ones. (AC-DGSQ6S.13)
+    fn enter_pd(&mut self) -> Result<(), UiError> {
+        if let Some(negotiation) = pd::ensure_entered(&mut self.pdm).map_err(|e| pd_error(&e))? {
+            self.entered = Entered::Pd;
+            self.offers = negotiation.offers;
+        }
+        Ok(())
+    }
+
     /// Validate `request` against what the charger offered and render its
     /// command; pure, nothing is written.
     fn command_of(&self, request: &LibRequest) -> Result<pdm::Command, UiError> {
@@ -617,6 +627,10 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
         match lib {
             LibRequest::Pd(r) => {
+                // Another protocol (or none) entered since PD: enter PD
+                // again so the request goes to a PD session, and check it
+                // against what the charger offers now. (AC-DGSQ6S.13)
+                self.enter_pd()?;
                 let outcome =
                     pd::request(&mut self.pdm, &self.offers, &r, confirmation).map_err(|e| {
                         // Written, then out of step: the charger may have
@@ -638,9 +652,12 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
                 })
             }
             LibRequest::Legacy(r) => {
+                // The library enters the protocol again first when another
+                // one was entered since; any entry attempt may leave the
+                // meter in it: `reset` on close.
+                self.entered = Entered::Legacy;
                 let outcome = legacy::request(&mut self.pdm, &r, confirmation)
                     .map_err(|e| legacy_error(&e))?;
-                self.entered = Entered::Legacy;
                 Ok(TriggerReply {
                     command: command_text(&outcome.command),
                     requested_mv: None,
@@ -682,14 +699,10 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
                 "A message that can raise VBUS above 5 V needs your confirmation.",
             ));
         }
-        if self.entered == Entered::None {
-            // Like `powerz pd send`: PD first, so the message has a PD
-            // session and the way back to 5 V (`pd req=1`, Hard Reset as
-            // the fallback) works.
-            let negotiation = pd::enter(&mut self.pdm).map_err(|e| pd_error(&e))?;
-            self.entered = Entered::Pd;
-            self.offers = negotiation.offers;
-        }
+        // Like `powerz pd send`: PD first (again, when another protocol was
+        // entered since), so the message has a PD session and the way back
+        // to 5 V (`pd req=1`, Hard Reset as the fallback) works.
+        self.enter_pd()?;
         if above {
             // It may change the contract: always end it through PD. Set
             // before the write, so a failure after it still undoes it.
@@ -1518,6 +1531,142 @@ mod tests {
             "{writes:?}"
         );
         drop(w);
+    }
+
+    // ---- AC-DGSQ6S.13: a request for another protocol enters its own first ----
+
+    /// `cmd` is written in `writes`, before `later`.
+    fn written_before(writes: &[String], cmd: &str, later: &str) {
+        let at = writes
+            .iter()
+            .position(|w| w == cmd)
+            .unwrap_or_else(|| panic!("{cmd:?} not written; wrote {writes:?}"));
+        let then = writes
+            .iter()
+            .position(|w| w.starts_with(later))
+            .unwrap_or_else(|| panic!("{later:?} not written; wrote {writes:?}"));
+        assert!(at < then, "{cmd:?} must come before {later:?}: {writes:?}");
+    }
+
+    #[test]
+    fn a_pd_request_after_a_legacy_protocol_was_listed_enters_pd_first() {
+        let (sim, w) = worker(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        let before = sim.writes().len();
+        let reply = c.request(pd(2), true).expect("the PD request succeeds");
+        let writes = writes_after(&sim, before);
+        written_before(&writes, "entry pd", "pd req=2");
+        assert_eq!(reply.requested_mv, Some(9000));
+        assert!(sim.vbus_mv() > 8000, "VBUS {} mV", sim.vbus_mv());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_pd_request_after_every_protocol_was_listed_enters_pd_first() {
+        // What the panel's detection does on the device (2026-10-24): every
+        // protocol in order, the last legacy one left entered; the PD
+        // request that followed got `req error 252`.
+        let (sim, w) = worker(SimCharger::MultiProtocol);
+        let c = w.control();
+        for p in TriggerProtocol::ALL {
+            c.list(p).unwrap_or_else(|e| panic!("list {p:?}: {e:?}"));
+        }
+        let before = sim.writes().len();
+        c.request(pd(2), true).expect("the PD request succeeds");
+        let writes = writes_after(&sim, before);
+        written_before(&writes, "entry pd", "pd req=2");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_pd_request_with_pd_entered_last_does_not_enter_again() {
+        let (sim, w) = worker(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let before = sim.writes().len();
+        c.request(pd(2), true).expect("9 V");
+        let writes = writes_after(&sim, before);
+        assert!(!writes.iter().any(|w| w == "entry pd"), "{writes:?}");
+        assert!(
+            writes.iter().any(|w| w.starts_with("pd req=2")),
+            "{writes:?}"
+        );
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_qc_request_after_pd_was_listed_last_enters_qc_first() {
+        let (sim, w) = worker(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let before = sim.writes().len();
+        let reply = c
+            .request(TriggerRequest::Qc { volts: 9 }, true)
+            .expect("the QC request succeeds");
+        let writes = writes_after(&sim, before);
+        written_before(&writes, "entry qc", "qc 9V");
+        assert_eq!(reply.reply.as_deref(), Some("ready"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_pd_message_after_a_legacy_protocol_was_listed_enters_pd_first() {
+        let (sim, w) = worker(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.list(TriggerProtocol::Ufcs).expect("list ufcs");
+        let before = sim.writes().len();
+        let soft_reset = PdMessageRequest {
+            sop: MessageSop::Sop,
+            msg_type: 13,
+            data_objects: vec![],
+        };
+        let r = c.send_message(soft_reset, false).expect("sent");
+        assert_eq!(r.command, "pd cmd=13");
+        written_before(&writes_after(&sim, before), "entry pd", "pd cmd=13");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_discover_identity_after_a_legacy_protocol_was_listed_enters_pd_first() {
+        let clock = SimClock::new(1_760_000_000_000);
+        let sim = SimPdm::new(SimCharger::MultiProtocol, clock.clone())
+            .with_cable(powerz_sim::SimCable::Epr240W);
+        let w = TriggerWorker::spawn(sim.open_port(), clock).expect("the session opens");
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        let before = sim.writes().len();
+        let discover = PdMessageRequest {
+            sop: MessageSop::SopPrime,
+            msg_type: 15,
+            data_objects: vec![0xFF00_A801],
+        };
+        let r = c.send_message(discover, true).expect("sent");
+        written_before(&writes_after(&sim, before), "entry pd", "pd data=01");
+        assert!(r.cable.is_some(), "the cable answered");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_pd_message_with_pd_entered_last_does_not_enter_again() {
+        let (sim, w) = worker(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let before = sim.writes().len();
+        let soft_reset = PdMessageRequest {
+            sop: MessageSop::Sop,
+            msg_type: 13,
+            data_objects: vec![],
+        };
+        c.send_message(soft_reset, false).expect("sent");
+        assert_eq!(writes_after(&sim, before), ["pd cmd=13"]);
+        w.close().expect("close");
     }
 
     #[test]

@@ -37,6 +37,7 @@ The desktop app lets the user detect protocols, read offers and request voltages
 - AC-DGSQ6S.10: The session recognises a reply that belongs to another command (for example `req error` answering `pdm parm`) and never takes it as the answer to the current command. It stops with an error saying the meter needs a power cycle, and the panel shows that error and disables requests until the session is reopened.
 - AC-DGSQ6S.11: While the desktop runs the automatic list, the measurement stream pauses polling without reconnecting the meter, and resumes when the list ends, also when it ends early or with an error.
 - AC-DGSQ6S.12: After polling resumes, the measurement stream survives the meter's backlog: a queue reply shorter than it declares keeps its whole records, the lost samples are reported as a gap, and the stream and the trigger session carry on.
+- AC-DGSQ6S.13: The session tracks which protocol is entered; a request or PD message for another protocol (PD, QC, UFCS or any other) enters its own protocol again first, refreshing what the charger offers, in the app and the command line tool alike.
 
 ## Technical Design
 

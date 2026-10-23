@@ -186,6 +186,25 @@ pub enum Request {
     UfcsCmd(u8),
 }
 
+impl Request {
+    /// The protocol the request is sent in.
+    pub fn protocol(&self) -> LegacyProtocol {
+        match self {
+            Request::Fixed { protocol, .. } => match protocol {
+                FixedProtocol::Qc => LegacyProtocol::Qc,
+                FixedProtocol::Fcp => LegacyProtocol::Fcp,
+                FixedProtocol::Afc => LegacyProtocol::Afc,
+                FixedProtocol::Sfcp => LegacyProtocol::Sfcp,
+            },
+            Request::Qc3Volt { .. } | Request::Qc3Inc(_) | Request::Qc3Dec(_) => LegacyProtocol::Qc,
+            Request::Scp { .. } => LegacyProtocol::Scp,
+            Request::Vfcp { .. } => LegacyProtocol::Vfcp,
+            Request::Tfcp { .. } => LegacyProtocol::Tfcp,
+            Request::Ufcs { .. } | Request::UfcsCmd(_) => LegacyProtocol::Ufcs,
+        }
+    }
+}
+
 /// A protocol after a successful `entry`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entered {
@@ -529,13 +548,30 @@ fn wait_for_block<P: Read + Write, C: Clock>(
     Err(Error::NotSupported { protocol })
 }
 
-/// Validate, send (with `confirmation` when above 5 V) and read the reply.
+/// `entry <protocol>` unless `protocol` is the one entered last
+/// ([`PdmSession::entered`]); the entry when it was sent.
+pub fn ensure_entered<P: Read + Write, C: Clock>(
+    session: &mut PdmSession<P, C>,
+    protocol: LegacyProtocol,
+) -> Result<Option<Entered>, Error> {
+    if session.entered() == Some(protocol.entry()) {
+        return Ok(None);
+    }
+    enter(session, protocol).map(Some)
+}
+
+/// Validate, enter the request's protocol again when another one (or none)
+/// was entered after it ([`ensure_entered`]; the request is then checked
+/// against the refreshed capabilities), send (with `confirmation` when
+/// above 5 V) and read the reply.
 pub fn request<P: Read + Write, C: Clock>(
     session: &mut PdmSession<P, C>,
     request: &Request,
     confirmation: Option<HighVoltageConfirmation>,
 ) -> Result<Outcome, Error> {
     // Validation first: an invalid request writes nothing.
+    validate(session.capabilities(), request)?;
+    ensure_entered(session, request.protocol())?;
     let command = validate(session.capabilities(), request)?;
     match confirmation {
         Some(confirmation) if session.risk(&command) == Risk::Above5V => {

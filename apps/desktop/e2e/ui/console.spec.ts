@@ -118,6 +118,22 @@ test("GoodCRC is refused in the console and the builder (AC-DGSQ6T.3)", async ({
   expect(await commands(page)).toEqual(before);
 });
 
+test("a refused console line shows its reason next to the console (AC-DGSQ6T.3 regression)", async ({
+  page,
+}) => {
+  // Found on the real app: `pd cmd=01` + Send wrote nothing, but no reason
+  // could be seen anywhere near the console.
+  await detected(page);
+  const before = await commands(page);
+  await typeLine(page, "pd cmd=01");
+  const reason = consoleRegion(page).getByRole("alert");
+  await expect(reason).toBeVisible();
+  await expect(reason).toContainText(/GoodCRC/);
+  await expect(reason).toBeInViewport();
+  await expect(dialog(page)).toBeHidden();
+  expect(await commands(page)).toEqual(before);
+});
+
 // ---- AC-DGSQ6T.5: the confirmation ----
 
 test("an unparsable line asks for the confirmation; Cancel sends nothing (AC-DGSQ6T.5)", async ({

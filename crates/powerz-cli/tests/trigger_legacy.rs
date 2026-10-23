@@ -183,6 +183,31 @@ mod trigger_legacy {
         ends_safely(&s, req);
     }
 
+    // ---- AC-DGSQ6S.13: the CLI enters its protocol before the request, once ----
+
+    #[test]
+    fn qc_request_enters_qc_once_before_the_request() {
+        let a = trigger(&["qc", "request", "9", "--allow-high-voltage", "--hold", "0"])
+            .assert()
+            .success();
+        let s = sent(&a);
+        let req = index_of(&s, "qc 9V");
+        let entries: Vec<usize> = s
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.starts_with("entry "))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            entries.iter().filter(|&&i| i < req).count(),
+            1,
+            "exactly one entry before the request: {s:?}"
+        );
+        let last_entry = *entries.iter().rfind(|&&i| i < req).expect("an entry");
+        assert_eq!(s[last_entry], "entry qc", "{s:?}");
+        ends_safely(&s, req);
+    }
+
     #[test]
     fn qc_20v_json_names_the_command() {
         let a = trigger(&[

@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use super::caps::Capabilities;
-use super::command::Command;
+use super::command::{Command, Protocol};
 use super::reply::{ReplyItem, ReplyReader};
 use super::risk::Risk;
 use super::{Error, map_io};
@@ -73,6 +73,9 @@ pub struct PdmSession<P: Read + Write, C: Clock = SystemClock> {
     /// A `pdm mode entry` line arrived since the last `pdm open`: a late
     /// `ver<n>` is then the rest of that reply, not a foreign one.
     opened: bool,
+    /// The protocol of the last `entry` written; cleared by `reset`,
+    /// `pdm open` and `pdm close`.
+    entered: Option<Protocol>,
 }
 
 impl<P: Read + Write> PdmSession<P, SystemClock> {
@@ -95,6 +98,7 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
             current: None,
             out_of_sync: None,
             opened: false,
+            entered: None,
         };
         // On any error below, dropping `session` sends `pdm close` before
         // the port is released.
@@ -266,6 +270,13 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
         if *command == Command::PdmOpen {
             self.opened = false;
         }
+        // Written is what counts: an entry attempt may leave the meter in
+        // the protocol even when its reply never comes.
+        match command {
+            Command::Entry(protocol) => self.entered = Some(*protocol),
+            Command::Reset | Command::PdmOpen | Command::PdmClose => self.entered = None,
+            _ => {}
+        }
         self.current = Some(command.clone());
         self.write_command(&command.render())
     }
@@ -313,6 +324,14 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
     /// The session clock's time, ms since the Unix epoch (for transcripts).
     pub fn now_ms(&mut self) -> u64 {
         self.clock.now_ms()
+    }
+
+    /// The protocol of the last `entry` written (`entry list` included),
+    /// or `None` after `pdm open`, `reset` and `pdm close`. A request for
+    /// another protocol enters its own first (AC-DGSQ6S.13): \[device\]
+    /// 2026-10-24, `pd req=2` after `entry ufcs` got `req error 252`.
+    pub fn entered(&self) -> Option<Protocol> {
+        self.entered
     }
 
     /// Capabilities from every block seen so far, solicited or not.
