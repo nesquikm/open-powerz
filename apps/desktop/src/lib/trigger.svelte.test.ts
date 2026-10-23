@@ -16,6 +16,7 @@ import type {
   TriggerProtocol,
   TriggerReply,
   TriggerRequest,
+  UiError,
 } from "./backend";
 import { TRIGGER_PROTOCOLS } from "./backend";
 import {
@@ -24,6 +25,7 @@ import {
   PROTOCOL_TITLES,
   TriggerPanel,
   confirmationText,
+  detectionChecks,
   deviates,
   requestVoltageMv,
   type TriggerApi,
@@ -496,5 +498,274 @@ describe("AC-DGSQ6S.5: Back to 5 V and leaving the view", () => {
     expect(panel.showBackTo5v).toBe(false);
     expect(panel.pending).toBeNull();
     expect(panel.vbusV).toBeNull();
+  });
+});
+
+describe("AC-DGSQ6S.9: a failed request shows its failure and reason", () => {
+  const FAILURES: { name: string; error: UiError }[] = [
+    {
+      name: "an error reply",
+      error: {
+        kind: "protocol",
+        message: "The charger refused the request (req error 252).",
+        hint: null,
+      },
+    },
+    {
+      name: "a timeout",
+      error: { kind: "timeout", message: "The meter did not answer in time.", hint: null },
+    },
+    {
+      name: "a refusal",
+      error: { kind: "usage", message: "The charger offers nothing at position 2.", hint: null },
+    },
+  ];
+
+  for (const { name, error } of FAILURES) {
+    it(`a confirmed request that fails with ${name} shows it in the request result`, async () => {
+      const { api, panel } = await detected();
+      api.request = async () => {
+        throw error;
+      };
+      await at9V(panel);
+      expect(panel.requestFailure).toEqual(error);
+      // The result is not empty: it says the request failed and why.
+      expect(panel.requestFailure?.message).toContain(error.message);
+    });
+  }
+
+  it("a failure replaces the previous request's reply", async () => {
+    const { api, panel } = await detected();
+    await at9V(panel);
+    expect(panel.reply).not.toBeNull();
+    api.request = async () => {
+      throw { kind: "protocol", message: "req error 252", hint: null };
+    };
+    await at9V(panel);
+    expect(panel.reply).toBeNull();
+    expect(panel.requestFailure?.message).toContain("252");
+  });
+
+  it("a later successful request clears the failure", async () => {
+    const { api, panel } = await detected();
+    const real = api.request.bind(api);
+    api.request = async () => {
+      throw { kind: "timeout", message: "No answer.", hint: null };
+    };
+    await at9V(panel);
+    expect(panel.requestFailure).not.toBeNull();
+    api.request = real;
+    await at9V(panel);
+    expect(panel.requestFailure).toBeNull();
+    expect(panel.reply?.requested_mv).toBe(9000);
+  });
+
+  it("a failure at or below 5 V (no dialog) is shown too", async () => {
+    const { api, panel } = await detected();
+    api.request = async () => {
+      throw { kind: "protocol", message: "req error 252", hint: null };
+    };
+    await panel.ask(PD_5V);
+    expect(panel.requestFailure?.message).toContain("252");
+  });
+});
+
+describe("AC-DGSQ6S.10: an out-of-sync meter stops the session's requests", () => {
+  const OUT_OF_SYNC: UiError = {
+    kind: "out_of_sync",
+    message: "The meter's replies are out of step with the commands.",
+    hint: "Power-cycle the meter (unplug it and plug it back in), then open the session again.",
+  };
+
+  it("an out-of-sync request shows the error and disables requests", async () => {
+    const { api, panel } = await detected();
+    expect(panel.requestsDisabled).toBe(false);
+    api.request = async () => {
+      throw OUT_OF_SYNC;
+    };
+    await at9V(panel);
+    expect(panel.error).toEqual(OUT_OF_SYNC);
+    expect(panel.requestsDisabled).toBe(true);
+  });
+
+  it("an out-of-sync error while listing disables requests too", async () => {
+    const api = new FakeApi();
+    api.list = async (protocol) => {
+      api.calls.push(`list ${protocol}`);
+      throw OUT_OF_SYNC;
+    };
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    expect(panel.error).toEqual(OUT_OF_SYNC);
+    expect(panel.requestsDisabled).toBe(true);
+  });
+
+  it("while disabled, asking sends nothing to the backend", async () => {
+    const { api, panel } = await detected();
+    api.request = async () => {
+      throw OUT_OF_SYNC;
+    };
+    await at9V(panel);
+    const calls = api.calls.length;
+    await panel.ask(PD_5V);
+    await panel.ask(PD_9V);
+    expect(panel.pending).toBeNull();
+    expect(api.calls.slice(calls)).toEqual([]);
+    // The power-cycle error stays on screen.
+    expect(panel.error).toEqual(OUT_OF_SYNC);
+  });
+
+  it("Back to 5 V still reaches the backend and shows its VBUS warning", async () => {
+    // The backend sends `pd hrst` blind, closes the session and answers with
+    // an out-of-sync error saying VBUS is not confirmed.
+    const { api, panel } = await detected();
+    api.request = async () => {
+      throw OUT_OF_SYNC;
+    };
+    await at9V(panel);
+    const warning: UiError = {
+      ...OUT_OF_SYNC,
+      hint: "VBUS may still be above 5 V: the app sent a Hard Reset (or reset) and closed the session.",
+    };
+    api.backTo5v = async () => {
+      api.calls.push("back");
+      throw warning;
+    };
+    const calls = api.calls.length;
+    await panel.backTo5v();
+    expect(api.calls.slice(calls)).toEqual(["back"]);
+    expect(panel.error).toEqual(warning);
+    expect(panel.requestsDisabled).toBe(true);
+  });
+
+  it("other errors do not disable requests", async () => {
+    const { api, panel } = await detected();
+    api.request = async () => {
+      throw { kind: "timeout", message: "No answer.", hint: null };
+    };
+    await at9V(panel);
+    expect(panel.requestsDisabled).toBe(false);
+  });
+
+  it("reopening the session enables requests again", async () => {
+    const { api, panel } = await detected();
+    const real = api.request.bind(api);
+    api.request = async () => {
+      throw OUT_OF_SYNC;
+    };
+    await at9V(panel);
+    expect(panel.requestsDisabled).toBe(true);
+    await panel.leave();
+    api.request = real;
+    await panel.detect();
+    expect(panel.requestsDisabled).toBe(false);
+    await at9V(panel);
+    expect(panel.reply?.requested_mv).toBe(9000);
+  });
+});
+
+describe("AC-DGSQ6R.7: a detection whose sync check fails stops the session", () => {
+  // The backend's detect fails with `out_of_sync` when the meter answers the
+  // `pdm parm` check after a cut list with another command's reply.
+  const OUT_OF_SYNC: UiError = {
+    kind: "out_of_sync",
+    message: "The meter's replies are out of step with the commands.",
+    hint: "Power-cycle the meter (unplug it and plug it back in), then open the session again.",
+  };
+
+  it("shows the power-cycle error, lists nothing and disables requests", async () => {
+    const api = new FakeApi();
+    api.detect = async () => {
+      api.calls.push("detect");
+      throw OUT_OF_SYNC;
+    };
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    expect(panel.error).toEqual(OUT_OF_SYNC);
+    expect(panel.requestsDisabled).toBe(true);
+    expect(api.calls.filter((c) => c.startsWith("list"))).toEqual([]);
+    const calls = api.calls.length;
+    await panel.ask(PD_5V);
+    expect(api.calls.slice(calls)).toEqual([]);
+  });
+});
+
+describe("AC-DGSQ6R.8: the entry checks and the list disagree", () => {
+  // Rule: `detectionChecks(d)` gives the BC1.2 and Apple rows of the Detection card.
+  // When a check (`entry bc` / `entry apple`) and the automatic list's matching line
+  // (`bc1.2` / an `Apple …` mode line) say supported vs not supported, the row names
+  // both sources: "entry bc: not supported · list: supported". Otherwise the row is the
+  // check's plain result ("Supported", "Not supported", "Unknown").
+  function d(
+    bc12: Detection["bc12"],
+    apple: Detection["apple"],
+    entries: [string, Detection["bc12"]][],
+  ): Detection {
+    return {
+      bc12,
+      apple,
+      entries: entries.map(([name, support]) => ({ name, support, vbus_mv: null, ibus_ma: null })),
+      complete: false,
+    };
+  }
+
+  function row(det: Detection, label: string): string | undefined {
+    return detectionChecks(det).find((r) => r.label === label)?.text;
+  }
+
+  it("names both sources for BC1.2 (device trace 2026-10-23)", () => {
+    const det = d("not-supported", "not-supported", [
+      ["bc1.2", "supported"],
+      ["ufcs", "not-supported"],
+    ]);
+    expect(detectionChecks(det).map((r) => r.label)).toEqual(["BC1.2", "Apple"]);
+    expect(row(det, "BC1.2")).toBe("entry bc: not supported · list: supported");
+    expect(row(det, "Apple")).toBe("Not supported");
+  });
+
+  it("names both sources for Apple against an Apple mode line", () => {
+    const det = d("supported", "not-supported", [
+      ["bc1.2", "supported"],
+      ["Apple 2.4A", "supported"],
+    ]);
+    expect(row(det, "Apple")).toBe("entry apple: not supported · list: supported (Apple 2.4A)");
+    expect(row(det, "BC1.2")).toBe("Supported");
+  });
+
+  it("names every clashing Apple mode line, like the library's disagreements", () => {
+    const det = d("unknown", "not-supported", [
+      ["Apple 2.4A", "supported"],
+      ["Apple 1A", "unknown"],
+      ["Apple 2.1A", "supported"],
+    ]);
+    expect(row(det, "Apple")).toBe(
+      "entry apple: not supported · list: supported (Apple 2.4A, Apple 2.1A)",
+    );
+  });
+
+  it("names both sources the other way round", () => {
+    const det = d("supported", "unknown", [["bc1.2", "not-supported"]]);
+    expect(row(det, "BC1.2")).toBe("entry bc: supported · list: not supported");
+  });
+
+  it("keeps the plain result when they agree or the list has no matching line", () => {
+    expect(row(d("not-supported", "unknown", [["bc1.2", "not-supported"]]), "BC1.2")).toBe(
+      "Not supported",
+    );
+    expect(row(d("not-supported", "unknown", [["ufcs", "not-supported"]]), "BC1.2")).toBe(
+      "Not supported",
+    );
+    expect(row(d("unknown", "unknown", []), "Apple")).toBe("Unknown");
+  });
+
+  it("never shows an unqualified not supported next to a supported list line", () => {
+    const det = d("not-supported", "not-supported", [
+      ["bc1.2", "supported"],
+      ["Apple 2.4A", "supported"],
+    ]);
+    for (const r of detectionChecks(det)) {
+      expect(r.text).not.toBe("Not supported");
+      expect(r.text).toMatch(/^entry (bc|apple): not supported · list: supported( \(.+\))?$/);
+    }
   });
 });

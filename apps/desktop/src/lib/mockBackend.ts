@@ -401,6 +401,10 @@ export const MOCK_MODES = [
   "replug",
   "trigger-sag",
   "trigger-all",
+  "trigger-out-of-sync",
+  "trigger-req-error",
+  "trigger-detect-disagree",
+  "trigger-list-lag",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -535,6 +539,15 @@ interface MockTrigger {
 
 /** The queue rate cap while a trigger session is open, SPS. [inferred] */
 const TRIGGER_MAX_SPS = 50;
+
+/** The backend's `OutOfSync` refusal: the meter's replies lag behind the commands. */
+function outOfSyncError(): UiError {
+  return {
+    kind: "out_of_sync",
+    message: "The meter's replies are out of step with the commands, so no more requests are sent.",
+    hint: "Power-cycle the meter (unplug it and plug it back in), then open the session again.",
+  };
+}
 
 /** `trigger-all`: the decoded limits of the charger that speaks every protocol. [inferred] */
 const MOCK_SCP_LIMITS: TriggerLimits = {
@@ -1203,13 +1216,20 @@ export class MockBackend {
     return this.#trigger;
   }
 
-  /** Like the 140 W charger: Apple fails, the automatic list stalls and ends with `reset`. */
+  /** Like the 140 W charger: Apple fails, the automatic list stalls and ends with `reset`,
+   * then the `pdm parm` check that the meter is still in step. */
   async triggerDetect(): Promise<Detection> {
     const t = this.#openTrigger();
-    this.#triggerLog.push("entry bc", "entry apple", "entry list", "reset");
+    this.#triggerLog.push("entry bc", "entry apple", "entry list", "reset", "pdm parm");
     t.entered = null;
+    if (this.#mode === "trigger-list-lag") {
+      // The meter answers the check one command late, like the backend's `OutOfSync`.
+      throw outOfSyncError();
+    }
     return {
-      bc12: "unknown",
+      // `trigger-detect-disagree`: `entry bc` → `fail` against the list's
+      // `bc1.2:true` (device trace 2026-10-23).
+      bc12: this.#mode === "trigger-detect-disagree" ? "not-supported" : "unknown",
       apple: "not-supported",
       entries: [
         { name: "bc1.2", support: "supported", vbus_mv: 5203, ibus_ma: 0 },
@@ -1343,6 +1363,20 @@ export class MockBackend {
     }
     const command = this.#commandText(request);
     this.#triggerLog.push(command);
+    if (this.#mode === "trigger-out-of-sync") {
+      // The meter answers with another command's reply (`type=...`), like the backend's
+      // `OutOfSync` refusal.
+      throw outOfSyncError();
+    }
+    if (this.#mode === "trigger-req-error" && mv !== null && mv > 5000) {
+      // The charger answers every request above 5 V with `req error 252`, like the
+      // backend's failed request; the session stays usable.
+      throw {
+        kind: "protocol",
+        message: "The charger refused the request (req error 252).",
+        hint: null,
+      } satisfies UiError;
+    }
     this.#openTrigger().entered = request.protocol === "pd" ? "pd" : "legacy";
     if (this.#session && mv !== null) {
       // The demo VBUS follows the request; `trigger-sag` keeps it 12 % below.

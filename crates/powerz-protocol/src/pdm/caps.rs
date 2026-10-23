@@ -183,9 +183,17 @@ impl Capabilities {
     }
 }
 
-/// The block tag `buf` starts with, if it starts with a block tag followed by
-/// a byte that is not a lowercase ASCII letter (`ufcs:null` is text).
-/// `None` also when too few bytes have arrived to tell.
+/// The block tag `buf` starts with, unless what follows the tag reads as an
+/// `entry list` text line: a result word (`ufcs:null`, `scp:true`), or a
+/// bare `vfcp:` line (see below). `None` also while the bytes so far could
+/// still become a result word.
+///
+/// A bare `vfcp:` line (the tag, then `\n`) is text only when what comes
+/// after the `\n` is nothing yet or printable text up to a line end (the
+/// next list line); a non-printable byte there makes it a block whose first
+/// data byte is 0x0A, and printable bytes with no line end yet keep the tag
+/// so the reader waits. `scp:` / `tfcp:` followed by `\n` are always blocks
+/// (an SCP max power whose low byte is 0x0A starts that way).
 pub fn block_tag(buf: &[u8]) -> Option<BlockTag> {
     let (tag, text) = TAGS.iter().find(|(_, text)| buf.starts_with(text))?;
     let rest = buf.get(text.len()..).filter(|r| !r.is_empty())?;
@@ -196,7 +204,31 @@ pub fn block_tag(buf: &[u8]) -> Option<BlockTag> {
     let maybe_word = TEXT_WORDS
         .iter()
         .any(|w| rest.starts_with(w) || w.starts_with(rest));
-    (!maybe_word).then_some(*tag)
+    // A cut-off `entry list` ended on a bare `vfcp:` line [device]
+    // 2026-10-23. Only VFCP: no field is read from its byte after the tag
+    // [static], while SCP's is the low byte of its max power.
+    let bare = *tag == BlockTag::Vfcp
+        && rest.first() == Some(&b'\n')
+        && text_follows(rest.get(1..).unwrap_or_default());
+    (!maybe_word && !bare).then_some(*tag)
+}
+
+/// Whether the bytes after a bare `vfcp:` line read as text: nothing yet
+/// (the cut-off list went quiet), or printable bytes up to a `\n`. A
+/// non-printable byte first, or printable bytes without a line end yet,
+/// is not (yet) text.
+fn text_follows(after: &[u8]) -> bool {
+    if after.is_empty() {
+        return true;
+    }
+    for &b in after {
+        match b {
+            b'\n' => return true,
+            0x20..=0x7e => {}
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Results `entry list` prints after a tag-like protocol name. \[device\]
@@ -674,6 +706,51 @@ mod tests {
         }
         assert_eq!(block_tag(&b), Some(BlockTag::Scp));
         assert!(matches!(parsed(&b).0, CapBlock::Scp(_)));
+    }
+
+    #[test]
+    fn scp_block_whose_first_data_byte_is_a_line_end_is_a_block() {
+        // 26.6 W max power = 266 = 0x010A: the byte after the tag is 0x0A.
+        let mut b = b"scp:".to_vec();
+        for v in [266u16, 3400, 20000, 100, 4000, 10, 50, 11000, 5000] {
+            b.extend(v.to_le_bytes());
+        }
+        assert_eq!(&b[4..6], [0x0A, 0x01]);
+        assert_eq!(block_tag(&b), Some(BlockTag::Scp));
+        assert_eq!(block_tag(b"scp:\n"), Some(BlockTag::Scp));
+        match parsed(&b) {
+            (CapBlock::Scp(s), 22) => assert_eq!(s.max_power_mw, 26_600),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn tfcp_block_whose_first_data_byte_is_a_line_end_is_a_block() {
+        let mut b = b"tfcp:".to_vec();
+        b.push(0x0A);
+        b.extend(600u32.to_le_bytes());
+        for v in [5000u16, 100, 20000, 3000] {
+            b.extend(v.to_le_bytes());
+        }
+        assert_eq!(block_tag(&b), Some(BlockTag::Tfcp));
+        assert_eq!(block_tag(b"tfcp:\n"), Some(BlockTag::Tfcp));
+        assert!(matches!(parsed(&b).0, CapBlock::Tfcp(_)));
+    }
+
+    #[test]
+    fn a_bare_vfcp_line_is_text_only_when_text_or_nothing_follows() {
+        // The cut-off list's last line, nothing after it yet [device].
+        assert_eq!(block_tag(b"vfcp:\n"), None);
+        // Another list line after it.
+        assert_eq!(block_tag(b"vfcp:\nready:5191mV,0mA\n"), None);
+        assert_eq!(block_tag(b"vfcp:\n\n"), None);
+        // A printable line not yet ended: undecided, the tag is kept so the
+        // reader waits for more bytes.
+        assert_eq!(block_tag(b"vfcp:\nready:51"), Some(BlockTag::Vfcp));
+        // A block whose first data byte is 0x0A: binary bytes follow.
+        let mut b = vfcp_block();
+        b[5] = 0x0A;
+        assert_eq!(block_tag(&b), Some(BlockTag::Vfcp));
     }
 
     #[test]

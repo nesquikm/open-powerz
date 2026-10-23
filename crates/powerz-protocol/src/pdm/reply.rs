@@ -411,6 +411,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_bare_vfcp_line_then_a_list_line_are_two_lines() {
+        let mut r = ReplyReader::new();
+        r.push(b"vfcp:\nready:5191mV,0mA\n");
+        assert_eq!(drain(&mut r), vec![line("vfcp:"), line("ready:5191mV,0mA")]);
+        // Split before the next line ends: the reader waits, then reads both.
+        let mut r = ReplyReader::new();
+        r.push(b"vfcp:\nready:51");
+        assert_eq!(drain(&mut r), vec![]);
+        r.push(b"91mV,0mA\n");
+        assert_eq!(drain(&mut r), vec![line("vfcp:"), line("ready:5191mV,0mA")]);
+        // The cut-off list's last line, nothing after it.
+        let mut r = ReplyReader::new();
+        r.push(b"vfcp:\n");
+        assert_eq!(drain(&mut r), vec![line("vfcp:")]);
+    }
+
+    #[test]
+    fn scp_and_vfcp_blocks_starting_with_a_line_end_byte_stay_blocks() {
+        let mut scp = b"scp:".to_vec();
+        for v in [266u16, 3400, 20000, 100, 4000, 10, 50, 11000, 5000] {
+            scp.extend(v.to_le_bytes());
+        }
+        let mut vfcp = vfcp_block();
+        vfcp[5] = 0x0A;
+        let mut bytes = scp.clone();
+        bytes.push(b'\n');
+        bytes.extend(&vfcp);
+        bytes.extend(b"\nready\n");
+        let mut r = ReplyReader::new();
+        r.push(&bytes);
+        let items = drain(&mut r);
+        assert!(
+            matches!(items.first(), Some(Ok(ReplyItem::Block(CapBlock::Scp(s)))) if s.max_power_mw == 26_600),
+            "{items:?}"
+        );
+        assert!(
+            matches!(items.get(1), Some(Ok(ReplyItem::Block(CapBlock::Vfcp(_))))),
+            "{items:?}"
+        );
+        assert_eq!(items.get(2), Some(&line("ready")));
+        assert_eq!(items.len(), 3, "{items:?}");
+    }
+
     // ---- AC-PR41FT.3: malformed blocks become typed errors, reader resyncs ----
 
     #[test]

@@ -48,3 +48,4 @@ Build order: PR41FT, then DGSQ6P, DGSQ6R, DGSQ6Q, DGSQ6S, DGSQ6T. 2BF5G6 is impl
 **M7 follow-ups:**
 
 - Cable info panel: one-click e-marker summary (vendor, current, voltage, speed, active/passive) built on the SOP' Discover Identity preset, with a passive fallback that reads the identity from the bulk PD capture (the charger's own SOP' exchange), since the cable answers only the VCONN source (DGSQ6T Notes).
+- Console: clear the command field after a line is sent (found in the 2026-10-23 click-through).

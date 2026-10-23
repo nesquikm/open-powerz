@@ -30,10 +30,12 @@ The library, the command line tool and the desktop app report which charging pro
 - AC-DGSQ6R.4: The command line tool has a detect command with text and JSON output.
 - AC-DGSQ6R.5: Detection commands are classified as 5 V or less and never trigger a confirmation.
 - AC-DGSQ6R.6: On the real meter, detection runs on each of the user's chargers with nothing on the output, and the results are recorded in the Notes.
+- AC-DGSQ6R.7: When the automatic list ends incomplete, the session checks that the meter still answers in step, with a read-only command that must get its own reply, before anything else is sent. If it does not, detection says the meter needs a power cycle and the session refuses further commands.
+- AC-DGSQ6R.8: When the BC1.2 or Apple check and the automatic list disagree, the result names which check said what, never an unqualified "not supported" next to "supported".
 
 ## Technical Design
 
-A detect module on the PDM session handles the per-command reply forms and the stall timer. The hint table is a pure lookup on the measured D+ and D- voltages, with ranges taken from the vendor manual. A list is also cut off with `reset` after 64 entries, and the CLI warns that the meter's own probing may raise VBUS.
+A detect module on the PDM session handles the per-command reply forms and the stall timer. The hint table is a pure lookup on the measured D+ and D- voltages, with ranges taken from the vendor manual. A list is also cut off with `reset` after 64 entries, and the CLI warns that the meter's own probing may raise VBUS. After a cut list a read-only `pdm parm` must get its own reply, and any line belonging to another command latches the session out of sync, refusing later commands.
 
 ## Testing
 

@@ -43,6 +43,7 @@ export type ErrorKind =
   | "protocol"
   | "disconnected"
   | "usage"
+  | "out_of_sync"
   | "internal";
 
 /** A plain-language error. */
@@ -59,6 +60,7 @@ const ERROR_KINDS: readonly ErrorKind[] = [
   "protocol",
   "disconnected",
   "usage",
+  "out_of_sync",
   "internal",
 ];
 

@@ -4,6 +4,7 @@
     LEGACY_FIXED_VOLTS,
     QC3_RANGE,
     clampToLimits,
+    detectionChecks,
     isFixedVoltProtocol,
     isLimitsProtocol,
     limitsRequest,
@@ -110,9 +111,11 @@
     limitsMa = {};
   });
 
-  /** Request controls work only in an open session and not while a
-   *  confirmation is waiting. */
-  const requestsOff = $derived(!panel.sessionOpen || panel.pending !== null);
+  /** Request controls work only in an open session, not while a confirmation is
+   *  waiting, and not once the meter fell out of step (until the session is reopened). */
+  const requestsOff = $derived(
+    !panel.sessionOpen || panel.pending !== null || panel.requestsDisabled,
+  );
 
   /** `SCP` or `UFCS #2`: the name of a limits block. */
   function limitsName(title: string, l: TriggerLimits): string {
@@ -162,7 +165,7 @@
     <output for={p.id}>{p.text}</output>
     {#if p.request}
       {@const r = p.request}
-      <button type="button" onclick={r.onclick}>{r.label}</button>
+      <button type="button" disabled={panel.requestsDisabled} onclick={r.onclick}>{r.label}</button>
     {/if}
   </div>
 {/snippet}
@@ -192,17 +195,19 @@
   </p>
 
   {#if panel.error}
-    <p class="error" role="alert">{panel.error.message}</p>
+    <p class="error" role="alert">
+      {panel.error.hint ? `${panel.error.message} ${panel.error.hint}` : panel.error.message}
+    </p>
   {/if}
 
   <section class="card" aria-labelledby="trigger-detection-title">
     <h2 id="trigger-detection-title">Detection</h2>
     {#if panel.detection}
       <dl class="facts">
-        <dt>BC1.2</dt>
-        <dd>{SUPPORT_TEXT[panel.detection.bc12] ?? panel.detection.bc12}</dd>
-        <dt>Apple</dt>
-        <dd>{SUPPORT_TEXT[panel.detection.apple] ?? panel.detection.apple}</dd>
+        {#each detectionChecks(panel.detection) as check (check.label)}
+          <dt>{check.label}</dt>
+          <dd>{check.text}</dd>
+        {/each}
       </dl>
       {#if panel.detection.entries.length > 0}
         <ul class="entries">
@@ -237,6 +242,7 @@
               {#each s.section.offers.filter((o) => o.kind === "fixed") as o (o.position)}
                 <button
                   type="button"
+                  disabled={panel.requestsDisabled}
                   onclick={() =>
                     void panel.ask({
                       protocol: "pd",
@@ -396,6 +402,11 @@
           <dd>{panel.reply.reply}</dd>
         {/if}
       </dl>
+    {:else if panel.requestFailure}
+      <p class="error">
+        Request failed: {panel.requestFailure.message}{#if panel.requestFailure.hint}
+          {panel.requestFailure.hint}{/if}
+      </p>
     {:else}
       <p class="muted">No request yet.</p>
     {/if}

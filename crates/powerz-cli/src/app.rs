@@ -144,10 +144,10 @@ fn run_pdm(cli: &Cli) -> Result<(), CliError> {
     let charger = sim_charger()?;
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-        let sim = with_sim_cable(SimPdm::new(charger, clock.clone()))?;
+        let sim = with_sim_knobs(SimPdm::new(charger, clock.clone()))?;
         pdm_on(cli, sim.open_port(), clock, hint)
     } else {
-        let sim = with_sim_cable(SimPdm::new(charger, SimClock::new(SystemClock.now_ms())))?;
+        let sim = with_sim_knobs(SimPdm::new(charger, SimClock::new(SystemClock.now_ms())))?;
         pdm_on(cli, sim.open_port(), SystemClock, hint)
     }
 }
@@ -249,14 +249,43 @@ fn sim_charger() -> Result<SimCharger, CliError> {
     }
 }
 
-/// Honour `POWERZ_SIM_CABLE=<name>` (test-only): `epr-240w` puts the
-/// session-2 e-marked 240 W cable on the simulated meter; unset, no cable.
-fn with_sim_cable(sim: SimPdm) -> Result<SimPdm, CliError> {
-    match std::env::var("POWERZ_SIM_CABLE").as_deref() {
+/// Honour the test-only simulated-meter knobs:
+/// - `POWERZ_SIM_CABLE=epr-240w` puts the session-2 e-marked 240 W cable
+///   on the simulated meter; unset, no cable.
+/// - `POWERZ_SIM_ENTRY_BC=fail`: `entry bc` answers `fail`.
+/// - `POWERZ_SIM_PDM_LAG=after-list`: one reply late after the `reset`
+///   that ends a stalled list.
+fn with_sim_knobs(sim: SimPdm) -> Result<SimPdm, CliError> {
+    let sim = sim_knob(
+        sim,
+        "POWERZ_SIM_ENTRY_BC",
+        "fail",
+        SimPdm::with_entry_bc_fail,
+    )?;
+    let sim = sim_knob(
+        sim,
+        "POWERZ_SIM_PDM_LAG",
+        "after-list",
+        SimPdm::with_lag_after_list,
+    )?;
+    sim_knob(sim, "POWERZ_SIM_CABLE", "epr-240w", |s| {
+        s.with_cable(SimCable::Epr240W)
+    })
+}
+
+/// A one-value test knob: unset leaves `sim` as is, `var=value` applies
+/// `apply`, anything else is a usage error.
+fn sim_knob(
+    sim: SimPdm,
+    var: &str,
+    value: &str,
+    apply: impl FnOnce(SimPdm) -> SimPdm,
+) -> Result<SimPdm, CliError> {
+    match std::env::var(var).as_deref() {
         Err(_) => Ok(sim),
-        Ok("epr-240w") => Ok(sim.with_cable(SimCable::Epr240W)),
+        Ok(v) if v == value => Ok(apply(sim)),
         Ok(other) => Err(CliError::Usage(format!(
-            "invalid POWERZ_SIM_CABLE {other:?}: expected epr-240w"
+            "invalid {var} {other:?}: expected {value}"
         ))),
     }
 }

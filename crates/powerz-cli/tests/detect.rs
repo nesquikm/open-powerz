@@ -11,17 +11,27 @@
 //! passes instantly), `POWERZ_SIM_CHARGER`; `--trace` logs each PDM command
 //! as a stderr line `> <command>`. The demo scenario `load-5v-1a` puts
 //! 0.6 V on D+ and D-.
+//!
+//! Test-only knobs for AC-DGSQ6R.7 / .8 (read by the CLI's sim transport,
+//! applied by `SimPdm::with_lag_after_list` / `SimPdm::with_entry_bc_fail`):
+//! - `POWERZ_SIM_PDM_LAG=after-list`: once `reset` has ended a stalled list,
+//!   the simulated meter answers every command with the previous command's
+//!   reply (one late), as the real meter did on 2026-10-23.
+//! - `POWERZ_SIM_ENTRY_BC=fail`: the simulated meter answers `entry bc` with
+//!   `fail` (device trace 2026-10-23) instead of session 2's `ok`.
 
 use std::time::Duration;
 
 use assert_cmd::Command;
 use serde_json::Value;
 
-const ENV_KNOBS: [&str; 4] = [
+const ENV_KNOBS: [&str; 6] = [
     "POWERZ_SIM_CLOCK",
     "POWERZ_SIM_FAULT",
     "POWERZ_SIM_CTRL_C_AFTER",
     "POWERZ_SIM_CHARGER",
+    "POWERZ_SIM_PDM_LAG",
+    "POWERZ_SIM_ENTRY_BC",
 ];
 
 /// `powerz --transport sim --scenario load-5v-1a --trace detect <args>`
@@ -77,7 +87,10 @@ fn index_of(sent: &[String], cmd: &str) -> usize {
 
 /// Only detection and session control reach the meter.
 fn only_safe_commands(sent: &[String]) {
-    const SAFE: [&str; 7] = [
+    // `pdm parm` is the read-only sync check after an incomplete list
+    // (AC-DGSQ6R.7).
+    const SAFE: [&str; 8] = [
+        "pdm parm",
         "pdm open",
         "pdm close",
         "reset",
@@ -234,5 +247,118 @@ mod detect {
         assert_eq!(s.first().map(String::as_str), Some("pdm open"), "{s:?}");
         assert_eq!(s.last().map(String::as_str), Some("pdm close"), "{s:?}");
         only_safe_commands(&s);
+    }
+
+    // ---- AC-DGSQ6R.7: the sync check after an incomplete list ----
+
+    fn says_power_cycle(text: &str) -> bool {
+        let t = text.to_lowercase();
+        t.contains("power cycle") || t.contains("power-cycle")
+    }
+
+    #[test]
+    fn an_incomplete_list_is_followed_by_reset_then_pdm_parm() {
+        // AC-DGSQ6R.7: in step → success, the partial list as before.
+        let a = detect(&["--list", "--stall-secs", "2"]).assert().success();
+        assert!(stdout_of(&a).contains("incomplete"), "{}", stdout_of(&a));
+        let s = sent(&a);
+        let reset = s
+            .iter()
+            .rposition(|c| c == "reset")
+            .unwrap_or_else(|| panic!("no reset; sent {s:?}"));
+        assert_eq!(
+            s.get(reset + 1).map(String::as_str),
+            Some("pdm parm"),
+            "the check comes right after reset: {s:?}"
+        );
+        assert_eq!(s.last().map(String::as_str), Some("pdm close"), "{s:?}");
+        only_safe_commands(&s);
+    }
+
+    #[test]
+    fn a_lagging_meter_after_the_list_fails_with_a_power_cycle_message() {
+        // AC-DGSQ6R.7: the meter answers one command late after the cut list.
+        let a = detect(&["--list", "--stall-secs", "2"])
+            .env("POWERZ_SIM_PDM_LAG", "after-list")
+            .assert()
+            .failure();
+        let err = stderr_of(&a);
+        assert!(says_power_cycle(&err), "{err}");
+        let s = sent(&a);
+        let parm = index_of(&s, "pdm parm");
+        assert_eq!(s.get(parm - 1).map(String::as_str), Some("reset"), "{s:?}");
+        // Nothing but (at most) the closing `pdm close` after the failed check.
+        let rest: Vec<&str> = s[parm + 1..].iter().map(String::as_str).collect();
+        assert!(
+            rest.iter().all(|c| *c == "pdm close"),
+            "sent after the failed check: {rest:?}"
+        );
+    }
+
+    #[test]
+    fn a_lagging_meter_fails_in_json_mode_too() {
+        // AC-DGSQ6R.7: no JSON result that looks like a normal partial list.
+        let a = detect(&["--list", "--stall-secs", "2", "--json"])
+            .env("POWERZ_SIM_PDM_LAG", "after-list")
+            .assert()
+            .failure();
+        assert!(says_power_cycle(&stderr_of(&a)), "{}", stderr_of(&a));
+    }
+
+    // ---- AC-DGSQ6R.8: the entry checks and the list disagree ----
+    //
+    // Rule: every output line that says `not-supported` about BC1.2 names its
+    // source (`entry bc`), and one line names both checks with what each said:
+    // `entry bc: not-supported` and `list: supported`.
+
+    #[test]
+    fn text_names_which_check_said_what_when_they_disagree() {
+        // AC-DGSQ6R.8, device trace 2026-10-23: `entry bc` → `fail`,
+        // list → `bc1.2:true`.
+        let a = detect(&["--list", "--stall-secs", "2"])
+            .env("POWERZ_SIM_ENTRY_BC", "fail")
+            .assert()
+            .success();
+        let out = stdout_of(&a);
+        let both = line_with(&out, &["entry bc: not-supported", "list: supported"])
+            .unwrap_or_else(|| panic!("no line naming both checks: {out}"));
+        assert!(both.to_lowercase().contains("bc1.2"), "{both}");
+        for line in out.lines() {
+            if line.to_lowercase().contains("bc1.2") && line.contains("not-supported") {
+                assert!(
+                    line.contains("entry bc"),
+                    "an unqualified not-supported for BC1.2: {line:?}\n{out}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn json_lists_the_disagreement_with_both_sources() {
+        // AC-DGSQ6R.8
+        let a = detect(&["--list", "--stall-secs", "2", "--json"])
+            .env("POWERZ_SIM_ENTRY_BC", "fail")
+            .assert()
+            .success();
+        let v: Value = serde_json::from_str(&stdout_of(&a)).expect("one JSON object");
+        assert_eq!(v["bc12"], "not-supported", "{v}");
+        let d = v["disagreements"].as_array().expect("disagreements array");
+        assert_eq!(d.len(), 1, "{v}");
+        assert_eq!(d[0]["check"], "entry bc", "{v}");
+        assert_eq!(d[0]["check_says"], "not-supported", "{v}");
+        assert_eq!(d[0]["entry"], "bc1.2", "{v}");
+        assert_eq!(d[0]["list_says"], "supported", "{v}");
+    }
+
+    #[test]
+    fn json_without_a_disagreement_has_an_empty_list_of_them() {
+        // AC-DGSQ6R.8: `entry bc` → `fail` and no list → nothing to compare.
+        let a = detect(&["--json"])
+            .env("POWERZ_SIM_ENTRY_BC", "fail")
+            .assert()
+            .success();
+        let v: Value = serde_json::from_str(&stdout_of(&a)).expect("one JSON object");
+        assert_eq!(v["bc12"], "not-supported", "{v}");
+        assert_eq!(v["disagreements"], serde_json::json!([]), "{v}");
     }
 }

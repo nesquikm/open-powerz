@@ -6,7 +6,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use powerz_protocol::pdm::PdmSession;
-use powerz_protocol::pdm::detect::{self, Hint, ListEntry, ListOptions, ListResult, Support};
+use powerz_protocol::pdm::detect::{
+    self, Check, Hint, ListEntry, ListOptions, ListResult, Support,
+};
 use powerz_protocol::session::Clock;
 use serde_json::{Value, json};
 
@@ -39,11 +41,27 @@ pub fn detect<P: Read + Write, C: Clock>(
 ) -> Result<(), CliError> {
     let result = run(&mut session, opts, stop, out);
     let (bc12, apple, list) = close_after(session, result)?;
+    let disagreements = list
+        .as_ref()
+        .map(|l| detect::disagreements(bc12, apple, l))
+        .unwrap_or_default();
     if opts.json {
+        let d: Vec<Value> = disagreements
+            .iter()
+            .map(|d| {
+                json!({
+                    "check": d.check.name(),
+                    "check_says": d.check_says.name(),
+                    "entry": d.entry,
+                    "list_says": d.list_says.name(),
+                })
+            })
+            .collect();
         let v = json!({
             "bc12": bc12.name(),
             "apple": apple.name(),
             "list": list.as_ref().map(list_json),
+            "disagreements": d,
             "hint": hint_json(hint),
         });
         return write_json(out, &v);
@@ -54,6 +72,9 @@ pub fn detect<P: Read + Write, C: Clock>(
         } else {
             writeln!(out, "list incomplete (stalled or cut off; reset sent)")?;
         }
+    }
+    for d in &disagreements {
+        writeln!(out, "disagree {}", d.label())?;
     }
     writeln!(out, "{}", hint.label())?;
     Ok(())
@@ -91,11 +112,11 @@ fn run<P: Read + Write, C: Clock>(
     }
     let bc12 = detect::bc12(session)?;
     if !opts.json {
-        writeln!(out, "BC1.2    {}", bc12.name())?;
+        writeln!(out, "BC1.2    {} ({})", bc12.name(), Check::Bc12.name())?;
     }
     let apple = detect::apple(session)?;
     if !opts.json {
-        writeln!(out, "Apple    {}", apple.name())?;
+        writeln!(out, "Apple    {} ({})", apple.name(), Check::Apple.name())?;
     }
     if !opts.list {
         return Ok((bc12, apple, None));

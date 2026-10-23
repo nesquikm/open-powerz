@@ -305,6 +305,13 @@ pub enum Error {
         /// Requested position.
         position: u8,
     },
+    /// The meter answered the request with `req error <n>`: the request
+    /// failed. The session stays in step (it is the request's own reply).
+    #[error("the request failed: the meter answered {reply:?}")]
+    RequestFailed {
+        /// The `req error` line.
+        reply: String,
+    },
     /// `pdm parm` did not have the expected form.
     #[error("unexpected pdm parm reply {got:?}")]
     BadSettings {
@@ -449,7 +456,15 @@ pub fn request<P: Read + Write, C: Clock>(
         // refused by `send` before anything is written.
         _ => session.send(&command)?,
     }
-    let requested = reading(&session.wait_for(&["req:"], REPLY_TIMEOUT)?, "req:")?;
+    // `req error <n>` is this request's own reply: it fails the request at
+    // once instead of being waited out. [device] `req error 252`
+    let line = session.wait_for(&["req:", "req error"], REPLY_TIMEOUT)?;
+    if line.starts_with("req error") {
+        return Err(Error::RequestFailed {
+            reply: line.trim().to_string(),
+        });
+    }
+    let requested = reading(&line, "req:")?;
     let delivered = reading(&session.wait_for(&["ready:"], ENTRY_TIMEOUT)?, "ready:")?;
     Ok(RequestOutcome {
         command,
@@ -501,10 +516,25 @@ pub struct ReturnTo5VError {
 
 /// Back to 5 V: `pd req=1` (a 5 V request needs no confirmation); if that
 /// fails, `pd hrst`, which also ends at 5 V.
+///
+/// A session out of sync trusts no reply, so `pd hrst` is written blind
+/// through [`PdmSession::send_safety`] and the result is an error with
+/// [`super::Error::OutOfSync`] as `request` (and as `hard_reset` when the
+/// write itself worked): VBUS is not confirmed back at 5 V.
 pub fn return_to_5v<P: Read + Write, C: Clock>(
     session: &mut PdmSession<P, C>,
     offers: &[Offer],
 ) -> Result<BackTo5V, ReturnTo5VError> {
+    if let Err(out_of_sync) = session.check_in_step() {
+        let hard_reset = session
+            .send_safety(&Command::PdHardReset)
+            .err()
+            .unwrap_or_else(|| out_of_sync.clone());
+        return Err(ReturnTo5VError {
+            request: Error::Pdm(out_of_sync),
+            hard_reset: Error::Pdm(hard_reset),
+        });
+    }
     let to_5v = Request::Fixed {
         position: 1,
         current_ma: None,

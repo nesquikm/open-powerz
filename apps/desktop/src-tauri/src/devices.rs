@@ -901,7 +901,7 @@ where
     /// queue is kept at 50 SPS or less while it is open. [inferred]
     pub fn install_trigger(
         &mut self,
-        worker: crate::trigger::TriggerWorker,
+        mut worker: crate::trigger::TriggerWorker,
     ) -> Result<(), UiError> {
         // A session that ended on its own (unplug) may have left this set.
         if lock(&self.trigger).is_none() {
@@ -935,6 +935,8 @@ where
         {
             self.rate_before_trigger = Some(before);
         }
+        // Polling pauses while the automatic list runs (AC-DGSQ6S.11).
+        worker.pause_during_list(control);
         *lock(&self.trigger) = Some(worker);
         Ok(())
     }

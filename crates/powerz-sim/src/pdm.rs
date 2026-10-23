@@ -282,9 +282,30 @@ struct State {
     pending: Vec<u8>,
     /// The e-marked cable on the input, if any.
     cable: Option<SimCable>,
+    /// `entry bc` answers `fail` instead of `ok`. \[device\] 2026-10-23
+    entry_bc_fail: bool,
+    /// Once `reset` ends a stalled list, answer one command late.
+    lag_after_list: bool,
+    /// Lagging: the reply held back for the next command. \[device\] 2026-10-23
+    held: Option<Vec<u8>>,
 }
 
 impl State {
+    /// [`State::handle`], one reply late once lagging: each command gets
+    /// the reply held from the command before it.
+    fn respond(&mut self, cmd: &[u8]) -> Vec<u8> {
+        let was_listing = self.listing;
+        let reply = self.handle(cmd);
+        if let Some(held) = self.held.as_mut() {
+            return std::mem::replace(held, reply);
+        }
+        if self.lag_after_list && was_listing && cmd.starts_with(b"reset") {
+            self.held = Some(reply);
+            return Vec::new();
+        }
+        reply
+    }
+
     /// Handle one written command; return the reply bytes.
     fn handle(&mut self, cmd: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(cmd);
@@ -410,6 +431,7 @@ impl State {
             }
             "vfcp" => b"ok\nready\n".to_vec(),
             "apple" => b"fail\n".to_vec(),
+            "bc" if self.entry_bc_fail => b"fail\n".to_vec(),
             "bc" => b"ok\n".to_vec(),
             // Session 2 on the 140 W charger, then silence. [device]
             "list" | "list+" => {
@@ -588,8 +610,25 @@ impl SimPdm {
                 writes: Vec::new(),
                 pending: Vec::new(),
                 cable: None,
+                entry_bc_fail: false,
+                lag_after_list: false,
+                held: None,
             })),
         }
+    }
+
+    /// `entry bc` answers `fail` (device trace 2026-10-23) instead of
+    /// session 2's `ok`.
+    pub fn with_entry_bc_fail(self) -> SimPdm {
+        lock(&self.shared).entry_bc_fail = true;
+        self
+    }
+
+    /// After the `reset` that ends a stalled list, answer every command
+    /// with the previous command's reply (device trace 2026-10-23).
+    pub fn with_lag_after_list(self) -> SimPdm {
+        lock(&self.shared).lag_after_list = true;
+        self
     }
 
     /// The first `pdm open` answers `pdm mode entry` plus `busy`; `reset`
@@ -695,7 +734,7 @@ impl Write for SimPdmPort {
         }
         let now = s.clock.now_ms();
         s.writes.push((now, buf.to_vec()));
-        let reply = s.handle(buf);
+        let reply = s.respond(buf);
         if !reply.is_empty() {
             if s.interleave {
                 let frames = s.binary_frames();

@@ -75,7 +75,9 @@ impl From<pdm::pd::Error> for CliError {
     fn from(e: pdm::pd::Error) -> Self {
         match e {
             pdm::pd::Error::Pdm(p) => p.into(),
-            pdm::pd::Error::BadSettings { .. } => CliError::Device(e.to_string()),
+            pdm::pd::Error::BadSettings { .. } | pdm::pd::Error::RequestFailed { .. } => {
+                CliError::Device(e.to_string())
+            }
             // Request validation: the user asked for something not offered.
             other => CliError::Usage(other.to_string()),
         }

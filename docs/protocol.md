@@ -537,6 +537,10 @@ as a sink and ask a charger for a voltage. [doc] [static] [device]
   chargers, so nothing that cannot take it belongs on the output. [inferred]
 - The `ufcs:`, `scp:`, `vfcp:` and `tfcp:` block layouts come from the vendor
   app only. [static]
+- A cut-short list ended on a bare `vfcp:` line [device]. We read `vfcp:`
+  then `\n` as that text line only when nothing or a printable line follows;
+  `scp:` / `tfcp:` then `\n` stay blocks (SCP's first data byte is its max
+  power's low byte, which can be 0x0A). [inferred]
 - Other protocols: `entry qc|fcp|afc|sfcp|scp|vfcp|tfcp|ufcs` → `ok` then
   `ready` when the charger speaks it, followed by the protocol's capability
   block for SCP, VFCP, TFCP and UFCS. Requests: `qc 5V|9V|12V|20V`,
@@ -603,6 +607,21 @@ How our library sends them safely:
   `pd data` line that cannot be read is refused too. PD role swaps (DR,
   PR, VCONN and FR_Swap) count as above 5 V. [inferred]
 - `pdm close` is always sent before the port is released.
+- Out of sync: a lagging meter was seen answering each command with the
+  previous command's reply [device] (2026-10-23). A line that only another
+  command gets (`pdm mode entry`, `type=`, `req:` / `req error`, a bare `ok`
+  to `pdm open` / `pdm parm`) latches the session: every later command is
+  refused until it is reopened. A late `ver<n>` after `pdm mode entry` is
+  not foreign; an unprompted `req:` is, on purpose (fail-closed). [inferred]
+- The way back to 5 V stays open when latched: only `pd hrst`, `pd req=1`
+  and `reset` may be written, blind (a short settle, no reply read or
+  trusted), then `pdm close`. VBUS is reported as not confirmed. [inferred]
+- After an `entry list` cut short by `reset`, a read-only `pdm parm` must get
+  its own `type=...` reply; anything else latches the session [device]. List
+  lines are checked for foreign replies as they arrive.
+- Known limits: a stale reply that starts with the awaited prefix cannot be
+  told apart, e.g. a late `fail` from `entry bc` answering `entry apple`, or
+  an unprompted `ready:` answering a legacy request. [inferred]
 
 ## PD capture
 

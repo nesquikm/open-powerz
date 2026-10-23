@@ -470,3 +470,162 @@ mod pdm_pd {
         assert_eq!(pd::offers(s.capabilities()), n.offers);
     }
 }
+
+/// FR DGSQ6S (AC .9, .10): error replies and a meter whose replies lag one
+/// command behind. [device] 2026-10-23: after `entry list` was cut short with
+/// `reset`, `pdm open` was answered `ok`, `pdm close` `pdm mode entry` /
+/// `ver1.0`, and `pdm parm` `req error 252` (the late answer to a `pd req=`).
+mod pdm_sync {
+    use super::*;
+    use powerz_protocol::pdm::Command;
+
+    /// The 140 W charger after `entry pd`, with `extra` scripted on top.
+    fn port_with(extra: &[(&str, &[u8])]) -> FakePort {
+        let mut port = FakePort::default()
+            .on("pdm open", OPEN_REPLY)
+            .on("entry pd", &epr_offers_reply(b"ok\ncc1 attach\n"))
+            .on("pdm close", b"ok\n");
+        for (cmd, reply) in extra {
+            port = port.on(cmd, reply);
+        }
+        port
+    }
+
+    fn fixed(position: u8) -> Request {
+        Request::Fixed {
+            position,
+            current_ma: None,
+        }
+    }
+
+    fn is_out_of_sync(e: &PdError) -> bool {
+        matches!(e, PdError::Pdm(Error::OutOfSync { .. }))
+    }
+
+    fn says_power_cycle(text: &str) -> bool {
+        let t = text.to_lowercase();
+        t.contains("power cycle") || t.contains("power-cycle")
+    }
+
+    // ---- AC-DGSQ6S.9: an error reply fails the request with its reason ----
+
+    #[test]
+    fn a_req_error_reply_fails_the_request_with_its_reason_not_a_timeout() {
+        // AC-DGSQ6S.9
+        let port = port_with(&[
+            ("pd req=2", b"req error 252\n"),
+            ("pd req=1", b"req:5000mV,3000mA\nready:5180mV,0mA\n"),
+        ]);
+        let mut s = open(&port);
+        let offers = pd::enter(&mut s).unwrap().offers;
+        let req = fixed(2);
+        let err = pd::request(&mut s, &offers, &req, confirmed(&offers, &req))
+            .expect_err("`req error` is a failed request");
+        assert!(
+            !matches!(err, PdError::Pdm(Error::Timeout { .. })),
+            "the error reply was waited out as a timeout: {err:?}"
+        );
+        assert!(
+            !is_out_of_sync(&err),
+            "`req error` is the request's own reply: {err:?}"
+        );
+        assert!(err.to_string().contains("252"), "the reason is lost: {err}");
+        // The session is still in step: the next request is answered.
+        let back = pd::request(&mut s, &offers, &fixed(1), None).expect("pd req=1");
+        assert_eq!(back.requested.voltage_mv, 5000);
+    }
+
+    // ---- AC-DGSQ6S.10: a reply that belongs to another command ----
+
+    #[test]
+    fn pdm_parm_answered_by_a_late_req_error_is_out_of_sync() {
+        // AC-DGSQ6S.10 [device]: `pdm parm` → `req error 252`.
+        let port = port_with(&[("pdm parm", b"req error 252\n")]);
+        let mut s = open(&port);
+        let err = pd::read_settings(&mut s).expect_err("not the settings");
+        assert!(is_out_of_sync(&err), "{err:?}");
+        assert!(says_power_cycle(&err.to_string()), "{err}");
+    }
+
+    #[test]
+    fn a_request_answered_by_a_late_settings_reply_is_out_of_sync() {
+        // AC-DGSQ6S.10: `pd req=1` → the `type=...` answer of an earlier `pdm parm`.
+        let port = port_with(&[("pd req=1", b"type=0,em=2,sink=0\n")]);
+        let mut s = open(&port);
+        let offers = pd::enter(&mut s).unwrap().offers;
+        let err = pd::request(&mut s, &offers, &fixed(1), None).expect_err("not a req: reply");
+        assert!(is_out_of_sync(&err), "{err:?}");
+    }
+
+    #[test]
+    fn entry_pd_answered_by_a_late_open_reply_is_out_of_sync() {
+        // AC-DGSQ6S.10 [device]: `pdm close` → `pdm mode entry` / `ver1.0`.
+        let port = FakePort::default()
+            .on("pdm open", OPEN_REPLY)
+            .on("entry pd", b"pdm mode entry\nver1.0\n")
+            .on("pdm close", b"ok\n");
+        let mut s = open(&port);
+        let err = pd::enter(&mut s).expect_err("not the offers");
+        assert!(is_out_of_sync(&err), "{err:?}");
+    }
+
+    #[test]
+    fn pdm_open_answered_by_a_late_ok_is_out_of_sync() {
+        // AC-DGSQ6S.10 [device]: `pdm open` → `ok`.
+        let port = FakePort::default()
+            .on("pdm open", b"ok\n")
+            .on("pdm close", b"ok\n");
+        let err = PdmSession::open_with_clock(port.clone(), FakeClock(Rc::new(Cell::new(T0))))
+            .expect_err("not in step");
+        assert!(matches!(err, Error::OutOfSync { .. }), "{err:?}");
+        assert!(says_power_cycle(&err.to_string()), "{err}");
+    }
+
+    #[test]
+    fn after_out_of_sync_the_session_refuses_every_command_and_writes_nothing() {
+        // AC-DGSQ6S.10: requests stay off until the session is reopened.
+        let port = port_with(&[
+            ("pdm parm", b"req error 252\n"),
+            ("pd req=1", b"req:5000mV,3000mA\nready:5180mV,0mA\n"),
+        ]);
+        let mut s = open(&port);
+        let offers = pd::enter(&mut s).unwrap().offers;
+        assert!(is_out_of_sync(&pd::read_settings(&mut s).unwrap_err()));
+        let written = port.writes().len();
+
+        let sent = s.send(&Command::PdmParm);
+        assert!(
+            matches!(sent, Err(Error::OutOfSync { .. })),
+            "a command after out-of-sync: {sent:?}"
+        );
+        let req = pd::request(&mut s, &offers, &fixed(1), None);
+        assert!(
+            matches!(&req, Err(e) if is_out_of_sync(e)),
+            "a request after out-of-sync: {req:?}"
+        );
+        assert_eq!(port.writes().len(), written, "{:?}", port.writes());
+    }
+
+    #[test]
+    fn out_of_sync_the_way_back_to_5v_is_a_blind_hard_reset() {
+        // The latch must not trap VBUS above 5 V: `pd hrst` goes out on the
+        // safety path, and since no reply is trusted the return is an error.
+        let port = port_with(&[
+            ("pd req=2", b"req:9000mV,3000mA\nready:8554mV,0mA\n"),
+            ("pdm parm", b"req error 252\n"),
+            ("pd hrst", b"type=0,em=2,sink=0\n"),
+        ]);
+        let mut s = open(&port);
+        let offers = pd::enter(&mut s).unwrap().offers;
+        let req = fixed(2);
+        pd::request(&mut s, &offers, &req, confirmed(&offers, &req)).expect("9 V");
+        assert!(is_out_of_sync(&pd::read_settings(&mut s).unwrap_err()));
+        let written = port.writes().len();
+        let err = pd::return_to_5v(&mut s, &offers).expect_err("VBUS not confirmed at 5 V");
+        assert!(is_out_of_sync(&err.request), "{err:?}");
+        assert_eq!(&port.writes()[written..], ["pd hrst"]);
+        // Closing is still allowed after it (its reply is not trusted either).
+        let _ = s.close();
+        assert_eq!(&port.writes()[written..], ["pd hrst", "pdm close"]);
+    }
+}

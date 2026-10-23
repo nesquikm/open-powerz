@@ -339,6 +339,9 @@ pub struct Worker<T: Transport, C: Clock> {
     /// Meter model and firmware version for a saved PD capture's header;
     /// never the serial number (FR TGE83E).
     pd_meter: (String, String),
+    /// Holds on the queue polling (FR DGSQ6S): while any is held, no
+    /// GET_DATA goes out, but the session stays connected.
+    poll_holds: u32,
 }
 
 /// A running PD sniffer.
@@ -427,6 +430,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             pd_run: None,
             pd: PdCapture::new(),
             pd_meter: (info.model.clone(), info.firmware_version.clone()),
+            poll_holds: 0,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -716,7 +720,14 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             return Step::Ended;
         }
         let now = self.clock.now_ms();
-        if now >= self.next_poll_ms {
+        if self.poll_holds > 0 {
+            // Held: the next poll waits a period, the session stays open.
+            if now >= self.next_poll_ms {
+                self.next_poll_ms = now.saturating_add(
+                    u64::try_from(Streamer::poll_period(self.rate).as_millis()).unwrap_or(u64::MAX),
+                );
+            }
+        } else if now >= self.next_poll_ms {
             if let Step::Ended = self.poll_queue() {
                 return Step::Ended;
             }
@@ -755,8 +766,24 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Step::Continue
     }
 
+    /// Hold (`true`) or release (`false`) the queue polling; holds nest.
+    /// A release that lets the last hold go polls at once.
+    pub fn hold_polling(&mut self, hold: bool) {
+        if hold {
+            self.poll_holds = self.poll_holds.saturating_add(1);
+        } else if self.poll_holds > 0 {
+            self.poll_holds -= 1;
+            if self.poll_holds == 0 {
+                self.next_poll_ms = self.clock.now_ms();
+            }
+        }
+    }
+
     /// Poll PD_PACKET when the sniffer runs and a poll is due.
     fn poll_pd(&mut self) -> Step {
+        if self.poll_holds > 0 {
+            return Step::Continue;
+        }
         let now = self.clock.now_ms();
         let (Some(session), Some(run)) = (self.session.as_mut(), self.pd_run.as_mut()) else {
             return Step::Continue;
@@ -976,6 +1003,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::PdSave(reply) => {
                 let _ = reply.send(self.pd_save());
             }
+            Command::HoldPolling(hold, reply) => {
+                self.hold_polling(hold);
+                let _ = reply.send(());
+            }
             Command::Handover(swap, reply) => {
                 // Read here and swapped behind the events already sent, so
                 // the new sink gets exactly the events after this answer.
@@ -1006,6 +1037,9 @@ enum Command {
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
     ClearPd(mpsc::Sender<Result<u64, UiError>>),
     PdSave(mpsc::Sender<PdSave>),
+    /// Hold or release the queue polling; answered between steps, so no
+    /// poll is in flight once a hold is answered.
+    HoldPolling(bool, mpsc::Sender<()>),
     /// Run the sink swap of an attach, then answer the open recording's
     /// progress: both on the worker thread, which sends every recording
     /// event, so none can fall between them (FR VEDDFD).
@@ -1024,6 +1058,7 @@ impl std::fmt::Debug for Command {
             Command::PdDetails(index, _) => f.debug_tuple("PdDetails").field(index).finish(),
             Command::ClearPd(_) => f.write_str("ClearPd"),
             Command::PdSave(_) => f.write_str("PdSave"),
+            Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::Handover(..) => f.write_str("Handover"),
         }
     }
@@ -1306,6 +1341,13 @@ impl WorkerControl {
             }
             other => other,
         }
+    }
+
+    /// Hold (`true`) or release (`false`) the queue polling without closing
+    /// the session; holds nest. Once a hold is answered no poll is in flight.
+    pub fn hold_polling(&self, hold: bool) -> Result<(), UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::HoldPolling(hold, reply), &answer)
     }
 
     /// Start the PD capture.
@@ -1689,6 +1731,37 @@ fn run_worker<T, C, O>(
         }
     }
     worker.stop();
+}
+
+/// A stream control whose worker answers the first polling hold only after
+/// its caller gave up waiting ([`COMMAND_TIMEOUT`] has passed), then the
+/// rest at once; every hold (`true`) / release (`false`) is logged in the
+/// order the worker applies them.
+#[cfg(test)]
+pub(crate) fn late_hold_control() -> (WorkerControl, Arc<Mutex<Vec<bool>>>) {
+    let (commands, inbox) = mpsc::channel::<Command>();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        let mut late = true;
+        while let Ok(command) = inbox.recv() {
+            if let Command::HoldPolling(hold, reply) = command {
+                if late {
+                    late = false;
+                    std::thread::sleep(COMMAND_TIMEOUT + Duration::from_millis(300));
+                }
+                log.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(hold);
+                let _ = reply.send(());
+            }
+        }
+    });
+    let control = WorkerControl {
+        commands,
+        store: SessionStore::new(),
+    };
+    (control, seen)
 }
 
 #[cfg(test)]

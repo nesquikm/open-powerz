@@ -21,6 +21,7 @@ use powerz_protocol::session::Clock;
 use serde::{Deserialize, Serialize};
 
 use crate::ui_error::{ErrorKind, UiError};
+use crate::worker::WorkerControl;
 
 /// Every protocol the panel has a section for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,6 +259,30 @@ pub struct PdSendReply {
 #[derive(Debug, Clone)]
 pub struct TriggerControl {
     tx: mpsc::Sender<Msg>,
+    /// The meter's measurement stream, held while the automatic list runs.
+    stream: Option<WorkerControl>,
+}
+
+/// Releases a hold on the stream's polling when dropped, so polling resumes
+/// on every way out of the automatic list.
+struct PollingHeld(WorkerControl);
+
+impl PollingHeld {
+    /// Hold `stream`'s polling; `None` when there is no stream. The guard
+    /// exists before the hold is asked for, so its release is sent even when
+    /// the hold's answer timed out: the worker takes commands in order, so
+    /// a late hold is still undone, and a release with no hold is a no-op.
+    fn hold(stream: Option<&WorkerControl>) -> Option<PollingHeld> {
+        let held = PollingHeld(stream?.clone());
+        let _ = held.0.hold_polling(true);
+        Some(held)
+    }
+}
+
+impl Drop for PollingHeld {
+    fn drop(&mut self) {
+        let _ = self.0.hold_polling(false);
+    }
 }
 
 impl TriggerControl {
@@ -275,7 +300,11 @@ impl TriggerControl {
     }
 
     /// BC 1.2, Apple and the automatic list; nothing above 5 V is asked.
+    /// The stream's GET_DATA polling pauses meanwhile on the open bulk
+    /// session (no reconnect: a bulk CONNECT silences the PDM session
+    /// [device]) and resumes however the list ends.
     pub fn detect(&self) -> Result<Detection, UiError> {
+        let _held = PollingHeld::hold(self.stream.as_ref());
         self.call(|e| e.detect())
     }
 
@@ -301,7 +330,9 @@ impl TriggerControl {
     }
 
     /// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
-    /// protocols `reset`. The session stays open.
+    /// protocols `reset`. The session stays open. Out of sync it still
+    /// works: `pd hrst` / `reset` go out blind, `pdm close` follows, and the
+    /// answer is the out-of-sync error saying VBUS is not confirmed.
     pub fn back_to_5v(&self) -> Result<(), UiError> {
         self.call(|e| e.back_to_5v())
     }
@@ -385,12 +416,19 @@ struct Session<P: Read + Write, C: Clock> {
     /// through PD (`pd req=1`, Hard Reset as the fallback), whatever was
     /// entered after it.
     pd_contract: bool,
+    /// The way back to 5 V went out blind while the meter was out of sync
+    /// with a contract above 5 V possibly active: VBUS is not confirmed.
+    vbus_unconfirmed: bool,
 }
 
 impl<P: Read + Write, C: Clock> Session<P, C> {
     /// Back to 5 V where the protocol allows it: PD `pd req=1` (Hard Reset
-    /// as the fallback), the others `reset`.
+    /// as the fallback), the others `reset`. Out of sync, the library's
+    /// safety path writes `pd hrst` / `reset` blind and `pdm close` follows.
     fn return_to_5v(&mut self) -> Result<(), UiError> {
+        if let Err(e) = self.pdm.check_in_step() {
+            return Err(self.blind_return_to_5v(&e));
+        }
         let pd = if self.pd_contract || self.entered == Entered::Pd {
             pd::return_to_5v(&mut self.pdm, &self.offers)
                 .map(|_| ())
@@ -407,6 +445,37 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
             Ok(())
         };
         pd.and(legacy)
+    }
+
+    /// The meter is out of step, so no reply can confirm 5 V: send the way
+    /// back blind (`pd hrst` for PD, `reset` for the others), close the PDM
+    /// session, and say what was done. Sent once; later calls only report.
+    fn blind_return_to_5v(&mut self, err: &pdm::Error) -> UiError {
+        // A PD contract or a legacy protocol may have raised VBUS.
+        if self.pd_contract || self.entered == Entered::Legacy {
+            self.vbus_unconfirmed = true;
+        }
+        // Both report OutOfSync after their blind write; nothing to add.
+        if self.pd_contract || self.entered == Entered::Pd {
+            let _ = pd::return_to_5v(&mut self.pdm, &self.offers);
+        }
+        if self.entered == Entered::Legacy {
+            let _ = legacy::return_to_5v(&mut self.pdm);
+        }
+        self.pd_contract = false;
+        self.entered = Entered::None;
+        let _ = self.pdm.close_in_place();
+        let mut ui = pdm_error(err);
+        if self.vbus_unconfirmed {
+            ui.hint = Some(
+                "VBUS may still be above 5 V: the app sent a Hard Reset (or reset) and closed \
+                 the session, but the meter could not confirm it. Unplug the charger if in \
+                 doubt, then power-cycle the meter (unplug it and plug it back in) and open \
+                 the session again."
+                    .to_owned(),
+            );
+        }
+        ui
     }
 
     /// Back to 5 V, then `pdm close`; the first error wins.
@@ -533,6 +602,8 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         confirmed: bool,
     ) -> Result<TriggerReply, UiError> {
         let lib = lib_request(request)?;
+        // A meter out of step refuses everything, before any validation.
+        self.pdm.check_in_step().map_err(|e| pdm_error(&e))?;
         // Validation first: an invalid request writes nothing.
         let command = self.command_of(&lib)?;
         let above = self.pdm.risk(&command) == pdm::Risk::Above5V;
@@ -546,8 +617,15 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
         match lib {
             LibRequest::Pd(r) => {
-                let outcome = pd::request(&mut self.pdm, &self.offers, &r, confirmation)
-                    .map_err(|e| pd_error(&e))?;
+                let outcome =
+                    pd::request(&mut self.pdm, &self.offers, &r, confirmation).map_err(|e| {
+                        // Written, then out of step: the charger may have
+                        // taken it, so Back to 5 V must end it through PD.
+                        if above && matches!(e, pd::Error::Pdm(pdm::Error::OutOfSync { .. })) {
+                            self.pd_contract = true;
+                        }
+                        pd_error(&e)
+                    })?;
                 self.entered = Entered::Pd;
                 self.pd_contract = true;
                 Ok(TriggerReply {
@@ -875,6 +953,17 @@ pub(crate) fn pdm_error(err: &pdm::Error) -> UiError {
             UiError::usage("The app refused a command that is not safe.")
         }
         E::Ambiguous { .. } => UiError::usage("Several meters are attached; connect only one."),
+        E::OutOfSync { .. } => UiError {
+            kind: ErrorKind::OutOfSync,
+            message: "The meter's replies are out of step with the commands, so no more \
+                      requests are sent."
+                .to_owned(),
+            hint: Some(
+                "Power-cycle the meter (unplug it and plug it back in), then open the \
+                 session again."
+                    .to_owned(),
+            ),
+        },
         E::Malformed { .. } | E::LineTooLong { .. } | E::UnexpectedReply { .. } => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter sent a reply the app did not understand.".to_owned(),
@@ -891,6 +980,11 @@ pub(crate) fn pdm_error(err: &pdm::Error) -> UiError {
 fn pd_error(err: &pd::Error) -> UiError {
     match err {
         pd::Error::Pdm(e) => pdm_error(e),
+        pd::Error::RequestFailed { reply } => UiError {
+            kind: ErrorKind::Protocol,
+            message: format!("The charger refused the request ({reply})."),
+            hint: None,
+        },
         other => UiError::usage(other.to_string()),
     }
 }
@@ -908,6 +1002,8 @@ fn legacy_error(err: &legacy::Error) -> UiError {
 pub struct TriggerWorker {
     tx: mpsc::Sender<Msg>,
     thread: Option<JoinHandle<()>>,
+    /// The meter's measurement stream, for its controls' detection.
+    stream: Option<WorkerControl>,
 }
 
 impl std::fmt::Debug for Msg {
@@ -946,6 +1042,7 @@ impl TriggerWorker {
                     offers: Vec::new(),
                     entered: Entered::None,
                     pd_contract: false,
+                    vbus_unconfirmed: false,
                 };
                 // Every handle gone without a close: still back to 5 V and close.
                 let mut reply = None;
@@ -968,6 +1065,7 @@ impl TriggerWorker {
             Ok(Ok(())) => Ok(TriggerWorker {
                 tx,
                 thread: Some(thread),
+                stream: None,
             }),
             Ok(Err(e)) => {
                 let _ = thread.join();
@@ -984,7 +1082,13 @@ impl TriggerWorker {
     pub fn control(&self) -> TriggerControl {
         TriggerControl {
             tx: self.tx.clone(),
+            stream: self.stream.clone(),
         }
+    }
+
+    /// Pause `stream`'s polling while the automatic list runs.
+    pub(crate) fn pause_during_list(&mut self, stream: WorkerControl) {
+        self.stream = Some(stream);
     }
 
     /// Back to 5 V where the protocol allows it, then `pdm close`; waits
@@ -2039,5 +2143,556 @@ mod custom_message_tests {
             "{after:?}"
         );
         assert_eq!(after.last().map(String::as_str), Some("pdm close"));
+    }
+}
+
+/// FR DGSQ6S (AC .9, .10, .11): failed requests, a meter whose replies lag
+/// one command behind, and the stream pausing while the automatic list runs.
+#[cfg(test)]
+mod sync_tests {
+    use std::collections::{HashMap, VecDeque};
+    use std::io::{Read, Write};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use powerz_protocol::session::SystemClock;
+    use powerz_protocol::transport::{self, Transport};
+    use powerz_sim::{Persona, Scenario, SimCharger, SimClock, SimDevice, SimPdm, SimPdmPort};
+
+    use super::*;
+    use crate::devices::{DeviceListing, DeviceManager, Opener};
+    use crate::ui_error::ErrorKind;
+    use crate::worker::BackendEvent;
+
+    const OPEN_REPLY: &[u8] = b"pdm mode entry\nver1.0\n";
+
+    fn hex(s: &str) -> Vec<u8> {
+        let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// `entry pd` on the 140 W charger, SPR list only. [device]
+    fn entry_pd_reply() -> Vec<u8> {
+        let mut b = b"ok\ncc1 attach\n".to_vec();
+        b.extend(hex(
+            "70646f3a 34 0b 2c918109 2cd10200 2cb10400 d6410600
+             00000000 00000000 00000000 00000000 00000000 00000000 00000000 0a",
+        ));
+        b.extend(b"ready:5191mV,0mA\n");
+        b
+    }
+
+    #[derive(Default)]
+    struct Script {
+        replies: HashMap<Vec<u8>, Vec<u8>>,
+        writes: Vec<String>,
+        pending: VecDeque<u8>,
+    }
+
+    /// A serial port answering exact command bytes with scripted replies.
+    #[derive(Clone, Default)]
+    struct Scripted(Arc<Mutex<Script>>);
+
+    impl Scripted {
+        fn on(self, cmd: &str, reply: &[u8]) -> Scripted {
+            self.0
+                .lock()
+                .unwrap()
+                .replies
+                .insert(cmd.as_bytes().to_vec(), reply.to_vec());
+            self
+        }
+        fn writes(&self) -> Vec<String> {
+            self.0.lock().unwrap().writes.clone()
+        }
+    }
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let mut s = self.0.lock().unwrap();
+            if s.pending.is_empty() {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "idle"));
+            }
+            let n = buf.len().min(s.pending.len());
+            for b in buf.iter_mut().take(n) {
+                *b = s.pending.pop_front().unwrap();
+            }
+            Ok(n)
+        }
+    }
+
+    impl Write for Scripted {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut s = self.0.lock().unwrap();
+            s.writes
+                .push(String::from_utf8_lossy(buf).trim().to_owned());
+            if let Some(r) = s.replies.get(buf).cloned() {
+                s.pending.extend(r);
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The 140 W charger (SPR) behind the meter, with `extra` replacing replies.
+    fn charger(extra: &[(&str, &[u8])]) -> Scripted {
+        let mut port = Scripted::default()
+            .on("pdm open", OPEN_REPLY)
+            .on("pdm close", b"ok\n")
+            .on("reset", b"ok\n")
+            .on("entry pd", &entry_pd_reply())
+            .on("pdm parm", b"type=0,em=2,sink=0\n")
+            .on("pd req=1", b"req:5000mV,3000mA\nready:5180mV,0mA\n")
+            .on("pd req=2", b"req:9000mV,3000mA\nready:8554mV,0mA\n");
+        for (cmd, reply) in extra {
+            port = port.on(cmd, reply);
+        }
+        port
+    }
+
+    fn spawn(port: &Scripted) -> TriggerWorker {
+        TriggerWorker::spawn(port.clone(), SimClock::new(1_760_000_000_000))
+            .expect("the session opens")
+    }
+
+    fn pd(position: u8) -> TriggerRequest {
+        TriggerRequest::Pd {
+            position,
+            voltage_mv: None,
+            current_ma: None,
+        }
+    }
+
+    fn text(e: &UiError) -> String {
+        format!("{} {}", e.message, e.hint.clone().unwrap_or_default()).to_lowercase()
+    }
+
+    fn says_power_cycle(e: &UiError) -> bool {
+        let t = text(e);
+        t.contains("power cycle") || t.contains("power-cycle")
+    }
+
+    // ---- AC-DGSQ6S.9: a failed request says why ----
+
+    #[test]
+    fn an_error_reply_to_a_request_is_a_failure_with_its_reason() {
+        // AC-DGSQ6S.9: `req error 252` answers `pd req=2`.
+        let port = charger(&[("pd req=2", b"req error 252\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let err = c.request(pd(2), true).expect_err("the charger refused");
+        assert_ne!(
+            err.kind,
+            ErrorKind::Timeout,
+            "the error reply was waited out: {err:?}"
+        );
+        assert!(text(&err).contains("252"), "the reason is lost: {err:?}");
+        // Its own reply, so the session stays usable.
+        c.request(pd(1), false).expect("pd req=1 still works");
+    }
+
+    // ---- AC-DGSQ6S.10: a reply that belongs to another command ----
+
+    #[test]
+    fn a_late_reply_to_another_command_stops_the_session_with_a_power_cycle_error() {
+        // AC-DGSQ6S.10 [device]: `pdm parm` answered by `req error 252`.
+        let port = charger(&[("pdm parm", b"req error 252\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        let err = c
+            .list(TriggerProtocol::Pd)
+            .expect_err("the settings reply was not the settings");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        assert!(says_power_cycle(&err), "{err:?}");
+    }
+
+    #[test]
+    fn after_out_of_sync_requests_are_refused_and_nothing_is_written() {
+        // AC-DGSQ6S.10: requests stay off until the session is reopened.
+        let port = charger(&[("pdm parm", b"req error 252\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        assert!(c.list(TriggerProtocol::Pd).is_err());
+        let before = port.writes().len();
+        let err = c.request(pd(1), false).expect_err("refused");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        assert!(says_power_cycle(&err), "{err:?}");
+        let err = c.list(TriggerProtocol::Qc).expect_err("refused");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        assert_eq!(
+            port.writes().len(),
+            before,
+            "written after out-of-sync: {:?}",
+            &port.writes()[before..]
+        );
+    }
+
+    #[test]
+    fn a_request_answered_by_another_commands_reply_is_out_of_sync() {
+        // AC-DGSQ6S.10: `pd req=2` answered by the late `type=...` of `pdm parm`.
+        let port = charger(&[("pd req=2", b"type=0,em=2,sink=0\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let err = c.request(pd(2), true).expect_err("not a req: reply");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        assert!(says_power_cycle(&err), "{err:?}");
+    }
+
+    #[test]
+    fn the_out_of_sync_kind_serializes_for_the_ui() {
+        // AC-DGSQ6S.10: the panel branches on the kind.
+        let json = serde_json::to_value(ErrorKind::OutOfSync).unwrap();
+        assert_eq!(json, serde_json::json!("out_of_sync"));
+    }
+
+    // ---- AC-DGSQ6R.7: detection checks the meter is in step after a cut list ----
+
+    /// Device trace 2026-10-23 (Apple 140 W): `entry bc` / `entry apple` →
+    /// `fail`, the list stops after `vfcp:`. [device]
+    const CUT_LIST: &[u8] = b"starting\nbc1.2:true 5194mV,0mA\nufcs:null\nvfcp:\n";
+
+    fn detecting(extra: &[(&str, &[u8])]) -> Scripted {
+        let mut all: Vec<(&str, &[u8])> = vec![
+            ("entry bc", b"fail\n"),
+            ("entry apple", b"fail\n"),
+            ("entry list", CUT_LIST),
+        ];
+        all.extend_from_slice(extra);
+        charger(&all)
+    }
+
+    /// Commands written after `entry list`.
+    fn after_entry_list(port: &Scripted) -> Vec<String> {
+        let w = port.writes();
+        let at = w
+            .iter()
+            .position(|c| c == "entry list")
+            .unwrap_or_else(|| panic!("entry list not sent: {w:?}"));
+        w[at + 1..].to_vec()
+    }
+
+    #[test]
+    fn an_incomplete_detection_checks_with_pdm_parm_right_after_reset() {
+        // AC-DGSQ6R.7: in step → the partial detection comes back.
+        let port = detecting(&[]);
+        let w = spawn(&port);
+        let d = w.control().detect().expect("in step");
+        assert!(!d.complete);
+        assert_eq!(d.entries.len(), 3, "{d:?}");
+        assert_eq!(after_entry_list(&port), ["reset", "pdm parm"]);
+    }
+
+    #[test]
+    fn a_lagging_meter_after_the_list_is_out_of_sync_with_a_power_cycle_error() {
+        // AC-DGSQ6R.7: `reset` unanswered, then `pdm parm` gets the late `ok`.
+        let port = detecting(&[("reset", b""), ("pdm parm", b"ok\n")]);
+        let w = spawn(&port);
+        let err = w.control().detect().expect_err("lagging meter");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        assert!(says_power_cycle(&err), "{err:?}");
+        assert_eq!(after_entry_list(&port), ["reset", "pdm parm"]);
+    }
+
+    #[test]
+    fn after_a_failed_detection_check_nothing_more_is_sent() {
+        // AC-DGSQ6R.7: listing, requests and detection are all refused.
+        let port = detecting(&[("pdm parm", b"req error 252\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        let err = c.detect().expect_err("lagging meter");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        let before = port.writes().len();
+        for err in [
+            c.list(TriggerProtocol::Pd).expect_err("refused"),
+            c.request(pd(1), false).expect_err("refused"),
+        ] {
+            assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        }
+        let again = c.detect().expect_err("refused");
+        assert_eq!(again.kind, ErrorKind::OutOfSync, "{again:?}");
+        assert_eq!(
+            port.writes().len(),
+            before,
+            "written after out-of-sync: {:?}",
+            &port.writes()[before..]
+        );
+    }
+
+    // ---- AC-DGSQ6S.11: the stream pauses while the automatic list runs ----
+
+    /// Bulk message types the stream sends, by time.
+    type Log = Arc<Mutex<Vec<(Instant, u8)>>>;
+
+    const CONNECT: u8 = 0x02;
+    const GET_DATA: u8 = 0x0C;
+
+    /// The demo meter's bulk pipe, logging the type of every request.
+    struct Logged {
+        inner: SimDevice,
+        log: Log,
+    }
+
+    impl Transport for Logged {
+        fn transact(
+            &mut self,
+            request: &[u8],
+            timeout: Duration,
+        ) -> Result<Vec<u8>, transport::Error> {
+            if let Some(&b) = request.first() {
+                self.log.lock().unwrap().push((Instant::now(), b & 0x7F));
+            }
+            self.inner.transact(request, timeout)
+        }
+        fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+            self.inner.read(timeout)
+        }
+        fn recover(&mut self) -> Result<(), transport::Error> {
+            self.inner.recover()
+        }
+    }
+
+    struct LoggingOpener(Log);
+
+    impl Opener for LoggingOpener {
+        type Transport = Logged;
+        fn open(&self, device: &DeviceListing) -> Result<Logged, transport::Error> {
+            let scenario = device
+                .demo_scenario
+                .as_deref()
+                .and_then(Scenario::from_name)
+                .ok_or(transport::Error::NotFound)?;
+            Ok(Logged {
+                inner: SimDevice::new(Persona::Bulk, scenario),
+                log: Arc::clone(&self.0),
+            })
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ListEnd {
+        Complete,
+        Incomplete,
+        Error,
+    }
+
+    /// The simulated meter's serial port, except that the automatic list
+    /// takes `HOLD` of real time and then ends the way `end` says.
+    struct ListGate {
+        port: SimPdmPort,
+        end: ListEnd,
+        armed: bool,
+        own: VecDeque<u8>,
+        /// When `entry list` was written and when the hold ended.
+        window: Arc<Mutex<Option<(Instant, Instant)>>>,
+    }
+
+    const HOLD: Duration = Duration::from_millis(600);
+
+    impl Read for ListGate {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.armed {
+                self.armed = false;
+                std::thread::sleep(HOLD);
+                let mut window = self.window.lock().unwrap();
+                if let Some((start, _)) = *window {
+                    *window = Some((start, Instant::now()));
+                }
+                drop(window);
+                if self.end == ListEnd::Error {
+                    return Err(std::io::Error::other("serial fault"));
+                }
+            }
+            if !self.own.is_empty() {
+                let n = buf.len().min(self.own.len());
+                for b in buf.iter_mut().take(n) {
+                    *b = self.own.pop_front().unwrap();
+                }
+                return Ok(n);
+            }
+            self.port.read(buf)
+        }
+    }
+
+    impl Write for ListGate {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.starts_with(b"entry list") {
+                let now = Instant::now();
+                *self.window.lock().unwrap() = Some((now, now));
+                self.armed = true;
+                if self.end == ListEnd::Complete {
+                    self.own
+                        .extend(b"starting\nqc2.0:5V,9V,12V\nufcs:null\n\ndone\n".iter());
+                    return Ok(buf.len());
+                }
+            }
+            self.port.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.port.flush()
+        }
+    }
+
+    fn eventually(what: &str, mut f: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !f() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn count(log: &Log, ty: u8, after: Option<Instant>) -> usize {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|(t, k)| *k == ty && after.is_none_or(|a| *t > a))
+            .count()
+    }
+
+    /// Connect the demo meter at 50 SPS, open a trigger session whose list
+    /// ends as `end`, detect, and check the stream around the list.
+    fn stream_pauses_during_the_list(end: ListEnd) {
+        let log: Log = Arc::default();
+        let mut m = DeviceManager::new(
+            || Ok(Vec::new()),
+            LoggingOpener(Arc::clone(&log)),
+            SystemClock,
+        );
+        m.connect_with_stop(
+            "demo:load-5v-1a",
+            50,
+            |_e: BackendEvent| {},
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("the demo device connects");
+        eventually("the stream polls", || count(&log, GET_DATA, None) > 0);
+
+        let clock = SimClock::new(1_760_000_000_000);
+        let sim = SimPdm::new(SimCharger::Epr140W, clock.clone());
+        let window = Arc::new(Mutex::new(None));
+        let port = ListGate {
+            port: sim.open_port(),
+            end,
+            armed: false,
+            own: VecDeque::new(),
+            window: Arc::clone(&window),
+        };
+        let w = TriggerWorker::spawn(port, clock).expect("the session opens");
+        m.install_trigger(w).expect("install");
+        let connects = count(&log, CONNECT, None);
+
+        let result = m.trigger_control().expect("open").detect();
+        let returned = Instant::now();
+        match end {
+            ListEnd::Complete => assert!(result.expect("detect").complete),
+            ListEnd::Incomplete => assert!(!result.expect("detect").complete),
+            ListEnd::Error => assert!(result.is_err(), "{result:?}"),
+        }
+        let (start, stop) = window.lock().unwrap().expect("entry list was sent");
+        let during: Vec<u8> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(t, k)| *t >= start && *t <= stop && (*k == GET_DATA || *k == CONNECT))
+            .map(|(_, k)| *k)
+            .collect();
+        assert!(
+            during.is_empty(),
+            "{end:?}: the stream sent {} requests while the list ran: {during:02x?}",
+            during.len()
+        );
+        eventually("polling to resume", || {
+            count(&log, GET_DATA, Some(returned)) > 0
+        });
+        assert_eq!(
+            count(&log, CONNECT, None),
+            connects,
+            "{end:?}: the meter was reconnected"
+        );
+        m.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn the_stream_pauses_during_a_complete_list_and_resumes() {
+        // AC-DGSQ6S.11
+        stream_pauses_during_the_list(ListEnd::Complete);
+    }
+
+    #[test]
+    fn the_stream_pauses_during_an_incomplete_list_and_resumes() {
+        // AC-DGSQ6S.11: the list stalls and is ended early with `reset`.
+        stream_pauses_during_the_list(ListEnd::Incomplete);
+    }
+
+    #[test]
+    fn the_stream_resumes_when_the_list_fails() {
+        // AC-DGSQ6S.11: the list ends with an error.
+        stream_pauses_during_the_list(ListEnd::Error);
+    }
+
+    #[test]
+    fn polling_is_released_even_when_the_hold_answer_timed_out() {
+        // AC-DGSQ6S.11: a slow worker applies the hold after the wait gave
+        // up; the release must still follow it, or polling stays held.
+        let (stream, seen) = crate::worker::late_hold_control();
+        let held = PollingHeld::hold(Some(&stream));
+        assert!(held.is_some(), "the guard exists whatever the answer");
+        drop(held);
+        eventually("the release to be applied", || {
+            seen.lock().unwrap().len() == 2
+        });
+        assert_eq!(*seen.lock().unwrap(), [true, false]);
+    }
+
+    // ---- AC-DGSQ6S.10: the way back to 5 V stays open out of sync ----
+
+    #[test]
+    fn out_of_sync_after_a_9v_contract_back_to_5v_sends_a_hard_reset_then_closes() {
+        let port = charger(&[]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), true).expect("9 V");
+        // From now on the meter lags: `pdm parm` gets `pd req=`'s late error.
+        let port = port.on("pdm parm", b"req error 252\n");
+        let err = c.list(TriggerProtocol::Pd).expect_err("out of sync");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        let before = port.writes().len();
+        let err = c.back_to_5v().expect_err("VBUS is not confirmed");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        assert_eq!(&port.writes()[before..], ["pd hrst", "pdm close"]);
+        let t = text(&err);
+        assert!(t.contains("above 5 v"), "{err:?}");
+        assert!(t.contains("hard reset"), "{err:?}");
+        assert!(t.contains("unplug the charger"), "{err:?}");
+        assert!(says_power_cycle(&err), "{err:?}");
+        // Sent once: Back to 5 V again and closing send nothing more.
+        let again = c.back_to_5v().expect_err("still out of sync");
+        assert!(text(&again).contains("above 5 v"), "{again:?}");
+        drop(c);
+        let _ = w.close();
+        assert_eq!(&port.writes()[before..], ["pd hrst", "pdm close"]);
+    }
+
+    #[test]
+    fn a_9v_request_answered_out_of_sync_is_ended_with_a_hard_reset() {
+        // The request was written; its reply was another command's.
+        let port = charger(&[("pd req=2", b"type=0,em=2,sink=0\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let err = c.request(pd(2), true).expect_err("out of sync");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        let before = port.writes().len();
+        let err = c.back_to_5v().expect_err("VBUS is not confirmed");
+        assert!(text(&err).contains("above 5 v"), "{err:?}");
+        assert_eq!(&port.writes()[before..], ["pd hrst", "pdm close"]);
     }
 }

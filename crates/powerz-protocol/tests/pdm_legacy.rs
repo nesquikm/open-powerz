@@ -686,6 +686,38 @@ mod pdm_legacy {
     }
 
     #[test]
+    fn out_of_sync_return_to_5v_writes_reset_blind_and_reports_it() {
+        // `qc 9V` answered by the late `type=...` of `pdm parm`: out of sync.
+        // The way back to 5 V still goes out, on the safety path.
+        let port = base()
+            .on("entry qc", b"ok\nready\n")
+            .on("qc 9V", b"type=0,em=2,sink=0\n");
+        let mut s = open(&port);
+        legacy::enter(&mut s, LegacyProtocol::Qc).unwrap();
+        let req = Request::Fixed {
+            protocol: FixedProtocol::Qc,
+            volts: 9,
+        };
+        let cmd = legacy::validate(s.capabilities(), &req).unwrap();
+        let err = legacy::request(
+            &mut s,
+            &req,
+            Some(HighVoltageConfirmation::for_command(&cmd)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, LegacyError::Pdm(Error::OutOfSync { .. })),
+            "{err:?}"
+        );
+        let err = legacy::return_to_5v(&mut s).unwrap_err();
+        assert!(
+            matches!(err, LegacyError::Pdm(Error::OutOfSync { .. })),
+            "{err:?}"
+        );
+        assert_eq!(port.sent(), ["entry qc", "qc 9V", "reset"]);
+    }
+
+    #[test]
     fn return_to_5v_without_ok_is_an_error() {
         let port = FakePort::default()
             .on("pdm open", OPEN_REPLY)

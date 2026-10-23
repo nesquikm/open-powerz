@@ -8,7 +8,9 @@
 //! - [`list`]: `entry list` (or `entry list+`), each line reported as it
 //!   arrives. A full list ends with a blank line and `done` (complete);
 //!   a stall longer than [`ListOptions::stall_limit`], a cut-off or a stop
-//!   ends it with `reset` and an incomplete result. \[device\]
+//!   ends it with `reset` and an incomplete result, after a `pdm parm`
+//!   check that the meter still answers in step (else
+//!   [`Error::OutOfSync`]). \[device\]
 //! - [`hint`]: a pure D+ / D- lookup of likely charging modes (a hint only).
 //!   Nominal levels from the vendor manual \[doc\]; the ±200 mV windows
 //!   (inclusive) are ours. \[inferred\]
@@ -149,8 +151,11 @@ fn list_line(in_pd: &mut bool, line: &str) -> ListLine {
         return ListLine::Entry(entry);
     }
     // A bare mode line (`Apple 2.4A`); `cc1 attach` / `cc2 detach` status
-    // lines are not modes. [device]
-    let status = trimmed.ends_with(" attach") || trimmed.ends_with(" detach");
+    // lines are not modes [device], nor is the late `ver1.0` of `pdm open`.
+    let version = trimmed
+        .strip_prefix("ver")
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+    let status = version || trimmed.ends_with(" attach") || trimmed.ends_with(" detach");
     if !status && !trimmed.contains(':') && trimmed.chars().any(|c| c.is_ascii_digit()) {
         return ListLine::Entry(ListEntry {
             name: trimmed.to_string(),
@@ -296,6 +301,9 @@ pub fn list_until<P: Read + Write, C: Clock>(
         let ReplyItem::Line(line) = item else {
             continue;
         };
+        // A stale reply of another command (`type=...`, `req error 252`,
+        // `pdm mode entry`) is never a list line: it latches OutOfSync.
+        session.reject_foreign(&line)?;
         match list_line(&mut in_pd, &line) {
             ListLine::Done => {
                 complete = true;
@@ -331,7 +339,95 @@ pub fn list_until<P: Read + Write, C: Clock>(
         Ok(_) | Err(Error::Timeout { .. }) => {}
         Err(e) => return Err(e),
     }
+    // After a cut list the meter was seen answering one command late
+    // (\[device\] 2026-10-23), so check it is in step before anything else:
+    // the read-only `pdm parm` must get its own `type=...` reply. A foreign
+    // reply latches [`Error::OutOfSync`] in `wait_for`; silence does here.
+    session.send(&Command::PdmParm)?;
+    match session.wait_for(&["type="], REPLY_TIMEOUT) {
+        Ok(_) => {}
+        Err(Error::Timeout { .. }) => return Err(session.mark_out_of_sync("no reply")),
+        Err(e) => return Err(e),
+    }
     Ok(ListResult { entries, complete })
+}
+
+/// A single-reply detection command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    /// `entry bc`, paired with the list's `bc1.2` line.
+    Bc12,
+    /// `entry apple`, paired with the list's Apple mode lines (`Apple 2.4A`).
+    Apple,
+}
+
+impl Check {
+    /// The command as sent: `entry bc` or `entry apple`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Check::Bc12 => "entry bc",
+            Check::Apple => "entry apple",
+        }
+    }
+
+    /// Whether a list line is the one this check is compared with.
+    fn pairs_with(self, entry: &str) -> bool {
+        match self {
+            Check::Bc12 => entry.eq_ignore_ascii_case("bc1.2"),
+            Check::Apple => entry.starts_with("Apple"),
+        }
+    }
+}
+
+/// A single-reply check and a list line that contradict each other: one
+/// says supported, the other not supported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Disagreement {
+    /// The check that said `check_says`.
+    pub check: Check,
+    /// What the check said.
+    pub check_says: Support,
+    /// The list line's name (`bc1.2`, `Apple 2.4A`, ...).
+    pub entry: String,
+    /// What the list said on that line.
+    pub list_says: Support,
+}
+
+impl Disagreement {
+    /// Both sides named, e.g. `bc1.2: entry bc: not-supported, list: supported`.
+    pub fn label(&self) -> String {
+        format!(
+            "{}: {}: {}, list: {}",
+            self.entry,
+            self.check.name(),
+            self.check_says.name(),
+            self.list_says.name()
+        )
+    }
+}
+
+/// Where `entry bc` (`bc12`) / `entry apple` (`apple`) and the list
+/// contradict each other (supported against not supported); an unknown
+/// side or a line the list never reached is no disagreement.
+pub fn disagreements(bc12: Support, apple: Support, list: &ListResult) -> Vec<Disagreement> {
+    let decided = |s: Support| s != Support::Unknown;
+    let mut out = Vec::new();
+    for (check, says) in [(Check::Bc12, bc12), (Check::Apple, apple)] {
+        if !decided(says) {
+            continue;
+        }
+        for e in list.entries.iter().filter(|e| check.pairs_with(&e.name)) {
+            if decided(e.support) && e.support != says {
+                out.push(Disagreement {
+                    check,
+                    check_says: says,
+                    entry: e.name.clone(),
+                    list_says: e.support,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Likely charging modes for a D+ / D- pair.
@@ -531,6 +627,8 @@ mod tests {
             list_line(&mut in_pd, "Apple 2.4A"),
             ListLine::Entry(_)
         ));
+        // The late `ver1.0` of `pdm open` is no mode either.
+        assert!(matches!(list_line(&mut in_pd, "ver1.0"), ListLine::Other));
     }
 
     #[test]

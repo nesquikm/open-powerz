@@ -21,6 +21,9 @@ pub enum ErrorKind {
     Disconnected,
     /// The request itself is not valid right now.
     Usage,
+    /// The meter's text replies are out of step with the commands: it needs
+    /// a power cycle, and the trigger session refuses requests until reopened.
+    OutOfSync,
     /// Anything else.
     Internal,
 }

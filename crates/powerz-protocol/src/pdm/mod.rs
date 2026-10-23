@@ -110,6 +110,20 @@ pub enum Error {
         /// What arrived.
         got: String,
     },
+    /// The meter answered a command with a reply that belongs to another
+    /// command: its replies lag behind the commands. The session refuses
+    /// every later command until it is reopened.
+    #[error(
+        "the meter answered {command:?} with {got:?}, a reply to another command: \
+         its replies are out of step with the commands; power-cycle the meter \
+         (unplug it and plug it back in), then reopen the session"
+    )]
+    OutOfSync {
+        /// The command whose reply was awaited.
+        command: String,
+        /// The line that arrived instead.
+        got: String,
+    },
     /// No POWER-Z serial port was found.
     #[error("no POWER-Z serial port found")]
     NotFound,

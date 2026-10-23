@@ -556,9 +556,17 @@ pub fn request<P: Read + Write, C: Clock>(
 
 /// `reset` and wait for `ok`: the meter leaves the protocol and VBUS goes
 /// back to 5 V (\[device\] after PD; \[inferred\] for these protocols).
+///
+/// A session out of sync trusts no reply: `reset` is written blind through
+/// [`PdmSession::send_safety`] and the latched [`super::Error::OutOfSync`]
+/// is returned, since VBUS is not confirmed back at 5 V.
 pub fn return_to_5v<P: Read + Write, C: Clock>(
     session: &mut PdmSession<P, C>,
 ) -> Result<(), Error> {
+    if let Err(out_of_sync) = session.check_in_step() {
+        session.send_safety(&Command::Reset)?;
+        return Err(out_of_sync.into());
+    }
     session.send(&Command::Reset)?;
     session.wait_for(&["ok"], REPLY_TIMEOUT)?;
     Ok(())

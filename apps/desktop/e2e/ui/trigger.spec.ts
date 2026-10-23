@@ -549,3 +549,60 @@ test("UFCS offers each capability inside its limits and power (AC-DGSQ6S.8)", as
   await backButton(page).click();
   await expect.poll(async () => (await commands(page)).at(-1)).toBe("reset");
 });
+
+// AC .9 / .10 page contract: `?mock=trigger-req-error` makes the scripted charger
+// answer every request above 5 V with `req error 252`; `?mock=trigger-out-of-sync`
+// makes the meter answer requests with a reply that belongs to another command, which
+// the backend reports as an `out_of_sync` error telling the user to power-cycle the
+// meter.
+
+test("a failed request shows the failure and its reason in the result (AC-DGSQ6S.9)", async ({
+  page,
+}) => {
+  await detected(page, "?mock=trigger-req-error");
+  await request9V(page);
+  await expect(result(page)).not.toContainText("No request yet");
+  await expect(result(page)).toContainText(/fail/i);
+  await expect(result(page)).toContainText("252");
+});
+
+test("an out-of-sync meter shows the power-cycle error and disables requests (AC-DGSQ6S.10)", async ({
+  page,
+}) => {
+  await detected(page, "?mock=trigger-out-of-sync");
+  await request9V(page);
+  await expect(view(page)).toContainText(/power[- ]cycle/i);
+  await expect(offerButton(page, 9)).toBeDisabled();
+  await expect(offerButton(page, 5)).toBeDisabled();
+  // Back to 5 V stays available; the session is reopened by detecting again.
+  await expect(backButton(page)).toBeVisible();
+  await expect(backButton(page)).toBeEnabled();
+});
+
+// FR DGSQ6R AC .7 / .8 page contract: `?mock=trigger-list-lag` makes the meter answer
+// one command late after the automatic list is cut off, so detection's `pdm parm`
+// check fails and the backend reports `out_of_sync` (the mock records `entry bc`,
+// `entry apple`, `entry list`, `reset`, `pdm parm` and nothing after);
+// `?mock=trigger-detect-disagree` is the 2026-10-23 trace: `entry bc` → fail while the
+// list says `bc1.2` supported, and the Detection region's BC1.2 row reads
+// "entry bc: not supported · list: supported".
+
+test("a meter out of step after a cut list shows the power-cycle error (AC-DGSQ6R.7)", async ({
+  page,
+}) => {
+  await open(page, "?mock=trigger-list-lag");
+  await streamDemo(page);
+  await showTrigger(page);
+  await detectButton(page).click();
+  await expect(view(page)).toContainText(/power[- ]cycle/i);
+  const sent = await commands(page);
+  expect(sent.slice(sent.indexOf("entry list"))).toEqual(["entry list", "reset", "pdm parm"]);
+  // Nothing was listed after the failed check.
+  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+});
+
+test("detection names which check said what when they disagree (AC-DGSQ6R.8)", async ({ page }) => {
+  await detected(page, "?mock=trigger-detect-disagree");
+  const detection = view(page).getByRole("region", { name: "Detection" });
+  await expect(detection).toContainText("entry bc: not supported · list: supported");
+});

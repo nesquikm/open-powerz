@@ -10,6 +10,7 @@ import type {
   Detection,
   ProtocolSection,
   RiskClass,
+  SupportName,
   TriggerLimits,
   TriggerProtocol,
   TriggerReply,
@@ -168,6 +169,46 @@ export function confirmationText(voltageMv: number): string {
   );
 }
 
+/** One BC1.2 / Apple row of the Detection card. */
+export interface DetectionCheck {
+  label: "BC1.2" | "Apple";
+  text: string;
+}
+
+const SUPPORT_TEXT: Record<SupportName, string> = {
+  supported: "Supported",
+  "not-supported": "Not supported",
+  unknown: "Unknown",
+};
+
+/**
+ * The BC1.2 and Apple rows. When `entry bc` / `entry apple` and the automatic
+ * list's matching line (`bc1.2` / an `Apple …` mode line) say supported vs not
+ * supported, the row names both sources:
+ * `entry bc: not supported · list: supported`. Like the library's
+ * `detect::disagreements`, every clashing Apple mode line is named:
+ * `entry apple: not supported · list: supported (Apple 2.4A, Apple 2.1A)`.
+ */
+export function detectionChecks(d: Detection): DetectionCheck[] {
+  const rows: [DetectionCheck["label"], string, SupportName, (name: string) => boolean, boolean][] =
+    [
+      ["BC1.2", "entry bc", d.bc12, (n) => n.toLowerCase() === "bc1.2", false],
+      ["Apple", "entry apple", d.apple, (n) => n.startsWith("Apple"), true],
+    ];
+  return rows.map(([label, check, says, pairs, named]) => {
+    // A decided check against decided lines: every clash says the opposite.
+    const clashes =
+      says === "unknown"
+        ? []
+        : d.entries.filter((e) => pairs(e.name) && e.support !== "unknown" && e.support !== says);
+    const first = clashes[0];
+    if (first === undefined) return { label, text: SUPPORT_TEXT[says] ?? says };
+    const names = named ? ` (${clashes.map((e) => e.name).join(", ")})` : "";
+    const text = `${check}: ${SUPPORT_TEXT[says].toLowerCase()} · list: ${SUPPORT_TEXT[first.support].toLowerCase()}${names}`;
+    return { label, text };
+  });
+}
+
 /** The dialog's text when the voltage of a request is not known. */
 const UNKNOWN_VOLTAGE_TEXT =
   "The charger may raise VBUS above 5 V. " +
@@ -184,6 +225,8 @@ export class TriggerPanel {
   pending = $state<PendingConfirmation | null>(null);
   /** The charger's answer to the last request. */
   reply = $state<TriggerReply | null>(null);
+  /** Why the last request failed (error reply, timeout, refusal), null when it did not. */
+  requestFailure = $state<UiError | null>(null);
   /** The voltage of the last request, mV. */
   requestedMv = $state<number | null>(null);
   /** Live VBUS from the meter stream, V. */
@@ -192,6 +235,9 @@ export class TriggerPanel {
   deviation = $state(false);
   /** The last failure, null when none. */
   error = $state<UiError | null>(null);
+  /** The meter's replies fell out of step with the commands (`out_of_sync`): no
+   * request is sent until the session is reopened. */
+  requestsDisabled = $state(false);
 
   #api: TriggerApi;
   /** The 2 s after the reply have passed: VBUS is compared with the request. */
@@ -225,6 +271,15 @@ export class TriggerPanel {
     this.error = null;
     this.#left = false;
     try {
+      // An out-of-step session refuses everything: detecting again reopens it.
+      if (this.requestsDisabled && this.sessionOpen) {
+        try {
+          await this.#api.close();
+        } catch {
+          // The session is dropped either way.
+        }
+        this.#ended();
+      }
       if (!this.sessionOpen) {
         await this.#api.open();
         this.sessionOpen = true;
@@ -247,12 +302,14 @@ export class TriggerPanel {
       }
     } catch (e) {
       // An error from a session the view already left is not news.
-      if (!this.#left) this.error = e as UiError;
+      if (!this.#left) this.#fail(e);
     }
   }
 
   /** Asks for `request`: above 5 V it waits in {@link pending} for {@link confirm}. */
   async ask(request: TriggerRequest): Promise<void> {
+    // Out of step: nothing goes to the meter, and the power-cycle error stays.
+    if (this.requestsDisabled) return;
     this.error = null;
     try {
       // The backend's classifier decides, not the UI's own guess.
@@ -270,7 +327,7 @@ export class TriggerPanel {
       }
       await this.#send(request, false);
     } catch (e) {
-      if (!this.#left) this.error = e as UiError;
+      if (!this.#left) this.#fail(e);
     }
   }
 
@@ -279,12 +336,20 @@ export class TriggerPanel {
     const pending = this.pending;
     if (!pending) return;
     this.pending = null;
+    if (this.requestsDisabled) return;
     this.error = null;
     try {
       await this.#send(pending.request, true);
     } catch (e) {
-      if (!this.#left) this.error = e as UiError;
+      if (!this.#left) this.#fail(e);
     }
+  }
+
+  /** Shows `e`; an `out_of_sync` failure also disables requests. */
+  #fail(e: unknown): void {
+    const error = e as UiError;
+    this.error = error;
+    if (error?.kind === "out_of_sync") this.requestsDisabled = true;
   }
 
   /** Drops the pending request; nothing is sent. */
@@ -294,9 +359,20 @@ export class TriggerPanel {
 
   /** Sends `request` and keeps the reply. */
   async #send(request: TriggerRequest, confirmed: boolean): Promise<void> {
-    const reply = await this.#api.request(request, confirmed);
+    let reply: TriggerReply;
+    try {
+      reply = await this.#api.request(request, confirmed);
+    } catch (e) {
+      // The failure is this request's result: it replaces the previous reply.
+      if (!this.#gone) {
+        this.reply = null;
+        this.requestFailure = e as UiError;
+      }
+      throw e;
+    }
     // Left (or closed) meanwhile: no result, no timer on a closed session.
     if (this.#gone) return;
+    this.requestFailure = null;
     this.reply = reply;
     this.requestedMv =
       reply.requested_mv ??
@@ -336,7 +412,7 @@ export class TriggerPanel {
       this.requestedMv = 5000;
       this.#restartSettle();
     } catch (e) {
-      if (!this.#left) this.error = e as UiError;
+      if (!this.#left) this.#fail(e);
     }
   }
 
@@ -368,8 +444,10 @@ export class TriggerPanel {
     this.#settleTimer = null;
     this.#settled = false;
     this.sessionOpen = false;
+    this.requestsDisabled = false;
     this.pending = null;
     this.reply = null;
+    this.requestFailure = null;
     this.requestedMv = null;
     this.vbusV = null;
     this.deviation = false;
