@@ -6,6 +6,14 @@
 //! [`Session`]: powerz_protocol::session::Session
 //! [`Write`]: std::io::Write
 
+use std::io::{Read, Write};
+
+use powerz_protocol::pdm::PdmSession;
+use powerz_protocol::session::Clock;
+
+use crate::error::CliError;
+
+mod detect;
 mod info;
 mod list;
 mod pd;
@@ -14,6 +22,7 @@ mod stream;
 mod trigger;
 mod watch;
 
+pub use detect::{DetectOptions, detect};
 pub use info::info;
 pub use list::{list, select_device};
 pub use pd::{pd, pd_decode, pd_save};
@@ -24,3 +33,14 @@ pub use trigger::{
     trigger_pd_settings,
 };
 pub use watch::{WatchOptions, watch};
+
+/// Close the PDM `session` whatever `result` is; the first error wins.
+fn close_after<T, P: Read + Write, C: Clock>(
+    session: PdmSession<P, C>,
+    result: Result<T, CliError>,
+) -> Result<T, CliError> {
+    let closed = session.close();
+    let value = result?;
+    closed?;
+    Ok(value)
+}

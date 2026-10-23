@@ -183,6 +183,45 @@ fn hil_trigger_pd_ladder_dry_run_against_the_simulator() {
     flow_trigger_pd_ladder(Target::Sim);
 }
 
+/// AC-DGSQ6R.6 flow: `detect --list --json`; BC1.2 / Apple results and
+/// every list entry carry a known support value, and the hint has D+ / D-.
+fn flow_detect(target: Target) {
+    let out = stdout(powerz(target).args(["detect", "--list", "--json"]));
+    eprintln!("detect --list: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let known = ["supported", "not-supported", "unknown"];
+    for key in ["bc12", "apple"] {
+        let r = v[key].as_str().unwrap_or_default();
+        assert!(known.contains(&r), "{key}: {r:?}");
+    }
+    let entries = v["list"]["entries"].as_array().expect("list entries");
+    for e in entries {
+        let r = e["support"].as_str().unwrap_or_default();
+        assert!(known.contains(&r), "{e}");
+    }
+    assert!(v["list"]["complete"].is_boolean(), "{v}");
+    assert!(
+        v["hint"]["dp_mv"].is_u64() && v["hint"]["dm_mv"].is_u64(),
+        "{v}"
+    );
+}
+
+// ---- AC-DGSQ6R.6: opt-in, real meter, each charger, nothing on the output ----
+
+/// Detection only (at most 5 V): needs `POWERZ_HIL=1` and
+/// `POWERZ_HIL_DETECT=1`, a charger on the input and nothing on the output.
+#[test]
+fn hil_detect() {
+    if hil_or_skip("hil_detect") && std::env::var("POWERZ_HIL_DETECT").as_deref() == Ok("1") {
+        flow_detect(Target::Meter);
+    }
+}
+
+#[test]
+fn hil_detect_dry_run_against_the_simulator() {
+    flow_detect(Target::Sim);
+}
+
 // ---- AC-G0W08Z.12: opt-in, real meter over bulk ----
 
 #[test]

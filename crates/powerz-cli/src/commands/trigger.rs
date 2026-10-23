@@ -10,6 +10,7 @@ use powerz_protocol::pdm::pd::{
 use powerz_protocol::pdm::{HighVoltageConfirmation, PdmSession, Risk};
 use powerz_protocol::session::Clock;
 
+use super::close_after;
 use crate::error::CliError;
 use crate::output::write_json;
 
@@ -104,17 +105,6 @@ pub fn trigger_pd_settings<P: Read + Write, C: Clock>(
     })();
     let settings = close_after(session, result)?;
     write_settings(&settings, json, out)
-}
-
-/// Close `session` whatever `result` is; the first error wins.
-fn close_after<T, P: Read + Write, C: Clock>(
-    session: PdmSession<P, C>,
-    result: Result<T, CliError>,
-) -> Result<T, CliError> {
-    let closed = session.close();
-    let value = result?;
-    closed?;
-    Ok(value)
 }
 
 /// The value named `name`, or a usage error.

@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use powerz_protocol::decode::AdcSnapshot;
 use powerz_protocol::frame;
+use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
 use powerz_protocol::pdm::{self, PdmSession};
 use powerz_protocol::session::{Clock, Session, SystemClock};
 use powerz_protocol::transport::bulk::BulkTransport;
@@ -23,9 +25,9 @@ use crate::args::{
     validate,
 };
 use crate::commands::{
-    PdRequestOptions, PdSettingsChange, StreamOptions, WatchOptions, info, list, pd, pd_decode,
-    pd_save, read, select_device, stream, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
-    trigger_pd_settings, watch,
+    DetectOptions, PdRequestOptions, PdSettingsChange, StreamOptions, WatchOptions, detect, info,
+    list, pd, pd_decode, pd_save, read, select_device, stream, trigger_pd_list, trigger_pd_request,
+    trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport};
@@ -79,8 +81,11 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
             &mut std::io::stderr().lock(),
         );
     }
-    if let Command::Trigger { protocol } = &cli.command {
-        return run_trigger(cli, protocol);
+    if matches!(
+        cli.command,
+        Command::Trigger { .. } | Command::Detect { .. }
+    ) {
+        return run_pdm(cli);
     }
     if cli.transport == TransportKind::Sim {
         return run_sim(cli);
@@ -90,16 +95,17 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     match cli.transport {
         TransportKind::Sim => unreachable!("the simulator is handled above"),
         TransportKind::Bulk => with_transport(cli, BulkTransport::open(device)?),
-        TransportKind::Cdc => {
-            let serial = device.serial.as_deref().ok_or_else(|| {
-                CliError::NoDevice(
-                    "the meter reports no serial number; cannot find its CDC port".into(),
-                )
-            })?;
-            with_transport(cli, CdcTransport::open(serial)?)
-        }
+        TransportKind::Cdc => with_transport(cli, open_cdc(device)?),
         TransportKind::Hid => with_transport(cli, HidTransport::open(device.serial.as_deref())?),
     }
+}
+
+/// The meter's CDC pipe, found by its USB serial number.
+fn open_cdc(device: &DeviceEntry) -> Result<impl Transport, CliError> {
+    let serial = device.serial.as_deref().ok_or_else(|| {
+        CliError::NoDevice("the meter reports no serial number; cannot find its CDC port".into())
+    })?;
+    Ok(CdcTransport::open(serial)?)
 }
 
 /// `pd decode FILE`: decode a saved pdcap file; no device is opened.
@@ -115,26 +121,102 @@ fn decode_file(d: &PdDecode) -> Result<(), CliError> {
     )
 }
 
-/// `trigger`: open the meter's serial port (or, with `--transport sim`, the
-/// simulated meter with the charger `POWERZ_SIM_CHARGER` names) and run.
-fn run_trigger(cli: &Cli, protocol: &TriggerProtocol) -> Result<(), CliError> {
+/// `trigger` / `detect`: open the meter's serial port (or, with
+/// `--transport sim`, the simulated meter with the charger
+/// `POWERZ_SIM_CHARGER` names) and run.
+fn run_pdm(cli: &Cli) -> Result<(), CliError> {
     // Before any command reaches the meter: a Ctrl-C must never kill the
     // process between a high-voltage request and the return to 5 V and
-    // `pdm close`; it only sets the stop flag.
+    // `pdm close`; it only sets the stop flag. `detect` stays at 5 V but
+    // must still always end with `pdm close`.
     ctrl_c_flag()?;
     if cli.transport != TransportKind::Sim {
+        let hint = detect_hint(cli)?;
         let port = pdm::open_port(cli.device.as_deref())?;
-        return trigger_on(cli, protocol, port, SystemClock);
+        return pdm_on(cli, port, SystemClock, hint);
     }
     select_demo(cli)?;
+    let hint = detect_hint(cli)?;
     let charger = sim_charger()?;
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
         let sim = SimPdm::new(charger, clock.clone());
-        trigger_on(cli, protocol, sim.open_port(), clock)
+        pdm_on(cli, sim.open_port(), clock, hint)
     } else {
         let sim = SimPdm::new(charger, SimClock::new(SystemClock.now_ms()));
-        trigger_on(cli, protocol, sim.open_port(), SystemClock)
+        pdm_on(cli, sim.open_port(), SystemClock, hint)
+    }
+}
+
+/// `detect` only: the D+ / D- hint from one ADC snapshot over the binary
+/// protocol (`--transport`; the simulated meter's `--scenario` with
+/// `--transport sim`). `None` for `trigger`.
+fn detect_hint(cli: &Cli) -> Result<Option<Hint>, CliError> {
+    if !matches!(cli.command, Command::Detect { .. }) {
+        return Ok(None);
+    }
+    let a = match cli.transport {
+        TransportKind::Sim => {
+            if fake_sim_clock() {
+                let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+                let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+                adc_snapshot(cli, sim, clock)?
+            } else {
+                adc_snapshot(
+                    cli,
+                    SimDevice::new(Persona::Bulk, cli.scenario),
+                    SystemClock,
+                )?
+            }
+        }
+        kind => {
+            let devices = transport::discovery::list_devices()?;
+            let device = select_device(&devices, cli.device.as_deref())?;
+            match kind {
+                TransportKind::Cdc => adc_snapshot(cli, open_cdc(device)?, SystemClock)?,
+                TransportKind::Hid => adc_snapshot(
+                    cli,
+                    HidTransport::open(device.serial.as_deref())?,
+                    SystemClock,
+                )?,
+                _ => adc_snapshot(cli, BulkTransport::open(device)?, SystemClock)?,
+            }
+        }
+    };
+    Ok(Some(dpdm_hint(
+        volts_to_mv(a.dp_v()),
+        volts_to_mv(a.dm_v()),
+    )))
+}
+
+/// Volts to whole millivolts (negative readings clamp to 0).
+fn volts_to_mv(v: f64) -> u32 {
+    // The cast saturates; ADC volts are far below u32::MAX mV.
+    (v * 1000.0).round().max(0.0) as u32
+}
+
+/// One ADC snapshot on `t` (traced with `--trace`; CONNECT where needed).
+fn adc_snapshot<T: Transport, C: Clock>(
+    cli: &Cli,
+    t: T,
+    clock: C,
+) -> Result<AdcSnapshot, CliError> {
+    fn snap<T: Transport, C: Clock>(
+        cli: &Cli,
+        mut session: Session<T, C>,
+    ) -> Result<AdcSnapshot, CliError> {
+        if needs_connect(cli.transport) {
+            session.connect()?;
+        }
+        Ok(session.read_adc()?)
+    }
+    if cli.trace {
+        snap(
+            cli,
+            Session::with_clock(TraceTransport::new(t, std::io::stderr()), clock),
+        )
+    } else {
+        snap(cli, Session::with_clock(t, clock))
     }
 }
 
@@ -163,17 +245,60 @@ fn sim_charger() -> Result<SimCharger, CliError> {
 }
 
 /// Wrap `port` for `--trace` if asked, open the PDM session and run.
-fn trigger_on<P: Read + Write, C: Clock>(
+fn pdm_on<P: Read + Write, C: Clock>(
     cli: &Cli,
-    protocol: &TriggerProtocol,
     port: P,
     clock: C,
+    hint: Option<Hint>,
 ) -> Result<(), CliError> {
     if cli.trace {
         let port = TracePort::new(port, std::io::stderr());
-        run_trigger_session(protocol, PdmSession::open_with_clock(port, clock)?)
+        run_pdm_session(
+            &cli.command,
+            PdmSession::open_with_clock(port, clock)?,
+            hint,
+        )
     } else {
-        run_trigger_session(protocol, PdmSession::open_with_clock(port, clock)?)
+        run_pdm_session(
+            &cli.command,
+            PdmSession::open_with_clock(port, clock)?,
+            hint,
+        )
+    }
+}
+
+/// Run `trigger` or `detect` on an open PDM session.
+fn run_pdm_session<P: Read + Write, C: Clock>(
+    command: &Command,
+    session: PdmSession<P, C>,
+    hint: Option<Hint>,
+) -> Result<(), CliError> {
+    match command {
+        Command::Trigger { protocol } => run_trigger_session(protocol, session),
+        Command::Detect {
+            list,
+            list_plus,
+            stall_secs,
+            json,
+        } => {
+            let opts = DetectOptions {
+                list: *list || *list_plus,
+                plus: *list_plus,
+                stall_limit: Duration::from_secs(*stall_secs),
+                json: *json,
+            };
+            // Always computed for `detect` (see `detect_hint`); D+ / D- at
+            // 0 V only if it somehow was not.
+            let hint = hint.unwrap_or_else(|| dpdm_hint(0, 0));
+            detect(
+                session,
+                &opts,
+                &hint,
+                &stop_flag(),
+                &mut std::io::stdout().lock(),
+            )
+        }
+        _ => unreachable!("only trigger and detect use the PDM session"),
     }
 }
 
@@ -210,7 +335,7 @@ fn run_trigger_session<P: Read + Write, C: Clock>(
                 hold: hold.map_or(Duration::MAX, Duration::from_secs),
                 json: *json,
             };
-            // Ctrl-C (handler installed by run_trigger) ends the hold early;
+            // Ctrl-C (handler installed by run_pdm) ends the hold early;
             // the meter still goes back to 5 V.
             let stop = stop_flag();
             let mut hold = |d: Duration| sleep_unless_stopped(d, &stop);
@@ -343,7 +468,9 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
     let mut out = std::io::stdout().lock();
     match &cli.command {
         Command::List { .. } => unreachable!("list is handled before opening a device"),
-        Command::Trigger { .. } => unreachable!("trigger is handled before opening a device"),
+        Command::Trigger { .. } | Command::Detect { .. } => {
+            unreachable!("trigger and detect are handled before opening a device")
+        }
         Command::Info { json } => info(&mut session, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
         Command::Watch { interval } => {

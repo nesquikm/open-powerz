@@ -33,7 +33,7 @@ The library, the command line tool and the desktop app report which charging pro
 
 ## Technical Design
 
-A detect module on the PDM session handles the per-command reply forms and the stall timer. The hint table is a pure lookup on the measured D+ and D- voltages, with ranges taken from the vendor manual.
+A detect module on the PDM session handles the per-command reply forms and the stall timer. The hint table is a pure lookup on the measured D+ and D- voltages, with ranges taken from the vendor manual. A list is also cut off with `reset` after 64 entries, and the CLI warns that the meter's own probing may raise VBUS.
 
 ## Testing
 
@@ -41,4 +41,4 @@ Simulator tests for every reply form and the stall timeout, unit tests for the h
 
 ## Notes
 
-Session 2: entry bc replied only ok, entry apple replied fail on a non-Apple charger, and entry list stalled after vfcp:null until reset.
+Session 2: entry bc replied only ok, entry apple replied fail on a non-Apple charger, and entry list stalled after vfcp:null until reset. How a full list ends is unknown, so a list is always reported incomplete until hardware shows its end.

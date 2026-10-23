@@ -526,6 +526,15 @@ as a sink and ask a charger for a voltage. [doc] [static] [device]
   emulation) makes the meter enter EPR by itself. [device]
 - A protocol the charger lacks answers `ok` then `timeout` (UFCS: three
   `timeout` lines). [device]
+- Detection: `entry bc` and `entry apple` answer `true` or `false` [doc];
+  on the device `entry bc` answered only `ok` (read as unknown) and
+  `entry apple` answered `fail` on a non-Apple charger (not supported).
+  `entry list` (and `entry list+`, which adds VOOC and MTK PE and needs a
+  load [doc]) prints `starting`, then one `<protocol>:<true|null>
+  [<mV>mV,<mA>mA]` line per protocol, and then went silent for 45 s; `reset`
+  ends it with `ok`. How a full list ends is not known yet. [device]
+- The meter's own probing during `entry list` may raise VBUS on some
+  chargers, so nothing that cannot take it belongs on the output. [inferred]
 - The `ufcs:`, `scp:`, `vfcp:` and `tfcp:` block layouts come from the vendor
   app only. [static]
 

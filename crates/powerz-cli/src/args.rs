@@ -136,6 +136,24 @@ pub enum Command {
         #[command(subcommand)]
         protocol: TriggerProtocol,
     },
+    /// Detect the charger's fast-charging protocols (BC1.2, Apple, and the
+    /// automatic list on request); never raises VBUS above 5 V.
+    Detect {
+        /// Also run the automatic protocol list (`entry list`).
+        #[arg(long, conflicts_with = "list_plus")]
+        list: bool,
+        /// Run the extended list (`entry list+`, adds VOOC / MTK PE; needs a
+        /// dummy load) instead.
+        #[arg(long)]
+        list_plus: bool,
+        /// Seconds of silence after which the list ends with `reset`.
+        #[arg(long, value_name = "N", default_value_t = 45,
+              value_parser = clap::value_parser!(u64).range(1..))]
+        stall_secs: u64,
+        /// Print one JSON object instead of labelled lines.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `trigger` protocols.
@@ -222,6 +240,7 @@ impl Command {
             Command::Stream { .. } => "stream",
             Command::Pd { .. } => "pd",
             Command::Trigger { .. } => "trigger",
+            Command::Detect { .. } => "detect",
         }
     }
 }
@@ -340,7 +359,11 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
     // `trigger` talks to the meter's serial port whatever `--transport` says
     // (bulk / cdc / sim); HID has no text session.
-    if matches!(cli.command, Command::Trigger { .. }) && cli.transport != TransportKind::Hid {
+    if matches!(
+        cli.command,
+        Command::Trigger { .. } | Command::Detect { .. }
+    ) && cli.transport != TransportKind::Hid
+    {
         return Ok(());
     }
     if cli.transport == TransportKind::Hid && !hid_ok {
@@ -390,6 +413,16 @@ mod tests {
             } => Ok(action),
             other => panic!("parsed {other:?}"),
         }
+    }
+
+    // ---- AC-DGSQ6R.4: a stall limit of zero would end every list at once ----
+
+    #[test]
+    fn stall_secs_must_be_at_least_one() {
+        let parse =
+            |v: &str| Cli::try_parse_from(["powerz", "detect", "--list", "--stall-secs", v]);
+        assert!(parse("0").is_err());
+        assert!(parse("1").is_ok());
     }
 
     // ---- AC-DGSQ6P.6: a request holds until Ctrl-C unless --hold is given ----

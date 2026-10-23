@@ -13,9 +13,11 @@
 //! - [`session`]: the paced session with high-voltage confirmation.
 //! - [`port`]: finding the meter's serial port.
 //! - [`pd`]: USB PD triggering (offers, requests, hard reset, settings).
+//! - [`detect`]: charger protocol detection and the D+ / D- hint table.
 
 pub mod caps;
 pub mod command;
+pub mod detect;
 pub mod pd;
 pub mod port;
 pub mod reply;

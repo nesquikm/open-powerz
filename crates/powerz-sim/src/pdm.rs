@@ -156,6 +156,8 @@ struct State {
     port_open: bool,
     pdm_active: bool,
     pd_entered: bool,
+    /// `entry list` / `entry list+` stalled: silent until `reset`. [device]
+    listing: bool,
     vbus_mv: u32,
     /// What `pdm parm` reports; `pdm set` replaces it. \[device\] default
     parm: String,
@@ -174,9 +176,14 @@ impl State {
             }
             return Vec::new();
         }
+        if self.listing && !text.starts_with("reset") && !text.starts_with("pdm close") {
+            // Stalled after the list: nothing answers but `reset`. [device]
+            return Vec::new();
+        }
         if text.starts_with("pdm open") {
             self.pdm_open()
         } else if text.starts_with("pdm close") {
+            self.listing = false;
             self.pdm_active = false;
             self.pd_entered = false;
             self.vbus_mv = VBUS_OFF_MV;
@@ -190,6 +197,7 @@ impl State {
         } else if text.starts_with("reset") {
             // Detach; Rd kept, VBUS back to 5 V.
             self.pd_entered = false;
+            self.listing = false;
             self.vbus_mv = VBUS_5V_MV;
             b"ok\n".to_vec()
         } else if let Some(rest) = text.strip_prefix("entry ") {
@@ -234,6 +242,11 @@ impl State {
             "vfcp" => b"ok\nready\n".to_vec(),
             "apple" => b"fail\n".to_vec(),
             "bc" => b"ok\n".to_vec(),
+            // Session 2 on the 140 W charger, then silence. [device]
+            "list" | "list+" => {
+                self.listing = true;
+                b"starting\nbc1.2:true 5203mV,0mA\nufcs:null\nvfcp:null\n".to_vec()
+            }
             _ => Vec::new(),
         }
     }
@@ -343,6 +356,7 @@ impl SimPdm {
                 port_open: false,
                 pdm_active: false,
                 pd_entered: false,
+                listing: false,
                 vbus_mv: 0,
                 parm: DEFAULT_PARM.to_string(),
                 writes: Vec::new(),
