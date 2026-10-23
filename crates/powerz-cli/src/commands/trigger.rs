@@ -1,0 +1,458 @@
+//! `powerz trigger pd ...` (FR DGSQ6P): USB PD triggering through the
+//! meter's PDM text session on its virtual serial port.
+
+use std::io::{Read, Write};
+use std::time::Duration;
+
+use powerz_protocol::pdm::pd::{
+    self, Emarker, Offer, OfferKind, PdSettings, PdType, Reading, Request, RequestOutcome, SinkCaps,
+};
+use powerz_protocol::pdm::{HighVoltageConfirmation, PdmSession, Risk};
+use powerz_protocol::session::Clock;
+
+use crate::error::CliError;
+use crate::output::write_json;
+
+/// `powerz trigger pd list`: `entry pd`, then the charger's offers decoded,
+/// one line per position (or one JSON object with `epr` and `offers`).
+pub fn trigger_pd_list<P: Read + Write, C: Clock>(
+    mut session: PdmSession<P, C>,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let negotiation = pd::enter(&mut session)?;
+    session.close()?;
+    write_offers(&negotiation.offers, json, out)
+}
+
+/// `powerz trigger pd reset`: `entry pd`, then `pd hrst`; print the offers
+/// of the renegotiation and VBUS once ready (back at 5 V), and close the
+/// session, on error too.
+pub fn trigger_pd_reset<P: Read + Write, C: Clock>(
+    mut session: PdmSession<P, C>,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    // A failed `entry pd` drops the session, which sends `pdm close`.
+    pd::enter(&mut session)?;
+    let result = pd::hard_reset(&mut session).map_err(CliError::from);
+    let negotiation = close_after(session, result)?;
+    let vbus = negotiation.vbus;
+    if json {
+        let mut v = offers_json(&negotiation.offers);
+        v["vbus_mv"] = vbus.voltage_mv.into();
+        v["vbus_ma"] = vbus.current_ma.into();
+        return write_json(out, &v);
+    }
+    write_offers(&negotiation.offers, false, out)?;
+    writeln!(out, "VBUS     {}", volts_amps(&vbus))?;
+    Ok(())
+}
+
+/// `powerz trigger pd settings` changes, by name; `None` keeps the current value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PdSettingsChange<'a> {
+    /// `--type`.
+    pub pd_type: Option<&'a str>,
+    /// `--em`.
+    pub emarker: Option<&'a str>,
+    /// `--sink`.
+    pub sink: Option<&'a str>,
+}
+
+/// `powerz trigger pd settings`: `pdm parm`, then (when a flag is given)
+/// `pdm set` with the changed values and `pdm parm` again; print the
+/// settings by name and close the session, on error too.
+pub fn trigger_pd_settings<P: Read + Write, C: Clock>(
+    mut session: PdmSession<P, C>,
+    change: &PdSettingsChange<'_>,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    // Names are checked before anything is sent.
+    let pd_type = change
+        .pd_type
+        .map(|n| named(n, PdType::from_name))
+        .transpose()?;
+    let emarker = change
+        .emarker
+        .map(|n| named(n, Emarker::from_name))
+        .transpose()?;
+    let sink = change
+        .sink
+        .map(|n| named(n, SinkCaps::from_name))
+        .transpose()?;
+    let result = (|| -> Result<PdSettings, CliError> {
+        let current = pd::read_settings(&mut session)?;
+        if pd_type.is_none() && emarker.is_none() && sink.is_none() {
+            return Ok(current);
+        }
+        // A reserved e-marker code is never written, not even back: its
+        // firmware effect is unknown. [static]
+        if emarker.is_none() && current.emarker.name().starts_with("reserved") {
+            return Err(CliError::Usage(format!(
+                "the meter's e-marker emulation is {}; pass --em to choose a known value",
+                current.emarker.name()
+            )));
+        }
+        let want = PdSettings {
+            pd_type: pd_type.unwrap_or(current.pd_type),
+            emarker: emarker.unwrap_or(current.emarker),
+            sink: sink.unwrap_or(current.sink),
+        };
+        Ok(pd::write_settings(&mut session, &want)?)
+    })();
+    let settings = close_after(session, result)?;
+    write_settings(&settings, json, out)
+}
+
+/// Close `session` whatever `result` is; the first error wins.
+fn close_after<T, P: Read + Write, C: Clock>(
+    session: PdmSession<P, C>,
+    result: Result<T, CliError>,
+) -> Result<T, CliError> {
+    let closed = session.close();
+    let value = result?;
+    closed?;
+    Ok(value)
+}
+
+/// The value named `name`, or a usage error.
+fn named<T>(name: &str, from_name: fn(&str) -> Option<T>) -> Result<T, CliError> {
+    from_name(name).ok_or_else(|| CliError::Usage(format!("unknown value {name:?}")))
+}
+
+/// The settings by name, as labelled lines or `{"type", "em", "sink"}`.
+fn write_settings(s: &PdSettings, json: bool, out: &mut dyn Write) -> Result<(), CliError> {
+    if json {
+        return write_json(
+            out,
+            &serde_json::json!({
+                "type": s.pd_type.name(),
+                "em": s.emarker.name(),
+                "sink": s.sink.name(),
+            }),
+        );
+    }
+    writeln!(out, "Type      {}", s.pd_type.name())?;
+    writeln!(out, "E-marker  {}", s.emarker.name())?;
+    writeln!(out, "Sink      {}", s.sink.name())?;
+    Ok(())
+}
+
+/// `powerz trigger pd request` options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PdRequestOptions {
+    /// Object position.
+    pub position: u8,
+    /// Voltage for a PPS / AVS offer, mV.
+    pub voltage_mv: Option<u32>,
+    /// Current, mA.
+    pub current_ma: Option<u32>,
+    /// `--allow-high-voltage` was given.
+    pub allow_high_voltage: bool,
+    /// How long to hold the voltage before returning to 5 V.
+    pub hold: Duration,
+    /// Print JSON.
+    pub json: bool,
+}
+
+/// `powerz trigger pd request`: `entry pd`, validate and send the request
+/// (above 5 V only with `--allow-high-voltage`), report the `req:` /
+/// `ready:` replies, hold, then return to 5 V (`pd req=1`) and close the
+/// session, on error too.
+pub fn trigger_pd_request<P: Read + Write, C: Clock>(
+    mut session: PdmSession<P, C>,
+    opts: &PdRequestOptions,
+    hold: &mut dyn FnMut(Duration),
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let request = request_of(opts)?;
+    // A failed `entry pd` drops the session, which sends `pdm close`.
+    let offers = pd::enter(&mut session)?.offers;
+    let result = request_and_hold(&mut session, &offers, &request, opts, hold, out);
+    let back = return_to_5v(&mut session, &offers);
+    // A failed return to 5 V outranks the request's own error: it is the
+    // one that says VBUS may still be high.
+    let result = match back {
+        Err(e) => Err(e),
+        Ok(()) => result,
+    };
+    close_after(session, result)
+}
+
+/// Back to 5 V whatever happened: `pd req=1` (a 5 V request needs no
+/// confirmation); if that fails, a Hard Reset, which also ends at 5 V.
+/// When both fail, say loudly that VBUS may still be high.
+fn return_to_5v<P: Read + Write, C: Clock>(
+    session: &mut PdmSession<P, C>,
+    offers: &[Offer],
+) -> Result<(), CliError> {
+    let to_5v = Request::Fixed {
+        position: 1,
+        current_ma: None,
+    };
+    let Err(first) = pd::request(session, offers, &to_5v, None) else {
+        return Ok(());
+    };
+    match pd::hard_reset(session) {
+        Ok(_) => {
+            eprintln!("warning: return to 5 V failed ({first}); sent a Hard Reset instead");
+            Ok(())
+        }
+        Err(second) => {
+            eprintln!(
+                "WARNING: could not return the charger to 5 V ({first}; Hard Reset: {second}). \
+                 VBUS may still be above 5 V: unplug the charger from the meter."
+            );
+            Err(CliError::Device(format!(
+                "could not return the charger to 5 V ({first}; Hard Reset: {second}); \
+                 VBUS may still be above 5 V"
+            )))
+        }
+    }
+}
+
+/// The library request for the command-line options.
+fn request_of(opts: &PdRequestOptions) -> Result<Request, CliError> {
+    match (opts.voltage_mv, opts.current_ma) {
+        (Some(voltage_mv), Some(current_ma)) => Ok(Request::Programmable {
+            position: opts.position,
+            voltage_mv,
+            current_ma,
+        }),
+        (Some(_), None) => Err(CliError::Usage(
+            "--voltage-mv needs --current-ma as well".into(),
+        )),
+        (None, current_ma) => Ok(Request::Fixed {
+            position: opts.position,
+            current_ma,
+        }),
+    }
+}
+
+/// Validate, check the high-voltage flag, send, report and hold.
+fn request_and_hold<P: Read + Write, C: Clock>(
+    session: &mut PdmSession<P, C>,
+    offers: &[Offer],
+    request: &Request,
+    opts: &PdRequestOptions,
+    hold: &mut dyn FnMut(Duration),
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let command = pd::validate(offers, request)?;
+    let confirmation = if session.risk(&command) == Risk::Above5V {
+        if !opts.allow_high_voltage {
+            return Err(CliError::Usage(format!(
+                "`{}` can raise VBUS above 5 V; pass --allow-high-voltage to send it",
+                String::from_utf8_lossy(&command.render())
+            )));
+        }
+        Some(HighVoltageConfirmation::for_command(&command))
+    } else {
+        None
+    };
+    let outcome = pd::request(session, offers, request, confirmation)?;
+    write_outcome(&outcome, opts.json, out)?;
+    if !opts.hold.is_zero() {
+        hold(opts.hold);
+    }
+    Ok(())
+}
+
+/// The command and the `req:` / `ready:` readings, as lines or JSON.
+fn write_outcome(o: &RequestOutcome, json: bool, out: &mut dyn Write) -> Result<(), CliError> {
+    let command = String::from_utf8_lossy(&o.command.render()).into_owned();
+    if json {
+        return write_json(
+            out,
+            &serde_json::json!({
+                "command": command,
+                "requested_mv": o.requested.voltage_mv,
+                "requested_ma": o.requested.current_ma,
+                "delivered_mv": o.delivered.voltage_mv,
+                "delivered_ma": o.delivered.current_ma,
+            }),
+        );
+    }
+    writeln!(out, "Command    {command}")?;
+    writeln!(out, "Requested  {}", volts_amps(&o.requested))?;
+    writeln!(out, "Delivered  {}", volts_amps(&o.delivered))?;
+    Ok(())
+}
+
+/// The offers as a table, or as `{"epr": bool, "offers": [...]}`.
+fn write_offers(offers: &[Offer], json: bool, out: &mut dyn Write) -> Result<(), CliError> {
+    if json {
+        return write_json(out, &offers_json(offers));
+    }
+    let epr = pd::epr_entered(offers);
+    writeln!(out, "EPR mode: {}", if epr { "yes" } else { "no" })?;
+    writeln!(out, "Pos  Type      Voltage          Maximum")?;
+    for o in offers {
+        writeln!(
+            out,
+            "{:>3}  {:<8}  {:<15}  {}",
+            o.position,
+            kind_label(o.kind),
+            voltage_text(o),
+            limit_text(o)
+        )?;
+    }
+    Ok(())
+}
+
+/// `{"epr": bool, "offers": [...]}`.
+fn offers_json(offers: &[Offer]) -> serde_json::Value {
+    let list: Vec<serde_json::Value> = offers
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "position": o.position,
+                "kind": o.kind.name(),
+                "min_voltage_mv": o.min_voltage_mv,
+                "max_voltage_mv": o.max_voltage_mv,
+                "max_current_ma": o.max_current_ma,
+                "max_power_mw": o.max_power_mw,
+            })
+        })
+        .collect();
+    serde_json::json!({ "epr": pd::epr_entered(offers), "offers": list })
+}
+
+/// Display name of an offer kind.
+fn kind_label(kind: OfferKind) -> &'static str {
+    match kind {
+        OfferKind::Fixed => "Fixed",
+        OfferKind::Battery => "Battery",
+        OfferKind::Variable => "Variable",
+        OfferKind::Pps => "PPS",
+        OfferKind::SprAvs => "SPR AVS",
+        OfferKind::EprAvs => "EPR AVS",
+    }
+}
+
+/// "5.00 V" for a fixed offer, "15.00-28.00 V" for a range.
+fn voltage_text(o: &Offer) -> String {
+    if o.min_voltage_mv == o.max_voltage_mv {
+        format!("{} V", two_decimals(o.max_voltage_mv))
+    } else {
+        format!(
+            "{}-{} V",
+            two_decimals(o.min_voltage_mv),
+            two_decimals(o.max_voltage_mv)
+        )
+    }
+}
+
+/// "3.00 A" for a current limit, "140 W" for a power limit.
+fn limit_text(o: &Offer) -> String {
+    match (o.max_current_ma, o.max_power_mw) {
+        (Some(ma), _) => format!("{} A", two_decimals(ma)),
+        (None, Some(mw)) if mw % 1000 == 0 => format!("{} W", mw / 1000),
+        (None, Some(mw)) => format!("{} W", two_decimals(mw)),
+        (None, None) => String::new(),
+    }
+}
+
+/// "5.16 V  0.00 A".
+fn volts_amps(r: &Reading) -> String {
+    format!(
+        "{} V  {} A",
+        two_decimals(r.voltage_mv),
+        two_decimals(r.current_ma)
+    )
+}
+
+/// Milli-units as "x.yy".
+fn two_decimals(milli: u32) -> String {
+    format!("{}.{:02}", milli / 1000, (milli % 1000) / 10)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use powerz_sim::{SimCharger, SimClock, SimPdm, SimPdmPort};
+
+    /// A sim port whose meter stays silent on `pd req=1`.
+    struct SilentOnReturn(SimPdmPort);
+
+    impl Read for SilentOnReturn {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl Write for SilentOnReturn {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf == b"pd req=1" {
+                return Ok(buf.len());
+            }
+            self.0.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    // ---- AC-DGSQ6P.4: a reserved e-marker code is never written back ----
+
+    #[test]
+    fn reserved_current_emarker_is_not_written_back() {
+        use powerz_protocol::pdm::Command;
+        let clock = SimClock::new(1_790_000_000_000);
+        let sim = SimPdm::new(SimCharger::Epr140W, clock.clone());
+        let mut session = PdmSession::open_with_clock(sim.open_port(), clock).expect("open");
+        // Someone else left the meter on reserved code 4.
+        session
+            .send(&Command::PdmSet {
+                ty: 0,
+                em: 4,
+                sink: 0,
+            })
+            .unwrap();
+        let change = PdSettingsChange {
+            sink: Some("pps-5a"),
+            ..PdSettingsChange::default()
+        };
+        let err = trigger_pd_settings(session, &change, false, &mut Vec::new()).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
+        let sets = sim
+            .writes()
+            .iter()
+            .filter(|w| w.starts_with("pdm set"))
+            .count();
+        assert_eq!(sets, 1, "only the test's own pdm set: {:?}", sim.writes());
+        assert_eq!(sim.writes().last().map(String::as_str), Some("pdm close"));
+    }
+
+    // ---- AC-DGSQ6P.6: the meter always ends at 5 V ----
+
+    #[test]
+    fn failed_return_to_5v_falls_back_to_a_hard_reset() {
+        let clock = SimClock::new(1_790_000_000_000);
+        let sim = SimPdm::new(SimCharger::Epr140W, clock.clone());
+        let session =
+            PdmSession::open_with_clock(SilentOnReturn(sim.open_port()), clock).expect("open");
+        let opts = PdRequestOptions {
+            position: 4,
+            voltage_mv: None,
+            current_ma: None,
+            allow_high_voltage: true,
+            hold: Duration::ZERO,
+            json: false,
+        };
+        let mut out = Vec::new();
+        trigger_pd_request(session, &opts, &mut |_| {}, &mut out).expect("ends at 5 V");
+        let writes = sim.writes();
+        let tail: Vec<&str> = writes
+            .iter()
+            .rev()
+            .take(2)
+            .rev()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(tail, ["pd hrst", "pdm close"], "{writes:?}");
+        assert!(sim.vbus_mv() < 5500, "VBUS {} mV", sim.vbus_mv());
+    }
+}

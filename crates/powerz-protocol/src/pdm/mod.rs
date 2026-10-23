@@ -12,9 +12,11 @@
 //! - [`risk`]: the pure risk classifier (read-only / ≤ 5 V / > 5 V).
 //! - [`session`]: the paced session with high-voltage confirmation.
 //! - [`port`]: finding the meter's serial port.
+//! - [`pd`]: USB PD triggering (offers, requests, hard reset, settings).
 
 pub mod caps;
 pub mod command;
+pub mod pd;
 pub mod port;
 pub mod reply;
 pub mod risk;

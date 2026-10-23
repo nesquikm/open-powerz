@@ -1,6 +1,6 @@
 //! [`CliError`]: a CLI failure and its process exit code.
 
-use powerz_protocol::{session, transport};
+use powerz_protocol::{pdm, session, transport};
 
 /// A CLI failure, carrying its exit code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +55,29 @@ impl From<transport::Error> for CliError {
             transport::Error::Permission(_) => CliError::Permission(e.to_string()),
             transport::Error::NotFound => CliError::NoDevice(e.to_string()),
             other => CliError::Device(other.to_string()),
+        }
+    }
+}
+
+impl From<pdm::Error> for CliError {
+    fn from(e: pdm::Error) -> Self {
+        match e {
+            pdm::Error::NotFound => CliError::NoDevice(e.to_string()),
+            pdm::Error::Ambiguous { .. } | pdm::Error::HighVoltageNotConfirmed { .. } => {
+                CliError::Usage(e.to_string())
+            }
+            other => CliError::Device(other.to_string()),
+        }
+    }
+}
+
+impl From<pdm::pd::Error> for CliError {
+    fn from(e: pdm::pd::Error) -> Self {
+        match e {
+            pdm::pd::Error::Pdm(p) => p.into(),
+            pdm::pd::Error::BadSettings { .. } => CliError::Device(e.to_string()),
+            // Request validation: the user asked for something not offered.
+            other => CliError::Usage(other.to_string()),
         }
     }
 }

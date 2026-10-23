@@ -1,27 +1,34 @@
 //! Running a parsed command line against real devices: discovery, device
 //! selection, opening the chosen pipe, Ctrl-C and exit codes.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use powerz_protocol::frame;
+use powerz_protocol::pdm::{self, PdmSession};
 use powerz_protocol::session::{Clock, Session, SystemClock};
 use powerz_protocol::transport::bulk::BulkTransport;
 use powerz_protocol::transport::cdc::CdcTransport;
 use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C};
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
-use powerz_sim::{FaultPlan, PdScenario, Persona, SIM_SERIAL, SimClock, SimDevice};
+use powerz_sim::{
+    FaultPlan, PdScenario, Persona, SIM_SERIAL, SimCharger, SimClock, SimDevice, SimPdm,
+};
 
-use crate::args::{Cli, Command, PdDecode, TransportKind, needs_connect, rate_from_sps, validate};
+use crate::args::{
+    Cli, Command, PdAction, PdDecode, TransportKind, TriggerProtocol, needs_connect, rate_from_sps,
+    validate,
+};
 use crate::commands::{
-    StreamOptions, WatchOptions, info, list, pd, pd_decode, pd_save, read, select_device, stream,
-    watch,
+    PdRequestOptions, PdSettingsChange, StreamOptions, WatchOptions, info, list, pd, pd_decode,
+    pd_save, read, select_device, stream, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
+    trigger_pd_settings, watch,
 };
 use crate::error::CliError;
-use crate::trace::TraceTransport;
+use crate::trace::{TracePort, TraceTransport};
 
 /// Run the parsed command line against real devices; returns the exit code.
 pub fn run(cli: Cli) -> i32 {
@@ -72,6 +79,9 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
             &mut std::io::stderr().lock(),
         );
     }
+    if let Command::Trigger { protocol } = &cli.command {
+        return run_trigger(cli, protocol);
+    }
     if cli.transport == TransportKind::Sim {
         return run_sim(cli);
     }
@@ -105,18 +115,137 @@ fn decode_file(d: &PdDecode) -> Result<(), CliError> {
     )
 }
 
+/// `trigger`: open the meter's serial port (or, with `--transport sim`, the
+/// simulated meter with the charger `POWERZ_SIM_CHARGER` names) and run.
+fn run_trigger(cli: &Cli, protocol: &TriggerProtocol) -> Result<(), CliError> {
+    // Before any command reaches the meter: a Ctrl-C must never kill the
+    // process between a high-voltage request and the return to 5 V and
+    // `pdm close`; it only sets the stop flag.
+    ctrl_c_flag()?;
+    if cli.transport != TransportKind::Sim {
+        let port = pdm::open_port(cli.device.as_deref())?;
+        return trigger_on(cli, protocol, port, SystemClock);
+    }
+    select_demo(cli)?;
+    let charger = sim_charger()?;
+    if fake_sim_clock() {
+        let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+        let sim = SimPdm::new(charger, clock.clone());
+        trigger_on(cli, protocol, sim.open_port(), clock)
+    } else {
+        let sim = SimPdm::new(charger, SimClock::new(SystemClock.now_ms()));
+        trigger_on(cli, protocol, sim.open_port(), SystemClock)
+    }
+}
+
+/// `--device`, when given, must name the demo device's synthetic serial.
+fn select_demo(cli: &Cli) -> Result<(), CliError> {
+    let demo = [demo_entry()];
+    select_device(&demo, cli.device.as_deref())?;
+    Ok(())
+}
+
+/// `POWERZ_SIM_CLOCK=fake` (test-only): run the simulator on a fake clock.
+fn fake_sim_clock() -> bool {
+    std::env::var("POWERZ_SIM_CLOCK").as_deref() == Ok("fake")
+}
+
+/// Honour `POWERZ_SIM_CHARGER=<name>` (test-only): `epr-140w` (default)
+/// or `pps-65w`.
+fn sim_charger() -> Result<SimCharger, CliError> {
+    match std::env::var("POWERZ_SIM_CHARGER").as_deref() {
+        Err(_) | Ok("epr-140w") => Ok(SimCharger::Epr140W),
+        Ok("pps-65w") => Ok(SimCharger::Pps65W),
+        Ok(other) => Err(CliError::Usage(format!(
+            "invalid POWERZ_SIM_CHARGER {other:?}: expected epr-140w or pps-65w"
+        ))),
+    }
+}
+
+/// Wrap `port` for `--trace` if asked, open the PDM session and run.
+fn trigger_on<P: Read + Write, C: Clock>(
+    cli: &Cli,
+    protocol: &TriggerProtocol,
+    port: P,
+    clock: C,
+) -> Result<(), CliError> {
+    if cli.trace {
+        let port = TracePort::new(port, std::io::stderr());
+        run_trigger_session(protocol, PdmSession::open_with_clock(port, clock)?)
+    } else {
+        run_trigger_session(protocol, PdmSession::open_with_clock(port, clock)?)
+    }
+}
+
+/// Run one `trigger` action on an open PDM session.
+fn run_trigger_session<P: Read + Write, C: Clock>(
+    protocol: &TriggerProtocol,
+    session: PdmSession<P, C>,
+) -> Result<(), CliError> {
+    let mut out = std::io::stdout().lock();
+    match protocol {
+        TriggerProtocol::Pd {
+            action: PdAction::List { json },
+        } => trigger_pd_list(session, *json, &mut out),
+        TriggerProtocol::Pd {
+            action: PdAction::Reset { json },
+        } => trigger_pd_reset(session, *json, &mut out),
+        TriggerProtocol::Pd {
+            action:
+                PdAction::Request {
+                    position,
+                    voltage_mv,
+                    current_ma,
+                    allow_high_voltage,
+                    hold,
+                    json,
+                },
+        } => {
+            let opts = PdRequestOptions {
+                position: *position,
+                voltage_mv: *voltage_mv,
+                current_ma: *current_ma,
+                allow_high_voltage: *allow_high_voltage,
+                // No --hold: hold until Ctrl-C.
+                hold: hold.map_or(Duration::MAX, Duration::from_secs),
+                json: *json,
+            };
+            // Ctrl-C (handler installed by run_trigger) ends the hold early;
+            // the meter still goes back to 5 V.
+            let stop = stop_flag();
+            let mut hold = |d: Duration| sleep_unless_stopped(d, &stop);
+            trigger_pd_request(session, &opts, &mut hold, &mut out)
+        }
+        TriggerProtocol::Pd {
+            action:
+                PdAction::Settings {
+                    pd_type,
+                    em,
+                    sink,
+                    json,
+                },
+        } => {
+            let change = PdSettingsChange {
+                pd_type: pd_type.as_deref(),
+                emarker: em.as_deref(),
+                sink: sink.as_deref(),
+            };
+            trigger_pd_settings(session, &change, *json, &mut out)
+        }
+    }
+}
+
 /// `--transport sim`: open the demo device (bulk persona, `--scenario`)
 /// without touching USB; `--device` must name its synthetic serial.
 fn run_sim(cli: &Cli) -> Result<(), CliError> {
-    let demo = [demo_entry()];
-    select_device(&demo, cli.device.as_deref())?;
+    select_demo(cli)?;
     let faults = sim_faults()?;
     // `pd` on the demo device plays the PD capture scenario.
     let with_pd = |sim: SimDevice| match cli.command {
         Command::Pd { .. } => sim.with_pd_scenario(PdScenario::Negotiation),
         _ => sim,
     };
-    if std::env::var("POWERZ_SIM_CLOCK").as_deref() == Ok("fake") {
+    if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
         let sim = with_pd(SimDevice::with_clock(
             Persona::Bulk,
@@ -214,6 +343,7 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
     let mut out = std::io::stdout().lock();
     match &cli.command {
         Command::List { .. } => unreachable!("list is handled before opening a device"),
+        Command::Trigger { .. } => unreachable!("trigger is handled before opening a device"),
         Command::Info { json } => info(&mut session, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
         Command::Watch { interval } => {
@@ -279,13 +409,16 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
 /// long `watch --interval` still honours Ctrl-C promptly.
 fn sleep_unless_stopped(d: Duration, stop: &AtomicBool) {
     const SLICE: Duration = Duration::from_millis(50);
-    let deadline = std::time::Instant::now() + d;
+    // `None`: no deadline (a hold until Ctrl-C), not an overflow panic.
+    let deadline = std::time::Instant::now().checked_add(d);
     while !stop.load(Ordering::SeqCst) {
         let now = std::time::Instant::now();
-        if now >= deadline {
-            return;
-        }
-        std::thread::sleep(SLICE.min(deadline - now));
+        let slice = match deadline {
+            Some(deadline) if now >= deadline => return,
+            Some(deadline) => SLICE.min(deadline - now),
+            None => SLICE,
+        };
+        std::thread::sleep(slice);
     }
 }
 
@@ -353,6 +486,15 @@ mod tests {
         let stop = AtomicBool::new(true);
         let t = std::time::Instant::now();
         sleep_unless_stopped(Duration::from_secs(10), &stop);
+        assert!(t.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn hold_until_ctrl_c_ends_at_once_when_stopped() {
+        // `--hold` left out holds without a deadline; that must not overflow.
+        let stop = AtomicBool::new(true);
+        let t = std::time::Instant::now();
+        sleep_unless_stopped(Duration::MAX, &stop);
         assert!(t.elapsed() < Duration::from_millis(200));
     }
 

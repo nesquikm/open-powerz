@@ -42,6 +42,7 @@ fn powerz(target: Target) -> Command {
         "POWERZ_SIM_CLOCK",
         "POWERZ_SIM_FAULT",
         "POWERZ_SIM_CTRL_C_AFTER",
+        "POWERZ_SIM_CHARGER",
     ] {
         c.env_remove(k);
     }
@@ -127,6 +128,59 @@ fn flow_stream_5s(target: Target) {
         "{rows} rows, want 250 ± 5% (50 SPS × 5 s)"
     );
     let _ = std::fs::remove_file(&csv);
+}
+
+/// AC-DGSQ6P.7 ladder: 9, 15, 20, 28 V, AVS 15 V, then a hard reset to
+/// 5 V; each delivered voltage within 5 % of the request.
+fn flow_trigger_pd_ladder(target: Target) {
+    let within = |got: u64, want: u64| got.abs_diff(want) * 20 <= want;
+    for (args, want_mv) in [
+        (vec!["2"], 9000),
+        (vec!["3"], 15_000),
+        (vec!["4"], 20_000),
+        (vec!["8"], 28_000),
+        (
+            vec!["9", "--voltage-mv", "15000", "--current-ma", "1000"],
+            15_000,
+        ),
+    ] {
+        let mut c = powerz(target);
+        c.args(["trigger", "pd", "request"]).args(&args).args([
+            "--allow-high-voltage",
+            "--hold",
+            "0",
+            "--json",
+        ]);
+        let v: serde_json::Value = serde_json::from_str(&stdout(&mut c)).unwrap();
+        let got = v["delivered_mv"].as_u64().expect("delivered_mv");
+        eprintln!("trigger pd request {args:?}: delivered {got} mV (want {want_mv})");
+        assert!(
+            within(got, want_mv),
+            "{args:?}: {got} mV, want {want_mv} ± 5%"
+        );
+    }
+    let out = stdout(powerz(target).args(["trigger", "pd", "reset", "--json"]));
+    eprintln!("trigger pd reset: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let got = v["vbus_mv"].as_u64().expect("vbus_mv");
+    assert!(within(got, 5000), "reset: {got} mV, want 5000 ± 5%");
+}
+
+// ---- AC-DGSQ6P.7: opt-in, real meter, 140 W charger, nothing on the output ----
+
+/// Raises VBUS up to 28 V: needs `POWERZ_HIL=1` and `POWERZ_HIL_PD=1`, and
+/// the wall-charger setup (laptop on the data port, output empty).
+#[test]
+fn hil_trigger_pd_ladder() {
+    if hil_or_skip("hil_trigger_pd_ladder") && std::env::var("POWERZ_HIL_PD").as_deref() == Ok("1")
+    {
+        flow_trigger_pd_ladder(Target::Meter);
+    }
+}
+
+#[test]
+fn hil_trigger_pd_ladder_dry_run_against_the_simulator() {
+    flow_trigger_pd_ladder(Target::Sim);
 }
 
 // ---- AC-G0W08Z.12: opt-in, real meter over bulk ----

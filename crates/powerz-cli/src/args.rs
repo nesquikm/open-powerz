@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Parser, Subcommand, ValueEnum};
 use powerz_protocol::decode::Rate;
+use powerz_protocol::pdm::pd::{Emarker, PdType, SinkCaps};
 use powerz_sim::Scenario;
 
 use crate::error::CliError;
@@ -129,6 +130,85 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Ask a charger for a voltage through the meter (protocol triggering).
+    Trigger {
+        /// Protocol to trigger.
+        #[command(subcommand)]
+        protocol: TriggerProtocol,
+    },
+}
+
+/// `trigger` protocols.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum TriggerProtocol {
+    /// USB Power Delivery: list offers, request a voltage.
+    Pd {
+        /// What to do.
+        #[command(subcommand)]
+        action: PdAction,
+    },
+}
+
+/// `trigger pd` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum PdAction {
+    /// Enter PD and list the charger's offers (SPR and EPR), decoded.
+    List {
+        /// Print one JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request an offer by position (PPS / AVS with --voltage-mv and
+    /// --current-ma), hold it, then return to 5 V.
+    Request {
+        /// Object position of the offer (see `trigger pd list`; EPR is 8 and up).
+        #[arg(value_name = "POS")]
+        position: u8,
+        /// Voltage for a PPS / AVS offer, mV.
+        #[arg(long, value_name = "MV")]
+        voltage_mv: Option<u32>,
+        /// Current, mA (required with --voltage-mv; default for a fixed offer: its maximum).
+        #[arg(long, value_name = "MA")]
+        current_ma: Option<u32>,
+        /// Allow a request that raises VBUS above 5 V.
+        #[arg(long)]
+        allow_high_voltage: bool,
+        /// Seconds to hold the voltage before returning to 5 V; without it
+        /// the voltage is held until Ctrl-C.
+        #[arg(long, value_name = "SECS")]
+        hold: Option<u64>,
+        /// Print one JSON object instead of labelled lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a Hard Reset: the charger returns to 5 V and offers again; list
+    /// the new offers and VBUS.
+    Reset {
+        /// Print one JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the meter's PD settings, or change them (a flag left out keeps
+    /// the current value).
+    Settings {
+        /// PD type.
+        #[arg(long = "type", value_name = "NAME",
+              value_parser = PossibleValuesParser::new(PdType::all().iter().map(|v| v.name())))]
+        pd_type: Option<String>,
+        /// e-marker emulation (the reserved codes are shown but never set:
+        /// what the firmware does with them is unknown).
+        #[arg(long, value_name = "NAME",
+              value_parser = PossibleValuesParser::new(
+                  Emarker::all().iter().map(|v| v.name()).filter(|n| !n.starts_with("reserved"))))]
+        em: Option<String>,
+        /// Sink capabilities emulation.
+        #[arg(long, value_name = "NAME",
+              value_parser = PossibleValuesParser::new(SinkCaps::all().iter().map(|v| v.name())))]
+        sink: Option<String>,
+        /// Print one JSON object instead of labelled lines.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl Command {
@@ -141,6 +221,7 @@ impl Command {
             Command::Watch { .. } => "watch",
             Command::Stream { .. } => "stream",
             Command::Pd { .. } => "pd",
+            Command::Trigger { .. } => "trigger",
         }
     }
 }
@@ -257,6 +338,11 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
         return Ok(());
     }
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
+    // `trigger` talks to the meter's serial port whatever `--transport` says
+    // (bulk / cdc / sim); HID has no text session.
+    if matches!(cli.command, Command::Trigger { .. }) && cli.transport != TransportKind::Hid {
+        return Ok(());
+    }
     if cli.transport == TransportKind::Hid && !hid_ok {
         return Err(CliError::Usage(format!(
             "--transport hid supports only `read` and `watch`, not `{}`",
@@ -294,5 +380,39 @@ mod tests {
         assert!(needs_connect(TransportKind::Bulk));
         assert!(!needs_connect(TransportKind::Cdc));
         assert!(!needs_connect(TransportKind::Hid));
+    }
+
+    fn pd_action(args: &[&str]) -> Result<PdAction, clap::Error> {
+        let cli = Cli::try_parse_from(["powerz", "trigger", "pd"].iter().chain(args))?;
+        match cli.command {
+            Command::Trigger {
+                protocol: TriggerProtocol::Pd { action },
+            } => Ok(action),
+            other => panic!("parsed {other:?}"),
+        }
+    }
+
+    // ---- AC-DGSQ6P.6: a request holds until Ctrl-C unless --hold is given ----
+
+    #[test]
+    fn request_holds_until_ctrl_c_by_default() {
+        match pd_action(&["request", "4"]).unwrap() {
+            PdAction::Request { hold, .. } => assert_eq!(hold, None),
+            other => panic!("{other:?}"),
+        }
+        match pd_action(&["request", "4", "--hold", "0"]).unwrap() {
+            PdAction::Request { hold, .. } => assert_eq!(hold, Some(0)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // ---- AC-DGSQ6P.4: reserved e-marker codes can be read, never written ----
+
+    #[test]
+    fn reserved_emarker_values_cannot_be_set() {
+        for name in ["reserved-1", "reserved-2"] {
+            assert!(pd_action(&["settings", "--em", name]).is_err(), "{name}");
+        }
+        assert!(pd_action(&["settings", "--em", "la135"]).is_ok());
     }
 }

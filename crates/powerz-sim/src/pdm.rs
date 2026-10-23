@@ -25,6 +25,10 @@ pub enum SimCharger {
     /// EPR list 5/9/15 V 3 A, 20 V 5 A, 28 V 5 A (slot 8), AVS 15-28 V
     /// 140 W (slot 9). PD only: every other protocol entry times out.
     Epr140W,
+    /// 65 W PD 3.0 SPR-only charger (no EPR): 5/9/15 V 3 A, 20 V 3.25 A,
+    /// PPS 3.3-21 V 3.25 A (slot 5). Only the SPR `pdo:` block follows
+    /// `entry pd` / `pd hrst`. [inferred]
+    Pps65W,
 }
 
 /// Slots per `pdo:` block. [device]
@@ -61,6 +65,22 @@ const EPR140_EPR: [u32; PDO_SLOTS] = [
     0,
 ];
 
+/// 65 W PPS charger, SPR Source_Capabilities: 5/9/15 V 3 A, 20 V 3.25 A,
+/// PPS 3.3-21 V 3.25 A (slot 5). [inferred]
+const PPS65_SPR: [u32; PDO_SLOTS] = [
+    0x0001_912C,
+    0x0002_D12C,
+    0x0004_B12C,
+    0x0006_4145,
+    0xC1A4_2141,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+];
+
 /// VBUS (mV) while the meter presents Rd on the charger's 5 V. [device]
 const VBUS_5V_MV: u32 = 5180;
 /// VBUS (mV) once PD is entered (and after a hard reset). [device]
@@ -69,11 +89,18 @@ const VBUS_PD_MV: u32 = 5162;
 const VBUS_OFF_MV: u32 = 7;
 
 impl SimCharger {
-    /// The SPR and EPR PDO lists the charger offers.
-    fn pdos(self) -> (&'static [u32; PDO_SLOTS], &'static [u32; PDO_SLOTS]) {
+    /// The SPR PDO list and, for an EPR charger, the EPR list.
+    fn pdos(self) -> (&'static [u32; PDO_SLOTS], Option<&'static [u32; PDO_SLOTS]>) {
         match self {
-            SimCharger::Epr140W => (&EPR140_SPR, &EPR140_EPR),
+            SimCharger::Epr140W => (&EPR140_SPR, Some(&EPR140_EPR)),
+            SimCharger::Pps65W => (&PPS65_SPR, None),
         }
+    }
+
+    /// The list requests are made against: the EPR list when there is one.
+    fn active_pdos(self) -> &'static [u32; PDO_SLOTS] {
+        let (spr, epr) = self.pdos();
+        epr.unwrap_or(spr)
     }
 
     /// `pdo:` block: tag, ASCII digit of the highest used slot, slot
@@ -90,14 +117,20 @@ impl SimCharger {
         b
     }
 
-    /// Both unprompted offers (SPR then EPR) with their `ready:` lines,
-    /// as sent after `entry pd` and after a hard reset. [device]
+    /// The unprompted offers (SPR, then EPR when the charger has it) with
+    /// their `ready:` lines, as sent after `entry pd` and after a hard
+    /// reset. [device]
     fn offers(self) -> Vec<u8> {
         let (spr, epr) = self.pdos();
         let mut out = SimCharger::block(spr);
-        out.extend(b"ready:5191mV,0mA\n");
-        out.extend(SimCharger::block(epr));
-        out.extend(format!("ready:{VBUS_PD_MV}mV,0mA\n").bytes());
+        match epr {
+            Some(epr) => {
+                out.extend(b"ready:5191mV,0mA\n");
+                out.extend(SimCharger::block(epr));
+                out.extend(format!("ready:{VBUS_PD_MV}mV,0mA\n").bytes());
+            }
+            None => out.extend(format!("ready:{VBUS_PD_MV}mV,0mA\n").bytes()),
+        }
         out
     }
 
@@ -105,9 +138,13 @@ impl SimCharger {
     fn supports(self, protocol: &str) -> bool {
         match self {
             SimCharger::Epr140W => protocol == "pd",
+            SimCharger::Pps65W => protocol == "pd",
         }
     }
 }
+
+/// The meter's `pdm parm` reply out of the box. \[device\] (session 2)
+const DEFAULT_PARM: &str = "type=0,em=2,sink=0";
 
 #[derive(Debug)]
 struct State {
@@ -120,6 +157,8 @@ struct State {
     pdm_active: bool,
     pd_entered: bool,
     vbus_mv: u32,
+    /// What `pdm parm` reports; `pdm set` replaces it. \[device\] default
+    parm: String,
     writes: Vec<(u64, Vec<u8>)>,
     pending: Vec<u8>,
 }
@@ -143,7 +182,11 @@ impl State {
             self.vbus_mv = VBUS_OFF_MV;
             b"ok\n".to_vec()
         } else if text.starts_with("pdm parm") {
-            b"type=0,em=2,sink=0\n".to_vec()
+            format!("{}\n", self.parm).into_bytes()
+        } else if let Some(rest) = text.strip_prefix("pdm set ") {
+            // No reply. [static]
+            self.parm = rest.trim().to_string();
+            Vec::new()
         } else if text.starts_with("reset") {
             // Detach; Rd kept, VBUS back to 5 V.
             self.pd_entered = false;
@@ -195,7 +238,8 @@ impl State {
         }
     }
 
-    /// `pd req=<pos>[,volt=<mV>][,cur=<mA>]` against the EPR list.
+    /// `pd req=<pos>[,volt=<mV>][,cur=<mA>]` against the active list (EPR
+    /// when the charger has one): fixed, PPS and EPR AVS offers.
     fn pd_request(&mut self, args: &str) -> Vec<u8> {
         if !self.pd_entered {
             return Vec::new();
@@ -212,13 +256,21 @@ impl State {
                 cur = c.trim().parse::<u32>().ok();
             }
         }
-        let (_, epr) = self.charger.pdos();
-        let Some(&pdo) = pos.checked_sub(1).and_then(|i| epr.get(i)) else {
+        let list = self.charger.active_pdos();
+        let Some(&pdo) = pos.checked_sub(1).and_then(|i| list.get(i)) else {
             return Vec::new();
         };
         let (v, i) = match pdo >> 30 {
             0 if pdo != 0 => ((pdo >> 10 & 0x3FF) * 50, cur.unwrap_or((pdo & 0x3FF) * 10)),
-            3 => {
+            // SPR PPS APDO: 3.3-21 V style range, current in 50 mA units.
+            3 if pdo >> 28 & 0x3 == 0 => {
+                let min = (pdo >> 8 & 0xFF) * 100;
+                let max = (pdo >> 17 & 0xFF) * 100;
+                let v = volt.unwrap_or(min).clamp(min, max);
+                (v, cur.unwrap_or((pdo & 0x7F) * 50))
+            }
+            // EPR AVS APDO: range in 100 mV units, PDP in watts.
+            3 if pdo >> 28 & 0x3 == 1 => {
                 let min = (pdo >> 8 & 0xFF) * 100;
                 let max = (pdo >> 17 & 0x1FF) * 100;
                 let v = volt.unwrap_or(min).clamp(min, max);
@@ -292,6 +344,7 @@ impl SimPdm {
                 pdm_active: false,
                 pd_entered: false,
                 vbus_mv: 0,
+                parm: DEFAULT_PARM.to_string(),
                 writes: Vec::new(),
                 pending: Vec::new(),
             })),

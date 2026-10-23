@@ -35,7 +35,7 @@ The library and the command line tool request fixed, PPS, AVS and EPR power from
 
 ## Technical Design
 
-A pd trigger layer on top of the PDM session renders requests, maps pdo blocks to the PD decoder's PDO types and validates requests against them. The CLI subcommand uses the session guard so the meter returns to 5 V and closes the session on exit. EPR uses the device default em=2 unless the user changes it.
+A pd trigger layer on top of the PDM session renders requests, maps pdo blocks to the PD decoder's PDO types and validates requests against them. The CLI subcommand uses the session guard so the meter returns to 5 V and closes the session on exit. EPR uses the device default em=2 unless the user changes it. `request` holds the contract until Ctrl-C unless `--hold` is given; a Ctrl-C only ends the hold, so the run always returns to 5 V (falling back to a hard reset) and closes the session. The reserved e-marker codes are shown but never written. A test-only `POWERZ_SIM_CHARGER` knob picks the simulated charger.
 
 ## Testing
 
