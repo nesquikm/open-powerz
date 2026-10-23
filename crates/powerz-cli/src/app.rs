@@ -9,7 +9,8 @@ use std::time::Duration;
 use powerz_protocol::decode::AdcSnapshot;
 use powerz_protocol::frame;
 use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
-use powerz_protocol::pdm::{self, PdmSession};
+use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
+use powerz_protocol::pdm::{self, FixedProtocol, PdmSession};
 use powerz_protocol::session::{Clock, Session, SystemClock};
 use powerz_protocol::transport::bulk::BulkTransport;
 use powerz_protocol::transport::cdc::CdcTransport;
@@ -21,12 +22,13 @@ use powerz_sim::{
 };
 
 use crate::args::{
-    Cli, Command, PdAction, PdDecode, TransportKind, TriggerProtocol, needs_connect, rate_from_sps,
-    validate,
+    Cli, Command, FixedAction, LimitsAction, PdAction, PdDecode, Qc3Action, QcAction, RequestFlags,
+    TransportKind, TriggerProtocol, UfcsAction, needs_connect, rate_from_sps, validate,
 };
 use crate::commands::{
-    DetectOptions, PdRequestOptions, PdSettingsChange, StreamOptions, WatchOptions, detect, info,
-    list, pd, pd_decode, pd_save, read, select_device, stream, trigger_pd_list, trigger_pd_request,
+    DetectOptions, LegacyRequestOptions, PdRequestOptions, PdSettingsChange, StreamOptions,
+    WatchOptions, detect, info, list, pd, pd_decode, pd_save, read, select_device, stream,
+    trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
     trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
@@ -232,14 +234,15 @@ fn fake_sim_clock() -> bool {
     std::env::var("POWERZ_SIM_CLOCK").as_deref() == Ok("fake")
 }
 
-/// Honour `POWERZ_SIM_CHARGER=<name>` (test-only): `epr-140w` (default)
-/// or `pps-65w`.
+/// Honour `POWERZ_SIM_CHARGER=<name>` (test-only): `epr-140w` (default),
+/// `pps-65w` or `multi-protocol`.
 fn sim_charger() -> Result<SimCharger, CliError> {
     match std::env::var("POWERZ_SIM_CHARGER").as_deref() {
         Err(_) | Ok("epr-140w") => Ok(SimCharger::Epr140W),
         Ok("pps-65w") => Ok(SimCharger::Pps65W),
+        Ok("multi-protocol") => Ok(SimCharger::MultiProtocol),
         Ok(other) => Err(CliError::Usage(format!(
-            "invalid POWERZ_SIM_CHARGER {other:?}: expected epr-140w or pps-65w"
+            "invalid POWERZ_SIM_CHARGER {other:?}: expected epr-140w, pps-65w or multi-protocol"
         ))),
     }
 }
@@ -331,15 +334,10 @@ fn run_trigger_session<P: Read + Write, C: Clock>(
                 voltage_mv: *voltage_mv,
                 current_ma: *current_ma,
                 allow_high_voltage: *allow_high_voltage,
-                // No --hold: hold until Ctrl-C.
-                hold: hold.map_or(Duration::MAX, Duration::from_secs),
+                hold: hold_duration(*hold),
                 json: *json,
             };
-            // Ctrl-C (handler installed by run_pdm) ends the hold early;
-            // the meter still goes back to 5 V.
-            let stop = stop_flag();
-            let mut hold = |d: Duration| sleep_unless_stopped(d, &stop);
-            trigger_pd_request(session, &opts, &mut hold, &mut out)
+            trigger_pd_request(session, &opts, &mut ctrl_c_hold(), &mut out)
         }
         TriggerProtocol::Pd {
             action:
@@ -357,7 +355,164 @@ fn run_trigger_session<P: Read + Write, C: Clock>(
             };
             trigger_pd_settings(session, &change, *json, &mut out)
         }
+        TriggerProtocol::Qc { .. }
+        | TriggerProtocol::Qc3 { .. }
+        | TriggerProtocol::Fcp { .. }
+        | TriggerProtocol::Afc { .. }
+        | TriggerProtocol::Sfcp { .. }
+        | TriggerProtocol::Scp { .. }
+        | TriggerProtocol::Vfcp { .. }
+        | TriggerProtocol::Tfcp { .. }
+        | TriggerProtocol::Ufcs { .. } => match legacy_action(protocol) {
+            Some(LegacyAction::List { protocol, json }) => {
+                trigger_legacy_list(session, protocol, json, &mut out)
+            }
+            Some(LegacyAction::Request(opts)) => {
+                trigger_legacy_request(session, &opts, &mut ctrl_c_hold(), &mut out)
+            }
+            None => Err(CliError::Usage("PD is triggered with `trigger pd`".into())),
+        },
     }
+}
+
+/// A non-PD `trigger` action, mapped to the library.
+enum LegacyAction {
+    /// `trigger scp|vfcp|tfcp|ufcs list`.
+    List {
+        protocol: LegacyProtocol,
+        json: bool,
+    },
+    /// Any request: enter, send, hold, back to 5 V.
+    Request(LegacyRequestOptions),
+}
+
+/// The library call for a `trigger qc|qc3|fcp|afc|sfcp|scp|vfcp|tfcp|ufcs`
+/// action; `None` for PD, which has its own flow.
+fn legacy_action(protocol: &TriggerProtocol) -> Option<LegacyAction> {
+    use LegacyProtocol as L;
+    let (legacy, request, flags) = match protocol {
+        TriggerProtocol::Qc {
+            action: QcAction::Request { volts, flags },
+        } => fixed(L::Qc, FixedProtocol::Qc, *volts, *flags),
+        TriggerProtocol::Qc3 {
+            action: Qc3Action::Request { voltage_mv, flags },
+        } => (
+            L::Qc,
+            LegacyRequest::Qc3Volt {
+                voltage_mv: *voltage_mv,
+            },
+            *flags,
+        ),
+        TriggerProtocol::Qc3 {
+            action: Qc3Action::Inc { count, flags },
+        } => (L::Qc, LegacyRequest::Qc3Inc(*count), *flags),
+        TriggerProtocol::Qc3 {
+            action: Qc3Action::Dec { count, flags },
+        } => (L::Qc, LegacyRequest::Qc3Dec(*count), *flags),
+        TriggerProtocol::Fcp {
+            action: FixedAction::Request { volts, flags },
+        } => fixed(L::Fcp, FixedProtocol::Fcp, *volts, *flags),
+        TriggerProtocol::Afc {
+            action: FixedAction::Request { volts, flags },
+        } => fixed(L::Afc, FixedProtocol::Afc, *volts, *flags),
+        TriggerProtocol::Sfcp {
+            action: FixedAction::Request { volts, flags },
+        } => fixed(L::Sfcp, FixedProtocol::Sfcp, *volts, *flags),
+        TriggerProtocol::Scp { action }
+        | TriggerProtocol::Vfcp { action }
+        | TriggerProtocol::Tfcp { action } => {
+            let legacy = match protocol {
+                TriggerProtocol::Scp { .. } => L::Scp,
+                TriggerProtocol::Vfcp { .. } => L::Vfcp,
+                TriggerProtocol::Tfcp { .. } => L::Tfcp,
+                _ => return None,
+            };
+            match action {
+                LimitsAction::List { json } => {
+                    return Some(LegacyAction::List {
+                        protocol: legacy,
+                        json: *json,
+                    });
+                }
+                LimitsAction::Request {
+                    voltage_mv,
+                    current_ma,
+                    flags,
+                } => {
+                    let (voltage_mv, current_ma) = (*voltage_mv, *current_ma);
+                    let request = match legacy {
+                        L::Scp => LegacyRequest::Scp {
+                            voltage_mv,
+                            current_ma,
+                        },
+                        L::Vfcp => LegacyRequest::Vfcp {
+                            voltage_mv,
+                            current_ma,
+                        },
+                        L::Tfcp => LegacyRequest::Tfcp {
+                            voltage_mv,
+                            current_ma,
+                        },
+                        _ => return None,
+                    };
+                    (legacy, request, *flags)
+                }
+            }
+        }
+        TriggerProtocol::Ufcs { action } => match action {
+            UfcsAction::List { json } => {
+                return Some(LegacyAction::List {
+                    protocol: L::Ufcs,
+                    json: *json,
+                });
+            }
+            UfcsAction::Request {
+                index,
+                voltage_mv,
+                current_ma,
+                flags,
+            } => (
+                L::Ufcs,
+                LegacyRequest::Ufcs {
+                    index: *index,
+                    voltage_mv: *voltage_mv,
+                    current_ma: *current_ma,
+                },
+                *flags,
+            ),
+            UfcsAction::Cmd { number, flags } => (L::Ufcs, LegacyRequest::UfcsCmd(*number), *flags),
+        },
+        TriggerProtocol::Pd { .. } => return None,
+    };
+    Some(LegacyAction::Request(LegacyRequestOptions {
+        protocol: legacy,
+        request,
+        allow_high_voltage: flags.allow_high_voltage,
+        hold: hold_duration(flags.hold),
+        json: flags.json,
+    }))
+}
+
+/// The protocol, request and flags of a fixed-voltage `request <VOLTS>`.
+fn fixed(
+    legacy: LegacyProtocol,
+    protocol: FixedProtocol,
+    volts: u8,
+    flags: RequestFlags,
+) -> (LegacyProtocol, LegacyRequest, RequestFlags) {
+    (legacy, LegacyRequest::Fixed { protocol, volts }, flags)
+}
+
+/// `--hold <SECS>`; without it, hold until Ctrl-C.
+fn hold_duration(secs: Option<u64>) -> Duration {
+    secs.map_or(Duration::MAX, Duration::from_secs)
+}
+
+/// The hold of a `trigger ... request`: Ctrl-C (handler installed by
+/// run_pdm) ends it early; the meter still goes back to 5 V.
+fn ctrl_c_hold() -> impl FnMut(Duration) {
+    let stop = stop_flag();
+    move |d: Duration| sleep_unless_stopped(d, &stop)
 }
 
 /// `--transport sim`: open the demo device (bulk persona, `--scenario`)

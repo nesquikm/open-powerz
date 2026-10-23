@@ -4,10 +4,11 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
+use powerz_protocol::pdm::legacy::{self, LegacyProtocol, Request as LegacyRequest};
 use powerz_protocol::pdm::pd::{
     self, Emarker, Offer, OfferKind, PdSettings, PdType, Reading, Request, RequestOutcome, SinkCaps,
 };
-use powerz_protocol::pdm::{HighVoltageConfirmation, PdmSession, Risk};
+use powerz_protocol::pdm::{Command, HighVoltageConfirmation, PdmSession, Risk};
 use powerz_protocol::session::Clock;
 
 use super::close_after;
@@ -231,23 +232,38 @@ fn request_and_hold<P: Read + Write, C: Clock>(
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     let command = pd::validate(offers, request)?;
-    let confirmation = if session.risk(&command) == Risk::Above5V {
-        if !opts.allow_high_voltage {
-            return Err(CliError::Usage(format!(
-                "`{}` can raise VBUS above 5 V; pass --allow-high-voltage to send it",
-                String::from_utf8_lossy(&command.render())
-            )));
-        }
-        Some(HighVoltageConfirmation::for_command(&command))
-    } else {
-        None
-    };
+    let confirmation = high_voltage_confirmation(session, &command, opts.allow_high_voltage)?;
     let outcome = pd::request(session, offers, request, confirmation)?;
     write_outcome(&outcome, opts.json, out)?;
-    if !opts.hold.is_zero() {
-        hold(opts.hold);
-    }
+    hold_for(opts.hold, hold);
     Ok(())
+}
+
+/// The confirmation `command` needs: `None` at or below 5 V; above 5 V
+/// one only with `--allow-high-voltage`, otherwise a usage error before
+/// anything is written.
+fn high_voltage_confirmation<P: Read + Write, C: Clock>(
+    session: &PdmSession<P, C>,
+    command: &Command,
+    allow_high_voltage: bool,
+) -> Result<Option<HighVoltageConfirmation>, CliError> {
+    if session.risk(command) != Risk::Above5V {
+        return Ok(None);
+    }
+    if !allow_high_voltage {
+        return Err(CliError::Usage(format!(
+            "`{}` can raise VBUS above 5 V; pass --allow-high-voltage to send it",
+            String::from_utf8_lossy(&command.render())
+        )));
+    }
+    Ok(Some(HighVoltageConfirmation::for_command(command)))
+}
+
+/// Hold the requested voltage for `duration` (nothing for zero).
+fn hold_for(duration: Duration, hold: &mut dyn FnMut(Duration)) {
+    if !duration.is_zero() {
+        hold(duration);
+    }
 }
 
 /// The command and the `req:` / `ready:` readings, as lines or JSON.
@@ -268,6 +284,156 @@ fn write_outcome(o: &RequestOutcome, json: bool, out: &mut dyn Write) -> Result<
     writeln!(out, "Command    {command}")?;
     writeln!(out, "Requested  {}", volts_amps(&o.requested))?;
     writeln!(out, "Delivered  {}", volts_amps(&o.delivered))?;
+    Ok(())
+}
+
+/// `powerz trigger qc|qc3|fcp|afc|sfcp|scp|vfcp|tfcp|ufcs ...` options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyRequestOptions {
+    /// The protocol to enter.
+    pub protocol: LegacyProtocol,
+    /// The request.
+    pub request: LegacyRequest,
+    /// `--allow-high-voltage` was given.
+    pub allow_high_voltage: bool,
+    /// How long to hold the voltage before returning to 5 V.
+    pub hold: Duration,
+    /// Print JSON.
+    pub json: bool,
+}
+
+/// `powerz trigger qc|qc3|fcp|afc|sfcp|scp|vfcp|tfcp|ufcs ...`: `entry
+/// <protocol>`, validate and send the request (above 5 V only with
+/// `--allow-high-voltage`), report it, hold, then return to 5 V (`reset`)
+/// and close the session, on error too.
+pub fn trigger_legacy_request<P: Read + Write, C: Clock>(
+    mut session: PdmSession<P, C>,
+    opts: &LegacyRequestOptions,
+    hold: &mut dyn FnMut(Duration),
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let result = (|| -> Result<(), CliError> {
+        legacy::enter(&mut session, opts.protocol)?;
+        let command = legacy::validate(session.capabilities(), &opts.request)?;
+        let confirmation = high_voltage_confirmation(&session, &command, opts.allow_high_voltage)?;
+        let outcome = legacy::request(&mut session, &opts.request, confirmation)?;
+        write_legacy_outcome(&outcome, opts.json, out)?;
+        // No `ready`: the charger may have ignored or refused it, so this is
+        // not reported as a success. [inferred]
+        if outcome.reply.is_none() {
+            return Err(CliError::Device(format!(
+                "the charger did not confirm `{}` (no ready reply)",
+                String::from_utf8_lossy(&outcome.command.render())
+            )));
+        }
+        hold_for(opts.hold, hold);
+        Ok(())
+    })();
+    finish_at_5v(session, result)
+}
+
+/// `powerz trigger scp|vfcp|tfcp list`: `entry <protocol>`, then the
+/// decoded limits of its capability block; back to 5 V (`reset`) and close
+/// the session, on error too.
+pub fn trigger_legacy_list<P: Read + Write, C: Clock>(
+    mut session: PdmSession<P, C>,
+    protocol: LegacyProtocol,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let result = legacy::enter(&mut session, protocol).map_err(CliError::from);
+    let entered = finish_at_5v(session, result)?;
+    write_limits(protocol, &entered.limits, json, out)
+}
+
+/// Back to 5 V (`reset`) whatever `result` is, then close the session. A
+/// failed return outranks `result`'s own error, since it is the one that
+/// says VBUS may still be high, but that earlier error is kept in the text.
+fn finish_at_5v<T, P: Read + Write, C: Clock>(
+    mut session: PdmSession<P, C>,
+    result: Result<T, CliError>,
+) -> Result<T, CliError> {
+    let result = match legacy::return_to_5v(&mut session) {
+        Err(e) => {
+            eprintln!(
+                "WARNING: could not return the charger to 5 V ({e}). \
+                 VBUS may still be above 5 V: unplug the charger from the meter."
+            );
+            let earlier = result
+                .err()
+                .map(|r| format!("; before that: {r}"))
+                .unwrap_or_default();
+            Err(CliError::Device(format!(
+                "could not return the charger to 5 V ({e}); VBUS may still be above 5 V{earlier}"
+            )))
+        }
+        Ok(()) => result,
+    };
+    close_after(session, result)
+}
+
+/// Limits as lines (V / A / W) or `{"protocol": .., "limits": [..]}`.
+fn write_limits(
+    protocol: LegacyProtocol,
+    limits: &[legacy::Limits],
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    if json {
+        let limits: Vec<_> = limits
+            .iter()
+            .map(|l| {
+                serde_json::json!({
+                    "index": l.index,
+                    "min_voltage_mv": l.min_voltage_mv,
+                    "max_voltage_mv": l.max_voltage_mv,
+                    "min_current_ma": l.min_current_ma,
+                    "max_current_ma": l.max_current_ma,
+                    "max_power_mw": l.max_power_mw,
+                })
+            })
+            .collect();
+        return write_json(
+            out,
+            &serde_json::json!({ "protocol": protocol.name(), "limits": limits }),
+        );
+    }
+    let milli = |v: u32| f64::from(v) / 1000.0;
+    for l in limits {
+        if let Some(i) = l.index {
+            write!(out, "#{i}  ")?;
+        }
+        write!(
+            out,
+            "Voltage {:.2}-{:.2} V  Current {:.2}-{:.2} A",
+            milli(l.min_voltage_mv),
+            milli(l.max_voltage_mv),
+            milli(l.min_current_ma),
+            milli(l.max_current_ma)
+        )?;
+        if let Some(p) = l.max_power_mw {
+            write!(out, "  Max power {} W", milli(p))?;
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// The command and the meter's reply, as lines or JSON.
+fn write_legacy_outcome(
+    o: &legacy::Outcome,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let command = String::from_utf8_lossy(&o.command.render()).into_owned();
+    if json {
+        return write_json(
+            out,
+            &serde_json::json!({ "command": command, "reply": o.reply }),
+        );
+    }
+    writeln!(out, "Command  {command}")?;
+    writeln!(out, "Reply    {}", o.reply.as_deref().unwrap_or("(none)"))?;
     Ok(())
 }
 
@@ -414,6 +580,59 @@ mod tests {
             .count();
         assert_eq!(sets, 1, "only the test's own pdm set: {:?}", sim.writes());
         assert_eq!(sim.writes().last().map(String::as_str), Some("pdm close"));
+    }
+
+    /// A sim port whose meter never hears `qc 9V` (so it never says `ready`).
+    struct DeafToQc9(SimPdmPort);
+
+    impl Read for DeafToQc9 {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl Write for DeafToQc9 {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf == b"qc 9V" {
+                return Ok(buf.len());
+            }
+            self.0.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    // ---- AC-DGSQ6Q.6: a request the charger never confirms is not a success ----
+
+    #[test]
+    fn legacy_request_without_a_ready_reply_fails_after_returning_to_5v() {
+        use powerz_protocol::pdm::FixedProtocol;
+        let clock = SimClock::new(1_790_000_000_000);
+        let sim = SimPdm::new(SimCharger::MultiProtocol, clock.clone());
+        let session = PdmSession::open_with_clock(DeafToQc9(sim.open_port()), clock).expect("open");
+        let opts = LegacyRequestOptions {
+            protocol: LegacyProtocol::Qc,
+            request: LegacyRequest::Fixed {
+                protocol: FixedProtocol::Qc,
+                volts: 9,
+            },
+            allow_high_voltage: true,
+            hold: Duration::ZERO,
+            json: false,
+        };
+        let err = trigger_legacy_request(session, &opts, &mut |_| {}, &mut Vec::new())
+            .expect_err("no ready reply");
+        assert!(matches!(err, CliError::Device(_)), "{err:?}");
+        let writes = sim.writes();
+        let tail: Vec<&str> = writes
+            .iter()
+            .rev()
+            .take(2)
+            .rev()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(tail, ["reset", "pdm close"], "{writes:?}");
     }
 
     // ---- AC-DGSQ6P.6: the meter always ends at 5 V ----

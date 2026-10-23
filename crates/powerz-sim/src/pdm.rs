@@ -29,6 +29,59 @@ pub enum SimCharger {
     /// PPS 3.3-21 V 3.25 A (slot 5). Only the SPR `pdo:` block follows
     /// `entry pd` / `pd hrst`. [inferred]
     Pps65W,
+    /// Synthetic multi-protocol charger (FR DGSQ6Q): the 65 W PD offers,
+    /// plus QC 2.0 / 3.0, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS. Entries
+    /// answer `ok\nready\n`, followed by a capability block for SCP (40 W,
+    /// 3.4-20 V, 0.1-4 A), VFCP (18 W, 9 V 2 A / 12 V 1.5 A), TFCP (60 W,
+    /// 5-20 V, 0.1-3 A) and UFCS (#1 3.4-11 V 5 A, #2 3.4-21 V 3 A); a
+    /// request answers `ready\n` and moves VBUS to the requested voltage.
+    /// \[static\] reply forms; no such charger has been seen on the device.
+    MultiProtocol,
+}
+
+/// Synthetic capability block (with its `\n`) for `scp` / `vfcp` / `tfcp` /
+/// `ufcs`,
+/// in the \[static\] layouts: SCP 40 W, 3.4-20 V, 0.1-4 A, 10 mV / 50 mA
+/// steps, bound 11 V / 5 A; VFCP 18 W, 9 V 2 A / 12 V 1.5 A and a short
+/// tail; TFCP 60 W, 5-20 V, 0.1-3 A; UFCS #1 3.4-11 V 0.1-5 A, #2
+/// 3.4-21 V 0.1-3 A.
+fn legacy_block(protocol: &str) -> Vec<u8> {
+    let mut b = format!("{protocol}:").into_bytes();
+    match protocol {
+        "scp" => {
+            for v in [400u16, 3400, 20000, 100, 4000, 10, 50, 11000, 5000] {
+                b.extend(v.to_le_bytes());
+            }
+        }
+        "vfcp" => {
+            b.push(0);
+            for v in [7000u16, 9000, 12000, 2000, 1500, 180] {
+                b.extend(v.to_le_bytes());
+            }
+            b.extend([0x04, 0x00, 0x01, 0x00, 0x0D, 0x20, 0xA6, 0x00]);
+        }
+        "tfcp" => {
+            b.push(0);
+            b.extend(600u32.to_le_bytes());
+            for v in [5000u16, 100, 20000, 3000] {
+                b.extend(v.to_le_bytes());
+            }
+        }
+        "ufcs" => {
+            // Count, then u64 LE entries: index (63..60), current step code
+            // (59..57, 50 mA), max V (55..40) and min V (39..24) in 10 mV,
+            // max I (23..8) and min I (7..0) in 10 mA.
+            let entry = |index: u64, max_10mv: u64, max_10ma: u64| -> u64 {
+                (index << 60) | (4 << 57) | (max_10mv << 40) | (340 << 24) | (max_10ma << 8) | 10
+            };
+            b.push(2);
+            b.extend(entry(1, 1100, 500).to_le_bytes());
+            b.extend(entry(2, 2100, 300).to_le_bytes());
+        }
+        _ => return Vec::new(),
+    }
+    b.push(b'\n');
+    b
 }
 
 /// Slots per `pdo:` block. [device]
@@ -93,7 +146,7 @@ impl SimCharger {
     fn pdos(self) -> (&'static [u32; PDO_SLOTS], Option<&'static [u32; PDO_SLOTS]>) {
         match self {
             SimCharger::Epr140W => (&EPR140_SPR, Some(&EPR140_EPR)),
-            SimCharger::Pps65W => (&PPS65_SPR, None),
+            SimCharger::Pps65W | SimCharger::MultiProtocol => (&PPS65_SPR, None),
         }
     }
 
@@ -139,6 +192,7 @@ impl SimCharger {
         match self {
             SimCharger::Epr140W => protocol == "pd",
             SimCharger::Pps65W => protocol == "pd",
+            SimCharger::MultiProtocol => true,
         }
     }
 }
@@ -156,6 +210,10 @@ struct State {
     port_open: bool,
     pdm_active: bool,
     pd_entered: bool,
+    /// The legacy protocol entered (`entry qc`, ...), until `reset`.
+    legacy: Option<String>,
+    /// Last legacy request, mV (QC 3.0 steps move from here).
+    legacy_mv: u32,
     /// `entry list` / `entry list+` stalled: silent until `reset`. [device]
     listing: bool,
     vbus_mv: u32,
@@ -186,6 +244,7 @@ impl State {
             self.listing = false;
             self.pdm_active = false;
             self.pd_entered = false;
+            self.legacy = None;
             self.vbus_mv = VBUS_OFF_MV;
             b"ok\n".to_vec()
         } else if text.starts_with("pdm parm") {
@@ -197,6 +256,7 @@ impl State {
         } else if text.starts_with("reset") {
             // Detach; Rd kept, VBUS back to 5 V.
             self.pd_entered = false;
+            self.legacy = None;
             self.listing = false;
             self.vbus_mv = VBUS_5V_MV;
             b"ok\n".to_vec()
@@ -204,6 +264,14 @@ impl State {
             self.entry(rest.split_whitespace().next().unwrap_or_default())
         } else if let Some(rest) = text.strip_prefix("pd req=") {
             self.pd_request(rest)
+        } else if let Some(mv) = self.legacy_target(text) {
+            self.legacy_mv = mv;
+            self.vbus_mv = if mv <= 5000 {
+                VBUS_5V_MV
+            } else {
+                mv * 985 / 1000
+            };
+            b"ready\n".to_vec()
         } else if text.starts_with("pd hrst") && self.pd_entered {
             self.vbus_mv = VBUS_PD_MV;
             self.charger.offers()
@@ -235,6 +303,17 @@ impl State {
                 out.extend(self.charger.offers());
                 out
             }
+            // SCP / VFCP / TFCP / UFCS follow `ready` with their block;
+            // `legacy_block` is empty for the others.
+            "qc" | "fcp" | "afc" | "sfcp" | "scp" | "vfcp" | "tfcp" | "ufcs"
+                if self.charger.supports(protocol) =>
+            {
+                self.legacy = Some(protocol.to_string());
+                self.legacy_mv = 5000;
+                let mut out = b"ok\nready\n".to_vec();
+                out.extend(legacy_block(protocol));
+                out
+            }
             "ufcs" if !self.charger.supports("ufcs") => b"ok\ntimeout\ntimeout\ntimeout\n".to_vec(),
             "qc" | "fcp" | "scp" | "afc" | "sfcp" | "tfcp" if !self.charger.supports(protocol) => {
                 b"ok\ntimeout\n".to_vec()
@@ -249,6 +328,61 @@ impl State {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The voltage (mV) a legacy request asks for, when the protocol it
+    /// belongs to is entered: `qc|fcp|afc|sfcp <n>V`, `qc3 volt=<mV>`,
+    /// `qc3 inc=<n>` / `qc3 dec=<n>` (200 mV per step, kept in 3.6-20 V).
+    fn legacy_target(&self, text: &str) -> Option<u32> {
+        let entered = self.legacy.as_deref()?;
+        if let Some(v) = text
+            .strip_prefix(entered)
+            .and_then(|r| r.strip_prefix(' '))
+            .and_then(|r| r.strip_suffix('V'))
+        {
+            return v.parse::<u32>().ok().map(|v| v * 1000);
+        }
+        if let Some(args) = text
+            .strip_prefix(entered)
+            .and_then(|r| r.strip_prefix(" volt="))
+        {
+            // `scp|vfcp|tfcp volt=<mV>,cur=<mA>`
+            return args.split(',').next()?.parse::<u32>().ok();
+        }
+        if entered == "ufcs" {
+            // `ufcs req=<n>,volt=<mV>,cur=<mA>` moves VBUS; `ufcs cmd=<n>`
+            // answers `ready` and leaves it where it is.
+            if let Some(args) = text.strip_prefix("ufcs req=") {
+                return args
+                    .split(',')
+                    .find_map(|kv| kv.strip_prefix("volt="))?
+                    .parse::<u32>()
+                    .ok();
+            }
+            if text.starts_with("ufcs cmd=") {
+                return Some(self.legacy_mv);
+            }
+            return None;
+        }
+        if entered != "qc" {
+            return None;
+        }
+        let (min, max, step) = (3600u32, 20_000u32, 200u32);
+        if let Some(v) = text.strip_prefix("qc3 volt=") {
+            return v.parse::<u32>().ok().map(|v| v.clamp(min, max));
+        }
+        let (n, up) = if let Some(n) = text.strip_prefix("qc3 inc=") {
+            (n, true)
+        } else {
+            (text.strip_prefix("qc3 dec=")?, false)
+        };
+        let delta = n.parse::<u32>().ok()?.saturating_mul(step);
+        let mv = if up {
+            self.legacy_mv.saturating_add(delta)
+        } else {
+            self.legacy_mv.saturating_sub(delta)
+        };
+        Some(mv.clamp(min, max))
     }
 
     /// `pd req=<pos>[,volt=<mV>][,cur=<mA>]` against the active list (EPR
@@ -356,6 +490,8 @@ impl SimPdm {
                 port_open: false,
                 pdm_active: false,
                 pd_entered: false,
+                legacy: None,
+                legacy_mv: 5000,
                 listing: false,
                 vbus_mv: 0,
                 parm: DEFAULT_PARM.to_string(),
@@ -386,6 +522,7 @@ impl SimPdm {
         s.port_open = true;
         s.pdm_active = false;
         s.pd_entered = false;
+        s.legacy = None;
         s.pending.clear();
         SimPdmPort {
             shared: Arc::clone(&self.shared),

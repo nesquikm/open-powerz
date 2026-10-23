@@ -41,9 +41,8 @@ pub fn classify(command: &Command, caps: &Capabilities) -> Risk {
         // PD control messages (types 1..=24 in USB PD r3.2) carry no data
         // objects, so no voltage request. [doc] [inferred]
         | Command::PdCmd(1..=24)
-        // UFCS control messages likewise. [doc] [inferred]
-        | Command::UfcsCmd(_)
-        // Stepping down never raises VBUS.
+        // Stepping down never raises VBUS: a QC 3.0 session is entered at
+        // 5 V and only `qc3 inc` / `qc3 volt=` raise it. [inferred]
         | Command::Qc3Dec(_) => Risk::AtMost5V,
         // `volt=` is rendered only together with `cur=`, so judge the
         // voltage that actually reaches the meter.
@@ -60,7 +59,10 @@ pub fn classify(command: &Command, caps: &Capabilities) -> Risk {
         | Command::TfcpRequest { voltage_mv, .. }
         | Command::UfcsRequest { voltage_mv, .. } => by_voltage(*voltage_mv),
         // Outside the PD control range: not known to be safe.
-        Command::PdCmd(_) | Command::Qc3Inc(_) | Command::Raw(_) => Risk::Above5V,
+        // UFCS control numbers: no trusted table of them, so fail closed.
+        Command::PdCmd(_) | Command::UfcsCmd(_) | Command::Qc3Inc(_) | Command::Raw(_) => {
+            Risk::Above5V
+        }
     }
 }
 
@@ -275,6 +277,13 @@ mod tests {
         assert_eq!(classify(&Command::PdCmd(0), &none), Risk::Above5V);
         assert_eq!(classify(&Command::PdCmd(25), &none), Risk::Above5V);
         assert_eq!(classify(&Command::PdCmd(200), &none), Risk::Above5V);
+    }
+
+    #[test]
+    fn ufcs_cmd_is_not_proven_safe() {
+        // No trusted table of UFCS control numbers: fail closed.
+        let none = Capabilities::default();
+        assert_eq!(classify(&Command::UfcsCmd(6), &none), Risk::Above5V);
     }
 
     // ---- AC-PR41FT.4: other protocols by requested voltage ----

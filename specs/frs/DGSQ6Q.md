@@ -35,7 +35,7 @@ The library and the command line tool enter each supported non-PD protocol and r
 
 ## Technical Design
 
-One small module per protocol renders commands and parses its capability block, sharing the PDM session, the risk classifier and the reply handling. The command line subcommands share argument parsing and the high-voltage flag.
+One small module per protocol renders commands and parses its capability block, sharing the PDM session, the risk classifier and the reply handling. The command line subcommands share argument parsing and the high-voltage flag. Requests must also fit the block's maximum power, a QC 3.0 step count of 0 is refused, and `ufcs cmd` needs the high-voltage flag because UFCS control numbers are not proven safe. The CLI leaves every protocol with `reset`, then `pdm close`.
 
 ## Testing
 

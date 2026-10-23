@@ -165,6 +165,194 @@ pub enum TriggerProtocol {
         #[command(subcommand)]
         action: PdAction,
     },
+    /// Quick Charge 2.0: request 5, 9, 12 or 20 V.
+    Qc {
+        /// What to do.
+        #[command(subcommand)]
+        action: QcAction,
+    },
+    /// Quick Charge 3.0: request a voltage (3.6-20 V, 200 mV steps) or step it
+    /// (each run enters QC afresh, so steps count from the entry voltage).
+    Qc3 {
+        /// What to do.
+        #[command(subcommand)]
+        action: Qc3Action,
+    },
+    /// Huawei FCP: request 5, 9 or 12 V.
+    Fcp {
+        /// What to do.
+        #[command(subcommand)]
+        action: FixedAction,
+    },
+    /// Samsung AFC: request 5, 9 or 12 V.
+    Afc {
+        /// What to do.
+        #[command(subcommand)]
+        action: FixedAction,
+    },
+    /// Spreadtrum SFCP: request 5, 9 or 12 V.
+    Sfcp {
+        /// What to do.
+        #[command(subcommand)]
+        action: FixedAction,
+    },
+    /// Huawei SCP: show the charger's limits, or request a voltage and
+    /// current inside them.
+    Scp {
+        /// What to do.
+        #[command(subcommand)]
+        action: LimitsAction,
+    },
+    /// vivo VFCP: show the charger's limits, or request a voltage and
+    /// current inside them.
+    Vfcp {
+        /// What to do.
+        #[command(subcommand)]
+        action: LimitsAction,
+    },
+    /// Transsion TFCP: show the charger's limits, or request a voltage and
+    /// current inside them.
+    Tfcp {
+        /// What to do.
+        #[command(subcommand)]
+        action: LimitsAction,
+    },
+    /// UFCS: list the charger's output capabilities by number, request a
+    /// voltage and current inside one, or send a control message.
+    Ufcs {
+        /// What to do.
+        #[command(subcommand)]
+        action: UfcsAction,
+    },
+}
+
+/// `trigger ufcs` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum UfcsAction {
+    /// Enter UFCS and show its output capabilities, by number.
+    List {
+        /// Print one JSON object instead of labelled lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request a voltage and current inside capability N, hold it, then
+    /// return to 5 V.
+    Request {
+        /// Capability number (1-based, as `list` shows it).
+        #[arg(value_name = "N")]
+        index: u8,
+        /// Voltage, mV.
+        #[arg(long, value_name = "MV")]
+        voltage_mv: u32,
+        /// Current, mA.
+        #[arg(long, value_name = "MA")]
+        current_ma: u32,
+        #[command(flatten)]
+        flags: RequestFlags,
+    },
+    /// Send UFCS control message N (by its number in the UFCS spec), then
+    /// return to 5 V.
+    Cmd {
+        /// Control message number.
+        #[arg(value_name = "N")]
+        number: u8,
+        #[command(flatten)]
+        flags: RequestFlags,
+    },
+}
+
+/// `trigger scp|vfcp|tfcp` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum LimitsAction {
+    /// Enter the protocol and show the decoded limits of its capability block.
+    List {
+        /// Print one JSON object instead of labelled lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request a voltage and current inside the limits, hold it, then
+    /// return to 5 V.
+    Request {
+        /// Voltage, mV.
+        #[arg(long, value_name = "MV")]
+        voltage_mv: u32,
+        /// Current, mA.
+        #[arg(long, value_name = "MA")]
+        current_ma: u32,
+        #[command(flatten)]
+        flags: RequestFlags,
+    },
+}
+
+/// Flags shared by every action that sends a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Args)]
+pub struct RequestFlags {
+    /// Allow a request that raises VBUS above 5 V.
+    #[arg(long)]
+    pub allow_high_voltage: bool,
+    /// Seconds to hold the voltage before returning to 5 V; without it
+    /// the voltage is held until Ctrl-C.
+    #[arg(long, value_name = "SECS")]
+    pub hold: Option<u64>,
+    /// Print one JSON object instead of labelled lines.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `trigger qc` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum QcAction {
+    /// Request a fixed voltage, hold it, then return to 5 V.
+    Request {
+        /// Volts: 5, 9, 12 or 20.
+        #[arg(value_name = "VOLTS")]
+        volts: u8,
+        #[command(flatten)]
+        flags: RequestFlags,
+    },
+}
+
+/// `trigger fcp|afc|sfcp` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum FixedAction {
+    /// Request a fixed voltage, hold it, then return to 5 V.
+    Request {
+        /// Volts: 5, 9 or 12.
+        #[arg(value_name = "VOLTS")]
+        volts: u8,
+        #[command(flatten)]
+        flags: RequestFlags,
+    },
+}
+
+/// `trigger qc3` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum Qc3Action {
+    /// Request a voltage, hold it, then return to 5 V.
+    Request {
+        /// Voltage, mV (3600-20000 in 200 mV steps).
+        #[arg(long, value_name = "MV")]
+        voltage_mv: u32,
+        #[command(flatten)]
+        flags: RequestFlags,
+    },
+    /// Step the voltage up by N steps of 200 mV (always needs
+    /// --allow-high-voltage).
+    Inc {
+        /// Number of steps.
+        #[arg(value_name = "N")]
+        count: u32,
+        #[command(flatten)]
+        flags: RequestFlags,
+    },
+    /// Step the voltage down by N steps of 200 mV.
+    Dec {
+        /// Number of steps.
+        #[arg(value_name = "N")]
+        count: u32,
+        #[command(flatten)]
+        flags: RequestFlags,
+    },
 }
 
 /// `trigger pd` actions.

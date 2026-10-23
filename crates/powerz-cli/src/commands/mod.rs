@@ -29,7 +29,8 @@ pub use pd::{pd, pd_decode, pd_save};
 pub use read::read;
 pub use stream::{StreamOptions, StreamSummary, stream};
 pub use trigger::{
-    PdRequestOptions, PdSettingsChange, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
+    LegacyRequestOptions, PdRequestOptions, PdSettingsChange, trigger_legacy_list,
+    trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
     trigger_pd_settings,
 };
 pub use watch::{WatchOptions, watch};

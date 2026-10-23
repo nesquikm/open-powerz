@@ -82,6 +82,27 @@ impl From<pdm::pd::Error> for CliError {
     }
 }
 
+impl From<pdm::legacy::Error> for CliError {
+    fn from(e: pdm::legacy::Error) -> Self {
+        match e {
+            pdm::legacy::Error::Pdm(p) => p.into(),
+            // The charger's side: it does not speak the protocol, or sent no
+            // capability block to check a request against.
+            pdm::legacy::Error::NotSupported { .. } | pdm::legacy::Error::NoCapabilities { .. } => {
+                CliError::Device(e.to_string())
+            }
+            // Request validation: the user asked for something not allowed.
+            pdm::legacy::Error::FixedVoltage { .. }
+            | pdm::legacy::Error::Qc3Voltage { .. }
+            | pdm::legacy::Error::StepCount { .. }
+            | pdm::legacy::Error::PowerOutOfRange { .. }
+            | pdm::legacy::Error::NoCapability { .. }
+            | pdm::legacy::Error::VoltageOutOfRange { .. }
+            | pdm::legacy::Error::CurrentOutOfRange { .. } => CliError::Usage(e.to_string()),
+        }
+    }
+}
+
 /// A failed write to an output sink (stdout, stderr or the CSV file).
 impl From<std::io::Error> for CliError {
     fn from(e: std::io::Error) -> Self {

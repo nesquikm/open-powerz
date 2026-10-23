@@ -537,6 +537,20 @@ as a sink and ask a charger for a voltage. [doc] [static] [device]
   chargers, so nothing that cannot take it belongs on the output. [inferred]
 - The `ufcs:`, `scp:`, `vfcp:` and `tfcp:` block layouts come from the vendor
   app only. [static]
+- Other protocols: `entry qc|fcp|afc|sfcp|scp|vfcp|tfcp|ufcs` → `ok` then
+  `ready` when the charger speaks it, followed by the protocol's capability
+  block for SCP, VFCP, TFCP and UFCS. Requests: `qc 5V|9V|12V|20V`,
+  `qc3 volt=<mV>` (3600-20000 mV in 200 mV steps), `qc3 inc=<n>` /
+  `qc3 dec=<n>`, `fcp|afc|sfcp 5V|9V|12V`, `scp|vfcp|tfcp volt=<mV>,cur=<mA>`,
+  `ufcs req=<n>,volt=<mV>,cur=<mA>` (capability n, counted from 1), and
+  `ufcs cmd=<n>` (a UFCS control message). [static] [doc] Only the timeout
+  answers have been seen on the device so far. `reset` is used to leave
+  them; that it returns VBUS to 5 V is seen after PD [device] and assumed
+  for the others. [inferred]
+- Our limits: a request must fit the capability block's voltage, current
+  and power; VFCP's two fixed modes are checked as one range plus the power
+  limit. [inferred] `qc3 inc` and every `ufcs cmd=<n>` count as above 5 V,
+  since no trusted table of UFCS control numbers is at hand.
 
 How our library sends them safely:
 
