@@ -15,6 +15,12 @@ use crate::pd::{Header, MessageKind, Rdo, Sop, SourcePdo};
 /// Highest voltage a command may request without a confirmation, mV.
 pub const SAFE_LIMIT_MV: u32 = 5000;
 
+/// PD control messages that swap roles: DR_Swap (9), PR_Swap (10),
+/// VCONN_Swap (11) and FR_Swap (19). They carry no voltage, but a power
+/// role or VCONN source swap changes who drives VBUS / VCONN, so they are
+/// not proven to stay at 5 V: fail closed. \[inferred\]
+const SWAP_CONTROL_TYPES: [u8; 4] = [9, 10, 11, 19];
+
 /// Risk of one command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Risk {
@@ -30,6 +36,7 @@ pub enum Risk {
 pub fn classify(command: &Command, caps: &Capabilities) -> Risk {
     match command {
         Command::PdmParm | Command::PdPdo | Command::UfcsPdo => Risk::ReadOnly,
+        Command::PdCmd(ty) if SWAP_CONTROL_TYPES.contains(ty) => Risk::Above5V,
         // Session control, protocol entry and detection, resets: the meter
         // negotiates nothing above the default 5 V. [doc] [inferred]
         Command::PdmOpen
@@ -96,8 +103,8 @@ fn pd_request(caps: &Capabilities, position: u8, voltage_mv: Option<u32>) -> Ris
 }
 
 /// `pd data=`: SOP byte, header u16 LE, data objects u32 LE. \[doc\]
-/// Control messages are at most 5 V; Request / EPR_Request go by the RDO;
-/// every other message is above 5 V.
+/// Control messages are at most 5 V (except the role swaps); Request /
+/// EPR_Request go by the RDO; every other message is above 5 V.
 fn pd_data(caps: &Capabilities, bytes: &[u8]) -> Risk {
     const REQUEST: u8 = 0x02;
     const EPR_REQUEST: u8 = 0x09;
@@ -106,6 +113,9 @@ fn pd_data(caps: &Capabilities, bytes: &[u8]) -> Risk {
     };
     let header = Header::decode(u16::from_le_bytes([*lo, *hi]), Sop::Sop);
     match header.message_type.kind() {
+        MessageKind::Control if SWAP_CONTROL_TYPES.contains(&header.message_type.code()) => {
+            Risk::Above5V
+        }
         MessageKind::Control => Risk::AtMost5V,
         MessageKind::Data if matches!(header.message_type.code(), REQUEST | EPR_REQUEST) => {
             let [a, b, c, d, ..] = *rest else {
@@ -277,6 +287,29 @@ mod tests {
         assert_eq!(classify(&Command::PdCmd(0), &none), Risk::Above5V);
         assert_eq!(classify(&Command::PdCmd(25), &none), Risk::Above5V);
         assert_eq!(classify(&Command::PdCmd(200), &none), Risk::Above5V);
+    }
+
+    #[test]
+    fn pd_role_swaps_are_above_5v_as_pd_cmd_and_as_pd_data() {
+        let spr = caps_with(spr_block());
+        for ty in [9u8, 10, 11, 19] {
+            assert_eq!(
+                classify(&Command::PdCmd(ty), &spr),
+                Risk::Above5V,
+                "pd cmd={ty}"
+            );
+            // Zero-object control message, Spec Rev 3.0, on SOP and SOP'.
+            let header = 0x0080u16 | u16::from(ty);
+            for sop in [0u8, 1] {
+                let [lo, hi] = header.to_le_bytes();
+                let data = Command::PdData(vec![sop, lo, hi]);
+                assert_eq!(classify(&data, &spr), Risk::Above5V, "{data:?}");
+            }
+        }
+        // Neighbouring control messages stay at most 5 V.
+        for ty in [8u8, 12, 13, 18, 20] {
+            assert_eq!(classify(&Command::PdCmd(ty), &spr), Risk::AtMost5V, "{ty}");
+        }
     }
 
     #[test]

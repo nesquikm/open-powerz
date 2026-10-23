@@ -9,6 +9,8 @@
     limitsRequest,
     type TriggerPanel,
   } from "../trigger.svelte";
+  import type { PdConsole } from "../console.svelte";
+  import PdConsoleView from "./PdConsoleView.svelte";
   import TriggerConfirmDialog from "./TriggerConfirmDialog.svelte";
 
   /**
@@ -18,10 +20,13 @@
   let {
     panel,
     connected,
+    pdConsole,
   }: {
     panel: TriggerPanel;
     /** A meter (or the demo device) is connected and streaming. */
     connected: boolean;
+    /** The PD message builder and raw console (FR DGSQ6T); shown while a session is open. */
+    pdConsole?: PdConsole;
   } = $props();
 
   let busy = $state(false);
@@ -404,6 +409,10 @@
       <p class="warning" role="status">VBUS differs from the request by more than 5 %.</p>
     {/if}
   </section>
+
+  {#if pdConsole && panel.sessionOpen}
+    <PdConsoleView {pdConsole} />
+  {/if}
 
   {#if panel.pending}
     <TriggerConfirmDialog

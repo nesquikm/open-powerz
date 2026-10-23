@@ -30,6 +30,10 @@ import type {
   SeriesBuckets,
   StatsSnapshot,
   Detection,
+  CableView,
+  ConsoleLine,
+  PdMessageRequest,
+  PdSendReply,
   TriggerLimits,
   TriggerOffer,
   TriggerProtocol,
@@ -38,6 +42,7 @@ import type {
   UiError,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
+import { DISCOVER_IDENTITY_CABLE, lineRefusal, messageRefusal } from "./console.svelte";
 import { PD_CYCLE_MS, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
@@ -466,6 +471,61 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
     "(see `docs/linux.md`).",
 };
 
+/** Like the library's builder: a control message on SOP is `pd cmd=<type>`, anything
+ * else `pd data=<SOP byte><header LE><objects LE>` in uppercase hex; GoodCRC and
+ * malformed messages are a usage error. */
+function renderMockMessage(m: PdMessageRequest): string {
+  const { msg_type: ty, data_objects: objects } = m;
+  if (!Number.isInteger(ty) || ty < 0 || ty > 31) {
+    throw usage(`Message type ${ty} does not fit the 5-bit field.`);
+  }
+  const refusal = messageRefusal(m);
+  if (refusal !== null) throw usage(refusal);
+  if (objects.length === 0) {
+    if (ty < 3 || ty > 0x18) throw usage("A data message needs at least one data object.");
+  }
+  if (objects.length > 7) {
+    throw usage(`${objects.length} data objects: a PD message carries at most 7.`);
+  }
+  if (objects.length === 0 && m.sop === "sop") return `pd cmd=${ty}`;
+  const sop = m.sop === "sop" ? 0 : m.sop === "sop_prime" ? 1 : 2;
+  const header = (objects.length << 12) | 0x80 | ty;
+  const bytes = [sop, header & 0xff, header >>> 8];
+  for (const o of objects) bytes.push(o & 0xff, (o >>> 8) & 0xff, (o >>> 16) & 0xff, o >>> 24);
+  const hex = bytes.map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join("");
+  return `pd data=${hex}`;
+}
+
+/** Like the library classifier for a raw console line: queries are read-only, session
+ * control and entries stay at 5 V, `pd req=` goes by the offer, unknown text is above 5 V. */
+function mockLineRisk(text: string): RiskClass {
+  if (["pdm parm", "pd pdo", "ufcs pdo"].includes(text)) return "read_only";
+  if (/^(pdm open|pdm close|reset|pd hrst|entry \S+)$/.test(text)) return "at_most_5v";
+  const cmd = /^pd cmd=(\d+)$/.exec(text);
+  if (cmd) return Number(cmd[1]) <= 24 ? "at_most_5v" : "above_5v";
+  const req = /^pd req=(\d+)$/.exec(text);
+  if (req) {
+    const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === Number(req[1]));
+    return offer && offer.max_voltage_mv <= 5000 ? "at_most_5v" : "above_5v";
+  }
+  return "above_5v";
+}
+
+/** The scripted charger's `pdo:` block in words, like the backend's description. */
+function mockPdoBlock(): string {
+  const v = (mv: number): string => (mv / 1000).toFixed(2);
+  const offers = MOCK_TRIGGER_OFFERS.map((o) => {
+    const volts =
+      o.min_voltage_mv === o.max_voltage_mv
+        ? `${v(o.max_voltage_mv)} V`
+        : `${v(o.min_voltage_mv)}-${v(o.max_voltage_mv)} V`;
+    const current = o.max_current_ma === null ? "" : ` ${v(o.max_current_ma)} A`;
+    const power = o.max_power_mw === null ? "" : ` ${(o.max_power_mw / 1000).toFixed(1)} W`;
+    return `#${o.position} ${o.kind} ${volts}${current}${power}`;
+  });
+  return `pdo: ${offers.join(", ")}`;
+}
+
 /** The mock trigger session: what was entered last (how to get back to 5 V). */
 interface MockTrigger {
   entered: "pd" | "legacy" | null;
@@ -578,6 +638,17 @@ const MOCK_TRIGGER_OFFERS: readonly TriggerOffer[] = [
 
 /** One page-lifetime instance; a running session's timer stops on `disconnect()` or
  * when the page goes away (it is a test and demo double, not a resource owner). */
+/** The demo e-marked cable's details: VID 0x050D, PID 0x8254, passive, 50 V, 5 A,
+ * EPR capable. */
+const MOCK_CABLE: CableView = {
+  vid: 0x050d,
+  pid: 0x8254,
+  active: false,
+  max_voltage_v: 50,
+  max_current_ma: 5000,
+  epr_capable: true,
+};
+
 export class MockBackend {
   #session: Running | null = null;
   /** The PD capture saved last in the page, and the one opened (FR TGE83E). */
@@ -1330,6 +1401,86 @@ export class MockBackend {
         data: { state: "rate", rate_sps: t.rateBefore, rate_locked: false },
       });
     }
+  }
+
+  // ---- Custom PD messages and the raw console (FR DGSQ6T) ----
+
+  /** The library risk class of a built message; GoodCRC is refused with a reason. */
+  async triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass> {
+    this.#openTrigger();
+    renderMockMessage(message);
+    if (message.data_objects.length === 0) return "at_most_5v";
+    // Request / EPR_Request go by the requested position; every other data message
+    // is above 5 V, like the library classifier.
+    if (message.sop !== "sop" || (message.msg_type !== 2 && message.msg_type !== 9)) {
+      return "above_5v";
+    }
+    const position = (message.data_objects[0]! >>> 28) & 0xf;
+    const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === position);
+    return offer && offer.max_voltage_mv <= 5000 ? "at_most_5v" : "above_5v";
+  }
+
+  /** Sends a built message to the scripted charger (or the demo e-marked cable). */
+  async triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply> {
+    this.#openTrigger();
+    const command = renderMockMessage(message);
+    if ((await this.triggerMessageRisk(message)) === "above_5v" && !confirmed) {
+      throw usage("A message that can raise VBUS above 5 V needs your confirmation.");
+    }
+    this.#triggerLog.push(command);
+    // The demo e-marked cable (the session-2 240 W passive cable) answers a
+    // Discover Identity REQ to a cable plug.
+    const discover =
+      message.sop !== "sop" &&
+      message.msg_type === 15 &&
+      message.data_objects.length === 1 &&
+      message.data_objects[0] === DISCOVER_IDENTITY_CABLE.data_objects[0];
+    return {
+      command,
+      lines: [{ at_ms: Date.now(), direction: "tx", text: command, block: null }],
+      cable: discover ? { ...MOCK_CABLE } : null,
+    };
+  }
+
+  /** The library risk class of a raw console line. */
+  async triggerConsoleRisk(line: string): Promise<RiskClass> {
+    this.#openTrigger();
+    return mockLineRisk(line.trim());
+  }
+
+  /** Sends a raw console line to the scripted charger. */
+  async triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]> {
+    const t = this.#openTrigger();
+    const text = line.trim();
+    // Like the backend: GoodCRC is refused before anything is sent.
+    const refusal = lineRefusal(text);
+    if (refusal !== null) throw usage(refusal);
+    if (mockLineRisk(text) === "above_5v" && !confirmed) {
+      throw usage("A line that can raise VBUS above 5 V needs your confirmation.");
+    }
+    this.#triggerLog.push(text);
+    const at = Date.now();
+    const lines: ConsoleLine[] = [{ at_ms: at, direction: "tx", text, block: null }];
+    const rx = (reply: string, block: string | null = null): void => {
+      lines.push({ at_ms: at, direction: "rx", text: reply, block });
+    };
+    const req = /^pd req=(\d+)/.exec(text);
+    if (text === "pdm parm") {
+      rx("type=0,em=2,sink=0");
+    } else if (text === "entry pd") {
+      t.entered = "pd";
+      rx("ok");
+      rx("pdo:", mockPdoBlock());
+      rx("ready:5000mV,0mA");
+    } else if (/^entry \S+$/.test(text)) {
+      t.entered = "legacy";
+      rx("ok");
+    } else if (req) {
+      t.entered = "pd";
+      const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === Number(req[1]));
+      rx(offer ? `ready:${offer.max_voltage_mv}mV,0mA` : "fail");
+    }
+    return lines;
   }
 
   /** Every command the scripted charger received (`pd req=2`, `pd req=1`, `reset`,

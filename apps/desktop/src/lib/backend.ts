@@ -635,3 +635,72 @@ export async function triggerClose(): Promise<void> {
   if (mock) return mock.triggerClose();
   await invoke("trigger_close");
 }
+
+// ---- Custom PD messages and the raw console (FR DGSQ6T; mirrors `src-tauri/src/trigger.rs`) ----
+
+/** Where a built PD message goes: SOP (the charger), SOP' or SOP'' (the cable plugs). */
+export type MessageSop = "sop" | "sop_prime" | "sop_double_prime";
+
+/** A PD message from the builder: no data objects is a control message. */
+export interface PdMessageRequest {
+  sop: MessageSop;
+  /** The 5-bit Message Type. */
+  msg_type: number;
+  /** 32-bit data objects. */
+  data_objects: number[];
+}
+
+/** One console transcript line. */
+export interface ConsoleLine {
+  /** Clock time, ms since the Unix epoch. */
+  at_ms: number;
+  direction: "tx" | "rx";
+  /** The line sent or received (a block's tag for a block). */
+  text: string;
+  /** A parsed binary block, in words; null for a text line. */
+  block: string | null;
+}
+
+/** A cable's e-marker details. */
+export interface CableView {
+  vid: number;
+  pid: number | null;
+  active: boolean;
+  max_voltage_v: number | null;
+  max_current_ma: number | null;
+  epr_capable: boolean;
+}
+
+/** What sending a built message did. */
+export interface PdSendReply {
+  command: string;
+  lines: ConsoleLine[];
+  cable: CableView | null;
+}
+
+/** The library risk class of a built message; GoodCRC is a usage error. */
+export async function triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass> {
+  if (mock) return mock.triggerMessageRisk(message);
+  return invoke<RiskClass>("trigger_message_risk", { message });
+}
+
+/** Sends a built message; above 5 V needs `confirmed`. */
+export async function triggerMessageSend(
+  message: PdMessageRequest,
+  confirmed: boolean,
+): Promise<PdSendReply> {
+  if (mock) return mock.triggerMessageSend(message, confirmed);
+  return invoke<PdSendReply>("trigger_message_send", { message, confirmed });
+}
+
+/** The library risk class of a raw console line. */
+export async function triggerConsoleRisk(line: string): Promise<RiskClass> {
+  if (mock) return mock.triggerConsoleRisk(line);
+  return invoke<RiskClass>("trigger_console_risk", { line });
+}
+
+/** Sends a raw console line; above 5 V (any unparsable line too) needs `confirmed`. */
+export async function triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]> {
+  if (mock) return mock.triggerConsoleSend(line, confirmed);
+  return invoke<ConsoleLine[]>("trigger_console_send", { line, confirmed });
+}

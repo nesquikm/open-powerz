@@ -381,6 +381,66 @@ async fn trigger_request(
     .await
 }
 
+/// The library risk class of a built PD message (FR DGSQ6T); GoodCRC and
+/// malformed messages are a usage error with the reason.
+#[tauri::command]
+async fn trigger_message_risk(
+    state: Shared<'_>,
+    message: trigger::PdMessageRequest,
+) -> Result<trigger::RiskClass, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.message_risk(message)
+    })
+    .await
+}
+
+/// Send a built PD message; above 5 V it is refused unless `confirmed`.
+#[tauri::command]
+async fn trigger_message_send(
+    state: Shared<'_>,
+    message: trigger::PdMessageRequest,
+    confirmed: bool,
+) -> Result<trigger::PdSendReply, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.send_message(message, confirmed)
+    })
+    .await
+}
+
+/// The library risk class of a raw console line (FR DGSQ6T).
+#[tauri::command]
+async fn trigger_console_risk(
+    state: Shared<'_>,
+    line: String,
+) -> Result<trigger::RiskClass, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.console_risk(line)
+    })
+    .await
+}
+
+/// Send a raw console line; above 5 V (any unparsable line too) it is
+/// refused unless `confirmed`; GoodCRC is always refused.
+#[tauri::command]
+async fn trigger_console_send(
+    state: Shared<'_>,
+    line: String,
+    confirmed: bool,
+) -> Result<Vec<trigger::ConsoleLine>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.console_send(line, confirmed)
+    })
+    .await
+}
+
 /// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
 /// protocols `reset`. The session stays open.
 #[tauri::command]
@@ -858,6 +918,10 @@ pub fn run() {
             trigger_risk,
             trigger_request,
             trigger_back_to_5v,
+            trigger_message_risk,
+            trigger_message_send,
+            trigger_console_risk,
+            trigger_console_send,
             trigger_close
         ])
         .on_window_event(|window, event| {

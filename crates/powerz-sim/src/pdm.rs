@@ -39,6 +39,65 @@ pub enum SimCharger {
     MultiProtocol,
 }
 
+/// E-marked cables between the simulated meter and the charger (FR DGSQ6T).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimCable {
+    /// The session-2 240 W passive cable: VID 0x050D, PID 0x8254, 50 V,
+    /// 5 A, EPR capable. It answers a SOP' Discover Identity with its ACK.
+    /// \[device\] (the ACK seen in the PD capture)
+    Epr240W,
+}
+
+/// The session-2 240 W cable's Discover Identity ACK data objects. [device]
+const CABLE_EPR240_ACK: [u32; 5] = [
+    0xFF00_A841,
+    0x1860_050D,
+    0x0000_404D,
+    0x8254_0000,
+    0x000A_2640,
+];
+
+/// PD CRC-32 (IEEE 802.3, reflected) over the header and data objects.
+fn pd_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+impl SimCable {
+    /// The ACK as a received-message line in the vendor doc's receive form:
+    /// `pd data=` + SOP byte, header LE, header LE again, data objects LE,
+    /// CRC-32 LE. [inferred] (receive form from the doc, not yet seen on a
+    /// device)
+    fn discover_identity_ack(self) -> Vec<u8> {
+        let objects = match self {
+            SimCable::Epr240W => CABLE_EPR240_ACK,
+        };
+        // Vendor_Defined, NumDO 5, Spec Rev 3.0, Cable Plug. [device]
+        let header: u16 = 0x518F;
+        let mut msg = header.to_le_bytes().to_vec();
+        for o in objects {
+            msg.extend(o.to_le_bytes());
+        }
+        let crc = pd_crc32(&msg);
+        let mut raw = vec![1u8];
+        raw.extend(header.to_le_bytes());
+        raw.extend(&msg);
+        raw.extend(crc.to_le_bytes());
+        let hex: String = raw.iter().map(|b| format!("{b:02X}")).collect();
+        format!("pd data={hex}\n").into_bytes()
+    }
+}
+
 /// Synthetic capability block (with its `\n`) for `scp` / `vfcp` / `tfcp` /
 /// `ufcs`,
 /// in the \[static\] layouts: SCP 40 W, 3.4-20 V, 0.1-4 A, 10 mV / 50 mA
@@ -221,6 +280,8 @@ struct State {
     parm: String,
     writes: Vec<(u64, Vec<u8>)>,
     pending: Vec<u8>,
+    /// The e-marked cable on the input, if any.
+    cable: Option<SimCable>,
 }
 
 impl State {
@@ -272,6 +333,8 @@ impl State {
                 mv * 985 / 1000
             };
             b"ready\n".to_vec()
+        } else if let Some(hex) = text.strip_prefix("pd data=") {
+            self.pd_data(hex)
         } else if text.starts_with("pd hrst") && self.pd_entered {
             self.vbus_mv = VBUS_PD_MV;
             self.charger.offers()
@@ -279,6 +342,33 @@ impl State {
             // Unknown text: silently ignored, case-sensitive. [device]
             Vec::new()
         }
+    }
+
+    /// `pd data=<hex>`: the e-marked cable answers a SOP' Discover Identity
+    /// REQ with its ACK; anything else is sent silently.
+    fn pd_data(&self, hex: &str) -> Vec<u8> {
+        let Some(cable) = self.cable else {
+            return Vec::new();
+        };
+        let bytes: Option<Vec<u8>> = (0..hex.len() / 2)
+            .map(|i| {
+                hex.get(2 * i..2 * i + 2)
+                    .and_then(|p| u8::from_str_radix(p, 16).ok())
+            })
+            .collect();
+        let Some([sop, lo, hi, o0, o1, o2, o3, ..]) = bytes.as_deref() else {
+            return Vec::new();
+        };
+        let header = u16::from_le_bytes([*lo, *hi]);
+        let vdm = u32::from_le_bytes([*o0, *o1, *o2, *o3]);
+        // SOP', Vendor_Defined, structured VDM (SVID 0xFF00) Discover
+        // Identity REQ.
+        let discover_req =
+            header & 0x1F == 0x0F && vdm & 0xFFFF_80DF == 0xFF00_8001 && vdm & 0xC0 == 0;
+        if *sop != 1 || !discover_req {
+            return Vec::new();
+        }
+        cable.discover_identity_ack()
     }
 
     fn pdm_open(&mut self) -> Vec<u8> {
@@ -497,6 +587,7 @@ impl SimPdm {
                 parm: DEFAULT_PARM.to_string(),
                 writes: Vec::new(),
                 pending: Vec::new(),
+                cable: None,
             })),
         }
     }
@@ -505,6 +596,13 @@ impl SimPdm {
     /// then answers `ok`.
     pub fn with_busy_open(self) -> SimPdm {
         lock(&self.shared).busy_open = true;
+        self
+    }
+
+    /// Put an e-marked `cable` on the input: it answers SOP' Discover
+    /// Identity (`pd data=01...`) once the PDM session is open.
+    pub fn with_cable(self, cable: SimCable) -> SimPdm {
+        lock(&self.shared).cable = Some(cable);
         self
     }
 

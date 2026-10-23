@@ -44,3 +44,7 @@ codename: Trigger Happy
 Build order: PR41FT, then DGSQ6P, DGSQ6R, DGSQ6Q, DGSQ6S, DGSQ6T. 2BF5G6 is implemented (merged with v0.3.0) and is archived with this milestone; record its CI run ids (39865959289, attempts 1 and 3) in its Notes at archive time.
 
 **Gate:** same gating rule as CLAUDE.md.
+
+**M7 follow-ups:**
+
+- Cable info panel: one-click e-marker summary (vendor, current, voltage, speed, active/passive) built on the SOP' Discover Identity preset, with a passive fallback that reads the identity from the bulk PD capture (the charger's own SOP' exchange), since the cable answers only the VCONN source (DGSQ6T Notes).

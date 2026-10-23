@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub use pd::PdScenario;
-pub use pdm::{SimCharger, SimPdm, SimPdmPort};
+pub use pdm::{SimCable, SimCharger, SimPdm, SimPdmPort};
 use powerz_protocol::session::Clock;
 use powerz_protocol::transport::{Error, Transport};
 

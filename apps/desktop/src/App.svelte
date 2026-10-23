@@ -21,8 +21,12 @@
     toUiError,
     triggerBackTo5v,
     triggerClose,
+    triggerConsoleRisk,
+    triggerConsoleSend,
     triggerDetect,
     triggerList,
+    triggerMessageRisk,
+    triggerMessageSend,
     triggerOpen,
     triggerRequest,
     triggerRisk,
@@ -53,6 +57,7 @@
   import TopBar from "./lib/components/TopBar.svelte";
   import TriggerView from "./lib/components/TriggerView.svelte";
   import { TriggerPanel } from "./lib/trigger.svelte";
+  import { PdConsole } from "./lib/console.svelte";
   import { onMount, setContext, untrack } from "svelte";
   import {
     ExportJob,
@@ -119,6 +124,17 @@
     request: triggerRequest,
     backTo5v: triggerBackTo5v,
     close: triggerClose,
+  });
+  /** The PD message builder and raw console on the trigger session (FR DGSQ6T). */
+  const pdConsole = new PdConsole({
+    messageRisk: triggerMessageRisk,
+    messageSend: triggerMessageSend,
+    consoleRisk: triggerConsoleRisk,
+    consoleSend: triggerConsoleSend,
+  });
+  // A closed trigger session takes the console's transcript, cable and error with it.
+  $effect(() => {
+    if (!trigger.sessionOpen) untrack(() => pdConsole.reset());
   });
 
   // Leaving the Trigger tab returns to 5 V and closes the trigger session.
@@ -645,7 +661,7 @@
     </div>
     {#if view === "trigger"}
       <div class="trigger-view" role="tabpanel" id="view-trigger" aria-labelledby="tab-trigger">
-        <TriggerView panel={trigger} connected={canRecord} />
+        <TriggerView panel={trigger} connected={canRecord} {pdConsole} />
       </div>
     {/if}
     {#if view === "pd"}

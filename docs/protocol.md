@@ -569,6 +569,16 @@ as a sink and ask a charger for a voltage. [doc] [static] [device]
     did not change VBUS: `ready` after an entry does not prove support.
   - macOS lists the port twice (`/dev/cu.*` and `/dev/tty.*`); the `cu.`
     one is used.
+  - `pd data=` with a SOP' Discover Identity (`018F1001A800FF`, and the
+    SVDM 1.0 form `018F1001A000FF`) goes out on the wire. A 240 W passive
+    e-marked cable behind an Apple 140 W charger answered it with GoodCRC
+    only, and the text channel printed no reply line. In the same bulk PD
+    capture the charger's own SOP' query got the full ACK (VID 0x050D, PID
+    0x8254, passive, 50 V, 5 A, EPR). The cable seems to answer only the
+    VCONN source. [inferred] The `pd data=` receive format is still
+    unconfirmed.
+  - The console answer to `pdm parm` is `type=0,em=2,sink=0`; after
+    `entry pd` the `pdo:` block arrives later than `ok` and `cc1 attach`.
 - Verified on the device with nothing on the output: PD fixed 9/15/20/28 V,
   PPS, EPR AVS, hard reset, QC 2.0 and QC 3.0 voltage requests. Not yet
   verified: QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS requests.
@@ -588,6 +598,10 @@ How our library sends them safely:
   the offer's minimum all count as above 5 V. A command above 5 V is sent
   only with an explicit confirmation made for that one command. Offers are
   forgotten when the port is reopened.
+- GoodCRC is never sent: `pd cmd=1` and a `pd data` GoodCRC are refused in
+  any spelling (leading zeros, `0x`, either hex case), and a `pd cmd`/
+  `pd data` line that cannot be read is refused too. PD role swaps (DR,
+  PR, VCONN and FR_Swap) count as above 5 V. [inferred]
 - `pdm close` is always sent before the port is released.
 
 ## PD capture

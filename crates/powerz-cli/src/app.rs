@@ -18,7 +18,7 @@ use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C};
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{
-    FaultPlan, PdScenario, Persona, SIM_SERIAL, SimCharger, SimClock, SimDevice, SimPdm,
+    FaultPlan, PdScenario, Persona, SIM_SERIAL, SimCable, SimCharger, SimClock, SimDevice, SimPdm,
 };
 
 use crate::args::{
@@ -26,10 +26,10 @@ use crate::args::{
     TransportKind, TriggerProtocol, UfcsAction, needs_connect, rate_from_sps, validate,
 };
 use crate::commands::{
-    DetectOptions, LegacyRequestOptions, PdRequestOptions, PdSettingsChange, StreamOptions,
-    WatchOptions, detect, info, list, pd, pd_decode, pd_save, read, select_device, stream,
-    trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
-    trigger_pd_reset, trigger_pd_settings, watch,
+    DetectOptions, LegacyRequestOptions, PdRequestOptions, PdSendOptions, PdSettingsChange,
+    StreamOptions, WatchOptions, console, detect, info, list, pd, pd_decode, pd_save, pd_send,
+    read, select_device, stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list,
+    trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport};
@@ -83,10 +83,12 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
             &mut std::io::stderr().lock(),
         );
     }
-    if matches!(
-        cli.command,
-        Command::Trigger { .. } | Command::Detect { .. }
-    ) {
+    if cli.pd_file.send.is_some()
+        || matches!(
+            cli.command,
+            Command::Trigger { .. } | Command::Detect { .. } | Command::Console { .. }
+        )
+    {
         return run_pdm(cli);
     }
     if cli.transport == TransportKind::Sim {
@@ -142,10 +144,10 @@ fn run_pdm(cli: &Cli) -> Result<(), CliError> {
     let charger = sim_charger()?;
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-        let sim = SimPdm::new(charger, clock.clone());
+        let sim = with_sim_cable(SimPdm::new(charger, clock.clone()))?;
         pdm_on(cli, sim.open_port(), clock, hint)
     } else {
-        let sim = SimPdm::new(charger, SimClock::new(SystemClock.now_ms()));
+        let sim = with_sim_cable(SimPdm::new(charger, SimClock::new(SystemClock.now_ms())))?;
         pdm_on(cli, sim.open_port(), SystemClock, hint)
     }
 }
@@ -247,6 +249,18 @@ fn sim_charger() -> Result<SimCharger, CliError> {
     }
 }
 
+/// Honour `POWERZ_SIM_CABLE=<name>` (test-only): `epr-240w` puts the
+/// session-2 e-marked 240 W cable on the simulated meter; unset, no cable.
+fn with_sim_cable(sim: SimPdm) -> Result<SimPdm, CliError> {
+    match std::env::var("POWERZ_SIM_CABLE").as_deref() {
+        Err(_) => Ok(sim),
+        Ok("epr-240w") => Ok(sim.with_cable(SimCable::Epr240W)),
+        Ok(other) => Err(CliError::Usage(format!(
+            "invalid POWERZ_SIM_CABLE {other:?}: expected epr-240w"
+        ))),
+    }
+}
+
 /// Wrap `port` for `--trace` if asked, open the PDM session and run.
 fn pdm_on<P: Read + Write, C: Clock>(
     cli: &Cli,
@@ -256,28 +270,37 @@ fn pdm_on<P: Read + Write, C: Clock>(
 ) -> Result<(), CliError> {
     if cli.trace {
         let port = TracePort::new(port, std::io::stderr());
-        run_pdm_session(
-            &cli.command,
-            PdmSession::open_with_clock(port, clock)?,
-            hint,
-        )
+        run_pdm_session(cli, PdmSession::open_with_clock(port, clock)?, hint)
     } else {
-        run_pdm_session(
-            &cli.command,
-            PdmSession::open_with_clock(port, clock)?,
-            hint,
-        )
+        run_pdm_session(cli, PdmSession::open_with_clock(port, clock)?, hint)
     }
 }
 
-/// Run `trigger` or `detect` on an open PDM session.
+/// Run `trigger`, `detect` or `pd send` on an open PDM session.
 fn run_pdm_session<P: Read + Write, C: Clock>(
-    command: &Command,
+    cli: &Cli,
     session: PdmSession<P, C>,
     hint: Option<Hint>,
 ) -> Result<(), CliError> {
-    match command {
+    if let Some(send) = &cli.pd_file.send {
+        let opts = PdSendOptions {
+            hex: send.hex.as_deref(),
+            preset: send.preset,
+            sop: send.sop,
+            allow_high_voltage: send.allow_high_voltage,
+            json: send.json,
+        };
+        return pd_send(session, &opts, &mut std::io::stdout().lock());
+    }
+    match &cli.command {
         Command::Trigger { protocol } => run_trigger_session(protocol, session),
+        Command::Console { allow_high_voltage } => console(
+            session,
+            *allow_high_voltage,
+            std::io::BufReader::new(std::io::stdin()),
+            &stop_flag(),
+            &mut std::io::stdout().lock(),
+        ),
         Command::Detect {
             list,
             list_plus,
@@ -623,8 +646,8 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
     let mut out = std::io::stdout().lock();
     match &cli.command {
         Command::List { .. } => unreachable!("list is handled before opening a device"),
-        Command::Trigger { .. } | Command::Detect { .. } => {
-            unreachable!("trigger and detect are handled before opening a device")
+        Command::Trigger { .. } | Command::Detect { .. } | Command::Console { .. } => {
+            unreachable!("trigger, detect and console are handled before opening a device")
         }
         Command::Info { json } => info(&mut session, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),

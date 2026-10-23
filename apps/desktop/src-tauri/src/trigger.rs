@@ -12,8 +12,10 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use powerz_protocol::pdm::console;
 use powerz_protocol::pdm::detect::{self, ListOptions};
 use powerz_protocol::pdm::legacy::{self, LegacyProtocol};
+use powerz_protocol::pdm::message::{self, CableIdentity, PdMessage, SopTarget};
 use powerz_protocol::pdm::{self, HighVoltageConfirmation, PdmSession, pd};
 use powerz_protocol::session::Clock;
 use serde::{Deserialize, Serialize};
@@ -191,6 +193,65 @@ pub struct TriggerReply {
     pub reply: Option<String>,
 }
 
+/// Where a built PD message goes, as the UI names it (FR DGSQ6T).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageSop {
+    Sop,
+    SopPrime,
+    SopDoublePrime,
+}
+
+/// A PD message from the builder: no data objects is a control message.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PdMessageRequest {
+    pub sop: MessageSop,
+    pub msg_type: u8,
+    pub data_objects: Vec<u32>,
+}
+
+/// Which way a console line went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleDirection {
+    Tx,
+    Rx,
+}
+
+/// One console transcript line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConsoleLine {
+    /// Clock time, ms since the Unix epoch.
+    pub at_ms: u64,
+    pub direction: ConsoleDirection,
+    /// The line sent or received (a block's tag for a block).
+    pub text: String,
+    /// A parsed binary block, in words (`pdo: #1 Fixed 5.00 V 3.00 A, ...`).
+    pub block: Option<String>,
+}
+
+/// A cable's e-marker details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CableView {
+    pub vid: u16,
+    pub pid: Option<u16>,
+    pub active: bool,
+    pub max_voltage_v: Option<u32>,
+    pub max_current_ma: Option<u32>,
+    pub epr_capable: bool,
+}
+
+/// What sending a built message did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PdSendReply {
+    /// The command sent (`pd cmd=13`, `pd data=01...`).
+    pub command: String,
+    /// The transcript of the send.
+    pub lines: Vec<ConsoleLine>,
+    /// The cable's identity, when a cable answered a Discover Identity.
+    pub cable: Option<CableView>,
+}
+
 /// A handle to the running trigger session: every call is answered by the
 /// session thread. Cheap to clone, so a command never holds the device
 /// manager's lock while it waits.
@@ -244,6 +305,37 @@ impl TriggerControl {
     pub fn back_to_5v(&self) -> Result<(), UiError> {
         self.call(|e| e.back_to_5v())
     }
+
+    /// The library risk class of a built message (FR DGSQ6T); GoodCRC and
+    /// malformed messages are a usage error with the reason.
+    pub fn message_risk(&self, message: PdMessageRequest) -> Result<RiskClass, UiError> {
+        self.call(move |e| e.message_risk(message))
+    }
+
+    /// Send a built message; above 5 V it is refused (nothing written)
+    /// unless `confirmed`. A cable's Discover Identity ACK is decoded.
+    pub fn send_message(
+        &self,
+        message: PdMessageRequest,
+        confirmed: bool,
+    ) -> Result<PdSendReply, UiError> {
+        self.call(move |e| e.send_message(message, confirmed))
+    }
+
+    /// The library risk class of a raw console line.
+    pub fn console_risk(&self, line: String) -> Result<RiskClass, UiError> {
+        self.call(move |e| e.console_risk(line))
+    }
+
+    /// Send a raw console line; above 5 V (any unparsable line too) it is
+    /// refused unless `confirmed`; GoodCRC is always refused.
+    pub fn console_send(&self, line: String, confirmed: bool) -> Result<Vec<ConsoleLine>, UiError> {
+        // GoodCRC is refused before the line reaches the session thread.
+        if let Some(reason) = message::refusal(&pdm::Command::parse(line.trim())) {
+            return Err(UiError::usage(reason));
+        }
+        self.call(move |e| e.console_send(line, confirmed))
+    }
 }
 
 /// The session's calls, on the session thread (erases the port / clock types).
@@ -257,6 +349,14 @@ trait Engine {
         confirmed: bool,
     ) -> Result<TriggerReply, UiError>;
     fn back_to_5v(&mut self) -> Result<(), UiError>;
+    fn message_risk(&mut self, message: PdMessageRequest) -> Result<RiskClass, UiError>;
+    fn send_message(
+        &mut self,
+        message: PdMessageRequest,
+        confirmed: bool,
+    ) -> Result<PdSendReply, UiError>;
+    fn console_risk(&mut self, line: String) -> Result<RiskClass, UiError>;
+    fn console_send(&mut self, line: String, confirmed: bool) -> Result<Vec<ConsoleLine>, UiError>;
 }
 
 type Job = Box<dyn FnOnce(&mut dyn Engine) + Send>;
@@ -360,6 +460,26 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
         }
     }
 
+    /// Remember what a written console line entered or raised, so closing
+    /// the session still returns to 5 V the right way. Raw text of unknown
+    /// effect is ended through PD once PD is entered, else by `pdm close`.
+    fn track_console(&mut self, effect: Option<console::Effect>) {
+        match effect {
+            Some(console::Effect::EnteredPd) => {
+                self.entered = Entered::Pd;
+                if self.pdm.capabilities().pd.is_some() {
+                    self.offers = pd::offers(self.pdm.capabilities());
+                }
+            }
+            Some(console::Effect::PdContract) => self.pd_contract = true,
+            Some(console::Effect::Legacy) => self.entered = Entered::Legacy,
+            Some(console::Effect::RawLine) if self.entered == Entered::Pd => {
+                self.pd_contract = true;
+            }
+            Some(console::Effect::RawLine) | None => {}
+        }
+    }
+
     /// Validate `request` against what the charger offered and render its
     /// command; pure, nothing is written.
     fn command_of(&self, request: &LibRequest) -> Result<pdm::Command, UiError> {
@@ -457,6 +577,136 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
 
     fn back_to_5v(&mut self) -> Result<(), UiError> {
         self.return_to_5v()
+    }
+
+    fn message_risk(&mut self, message: PdMessageRequest) -> Result<RiskClass, UiError> {
+        let command = lib_message(&message)
+            .to_command()
+            .map_err(|e| UiError::usage(e.to_string()))?;
+        Ok(risk_class(self.pdm.risk(&command)))
+    }
+
+    fn send_message(
+        &mut self,
+        message: PdMessageRequest,
+        confirmed: bool,
+    ) -> Result<PdSendReply, UiError> {
+        // Building first: GoodCRC and malformed messages write nothing.
+        let lib = lib_message(&message);
+        let command = lib
+            .to_command()
+            .map_err(|e| UiError::usage(e.to_string()))?;
+        let above = self.pdm.risk(&command) == pdm::Risk::Above5V;
+        // The final gate: above 5 V without the user's confirmation is
+        // refused before anything is written.
+        if above && !confirmed {
+            return Err(UiError::usage(
+                "A message that can raise VBUS above 5 V needs your confirmation.",
+            ));
+        }
+        if self.entered == Entered::None {
+            // Like `powerz pd send`: PD first, so the message has a PD
+            // session and the way back to 5 V (`pd req=1`, Hard Reset as
+            // the fallback) works.
+            let negotiation = pd::enter(&mut self.pdm).map_err(|e| pd_error(&e))?;
+            self.entered = Entered::Pd;
+            self.offers = negotiation.offers;
+        }
+        if above {
+            // It may change the contract: always end it through PD. Set
+            // before the write, so a failure after it still undoes it.
+            self.pd_contract = true;
+        }
+        let at_ms = self.pdm.now_ms();
+        let sent = match above.then(|| HighVoltageConfirmation::for_command(&command)) {
+            Some(c) => self.pdm.send_confirmed(&command, c),
+            None => self.pdm.send(&command),
+        };
+        sent.map_err(|e| pdm_error(&e))?;
+        // A Discover Identity to a cable plug: read its ACK, if any.
+        let cable = if lib.is_cable_discover_identity() {
+            message::await_cable_identity(&mut self.pdm, message::CABLE_WAIT)
+                .map_err(|e| pdm_error(&e))?
+                .map(|c| cable_view(&c))
+        } else {
+            None
+        };
+        let text = command_text(&command);
+        Ok(PdSendReply {
+            command: text.clone(),
+            lines: vec![ConsoleLine {
+                at_ms,
+                direction: ConsoleDirection::Tx,
+                text,
+                block: None,
+            }],
+            cable,
+        })
+    }
+
+    fn console_risk(&mut self, line: String) -> Result<RiskClass, UiError> {
+        Ok(risk_class(self.pdm.risk(&console::command_of(&line))))
+    }
+
+    fn console_send(&mut self, line: String, confirmed: bool) -> Result<Vec<ConsoleLine>, UiError> {
+        let command = console::command_of(&line);
+        let above = self.pdm.risk(&command) == pdm::Risk::Above5V;
+        // The final gate: above 5 V (any unparsable line too) without the
+        // user's confirmation is refused before anything is written.
+        if above && !confirmed {
+            return Err(UiError::usage(
+                "A line that can raise VBUS above 5 V needs your confirmation.",
+            ));
+        }
+        let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
+        let sent = console::send_line(&mut self.pdm, &line, confirmation, console::LISTEN)
+            .map_err(|e| pdm_error(&e))?;
+        // The line was written: its undo is recorded even if reading the
+        // replies failed.
+        self.track_console(sent.effect);
+        if let Some(e) = &sent.error {
+            return Err(pdm_error(e));
+        }
+        Ok(sent.entries.iter().map(console_line).collect())
+    }
+}
+
+/// A library console entry as the UI's line; a block is described in words.
+fn console_line(e: &console::ConsoleEntry) -> ConsoleLine {
+    ConsoleLine {
+        at_ms: e.at_ms,
+        direction: match e.direction {
+            console::Direction::Tx => ConsoleDirection::Tx,
+            console::Direction::Rx => ConsoleDirection::Rx,
+        },
+        text: e.text.clone(),
+        block: e.block.as_ref().map(console::describe_block),
+    }
+}
+
+/// The library's cable identity as the UI's.
+fn cable_view(c: &CableIdentity) -> CableView {
+    CableView {
+        vid: c.vid,
+        pid: c.pid,
+        active: c.active,
+        max_voltage_v: c.max_voltage_v,
+        max_current_ma: c.max_current_ma,
+        epr_capable: c.epr_capable,
+    }
+}
+
+/// A UI message as the library's.
+fn lib_message(m: &PdMessageRequest) -> PdMessage {
+    let sop = match m.sop {
+        MessageSop::Sop => SopTarget::Sop,
+        MessageSop::SopPrime => SopTarget::SopPrime,
+        MessageSop::SopDoublePrime => SopTarget::SopDoublePrime,
+    };
+    PdMessage {
+        sop,
+        msg_type: m.msg_type,
+        data_objects: m.data_objects.clone(),
     }
 }
 
@@ -620,6 +870,7 @@ pub(crate) fn pdm_error(err: &pdm::Error) -> UiError {
         E::HighVoltageNotConfirmed { .. } => {
             UiError::usage("A request above 5 V needs your confirmation.")
         }
+        E::Refused { reason, .. } => UiError::usage(reason.clone()),
         E::Forbidden { .. } | E::UnsupportedOnCdc { .. } => {
             UiError::usage("The app refused a command that is not safe.")
         }
@@ -1404,5 +1655,389 @@ mod tests {
             .expect("list pd");
         assert_eq!(n, 6);
         w.close().expect("close");
+    }
+}
+
+/// FR DGSQ6T: the builder and the raw console on the trigger session.
+#[cfg(test)]
+mod custom_message_tests {
+    use powerz_sim::{SimCable, SimCharger, SimClock, SimPdm};
+
+    use super::*;
+    use crate::ui_error::ErrorKind;
+
+    fn worker_with(cable: Option<SimCable>) -> (SimPdm, TriggerWorker) {
+        let clock = SimClock::new(1_760_000_000_000);
+        let mut sim = SimPdm::new(SimCharger::Epr140W, clock.clone());
+        if let Some(c) = cable {
+            sim = sim.with_cable(c);
+        }
+        let w = TriggerWorker::spawn(sim.open_port(), clock).expect("the session opens");
+        (sim, w)
+    }
+
+    fn worker() -> (SimPdm, TriggerWorker) {
+        worker_with(None)
+    }
+
+    fn writes_after(sim: &SimPdm, skip: usize) -> Vec<String> {
+        sim.writes()
+            .into_iter()
+            .skip(skip)
+            .map(|w| w.trim().to_owned())
+            .collect()
+    }
+
+    fn msg(sop: MessageSop, msg_type: u8, data_objects: Vec<u32>) -> PdMessageRequest {
+        PdMessageRequest {
+            sop,
+            msg_type,
+            data_objects,
+        }
+    }
+
+    /// Discover Identity REQ (structured VDM, SVID 0xFF00) to the cable.
+    fn discover_cable() -> PdMessageRequest {
+        msg(MessageSop::SopPrime, 15, vec![0xFF00_A801])
+    }
+
+    // ---- AC-DGSQ6T.1: the builder sends control and data messages ----
+
+    #[test]
+    fn a_built_control_message_goes_out_as_pd_cmd_or_pd_data() {
+        let (sim, w) = worker();
+        let c = w.control();
+        let before = sim.writes().len();
+        let r = c
+            .send_message(msg(MessageSop::Sop, 13, vec![]), false)
+            .expect("soft reset needs no confirmation");
+        assert_eq!(r.command, "pd cmd=13");
+        let r = c
+            .send_message(msg(MessageSop::SopDoublePrime, 13, vec![]), false)
+            .expect("sent");
+        assert_eq!(r.command, "pd data=028D00");
+        let writes = writes_after(&sim, before);
+        // Nothing was entered yet: PD first, like `powerz pd send`.
+        assert_eq!(writes.first().map(String::as_str), Some("entry pd"));
+        let messages: Vec<&String> = writes.iter().filter(|w| w.starts_with("pd ")).collect();
+        assert_eq!(messages, ["pd cmd=13", "pd data=028D00"]);
+        assert_eq!(
+            r.lines.first().map(|l| l.direction),
+            Some(ConsoleDirection::Tx)
+        );
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn the_ui_names_of_the_sops_deserialize() {
+        let m: PdMessageRequest = serde_json::from_value(serde_json::json!({
+            "sop": "sop_prime", "msg_type": 15, "data_objects": [4278233089u32]
+        }))
+        .expect("deserializes");
+        assert_eq!(m, discover_cable());
+    }
+
+    // ---- AC-DGSQ6T.2: the cable preset's reply is decoded ----
+
+    #[test]
+    fn discover_identity_to_the_cable_returns_its_emarker_details() {
+        let (sim, w) = worker_with(Some(SimCable::Epr240W));
+        let c = w.control();
+        // Confirmed either way: what the classifier says about a VDM is its call.
+        let r = c.send_message(discover_cable(), true).expect("sent");
+        assert!(r.command.starts_with("pd data=01"), "{}", r.command);
+        assert!(sim.writes().iter().any(|w| w.trim() == r.command));
+        let cable = r.cable.expect("the cable answered");
+        assert_eq!(cable.vid, 0x050D);
+        assert_eq!(cable.pid, Some(0x8254));
+        assert_eq!(cable.max_voltage_v, Some(50));
+        assert_eq!(cable.max_current_ma, Some(5000));
+        assert!(cable.epr_capable);
+        let json = serde_json::to_value(&cable).unwrap();
+        assert_eq!(json["vid"], 0x050D);
+        assert_eq!(json["epr_capable"], true);
+        w.close().expect("close");
+    }
+
+    // ---- AC-DGSQ6T.3: GoodCRC is refused with a reason ----
+
+    #[test]
+    fn goodcrc_is_refused_in_the_builder_and_the_console() {
+        let (sim, w) = worker();
+        let c = w.control();
+        let before = sim.writes().len();
+        for sop in [MessageSop::Sop, MessageSop::SopPrime] {
+            let err = c
+                .send_message(msg(sop, 1, vec![]), true)
+                .expect_err("refused");
+            assert_eq!(err.kind, ErrorKind::Usage);
+            assert!(err.message.contains("GoodCRC"), "{}", err.message);
+            let err = c.message_risk(msg(sop, 1, vec![])).expect_err("refused");
+            assert!(err.message.contains("GoodCRC"), "{}", err.message);
+        }
+        for line in ["pd cmd=1", "pd data=014100"] {
+            let err = c.console_send(line.to_owned(), true).expect_err("refused");
+            assert_eq!(err.kind, ErrorKind::Usage);
+            assert!(err.message.contains("GoodCRC"), "{line}: {}", err.message);
+        }
+        assert_eq!(sim.writes().len(), before, "nothing was written");
+        w.close().expect("close");
+    }
+
+    // ---- AC-DGSQ6T.4: the console's transcript ----
+
+    #[test]
+    fn the_console_returns_sent_and_received_lines_with_times() {
+        let (sim, w) = worker();
+        let c = w.control();
+        let lines = c
+            .console_send("pdm parm".to_owned(), false)
+            .expect("read-only needs no confirmation");
+        assert!(sim.writes().iter().any(|w| w.trim() == "pdm parm"));
+        assert_eq!(lines[0].direction, ConsoleDirection::Tx);
+        assert_eq!(lines[0].text, "pdm parm");
+        assert!(lines[0].at_ms >= 1_760_000_000_000, "{lines:?}");
+        let rx = lines
+            .iter()
+            .find(|l| l.direction == ConsoleDirection::Rx)
+            .expect("a reply");
+        assert_eq!(rx.text, "type=0,em=2,sink=0");
+        assert!(rx.at_ms >= lines[0].at_ms);
+        let json = serde_json::to_value(&lines[0]).unwrap();
+        assert_eq!(json["direction"], "tx");
+        assert!(json["at_ms"].is_u64());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn the_console_shows_a_parsed_block() {
+        let (_sim, w) = worker();
+        let c = w.control();
+        let lines = c.console_send("entry pd".to_owned(), false).expect("entry");
+        let block = lines
+            .iter()
+            .find_map(|l| l.block.as_deref())
+            .unwrap_or_else(|| panic!("no block in {lines:?}"));
+        assert!(block.contains("9.00 V"), "{block}");
+        w.close().expect("close");
+    }
+
+    // ---- AC-DGSQ6T.5: above 5 V and unparsable lines need the confirmation ----
+
+    #[test]
+    fn an_unconfirmed_unparsable_line_is_refused_and_writes_nothing() {
+        let (sim, w) = worker();
+        let c = w.control();
+        assert_eq!(
+            c.console_risk("hello meter".to_owned()).expect("risk"),
+            RiskClass::Above5V
+        );
+        assert_eq!(
+            c.console_risk("pdm parm".to_owned()).expect("risk"),
+            RiskClass::ReadOnly
+        );
+        let before = sim.writes().len();
+        let err = c
+            .console_send("hello meter".to_owned(), false)
+            .expect_err("refused");
+        assert_eq!(err.kind, ErrorKind::Usage);
+        assert_eq!(sim.writes().len(), before, "nothing was written");
+        c.console_send("hello meter".to_owned(), true)
+            .expect("confirmed");
+        assert_eq!(writes_after(&sim, before), ["hello meter"]);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_built_request_for_9v_needs_the_confirmation() {
+        let (sim, w) = worker();
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let request_9v = msg(MessageSop::Sop, 2, vec![0x2304_B12C]);
+        assert_eq!(
+            c.message_risk(request_9v.clone()).expect("risk"),
+            RiskClass::Above5V
+        );
+        let before = sim.writes().len();
+        let vbus = sim.vbus_mv();
+        let err = c
+            .send_message(request_9v.clone(), false)
+            .expect_err("refused");
+        assert_eq!(err.kind, ErrorKind::Usage);
+        assert_eq!(sim.writes().len(), before, "nothing was written");
+        assert_eq!(sim.vbus_mv(), vbus);
+        let r = c.send_message(request_9v, true).expect("confirmed");
+        assert_eq!(r.command, "pd data=0082102CB10423");
+        w.close().expect("close");
+    }
+
+    /// The simulated port; the write of `fail_write` reaches the meter but
+    /// reports an error, and one read fails after `fail_read_after`.
+    struct Faulty {
+        port: powerz_sim::SimPdmPort,
+        fail_write: Option<&'static str>,
+        fail_read_after: Option<&'static str>,
+        fail_next_read: bool,
+    }
+
+    impl Faulty {
+        fn spawn(
+            charger: SimCharger,
+            fail_write: Option<&'static str>,
+            fail_read_after: Option<&'static str>,
+        ) -> (SimPdm, TriggerWorker) {
+            let clock = SimClock::new(1_760_000_000_000);
+            let sim = SimPdm::new(charger, clock.clone());
+            let port = Faulty {
+                port: sim.open_port(),
+                fail_write,
+                fail_read_after,
+                fail_next_read: false,
+            };
+            let w = TriggerWorker::spawn(port, clock).expect("the session opens");
+            (sim, w)
+        }
+    }
+
+    impl Read for Faulty {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if std::mem::take(&mut self.fail_next_read) {
+                return Err(std::io::Error::other("read failed"));
+            }
+            self.port.read(buf)
+        }
+    }
+
+    impl Write for Faulty {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let text = String::from_utf8_lossy(buf).into_owned();
+            let n = self.port.write(buf)?;
+            if self.fail_read_after == Some(text.as_str()) {
+                self.fail_next_read = true;
+            }
+            if self.fail_write == Some(text.as_str()) {
+                return Err(std::io::Error::other("write failed"));
+            }
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.port.flush()
+        }
+    }
+
+    fn returned_to_5v_before_close(after: &[String]) {
+        let back = after
+            .iter()
+            .rposition(|w| w == "pd req=1" || w == "pd hrst")
+            .unwrap_or_else(|| panic!("no return through PD: {after:?}"));
+        let close = after
+            .iter()
+            .rposition(|w| w == "pdm close")
+            .unwrap_or_else(|| panic!("no pdm close: {after:?}"));
+        assert!(back < close, "{after:?}");
+    }
+
+    #[test]
+    fn a_console_read_error_after_the_write_still_records_the_undo() {
+        // QC was entered last, so only the recorded PD contract makes the
+        // close go back through PD.
+        let (sim, w) = Faulty::spawn(SimCharger::MultiProtocol, None, Some("pd req=2"));
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.console_send("pd req=2".to_owned(), true)
+            .expect_err("the read failed");
+        assert!(sim.writes().iter().any(|w| w == "pd req=2"));
+        let before = sim.writes().len();
+        let _ = w.close();
+        returned_to_5v_before_close(&writes_after(&sim, before));
+    }
+
+    #[test]
+    fn a_message_whose_write_fails_is_still_undone_through_pd() {
+        let (sim, w) = Faulty::spawn(
+            SimCharger::MultiProtocol,
+            Some("pd data=0082102CB10423"),
+            None,
+        );
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.send_message(msg(MessageSop::Sop, 2, vec![0x2304_B12C]), true)
+            .expect_err("the write failed");
+        let before = sim.writes().len();
+        let _ = w.close();
+        returned_to_5v_before_close(&writes_after(&sim, before));
+    }
+
+    #[test]
+    fn a_confirmed_raw_line_with_pd_entered_is_undone_through_pd() {
+        let clock = SimClock::new(1_760_000_000_000);
+        let sim = SimPdm::new(SimCharger::MultiProtocol, clock.clone());
+        let w = TriggerWorker::spawn(sim.open_port(), clock).expect("the session opens");
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.console_send("hello meter".to_owned(), true)
+            .expect("confirmed");
+        // Entering QC afterwards must not lose the PD undo.
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        let before = sim.writes().len();
+        w.close().expect("close");
+        returned_to_5v_before_close(&writes_after(&sim, before));
+    }
+
+    #[test]
+    fn pdm_open_and_pdm_close_are_refused_in_the_console() {
+        let (sim, w) = worker();
+        let c = w.control();
+        let before = sim.writes().len();
+        for line in ["pdm close", "pdm open"] {
+            let err = c.console_send(line.to_owned(), true).expect_err("refused");
+            assert_eq!(err.kind, ErrorKind::Usage);
+            assert!(err.message.contains("pdm close"), "{}", err.message);
+        }
+        assert_eq!(sim.writes().len(), before, "nothing was written");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn goodcrc_in_any_raw_spelling_is_refused_in_the_console() {
+        let (sim, w) = worker();
+        let c = w.control();
+        let before = sim.writes().len();
+        for line in ["pd cmd=01", "pd cmd=+1", "pd cmd=0x1", "pd  cmd=1"] {
+            let err = c.console_send(line.to_owned(), true).expect_err("refused");
+            assert_eq!(err.kind, ErrorKind::Usage);
+        }
+        assert_eq!(sim.writes().len(), before, "nothing was written");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn any_structured_discover_identity_to_the_cable_waits_for_its_answer() {
+        let (_sim, w) = worker_with(Some(SimCable::Epr240W));
+        let c = w.control();
+        // VDM version 1.0 and a second object: not the preset's exact VDO.
+        let r = c
+            .send_message(msg(MessageSop::SopPrime, 15, vec![0xFF00_8001, 0]), true)
+            .expect("sent");
+        let cable = r.cable.expect("the cable answered");
+        assert_eq!(cable.vid, 0x050D);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn closing_after_a_raw_request_returns_to_5v() {
+        let (sim, w) = worker();
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.console_send("pd req=2".to_owned(), true)
+            .expect("confirmed");
+        let before = sim.writes().len();
+        w.close().expect("close");
+        let after = writes_after(&sim, before);
+        assert!(
+            after.iter().any(|w| w == "pd req=1" || w == "pd hrst"),
+            "{after:?}"
+        );
+        assert_eq!(after.last().map(String::as_str), Some("pdm close"));
     }
 }

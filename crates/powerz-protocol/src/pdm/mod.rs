@@ -15,11 +15,15 @@
 //! - [`pd`]: USB PD triggering (offers, requests, hard reset, settings).
 //! - [`detect`]: charger protocol detection and the D+ / D- hint table.
 //! - [`legacy`]: QC, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS triggering.
+//! - [`message`]: custom PD messages (`pd cmd=` / `pd data=`) and cable identity.
+//! - [`console`]: the raw text console.
 
 pub mod caps;
 pub mod command;
+pub mod console;
 pub mod detect;
 pub mod legacy;
+pub mod message;
 pub mod pd;
 pub mod port;
 pub mod reply;
@@ -70,6 +74,14 @@ pub enum Error {
     HighVoltageNotConfirmed {
         /// The command text.
         command: String,
+    },
+    /// The command is never sent (GoodCRC), whatever the confirmation.
+    #[error("refusing to send {command:?}: {reason}")]
+    Refused {
+        /// The command text.
+        command: String,
+        /// Why it is never sent.
+        reason: String,
     },
     /// The guard refused the bytes (their first byte maps to a forbidden frame type).
     #[error("refusing to send: first byte maps to forbidden frame type {ty:#04x}")]

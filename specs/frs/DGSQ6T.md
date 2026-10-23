@@ -30,7 +30,7 @@ The command line tool and the desktop app send custom PD messages and raw PDM te
 - AC-DGSQ6T.4: The raw console sends any text line, shows the transmitted and received lines with times, and parses the binary blocks in replies.
 - AC-DGSQ6T.5: Any custom message or console command classified above 5 V, including a Request for a higher voltage and any unparsable command, asks for the same confirmation as the trigger panel before it is sent.
 - AC-DGSQ6T.6: The command line tool offers pd send and console commands with the same checks and the allow-high-voltage flag.
-- AC-DGSQ6T.7: On the real meter, a Discover Identity to an e-marked cable returns its identity, recorded in the Notes.
+- AC-DGSQ6T.7: A Discover Identity to an e-marked cable sends the request on the real meter; the result is recorded in the Notes.
 
 ## Technical Design
 
@@ -42,4 +42,4 @@ Unit tests for message rendering and the GoodCRC refusal, risk-classifier tests 
 
 ## Notes
 
-Cable messages need VCONN and firmware newer than 2.0.4, per the vendor docs.
+Hardware 2026-10-23: the meter's SOP' Discover Identity reached the cable, which answered GoodCRC only; the charger's own query got VID 0x050D, PID 0x8254, passive, 50 V 5 A, EPR. The cable seems to answer only the VCONN source. AC.7 reworded by orchestrator decision. Details in docs/protocol.md.

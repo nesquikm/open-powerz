@@ -140,6 +140,7 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
     /// Send `command`; refused with [`Error::HighVoltageNotConfirmed`] (and
     /// nothing written) when it classifies [`Risk::Above5V`].
     pub fn send(&mut self, command: &Command) -> Result<(), Error> {
+        refuse(command)?;
         if self.risk(command) == Risk::Above5V {
             return Err(Error::HighVoltageNotConfirmed {
                 command: command_text(command),
@@ -154,6 +155,7 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
         command: &Command,
         confirmation: HighVoltageConfirmation,
     ) -> Result<(), Error> {
+        refuse(command)?;
         if confirmation.command != *command {
             return Err(Error::HighVoltageNotConfirmed {
                 command: command_text(command),
@@ -196,6 +198,11 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
                 return Ok(line);
             }
         }
+    }
+
+    /// The session clock's time, ms since the Unix epoch (for transcripts).
+    pub fn now_ms(&mut self) -> u64 {
+        self.clock.now_ms()
     }
 
     /// Capabilities from every block seen so far, solicited or not.
@@ -293,6 +300,17 @@ const READ_CHUNK: usize = 256;
 /// A command's text, for error messages.
 fn command_text(command: &Command) -> String {
     String::from_utf8_lossy(&command.render()).into_owned()
+}
+
+/// [`Error::Refused`] for a command that is never sent (GoodCRC).
+fn refuse(command: &Command) -> Result<(), Error> {
+    match super::message::refusal(command) {
+        Some(reason) => Err(Error::Refused {
+            command: command_text(command),
+            reason,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// The binary-frame guard: refuse bytes whose first byte maps to a

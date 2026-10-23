@@ -166,17 +166,13 @@ pub fn trigger_pd_request<P: Read + Write, C: Clock>(
     let back = return_to_5v(&mut session, &offers);
     // A failed return to 5 V outranks the request's own error: it is the
     // one that says VBUS may still be high.
-    let result = match back {
-        Err(e) => Err(e),
-        Ok(()) => result,
-    };
-    close_after(session, result)
+    close_after(session, back.and(result))
 }
 
 /// Back to 5 V whatever happened ([`pd::return_to_5v`]: `pd req=1`, a
 /// Hard Reset as the fallback). When both fail, say loudly that VBUS may
 /// still be high.
-fn return_to_5v<P: Read + Write, C: Clock>(
+pub(super) fn return_to_5v<P: Read + Write, C: Clock>(
     session: &mut PdmSession<P, C>,
     offers: &[Offer],
 ) -> Result<(), CliError> {
@@ -235,7 +231,7 @@ fn request_and_hold<P: Read + Write, C: Clock>(
 /// The confirmation `command` needs: `None` at or below 5 V; above 5 V
 /// one only with `--allow-high-voltage`, otherwise a usage error before
 /// anything is written.
-fn high_voltage_confirmation<P: Read + Write, C: Clock>(
+pub(super) fn high_voltage_confirmation<P: Read + Write, C: Clock>(
     session: &PdmSession<P, C>,
     command: &Command,
     allow_high_voltage: bool,

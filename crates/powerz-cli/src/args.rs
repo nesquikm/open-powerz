@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Parser, Subcommand, ValueEnum};
 use powerz_protocol::decode::Rate;
+use powerz_protocol::pdm::message::{Preset, SopTarget};
 use powerz_protocol::pdm::pd::{Emarker, PdType, SinkCaps};
 use powerz_sim::Scenario;
 
@@ -122,7 +123,7 @@ pub enum Command {
     /// Capture USB PD traffic (messages and events) until Ctrl-C; bulk pipe only.
     #[command(
         arg = save_arg(),
-        subcommands = [decode_command()],
+        subcommands = [decode_command(), send_command()],
         args_conflicts_with_subcommands = true
     )]
     Pd {
@@ -153,6 +154,13 @@ pub enum Command {
         /// Print one JSON object instead of labelled lines.
         #[arg(long)]
         json: bool,
+    },
+    /// Raw PDM text console: send command lines from stdin and print what
+    /// was sent and received, with times.
+    Console {
+        /// Allow lines that can raise VBUS above 5 V (and any unknown text).
+        #[arg(long)]
+        allow_high_voltage: bool,
     },
 }
 
@@ -429,6 +437,7 @@ impl Command {
             Command::Pd { .. } => "pd",
             Command::Trigger { .. } => "trigger",
             Command::Detect { .. } => "detect",
+            Command::Console { .. } => "console",
         }
     }
 }
@@ -461,8 +470,68 @@ fn decode_command() -> clap::Command {
         )
 }
 
+/// `pd send [HEX] [--preset NAME] [--sop sop|sop1|sop2] ...` (FR DGSQ6T).
+fn send_command() -> clap::Command {
+    use clap::{Arg, ArgAction};
+    clap::Command::new(SEND)
+        .about(
+            "Send a custom PD message through the meter (a control message on SOP \
+             as `pd cmd=`, everything else as `pd data=`)",
+        )
+        .arg(
+            Arg::new("hex")
+                .value_name("HEX")
+                .required_unless_present("preset")
+                .conflicts_with("preset")
+                .help("PD message as hex: header little-endian, then data objects little-endian; no SOP byte"),
+        )
+        .arg(
+            Arg::new("preset")
+                .long("preset")
+                .value_name("NAME")
+                .value_parser(PossibleValuesParser::new(Preset::ALL.map(Preset::name)))
+                .help("Send a built-in message instead of HEX"),
+        )
+        .arg(
+            Arg::new("sop")
+                .long("sop")
+                .value_name("TARGET")
+                .value_parser(PossibleValuesParser::new(["sop", "sop1", "sop2"]))
+                .default_value("sop")
+                .help("Target: sop (the charger), sop1 (SOP', near cable plug), sop2 (SOP'', far plug)"),
+        )
+        .arg(
+            Arg::new("allow_high_voltage")
+                .long("allow-high-voltage")
+                .action(ArgAction::SetTrue)
+                .help("Allow a message that can raise VBUS above 5 V"),
+        )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .action(ArgAction::SetTrue)
+                .help("Print one JSON object instead of labelled lines"),
+        )
+}
+
 const SAVE: &str = "save";
 const DECODE: &str = "decode";
+const SEND: &str = "send";
+
+/// Arguments of `pd send`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdSend {
+    /// The message as hex (no SOP byte), when no preset is given.
+    pub hex: Option<String>,
+    /// `--preset`.
+    pub preset: Option<Preset>,
+    /// `--sop`.
+    pub sop: SopTarget,
+    /// `--allow-high-voltage`.
+    pub allow_high_voltage: bool,
+    /// `--json`.
+    pub json: bool,
+}
 
 /// What the `pd` subcommand does besides a plain live capture: `--save`
 /// and `decode` are declared on `pd` and read back here, so
@@ -473,6 +542,8 @@ pub struct PdFile {
     pub save: Option<PathBuf>,
     /// `pd decode [--json] FILE`: decode a saved file instead of capturing.
     pub decode: Option<PdDecode>,
+    /// `pd send ...`: send a custom PD message instead of capturing.
+    pub send: Option<PdSend>,
 }
 
 /// Arguments of `pd decode`.
@@ -495,9 +566,22 @@ impl clap::FromArgMatches for PdFile {
                 file: file.clone(),
             })
         });
+        let send = pd.subcommand_matches(SEND).map(|m| PdSend {
+            hex: m.get_one::<String>("hex").cloned(),
+            preset: m
+                .get_one::<String>("preset")
+                .and_then(|n| Preset::from_name(n)),
+            sop: m
+                .get_one::<String>("sop")
+                .and_then(|n| SopTarget::from_name(n))
+                .unwrap_or(SopTarget::Sop),
+            allow_high_voltage: m.get_flag("allow_high_voltage"),
+            json: m.get_flag("json"),
+        });
         Ok(PdFile {
             save: pd.get_one::<PathBuf>(SAVE).cloned(),
             decode,
+            send,
         })
     }
 
@@ -545,11 +629,15 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
         return Ok(());
     }
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
+    // `pd send` talks to the meter's serial port like `trigger`.
+    if cli.pd_file.send.is_some() && cli.transport != TransportKind::Hid {
+        return Ok(());
+    }
     // `trigger` talks to the meter's serial port whatever `--transport` says
     // (bulk / cdc / sim); HID has no text session.
     if matches!(
         cli.command,
-        Command::Trigger { .. } | Command::Detect { .. }
+        Command::Trigger { .. } | Command::Detect { .. } | Command::Console { .. }
     ) && cli.transport != TransportKind::Hid
     {
         return Ok(());
