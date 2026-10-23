@@ -196,3 +196,118 @@ describe("FR DGSQ6S Notes: the queue and the PD capture while triggering [inferr
     await expect(backend.pdStart()).resolves.toBeUndefined();
   });
 });
+
+/**
+ * AC-DGSQ6S.8: `?mock=trigger-all` puts a charger that speaks every protocol behind the
+ * demo meter, so the UI suite can drive the non-PD sections. Its decoded limits:
+ * SCP 3.4-11 V at 0.5-5 A (no power cap); VFCP and TFCP one block each (index null);
+ * UFCS capability #1 3.4-11 V at 0.5-5 A up to 40 W and #2 3.4-21 V at 0.5-3 A up to
+ * 63 W. Like the backend it refuses what the protocol or the limits do not allow,
+ * before anything is sent.
+ */
+describe("AC-DGSQ6S.8: `?mock=trigger-all`, a charger that speaks every protocol", () => {
+  const ALL = "trigger-all" as unknown as ConstructorParameters<typeof MockBackend>[0];
+
+  it("is a mock mode", () => {
+    expect(mockModeFromUrl("?mock=trigger-all")).toBe("trigger-all");
+  });
+
+  it("lists every protocol as supported, with the decoded limits", async () => {
+    const { backend } = await opened(ALL);
+    for (const p of ["pd", "qc", "fcp", "afc", "sfcp", "scp", "vfcp", "tfcp", "ufcs"] as const) {
+      expect((await backend.triggerList(p)).supported, p).toBe(true);
+    }
+    expect((await backend.triggerList("scp")).limits).toEqual([
+      {
+        index: null,
+        min_voltage_mv: 3400,
+        max_voltage_mv: 11000,
+        min_current_ma: 500,
+        max_current_ma: 5000,
+        max_power_mw: null,
+      },
+    ]);
+    for (const p of ["vfcp", "tfcp"] as const) {
+      const limits = (await backend.triggerList(p)).limits;
+      expect(limits).toHaveLength(1);
+      expect(limits[0]!.index).toBeNull();
+      expect(limits[0]!.max_voltage_mv).toBeGreaterThan(5000);
+    }
+    expect((await backend.triggerList("ufcs")).limits).toEqual([
+      {
+        index: 1,
+        min_voltage_mv: 3400,
+        max_voltage_mv: 11000,
+        min_current_ma: 500,
+        max_current_ma: 5000,
+        max_power_mw: 40000,
+      },
+      {
+        index: 2,
+        min_voltage_mv: 3400,
+        max_voltage_mv: 21000,
+        min_current_ma: 500,
+        max_current_ma: 3000,
+        max_power_mw: 63000,
+      },
+    ]);
+  });
+
+  it("sends each protocol's command and moves VBUS to it", async () => {
+    const { backend, events } = await opened(ALL);
+    const cases: [TriggerRequest, string, number][] = [
+      [{ protocol: "qc", volts: 20 }, "qc 20V", 20],
+      [{ protocol: "qc3", voltage_mv: 6600 }, "qc3 volt=6600", 6.6],
+      [{ protocol: "afc", volts: 9 }, "afc 9V", 9],
+      [{ protocol: "scp", voltage_mv: 10000, current_ma: 2000 }, "scp volt=10000,cur=2000", 10],
+      [
+        { protocol: "ufcs", index: 2, voltage_mv: 21000, current_ma: 3000 },
+        "ufcs req=2,volt=21000,cur=3000",
+        21,
+      ],
+    ];
+    for (const [request, command, volts] of cases) {
+      const reply = await backend.triggerRequest(request, true);
+      expect(reply.command).toBe(command);
+      expect(backend.triggerCommands().at(-1)).toBe(command);
+      vi.advanceTimersByTime(500);
+      expect(Math.abs(lastVbus(events) - volts) / volts, command).toBeLessThanOrEqual(0.05);
+    }
+  });
+
+  it("refuses what the protocol or the limits do not allow, and sends nothing", async () => {
+    const { backend } = await opened(ALL);
+    const refused: TriggerRequest[] = [
+      { protocol: "qc", volts: 7 },
+      { protocol: "fcp", volts: 20 },
+      { protocol: "qc3", voltage_mv: 6700 },
+      { protocol: "qc3", voltage_mv: 20200 },
+      { protocol: "scp", voltage_mv: 12000, current_ma: 1000 },
+      { protocol: "scp", voltage_mv: 9000, current_ma: 6000 },
+      { protocol: "ufcs", index: 3, voltage_mv: 9000, current_ma: 1000 },
+      // 11 V × 5 A is above capability #1's 40 W.
+      { protocol: "ufcs", index: 1, voltage_mv: 11000, current_ma: 5000 },
+    ];
+    const before = backend.triggerCommands().length;
+    for (const r of refused) {
+      await expect(backend.triggerRequest(r, true), JSON.stringify(r)).rejects.toMatchObject({
+        kind: "usage",
+      });
+    }
+    expect(backend.triggerCommands()).toHaveLength(before);
+  });
+
+  it("Back to 5 V sends `reset` after SCP and UFCS", async () => {
+    const { backend, events } = await opened(ALL);
+    for (const r of [
+      { protocol: "scp", voltage_mv: 9000, current_ma: 2000 },
+      { protocol: "ufcs", index: 1, voltage_mv: 9000, current_ma: 2000 },
+    ] as TriggerRequest[]) {
+      await backend.triggerRequest(r, true);
+      await backend.triggerBackTo5v();
+      expect(backend.triggerCommands().at(-1)).toBe("reset");
+      vi.advanceTimersByTime(500);
+      expect(lastVbus(events)).toBeCloseTo(5, 0);
+    }
+  });
+});

@@ -32,10 +32,11 @@ The desktop app lets the user detect protocols, read offers and request voltages
 - AC-DGSQ6S.5: A Back to 5 V button is always visible while a session is open. Leaving the view, disconnecting, or quitting the app returns to 5 V where the protocol allows it and closes the session.
 - AC-DGSQ6S.6: The view works with the keyboard alone, the axe check passes, and it follows the themes.
 - AC-DGSQ6S.7: Playwright tests on the mocked backend cover detection, a PD request with the confirmation, cancel, and Back to 5 V. A real-meter drive with the 140 W charger and nothing on the output is recorded in the Notes.
+- AC-DGSQ6S.8: The QC, QC 3.0, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS sections offer request controls for what the charger reports (fixed-voltage buttons, a QC 3.0 voltage control, voltage and current inside the decoded limits, UFCS by capability), with the same confirmation above 5 V, live VBUS check and Back to 5 V as the PD section.
 
 ## Technical Design
 
-The backend runs the PDM session in the device worker next to the measurement stream and exposes commands for detect, list, request and reset. The risk classifier decides when the UI must confirm, and the backend refuses unconfirmed high-voltage commands. While a session is open the queue stays at 50 samples per second or less and the PD capture is paused. A new bulk connect, a dropped meter or a reloaded page first returns to 5 V and closes the session, since a bulk connect silences an open PDM session. A held PD contract always ends through PD.
+The backend runs the PDM session in the device worker next to the measurement stream and exposes commands for detect, list, request and reset. The risk classifier decides when the UI must confirm, and the backend refuses unconfirmed high-voltage commands. While a session is open the queue stays at 50 samples per second or less and the PD capture is paused. A new bulk connect, a dropped meter or a reloaded page first returns to 5 V and closes the session, since a bulk connect silences an open PDM session. A held PD contract always ends through PD. Other protocols get fixed-voltage buttons, a QC 3.0 control, or voltage and current controls clamped to their block's limits and power.
 
 ## Testing
 

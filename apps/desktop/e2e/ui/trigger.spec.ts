@@ -20,10 +20,20 @@
  *   "Cancel" and "Confirm";
  * - a region "Request result" with the reply and the live VBUS (labelled "Live VBUS"),
  *   which says "more than 5 %" when VBUS is off by more than 5 % after 2 s;
- * - a "Back to 5 V" button while a session is open.
+ * - a "Back to 5 V" button while a session is open;
+ * - (AC .8) in "QC": one button per QC 2.0 voltage whose name starts with it ("5 V",
+ *   "9 V", "12 V", "20 V"), a slider named with "QC 3.0" (3.6-20 V in 200 mV steps)
+ *   and a button whose name starts with "Request QC 3.0"; in "FCP", "AFC", "SFCP":
+ *   "5 V", "9 V", "12 V" buttons; in "SCP", "VFCP", "TFCP": a slider named with
+ *   "voltage" and one named with "current", bounded by the decoded limits (mV / mA or
+ *   V / A), and a button whose name starts with "Request"; in "UFCS" the same per
+ *   capability, every name carrying the capability's "#<index>". The current a
+ *   request sends never exceeds the block's power at the requested voltage.
  * The mock records what it sent to its scripted charger on
  * `window.__OPEN_POWERZ_MOCK__.triggerCommands()`; `?mock=trigger-sag` keeps VBUS
- * more than 5 % below a request.
+ * more than 5 % below a request; `?mock=trigger-all` puts a charger that speaks every
+ * protocol behind the demo meter (SCP 3.4-11 V at 0.5-5 A; UFCS #1 3.4-11 V at
+ * 0.5-5 A up to 40 W, #2 3.4-21 V at 0.5-3 A up to 63 W).
  */
 
 import AxeBuilder from "@axe-core/playwright";
@@ -376,4 +386,166 @@ test("the trigger view follows the system theme (AC-DGSQ6S.6)", async ({ page })
   expect(await backgroundLuminance(section(page, "USB PD"))).toBeLessThan(0.2);
   await page.emulateMedia({ colorScheme: "light" });
   await expect.poll(() => backgroundLuminance(section(page, "USB PD"))).toBeGreaterThan(0.7);
+});
+
+// ---- AC-DGSQ6S.8: request controls for the other protocols ----
+
+function legacyButton(page: Page, name: (typeof PROTOCOL_REGIONS)[number], volts: number): Locator {
+  return section(page, name).getByRole("button", { name: new RegExp(`^${volts} V\\b`) });
+}
+
+/** A slider in `region` whose name has every one of `words`. */
+function slider(page: Page, name: (typeof PROTOCOL_REGIONS)[number], ...words: string[]): Locator {
+  const pattern = new RegExp(words.map((w) => `(?=.*${w})`).join(""), "i");
+  return section(page, name).getByRole("slider", { name: pattern });
+}
+
+/** A slider's bound in mV / mA, whichever unit it uses. */
+async function bound(s: Locator, attr: "min" | "max"): Promise<number> {
+  const v = Number(await s.getAttribute(attr));
+  return v < 100 ? Math.round(v * 1000) : v;
+}
+
+/** Moves a slider to its end with the keyboard. */
+async function toEnd(s: Locator, key: "Home" | "End"): Promise<void> {
+  await s.focus();
+  await s.press(key);
+}
+
+async function confirmDialog(page: Page, volts: RegExp): Promise<void> {
+  await expect(dialog(page)).toBeVisible();
+  await expect(dialog(page)).toContainText(volts);
+  await expect(dialog(page)).toContainText(/output/i);
+  await dialog(page).getByRole("button", { name: "Confirm" }).click();
+  await expect(dialog(page)).toBeHidden();
+}
+
+test("the QC section offers 5, 9, 12 and 20 V and a QC 3.0 control (AC-DGSQ6S.8)", async ({
+  page,
+}) => {
+  await detected(page);
+  for (const volts of [5, 9, 12, 20]) await expect(legacyButton(page, "QC", volts)).toBeVisible();
+  const qc3 = slider(page, "QC", "QC 3\\.0");
+  await expect(qc3).toBeVisible();
+  expect(await bound(qc3, "min")).toBe(3600);
+  expect(await bound(qc3, "max")).toBe(20000);
+  expect([200, 0.2]).toContain(Number(await qc3.getAttribute("step")));
+  await expect(section(page, "QC").getByRole("button", { name: /^Request QC 3\.0/ })).toBeVisible();
+});
+
+test("a QC 9 V request confirms, follows VBUS and goes back to 5 V (AC-DGSQ6S.8)", async ({
+  page,
+}) => {
+  await detected(page);
+  const before = await commands(page);
+  await legacyButton(page, "QC", 9).click();
+  await expect(dialog(page)).toBeVisible();
+  // Nothing goes out while the dialog waits.
+  expect(await commands(page)).toEqual(before);
+  await confirmDialog(page, /\b9(\.0+)? V\b/);
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("qc 9V");
+  await expect(result(page)).toContainText(/\b9(\.0+)? V\b/);
+  await expect
+    .poll(async () => Math.abs((await liveVbus(page)) - 9) / 9, { timeout: 5_000 })
+    .toBeLessThanOrEqual(0.05);
+  await page.waitForTimeout(2_500);
+  await expect(result(page).getByText(/more than 5\s?%/i)).toHaveCount(0);
+  await backButton(page).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("reset");
+  await expect.poll(async () => liveVbus(page), { timeout: 5_000 }).toBeLessThan(5.5);
+});
+
+test("QC 5 V and QC 3.0 at 3.6 V go out at once; QC 3.0 at 20 V asks first (AC-DGSQ6S.8)", async ({
+  page,
+}) => {
+  await detected(page);
+  await legacyButton(page, "QC", 5).click();
+  await expect(dialog(page)).toBeHidden();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("qc 5V");
+  const qc3 = slider(page, "QC", "QC 3\\.0");
+  const request = section(page, "QC").getByRole("button", { name: /^Request QC 3\.0/ });
+  await toEnd(qc3, "Home");
+  await request.click();
+  await expect(dialog(page)).toBeHidden();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("qc3 volt=3600");
+  await toEnd(qc3, "End");
+  await request.click();
+  await confirmDialog(page, /\b20(\.0+)? V\b/);
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("qc3 volt=20000");
+});
+
+test("FCP, AFC and SFCP offer 5, 9 and 12 V (AC-DGSQ6S.8)", async ({ page }) => {
+  await detected(page, "?mock=trigger-all");
+  for (const name of ["FCP", "AFC", "SFCP"] as const) {
+    await expect(section(page, name)).not.toContainText(/not supported/i);
+    for (const volts of [5, 9, 12]) await expect(legacyButton(page, name, volts)).toBeVisible();
+    await expect(legacyButton(page, name, 20)).toHaveCount(0);
+  }
+  await legacyButton(page, "AFC", 12).click();
+  await confirmDialog(page, /\b12(\.0+)? V\b/);
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("afc 12V");
+});
+
+test("SCP offers voltage and current inside its limits (AC-DGSQ6S.8)", async ({ page }) => {
+  await detected(page, "?mock=trigger-all");
+  const volt = slider(page, "SCP", "voltage");
+  const cur = slider(page, "SCP", "current");
+  await expect(volt).toBeVisible();
+  await expect(cur).toBeVisible();
+  expect([await bound(volt, "min"), await bound(volt, "max")]).toEqual([3400, 11000]);
+  expect([await bound(cur, "min"), await bound(cur, "max")]).toEqual([500, 5000]);
+  await toEnd(volt, "End");
+  await toEnd(cur, "End");
+  await section(page, "SCP")
+    .getByRole("button", { name: /^Request/ })
+    .click();
+  await confirmDialog(page, /\b11(\.0+)? V\b/);
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("scp volt=11000,cur=5000");
+  await expect
+    .poll(async () => Math.abs((await liveVbus(page)) - 11) / 11, { timeout: 5_000 })
+    .toBeLessThanOrEqual(0.05);
+  await backButton(page).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("reset");
+});
+
+test("VFCP and TFCP offer voltage and current controls (AC-DGSQ6S.8)", async ({ page }) => {
+  await detected(page, "?mock=trigger-all");
+  for (const name of ["VFCP", "TFCP"] as const) {
+    await expect(slider(page, name, "voltage")).toBeVisible();
+    await expect(slider(page, name, "current")).toBeVisible();
+    await expect(section(page, name).getByRole("button", { name: /^Request/ })).toBeVisible();
+  }
+});
+
+test("UFCS offers each capability inside its limits and power (AC-DGSQ6S.8)", async ({ page }) => {
+  await detected(page, "?mock=trigger-all");
+  const v2 = slider(page, "UFCS", "#2\\b", "voltage");
+  const c2 = slider(page, "UFCS", "#2\\b", "current");
+  expect([await bound(v2, "min"), await bound(v2, "max")]).toEqual([3400, 21000]);
+  expect([await bound(c2, "min"), await bound(c2, "max")]).toEqual([500, 3000]);
+  await toEnd(v2, "End");
+  await toEnd(c2, "End");
+  await section(page, "UFCS")
+    .getByRole("button", { name: /^Request.*#2\b/ })
+    .click();
+  await confirmDialog(page, /\b21(\.0+)? V\b/);
+  await expect
+    .poll(async () => (await commands(page)).at(-1))
+    .toBe("ufcs req=2,volt=21000,cur=3000");
+  // Capability #1 at 11 V is held to its 40 W.
+  const v1 = slider(page, "UFCS", "#1\\b", "voltage");
+  const c1 = slider(page, "UFCS", "#1\\b", "current");
+  await toEnd(v1, "End");
+  await toEnd(c1, "End");
+  await section(page, "UFCS")
+    .getByRole("button", { name: /^Request.*#1\b/ })
+    .click();
+  await confirmDialog(page, /\b11(\.0+)? V\b/);
+  await expect.poll(async () => (await commands(page)).at(-1)).toMatch(/^ufcs req=1,volt=11000,/);
+  const last = (await commands(page)).at(-1) ?? "";
+  const ma = Number(/cur=(\d+)/.exec(last)?.[1]);
+  expect(ma).toBeGreaterThanOrEqual(500);
+  expect(11000 * ma).toBeLessThanOrEqual(40000 * 1000);
+  await backButton(page).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("reset");
 });

@@ -30,6 +30,7 @@ import type {
   SeriesBuckets,
   StatsSnapshot,
   Detection,
+  TriggerLimits,
   TriggerOffer,
   TriggerProtocol,
   TriggerReply,
@@ -394,6 +395,7 @@ export const MOCK_MODES = [
   "blip",
   "replug",
   "trigger-sag",
+  "trigger-all",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -473,6 +475,39 @@ interface MockTrigger {
 
 /** The queue rate cap while a trigger session is open, SPS. [inferred] */
 const TRIGGER_MAX_SPS = 50;
+
+/** `trigger-all`: the decoded limits of the charger that speaks every protocol. [inferred] */
+const MOCK_SCP_LIMITS: TriggerLimits = {
+  index: null,
+  min_voltage_mv: 3400,
+  max_voltage_mv: 11000,
+  min_current_ma: 500,
+  max_current_ma: 5000,
+  max_power_mw: null,
+};
+const MOCK_ALL_LIMITS: Partial<Record<TriggerProtocol, readonly TriggerLimits[]>> = {
+  scp: [MOCK_SCP_LIMITS],
+  vfcp: [{ ...MOCK_SCP_LIMITS, max_current_ma: 4000 }],
+  tfcp: [{ ...MOCK_SCP_LIMITS }],
+  ufcs: [
+    { ...MOCK_SCP_LIMITS, index: 1, max_power_mw: 40000 },
+    {
+      ...MOCK_SCP_LIMITS,
+      index: 2,
+      max_voltage_mv: 21000,
+      max_current_ma: 3000,
+      max_power_mw: 63000,
+    },
+  ],
+};
+
+/** The fixed voltages each protocol allows, V. */
+const MOCK_FIXED_VOLTS: Record<"qc" | "fcp" | "afc" | "sfcp", readonly number[]> = {
+  qc: [5, 9, 12, 20],
+  fcp: [5, 9, 12],
+  afc: [5, 9, 12],
+  sfcp: [5, 9, 12],
+};
 
 /** The scripted charger's PD offers: 5/9/15/20 V fixed, PPS 3.3-21 V, EPR 28 V and AVS. */
 const MOCK_TRIGGER_OFFERS: readonly TriggerOffer[] = [
@@ -1130,6 +1165,10 @@ export class MockBackend {
       };
     }
     t.entered = "legacy";
+    if (this.#mode === "trigger-all") {
+      const limits = (MOCK_ALL_LIMITS[protocol] ?? []).map((l) => ({ ...l }));
+      return { protocol, supported: true, offers: [], limits, settings: null };
+    }
     return { protocol, supported: protocol === "qc", offers: [], limits: [], settings: null };
   }
 
@@ -1182,6 +1221,43 @@ export class MockBackend {
     }
   }
 
+  /** Why the protocol or the decoded limits refuse `request`, or null when they allow it. */
+  #refusal(request: TriggerRequest): string | null {
+    switch (request.protocol) {
+      case "pd":
+        return null;
+      case "qc":
+      case "fcp":
+      case "afc":
+      case "sfcp":
+        return MOCK_FIXED_VOLTS[request.protocol].includes(request.volts)
+          ? null
+          : `${request.protocol.toUpperCase()} does not offer ${request.volts} V.`;
+      case "qc3": {
+        const mv = request.voltage_mv;
+        return mv >= 3600 && mv <= 20000 && (mv - 3600) % 200 === 0
+          ? null
+          : "QC 3.0 runs from 3.6 to 20 V in 200 mV steps.";
+      }
+      default: {
+        const all = this.#mode === "trigger-all" ? (MOCK_ALL_LIMITS[request.protocol] ?? []) : [];
+        if (all.length === 0) return null;
+        const l = request.protocol === "ufcs" ? all.find((b) => b.index === request.index) : all[0];
+        if (!l) return "The charger reports no such capability.";
+        const { voltage_mv: v, current_ma: c } = request;
+        // Written so that NaN fails too.
+        if (!(v >= l.min_voltage_mv && v <= l.max_voltage_mv))
+          return "The voltage is outside the limits.";
+        if (!(c >= l.min_current_ma && c <= l.max_current_ma))
+          return "The current is outside the limits.";
+        if (l.max_power_mw !== null && v * c > l.max_power_mw * 1000) {
+          return "The request is above the capability's power.";
+        }
+        return null;
+      }
+    }
+  }
+
   /** Refuses an unconfirmed above-5 V request before anything is sent. */
   async triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply> {
     this.#openTrigger();
@@ -1189,6 +1265,8 @@ export class MockBackend {
     if (mv === null && request.protocol === "pd") {
       throw usage(`The charger offers nothing at position ${request.position}.`);
     }
+    const refusal = this.#refusal(request);
+    if (refusal !== null) throw usage(refusal);
     if ((await this.triggerRisk(request)) === "above_5v" && !confirmed) {
       throw usage("A request above 5 V needs your confirmation.");
     }

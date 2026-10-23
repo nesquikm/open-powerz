@@ -1,6 +1,14 @@
 <script lang="ts">
-  import type { TriggerOffer } from "../backend";
-  import type { TriggerPanel } from "../trigger.svelte";
+  import type { TriggerLimits, TriggerOffer, TriggerProtocol } from "../backend";
+  import {
+    LEGACY_FIXED_VOLTS,
+    QC3_RANGE,
+    clampToLimits,
+    isFixedVoltProtocol,
+    isLimitsProtocol,
+    limitsRequest,
+    type TriggerPanel,
+  } from "../trigger.svelte";
   import TriggerConfirmDialog from "./TriggerConfirmDialog.svelte";
 
   /**
@@ -75,12 +83,84 @@
     return Math.min(o.max_voltage_mv, Math.max(o.min_voltage_mv, mv));
   }
 
+  /** The QC 3.0 slider's value, mV. */
+  let qc3Mv = $state<number>(QC3_RANGE.minMv);
+
+  /** The voltage and current slider values of each limits block, by key. */
+  let limitsMv = $state<Record<string, number>>({});
+  let limitsMa = $state<Record<string, number>>({});
+
+  function limitsKey(p: TriggerProtocol, l: TriggerLimits, i: number): string {
+    // The position is part of the key, so two blocks with one number never clash.
+    return `${p}-${i}-${l.index ?? "n"}`;
+  }
+
+  // A new detection starts every control afresh: stale values from another
+  // charger or an earlier list are never reused.
+  $effect(() => {
+    void panel.detection;
+    rangeMv = {};
+    qc3Mv = QC3_RANGE.minMv;
+    limitsMv = {};
+    limitsMa = {};
+  });
+
+  /** Request controls work only in an open session and not while a
+   *  confirmation is waiting. */
+  const requestsOff = $derived(!panel.sessionOpen || panel.pending !== null);
+
+  /** `SCP` or `UFCS #2`: the name of a limits block. */
+  function limitsName(title: string, l: TriggerLimits): string {
+    return l.index === null ? title : `${title} #${l.index}`;
+  }
+
+  /** The block's slider values, clamped to its limits (and power). */
+  function limitsValue(key: string, l: TriggerLimits): { voltage_mv: number; current_ma: number } {
+    return clampToLimits(l, limitsMv[key] ?? l.min_voltage_mv, limitsMa[key] ?? l.max_current_ma);
+  }
+
+  /** One slider row: its label, the range input, the value it reads out and,
+   *  optionally, the button that requests it. */
+  interface SliderProps {
+    id: string;
+    label: string;
+    min: number;
+    max: number;
+    step: number;
+    value: number;
+    /** The read-out (and `aria-valuetext`) of the value. */
+    text: string | null;
+    onvalue: (value: number) => void;
+    request?: { label: string; onclick: () => void };
+  }
+
   const SUPPORT_TEXT: Record<string, string> = {
     supported: "Supported",
     "not-supported": "Not supported",
     unknown: "Unknown",
   };
 </script>
+
+{#snippet slider(p: SliderProps)}
+  <label for={p.id}>{p.label}</label>
+  <div class="range-row">
+    <input
+      id={p.id}
+      type="range"
+      min={p.min}
+      max={p.max}
+      step={p.step}
+      value={p.value}
+      aria-valuetext={p.text}
+      oninput={(e) => p.onvalue(Number((e.currentTarget as HTMLInputElement).value))}
+    />
+    <output for={p.id}>{p.text}</output>
+    {#if p.request}
+      {@const r = p.request}
+      <button type="button" onclick={r.onclick}>{r.label}</button>
+    {/if}
+  </div>
+{/snippet}
 
 <div class="trigger">
   <div class="toolbar" role="toolbar" aria-label="Trigger">
@@ -166,35 +246,26 @@
           {#each s.section.offers.filter(isRange) as o (o.position)}
             {@const mv = sliderMv(o)}
             <div class="range">
-              <label for="trigger-range-{o.position}"
-                >{rangeName(o)} #{o.position}, {volts(o.min_voltage_mv)}–{volts(
-                  o.max_voltage_mv,
-                )}</label
-              >
-              <div class="range-row">
-                <input
-                  id="trigger-range-{o.position}"
-                  type="range"
-                  min={o.min_voltage_mv}
-                  max={o.max_voltage_mv}
-                  step={rangeStep(o)}
-                  value={mv}
-                  aria-valuetext={volts(mv)}
-                  oninput={(e) =>
-                    (rangeMv[o.position] = Number((e.currentTarget as HTMLInputElement).value))}
-                />
-                <output for="trigger-range-{o.position}">{volts(mv)}</output>
-                <button
-                  type="button"
-                  onclick={() =>
+              {@render slider({
+                id: `trigger-range-${o.position}`,
+                label: `${rangeName(o)} #${o.position}, ${volts(o.min_voltage_mv)}–${volts(o.max_voltage_mv)}`,
+                min: o.min_voltage_mv,
+                max: o.max_voltage_mv,
+                step: rangeStep(o),
+                value: mv,
+                text: volts(mv),
+                onvalue: (v) => (rangeMv[o.position] = v),
+                request: {
+                  label: `Request ${rangeName(o)} ${volts(mv)}`,
+                  onclick: () =>
                     void panel.ask({
                       protocol: "pd",
                       position: o.position,
                       voltage_mv: mv,
                       current_ma: rangeCurrent(o, mv),
-                    })}>Request {rangeName(o)} {volts(mv)}</button
-                >
-              </div>
+                    }),
+                },
+              })}
             </div>
           {/each}
           {#if s.section.settings}
@@ -208,17 +279,84 @@
               <dd>{s.section.settings.sink}</dd>
             </dl>
           {/if}
-          {#if s.section.limits.length > 0}
-            <ul class="entries">
-              {#each s.section.limits as l, i (i)}
-                <li>
-                  {#if l.index !== null}<span class="name">#{l.index}</span>{/if}
-                  {volts(l.min_voltage_mv)}–{volts(l.max_voltage_mv)}, up to {amps(
-                    l.max_current_ma,
-                  )}
-                </li>
+          {#if isFixedVoltProtocol(s.protocol)}
+            {@const p = s.protocol}
+            <div class="offers" role="group" aria-label="{s.title} voltages">
+              {#each LEGACY_FIXED_VOLTS[p] as v (v)}
+                <button
+                  type="button"
+                  disabled={requestsOff}
+                  onclick={() => void panel.ask({ protocol: p, volts: v })}>{v} V</button
+                >
               {/each}
-            </ul>
+            </div>
+          {/if}
+          {#if s.protocol === "qc"}
+            <div class="range">
+              {@render slider({
+                id: "trigger-qc3",
+                label: `QC 3.0, ${volts(QC3_RANGE.minMv)}–${volts(QC3_RANGE.maxMv)}`,
+                min: QC3_RANGE.minMv,
+                max: QC3_RANGE.maxMv,
+                step: QC3_RANGE.stepMv,
+                value: qc3Mv,
+                text: volts(qc3Mv),
+                onvalue: (v) => (qc3Mv = v),
+                request: {
+                  label: `Request QC 3.0 ${volts(qc3Mv)}`,
+                  onclick: () => void panel.ask({ protocol: "qc3", voltage_mv: qc3Mv }),
+                },
+              })}
+            </div>
+          {/if}
+          {#if isLimitsProtocol(s.protocol)}
+            {@const p = s.protocol}
+            {#each s.section.limits as l, i (limitsKey(p, l, i))}
+              {@const key = limitsKey(p, l, i)}
+              {@const name = limitsName(s.title, l)}
+              {@const value = limitsValue(key, l)}
+              {@const id = `trigger-${key}`}
+              <div class="range">
+                {@render slider({
+                  id: `${id}-v`,
+                  label: `${name} voltage, ${volts(l.min_voltage_mv)}–${volts(l.max_voltage_mv)}`,
+                  min: l.min_voltage_mv,
+                  max: l.max_voltage_mv,
+                  step: 10,
+                  value: value.voltage_mv,
+                  text: volts(value.voltage_mv),
+                  onvalue: (v) => (limitsMv[key] = v),
+                })}
+                {@render slider({
+                  id: `${id}-c`,
+                  label: `${name} current, ${amps(l.min_current_ma)}–${amps(l.max_current_ma)}${
+                    l.max_power_mw === null
+                      ? ""
+                      : `, up to ${Number((l.max_power_mw / 1000).toFixed(1))} W`
+                  }`,
+                  min: l.min_current_ma,
+                  max: l.max_current_ma,
+                  step: 10,
+                  value: value.current_ma,
+                  text: amps(value.current_ma),
+                  // Stored clamped, so the thumb stays where the request is.
+                  onvalue: (v) =>
+                    (limitsMa[key] = clampToLimits(l, value.voltage_mv, v).current_ma),
+                })}
+                <button
+                  type="button"
+                  disabled={requestsOff || (p === "ufcs" && l.index === null)}
+                  title={p === "ufcs" && l.index === null
+                    ? "This UFCS capability has no number, so it cannot be requested."
+                    : undefined}
+                  onclick={() =>
+                    void panel.ask(limitsRequest(p, l, value.voltage_mv, value.current_ma))}
+                  >Request {name}
+                  {volts(value.voltage_mv)}
+                  {amps(value.current_ma)}</button
+                >
+              </div>
+            {/each}
           {/if}
           <p class="muted">Supported.</p>
         {/if}

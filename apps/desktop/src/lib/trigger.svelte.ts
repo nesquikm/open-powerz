@@ -10,6 +10,7 @@ import type {
   Detection,
   ProtocolSection,
   RiskClass,
+  TriggerLimits,
   TriggerProtocol,
   TriggerReply,
   TriggerRequest,
@@ -45,6 +46,69 @@ export const PROTOCOL_TITLES: Record<TriggerProtocol, string> = {
   tfcp: "TFCP",
   ufcs: "UFCS",
 };
+
+/** The protocols requested by a fixed voltage. */
+export type FixedVoltProtocol = "qc" | "fcp" | "afc" | "sfcp";
+
+/** The fixed-voltage buttons per protocol, V: QC 2.0 has 20 V, FCP / AFC / SFCP stop at 12 V. */
+export const LEGACY_FIXED_VOLTS: Record<FixedVoltProtocol, readonly number[]> = {
+  qc: [5, 9, 12, 20],
+  fcp: [5, 9, 12],
+  afc: [5, 9, 12],
+  sfcp: [5, 9, 12],
+};
+
+export function isFixedVoltProtocol(p: TriggerProtocol): p is FixedVoltProtocol {
+  return p === "qc" || p === "fcp" || p === "afc" || p === "sfcp";
+}
+
+/** The QC 3.0 control: 3.6-20 V in 200 mV steps. */
+export const QC3_RANGE = { minMv: 3600, maxMv: 20000, stepMv: 200 } as const;
+
+/** The protocols requested by a voltage and a current inside decoded limits. */
+export type LimitsProtocol = "scp" | "vfcp" | "tfcp" | "ufcs";
+
+export function isLimitsProtocol(p: TriggerProtocol): p is LimitsProtocol {
+  return p === "scp" || p === "vfcp" || p === "tfcp" || p === "ufcs";
+}
+
+/** `voltageMv` and `currentMa` kept inside the block's ranges and, when it has one,
+ * its power at that voltage. */
+export function clampToLimits(
+  limits: TriggerLimits,
+  voltageMv: number,
+  currentMa: number,
+): { voltage_mv: number; current_ma: number } {
+  const clamp = (x: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, x));
+  let voltage_mv = clamp(Math.round(voltageMv), limits.min_voltage_mv, limits.max_voltage_mv);
+  let current_ma = clamp(Math.round(currentMa), limits.min_current_ma, limits.max_current_ma);
+  if (limits.max_power_mw !== null && voltage_mv > 0) {
+    const cap = limits.max_power_mw * 1000;
+    current_ma = Math.min(current_ma, Math.floor(cap / voltage_mv));
+    // The cap would push the current below its minimum: lower the voltage
+    // so the minimum current still fits the power.
+    if (current_ma < limits.min_current_ma && limits.min_current_ma > 0) {
+      current_ma = limits.min_current_ma;
+      voltage_mv = Math.max(limits.min_voltage_mv, Math.floor(cap / current_ma));
+    }
+  }
+  return { voltage_mv, current_ma };
+}
+
+/** The request of an SCP / VFCP / TFCP / UFCS control, clamped to `limits`; UFCS
+ * addresses the capability by the block's index. */
+export function limitsRequest(
+  protocol: LimitsProtocol,
+  limits: TriggerLimits,
+  voltageMv: number,
+  currentMa: number,
+): TriggerRequest {
+  const c = clampToLimits(limits, voltageMv, currentMa);
+  // A block without a number is never sent to a guessed capability: 0 is no
+  // capability (they count from 1), so the backend refuses it.
+  if (protocol === "ufcs") return { protocol, index: limits.index ?? 0, ...c };
+  return { protocol, ...c };
+}
 
 /** One section of the view. */
 export interface SectionView {
