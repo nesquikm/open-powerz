@@ -257,6 +257,12 @@ rate. [static]
 - [device] On firmware 2.0.6 one reply holds at most 63 records (6-bit
   `chunk`); the backlog is kept between polls. At 1000 SPS poll at least every
   60 ms (the vendor app uses 32 ms) or samples are lost.
+- [device] On firmware 2.0.6 the first poll after a long pause (70 s at
+  50 SPS) can arrive cut short: the section declares 63 records (1260 bytes)
+  but only 1208 bytes come. We keep the whole records, drop the partial one,
+  and report the missing samples as a stream gap at the next record. Only a
+  last `ADC_QUEUE` section gets this leniency; any other cut section is an
+  error.
 
 Rate codes, as measured on firmware 2.0.6 (10 s per code at auth level 1):
 

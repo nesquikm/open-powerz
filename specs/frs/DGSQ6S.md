@@ -36,6 +36,7 @@ The desktop app lets the user detect protocols, read offers and request voltages
 - AC-DGSQ6S.9: A request that fails (an error reply, a timeout or a refusal) shows the failure and its reason in the request result; after a confirmed request the panel never keeps saying "No request yet".
 - AC-DGSQ6S.10: The session recognises a reply that belongs to another command (for example `req error` answering `pdm parm`) and never takes it as the answer to the current command. It stops with an error saying the meter needs a power cycle, and the panel shows that error and disables requests until the session is reopened.
 - AC-DGSQ6S.11: While the desktop runs the automatic list, the measurement stream pauses polling without reconnecting the meter, and resumes when the list ends, also when it ends early or with an error.
+- AC-DGSQ6S.12: After polling resumes, the measurement stream survives the meter's backlog: a queue reply shorter than it declares keeps its whole records, the lost samples are reported as a gap, and the stream and the trigger session carry on.
 
 ## Technical Design
 

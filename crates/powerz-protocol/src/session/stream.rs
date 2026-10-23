@@ -145,7 +145,10 @@ impl<T: Transport, C: Clock> Session<T, C> {
             if section.att != Attribute::ADC_QUEUE {
                 continue;
             }
-            for chunk in section.payload.chunks(RECORD_LEN) {
+            // [device] A backlog reply can arrive shorter than it declares:
+            // keep the whole records, drop a partial last one. The missing
+            // samples surface as a gap on the next record that arrives.
+            for chunk in section.payload.as_chunks::<RECORD_LEN>().0 {
                 records.push(QueueRecord::decode(chunk, rate)?);
             }
         }

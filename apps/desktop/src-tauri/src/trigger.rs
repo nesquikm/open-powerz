@@ -2163,7 +2163,7 @@ mod sync_tests {
     use super::*;
     use crate::devices::{DeviceListing, DeviceManager, Opener};
     use crate::ui_error::ErrorKind;
-    use crate::worker::BackendEvent;
+    use crate::worker::{BackendEvent, GapKind, Status};
 
     const OPEN_REPLY: &[u8] = b"pdm mode entry\nver1.0\n";
 
@@ -2649,6 +2649,158 @@ mod sync_tests {
             seen.lock().unwrap().len() == 2
         });
         assert_eq!(*seen.lock().unwrap(), [true, false]);
+    }
+
+    // ---- AC-DGSQ6S.12: the stream survives the meter's backlog ----
+
+    /// When the backlog reply was cut, and the requests after it.
+    #[derive(Default)]
+    struct BacklogState {
+        last_request: Option<Instant>,
+        cut_at: Option<Instant>,
+        polls_after_cut: usize,
+    }
+
+    /// The demo meter's bulk pipe, except that the first queue poll after a
+    /// pause of at least `PAUSE` arrives cut short, as FW 2.0.6 sends its
+    /// backlog [device]: the section still declares every record, but the
+    /// tail of the last one is missing.
+    struct Backlog {
+        inner: SimDevice,
+        state: Arc<Mutex<BacklogState>>,
+    }
+
+    const PAUSE: Duration = Duration::from_millis(400);
+
+    impl Transport for Backlog {
+        fn transact(
+            &mut self,
+            request: &[u8],
+            timeout: Duration,
+        ) -> Result<Vec<u8>, transport::Error> {
+            let mut reply = self.inner.transact(request, timeout)?;
+            let now = Instant::now();
+            let queue_poll = request.first().map(|b| b & 0x7F) == Some(GET_DATA)
+                && request.get(2..4) == Some(&[0x04, 0x00][..]);
+            let mut s = self.state.lock().unwrap();
+            let paused = s
+                .last_request
+                .is_some_and(|t| now.duration_since(t) >= PAUSE);
+            s.last_request = Some(now);
+            if !queue_poll {
+                return Ok(reply);
+            }
+            if s.cut_at.is_some() {
+                s.polls_after_cut += 1;
+                return Ok(reply);
+            }
+            // Section header at offset 4: att 0x002, chunk in bits 16..21.
+            if paused && reply.len() >= 8 && reply[4] == 0x02 {
+                let chunk = reply[6] & 0x3F;
+                if chunk >= 1 {
+                    reply.truncate(reply.len() - 12);
+                } else {
+                    reply[6] = (reply[6] & !0x3F) | 3;
+                }
+                s.cut_at = Some(now);
+            }
+            Ok(reply)
+        }
+        fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+            self.inner.read(timeout)
+        }
+        fn recover(&mut self) -> Result<(), transport::Error> {
+            self.inner.recover()
+        }
+    }
+
+    struct BacklogOpener(Arc<Mutex<BacklogState>>);
+
+    impl Opener for BacklogOpener {
+        type Transport = Backlog;
+        fn open(&self, device: &DeviceListing) -> Result<Backlog, transport::Error> {
+            let scenario = device
+                .demo_scenario
+                .as_deref()
+                .and_then(Scenario::from_name)
+                .ok_or(transport::Error::NotFound)?;
+            Ok(Backlog {
+                inner: SimDevice::new(Persona::Bulk, scenario),
+                state: Arc::clone(&self.0),
+            })
+        }
+    }
+
+    #[test]
+    fn a_short_backlog_reply_after_the_list_keeps_the_stream_and_the_trigger_session() {
+        // AC-DGSQ6S.12 [device]: the first queue poll after the automatic
+        // list arrives shorter than it declares.
+        let state = Arc::new(Mutex::new(BacklogState::default()));
+        let events: Arc<Mutex<Vec<(Instant, BackendEvent)>>> = Arc::default();
+        let sink_events = Arc::clone(&events);
+        let mut m = DeviceManager::new(
+            || Ok(Vec::new()),
+            BacklogOpener(Arc::clone(&state)),
+            SystemClock,
+        );
+        m.connect_with_stop(
+            "demo:load-5v-1a",
+            50,
+            move |e: BackendEvent| sink_events.lock().unwrap().push((Instant::now(), e)),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("the demo device connects");
+        eventually("the stream polls", || {
+            state.lock().unwrap().last_request.is_some()
+        });
+
+        let clock = SimClock::new(1_760_000_000_000);
+        let sim = SimPdm::new(SimCharger::Epr140W, clock.clone());
+        let port = ListGate {
+            port: sim.open_port(),
+            end: ListEnd::Complete,
+            armed: false,
+            own: VecDeque::new(),
+            window: Arc::new(Mutex::new(None)),
+        };
+        let w = TriggerWorker::spawn(port, clock).expect("the session opens");
+        m.install_trigger(w).expect("install");
+        assert!(m.trigger_control().expect("open").detect().is_ok());
+
+        eventually("the backlog reply to be cut", || {
+            state.lock().unwrap().cut_at.is_some()
+        });
+        let cut_at = state.lock().unwrap().cut_at.expect("cut");
+        eventually("polls to carry on after the cut", || {
+            state.lock().unwrap().polls_after_cut >= 3
+        });
+        eventually("samples after the cut", || {
+            events.lock().unwrap().iter().any(|(t, e)| {
+                *t > cut_at && matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty())
+            })
+        });
+
+        let seen = events.lock().unwrap().clone();
+        let lost: Vec<&BackendEvent> = seen
+            .iter()
+            .map(|(_, e)| e)
+            .filter(|e| matches!(e, BackendEvent::Status(Status::Disconnected { .. })))
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "AC-DGSQ6S.12: the short reply ended the session: {lost:?}"
+        );
+        assert!(
+            seen.iter().any(|(t, e)| *t > cut_at
+                && matches!(e, BackendEvent::Gap(g) if g.kind == GapKind::Stream)),
+            "AC-DGSQ6S.12: the lost samples were not reported as a gap"
+        );
+        assert!(
+            m.trigger_open(),
+            "AC-DGSQ6S.12: the trigger session was closed"
+        );
+        assert!(m.trigger_control().is_ok());
+        m.disconnect().expect("disconnect");
     }
 
     // ---- AC-DGSQ6S.10: the way back to 5 V stays open out of sync ----

@@ -346,3 +346,118 @@ fn session_meter_rate_code_4_behaves_like_code_0() {
         "0.1 mV units at code 0/4"
     );
 }
+
+// ---- AC-DGSQ6S.12: a queue reply shorter than it declares ----
+
+/// A queue reply for `times` whose last `cut` bytes never arrived: the
+/// section header still declares every record.
+fn short_queue_reply(id: u8, level: u8, times: &[u32], cut: usize) -> Vec<u8> {
+    let mut f = queue_reply(id, level, times);
+    f.truncate(f.len() - cut);
+    f
+}
+
+/// Lost samples the gaps account for (`expected - received` per gap).
+fn lost(gaps: &[Gap]) -> u32 {
+    gaps.iter().map(|g| g.expected - g.received).sum()
+}
+
+#[test]
+fn session_stream_short_backlog_reply_keeps_whole_records_and_reports_the_lost_tail() {
+    // AC-DGSQ6S.12 [device]: FW 2.0.6 at 50 SPS after a 70 s pause: the
+    // queue section declares 63 records (1260 bytes) but 1208 arrive.
+    let backlog: Vec<u32> = (0..63).map(|k| 1060 + k * 20).collect();
+    let mut s = started(
+        Rate::Sps50,
+        vec![
+            poll(3, &[1000, 1020, 1040]),
+            Step::transact(get_data(4, 0x002), short_queue_reply(4, 1, &backlog, 52)),
+            poll(5, &[2320, 2340]),
+        ],
+    );
+    assert!(s.poll_stream().unwrap().gaps.is_empty());
+
+    let short = s
+        .poll_stream()
+        .expect("AC-DGSQ6S.12: a short backlog reply is not fatal");
+    // 1208 bytes = 60 whole records + 8 bytes of the 61st, which is dropped.
+    assert_eq!(times(&short.records), backlog[..60].to_vec());
+    assert_eq!(
+        short.records[59].vbus_v(),
+        f64::from(5_000_000 + 2240) / 1e6
+    );
+
+    let next = s
+        .poll_stream()
+        .expect("AC-DGSQ6S.12: the stream carries on after a short reply");
+    assert_eq!(times(&next.records), vec![2320, 2340]);
+
+    // The three records that never arrived (2260, 2280, 2300) are reported
+    // as a gap after the last whole record, and counted once.
+    let gaps = [short.gaps.clone(), next.gaps.clone()].concat();
+    assert!(
+        gaps.iter().any(|g| g.from_ms == 2240),
+        "AC-DGSQ6S.12: no gap after the last whole record: {gaps:?}"
+    );
+    assert_eq!(lost(&gaps), 3, "AC-DGSQ6S.12: {gaps:?}");
+    assert_eq!(s.transport().remaining(), 0);
+}
+
+#[test]
+fn session_stream_short_reply_without_a_known_rate_keeps_whole_records() {
+    // AC-DGSQ6S.12: an unauthenticated poll, no rate known: whole records
+    // only, no error, and no gap claimed.
+    let mut s = Session::open(MockTransport::new(vec![
+        Step::transact(
+            get_data(1, 0x002),
+            short_queue_reply(1, 0, &[700, 1200, 1700, 2200], 30),
+        ),
+        Step::transact(get_data(2, 0x002), queue_reply(2, 0, &[3200])),
+    ]));
+    let p = s
+        .poll_stream()
+        .expect("AC-DGSQ6S.12: a short reply is not fatal");
+    // 80 - 30 = 50 bytes: two whole records.
+    assert_eq!(times(&p.records), vec![700, 1200]);
+    assert!(p.gaps.is_empty(), "{:?}", p.gaps);
+    let p = s.poll_stream().expect("the next poll works");
+    assert_eq!(times(&p.records), vec![3200]);
+}
+
+#[test]
+fn session_stream_short_reply_with_no_whole_record_is_an_empty_poll() {
+    // AC-DGSQ6S.12: fewer than 20 bytes of a declared record.
+    let mut s = started(
+        Rate::Sps10,
+        vec![
+            Step::transact(get_data(3, 0x002), short_queue_reply(3, 1, &[1000], 8)),
+            poll(4, &[1100]),
+        ],
+    );
+    let p = s
+        .poll_stream()
+        .expect("AC-DGSQ6S.12: a short reply is not fatal");
+    assert!(p.records.is_empty(), "{:?}", times(&p.records));
+    let p = s.poll_stream().expect("the next poll works");
+    assert_eq!(times(&p.records), vec![1100]);
+}
+
+#[test]
+fn session_short_section_of_another_attribute_still_fails() {
+    // AC-DGSQ6S.12: only the ADC queue gets the leniency; a cut ADC
+    // snapshot is still a frame error.
+    let mut adc = with_id(vector(ADC_52), 1);
+    adc.truncate(adc.len() - 8);
+    let mut s = Session::open(MockTransport::new(vec![Step::transact(
+        get_data(1, 0x001),
+        adc,
+    )]));
+    let err = s.read_adc().expect_err("a short ADC section is an error");
+    assert!(
+        matches!(
+            err,
+            Error::Frame(powerz_protocol::frame::FrameError::SectionOverrun { att: 0x001, .. })
+        ),
+        "{err:?}"
+    );
+}

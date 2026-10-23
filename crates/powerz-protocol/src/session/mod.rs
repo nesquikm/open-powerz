@@ -262,7 +262,9 @@ impl<T: Transport, C: Clock> Session<T, C> {
                 if reply.len() == frame::HEADER_LEN {
                     return Ok(Vec::new());
                 }
-                Ok(frame::parse_put_data(&reply)?
+                // A cut last ADC_QUEUE section is kept [device]; see
+                // `frame::parse_put_data_cut_queue`.
+                Ok(frame::parse_put_data_cut_queue(&reply)?
                     .into_iter()
                     .map(|s| OwnedSection {
                         att: s.att,

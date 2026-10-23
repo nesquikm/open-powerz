@@ -352,6 +352,22 @@ pub fn classify_reply(frame: &[u8]) -> Result<Reply, FrameError> {
 /// A `PD_STATUS` section has no usable size and takes the rest of the frame.
 /// ADC queue sections hold `chunk * size` bytes; every other section `size`.
 pub fn parse_put_data(frame: &[u8]) -> Result<Vec<Section<'_>>, FrameError> {
+    walk_sections(frame, false)
+}
+
+/// [`parse_put_data`], except that a last `ADC_QUEUE` section (`next = 0`)
+/// shorter than it declares keeps the bytes that arrived instead of failing.
+///
+/// [device] FW 2.0.6 at 50 SPS after a 70 s pause: the first queue poll
+/// declared 63 records (1260 bytes) but only 1208 arrived. The caller keeps
+/// the whole records; the lost tail shows up as a stream gap. Every other
+/// attribute, or a cut queue section followed by another, still fails.
+pub(crate) fn parse_put_data_cut_queue(frame: &[u8]) -> Result<Vec<Section<'_>>, FrameError> {
+    walk_sections(frame, true)
+}
+
+/// Section walk shared by [`parse_put_data`] and [`parse_put_data_cut_queue`].
+fn walk_sections(frame: &[u8], cut_queue_ok: bool) -> Result<Vec<Section<'_>>, FrameError> {
     MainHeader::decode(frame)?;
     let mut sections = Vec::new();
     let mut offset = HEADER_LEN;
@@ -368,6 +384,13 @@ pub fn parse_put_data(frame: &[u8]) -> Result<Vec<Section<'_>>, FrameError> {
         }
         let needed = header.payload_len();
         let available = frame.len() - start;
+        if needed > available && cut_queue_ok && att == Attribute::ADC_QUEUE && !header.next {
+            sections.push(Section {
+                att,
+                payload: &frame[start..],
+            });
+            return Ok(sections);
+        }
         if needed > available {
             return Err(FrameError::SectionOverrun {
                 att: header.att,
