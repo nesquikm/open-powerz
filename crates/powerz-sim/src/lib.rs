@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 pub use pd::PdScenario;
 pub use pdm::{SimCable, SimCharger, SimPdm, SimPdmPort};
+use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::Clock;
 use powerz_protocol::transport::{Error, Transport};
 
@@ -306,6 +307,12 @@ pub struct SimDevice {
     unplugged: bool,
     /// The PD sniffer (0x10 / 0x11) and its capture scenario.
     pd: pd::PdSniffer,
+    /// Application or bootloader mode (sets the USB interface string).
+    mode: DeviceMode,
+    /// Old-firmware field of the HEAD reply (0 = normal firmware).
+    head_field: u32,
+    /// Application firmware version in the 0x4420 info block.
+    app_version: String,
 }
 
 impl SimDevice {
@@ -343,6 +350,9 @@ impl SimDevice {
             polls: 0,
             unplugged: false,
             pd: pd::PdSniffer::default(),
+            mode: DeviceMode::Application,
+            head_field: 0,
+            app_version: memory::SIM_APP_VERSION.to_string(),
         }
     }
 
@@ -360,6 +370,45 @@ impl SimDevice {
     pub fn with_pd_scenario(mut self, scenario: PdScenario) -> SimDevice {
         self.pd.set_scenario(scenario);
         self
+    }
+
+    /// Run in `mode` (application by default): changes the USB interface
+    /// string the simulated meter reports.
+    pub fn with_mode(mut self, mode: DeviceMode) -> SimDevice {
+        self.mode = mode;
+        self
+    }
+
+    /// Answer HEAD with old-firmware field `field` (default 0).
+    pub fn with_head_field(mut self, field: u32) -> SimDevice {
+        self.head_field = field;
+        self
+    }
+
+    /// Report application firmware `version` in the 0x4420 info block.
+    /// The version field is 12 bytes; a longer string is cut to fit.
+    pub fn with_app_version(mut self, version: &str) -> SimDevice {
+        let mut end = version.len().min(12);
+        while !version.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.app_version = version[..end].to_string();
+        self
+    }
+
+    /// The USB iProduct string: the model name `[device]`.
+    pub fn product_string(&self) -> &'static str {
+        "POWER-Z KM003C"
+    }
+
+    /// The interface string of the vendor interface (string 2): `APP` in
+    /// application mode `[device]`, `BOOT` in bootloader mode `[inferred]`.
+    pub fn interface_string(&self) -> &'static str {
+        match self.mode {
+            DeviceMode::Application => "APP",
+            DeviceMode::Bootloader => "BOOT",
+            DeviceMode::Unknown => "POWER-Z",
+        }
     }
 
     /// Inject `faults`.

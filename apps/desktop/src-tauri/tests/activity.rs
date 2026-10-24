@@ -37,6 +37,8 @@ fn manager(faults: FaultPlan) -> DeviceManager<SimOpener, SimClock> {
                 model: Model::Km003c,
                 pid: 0x0063,
                 serial: Some("SERIAL-0001".to_owned()),
+                product: Some("POWER-Z KM003C".to_owned()),
+                interface_string: Some("APP".to_owned()),
                 bus: "1".to_owned(),
                 address: 7,
             }])

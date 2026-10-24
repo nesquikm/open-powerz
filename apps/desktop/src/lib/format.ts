@@ -87,10 +87,13 @@ export function readoutView(
   };
 }
 
-/** Picker label: "Demo device — <scenario>" for demo entries, "<model> — <serial>" for meters. */
+/** Picker label: "Demo device — <scenario>" for demo entries, "<model> — <serial>" for
+ * meters, with "(bootloader mode)" after a meter in bootloader mode. */
 export function deviceOptionLabel(device: DeviceListing): string {
   if (device.demo_scenario !== null) return `Demo device — ${device.demo_scenario}`;
-  return device.serial ? `${device.model} — ${device.serial}` : device.model;
+  const name = device.serial ? `${device.model} — ${device.serial}` : device.model;
+  // A meter in bootloader mode is listed as such (FR V9SK52, AC .5).
+  return device.mode === "bootloader" ? `${name} (bootloader mode)` : name;
 }
 
 /** Real meters first, then demo devices; order within each group is kept. */

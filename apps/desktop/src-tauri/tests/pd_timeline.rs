@@ -23,10 +23,7 @@ use powerz_sim::PdScenario;
 use serde_json::Value;
 
 fn config() -> WorkerConfig {
-    WorkerConfig {
-        rate: Rate::Sps50,
-        session_id: 1,
-    }
+    WorkerConfig::new(Rate::Sps50, 1)
 }
 
 /// The PD scenario plays for ~3.4 s from the sniffer start.

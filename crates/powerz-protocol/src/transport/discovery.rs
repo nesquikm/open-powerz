@@ -1,6 +1,7 @@
 //! Device discovery: list attached POWER-Z meters without opening them.
 
 use super::Error;
+use crate::firmware::DeviceMode;
 
 /// USB product ID of the KM003C.
 pub const PID_KM003C: u16 = 0x0063;
@@ -38,6 +39,11 @@ pub struct UsbDeviceInfo {
     pub pid: u16,
     /// iSerialNumber string, if the OS reported one.
     pub serial: Option<String>,
+    /// iProduct string, if the OS reported one (the model name).
+    pub product: Option<String>,
+    /// Interface string of the vendor-class (0xFF) interface, if the OS
+    /// reported one (`APP` in application mode `[device]`).
+    pub interface_string: Option<String>,
     /// Bus identifier as reported by the OS.
     pub bus: String,
     /// Device address on the bus.
@@ -53,10 +59,21 @@ pub struct DeviceEntry {
     pub pid: u16,
     /// Serial string.
     pub serial: Option<String>,
+    /// USB product string, if the OS reported one.
+    pub product: Option<String>,
+    /// Vendor-interface string, if the OS reported one; decides the mode.
+    pub interface_string: Option<String>,
     /// Bus identifier.
     pub bus: String,
     /// Device address on the bus.
     pub address: u8,
+}
+
+impl DeviceEntry {
+    /// Application or bootloader mode, from the vendor-interface string.
+    pub fn mode(&self) -> DeviceMode {
+        DeviceMode::from_interface_string(self.interface_string.as_deref())
+    }
 }
 
 /// Keep every device with the POWER-Z vendor ID, in input order.
@@ -68,6 +85,8 @@ pub fn filter_devices(devices: &[UsbDeviceInfo]) -> Vec<DeviceEntry> {
             model: Model::from_pid(d.pid),
             pid: d.pid,
             serial: d.serial.clone(),
+            product: d.product.clone(),
+            interface_string: d.interface_string.clone(),
             bus: d.bus.clone(),
             address: d.address,
         })
@@ -84,11 +103,22 @@ pub fn list_devices() -> Result<Vec<DeviceEntry>, Error> {
             vid: d.vendor_id(),
             pid: d.product_id(),
             serial: d.serial_number().map(str::to_owned),
+            product: d.product_string().map(str::to_owned),
+            interface_string: vendor_interface_string(&d),
             bus: d.bus_id().to_owned(),
             address: d.device_address(),
         })
         .collect();
     Ok(filter_devices(&infos))
+}
+
+/// Interface string of the vendor-class (0xFF) interface, picked by class,
+/// never by number; read from the OS device list, nothing is opened.
+fn vendor_interface_string(d: &nusb::DeviceInfo) -> Option<String> {
+    d.interfaces()
+        .filter(|i| i.class() == 0xFF)
+        .find_map(|i| i.interface_string())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -102,6 +132,8 @@ mod tests {
             vid,
             pid,
             serial: serial.map(str::to_owned),
+            product: None,
+            interface_string: None,
             bus: bus.to_owned(),
             address,
         }
@@ -133,6 +165,8 @@ mod tests {
                     model: Model::Km003c,
                     pid: 0x0063,
                     serial: Some(PLACEHOLDER_SERIAL.to_owned()),
+                    product: None,
+                    interface_string: None,
                     bus: "1".to_owned(),
                     address: 7,
                 },
@@ -140,6 +174,8 @@ mod tests {
                     model: Model::Km002c,
                     pid: 0x0061,
                     serial: Some("SERIAL-0002".to_owned()),
+                    product: None,
+                    interface_string: None,
                     bus: "2".to_owned(),
                     address: 3,
                 },
@@ -147,6 +183,8 @@ mod tests {
                     model: Model::Unknown(0x00AA),
                     pid: 0x00AA,
                     serial: None,
+                    product: None,
+                    interface_string: None,
                     bus: "3".to_owned(),
                     address: 9,
                 },

@@ -2,7 +2,11 @@
 
 use super::{Clock, Error, Session};
 use crate::crypto;
+use std::time::Duration;
+
+use crate::decode::head::{self, HeadReply};
 use crate::decode::{DeviceInfoBlock, OtpBlock, Uid};
+use crate::firmware::version::{self, FirmwareWarning};
 use crate::transport::{self, Transport};
 
 /// Hardware / boot-loader info block.
@@ -13,6 +17,9 @@ const FIRMWARE_INFO: (u32, u32) = (0x0000_4420, 64);
 pub(super) const OTP: (u32, u32) = (0x0300_0C00, 64);
 /// MCU unique ID (the level-1 credential).
 pub(super) const UID: (u32, u32) = (0x4001_0450, 12);
+
+/// Pause between CONNECT and HEAD `[static]`.
+const HEAD_DELAY: Duration = Duration::from_millis(50);
 
 /// The only memory blocks [`Session::memory_read`] may read.
 const MEMORY_READ_ALLOWED: [(u32, u32); 4] = [HARDWARE_INFO, FIRMWARE_INFO, OTP, UID];
@@ -34,6 +41,34 @@ pub struct DeviceInfo {
     pub serial: String,
     /// MCU unique ID as lowercase hex.
     pub uid: String,
+}
+
+/// Both firmware info blocks and the HEAD old-firmware flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirmwareStatus {
+    /// Bootloader info block (0x420), if not blank.
+    pub bootloader: Option<DeviceInfoBlock>,
+    /// Application info block (0x4420), if not blank.
+    pub application: Option<DeviceInfoBlock>,
+    /// The HEAD reply asked for a firmware update.
+    pub update_required: bool,
+}
+
+impl FirmwareStatus {
+    /// The status when it could not be read: no blocks, no update flag.
+    pub fn unknown() -> Self {
+        Self {
+            bootloader: None,
+            application: None,
+            update_required: false,
+        }
+    }
+
+    /// Firmware warnings for this status.
+    pub fn warnings(&self) -> Vec<FirmwareWarning> {
+        let app = self.application.as_ref().map_or("", |b| b.version());
+        version::warnings(app, self.update_required)
+    }
 }
 
 /// Plaintext of a memory-read request: `addr, len, 0xFFFFFFFF,
@@ -125,5 +160,50 @@ impl<T: Transport, C: Clock> Session<T, C> {
             serial: otp.serial(),
             uid: uid.to_string(),
         })
+    }
+
+    /// Both info blocks and the HEAD old-firmware flag; read-only.
+    ///
+    /// Sends CONNECT, waits [`HEAD_DELAY`] on the session clock, sends HEAD
+    /// (as the vendor app does `[static]`), then reads the bootloader
+    /// (0x420) and application (0x4420) info blocks.
+    pub fn firmware_status(&mut self) -> Result<FirmwareStatus, Error> {
+        self.connect()?;
+        self.read_firmware_status()
+    }
+
+    /// [`firmware_status`](Self::firmware_status) on a session that is
+    /// already connected: waits [`HEAD_DELAY`], sends HEAD, then reads both
+    /// info blocks. A caller that sees an error here still has a connected
+    /// session and may carry on without the firmware status.
+    pub fn read_firmware_status(&mut self) -> Result<FirmwareStatus, Error> {
+        self.sleep(HEAD_DELAY);
+        let request = head::request(self.counter.next());
+        let reply = self.exchange(&request)?;
+        let update_required = HeadReply::decode(&reply)?.update_required();
+        let bootloader = DeviceInfoBlock::decode(&self.read_block(HARDWARE_INFO)?)?;
+        let application = DeviceInfoBlock::decode(&self.read_block(FIRMWARE_INFO)?)?;
+        Ok(FirmwareStatus {
+            bootloader,
+            application,
+            update_required,
+        })
+    }
+
+    /// [`read_firmware_status`](Self::read_firmware_status) that only costs
+    /// the firmware status when it fails: a HEAD or info block that timed
+    /// out or did not decode is followed by one CONNECT (which skips a late
+    /// reply and recovers a stuck pipe) and gives
+    /// [`FirmwareStatus::unknown`]. A [link-fatal](Error::is_link_fatal)
+    /// error, or a failed recovery CONNECT, is returned.
+    pub fn read_firmware_status_or_unknown(&mut self) -> Result<FirmwareStatus, Error> {
+        match self.read_firmware_status() {
+            Ok(st) => Ok(st),
+            Err(e) if e.is_link_fatal() => Err(e),
+            Err(_) => {
+                self.connect()?;
+                Ok(FirmwareStatus::unknown())
+            }
+        }
     }
 }

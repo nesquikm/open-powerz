@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use common::*;
+use powerz_cli::commands::info_in_mode;
 use powerz_cli::record::CSV_HEADER;
 use powerz_cli::trace::TraceTransport;
 use powerz_cli::{
@@ -15,6 +16,7 @@ use powerz_cli::{
     select_device, stream, validate, watch,
 };
 use powerz_protocol::decode::Rate;
+use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::{self, Gap, Streamer};
 use powerz_protocol::transport::discovery::Model;
 use powerz_protocol::transport::mock::{MockTransport, Step};
@@ -100,7 +102,9 @@ fn list_json_with_no_meter_is_empty_array() {
 
 #[test]
 fn info_prints_model_versions_serial_and_uid() {
-    let mut s = session(MockTransport::new(device_info_steps(1)));
+    let mut s = session(MockTransport::new(
+        [device_info_steps(1), read_firmware_status_steps(5)].concat(),
+    ));
     let mut out = Vec::new();
     info(&mut s, false, &mut out).unwrap();
     let out = text(&out);
@@ -112,7 +116,9 @@ fn info_prints_model_versions_serial_and_uid() {
 
 #[test]
 fn info_json_is_one_object() {
-    let mut s = session(MockTransport::new(device_info_steps(1)));
+    let mut s = session(MockTransport::new(
+        [device_info_steps(1), read_firmware_status_steps(5)].concat(),
+    ));
     let mut out = Vec::new();
     info(&mut s, true, &mut out).unwrap();
     let v: Value = serde_json::from_slice(&out).expect("valid JSON");
@@ -122,6 +128,154 @@ fn info_json_is_one_object() {
     assert_eq!(v["hardware_version"], SYNTH_HW);
     assert_eq!(v["serial"], SYNTH_SERIAL);
     assert_eq!(v["uid"], SYNTH_UID_HEX);
+}
+
+// ---- AC-V9SK52.2 / .4: info by mode ----
+
+/// `info_in_mode` on `script`; the call's result, its stdout text and the
+/// frames it sent.
+fn info_mode(
+    mode: DeviceMode,
+    json: bool,
+    script: Vec<Step>,
+) -> (Result<(), CliError>, String, Vec<Vec<u8>>) {
+    let mut s = session(MockTransport::new(script));
+    let mut out = Vec::new();
+    let r = info_in_mode(&mut s, mode, json, &mut out);
+    (r, text(&out), s.transport().written().to_vec())
+}
+
+#[test]
+fn info_outside_application_mode_reports_the_mode_and_sends_nothing() {
+    for mode in [DeviceMode::Bootloader, DeviceMode::Unknown] {
+        let (r, out, sent) = info_mode(mode, false, vec![]);
+        assert!(r.is_ok(), "{mode:?}: {r:?}");
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("Mode:"))
+            .unwrap_or_else(|| panic!("{mode:?}: no Mode line in:\n{out}"));
+        assert!(line.contains(mode.name()), "{mode:?}: {out}");
+        assert_eq!(
+            sent,
+            Vec::<Vec<u8>>::new(),
+            "{mode:?}: no HEAD, no memory read"
+        );
+
+        let (r, out, sent) = info_mode(mode, true, vec![]);
+        assert!(r.is_ok(), "{mode:?} --json: {r:?}");
+        let v: Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["mode"], mode.name(), "{v}");
+        assert_eq!(sent, Vec::<Vec<u8>>::new(), "{mode:?} --json sends nothing");
+    }
+}
+
+#[test]
+fn info_in_application_mode_sends_no_connect_of_its_own() {
+    for json in [false, true] {
+        let (r, out, sent) = info_mode(
+            DeviceMode::Application,
+            json,
+            [device_info_steps(1), read_firmware_status_steps(5)].concat(),
+        );
+        assert!(r.is_ok(), "json={json}: {r:?}");
+        assert!(out.contains(SYNTH_FW), "{out}");
+        let connects = sent.iter().filter(|f| f.first() == Some(&0x02)).count();
+        assert_eq!(connects, 0, "the session is already connected: {sent:02x?}");
+        let heads = sent.iter().filter(|f| f.first() == Some(&0x40)).count();
+        assert_eq!(heads, 1, "one HEAD: {sent:02x?}");
+    }
+}
+
+/// HEAD at request id 5 (after the device-info reads) fails as `head`;
+/// the recovery CONNECT (id 6) that follows a failed HEAD is accepted.
+fn info_with_bad_head(json: bool, head: Step) -> (Result<(), CliError>, String) {
+    let (r, out, _) = info_mode(DeviceMode::Application, json, bad_head_script(head));
+    (r, out)
+}
+
+/// Device info (ids 1..4), the failing `head` (id 5), then the recovery
+/// CONNECT (id 6) the shared degrade helper sends.
+fn bad_head_script(head: Step) -> Vec<Step> {
+    [
+        device_info_steps(1),
+        vec![
+            head,
+            Step::transact(powerz_protocol::frame::connect(6).to_vec(), accept(6)),
+        ],
+    ]
+    .concat()
+}
+
+fn bad_heads() -> Vec<(&'static str, Step)> {
+    let req = powerz_protocol::decode::head::request(5).to_vec();
+    vec![
+        (
+            "timeout",
+            Step::transact_err(req.clone(), transport::Error::Timeout),
+        ),
+        // Header only: too short for the old-firmware field.
+        (
+            "undecodable",
+            Step::transact(req, vec![0x40, 5, 0x00, 0x01]),
+        ),
+    ]
+}
+
+#[test]
+fn info_degrades_when_head_times_out_or_is_undecodable() {
+    for (what, head) in bad_heads() {
+        let (r, out) = info_with_bad_head(false, head);
+        assert!(r.is_ok(), "{what}: info still succeeds: {r:?}");
+        for want in [SYNTH_MODEL, SYNTH_FW, SYNTH_HW, SYNTH_SERIAL] {
+            assert!(out.contains(want), "{what}: missing {want} in:\n{out}");
+        }
+        assert!(
+            !out.to_lowercase().contains("update required"),
+            "{what}: no update-required warning:\n{out}"
+        );
+    }
+    for (what, head) in bad_heads() {
+        let (r, out) = info_with_bad_head(true, head);
+        assert!(r.is_ok(), "{what} --json: {r:?}");
+        let v: Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["model"], SYNTH_MODEL, "{v}");
+        assert_eq!(v["firmware_version"], SYNTH_FW, "{v}");
+        assert_eq!(v["hardware_version"], SYNTH_HW, "{v}");
+        assert_ne!(v["update_required"], true, "{v}");
+        let codes = v["warnings"].as_array().cloned().unwrap_or_default();
+        assert!(
+            !codes.contains(&serde_json::json!("update_required")),
+            "{what}: {v}"
+        );
+    }
+}
+
+#[test]
+fn info_reconnects_once_after_a_failed_head_before_continuing() {
+    for json in [false, true] {
+        for (what, head) in bad_heads() {
+            let mut s = session(MockTransport::new(bad_head_script(head)));
+            let mut out = Vec::new();
+            let r = info_in_mode(&mut s, DeviceMode::Application, json, &mut out);
+            assert!(r.is_ok(), "{what} json={json}: {r:?}");
+            let sent = s.transport().written();
+            let head_at = sent
+                .iter()
+                .position(|f| f.first() == Some(&0x40))
+                .unwrap_or_else(|| panic!("{what}: no HEAD: {sent:02x?}"));
+            let after: Vec<u8> = sent[head_at + 1..].iter().map(|f| f[0]).collect();
+            assert_eq!(
+                after,
+                vec![0x02],
+                "{what} json={json}: one recovery CONNECT after the failed HEAD"
+            );
+            assert_eq!(
+                s.transport().remaining(),
+                0,
+                "{what} json={json}: the recovery CONNECT was not sent"
+            );
+        }
+    }
 }
 
 // ---- AC-STQEA1.3: read ----

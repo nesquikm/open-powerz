@@ -405,6 +405,7 @@ export const MOCK_MODES = [
   "trigger-req-error",
   "trigger-detect-disagree",
   "trigger-list-lag",
+  "bootloader",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -429,6 +430,19 @@ export const MOCK_BLIP = { startMs: 30_400_000, beforeMs: 20_000, gapMs: 10_000 
  * the OS lists it again at a new address and the backend reconnects on its own. */
 export const MOCK_REPLUG = { serial: "MOCK-REPLUG-0001", beforeMs: 3_000, awayMs: 3_000 } as const;
 
+/** `bootloader`: one real meter in bootloader mode, listed before the demo entries and
+ * never connected (FR V9SK52, AC .5). */
+const BOOTLOADER_METER: DeviceListing = {
+  id: "usb:1:9",
+  label: "KM003C — bus 1 address 9 (bootloader mode)",
+  model: "KM003C",
+  serial: null,
+  bus: "1",
+  address: 9,
+  demo_scenario: null,
+  mode: "bootloader",
+};
+
 /** The replug meter's picker entry at USB address `address`. */
 function replugMeter(address: number): DeviceListing {
   return {
@@ -439,6 +453,7 @@ function replugMeter(address: number): DeviceListing {
     bus: "1",
     address,
     demo_scenario: null,
+    mode: "application",
   };
 }
 
@@ -450,6 +465,9 @@ function connectedStatus(serial: string, rateSps: number | null): BackendEvent {
       state: "connected",
       model: "KM003C",
       firmware_version: "2.0.6",
+      bootloader_version: "2.5",
+      mode: "application",
+      warnings: ["outdated"],
       serial,
       rate_sps: rateSps,
       rate_locked: rateSps === null,
@@ -693,8 +711,10 @@ export class MockBackend {
     this.#options = options;
   }
 
-  /** `replug`: the real meter's listing while the OS lists it, else null. */
+  /** `replug`: the real meter's listing while the OS lists it; `bootloader`: the
+   * bootloader-mode meter; else null. */
   #listedMeter(): DeviceListing | null {
+    if (this.#mode === "bootloader") return BOOTLOADER_METER;
     return this.#mode === "replug" && this.#meterAddress !== null
       ? replugMeter(this.#meterAddress)
       : null;
@@ -711,6 +731,7 @@ export class MockBackend {
       bus: null,
       address: null,
       demo_scenario: name,
+      mode: "application" as const,
     }));
     return [...meters, ...demos];
   }

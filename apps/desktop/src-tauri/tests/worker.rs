@@ -16,10 +16,7 @@ use powerz_protocol::frame::Attribute;
 use powerz_protocol::transport::guard::FORBIDDEN_TYPES;
 
 fn config(rate: Rate) -> WorkerConfig {
-    WorkerConfig {
-        rate,
-        session_id: 1,
-    }
+    WorkerConfig::new(rate, 1)
 }
 
 /// Start a worker on a fresh simulator; returns the worker, its clock, the

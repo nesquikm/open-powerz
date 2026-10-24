@@ -7,6 +7,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use powerz_protocol::decode::AdcSnapshot;
+use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::frame;
 use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
 use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
@@ -27,9 +28,9 @@ use crate::args::{
 };
 use crate::commands::{
     DetectOptions, LegacyRequestOptions, PdRequestOptions, PdSendOptions, PdSettingsChange,
-    StreamOptions, WatchOptions, console, detect, info, list, pd, pd_decode, pd_save, pd_send,
-    read, select_device, stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list,
-    trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch,
+    StreamOptions, WatchOptions, console, detect, info_in_mode, list, pd, pd_decode, pd_save,
+    pd_send, read, select_device, stream, trigger_legacy_list, trigger_legacy_request,
+    trigger_pd_list, trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport};
@@ -55,6 +56,8 @@ fn demo_entry() -> DeviceEntry {
         model: Model::Km003c,
         pid: PID_KM003C,
         serial: Some(SIM_SERIAL.to_string()),
+        product: Some("POWER-Z KM003C".to_owned()),
+        interface_string: Some("APP".to_owned()),
         bus: "demo".to_string(),
         address: 0,
     }
@@ -96,11 +99,14 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     }
     let devices = transport::discovery::list_devices()?;
     let device = select_device(&devices, cli.device.as_deref())?;
+    let mode = device.mode();
     match cli.transport {
         TransportKind::Sim => unreachable!("the simulator is handled above"),
-        TransportKind::Bulk => with_transport(cli, BulkTransport::open(device)?),
-        TransportKind::Cdc => with_transport(cli, open_cdc(device)?),
-        TransportKind::Hid => with_transport(cli, HidTransport::open(device.serial.as_deref())?),
+        TransportKind::Bulk => with_transport(cli, mode, BulkTransport::open(device)?),
+        TransportKind::Cdc => with_transport(cli, mode, open_cdc(device)?),
+        TransportKind::Hid => {
+            with_transport(cli, mode, HidTransport::open(device.serial.as_deref())?)
+        }
     }
 }
 
@@ -571,6 +577,7 @@ fn ctrl_c_hold() -> impl FnMut(Duration) {
 /// without touching USB; `--device` must name its synthetic serial.
 fn run_sim(cli: &Cli) -> Result<(), CliError> {
     select_demo(cli)?;
+    let mode = demo_entry().mode();
     let faults = sim_faults()?;
     // `pd` on the demo device plays the PD capture scenario.
     let with_pd = |sim: SimDevice| match cli.command {
@@ -584,11 +591,29 @@ fn run_sim(cli: &Cli) -> Result<(), CliError> {
             cli.scenario,
             clock.clone(),
         ));
-        with_ctrl_c_after(cli, sim.with_faults(faults), clock)
+        let sim = sim_firmware_knobs(sim)?;
+        with_ctrl_c_after(cli, mode, sim.with_faults(faults), clock)
     } else {
-        let sim = with_pd(SimDevice::new(Persona::Bulk, cli.scenario));
-        with_ctrl_c_after(cli, sim.with_faults(faults), SystemClock)
+        let sim = sim_firmware_knobs(with_pd(SimDevice::new(Persona::Bulk, cli.scenario)))?;
+        with_ctrl_c_after(cli, mode, sim.with_faults(faults), SystemClock)
     }
+}
+
+/// Honour the firmware test knobs (test-only):
+///
+/// - `POWERZ_SIM_HEAD=<n>`: HEAD answers with old-firmware field `n`.
+/// - `POWERZ_SIM_APP_VERSION=<v>`: the application info block reports `v`.
+fn sim_firmware_knobs(mut sim: SimDevice) -> Result<SimDevice, CliError> {
+    if let Ok(n) = std::env::var("POWERZ_SIM_HEAD") {
+        let field = n
+            .parse::<u32>()
+            .map_err(|e| CliError::Usage(format!("invalid POWERZ_SIM_HEAD {n:?}: {e}")))?;
+        sim = sim.with_head_field(field);
+    }
+    if let Ok(v) = std::env::var("POWERZ_SIM_APP_VERSION") {
+        sim = sim.with_app_version(&v);
+    }
+    Ok(sim)
 }
 
 /// Honour `POWERZ_SIM_FAULT=<plan>` (test-only, [`FaultPlan::parse`] syntax).
@@ -602,7 +627,12 @@ fn sim_faults() -> Result<FaultPlan, CliError> {
 
 /// Honour `POWERZ_SIM_CTRL_C_AFTER=N` (test-only): stand in for Ctrl-C once
 /// the simulator has answered N GET_DATA requests.
-fn with_ctrl_c_after<C: Clock>(cli: &Cli, sim: SimDevice, clock: C) -> Result<(), CliError> {
+fn with_ctrl_c_after<C: Clock>(
+    cli: &Cli,
+    mode: DeviceMode,
+    sim: SimDevice,
+    clock: C,
+) -> Result<(), CliError> {
     match std::env::var("POWERZ_SIM_CTRL_C_AFTER") {
         Ok(n) => {
             let after = n.parse::<usize>().map_err(|e| {
@@ -613,9 +643,9 @@ fn with_ctrl_c_after<C: Clock>(cli: &Cli, sim: SimDevice, clock: C) -> Result<()
                 remaining: after,
                 stop: stop_flag(),
             };
-            with_clock(cli, t, clock)
+            with_clock(cli, mode, t, clock)
         }
-        Err(_) => with_clock(cli, sim, clock),
+        Err(_) => with_clock(cli, mode, sim, clock),
     }
 }
 
@@ -645,40 +675,55 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
 }
 
 /// [`with_clock`] on the system clock.
-fn with_transport<T: Transport>(cli: &Cli, t: T) -> Result<(), CliError> {
-    with_clock(cli, t, SystemClock)
+fn with_transport<T: Transport>(cli: &Cli, mode: DeviceMode, t: T) -> Result<(), CliError> {
+    with_clock(cli, mode, t, SystemClock)
 }
 
 /// Wrap `t` for `--trace` if asked, open a session on `clock`, send CONNECT
 /// where the pipe needs it and run.
-fn with_clock<T: Transport, C: Clock>(cli: &Cli, t: T, clock: C) -> Result<(), CliError> {
+fn with_clock<T: Transport, C: Clock>(
+    cli: &Cli,
+    mode: DeviceMode,
+    t: T,
+    clock: C,
+) -> Result<(), CliError> {
     if cli.trace {
         start(
             cli,
+            mode,
             Session::with_clock(TraceTransport::new(t, std::io::stderr()), clock),
         )
     } else {
-        start(cli, Session::with_clock(t, clock))
+        start(cli, mode, Session::with_clock(t, clock))
     }
 }
 
 /// CONNECT (bulk only) then dispatch.
-fn start<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Result<(), CliError> {
+fn start<T: Transport, C: Clock>(
+    cli: &Cli,
+    mode: DeviceMode,
+    mut session: Session<T, C>,
+) -> Result<(), CliError> {
     if needs_connect(cli.transport) {
         session.connect()?;
     }
-    dispatch(cli, session)
+    dispatch(cli, mode, session)
 }
 
-/// Run one device subcommand on an open session.
-fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Result<(), CliError> {
+/// Run one device subcommand on an open session; `mode` is the opened
+/// meter's mode, from its vendor interface's USB string.
+fn dispatch<T: Transport, C: Clock>(
+    cli: &Cli,
+    mode: DeviceMode,
+    mut session: Session<T, C>,
+) -> Result<(), CliError> {
     let mut out = std::io::stdout().lock();
     match &cli.command {
         Command::List { .. } => unreachable!("list is handled before opening a device"),
         Command::Trigger { .. } | Command::Detect { .. } | Command::Console { .. } => {
             unreachable!("trigger, detect and console are handled before opening a device")
         }
-        Command::Info { json } => info(&mut session, *json, &mut out),
+        Command::Info { json } => info_in_mode(&mut session, mode, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
         Command::Watch { interval } => {
             let stop = ctrl_c_flag()?;

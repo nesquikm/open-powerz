@@ -35,7 +35,7 @@ KM002C facts stay `[inferred]` until a KM002C is tested.
 | PID matching | the vendor app accepts any PID 0x00xx and never branches on it; the model comes from the device-info block | [static] |
 | device class | 0xEF / 0x02 / 0x01 (composite with an interface association), USB 2.10, full speed, EP0 32 bytes | [device] (firmware 2.0.6) |
 | string 4 (iProduct) | `POWER-Z KM003C` | [device] (firmware 2.0.6) |
-| string 2 | `APP` in application mode (the interface string of IF0 and IF1, not the product string); anything else means boot loader | [static] [device] (firmware 2.0.6) |
+| string 2 | `APP` in application mode (the interface string of IF0 and IF1, not the product string); the vendor app reads anything else as boot loader, while this library reports only BOOT or DFU strings as boot loader and anything else as unknown | [static] [device] (firmware 2.0.6) |
 | string 3 (iSerial) | the device serial number (not reproduced here) | [device] |
 | WinUSB binding | MS OS 2.0 descriptor set (vendor request code 0x20) gives interface 0 the `WINUSB` compatible ID | [device] (firmware 2.0.6) |
 
@@ -159,7 +159,7 @@ Data types (main header type 0x40 and up):
 
 | type | request header | payload | purpose | tag |
 |---|---|---|---|---|
-| 0x40 HEAD | `40 id 00 01` | 16 zero bytes | firmware-download pre-check: the device must report it is ready for an update | [static]; meaning [inferred] |
+| 0x40 HEAD | `40 id 00 01` | 16 zero bytes | read-only status check. The reply is type 0x40, and the u32 LE at offset 4 is 0 for normal firmware and non-zero for "original firmware, update required". The vendor app sends it 50 ms after CONNECT in application mode, and before a download in boot-loader mode, where the field must be 0 | [static]; meaning [inferred] |
 | 0x41 PUT_DATA | reply only | section chain | GET_DATA reply | [doc] [static] [device] |
 | 0x42 | `42 id 00 04` | 64-byte firmware descriptor | firmware download; never sent by us | [static] |
 | 0x44 | `44 id 01 01` | 32 encrypted bytes | memory read (see Memory read and device info) | [static] [device] |
@@ -356,6 +356,14 @@ Known addresses (the only ones we ever read):
   that other peripheral addresses crash the meter. [inferred] (prior art)
 - The SPI-flash read window at `0x98000000 + offset` holds offline
   recordings; it is not on our allowed list yet. [static]
+
+Firmware status (FR V9SK52). All requests below are read-only:
+
+| item | rule | tag |
+|---|---|---|
+| mode | the interface string (string 2) of the vendor-class (0xFF) interface, picked by class and read from the OS device list without opening the device: `APP` is application mode [device] (firmware 2.0.6), a string naming BOOT or DFU is boot-loader mode [inferred], and anything else (or no string) is reported as unknown | [static] [device] [inferred] |
+| sequence | CONNECT, wait 50 ms, HEAD, then the info blocks `0x420` (boot loader) and `0x4420` (application) | [static] |
+| warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated; HEAD field non-zero: update required | [static] [inferred] |
 
 ## Authentication
 
@@ -710,6 +718,9 @@ transport sends only the ADC snapshot. [device] [static]
 | type 0x4A | memory / SPI-flash write | [static] |
 | memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
 | any HID request other than the ADC snapshot (GET_DATA mask 0x001) | replies over 64 bytes hang and reboot the meter; control commands are ignored | [device] (firmware 2.0.6) |
+
+HEAD (0x40) is not on this list: it only reads a status word, so the
+guard lets it through. [static]
 
 PDM text commands go through the same guard, and a request that could raise
 VBUS above 5 V needs a per-command confirmation (see PDM text session).

@@ -95,11 +95,24 @@ export interface DeviceListing {
   bus: string | null;
   address: number | null;
   demo_scenario: string | null;
+  /** What the meter runs, from its vendor interface's USB string (FR V9SK52). */
+  mode: DeviceMode;
 }
+
+/** Application firmware, bootloader, or not known (mirrors `firmware::DeviceMode`). */
+export type DeviceMode = "application" | "bootloader" | "unknown";
+
+/** Firmware warning codes (mirrors `version::FirmwareWarning::code`). */
+export type FirmwareWarningCode = "too_old" | "outdated" | "update_required";
 
 export interface ConnectedInfo {
   model: string;
   firmware_version: string;
+  /** Bootloader version, empty when the meter did not report one (FR V9SK52). */
+  bootloader_version: string;
+  mode: DeviceMode;
+  /** Firmware warnings for this meter, none when it is up to date. */
+  warnings: FirmwareWarningCode[];
   serial: string;
   rate_sps: number | null;
   rate_locked: boolean;

@@ -4,6 +4,7 @@
 //! accessors returning SI units. See `docs/protocol.md`.
 
 pub mod adc;
+pub mod head;
 pub mod info;
 pub mod pd_packet;
 pub mod queue;
@@ -28,6 +29,16 @@ pub enum DecodeError {
         expected: usize,
         /// Length actually supplied.
         got: usize,
+    },
+    /// The frame is of another type than the record expects.
+    #[error("{what}: expected frame type {expected:#04x}, got {got:#04x}")]
+    UnexpectedType {
+        /// Record being decoded.
+        what: &'static str,
+        /// Frame type the record needs.
+        expected: u8,
+        /// Frame type actually supplied (extend bit masked off).
+        got: u8,
     },
 }
 

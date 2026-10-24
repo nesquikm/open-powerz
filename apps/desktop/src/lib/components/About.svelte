@@ -1,13 +1,17 @@
 <script lang="ts">
   import { aboutLines } from "../about";
-  import { appInfo, type AppInfo } from "../backend";
+  import { appInfo, type AppInfo, type ConnectedInfo } from "../backend";
+  import { deviceDetailsRows } from "../deviceDetails";
   import Panel from "./Panel.svelte";
 
   let {
     onClose,
     opener,
+    details = null,
   }: {
     onClose: () => void;
+    /** The connected meter's details (FR V9SK52, AC .5), null while none is connected. */
+    details?: ConnectedInfo | null;
     /** The control that opened About; focus returns there on close (or to ⋯ when it is gone). */
     opener?: HTMLElement | null;
   } = $props();
@@ -38,10 +42,38 @@
   {#each lines as line (line)}
     <p>{line}</p>
   {/each}
+  {#if details !== null}
+    <section aria-label="Device details">
+      <h3>Device details</h3>
+      <dl>
+        {#each deviceDetailsRows(details) as row (row.label)}
+          <dt>{row.label}</dt>
+          <dd>{row.value}</dd>
+        {/each}
+      </dl>
+    </section>
+  {/if}
 </Panel>
 
 <style>
   p {
     margin: 0.5rem 0 0;
+  }
+  h3 {
+    margin: 1rem 0 0.25rem;
+    font-size: 1em;
+  }
+  dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.25rem 1rem;
+    margin: 0;
+  }
+  dt {
+    color: var(--muted);
+  }
+  dd {
+    margin: 0;
+    overflow-wrap: anywhere;
   }
 </style>

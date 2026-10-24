@@ -43,10 +43,12 @@
     pdSaveNoticeText,
   } from "./lib/pdSave";
   import { attachSession } from "./lib/attach";
+  import { firmwareWarningText } from "./lib/deviceDetails";
   import { AutoDismiss, type HoldReason } from "./lib/autoDismiss";
   import About from "./lib/components/About.svelte";
   import Chart from "./lib/components/Chart.svelte";
   import ErrorBanner from "./lib/components/ErrorBanner.svelte";
+  import FirmwareNotice from "./lib/components/FirmwareNotice.svelte";
   import Notice from "./lib/components/Notice.svelte";
   import PdAnalyzer from "./lib/components/PdAnalyzer.svelte";
   import { PdCapture } from "./lib/pdCapture.svelte";
@@ -196,6 +198,13 @@
       },
     );
   }
+
+  /** The connected meter's firmware warnings, worded (FR V9SK52, AC .4). */
+  const firmwareWarnings = $derived.by(() => {
+    const info = session.details;
+    if (info === null) return [];
+    return info.warnings.map((code) => firmwareWarningText(code, info));
+  });
 
   /** The last PD capture save (FR TGE83E), while its notice shows. */
   let pdSaved = $state<ExportResult | null>(null);
@@ -623,6 +632,9 @@
           if (leftStack(e)) holdNotices("focus", false);
         }}
       >
+        {#if firmwareWarnings.length > 0}
+          <FirmwareNotice warnings={firmwareWarnings} />
+        {/if}
         {#if recording.notice !== null || recording.error !== null}
           <Notice
             tone={recording.error ? "error" : "info"}
@@ -722,7 +734,7 @@
     <ShortcutHelp onClose={() => (helpOpen = false)} />
   {/if}
   {#if aboutOpen}
-    <About opener={aboutOpener} onClose={() => (aboutOpen = false)} />
+    <About opener={aboutOpener} details={session.details} onClose={() => (aboutOpen = false)} />
   {/if}
 </div>
 

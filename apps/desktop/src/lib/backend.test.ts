@@ -47,6 +47,7 @@ const meter: DeviceListing = {
   bus: "1",
   address: 4,
   demo_scenario: null,
+  mode: "application",
 };
 
 beforeEach(() => {

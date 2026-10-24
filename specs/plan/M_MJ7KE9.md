@@ -38,6 +38,19 @@ codename: Flash Gordon
 
 Build order: V9SK52, V9SK53, V9SK54, V9SK55, then V9SK56 (stage 1 can run once V9SK52 is done).
 
+**Tasks:**
+- [ ] Device mode and firmware version — V9SK52
+- [ ] Firmware file inspection — V9SK53
+- [ ] Firmware flashing engine — V9SK54
+- [ ] Desktop firmware update — V9SK55
+- [ ] Staged firmware checks on the real meter — V9SK56
+
+**M7 follow-ups:**
+- `.claude/settings.json` has no `Bash(claude:*)` allow rule, so gate probe `spawn_pattern_allowlist` fails. It has failed since the bootstrap commit, and the fix is a settings change only the user can approve.
+- The desktop UI copies the firmware thresholds (1.7.0, 2.0.7) by hand from the Rust constants. Have the backend send them, or pin both sides with one test (V9SK52 review).
+- `Version::parse` is strict: `v2.0.7` or `2.0.7-beta` give no warning. The meter reports plain `2.0.6`; settle a policy if other strings appear (V9SK52 review).
+- The firmware notice's live region mounts with its text already in it, so screen readers may not announce it (V9SK52 review).
+
 **Device safety:** JUMP_DFU (09), JUMP_APROM (08), the 0x42 descriptor and payload writes stay forbidden on the real meter until the user approves the stage that needs them.
 
 **Gate:** same gating rule as CLAUDE.md.

@@ -11,6 +11,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use powerz_protocol::decode::Rate;
+use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::Clock;
 use powerz_protocol::transport::bulk::BulkTransport;
 use powerz_protocol::transport::discovery::{self, DeviceEntry, Model};
@@ -45,6 +46,39 @@ pub struct DeviceListing {
     pub address: Option<u8>,
     /// Simulator scenario name (demo entries only).
     pub demo_scenario: Option<String>,
+    /// What the entry runs, sent to the UI by name (FR V9SK52, AC .5).
+    /// Demo entries are always in application mode.
+    #[serde(serialize_with = "serialize_mode")]
+    pub mode: DeviceMode,
+}
+
+/// Why a bootloader-mode meter is not connected (FR V9SK52, AC .5).
+const BOOTLOADER_REFUSAL: &str =
+    "This meter is in bootloader mode. Restart it into the application firmware to connect.";
+
+impl DeviceListing {
+    /// The bootloader answers none of the measurement requests: refuse it
+    /// before opening anything, for a user connect and an automatic reconnect
+    /// alike (FR V9SK52, AC .5).
+    fn ensure_connectable(&self) -> Result<(), UiError> {
+        if self.mode == DeviceMode::Bootloader {
+            return Err(UiError::usage(BOOTLOADER_REFUSAL));
+        }
+        Ok(())
+    }
+}
+
+fn serialize_mode<S: serde::Serializer>(mode: &DeviceMode, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(mode.name())
+}
+
+/// The label suffix naming a real meter's mode; only a bootloader-mode
+/// meter gets one.
+fn mode_suffix(mode: DeviceMode) -> &'static str {
+    match mode {
+        DeviceMode::Application | DeviceMode::Unknown => "",
+        DeviceMode::Bootloader => " (bootloader mode)",
+    }
 }
 
 fn model_name(model: Model) -> String {
@@ -57,10 +91,12 @@ fn model_name(model: Model) -> String {
 
 fn usb_listing(entry: &DeviceEntry) -> DeviceListing {
     let model = model_name(entry.model);
-    let label = match &entry.serial {
+    let mode = entry.mode();
+    let name = match &entry.serial {
         Some(serial) => format!("{model} — {serial}"),
         None => format!("{model} — bus {} address {}", entry.bus, entry.address),
     };
+    let label = format!("{name}{}", mode_suffix(mode));
     DeviceListing {
         id: format!("usb:{}:{}", entry.bus, entry.address),
         label,
@@ -69,6 +105,7 @@ fn usb_listing(entry: &DeviceEntry) -> DeviceListing {
         bus: Some(entry.bus.clone()),
         address: Some(entry.address),
         demo_scenario: None,
+        mode,
     }
 }
 
@@ -82,6 +119,7 @@ fn demo_listing(scenario: Scenario) -> DeviceListing {
         bus: None,
         address: None,
         demo_scenario: Some(name.to_owned()),
+        mode: DeviceMode::Application,
     }
 }
 
@@ -564,6 +602,11 @@ where
         else {
             return false;
         };
+        // A meter back in bootloader mode is listed but not opened; keep
+        // waiting for its application-mode return.
+        if device.ensure_connectable().is_err() {
+            return false;
+        }
         // Resume at the rate the session last ran at. The ended session's info
         // is only dropped once the reconnect is certain to start.
         let (rate_sps, rate) = {
@@ -627,6 +670,7 @@ where
             .into_iter()
             .find(|d| d.id == id)
             .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
+        device.ensure_connectable()?;
         let live = Arc::new(Mutex::new(Live {
             device_id: device.id.clone(),
             info: None,
@@ -681,7 +725,10 @@ where
             .session_id;
         self.device = Some(device.clone());
         let opener = Arc::clone(&self.opener);
-        let config = WorkerConfig { rate, session_id };
+        let config = WorkerConfig {
+            mode: device.mode,
+            ..WorkerConfig::new(rate, session_id)
+        };
         self.live = Some(Arc::clone(&live));
         self.stop = Some(Arc::clone(&stop));
         let sink = trigger_sink(

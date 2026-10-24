@@ -14,10 +14,7 @@ use powerz_protocol::decode::Rate;
 use powerz_protocol::transport::{self, Transport};
 
 fn config(rate: Rate) -> WorkerConfig {
-    WorkerConfig {
-        rate,
-        session_id: 1,
-    }
+    WorkerConfig::new(rate, 1)
 }
 
 fn connected_serial(events: &Events) -> String {

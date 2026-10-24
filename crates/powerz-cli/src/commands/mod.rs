@@ -26,7 +26,7 @@ mod watch;
 
 pub use console::console;
 pub use detect::{DetectOptions, detect};
-pub use info::info;
+pub use info::{info, info_in_mode};
 pub use list::{list, select_device};
 pub use pd::{pd, pd_decode, pd_save};
 pub use pd_send::{PdSendOptions, pd_send};

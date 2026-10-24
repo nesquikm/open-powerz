@@ -26,7 +26,7 @@ use crate::frame::{self, Attribute, FrameError, Reply, SequenceCounter};
 use crate::transport::{self, Transport};
 
 pub use auth::{auth_plaintext, auth_request};
-pub use memory::{DeviceInfo, memory_read_plaintext, memory_read_request};
+pub use memory::{DeviceInfo, FirmwareStatus, memory_read_plaintext, memory_read_request};
 pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer};
 pub use stream::{Gap, SnapshotCadence, StreamPoll, Streamer};
 
@@ -62,6 +62,17 @@ pub enum Error {
     /// A reply frame was malformed.
     #[error(transparent)]
     Frame(#[from] FrameError),
+}
+
+impl Error {
+    /// The meter was unplugged or the OS refused access: retrying on this
+    /// link cannot help.
+    pub fn is_link_fatal(&self) -> bool {
+        matches!(
+            self,
+            Error::Transport(transport::Error::Disconnected | transport::Error::Permission(_))
+        )
+    }
 }
 
 /// Source of wall-clock time, randomness and sleeping, injected so that
