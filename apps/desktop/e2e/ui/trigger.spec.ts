@@ -126,11 +126,14 @@ async function request9V(page: Page): Promise<void> {
   await expect(dialog(page)).toBeHidden();
 }
 
-/** Press Tab until `target` has the focus (at most `max` presses). */
+/** Press Tab until `target` has the focus (at most `max` presses).
+ * WebKit (as Safari) tabs only to form fields unless Option is held, so it
+ * gets Alt+Tab, as in focus.spec.ts (CI run 40070430207, macOS WebKit). */
 async function tabTo(page: Page, target: Locator, max = 120): Promise<void> {
+  const key = page.context().browser()?.browserType().name() === "webkit" ? "Alt+Tab" : "Tab";
   for (let i = 0; i < max; i++) {
     if (await target.evaluate((el) => el === document.activeElement)) return;
-    await page.keyboard.press("Tab");
+    await page.keyboard.press(key);
   }
   await expect(target, "reached with Tab").toBeFocused();
 }
