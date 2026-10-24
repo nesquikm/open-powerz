@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use powerz_protocol::decode::AdcSnapshot;
 use powerz_protocol::firmware::DeviceMode;
+use powerz_protocol::firmware::container::read_container_file;
 use powerz_protocol::frame;
 use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
 use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
@@ -23,13 +24,14 @@ use powerz_sim::{
 };
 
 use crate::args::{
-    Cli, Command, FixedAction, LimitsAction, PdAction, PdDecode, Qc3Action, QcAction, RequestFlags,
-    TransportKind, TriggerProtocol, UfcsAction, needs_connect, rate_from_sps, validate,
+    Cli, Command, FirmwareAction, FixedAction, LimitsAction, PdAction, PdDecode, Qc3Action,
+    QcAction, RequestFlags, TransportKind, TriggerProtocol, UfcsAction, needs_connect,
+    rate_from_sps, validate,
 };
 use crate::commands::{
     DetectOptions, LegacyRequestOptions, PdRequestOptions, PdSendOptions, PdSettingsChange,
-    StreamOptions, WatchOptions, console, detect, info_in_mode, list, pd, pd_decode, pd_save,
-    pd_send, read, select_device, stream, trigger_legacy_list, trigger_legacy_request,
+    StreamOptions, WatchOptions, console, detect, firmware_info, info_in_mode, list, pd, pd_decode,
+    pd_save, pd_send, read, select_device, stream, trigger_legacy_list, trigger_legacy_request,
     trigger_pd_list, trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
@@ -67,6 +69,13 @@ fn demo_entry() -> DeviceEntry {
 fn try_run(cli: &Cli) -> Result<(), CliError> {
     if let Some(d) = &cli.pd_file.decode {
         return decode_file(d);
+    }
+    if let Command::Firmware {
+        action: FirmwareAction::Info { json, file },
+    } = &cli.command
+    {
+        // Reads a local file; no device is opened, whatever `--transport` says.
+        return firmware_info_file(file, *json);
     }
     validate(cli)?;
     if let Command::List { json, include_demo } = cli.command {
@@ -129,6 +138,14 @@ fn decode_file(d: &PdDecode) -> Result<(), CliError> {
         d.json,
         &mut std::io::stdout().lock(),
     )
+}
+
+/// `firmware info FILE`: print a firmware container's metadata; no device
+/// is opened.
+fn firmware_info_file(file: &std::path::Path, json: bool) -> Result<(), CliError> {
+    let name = file.display().to_string();
+    let bytes = read_container_file(file).map_err(|e| CliError::Usage(e.to_string()))?;
+    firmware_info(&bytes, &name, json, &mut std::io::stdout().lock())
 }
 
 /// `trigger` / `detect`: open the meter's serial port (or, with
@@ -723,6 +740,7 @@ fn dispatch<T: Transport, C: Clock>(
         Command::Trigger { .. } | Command::Detect { .. } | Command::Console { .. } => {
             unreachable!("trigger, detect and console are handled before opening a device")
         }
+        Command::Firmware { .. } => unreachable!("firmware is handled before opening a device"),
         Command::Info { json } => info_in_mode(&mut session, mode, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
         Command::Watch { interval } => {

@@ -3,6 +3,7 @@ pub mod batch;
 pub mod devices;
 #[cfg(feature = "e2e")]
 pub mod e2e;
+pub mod firmware_file;
 pub mod history;
 pub mod pd_capture;
 pub mod pd_import;
@@ -623,6 +624,13 @@ async fn pd_import(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<Pd
     .await
 }
 
+/// Inspect the firmware container at `path` (FR V9SK53, AC .3); needs no
+/// meter. Resolves to its metadata with the English release notes.
+#[tauri::command]
+async fn firmware_inspect(path: String) -> Result<firmware_file::FirmwareFileInfo, UiError> {
+    blocking(move || firmware_file::inspect_firmware_file(std::path::Path::new(&path))).await
+}
+
 /// The save dialog's file type for a proposed file name: a PD capture for
 /// `.pdcap`, CSV otherwise.
 fn save_filter(suggested_name: &str) -> (&'static str, &'static [&'static str]) {
@@ -912,6 +920,7 @@ pub fn run() {
             pd_save,
             pd_open,
             pd_import,
+            firmware_inspect,
             trigger_open,
             trigger_detect,
             trigger_list,

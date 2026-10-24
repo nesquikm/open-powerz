@@ -14,6 +14,7 @@ import type {
   DeviceListing,
   ExportProgress,
   ExportResult,
+  FirmwareFileInfo,
   Gap,
   HistoryGap,
   HistorySeries,
@@ -1179,6 +1180,22 @@ export class MockBackend {
       damaged_line: null,
       oversized: 0,
       truncated: false,
+    };
+  }
+
+  /** Synthetic metadata of a KM003C firmware file, whatever `path` names; no file is
+   * read, like the backend it needs no meter. */
+  async firmwareInspect(path: string): Promise<FirmwareFileInfo> {
+    void path;
+    return {
+      vendor: "ChargerLab",
+      container_version: "V1.0",
+      model: "KM003C",
+      version: "2.0.7",
+      date: "2026.9.29",
+      crc: "A175E4A0",
+      size: 456896,
+      release_notes_en: "1. Demo note: improved PD capture.\n2. Demo note: minor fixes.",
     };
   }
 

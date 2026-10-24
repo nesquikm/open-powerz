@@ -700,6 +700,26 @@ Record body:
 - Idle QC_PACKET adds 8 constant bytes of unknown meaning after the status.
   [device]
 
+## Firmware container
+
+Firmware for the meter ships as an encrypted container file (`.mencrypt`) from
+the vendor's download page. This library only reads its header and passes the
+payload on unchanged; it never decrypts it and never ships firmware files. The
+layout is a Qt data stream, big-endian. [static]
+
+| part | encoding | content | tag |
+|---|---|---|---|
+| count | u32 | number of header strings, 10 | [static] |
+| strings 0..9 | each a u32 byte length, then UTF-16BE code units; length 0xFFFFFFFF means a null string | magic `Firmware file`, vendor, container version, model, firmware version, date, CRC-32 as 8 hex digits, size in decimal, release notes (Chinese), release notes (English) | [static] |
+| payload | u32 byte length, then the bytes | the encrypted image, at least `size` bytes long; the vendor's 2.0.7 file is 16 bytes longer than `size` (an IV or padding) | [static]; the extra bytes [inferred] |
+
+- The CRC and size describe the decrypted image, which the meter checks
+  after a download; they do not match the stored bytes. [static] [inferred]
+- We refuse a file with the wrong magic, a truncated header or payload, a
+  payload shorter than `size`, a string count other than 10, an unreadable CRC
+  or size, or a model that differs from the meter, before any device command
+  is sent. [static]
+
 ## Never-send commands
 
 Our library refuses to send these requests, so a bug or a CLI typo cannot

@@ -162,6 +162,27 @@ pub enum Command {
         #[arg(long)]
         allow_high_voltage: bool,
     },
+    /// Work with firmware files; `info` needs no meter.
+    Firmware {
+        /// What to do.
+        #[command(subcommand)]
+        action: FirmwareAction,
+    },
+}
+
+/// `firmware` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum FirmwareAction {
+    /// Show a firmware file's model, version, date, CRC, size and English
+    /// release notes; no meter needed, nothing is decrypted.
+    Info {
+        /// Print one JSON object instead of labelled lines.
+        #[arg(long)]
+        json: bool,
+        /// Firmware container file to inspect.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
 }
 
 /// `trigger` protocols.
@@ -438,6 +459,7 @@ impl Command {
             Command::Trigger { .. } => "trigger",
             Command::Detect { .. } => "detect",
             Command::Console { .. } => "console",
+            Command::Firmware { .. } => "firmware",
         }
     }
 }

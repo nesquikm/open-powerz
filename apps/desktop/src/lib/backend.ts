@@ -474,6 +474,26 @@ export async function pdImport(): Promise<PdOpened | null> {
   return invoke<PdOpened | null>("pd_import");
 }
 
+/** A local firmware container's metadata (FR V9SK53, AC .3). The image itself is never
+ * decrypted; `crc` is 8 uppercase hex digits and `size` the declared image length in bytes. */
+export interface FirmwareFileInfo {
+  vendor: string;
+  container_version: string;
+  model: string;
+  version: string;
+  date: string;
+  crc: string;
+  size: number;
+  release_notes_en: string;
+}
+
+/** Reads the firmware container at `path` and resolves to its metadata; needs no meter.
+ * A corrupt file or one that is not a firmware container rejects with a usage error. */
+export async function firmwareInspect(path: string): Promise<FirmwareFileInfo> {
+  if (mock) return mock.firmwareInspect(path);
+  return invoke<FirmwareFileInfo>("firmware_inspect", { path });
+}
+
 /** Drops every captured PD record; resolves to the index of the next record. Rows
  * numbered below it were sent before the clear and are stale. */
 export async function pdClear(): Promise<number> {
