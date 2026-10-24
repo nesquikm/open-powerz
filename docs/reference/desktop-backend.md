@@ -6,8 +6,8 @@ The desktop app's web UI talks to its Rust backend through one TypeScript
 module, `apps/desktop/src/lib/backend.ts`. Every function there calls a Tauri
 command, or the in-browser `MockBackend` when the UI is built with
 `VITE_BACKEND=mock`. Scripts and other front ends can use the same seam. This
-page lists the parts added for session gaps, replug and the PD analyzer; the
-source has the rest.
+page lists the parts added for session gaps, replug, the PD analyzer and the
+trigger panel; the source has the rest.
 
 ## Session history
 
@@ -63,6 +63,76 @@ status samples for the table and the chart. `THEME_COLORS` and
 `themeVariables` (in `theme.ts`) carry the marker colours, one per
 `PdMarkerKind`: `negotiation`, `reset`, `error`, `attach_detach`, `other`.
 
+## Trigger panel
+
+The trigger panel drives a PDM text session on the meter's virtual serial
+port (`src-tauri/src/trigger.rs`). It runs on a thread of its own next to the
+measurement stream, which stays connected on the bulk pipe. Every function
+below calls the Tauri command with the same name in snake case (for example
+`triggerOpen` calls `trigger_open`).
+
+Commands:
+
+| function | what it does |
+|---|---|
+| `triggerOpen(): Promise<void>` | Opens the trigger session on the connected meter (a simulated one for a demo device). Fails with `usage` when no meter is connected or a session is already open. |
+| `triggerDetect(): Promise<Detection>` | BC1.2, Apple and the automatic list. Nothing above 5 V is asked. The stream's polling pauses while it runs (see below). |
+| `triggerList(protocol: TriggerProtocol): Promise<ProtocolSection>` | Enters `protocol` and reports its section. A protocol the charger does not answer is `supported: false`, not an error. |
+| `triggerRisk(request: TriggerRequest): Promise<RiskClass>` | The library's risk class of `request`, given what the charger offered. `above_5v` needs the user's confirmation. |
+| `triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply>` | Sends `request`. The backend is the final gate: above 5 V it is refused unless `confirmed`. A request for another protocol than the one entered enters that protocol again first. |
+| `triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>` | The risk class of a built PD message. GoodCRC and malformed messages fail with `usage` and the reason. |
+| `triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>` | Sends a built PD message; above 5 V only when `confirmed`. |
+| `triggerConsoleRisk(line: string): Promise<RiskClass>` | The risk class of a raw console line. |
+| `triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]>` | Sends a raw console line and answers the transcript lines. Above 5 V (any unparsable line too) only when `confirmed`; GoodCRC is always refused. |
+| `triggerBackTo5v(): Promise<void>` | Back to 5 V: PD sends `pd req=1` (a Hard Reset as the fallback), the other protocols `reset`. The session stays open. |
+| `triggerClose(): Promise<void>` | Back to 5 V where the protocol allows it, then `pdm close`. Does nothing when no session is open. |
+
+Types (they mirror `src-tauri/src/trigger.rs`):
+
+| type | fields |
+|---|---|
+| `TriggerProtocol` | `"pd"`, `"qc"`, `"fcp"`, `"afc"`, `"sfcp"`, `"scp"`, `"vfcp"`, `"tfcp"`, `"ufcs"`. `TRIGGER_PROTOCOLS` lists them, PD first. |
+| `Detection` | `bc12`, `apple` (each a `SupportName`: `"supported"`, `"not-supported"` or `"unknown"`), `entries` (`DetectEntry[]`: `name`, `support`, `vbus_mv`, `ibus_ma`), `complete` (false when the list stalled or was cut off) |
+| `ProtocolSection` | `protocol`, `supported`, `offers` (`TriggerOffer[]`, PD only), `limits` (`TriggerLimits[]`), `settings` (`PdEmulation`: `pd_type`, `emarker`, `sink`; PD only, else `null`) |
+| `TriggerOffer` | `position`, `kind` (`"fixed"`, `"battery"`, `"variable"`, `"pps"`, `"spr-avs"`, `"epr-avs"`), `min_voltage_mv`, `max_voltage_mv`, `max_current_ma`, `max_power_mw`, `epr` |
+| `TriggerLimits` | `index` (the UFCS capability number, else `null`), `min_voltage_mv`, `max_voltage_mv`, `min_current_ma`, `max_current_ma`, `max_power_mw` |
+| `TriggerRequest` | One of `{ protocol: "pd"; position; voltage_mv; current_ma }` (the last two `null` for a fixed offer), `{ protocol: "qc" \| "fcp" \| "afc" \| "sfcp"; volts }`, `{ protocol: "qc3"; voltage_mv }`, `{ protocol: "scp" \| "vfcp" \| "tfcp"; voltage_mv; current_ma }`, `{ protocol: "ufcs"; index; voltage_mv; current_ma }` |
+| `RiskClass` | `"read_only"`, `"at_most_5v"` or `"above_5v"` |
+| `TriggerReply` | `command`, `requested_mv`, `requested_ma`, `delivered_mv`, `delivered_ma`, `reply` |
+| `PdMessageRequest` | `sop` (`"sop"`, `"sop_prime"` or `"sop_double_prime"`), `msg_type` (the 5-bit Message Type), `data_objects` (32-bit numbers; none means a control message) |
+| `ConsoleLine` | `at_ms` (clock time, ms since the Unix epoch), `direction` (`"tx"` or `"rx"`), `text`, `block` (a parsed binary block in words, or `null`) |
+| `PdSendReply` | `command`, `lines` (`ConsoleLine[]`), `cable` (`CableView` or `null`) |
+| `CableView` | `vid`, `pid`, `active`, `max_voltage_v`, `max_current_ma`, `epr_capable` |
+
+Behaviour:
+
+- **Polling pauses during the automatic list.** While `triggerDetect` runs
+  the list, the measurement stream stops polling on its open bulk session and
+  resumes however the list ends, on error too. It does not reconnect: a bulk
+  CONNECT silences the PDM session. A queue reply that arrives shorter than
+  it declares after the pause keeps its whole records, and the lost samples
+  show as a gap.
+- **Other limits while a session is open.** The sample rate is held at
+  50 SPS or less and restored when the session closes. Opening a session
+  stops the PD capture, and `pdStart` fails with `usage` until the session is
+  closed.
+- **Back to 5 V on every way out.** Disconnecting the meter, closing the
+  window or `triggerClose` returns the charger to 5 V where the protocol
+  allows it and sends `pdm close`. The UI calls `triggerClose` when the user
+  leaves the Trigger tab.
+- **`out_of_sync` errors.** `ErrorKind` has an `out_of_sync` kind. The
+  backend uses it when the meter answers a command with a reply that belongs
+  to another command. The message says no more requests are sent; the hint
+  says to power-cycle the meter (unplug it and plug it back in) and open the
+  session again. From then on the session refuses every command and writes
+  nothing. The panel disables requests; **Detect** closes the session and
+  opens a new one.
+
+On the UI side, `TriggerPanel` (in `trigger.svelte.ts`) holds the view's
+state: detection, the protocol sections, the pending confirmation, the last
+reply and the live VBUS check. `PdConsole` (in `console.svelte.ts`) holds the
+message builder and the console transcript.
+
 ## Mock backend
 
 `MockBackend` (in `mockBackend.ts`) plays a demo session in the browser, with
@@ -72,4 +142,10 @@ it does:
 | parameter | effect |
 |---|---|
 | `?mock=replug` | One meter is listed next to the demo devices. A session on it is unplugged once and plugged back in; `MOCK_REPLUG` sets the timings. |
+| `?mock=trigger-sag` | A trigger request delivers 12 % less than asked, so the panel flags the live VBUS. |
+| `?mock=trigger-all` | The demo charger speaks every protocol, with decoded limits for SCP, VFCP, TFCP and UFCS. |
+| `?mock=trigger-out-of-sync` | Every trigger request fails with an `out_of_sync` error. |
+| `?mock=trigger-req-error` | The charger refuses every request above 5 V (`req error 252`); the session stays usable. |
+| `?mock=trigger-detect-disagree` | BC1.2 says not supported while the automatic list says supported. |
+| `?mock=trigger-list-lag` | Detection fails with an `out_of_sync` error after the list, as when the meter answers one command late. |
 | `?pdsynthetic=<n>` | Seeds `n` PD records when the capture first starts, for performance checks. `pdSyntheticFromUrl` reads it into `MockOptions.pdSynthetic`. |

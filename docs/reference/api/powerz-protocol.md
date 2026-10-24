@@ -15,9 +15,10 @@ This page is a map of the public modules.
 | crate root | `VID` (`0x5FC9`, the ChargerLAB USB vendor ID); `VERSION` (the library's version); `pd`, a re-export of the [`powerz-pd`](powerz-pd.md) decoder crate (`pub use powerz_pd as pd`) |
 | `frame` | Pure framing over byte slices: `MainHeader`, `ControlHeader`, `DataHeader`, `SectionHeader`, `Attribute`, `Section`, `Reply`; `classify_reply`, `parse_put_data`; request builders `get_data`, `connect`, `start_queue`, `stop_queue`, `start_pd_sniffer`, `stop_analyzer`; `Attribute::PD_PACKET`; `SequenceCounter`; `FrameError` |
 | `decode` | Payload decoders: `AdcSnapshot`, `QueueRecord` (also built from raw units with `QueueRecord::from_raw`), `Rate`, `Settings`, `DeviceInfoBlock`, `OtpBlock`, `Uid`; `DecodeError`; the `pd_packet` module (see below) |
-| `transport` | The `Transport` trait and its pipes: `bulk` (`nusb`), `cdc` (`serialport`), `hid` (`hidapi`, ADC snapshot only); `discovery` and `select` for finding meters; `GuardedTransport` (refuses commands outside the safe set before they are sent); `MockTransport` for tests; `FIRST_CONNECT_TIMEOUT` (wait for the first ACCEPT before `Transport::recover` and a retry); `Error` |
+| `transport` | The `Transport` trait and its pipes: `bulk` (`nusb`), `cdc` (`serialport`; `cdc::without_tty_twins` drops the macOS `/dev/tty.*` twin of each `/dev/cu.*` port), `hid` (`hidapi`, ADC snapshot only); `discovery` and `select` for finding meters; `GuardedTransport` (refuses commands outside the safe set before they are sent); `MockTransport` for tests; `FIRST_CONNECT_TIMEOUT` (wait for the first ACCEPT before `Transport::recover` and a retry); `Error` |
 | `session` | `Session` over a transport: CONNECT, memory read (`DeviceInfo`), authentication, and ADC-queue streaming (`Streamer`, `StreamPoll`, `Gap`, and `SnapshotCadence` for the side snapshot that refreshes temperature at 1000 SPS); PD capture (`PdSniffer`, `PdOptions`, `PdPoll`, `CapturedRecord`, and the `Session` methods `start_pd_sniffer`, `stop_pd_sniffer`, `poll_pd_sniffer`; see below); `Clock` / `SystemClock`; `OwnedSection`; `Error` |
 | `pdcap` | The [pdcap](../pdcap.md) capture file format: `Header`, `Entry`, `Writer`, `Reader`, `load` / `Loaded`, `Error` / `ErrorKind`, `FORMAT_VERSION`, `MAX_LINE_BYTES` (see below) |
+| `pdm` | The PDM text session on the virtual serial port, for protocol triggering: `PdmSession`, `HighVoltageConfirmation`, `Command`, `Protocol`, `Risk` and `classify`, `ReplyReader`, `Capabilities`, `find_port` / `open_port`, `Error`; submodules `pd`, `legacy`, `detect`, `message`, `console` (see below) |
 | `crypto` | AES-128-ECB with 0xFF padding (`pad_ff`, `encrypt`, `decrypt`), `crc32`, and the shipped `KEYS` |
 
 Decoders and framing are pure functions (`&[u8] → Result<T, _>`), so they can
@@ -78,3 +79,31 @@ Reads and writes the [pdcap format](../pdcap.md). It works on any `Write` or
 | `Loaded` | `header: Option<Header>`, `entries: Vec<Entry>`, `error: Option<Error>` |
 | `Error` | `line(&self) -> usize` (1-based; the header is line 1); `kind(&self) -> &ErrorKind` |
 | `ErrorKind` | `Io`, `MissingHeader`, `Json`, `NotUtf8`, `LineTooLong`, `NotPdcap(String)`, `NewerVersion(u32)`, `BadHex`, `BadStatus(usize)`, `BadRecord` |
+
+## PDM text session
+
+`pdm` drives the meter's text commands on its virtual serial port. The
+session and the risk check are in the root of the module; each feature has a
+submodule. All functions that talk to the meter take a
+`&mut PdmSession<P: Read + Write, C: Clock>`, so tests run them on a fake
+port.
+
+| item | signature or contents |
+|---|---|
+| `PdmSession<P, C = SystemClock>` | `open(port: P) -> Result<Self, Error>`, `open_with_clock(port: P, clock: C)`; `send(&mut self, command: &Command)`, `send_confirmed(..)` (above 5 V, with a `HighVoltageConfirmation`), `wait_for(&mut self, prefixes: &[&str], timeout: Duration) -> Result<String, Error>`, `risk(&self, command: &Command) -> Risk`, `check_in_step(&self)`, `capabilities(&self) -> &Capabilities`, `entered(&self) -> Option<Protocol>`, `reopen(&mut self, port: P)`, `close(self)`. `pdm close` is also sent on drop. |
+| session constants | `MIN_COMMAND_GAP` (60 ms), `REPLY_TIMEOUT` (1 s) |
+| `HighVoltageConfirmation` | `HighVoltageConfirmation::for_command(command: &Command)`: a confirmation that covers that one command |
+| `Command` | Every command the session sends; `render(&self) -> Vec<u8>` (the exact ASCII), `Command::parse(text: &str) -> Command` (unknown text is `Command::Raw`) |
+| `Risk`, `classify` | `Risk::{ReadOnly, AtMost5V, Above5V}`; `classify(command: &Command, caps: &Capabilities) -> Risk`, pure and fail-closed; `risk::SAFE_LIMIT_MV` (5000) |
+| `ReplyReader`, `ReplyItem` | The pure stream reader: `push(&mut self, bytes: &[u8])`, `next_item(&mut self) -> Option<Result<ReplyItem, Error>>`; `reply::MAX_LINE` (4096) |
+| `caps` | `parse(buf: &[u8]) -> Result<Option<(CapBlock, usize)>, Error>`; `CapBlock`, `PdoBlock`, `UfcsCaps` / `UfcsCap`, `ScpCaps`, `VfcpCaps`, `TfcpCaps`; `Capabilities` (the last block of each kind) |
+| `port` | `find_port(ports, serial: Option<&str>)`, `open_port(serial: Option<&str>) -> Result<Box<dyn serialport::SerialPort>, Error>` |
+| `Error` | `Timeout`, `Malformed`, `HighVoltageNotConfirmed`, `Refused` (GoodCRC), `Forbidden`, `UnsupportedOnCdc`, `LineTooLong`, `UnexpectedReply`, `OutOfSync` (the meter needs a power cycle), `NotFound`, `Ambiguous`, `Disconnected`, `Io` |
+| `pd` | USB PD: `enter`, `ensure_entered`, `offers` / `Offer` / `OfferKind`, `validate`, `request` / `Request` / `RequestOutcome`, `hard_reset`, `return_to_5v` / `BackTo5V`, `read_settings` / `write_settings` / `PdSettings` (`PdType`, `Emarker`, `SinkCaps`), `Error`; `FIRST_EPR_POSITION` (8) |
+| `legacy` | QC 2.0, QC 3.0, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS: `LegacyProtocol`, `enter`, `ensure_entered`, `limits` / `Limits`, `validate`, `request` / `Request` / `Outcome`, `return_to_5v`, `Error`; `QC3_MIN_MV`, `QC3_MAX_MV`, `QC3_STEP_MV` |
+| `detect` | `bc12`, `apple` (each answers a `Support`), `list` / `list_until` with `ListOptions` → `ListResult` of `ListEntry`; `disagreements` / `Disagreement`; `hint(dp_mv: u32, dm_mv: u32) -> Hint` and `ChargeMode`; `DEFAULT_STALL_LIMIT` (45 s) |
+| `message` | Custom PD messages: `PdMessage` (`control`, `data`, `from_hex`, `to_command`), `SopTarget`, `Preset` (the cable Discover Identity), `await_cable_identity` / `CableIdentity`, `cable_identity_from_message`, `refusal` (GoodCRC), `MessageError` |
+| `console` | The raw console: `send_line` (returns `SentLine`), `command_of`, `console_refusal`, `effect_of` / `Effect` (what has to be undone before `pdm close`), `ConsoleEntry` / `Direction`, `describe_block`; `LISTEN` (300 ms) |
+
+The text protocol itself is described in
+[docs/protocol.md](../../protocol.md#pdm-text-session-protocol-triggering).

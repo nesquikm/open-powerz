@@ -17,13 +17,14 @@ Recipes for one task each, in [how-to/](how-to/):
 - [Record a high-rate CSV](how-to/record-a-csv.md), from the CLI or the desktop app
 - [Explore a session in the desktop app](how-to/explore-a-session.md): pause, zoom, gaps, replug, keyboard
 - [Analyze USB PD traffic](how-to/analyze-pd-traffic.md): capture, filter and read PD messages, see them on the power chart, save and open captures
+- [Trigger a charger](how-to/trigger-a-charger.md): detect protocols, request a voltage safely, send PD messages and console commands, read a cable's e-marker
 - [Set up Linux permissions](linux.md) (udev rule, `powerz` hwmon driver)
 
 ## Reference {#reference}
 
 Facts to look up, in [reference/](reference/):
 
-- [`powerz` CLI](reference/cli.md): commands, options, output formats, exit codes
+- [`powerz` CLI](reference/cli.md): commands, options, triggering and its safety rules, output formats, exit codes
 - [pdcap file format](reference/pdcap.md): saved PD captures, with a worked example
 - [`powerz-protocol` API](reference/api/powerz-protocol.md): the library's public modules, PD capture and pdcap included
 - [`powerz-pd` API](reference/api/powerz-pd.md): the USB PD message decoder

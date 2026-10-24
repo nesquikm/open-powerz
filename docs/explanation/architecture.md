@@ -14,7 +14,7 @@ down in [docs/protocol.md](../protocol.md), where each fact is tagged
 ```
 powerz-pd         library: USB PD r3.2 message decoder (no dependencies)
 powerz-protocol   library: framing, decoders, transports, session, crypto,
-                  PD capture, pdcap files     uses pd
+                  PD capture, pdcap files, PDM text session   uses pd
 powerz-sim        demo device: a simulated KM003C behind the Transport trait
 powerz-record     vendor-compatible CSV writer
 
@@ -98,6 +98,39 @@ safe to share. A damaged file loads up to the damaged line. See the
 (SQLite) read-only. The file is treated as untrusted: it is never written, and
 every value read from it is bounded.
 
+## Protocol triggering (the PDM session)
+
+Triggering does not use the binary protocol. The meter takes short text
+commands on its virtual serial (CDC) port (`pdm open`, `entry pd`,
+`pd req=2`, ...), and the `pdm` module of `powerz-protocol` speaks them:
+
+- `reply` is a pure stream reader. It splits the bytes into text lines,
+  binary capability blocks (`pdo:`, `ufcs:`, `scp:`, ...) and stray binary
+  frames, which can arrive between lines at any time. `caps` parses the
+  blocks.
+- `session` (`PdmSession`) opens the session, keeps 60 ms between commands,
+  and always ends with `pdm close`, on error and on drop too. It notices when
+  a reply belongs to another command. The meter is then out of step, and the
+  session refuses everything until it is reopened after a power cycle.
+- `risk` is a pure classifier: read-only, 5 V or less, or above 5 V. It fails
+  closed, so anything it cannot prove safe counts as above 5 V. The session
+  sends an above-5 V command only with a `HighVoltageConfirmation` made for
+  that one command. The CLI makes one from `--allow-high-voltage`, the
+  desktop app from the user's click on **Confirm**.
+- `pd`, `legacy`, `detect`, `message` and `console` build the features on
+  top: PD offers and requests, the other protocols, detection, custom PD
+  messages and the raw console. Each request path ends with a return to
+  5 V.
+
+**Next to the bulk stream.** In the desktop app the measurement stream keeps
+running on the bulk pipe while a trigger session is open, so the panel can
+show live VBUS. The bulk session must be connected first: a bulk CONNECT
+after the PDM session has started silences it. For the same reason, the
+stream does not reconnect while the automatic protocol list runs. It only
+pauses its polling and resumes when the list ends. The trigger session runs
+on its own thread, and every request goes through the backend, which is the
+final gate for the confirmation.
+
 ## The desktop app
 
 - **The backend owns the session.** One worker thread per connected meter
@@ -133,3 +166,12 @@ every value read from it is bounded.
   at 16 and 32 pixels; `bun run icons` in `apps/desktop` regenerates every
   platform's icon files from them, so edit the drawings rather than the
   generated images.
+
+## Timing budgets in tests
+
+Timing tests keep a strict budget on a developer machine and widen it by a
+fixed factor on CI, where shared runners are slower. The 10-million-sample
+history test takes both of its limits from `historyPanBudget`: a pan step must
+finish within `HISTORY_PAN_BUDGET_MS` (100 ms), and the whole test within
+`HISTORY_PAN_TIMEOUT_MS` (5 s). With the `CI` environment variable set, both
+are three times larger. A failure message names the budget it used.

@@ -92,6 +92,8 @@ Press Ctrl-C to stop it.
 
 - Recipes: [record a high-rate CSV](../how-to/record-a-csv.md),
   [explore a session in the desktop app](../how-to/explore-a-session.md),
-  [analyze USB PD traffic](../how-to/analyze-pd-traffic.md)
+  [analyze USB PD traffic](../how-to/analyze-pd-traffic.md),
+  [trigger a charger](../how-to/trigger-a-charger.md) (ask it for 9 V, 20 V
+  and more, with the safety rules first)
 - Every command and option: [CLI reference](../reference/cli.md)
 - Why it is built this way: [architecture](../explanation/architecture.md)
