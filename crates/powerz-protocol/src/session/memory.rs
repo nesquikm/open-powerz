@@ -164,7 +164,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
 
     /// Both info blocks and the HEAD old-firmware flag; read-only.
     ///
-    /// Sends CONNECT, waits [`HEAD_DELAY`] on the session clock, sends HEAD
+    /// Sends CONNECT, waits 50 ms on the session clock, sends HEAD
     /// (as the vendor app does `[static]`), then reads the bootloader
     /// (0x420) and application (0x4420) info blocks.
     pub fn firmware_status(&mut self) -> Result<FirmwareStatus, Error> {
@@ -173,7 +173,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
     }
 
     /// [`firmware_status`](Self::firmware_status) on a session that is
-    /// already connected: waits [`HEAD_DELAY`], sends HEAD, then reads both
+    /// already connected: waits 50 ms, sends HEAD, then reads both
     /// info blocks. A caller that sees an error here still has a connected
     /// session and may carry on without the firmware status.
     pub fn read_firmware_status(&mut self) -> Result<FirmwareStatus, Error> {
