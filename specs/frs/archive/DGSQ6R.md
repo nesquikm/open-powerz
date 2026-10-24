@@ -1,8 +1,8 @@
 ---
 title: Charger protocol detection
 milestone: M_X4VEQ3
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-24T06:07:16Z
 id: fr_01M5KJYD899REQQGB2GZDGSQ6R
 created_at: 2026-10-23T05:15:09.449Z
 changelog_category: Added
@@ -44,3 +44,10 @@ Simulator tests for every reply form and the stall timeout, unit tests for the h
 ## Notes
 
 Hardware 2026-10-23: entry bc and entry apple answered fail on all three chargers. Auto-list: Apple 140 W bc1.2 only; Anker QC 2.0, QC 3.0 and PD 45 W; EcoFlow Apple 2.4A, Samsung 2A, UFCS 63 W, QC 2.0, QC3+, AFC, FCP and PD. A full list ends with done.
+
+## Implementation notes
+
+- ListResult.complete is a bool: a 64-entry cut-off, a stall and a stop all read "incomplete" — reason enum later
+- any `word:rest` line counts as a list entry (by design, so unknown protocols still show); a stray `error: x` line would too — recorded during review or hardware runs; not gate-blocking
+- an I/O error mid-list drops the collected entries (text mode already printed them; --json prints nothing) — recorded during review or hardware runs; not gate-blocking
+- Ctrl-C during entry bc / entry apple waits out the 8 s reply window before pdm close — recorded during review or hardware runs; not gate-blocking

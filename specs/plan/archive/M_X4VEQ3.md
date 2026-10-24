@@ -1,8 +1,8 @@
 ---
 milestone: M_X4VEQ3
 id: fr_01M5CYB12YQPNR2Y2TA0X4VEQ3
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-24T06:07:29Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -33,13 +33,13 @@ codename: Trigger Happy
 
 | FR | Title | Tracker |
 |---|---|---|
-| [2BF5G6](../frs/2BF5G6.md) | Windows CI fails on every failing command and runs green | n/a |
-| [PR41FT](../frs/PR41FT.md) | PDM text session over the virtual serial port | n/a |
-| [DGSQ6P](../frs/DGSQ6P.md) | USB PD triggering | n/a |
-| [DGSQ6Q](../frs/DGSQ6Q.md) | Legacy and vendor protocol triggering | n/a |
-| [DGSQ6R](../frs/DGSQ6R.md) | Charger protocol detection | n/a |
-| [DGSQ6S](../frs/DGSQ6S.md) | Desktop trigger panel | n/a |
-| [DGSQ6T](../frs/DGSQ6T.md) | Custom PD messages and the raw console | n/a |
+| [2BF5G6](../frs/archive/2BF5G6.md) | Windows CI fails on every failing command and runs green | n/a |
+| [PR41FT](../frs/archive/PR41FT.md) | PDM text session over the virtual serial port | n/a |
+| [DGSQ6P](../frs/archive/DGSQ6P.md) | USB PD triggering | n/a |
+| [DGSQ6Q](../frs/archive/DGSQ6Q.md) | Legacy and vendor protocol triggering | n/a |
+| [DGSQ6R](../frs/archive/DGSQ6R.md) | Charger protocol detection | n/a |
+| [DGSQ6S](../frs/archive/DGSQ6S.md) | Desktop trigger panel | n/a |
+| [DGSQ6T](../frs/archive/DGSQ6T.md) | Custom PD messages and the raw console | n/a |
 
 Build order: PR41FT, then DGSQ6P, DGSQ6R, DGSQ6Q, DGSQ6S, DGSQ6T. 2BF5G6 is implemented (merged with v0.3.0) and is archived with this milestone; record its CI run ids (39865959289, attempts 1 and 3) in its Notes at archive time.
 
@@ -51,3 +51,13 @@ Build order: PR41FT, then DGSQ6P, DGSQ6R, DGSQ6Q, DGSQ6S, DGSQ6T. 2BF5G6 is impl
 - Console: clear the command field after a line is sent (found in the 2026-10-23 click-through).
 - Trigger session survives a stream error that is not a device loss (decode/protocol): keep the PDM session open, suppress the automatic bulk reconnect while it is open (a new bulk CONNECT silences PDM [device]), and show that live VBUS is unavailable.
 - CLI stream: after a queue backlog overflow (long pause at 50 SPS), the stop request 0x0F was rejected at exit [device 2026-10-24]; investigate and make the stop tolerant.
+- Request result: after Back to 5 V the card mixes the old command and delivered values with the new request (seen as `pd req=2`, requested 5 V, delivered 8.47 V); show the return-to-5 V result on its own.
+- Request result: a failure's message and hint are joined without a space ("…sent.Power-cycle…").
+- Hardware coverage still open: QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS requests need a charger that speaks them (only PD, PPS, EPR AVS, QC 2.0 and QC 3.0 voltage were verified).
+- Console: lengthen the listen window after `entry` lines; the `pdo:` block arrives after it (meter, 2026-10-23).
+- Mock backend: mirror the Stage B fixes (PD entry before built messages, cable match by VDM, swaps above 5 V, reserved control types) so demo mode matches the app.
+- Risk classes: consider rating SOP'/SOP'' messages as at most 5 V (they cannot raise VBUS) to drop the confirmation on Discover Identity; today the classifier stays fail-closed.
+- GoodCRC detection lives in both TypeScript and Rust; keep one source of truth, or add a parity test.
+- `.claude/settings.json` lacks `Bash(claude:*)`, so the spawn-pattern probe keeps failing; decide whether to add it.
+- `specs/technical-spec.md` still describes the PDM transport as planned; refresh it to match what shipped.
+- Toolkit: the dev-process-toolkit evidence renderer and gate capture cannot parse cargo/Vitest/Playwright output (they ran `bun test`); report it upstream.

@@ -1,8 +1,8 @@
 ---
 title: USB PD triggering
 milestone: M_X4VEQ3
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-24T06:07:16Z
 id: fr_01M5KJYD899REQQGB2GZDGSQ6P
 created_at: 2026-10-23T05:15:09.449Z
 changelog_category: Added
@@ -44,3 +44,10 @@ Simulator tests for every request type, the range validation, EPR entry failure 
 ## Notes
 
 Hardware 2026-10-23, nothing on the output, settled VBUS read over bulk: Apple 140 W 9 V 8.87, 15 V 14.99, 20 V 20.49, 28 V 28.01 (EPR only through the 240 W cable); EcoFlow EPR AVS 15 V 15.12, 21 V 21.10; Anker PPS 9 V 9.07, 12 V 12.10; hard reset 5.17 V.
+
+## Implementation notes
+
+- after a request refused before sending, the CLI still sends a harmless pd req=1 (and on failure a pd hrst) — errs safe
+- PDM waits ignore Ctrl-C; each step is bounded (seconds), so a Ctrl-C can take a few seconds to finish the return to 5 V — recorded during review or hardware runs; not gate-blocking
+- battery/variable offer current checked at max voltage — conservative, rejects some valid currents, never allows an unsafe one
+- AC.7 ladder compares the PS_RDY ready: reading (may still be ramping) against 5 %; hardware slot also reads settled VBUS over bulk — recorded during review or hardware runs; not gate-blocking

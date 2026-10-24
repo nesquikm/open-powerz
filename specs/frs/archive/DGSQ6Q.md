@@ -1,8 +1,8 @@
 ---
 title: Legacy and vendor protocol triggering
 milestone: M_X4VEQ3
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-24T06:07:16Z
 id: fr_01M5KJYD899REQQGB2GZDGSQ6Q
 created_at: 2026-10-23T05:15:09.449Z
 changelog_category: Added
@@ -44,3 +44,12 @@ Simulator tests per protocol, including capability parsing, range validation and
 ## Notes
 
 Hardware 2026-10-23, nothing on the output: QC 2.0 9 V (9.07 and 9.14 V) and QC 3.0 7.0 V (7.20 V) verified. Not verified on hardware: QC 3.0 steps, FCP and AFC (no reply or VBUS unchanged), UFCS requests (VBUS unchanged), SCP, TFCP, VFCP and SFCP.
+
+## Implementation notes
+
+- an invalid fixed/QC3 request still sends `entry <proto>` (<=5 V) before the pure validation refuses it — recorded during review or hardware runs; not gate-blocking
+- UFCS capability number taken from the entry's own index field (vendor NUM<n>), not its list position — recheck with a UFCS charger
+- PdmSession Drop sends only `pdm close` (Rd removed), not `reset`; library users rely on that after a request — recorded during review or hardware runs; not gate-blocking
+- VFCP limits merge its two fixed modes into one range (plus the power limit) [inferred] — recorded during review or hardware runs; not gate-blocking
+- the block wait after `ready` is bounded by 32 items x 3 s, not one overall deadline — recorded during review or hardware runs; not gate-blocking
+- when the port is already dead, the CLI still tries `reset` (one extra bounded wait) and reports both errors — recorded during review or hardware runs; not gate-blocking

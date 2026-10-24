@@ -1,8 +1,8 @@
 ---
 title: PDM text session over the virtual serial port
 milestone: M_X4VEQ3
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-24T06:07:16Z
 id: fr_01M5KJYD88N3M6FC2TJFPR41FT
 created_at: 2026-10-23T05:15:09.449Z
 changelog_category: Added
@@ -44,3 +44,11 @@ Unit and property tests for the reply parser and the risk classifier, golden tes
 ## Notes
 
 Session-2 device facts: newline-terminated replies, unprompted pdo blocks after entry pd, and pdm open needed again after reopening the port. Triggering is tested with no load on the output.
+
+## Implementation notes
+
+- ufcs cmd=n classified <=5 V for every n ([inferred]) — bound it in DGSQ6Q or with a UFCS charger; gate otherwise fail-closed
+- wait_for aborts on one LineTooLong/Malformed item though the reader resynced — typed error, Drop still closes
+- a text line starting with 'A' (0x41) is taken as a PUT_DATA frame start — bounded by MAX_LINE; replies are lowercase [device]
+- caps u16_at substitutes 0 for missing bytes — callers check length first
+- Entry(list/list+/apple) <=5 V by AC-DGSQ6R.5; entry list+ probes VOOC/MTK PE — confirm on hardware no VBUS rise

@@ -1,8 +1,8 @@
 ---
 title: Desktop trigger panel
 milestone: M_X4VEQ3
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-24T06:07:16Z
 id: fr_01M5KJYD899REQQGB2GZDGSQ6S
 created_at: 2026-10-23T05:15:09.449Z
 changelog_category: Added
@@ -49,4 +49,14 @@ Worker tests against the simulator, Vitest for the panel state, and Playwright w
 
 ## Notes
 
-Hardware 2026-10-23, Apple 140 W via the 240 W cable, output empty: the panel's backend drove the real meter (bulk first, then the trigger session). Unconfirmed 9 V was refused; 9 V read 8.869 V, 28 V 28.009 V; Back to 5 V 5.19 V. The UI ran on the mocked backend; a by-hand click-through is open.
+Hardware 2026-10-23/24, Apple 140 W via the 240 W cable, output empty. Backend drive: 9 V read 8.869 V, 28 V 28.009 V. UI click-through 4 (baa5f3b): Detect, confirmed 9 V (8.87 V), Back to 5 V (5.18 V), Discover Identity, console GoodCRC refusal all passed; meter stayed in sync. Click-throughs 1–3 found AC.9–.13.
+
+## Implementation notes
+
+- install_trigger's refusal path and open_session close a worker unbounded under the manager lock (rare: a racing second open, or a reconnect with a silent meter) — recorded during review or hardware runs; not gate-blocking
+- TriggerControl::call waits without its own timeout; every PdmSession wait is bounded — recorded during review or hardware runs; not gate-blocking
+- on unplug the trigger close runs on the bulk worker thread before Disconnected reaches the page — recorded during review or hardware runs; not gate-blocking
+- quitting waits up to 3 s for an open trigger session to return to 5 V (longer than the 1 s quit budget, on purpose) — recorded during review or hardware runs; not gate-blocking
+- non-PD sections show limits only; no request controls (Requirement says every protocol) — ambiguous, for the gate
+- AC.7 drive: backend on hardware + UI on mock; a by-hand UI click-through on the real meter is open — recorded during review or hardware runs; not gate-blocking
+- DGSQ6S.12: refactor skipped (4-file, single-purpose change); audit done inline: 3 protocol tests + desktop sync test trace the AC; hardware 70 s pause re-check passed (stream continued, gap only). — recorded during review or hardware runs; not gate-blocking
