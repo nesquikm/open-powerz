@@ -42,6 +42,8 @@ fn powerz(target: Target) -> Command {
         "POWERZ_SIM_CLOCK",
         "POWERZ_SIM_FAULT",
         "POWERZ_SIM_CTRL_C_AFTER",
+        "POWERZ_SIM_CHARGER",
+        "POWERZ_SIM_CABLE",
     ] {
         c.env_remove(k);
     }
@@ -127,6 +129,154 @@ fn flow_stream_5s(target: Target) {
         "{rows} rows, want 250 ± 5% (50 SPS × 5 s)"
     );
     let _ = std::fs::remove_file(&csv);
+}
+
+/// AC-DGSQ6P.7 ladder: 9, 15, 20, 28 V, AVS 15 V, then a hard reset to
+/// 5 V; each delivered voltage within 5 % of the request.
+fn flow_trigger_pd_ladder(target: Target) {
+    let within = |got: u64, want: u64| got.abs_diff(want) * 20 <= want;
+    for (args, want_mv) in [
+        (vec!["2"], 9000),
+        (vec!["3"], 15_000),
+        (vec!["4"], 20_000),
+        (vec!["8"], 28_000),
+        (
+            vec!["9", "--voltage-mv", "15000", "--current-ma", "1000"],
+            15_000,
+        ),
+    ] {
+        let mut c = powerz(target);
+        c.args(["trigger", "pd", "request"]).args(&args).args([
+            "--allow-high-voltage",
+            "--hold",
+            "0",
+            "--json",
+        ]);
+        let v: serde_json::Value = serde_json::from_str(&stdout(&mut c)).unwrap();
+        let got = v["delivered_mv"].as_u64().expect("delivered_mv");
+        eprintln!("trigger pd request {args:?}: delivered {got} mV (want {want_mv})");
+        assert!(
+            within(got, want_mv),
+            "{args:?}: {got} mV, want {want_mv} ± 5%"
+        );
+    }
+    let out = stdout(powerz(target).args(["trigger", "pd", "reset", "--json"]));
+    eprintln!("trigger pd reset: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let got = v["vbus_mv"].as_u64().expect("vbus_mv");
+    assert!(within(got, 5000), "reset: {got} mV, want 5000 ± 5%");
+}
+
+// ---- AC-DGSQ6P.7: opt-in, real meter, 140 W charger, nothing on the output ----
+
+/// Raises VBUS up to 28 V: needs `POWERZ_HIL=1` and `POWERZ_HIL_PD=1`, and
+/// the wall-charger setup (laptop on the data port, output empty).
+#[test]
+fn hil_trigger_pd_ladder() {
+    if hil_or_skip("hil_trigger_pd_ladder") && std::env::var("POWERZ_HIL_PD").as_deref() == Ok("1")
+    {
+        flow_trigger_pd_ladder(Target::Meter);
+    }
+}
+
+#[test]
+fn hil_trigger_pd_ladder_dry_run_against_the_simulator() {
+    flow_trigger_pd_ladder(Target::Sim);
+}
+
+/// AC-DGSQ6R.6 flow: `detect --list --json`; BC1.2 / Apple results and
+/// every list entry carry a known support value, and the hint has D+ / D-.
+fn flow_detect(target: Target) {
+    let out = stdout(powerz(target).args(["detect", "--list", "--json"]));
+    eprintln!("detect --list: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let known = ["supported", "not-supported", "unknown"];
+    for key in ["bc12", "apple"] {
+        let r = v[key].as_str().unwrap_or_default();
+        assert!(known.contains(&r), "{key}: {r:?}");
+    }
+    let entries = v["list"]["entries"].as_array().expect("list entries");
+    for e in entries {
+        let r = e["support"].as_str().unwrap_or_default();
+        assert!(known.contains(&r), "{e}");
+    }
+    assert!(v["list"]["complete"].is_boolean(), "{v}");
+    assert!(
+        v["hint"]["dp_mv"].is_u64() && v["hint"]["dm_mv"].is_u64(),
+        "{v}"
+    );
+}
+
+// ---- AC-DGSQ6R.6: opt-in, real meter, each charger, nothing on the output ----
+
+/// Detection only (at most 5 V): needs `POWERZ_HIL=1` and
+/// `POWERZ_HIL_DETECT=1`, a charger on the input and nothing on the output.
+#[test]
+fn hil_detect() {
+    if hil_or_skip("hil_detect") && std::env::var("POWERZ_HIL_DETECT").as_deref() == Ok("1") {
+        flow_detect(Target::Meter);
+    }
+}
+
+#[test]
+fn hil_detect_dry_run_against_the_simulator() {
+    flow_detect(Target::Sim);
+}
+
+/// AC-DGSQ6T.7 flow: `pd send --preset discover-identity-cable --json`.
+/// The simulated cable answers on SOP' with its identity (VID, cable VDO).
+/// On the meter the request goes out, but a cable that answers only the
+/// VCONN source gives GoodCRC and nothing else [device, 2026-10-23], so the
+/// "no answer" report counts as a recorded result there.
+fn flow_cable_identity(target: Target) {
+    let mut c = powerz(target);
+    if target == Target::Sim {
+        c.env("POWERZ_SIM_CABLE", "epr-240w");
+    }
+    c.args([
+        "pd",
+        "send",
+        "--preset",
+        "discover-identity-cable",
+        "--allow-high-voltage",
+        "--json",
+    ]);
+    let o = c.output().expect("powerz runs");
+    if target == Target::Meter && !o.status.success() {
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("no answer from the cable"), "{err}");
+        eprintln!("pd send --preset discover-identity-cable: {err}");
+        return;
+    }
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    eprintln!("pd send --preset discover-identity-cable: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let vid = v["cable"]["vid"].as_u64().expect("cable vid");
+    assert!(vid != 0 && vid <= 0xFFFF, "{v}");
+    assert!(v["cable"]["epr_capable"].is_boolean(), "{v}");
+    let amps = v["cable"]["max_current_ma"]
+        .as_u64()
+        .expect("max_current_ma");
+    assert!(amps == 3000 || amps == 5000, "{v}");
+}
+
+// ---- AC-DGSQ6T.7: opt-in, real meter, e-marked cable, nothing on the output ----
+
+/// Discover Identity to the cable (SOP', no VBUS change): needs
+/// `POWERZ_HIL=1` and `POWERZ_HIL_CABLE=1`, an e-marked cable between the
+/// charger and the meter, VCONN, and firmware newer than 2.0.4.
+#[test]
+fn hil_cable_identity() {
+    if hil_or_skip("hil_cable_identity") && std::env::var("POWERZ_HIL_CABLE").as_deref() == Ok("1")
+    {
+        flow_cable_identity(Target::Meter);
+    }
+}
+
+#[test]
+fn hil_cable_identity_dry_run_against_the_simulator() {
+    flow_cable_identity(Target::Sim);
 }
 
 // ---- AC-G0W08Z.12: opt-in, real meter over bulk ----

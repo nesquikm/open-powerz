@@ -43,6 +43,7 @@ export type ErrorKind =
   | "protocol"
   | "disconnected"
   | "usage"
+  | "out_of_sync"
   | "internal";
 
 /** A plain-language error. */
@@ -59,6 +60,7 @@ const ERROR_KINDS: readonly ErrorKind[] = [
   "protocol",
   "disconnected",
   "usage",
+  "out_of_sync",
   "internal",
 ];
 
@@ -491,4 +493,216 @@ export async function appInfo(): Promise<AppInfo> {
 export async function revealPath(path: string): Promise<void> {
   if (mock) return mock.revealPath(path);
   await revealItemInDir(path);
+}
+
+// ---- Trigger panel (FR DGSQ6S; mirrors `src-tauri/src/trigger.rs`) ----
+
+/** A protocol the trigger view has a section for. */
+export type TriggerProtocol =
+  "pd" | "qc" | "fcp" | "afc" | "sfcp" | "scp" | "vfcp" | "tfcp" | "ufcs";
+
+/** Every protocol, PD first: one section each. */
+export const TRIGGER_PROTOCOLS: readonly TriggerProtocol[] = [
+  "pd",
+  "qc",
+  "fcp",
+  "afc",
+  "sfcp",
+  "scp",
+  "vfcp",
+  "tfcp",
+  "ufcs",
+];
+
+/** What a detection says about one protocol. */
+export type SupportName = "supported" | "not-supported" | "unknown";
+
+/** One line of the meter's automatic list. */
+export interface DetectEntry {
+  name: string;
+  support: SupportName;
+  vbus_mv: number | null;
+  ibus_ma: number | null;
+}
+
+/** What a detection found. */
+export interface Detection {
+  bc12: SupportName;
+  apple: SupportName;
+  entries: DetectEntry[];
+  complete: boolean;
+}
+
+export type OfferKind = "fixed" | "battery" | "variable" | "pps" | "spr-avs" | "epr-avs";
+
+/** One PD offer: a button (fixed) or a slider range (PPS / AVS). */
+export interface TriggerOffer {
+  position: number;
+  kind: OfferKind;
+  min_voltage_mv: number;
+  max_voltage_mv: number;
+  max_current_ma: number | null;
+  max_power_mw: number | null;
+  epr: boolean;
+}
+
+/** The limits of one non-PD capability. */
+export interface TriggerLimits {
+  index: number | null;
+  min_voltage_mv: number;
+  max_voltage_mv: number;
+  min_current_ma: number;
+  max_current_ma: number;
+  max_power_mw: number | null;
+}
+
+/** The meter's PD emulation settings, by name. */
+export interface PdEmulation {
+  pd_type: string;
+  emarker: string;
+  sink: string;
+}
+
+/** One protocol's section. */
+export interface ProtocolSection {
+  protocol: TriggerProtocol;
+  supported: boolean;
+  offers: TriggerOffer[];
+  limits: TriggerLimits[];
+  settings: PdEmulation | null;
+}
+
+/** One request. */
+export type TriggerRequest =
+  | { protocol: "pd"; position: number; voltage_mv: number | null; current_ma: number | null }
+  | { protocol: "qc" | "fcp" | "afc" | "sfcp"; volts: number }
+  | { protocol: "qc3"; voltage_mv: number }
+  | { protocol: "scp" | "vfcp" | "tfcp"; voltage_mv: number; current_ma: number }
+  | { protocol: "ufcs"; index: number; voltage_mv: number; current_ma: number };
+
+/** The library risk class of a request. */
+export type RiskClass = "read_only" | "at_most_5v" | "above_5v";
+
+/** What the charger answered. */
+export interface TriggerReply {
+  command: string;
+  requested_mv: number | null;
+  requested_ma: number | null;
+  delivered_mv: number | null;
+  delivered_ma: number | null;
+  reply: string | null;
+}
+
+/** Opens the trigger session on the connected meter. */
+export async function triggerOpen(): Promise<void> {
+  if (mock) return mock.triggerOpen();
+  await invoke("trigger_open");
+}
+
+/** BC 1.2, Apple and the automatic list. */
+export async function triggerDetect(): Promise<Detection> {
+  if (mock) return mock.triggerDetect();
+  return invoke<Detection>("trigger_detect");
+}
+
+/** One protocol's section (offers, limits, PD emulation settings). */
+export async function triggerList(protocol: TriggerProtocol): Promise<ProtocolSection> {
+  if (mock) return mock.triggerList(protocol);
+  return invoke<ProtocolSection>("trigger_list", { protocol });
+}
+
+/** The risk class of `request`: `above_5v` needs the user's confirmation. */
+export async function triggerRisk(request: TriggerRequest): Promise<RiskClass> {
+  if (mock) return mock.triggerRisk(request);
+  return invoke<RiskClass>("trigger_risk", { request });
+}
+
+/** Sends `request`; the backend refuses an above-5 V one unless `confirmed`. */
+export async function triggerRequest(
+  request: TriggerRequest,
+  confirmed: boolean,
+): Promise<TriggerReply> {
+  if (mock) return mock.triggerRequest(request, confirmed);
+  return invoke<TriggerReply>("trigger_request", { request, confirmed });
+}
+
+/** Back to 5 V; the session stays open. */
+export async function triggerBackTo5v(): Promise<void> {
+  if (mock) return mock.triggerBackTo5v();
+  await invoke("trigger_back_to_5v");
+}
+
+/** Back to 5 V where the protocol allows it, then closes the session. */
+export async function triggerClose(): Promise<void> {
+  if (mock) return mock.triggerClose();
+  await invoke("trigger_close");
+}
+
+// ---- Custom PD messages and the raw console (FR DGSQ6T; mirrors `src-tauri/src/trigger.rs`) ----
+
+/** Where a built PD message goes: SOP (the charger), SOP' or SOP'' (the cable plugs). */
+export type MessageSop = "sop" | "sop_prime" | "sop_double_prime";
+
+/** A PD message from the builder: no data objects is a control message. */
+export interface PdMessageRequest {
+  sop: MessageSop;
+  /** The 5-bit Message Type. */
+  msg_type: number;
+  /** 32-bit data objects. */
+  data_objects: number[];
+}
+
+/** One console transcript line. */
+export interface ConsoleLine {
+  /** Clock time, ms since the Unix epoch. */
+  at_ms: number;
+  direction: "tx" | "rx";
+  /** The line sent or received (a block's tag for a block). */
+  text: string;
+  /** A parsed binary block, in words; null for a text line. */
+  block: string | null;
+}
+
+/** A cable's e-marker details. */
+export interface CableView {
+  vid: number;
+  pid: number | null;
+  active: boolean;
+  max_voltage_v: number | null;
+  max_current_ma: number | null;
+  epr_capable: boolean;
+}
+
+/** What sending a built message did. */
+export interface PdSendReply {
+  command: string;
+  lines: ConsoleLine[];
+  cable: CableView | null;
+}
+
+/** The library risk class of a built message; GoodCRC is a usage error. */
+export async function triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass> {
+  if (mock) return mock.triggerMessageRisk(message);
+  return invoke<RiskClass>("trigger_message_risk", { message });
+}
+
+/** Sends a built message; above 5 V needs `confirmed`. */
+export async function triggerMessageSend(
+  message: PdMessageRequest,
+  confirmed: boolean,
+): Promise<PdSendReply> {
+  if (mock) return mock.triggerMessageSend(message, confirmed);
+  return invoke<PdSendReply>("trigger_message_send", { message, confirmed });
+}
+
+/** The library risk class of a raw console line. */
+export async function triggerConsoleRisk(line: string): Promise<RiskClass> {
+  if (mock) return mock.triggerConsoleRisk(line);
+  return invoke<RiskClass>("trigger_console_risk", { line });
+}
+
+/** Sends a raw console line; above 5 V (any unparsable line too) needs `confirmed`. */
+export async function triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]> {
+  if (mock) return mock.triggerConsoleSend(line, confirmed);
+  return invoke<ConsoleLine[]>("trigger_console_send", { line, confirmed });
 }

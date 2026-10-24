@@ -251,7 +251,22 @@ pub struct DeviceManager<O, C> {
     waiting: Arc<Mutex<Option<String>>>,
     /// Rate the open (or awaited) session was connected at, SPS.
     rate_sps: u32,
+    /// The device the open (or awaited) session was connected to.
+    device: Option<DeviceListing>,
+    /// The open trigger session (FR DGSQ6S).
+    /// The open trigger session (FR DGSQ6S). Shared with the session's
+    /// event sink, so a meter that drops out closes it too.
+    trigger: Arc<Mutex<Option<crate::trigger::TriggerWorker>>>,
+    /// The queue rate to restore when the trigger session closes, if it was
+    /// capped for it.
+    rate_before_trigger: Option<Rate>,
 }
+
+/// The queue rate cap while a trigger session is open, SPS. [inferred]
+const TRIGGER_MAX_SPS: u32 = 50;
+/// How long quitting waits for an open trigger session to return to 5 V
+/// and close (longer than the usual quit budget, on purpose).
+const TRIGGER_SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 
 /// The page the running session streams to, and what it has reported.
 struct Live {
@@ -397,6 +412,62 @@ fn history_sink(history: Arc<Mutex<History>>, mut sink: impl EventSink) -> impl 
     }
 }
 
+/// Opens a trigger session for the connected meter (see
+/// [`DeviceManager::trigger_opener`]); a simulated one for a demo device.
+#[derive(Debug, Clone)]
+pub struct TriggerOpener {
+    demo: bool,
+    serial: Option<String>,
+    now_ms: u64,
+}
+
+impl TriggerOpener {
+    /// Open the port and the PDM session; may take a few seconds.
+    pub fn open(&self) -> Result<crate::trigger::TriggerWorker, UiError> {
+        if self.demo {
+            let clock = powerz_sim::SimClock::new(self.now_ms);
+            let sim = powerz_sim::SimPdm::new(powerz_sim::SimCharger::MultiProtocol, clock.clone());
+            return crate::trigger::TriggerWorker::spawn(sim.open_port(), clock);
+        }
+        let port = powerz_protocol::pdm::open_port(self.serial.as_deref())
+            .map_err(|e| crate::trigger::pdm_error(&e))?;
+        crate::trigger::TriggerWorker::spawn(port, powerz_protocol::session::SystemClock)
+    }
+}
+
+/// The open trigger session slot, locked (a poisoned lock still holds it).
+fn lock(
+    slot: &Mutex<Option<crate::trigger::TriggerWorker>>,
+) -> std::sync::MutexGuard<'_, Option<crate::trigger::TriggerWorker>> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Take the open trigger session out of `slot`, so it can be closed
+/// without holding the lock.
+fn take(
+    slot: &Mutex<Option<crate::trigger::TriggerWorker>>,
+) -> Option<crate::trigger::TriggerWorker> {
+    lock(slot).take()
+}
+
+/// Wrap `sink` so a session that ends (asked to or not, e.g. an unplug)
+/// first returns an open trigger session to 5 V and closes it (FR DGSQ6S):
+/// the page is told the meter disconnected only after that, so it can rely
+/// on the trigger session being gone.
+fn trigger_sink(
+    trigger: Arc<Mutex<Option<crate::trigger::TriggerWorker>>>,
+    mut sink: impl EventSink,
+) -> impl EventSink {
+    move |event: BackendEvent| {
+        if matches!(event, BackendEvent::Status(Status::Disconnected { .. }))
+            && let Some(open) = take(&trigger)
+        {
+            let _ = open.close();
+        }
+        sink(event);
+    }
+}
+
 /// Wrap `sink` so a real meter's session that ends without being asked to,
 /// after it delivered samples, is followed by a waiting status for `serial`,
 /// and the manager remembers that serial (FR TGE839).
@@ -449,6 +520,9 @@ where
             stop: None,
             waiting: Arc::new(Mutex::new(None)),
             rate_sps: 0,
+            device: None,
+            trigger: Arc::default(),
+            rate_before_trigger: None,
         }
     }
 
@@ -572,6 +646,12 @@ where
         live: Arc<Mutex<Live>>,
         stop: Arc<AtomicBool>,
     ) {
+        // A new bulk CONNECT silences an open PDM session [device], so the
+        // trigger session (if any) returns to 5 V and closes first.
+        self.rate_before_trigger = None;
+        if let Some(trigger) = take(&self.trigger) {
+            let _ = trigger.close();
+        }
         if let Some(old) = self.worker.take() {
             old.disconnect();
         }
@@ -599,11 +679,15 @@ where
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .session_id;
+        self.device = Some(device.clone());
         let opener = Arc::clone(&self.opener);
         let config = WorkerConfig { rate, session_id };
         self.live = Some(Arc::clone(&live));
         self.stop = Some(Arc::clone(&stop));
-        let sink = history_sink(Arc::clone(&history), live_sink(live));
+        let sink = trigger_sink(
+            Arc::clone(&self.trigger),
+            history_sink(Arc::clone(&history), live_sink(live)),
+        );
         let sink: Box<dyn FnMut(BackendEvent) + Send> = match waits_for {
             Some(serial) => Box::new(waiting_sink(
                 Arc::clone(&self.waiting),
@@ -633,6 +717,12 @@ where
     /// worker's answer after releasing its lock on the manager.
     pub fn rate_control(&self, rate_sps: u32) -> Result<(worker::WorkerControl, Rate), UiError> {
         let rate = supported_rate(rate_sps)?;
+        // The queue stays at 50 SPS or less while triggering. [inferred]
+        if rate_sps > TRIGGER_MAX_SPS && lock(&self.trigger).is_some() {
+            return Err(UiError::usage(
+                "The rate stays at 50 samples/s or less while the trigger panel is open.",
+            ));
+        }
         Ok((self.control()?, rate))
     }
 
@@ -798,14 +888,132 @@ where
 
     /// Stop the queue and close the open session.
     pub fn disconnect(&mut self) -> Result<(), UiError> {
+        // Back to 5 V and `pdm close` before the queue stops.
+        if let Some(trigger) = self.take_trigger() {
+            let _ = trigger.close();
+        }
         self.take_session()?.disconnect();
         Ok(())
+    }
+
+    /// Hand the open session a trigger session (FR DGSQ6S): refused (and
+    /// `worker` closed) without a connected meter or while one is open. The
+    /// queue is kept at 50 SPS or less while it is open. [inferred]
+    pub fn install_trigger(
+        &mut self,
+        mut worker: crate::trigger::TriggerWorker,
+    ) -> Result<(), UiError> {
+        // A session that ended on its own (unplug) may have left this set.
+        if lock(&self.trigger).is_none() {
+            self.rate_before_trigger = None;
+        }
+        let Some(control) = self.running_worker().map(WorkerHandle::control) else {
+            let _ = worker.close();
+            return Err(UiError::usage("Connect a meter first."));
+        };
+        if lock(&self.trigger).is_some() {
+            let _ = worker.close();
+            return Err(UiError::usage("A trigger session is already open."));
+        }
+        // The PD capture pauses while triggering. [inferred]
+        let _ = control.stop_pd();
+        let current = self
+            .live
+            .as_ref()
+            .and_then(|l| {
+                l.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .info
+                    .as_ref()
+                    .and_then(|i| i.rate_sps)
+            })
+            .unwrap_or(self.rate_sps);
+        if current > TRIGGER_MAX_SPS
+            && let (Some(capped), Some(before)) =
+                (Rate::from_sps(TRIGGER_MAX_SPS), Rate::from_sps(current))
+            && control.set_rate(capped).is_ok()
+        {
+            self.rate_before_trigger = Some(before);
+        }
+        // Polling pauses while the automatic list runs (AC-DGSQ6S.11).
+        worker.pause_during_list(control);
+        *lock(&self.trigger) = Some(worker);
+        Ok(())
+    }
+
+    /// Open a trigger session on the connected meter's virtual serial port
+    /// (a simulated one for a demo device).
+    pub fn open_trigger(&mut self) -> Result<(), UiError> {
+        let opener = self.trigger_opener()?;
+        let worker = opener.open()?;
+        self.install_trigger(worker)
+    }
+
+    /// What opening a trigger session needs, checked under the manager lock,
+    /// so the caller can open the port and run the PDM handshake without it
+    /// and then [`DeviceManager::install_trigger`] the result.
+    pub fn trigger_opener(&self) -> Result<TriggerOpener, UiError> {
+        if self.running_worker().is_none() {
+            return Err(UiError::usage("Connect a meter first."));
+        }
+        if lock(&self.trigger).is_some() {
+            return Err(UiError::usage("A trigger session is already open."));
+        }
+        let device = self
+            .device
+            .clone()
+            .ok_or_else(|| UiError::usage("Connect a meter first."))?;
+        Ok(TriggerOpener {
+            demo: device.demo_scenario.is_some(),
+            serial: device.serial,
+            now_ms: self.clock.clone().now_ms(),
+        })
+    }
+
+    /// The open trigger session's handle.
+    pub fn trigger_control(&self) -> Result<crate::trigger::TriggerControl, UiError> {
+        lock(&self.trigger)
+            .as_ref()
+            .map(crate::trigger::TriggerWorker::control)
+            .ok_or_else(|| UiError::usage("No trigger session is open."))
+    }
+
+    /// Whether a trigger session is open.
+    pub fn trigger_open(&self) -> bool {
+        lock(&self.trigger).is_some()
+    }
+
+    /// Take the open trigger session out of the manager, so a caller can
+    /// close it without holding its lock; the capped queue rate is restored.
+    pub fn take_trigger(&mut self) -> Option<crate::trigger::TriggerWorker> {
+        let trigger = take(&self.trigger)?;
+        if let (Some(rate), Some(worker)) = (self.rate_before_trigger.take(), self.running_worker())
+        {
+            let _ = worker.set_rate(rate);
+        }
+        Some(trigger)
+    }
+
+    /// Back to 5 V and close the trigger session, if one is open.
+    pub fn close_trigger(&mut self) -> Result<(), UiError> {
+        match self.take_trigger() {
+            Some(trigger) => trigger.close(),
+            None => Ok(()),
+        }
     }
 
     /// End the open session, if any, on quit or window close (FR X2SPDW):
     /// stops the queue and releases the interface. Events go through the
     /// forwarder thread, so a slow page never holds this up.
     pub fn shutdown(&mut self) {
+        // Back to 5 V and `pdm close` first, while the meter is still there.
+        // Bounded, but generously: a contract left above 5 V outlives the
+        // app (the PD contract continues after the port closes [device]), so
+        // returning to 5 V is worth more than the 1 s quit budget here.
+        if let Some(trigger) = take(&self.trigger) {
+            self.rate_before_trigger = None;
+            let _ = trigger.close_within(TRIGGER_SHUTDOWN_WAIT);
+        }
         if let Some(stop) = &self.stop {
             stop.store(true, Ordering::SeqCst);
         }

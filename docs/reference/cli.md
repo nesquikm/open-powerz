@@ -14,15 +14,136 @@ the built-in help.
 | `stream` | Records the ADC sample stream to CSV until Ctrl-C or `--duration`; prints the sample count and any gaps to stderr. | `--rate {2,10,50,1000}`, `--csv FILE` (created or overwritten), `--duration SECONDS` (device time, fractions allowed) |
 | `pd` | Captures USB PD traffic (messages and events) until Ctrl-C and prints one line per record: elapsed ms, sender (`meter` or `line`), then for a message its SOP, PD header and data objects in hex and a one-line decoded summary that starts with the message name; for an event its name, with the CC line or a detail where it has one. Bulk pipe (or `sim`) only. | `--json` (one JSON object per record, JSON Lines), `--save FILE` (also save the capture as a [pdcap file](pdcap.md)) |
 | `pd decode` | Prints the records of a saved [pdcap file](pdcap.md) as `pd` would; no meter needed. On a damaged file it prints every record before the damage, then the line number where reading stopped, and exits 5. | `--json`, `FILE` |
+| `pd send` | Sends one custom PD message through the meter: a control message on SOP as `pd cmd=`, everything else as `pd data=`. See [Custom PD messages](#custom-pd-messages). | `HEX` or `--preset discover-identity-cable`, `--sop {sop,sop1,sop2}` (default `sop`), `--allow-high-voltage`, `--json` |
+| `trigger` | Asks a charger for a voltage through the meter (protocol triggering). One subcommand per protocol; see [Protocol triggering](#protocol-triggering). | `pd`, `qc`, `qc3`, `fcp`, `afc`, `sfcp`, `scp`, `vfcp`, `tfcp`, `ufcs` |
+| `detect` | Detects the charger's fast-charging protocols: BC1.2, Apple, and the automatic list on request. Never raises VBUS above 5 V. See [Detection](#detection). | `--list`, `--list-plus`, `--stall-secs N` (default 45), `--json` |
+| `console` | Raw PDM text console: sends the command lines it reads from stdin and prints what was sent and received, with times. See [Console](#console). | `--allow-high-voltage` |
 
 ## Global options
 
 | option | meaning |
 |---|---|
 | `--device SERIAL` | The meter to use. Required when several are attached. |
-| `--transport bulk\|cdc\|hid\|sim` | The USB pipe. `bulk` (default) supports every command; `cdc` and `hid` support only `read` and `watch` (and `pd decode`, which needs no meter); `sim` is the demo device. |
+| `--transport bulk\|cdc\|hid\|sim` | The USB pipe. `bulk` (default) supports every measuring command; `cdc` and `hid` support only `read` and `watch` (and `pd decode`, which needs no meter); `sim` is the demo device. `trigger`, `detect`, `console` and `pd send` always talk to the meter's virtual serial port, whatever pipe is chosen; with `sim` they talk to a simulated meter and charger instead. For `detect`, the pipe also takes the one ADC snapshot behind the D+/D− hint. |
 | `--scenario NAME` | What the demo device plays: `idle` (default), `load-5v-1a`, `pd-9v-2a`, `noisy-negative`. |
 | `--trace` | Logs every frame to stderr as hex: `>` sent, `<` received, `x` refused by the safety guard before sending. |
+
+## Protocol triggering
+
+`powerz trigger <PROTOCOL> <ACTION>` opens the PDM text session on the
+meter's virtual serial port, enters the protocol, does the action, and ends
+the session. Read [Safety](#safety) first.
+
+| command | what it does | options |
+|---|---|---|
+| `trigger pd list` | Enters PD and lists the charger's offers (SPR and EPR), decoded: position, type, voltage or range, maximum current or power, and whether EPR mode is on. | `--json` (`epr` and `offers`) |
+| `trigger pd request POS` | Requests the offer at object position `POS` (see `trigger pd list`; EPR is 8 and up), holds it, then returns to 5 V. A PPS or AVS offer needs `--voltage-mv` and `--current-ma`. The request is checked against the offer before it is sent. Prints the command and the requested and delivered voltage and current. | `--voltage-mv MV`, `--current-ma MA` (required with `--voltage-mv`; for a fixed offer the default is its maximum), `--allow-high-voltage`, `--hold SECS`, `--json` |
+| `trigger pd reset` | Sends a Hard Reset: the charger returns to 5 V and offers again. Lists the new offers and VBUS. | `--json` (adds `vbus_mv`, `vbus_ma`) |
+| `trigger pd settings` | Shows the meter's PD settings, or changes them. A flag left out keeps the current value. Reserved e-marker codes are shown but never set. | `--type {auto,spr,epr,proprietary-pps}`, `--em {off,20v-5a,50v-240w-epr,la135}`, `--sink {pps-3a,pps-5a}`, `--json` (`type`, `em`, `sink`) |
+| `trigger qc request VOLTS` | Quick Charge 2.0: 5, 9, 12 or 20 V. | `--allow-high-voltage`, `--hold SECS`, `--json` |
+| `trigger qc3 request --voltage-mv MV` | Quick Charge 3.0: 3600 to 20000 mV in 200 mV steps. | `--allow-high-voltage`, `--hold SECS`, `--json` |
+| `trigger qc3 inc N` / `trigger qc3 dec N` | Steps the QC 3.0 voltage up or down by `N` steps of 200 mV. Each run enters QC afresh, so steps count from the entry voltage. `inc` always needs `--allow-high-voltage`. | `--allow-high-voltage`, `--hold SECS`, `--json` |
+| `trigger fcp request VOLTS`, `trigger afc request VOLTS`, `trigger sfcp request VOLTS` | Huawei FCP, Samsung AFC, Spreadtrum SFCP: 5, 9 or 12 V. | `--allow-high-voltage`, `--hold SECS`, `--json` |
+| `trigger scp list`, `trigger vfcp list`, `trigger tfcp list` | Huawei SCP, vivo VFCP, Transsion TFCP: enters the protocol and shows the decoded limits of its capability block (voltage, current, maximum power). | `--json` (`protocol`, `limits`) |
+| `trigger scp request`, `trigger vfcp request`, `trigger tfcp request` | Requests a voltage and current inside the limits, holds it, then returns to 5 V. | `--voltage-mv MV`, `--current-ma MA` (both required), `--allow-high-voltage`, `--hold SECS`, `--json` |
+| `trigger ufcs list` | Enters UFCS and shows its output capabilities, numbered from 1. | `--json` |
+| `trigger ufcs request N` | Requests a voltage and current inside capability `N`, holds it, then returns to 5 V. | `--voltage-mv MV`, `--current-ma MA` (both required), `--allow-high-voltage`, `--hold SECS`, `--json` |
+| `trigger ufcs cmd N` | Sends UFCS control message `N` (its number in the UFCS spec), then returns to 5 V. | `--allow-high-voltage`, `--hold SECS`, `--json` |
+
+`--hold SECS` is how long the voltage is held before the return to 5 V.
+Without it, the voltage is held until Ctrl-C. When the charger does not
+answer a protocol, the command says the charger does not support it and
+exits 5; the meter stays at 5 V.
+
+## Detection
+
+`powerz detect` runs `entry bc` (BC1.2) and `entry apple`, prints a D+/D−
+hint, and with `--list` (or `--list-plus`) also runs the meter's automatic
+protocol list.
+
+- `--list` runs `entry list`. Each protocol line is printed as it arrives,
+  with its result and VBUS/IBUS.
+- `--list-plus` runs `entry list+` instead. It adds VOOC and MTK PE and needs
+  a dummy load.
+- `--stall-secs N`: when the list is silent for `N` seconds (45 by default),
+  it ends with `reset` and the result is marked incomplete.
+- The hint maps the measured D+ and D− voltages to likely charging modes
+  (for example Apple 2.4 A, Samsung 2 A, DCP). It is labelled as a hint, not
+  a measurement.
+- When BC1.2 or Apple and the list disagree, a `disagree` line names which
+  check said what.
+- `--json` prints one object instead of labelled lines.
+
+Detection commands are rated 5 V or less and never need
+`--allow-high-voltage`. The automatic list lets the meter probe protocols,
+which can briefly raise VBUS above 5 V on some chargers, so `detect --list`
+prints a note to keep the output empty.
+
+## Custom PD messages
+
+`powerz pd send [HEX]` sends one PD message through the meter's PDM session
+(not the bulk pipe that `pd` captures on).
+
+- `HEX` is the PD header, little-endian, then the data objects, little-endian.
+  No SOP byte.
+- `--sop` picks the target: `sop` (the charger, default), `sop1` (SOP', the
+  near cable plug) or `sop2` (SOP'', the far plug).
+- `--preset discover-identity-cable` sends a Discover Identity request to the
+  cable (SOP') instead of `HEX`. When the cable answers, its e-marker details
+  are decoded: VID, PID, passive or active, maximum voltage and current, and
+  EPR capability. The cable answers only the VCONN source, so it may stay
+  silent behind some chargers.
+- A message that could have raised VBUS is followed by a return to 5 V.
+- GoodCRC (`pd cmd=1`) is always refused: the meter's PD stack sends it
+  itself.
+
+## Console
+
+`powerz console` reads command lines from stdin, sends each one through the
+PDM session, and prints the transcript:
+
+```
+00:00:00.100 > pdm parm
+00:00:00.100 < type=0,em=2,sink=0
+```
+
+Times are UTC clock times. `>` is sent, `<` is received, and a binary
+capability block in a reply is printed parsed into words. A refused line is
+reported on stderr (`refused: ...`) and the console goes on with the next
+line. When stdin ends, or on Ctrl-C, the console returns to 5 V if a line
+could have raised VBUS, then sends `pdm close`.
+
+## Safety
+
+Every command that `trigger`, `detect`, `console` and `pd send` send is
+classified before it is written:
+
+| risk class | what it covers |
+|---|---|
+| read-only | Reads only: the settings, the PD offers, the UFCS capabilities. |
+| 5 V or less | Session control, protocol entry, detection, Hard Reset, and requests that provably stay at or below 5 V. |
+| above 5 V | Anything that may raise VBUS above 5 V. This includes every command the classifier cannot prove safe: unknown or raw text, a request for a position with no known offer, `qc3 inc`, UFCS control messages, PD role swaps, and any PD data message other than a Request (a Request is rated by the voltage it asks for). So the cable Discover Identity preset needs the flag too. |
+
+- **`--allow-high-voltage`.** A command rated above 5 V is refused with exit
+  code 2 unless this flag is given. Nothing is written to the meter before
+  the check. Example: `` `pd req=4` can raise VBUS above 5 V; pass
+  --allow-high-voltage to send it ``.
+- **Keep the output empty.** Run triggering with nothing on the meter's
+  output, or only a device rated for the voltage you ask for.
+- **Always back to 5 V, always `pdm close`.** A request holds its voltage,
+  then returns to 5 V: PD sends `pd req=1` (a Hard Reset if that fails), the
+  other protocols send `reset`. Then the session ends with `pdm close`. This
+  also happens on error and on Ctrl-C: Ctrl-C only sets a stop flag, so it
+  never kills the process between a request and the return to 5 V. If the
+  return to 5 V fails, the CLI warns that VBUS may still be above 5 V and
+  tells you to unplug the charger from the meter.
+- **GoodCRC is refused** in `pd send` and `console`, whatever the flags.
+- **Out of step.** If the meter answers a command with a reply that belongs
+  to another command, its replies lag behind the commands. The session
+  refuses every later command and the CLI exits 5 with a message that says
+  to power-cycle the meter (unplug it and plug it back in). After an
+  incomplete automatic list, `detect` checks with a read-only command that
+  the meter is still in step before it sends anything else.
 
 ## Output formats
 
@@ -47,13 +168,22 @@ the built-in help.
 | code | meaning |
 |---|---|
 | 0 | success |
-| 2 | usage error, including an ambiguous device choice |
-| 3 | no matching device |
+| 2 | usage error, including an ambiguous device choice, a request the charger does not offer or allow, and a command above 5 V without `--allow-high-voltage` |
+| 3 | no matching device (or no POWER-Z serial port) |
 | 4 | permission denied (on Linux the message names the udev rule) |
-| 5 | device or protocol error |
+| 5 | device or protocol error, including a protocol the charger does not support, a failed request, a meter out of step, and a failed return to 5 V |
 
 ## Test knobs (demo device)
 
-`POWERZ_SIM_CLOCK=fake` (deterministic simulated time), `POWERZ_SIM_FAULT`
-(for example `timeout@2,disconnect@3,wrong-id@4,permission`) and
-`POWERZ_SIM_CTRL_C_AFTER=N` (act as if Ctrl-C was pressed after N polls).
+These environment variables are for tests only. They work only with
+`--transport sim`; any other value than the ones listed is a usage error.
+
+| variable | effect |
+|---|---|
+| `POWERZ_SIM_CLOCK=fake` | Deterministic simulated time. |
+| `POWERZ_SIM_FAULT` | Injects faults, for example `timeout@2,disconnect@3,wrong-id@4,permission`. |
+| `POWERZ_SIM_CTRL_C_AFTER=N` | Acts as if Ctrl-C was pressed after `N` polls. |
+| `POWERZ_SIM_CHARGER` | The simulated charger behind `trigger`, `detect`, `console` and `pd send`: `epr-140w` (default), `pps-65w` or `multi-protocol`. |
+| `POWERZ_SIM_CABLE=epr-240w` | Puts an e-marked 240 W EPR cable on the simulated meter, so `pd send --preset discover-identity-cable` gets an answer. Unset, there is no cable. |
+| `POWERZ_SIM_ENTRY_BC=fail` | `entry bc` answers `fail`. |
+| `POWERZ_SIM_PDM_LAG=after-list` | The simulated meter answers one reply late after the `reset` that ends a stalled list, to test the out-of-step error. |

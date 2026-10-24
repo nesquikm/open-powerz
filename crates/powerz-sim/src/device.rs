@@ -9,7 +9,7 @@ use crate::queue::RECORD_LEN;
 use crate::{Persona, Sample, SimDevice};
 
 /// Message type codes the simulator understands.
-mod msg {
+pub(crate) mod msg {
     pub const CONNECT: u8 = 0x02;
     pub const DISCONNECT: u8 = 0x03;
     pub const ACCEPT: u8 = 0x05;
@@ -43,7 +43,7 @@ fn auth_reply_key() -> [u8; 16] {
 }
 
 /// `obj` field of a PUT_DATA header: `floor((total - 12) / 4)` in 10 bits.
-fn put_data_obj(total_len: usize) -> u16 {
+pub(crate) fn put_data_obj(total_len: usize) -> u16 {
     ((total_len as i64 - 12).div_euclid(4) as u16) & 0x3FF
 }
 

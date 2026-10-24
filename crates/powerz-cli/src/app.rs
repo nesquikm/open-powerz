@@ -1,27 +1,38 @@
 //! Running a parsed command line against real devices: discovery, device
 //! selection, opening the chosen pipe, Ctrl-C and exit codes.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use powerz_protocol::decode::AdcSnapshot;
 use powerz_protocol::frame;
+use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
+use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
+use powerz_protocol::pdm::{self, FixedProtocol, PdmSession};
 use powerz_protocol::session::{Clock, Session, SystemClock};
 use powerz_protocol::transport::bulk::BulkTransport;
 use powerz_protocol::transport::cdc::CdcTransport;
 use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C};
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
-use powerz_sim::{FaultPlan, PdScenario, Persona, SIM_SERIAL, SimClock, SimDevice};
+use powerz_sim::{
+    FaultPlan, PdScenario, Persona, SIM_SERIAL, SimCable, SimCharger, SimClock, SimDevice, SimPdm,
+};
 
-use crate::args::{Cli, Command, PdDecode, TransportKind, needs_connect, rate_from_sps, validate};
+use crate::args::{
+    Cli, Command, FixedAction, LimitsAction, PdAction, PdDecode, Qc3Action, QcAction, RequestFlags,
+    TransportKind, TriggerProtocol, UfcsAction, needs_connect, rate_from_sps, validate,
+};
 use crate::commands::{
-    StreamOptions, WatchOptions, info, list, pd, pd_decode, pd_save, read, select_device, stream,
-    watch,
+    DetectOptions, LegacyRequestOptions, PdRequestOptions, PdSendOptions, PdSettingsChange,
+    StreamOptions, WatchOptions, console, detect, info, list, pd, pd_decode, pd_save, pd_send,
+    read, select_device, stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list,
+    trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
-use crate::trace::TraceTransport;
+use crate::trace::{TracePort, TraceTransport};
 
 /// Run the parsed command line against real devices; returns the exit code.
 pub fn run(cli: Cli) -> i32 {
@@ -72,6 +83,14 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
             &mut std::io::stderr().lock(),
         );
     }
+    if cli.pd_file.send.is_some()
+        || matches!(
+            cli.command,
+            Command::Trigger { .. } | Command::Detect { .. } | Command::Console { .. }
+        )
+    {
+        return run_pdm(cli);
+    }
     if cli.transport == TransportKind::Sim {
         return run_sim(cli);
     }
@@ -80,16 +99,17 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     match cli.transport {
         TransportKind::Sim => unreachable!("the simulator is handled above"),
         TransportKind::Bulk => with_transport(cli, BulkTransport::open(device)?),
-        TransportKind::Cdc => {
-            let serial = device.serial.as_deref().ok_or_else(|| {
-                CliError::NoDevice(
-                    "the meter reports no serial number; cannot find its CDC port".into(),
-                )
-            })?;
-            with_transport(cli, CdcTransport::open(serial)?)
-        }
+        TransportKind::Cdc => with_transport(cli, open_cdc(device)?),
         TransportKind::Hid => with_transport(cli, HidTransport::open(device.serial.as_deref())?),
     }
+}
+
+/// The meter's CDC pipe, found by its USB serial number.
+fn open_cdc(device: &DeviceEntry) -> Result<impl Transport, CliError> {
+    let serial = device.serial.as_deref().ok_or_else(|| {
+        CliError::NoDevice("the meter reports no serial number; cannot find its CDC port".into())
+    })?;
+    Ok(CdcTransport::open(serial)?)
 }
 
 /// `pd decode FILE`: decode a saved pdcap file; no device is opened.
@@ -105,18 +125,459 @@ fn decode_file(d: &PdDecode) -> Result<(), CliError> {
     )
 }
 
+/// `trigger` / `detect`: open the meter's serial port (or, with
+/// `--transport sim`, the simulated meter with the charger
+/// `POWERZ_SIM_CHARGER` names) and run.
+fn run_pdm(cli: &Cli) -> Result<(), CliError> {
+    // Before any command reaches the meter: a Ctrl-C must never kill the
+    // process between a high-voltage request and the return to 5 V and
+    // `pdm close`; it only sets the stop flag. `detect` stays at 5 V but
+    // must still always end with `pdm close`.
+    ctrl_c_flag()?;
+    if cli.transport != TransportKind::Sim {
+        let hint = detect_hint(cli)?;
+        let port = pdm::open_port(cli.device.as_deref())?;
+        return pdm_on(cli, port, SystemClock, hint);
+    }
+    select_demo(cli)?;
+    let hint = detect_hint(cli)?;
+    let charger = sim_charger()?;
+    if fake_sim_clock() {
+        let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+        let sim = with_sim_knobs(SimPdm::new(charger, clock.clone()))?;
+        pdm_on(cli, sim.open_port(), clock, hint)
+    } else {
+        let sim = with_sim_knobs(SimPdm::new(charger, SimClock::new(SystemClock.now_ms())))?;
+        pdm_on(cli, sim.open_port(), SystemClock, hint)
+    }
+}
+
+/// `detect` only: the D+ / D- hint from one ADC snapshot over the binary
+/// protocol (`--transport`; the simulated meter's `--scenario` with
+/// `--transport sim`). `None` for `trigger`.
+fn detect_hint(cli: &Cli) -> Result<Option<Hint>, CliError> {
+    if !matches!(cli.command, Command::Detect { .. }) {
+        return Ok(None);
+    }
+    let a = match cli.transport {
+        TransportKind::Sim => {
+            if fake_sim_clock() {
+                let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+                let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+                adc_snapshot(cli, sim, clock)?
+            } else {
+                adc_snapshot(
+                    cli,
+                    SimDevice::new(Persona::Bulk, cli.scenario),
+                    SystemClock,
+                )?
+            }
+        }
+        kind => {
+            let devices = transport::discovery::list_devices()?;
+            let device = select_device(&devices, cli.device.as_deref())?;
+            match kind {
+                TransportKind::Cdc => adc_snapshot(cli, open_cdc(device)?, SystemClock)?,
+                TransportKind::Hid => adc_snapshot(
+                    cli,
+                    HidTransport::open(device.serial.as_deref())?,
+                    SystemClock,
+                )?,
+                _ => adc_snapshot(cli, BulkTransport::open(device)?, SystemClock)?,
+            }
+        }
+    };
+    Ok(Some(dpdm_hint(
+        volts_to_mv(a.dp_v()),
+        volts_to_mv(a.dm_v()),
+    )))
+}
+
+/// Volts to whole millivolts (negative readings clamp to 0).
+fn volts_to_mv(v: f64) -> u32 {
+    // The cast saturates; ADC volts are far below u32::MAX mV.
+    (v * 1000.0).round().max(0.0) as u32
+}
+
+/// One ADC snapshot on `t` (traced with `--trace`; CONNECT where needed).
+fn adc_snapshot<T: Transport, C: Clock>(
+    cli: &Cli,
+    t: T,
+    clock: C,
+) -> Result<AdcSnapshot, CliError> {
+    fn snap<T: Transport, C: Clock>(
+        cli: &Cli,
+        mut session: Session<T, C>,
+    ) -> Result<AdcSnapshot, CliError> {
+        if needs_connect(cli.transport) {
+            session.connect()?;
+        }
+        Ok(session.read_adc()?)
+    }
+    if cli.trace {
+        snap(
+            cli,
+            Session::with_clock(TraceTransport::new(t, std::io::stderr()), clock),
+        )
+    } else {
+        snap(cli, Session::with_clock(t, clock))
+    }
+}
+
+/// `--device`, when given, must name the demo device's synthetic serial.
+fn select_demo(cli: &Cli) -> Result<(), CliError> {
+    let demo = [demo_entry()];
+    select_device(&demo, cli.device.as_deref())?;
+    Ok(())
+}
+
+/// `POWERZ_SIM_CLOCK=fake` (test-only): run the simulator on a fake clock.
+fn fake_sim_clock() -> bool {
+    std::env::var("POWERZ_SIM_CLOCK").as_deref() == Ok("fake")
+}
+
+/// Honour `POWERZ_SIM_CHARGER=<name>` (test-only): `epr-140w` (default),
+/// `pps-65w` or `multi-protocol`.
+fn sim_charger() -> Result<SimCharger, CliError> {
+    match std::env::var("POWERZ_SIM_CHARGER").as_deref() {
+        Err(_) | Ok("epr-140w") => Ok(SimCharger::Epr140W),
+        Ok("pps-65w") => Ok(SimCharger::Pps65W),
+        Ok("multi-protocol") => Ok(SimCharger::MultiProtocol),
+        Ok(other) => Err(CliError::Usage(format!(
+            "invalid POWERZ_SIM_CHARGER {other:?}: expected epr-140w, pps-65w or multi-protocol"
+        ))),
+    }
+}
+
+/// Honour the test-only simulated-meter knobs:
+/// - `POWERZ_SIM_CABLE=epr-240w` puts the session-2 e-marked 240 W cable
+///   on the simulated meter; unset, no cable.
+/// - `POWERZ_SIM_ENTRY_BC=fail`: `entry bc` answers `fail`.
+/// - `POWERZ_SIM_PDM_LAG=after-list`: one reply late after the `reset`
+///   that ends a stalled list.
+fn with_sim_knobs(sim: SimPdm) -> Result<SimPdm, CliError> {
+    let sim = sim_knob(
+        sim,
+        "POWERZ_SIM_ENTRY_BC",
+        "fail",
+        SimPdm::with_entry_bc_fail,
+    )?;
+    let sim = sim_knob(
+        sim,
+        "POWERZ_SIM_PDM_LAG",
+        "after-list",
+        SimPdm::with_lag_after_list,
+    )?;
+    sim_knob(sim, "POWERZ_SIM_CABLE", "epr-240w", |s| {
+        s.with_cable(SimCable::Epr240W)
+    })
+}
+
+/// A one-value test knob: unset leaves `sim` as is, `var=value` applies
+/// `apply`, anything else is a usage error.
+fn sim_knob(
+    sim: SimPdm,
+    var: &str,
+    value: &str,
+    apply: impl FnOnce(SimPdm) -> SimPdm,
+) -> Result<SimPdm, CliError> {
+    match std::env::var(var).as_deref() {
+        Err(_) => Ok(sim),
+        Ok(v) if v == value => Ok(apply(sim)),
+        Ok(other) => Err(CliError::Usage(format!(
+            "invalid {var} {other:?}: expected {value}"
+        ))),
+    }
+}
+
+/// Wrap `port` for `--trace` if asked, open the PDM session and run.
+fn pdm_on<P: Read + Write, C: Clock>(
+    cli: &Cli,
+    port: P,
+    clock: C,
+    hint: Option<Hint>,
+) -> Result<(), CliError> {
+    if cli.trace {
+        let port = TracePort::new(port, std::io::stderr());
+        run_pdm_session(cli, PdmSession::open_with_clock(port, clock)?, hint)
+    } else {
+        run_pdm_session(cli, PdmSession::open_with_clock(port, clock)?, hint)
+    }
+}
+
+/// Run `trigger`, `detect` or `pd send` on an open PDM session.
+fn run_pdm_session<P: Read + Write, C: Clock>(
+    cli: &Cli,
+    session: PdmSession<P, C>,
+    hint: Option<Hint>,
+) -> Result<(), CliError> {
+    if let Some(send) = &cli.pd_file.send {
+        let opts = PdSendOptions {
+            hex: send.hex.as_deref(),
+            preset: send.preset,
+            sop: send.sop,
+            allow_high_voltage: send.allow_high_voltage,
+            json: send.json,
+        };
+        return pd_send(session, &opts, &mut std::io::stdout().lock());
+    }
+    match &cli.command {
+        Command::Trigger { protocol } => run_trigger_session(protocol, session),
+        Command::Console { allow_high_voltage } => console(
+            session,
+            *allow_high_voltage,
+            std::io::BufReader::new(std::io::stdin()),
+            &stop_flag(),
+            &mut std::io::stdout().lock(),
+        ),
+        Command::Detect {
+            list,
+            list_plus,
+            stall_secs,
+            json,
+        } => {
+            let opts = DetectOptions {
+                list: *list || *list_plus,
+                plus: *list_plus,
+                stall_limit: Duration::from_secs(*stall_secs),
+                json: *json,
+            };
+            // Always computed for `detect` (see `detect_hint`); D+ / D- at
+            // 0 V only if it somehow was not.
+            let hint = hint.unwrap_or_else(|| dpdm_hint(0, 0));
+            detect(
+                session,
+                &opts,
+                &hint,
+                &stop_flag(),
+                &mut std::io::stdout().lock(),
+            )
+        }
+        _ => unreachable!("only trigger and detect use the PDM session"),
+    }
+}
+
+/// Run one `trigger` action on an open PDM session.
+fn run_trigger_session<P: Read + Write, C: Clock>(
+    protocol: &TriggerProtocol,
+    session: PdmSession<P, C>,
+) -> Result<(), CliError> {
+    let mut out = std::io::stdout().lock();
+    match protocol {
+        TriggerProtocol::Pd {
+            action: PdAction::List { json },
+        } => trigger_pd_list(session, *json, &mut out),
+        TriggerProtocol::Pd {
+            action: PdAction::Reset { json },
+        } => trigger_pd_reset(session, *json, &mut out),
+        TriggerProtocol::Pd {
+            action:
+                PdAction::Request {
+                    position,
+                    voltage_mv,
+                    current_ma,
+                    allow_high_voltage,
+                    hold,
+                    json,
+                },
+        } => {
+            let opts = PdRequestOptions {
+                position: *position,
+                voltage_mv: *voltage_mv,
+                current_ma: *current_ma,
+                allow_high_voltage: *allow_high_voltage,
+                hold: hold_duration(*hold),
+                json: *json,
+            };
+            trigger_pd_request(session, &opts, &mut ctrl_c_hold(), &mut out)
+        }
+        TriggerProtocol::Pd {
+            action:
+                PdAction::Settings {
+                    pd_type,
+                    em,
+                    sink,
+                    json,
+                },
+        } => {
+            let change = PdSettingsChange {
+                pd_type: pd_type.as_deref(),
+                emarker: em.as_deref(),
+                sink: sink.as_deref(),
+            };
+            trigger_pd_settings(session, &change, *json, &mut out)
+        }
+        TriggerProtocol::Qc { .. }
+        | TriggerProtocol::Qc3 { .. }
+        | TriggerProtocol::Fcp { .. }
+        | TriggerProtocol::Afc { .. }
+        | TriggerProtocol::Sfcp { .. }
+        | TriggerProtocol::Scp { .. }
+        | TriggerProtocol::Vfcp { .. }
+        | TriggerProtocol::Tfcp { .. }
+        | TriggerProtocol::Ufcs { .. } => match legacy_action(protocol) {
+            Some(LegacyAction::List { protocol, json }) => {
+                trigger_legacy_list(session, protocol, json, &mut out)
+            }
+            Some(LegacyAction::Request(opts)) => {
+                trigger_legacy_request(session, &opts, &mut ctrl_c_hold(), &mut out)
+            }
+            None => Err(CliError::Usage("PD is triggered with `trigger pd`".into())),
+        },
+    }
+}
+
+/// A non-PD `trigger` action, mapped to the library.
+enum LegacyAction {
+    /// `trigger scp|vfcp|tfcp|ufcs list`.
+    List {
+        protocol: LegacyProtocol,
+        json: bool,
+    },
+    /// Any request: enter, send, hold, back to 5 V.
+    Request(LegacyRequestOptions),
+}
+
+/// The library call for a `trigger qc|qc3|fcp|afc|sfcp|scp|vfcp|tfcp|ufcs`
+/// action; `None` for PD, which has its own flow.
+fn legacy_action(protocol: &TriggerProtocol) -> Option<LegacyAction> {
+    use LegacyProtocol as L;
+    let (legacy, request, flags) = match protocol {
+        TriggerProtocol::Qc {
+            action: QcAction::Request { volts, flags },
+        } => fixed(L::Qc, FixedProtocol::Qc, *volts, *flags),
+        TriggerProtocol::Qc3 {
+            action: Qc3Action::Request { voltage_mv, flags },
+        } => (
+            L::Qc,
+            LegacyRequest::Qc3Volt {
+                voltage_mv: *voltage_mv,
+            },
+            *flags,
+        ),
+        TriggerProtocol::Qc3 {
+            action: Qc3Action::Inc { count, flags },
+        } => (L::Qc, LegacyRequest::Qc3Inc(*count), *flags),
+        TriggerProtocol::Qc3 {
+            action: Qc3Action::Dec { count, flags },
+        } => (L::Qc, LegacyRequest::Qc3Dec(*count), *flags),
+        TriggerProtocol::Fcp {
+            action: FixedAction::Request { volts, flags },
+        } => fixed(L::Fcp, FixedProtocol::Fcp, *volts, *flags),
+        TriggerProtocol::Afc {
+            action: FixedAction::Request { volts, flags },
+        } => fixed(L::Afc, FixedProtocol::Afc, *volts, *flags),
+        TriggerProtocol::Sfcp {
+            action: FixedAction::Request { volts, flags },
+        } => fixed(L::Sfcp, FixedProtocol::Sfcp, *volts, *flags),
+        TriggerProtocol::Scp { action }
+        | TriggerProtocol::Vfcp { action }
+        | TriggerProtocol::Tfcp { action } => {
+            let legacy = match protocol {
+                TriggerProtocol::Scp { .. } => L::Scp,
+                TriggerProtocol::Vfcp { .. } => L::Vfcp,
+                TriggerProtocol::Tfcp { .. } => L::Tfcp,
+                _ => return None,
+            };
+            match action {
+                LimitsAction::List { json } => {
+                    return Some(LegacyAction::List {
+                        protocol: legacy,
+                        json: *json,
+                    });
+                }
+                LimitsAction::Request {
+                    voltage_mv,
+                    current_ma,
+                    flags,
+                } => {
+                    let (voltage_mv, current_ma) = (*voltage_mv, *current_ma);
+                    let request = match legacy {
+                        L::Scp => LegacyRequest::Scp {
+                            voltage_mv,
+                            current_ma,
+                        },
+                        L::Vfcp => LegacyRequest::Vfcp {
+                            voltage_mv,
+                            current_ma,
+                        },
+                        L::Tfcp => LegacyRequest::Tfcp {
+                            voltage_mv,
+                            current_ma,
+                        },
+                        _ => return None,
+                    };
+                    (legacy, request, *flags)
+                }
+            }
+        }
+        TriggerProtocol::Ufcs { action } => match action {
+            UfcsAction::List { json } => {
+                return Some(LegacyAction::List {
+                    protocol: L::Ufcs,
+                    json: *json,
+                });
+            }
+            UfcsAction::Request {
+                index,
+                voltage_mv,
+                current_ma,
+                flags,
+            } => (
+                L::Ufcs,
+                LegacyRequest::Ufcs {
+                    index: *index,
+                    voltage_mv: *voltage_mv,
+                    current_ma: *current_ma,
+                },
+                *flags,
+            ),
+            UfcsAction::Cmd { number, flags } => (L::Ufcs, LegacyRequest::UfcsCmd(*number), *flags),
+        },
+        TriggerProtocol::Pd { .. } => return None,
+    };
+    Some(LegacyAction::Request(LegacyRequestOptions {
+        protocol: legacy,
+        request,
+        allow_high_voltage: flags.allow_high_voltage,
+        hold: hold_duration(flags.hold),
+        json: flags.json,
+    }))
+}
+
+/// The protocol, request and flags of a fixed-voltage `request <VOLTS>`.
+fn fixed(
+    legacy: LegacyProtocol,
+    protocol: FixedProtocol,
+    volts: u8,
+    flags: RequestFlags,
+) -> (LegacyProtocol, LegacyRequest, RequestFlags) {
+    (legacy, LegacyRequest::Fixed { protocol, volts }, flags)
+}
+
+/// `--hold <SECS>`; without it, hold until Ctrl-C.
+fn hold_duration(secs: Option<u64>) -> Duration {
+    secs.map_or(Duration::MAX, Duration::from_secs)
+}
+
+/// The hold of a `trigger ... request`: Ctrl-C (handler installed by
+/// run_pdm) ends it early; the meter still goes back to 5 V.
+fn ctrl_c_hold() -> impl FnMut(Duration) {
+    let stop = stop_flag();
+    move |d: Duration| sleep_unless_stopped(d, &stop)
+}
+
 /// `--transport sim`: open the demo device (bulk persona, `--scenario`)
 /// without touching USB; `--device` must name its synthetic serial.
 fn run_sim(cli: &Cli) -> Result<(), CliError> {
-    let demo = [demo_entry()];
-    select_device(&demo, cli.device.as_deref())?;
+    select_demo(cli)?;
     let faults = sim_faults()?;
     // `pd` on the demo device plays the PD capture scenario.
     let with_pd = |sim: SimDevice| match cli.command {
         Command::Pd { .. } => sim.with_pd_scenario(PdScenario::Negotiation),
         _ => sim,
     };
-    if std::env::var("POWERZ_SIM_CLOCK").as_deref() == Ok("fake") {
+    if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
         let sim = with_pd(SimDevice::with_clock(
             Persona::Bulk,
@@ -214,6 +675,9 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
     let mut out = std::io::stdout().lock();
     match &cli.command {
         Command::List { .. } => unreachable!("list is handled before opening a device"),
+        Command::Trigger { .. } | Command::Detect { .. } | Command::Console { .. } => {
+            unreachable!("trigger, detect and console are handled before opening a device")
+        }
         Command::Info { json } => info(&mut session, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
         Command::Watch { interval } => {
@@ -279,13 +743,16 @@ fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Re
 /// long `watch --interval` still honours Ctrl-C promptly.
 fn sleep_unless_stopped(d: Duration, stop: &AtomicBool) {
     const SLICE: Duration = Duration::from_millis(50);
-    let deadline = std::time::Instant::now() + d;
+    // `None`: no deadline (a hold until Ctrl-C), not an overflow panic.
+    let deadline = std::time::Instant::now().checked_add(d);
     while !stop.load(Ordering::SeqCst) {
         let now = std::time::Instant::now();
-        if now >= deadline {
-            return;
-        }
-        std::thread::sleep(SLICE.min(deadline - now));
+        let slice = match deadline {
+            Some(deadline) if now >= deadline => return,
+            Some(deadline) => SLICE.min(deadline - now),
+            None => SLICE,
+        };
+        std::thread::sleep(slice);
     }
 }
 
@@ -353,6 +820,15 @@ mod tests {
         let stop = AtomicBool::new(true);
         let t = std::time::Instant::now();
         sleep_unless_stopped(Duration::from_secs(10), &stop);
+        assert!(t.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn hold_until_ctrl_c_ends_at_once_when_stopped() {
+        // `--hold` left out holds without a deadline; that must not overflow.
+        let stop = AtomicBool::new(true);
+        let t = std::time::Instant::now();
+        sleep_unless_stopped(Duration::MAX, &stop);
         assert!(t.elapsed() < Duration::from_millis(200));
     }
 

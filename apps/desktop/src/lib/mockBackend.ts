@@ -22,14 +22,27 @@ import type {
   PdOpened,
   PdRow,
   PdStatusSample,
+  ProtocolSection,
   RecordingSummary,
+  RiskClass,
   Sample,
   Series,
   SeriesBuckets,
   StatsSnapshot,
+  Detection,
+  CableView,
+  ConsoleLine,
+  PdMessageRequest,
+  PdSendReply,
+  TriggerLimits,
+  TriggerOffer,
+  TriggerProtocol,
+  TriggerReply,
+  TriggerRequest,
   UiError,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
+import { DISCOVER_IDENTITY_CABLE, lineRefusal, messageRefusal } from "./console.svelte";
 import { PD_CYCLE_MS, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
@@ -366,6 +379,8 @@ interface Running {
   pendingGap: Gap | null;
   stats: MockStats;
   pd: MockPdCapture;
+  /** The VBUS a trigger request moved the demo charger to, V; null at its own. */
+  triggerVbusV: number | null;
 }
 
 interface MockRecording {
@@ -384,6 +399,12 @@ export const MOCK_MODES = [
   "outage",
   "blip",
   "replug",
+  "trigger-sag",
+  "trigger-all",
+  "trigger-out-of-sync",
+  "trigger-req-error",
+  "trigger-detect-disagree",
+  "trigger-list-lag",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -454,8 +475,193 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
     "(see `docs/linux.md`).",
 };
 
+/** Like the library's builder: a control message on SOP is `pd cmd=<type>`, anything
+ * else `pd data=<SOP byte><header LE><objects LE>` in uppercase hex; GoodCRC and
+ * malformed messages are a usage error. */
+function renderMockMessage(m: PdMessageRequest): string {
+  const { msg_type: ty, data_objects: objects } = m;
+  if (!Number.isInteger(ty) || ty < 0 || ty > 31) {
+    throw usage(`Message type ${ty} does not fit the 5-bit field.`);
+  }
+  const refusal = messageRefusal(m);
+  if (refusal !== null) throw usage(refusal);
+  if (objects.length === 0) {
+    if (ty < 3 || ty > 0x18) throw usage("A data message needs at least one data object.");
+  }
+  if (objects.length > 7) {
+    throw usage(`${objects.length} data objects: a PD message carries at most 7.`);
+  }
+  if (objects.length === 0 && m.sop === "sop") return `pd cmd=${ty}`;
+  const sop = m.sop === "sop" ? 0 : m.sop === "sop_prime" ? 1 : 2;
+  const header = (objects.length << 12) | 0x80 | ty;
+  const bytes = [sop, header & 0xff, header >>> 8];
+  for (const o of objects) bytes.push(o & 0xff, (o >>> 8) & 0xff, (o >>> 16) & 0xff, o >>> 24);
+  const hex = bytes.map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join("");
+  return `pd data=${hex}`;
+}
+
+/** Like the library classifier for a raw console line: queries are read-only, session
+ * control and entries stay at 5 V, `pd req=` goes by the offer, unknown text is above 5 V. */
+function mockLineRisk(text: string): RiskClass {
+  if (["pdm parm", "pd pdo", "ufcs pdo"].includes(text)) return "read_only";
+  if (/^(pdm open|pdm close|reset|pd hrst|entry \S+)$/.test(text)) return "at_most_5v";
+  const cmd = /^pd cmd=(\d+)$/.exec(text);
+  if (cmd) return Number(cmd[1]) <= 24 ? "at_most_5v" : "above_5v";
+  const req = /^pd req=(\d+)$/.exec(text);
+  if (req) {
+    const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === Number(req[1]));
+    return offer && offer.max_voltage_mv <= 5000 ? "at_most_5v" : "above_5v";
+  }
+  return "above_5v";
+}
+
+/** The scripted charger's `pdo:` block in words, like the backend's description. */
+function mockPdoBlock(): string {
+  const v = (mv: number): string => (mv / 1000).toFixed(2);
+  const offers = MOCK_TRIGGER_OFFERS.map((o) => {
+    const volts =
+      o.min_voltage_mv === o.max_voltage_mv
+        ? `${v(o.max_voltage_mv)} V`
+        : `${v(o.min_voltage_mv)}-${v(o.max_voltage_mv)} V`;
+    const current = o.max_current_ma === null ? "" : ` ${v(o.max_current_ma)} A`;
+    const power = o.max_power_mw === null ? "" : ` ${(o.max_power_mw / 1000).toFixed(1)} W`;
+    return `#${o.position} ${o.kind} ${volts}${current}${power}`;
+  });
+  return `pdo: ${offers.join(", ")}`;
+}
+
+/** The mock trigger session: what was entered last (how to get back to 5 V). */
+interface MockTrigger {
+  entered: "pd" | "legacy" | null;
+  /** The queue rate before the session capped it at 50 SPS, if it did. */
+  rateBefore: number | null;
+}
+
+/** The queue rate cap while a trigger session is open, SPS. [inferred] */
+const TRIGGER_MAX_SPS = 50;
+
+/** The backend's `OutOfSync` refusal: the meter's replies lag behind the commands. */
+function outOfSyncError(): UiError {
+  return {
+    kind: "out_of_sync",
+    message: "The meter's replies are out of step with the commands, so no more requests are sent.",
+    hint: "Power-cycle the meter (unplug it and plug it back in), then open the session again.",
+  };
+}
+
+/** `trigger-all`: the decoded limits of the charger that speaks every protocol. [inferred] */
+const MOCK_SCP_LIMITS: TriggerLimits = {
+  index: null,
+  min_voltage_mv: 3400,
+  max_voltage_mv: 11000,
+  min_current_ma: 500,
+  max_current_ma: 5000,
+  max_power_mw: null,
+};
+const MOCK_ALL_LIMITS: Partial<Record<TriggerProtocol, readonly TriggerLimits[]>> = {
+  scp: [MOCK_SCP_LIMITS],
+  vfcp: [{ ...MOCK_SCP_LIMITS, max_current_ma: 4000 }],
+  tfcp: [{ ...MOCK_SCP_LIMITS }],
+  ufcs: [
+    { ...MOCK_SCP_LIMITS, index: 1, max_power_mw: 40000 },
+    {
+      ...MOCK_SCP_LIMITS,
+      index: 2,
+      max_voltage_mv: 21000,
+      max_current_ma: 3000,
+      max_power_mw: 63000,
+    },
+  ],
+};
+
+/** The fixed voltages each protocol allows, V. */
+const MOCK_FIXED_VOLTS: Record<"qc" | "fcp" | "afc" | "sfcp", readonly number[]> = {
+  qc: [5, 9, 12, 20],
+  fcp: [5, 9, 12],
+  afc: [5, 9, 12],
+  sfcp: [5, 9, 12],
+};
+
+/** The scripted charger's PD offers: 5/9/15/20 V fixed, PPS 3.3-21 V, EPR 28 V and AVS. */
+const MOCK_TRIGGER_OFFERS: readonly TriggerOffer[] = [
+  {
+    position: 1,
+    kind: "fixed",
+    min_voltage_mv: 5000,
+    max_voltage_mv: 5000,
+    max_current_ma: 3000,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 2,
+    kind: "fixed",
+    min_voltage_mv: 9000,
+    max_voltage_mv: 9000,
+    max_current_ma: 3000,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 3,
+    kind: "fixed",
+    min_voltage_mv: 15000,
+    max_voltage_mv: 15000,
+    max_current_ma: 3000,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 4,
+    kind: "fixed",
+    min_voltage_mv: 20000,
+    max_voltage_mv: 20000,
+    max_current_ma: 5000,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 5,
+    kind: "pps",
+    min_voltage_mv: 3300,
+    max_voltage_mv: 21000,
+    max_current_ma: 3250,
+    max_power_mw: null,
+    epr: false,
+  },
+  {
+    position: 8,
+    kind: "fixed",
+    min_voltage_mv: 28000,
+    max_voltage_mv: 28000,
+    max_current_ma: 5000,
+    max_power_mw: null,
+    epr: true,
+  },
+  {
+    position: 9,
+    kind: "epr-avs",
+    min_voltage_mv: 15000,
+    max_voltage_mv: 28000,
+    max_current_ma: null,
+    max_power_mw: 140000,
+    epr: true,
+  },
+];
+
 /** One page-lifetime instance; a running session's timer stops on `disconnect()` or
  * when the page goes away (it is a test and demo double, not a resource owner). */
+/** The demo e-marked cable's details: VID 0x050D, PID 0x8254, passive, 50 V, 5 A,
+ * EPR capable. */
+const MOCK_CABLE: CableView = {
+  vid: 0x050d,
+  pid: 0x8254,
+  active: false,
+  max_voltage_v: 50,
+  max_current_ma: 5000,
+  epr_capable: true,
+};
+
 export class MockBackend {
   #session: Running | null = null;
   /** The PD capture saved last in the page, and the one opened (FR TGE83E). */
@@ -472,6 +678,10 @@ export class MockBackend {
   #unplugDone = false;
   #replugTimer: ReturnType<typeof setTimeout> | null = null;
   #watchers = new Set<(devices: DeviceListing[]) => void>();
+  /** The open trigger session (FR DGSQ6S), null when none. */
+  #trigger: MockTrigger | null = null;
+  /** Every command the scripted charger received. */
+  #triggerLog: string[] = [];
 
   /** `mode` defaults to the page URL's `?mock=` parameter, the PD seed to its
    * `?pdsynthetic=`. */
@@ -551,6 +761,7 @@ export class MockBackend {
       history: new HistoryColumns(),
       gaps: [],
       pendingGap: null,
+      triggerVbusV: null,
       stats: new MockStats(),
       pd: {
         timer: null,
@@ -641,6 +852,9 @@ export class MockBackend {
     const samples: Sample[] = [];
     for (let i = 0; i < n; i++) {
       const sample = sampleAt(s.scenario, Math.round(s.nextMs));
+      if (s.triggerVbusV !== null) {
+        sample.vbus_v = s.triggerVbusV + 0.01 * Math.sin(s.nextMs / 140);
+      }
       samples.push(sample);
       s.history.push(sample);
       s.stats.push(sample);
@@ -701,6 +915,8 @@ export class MockBackend {
 
   async disconnect(): Promise<void> {
     const s = this.#open();
+    // Like the backend: back to 5 V and `pdm close` before the queue stops.
+    this.#closeTrigger();
     if (this.#replugTimer !== null) clearTimeout(this.#replugTimer);
     this.#replugTimer = null;
     this.#endSession(s, null);
@@ -824,6 +1040,8 @@ export class MockBackend {
    * worker's at most 60 times a second. */
   async pdStart(): Promise<void> {
     const s = this.#open();
+    // The PD capture waits while triggering. [inferred]
+    if (this.#trigger) throw usage("Close the trigger session to capture PD traffic.");
     const pd = s.pd;
     if (pd.timer !== null) return;
     pd.timer = setInterval(() => this.#pdTick(s), BATCH_MS);
@@ -972,5 +1190,336 @@ export class MockBackend {
   /** Every path `revealPath` was asked to show, oldest first. */
   revealedPaths(): string[] {
     return [...this.#revealed];
+  }
+
+  // ---- Trigger panel (FR DGSQ6S): a scripted charger behind the demo meter ----
+
+  /** Opens the trigger session on the connected demo meter. */
+  async triggerOpen(): Promise<void> {
+    if (!this.#session) throw usage("Connect a meter first.");
+    if (this.#trigger) return;
+    const s = this.#session;
+    // Like the backend: the PD capture pauses and the queue runs at 50 SPS or less.
+    this.#stopPd(s);
+    let rateBefore: number | null = null;
+    if (s.rateSps > TRIGGER_MAX_SPS && !s.recording && this.#mode !== "rate-locked") {
+      rateBefore = s.rateSps;
+      await this.setRate(TRIGGER_MAX_SPS);
+    }
+    this.#trigger = { entered: null, rateBefore };
+    this.#triggerLog.push("pdm open");
+  }
+
+  /** The open trigger session, or a usage error. */
+  #openTrigger(): MockTrigger {
+    if (!this.#trigger) throw usage("No trigger session is open.");
+    return this.#trigger;
+  }
+
+  /** Like the 140 W charger: Apple fails, the automatic list stalls and ends with `reset`,
+   * then the `pdm parm` check that the meter is still in step. */
+  async triggerDetect(): Promise<Detection> {
+    const t = this.#openTrigger();
+    this.#triggerLog.push("entry bc", "entry apple", "entry list", "reset", "pdm parm");
+    t.entered = null;
+    if (this.#mode === "trigger-list-lag") {
+      // The meter answers the check one command late, like the backend's `OutOfSync`.
+      throw outOfSyncError();
+    }
+    return {
+      // `trigger-detect-disagree`: `entry bc` → `fail` against the list's
+      // `bc1.2:true` (device trace 2026-10-23).
+      bc12: this.#mode === "trigger-detect-disagree" ? "not-supported" : "unknown",
+      apple: "not-supported",
+      entries: [
+        { name: "bc1.2", support: "supported", vbus_mv: 5203, ibus_ma: 0 },
+        { name: "ufcs", support: "not-supported", vbus_mv: null, ibus_ma: null },
+        { name: "vfcp", support: "not-supported", vbus_mv: null, ibus_ma: null },
+      ],
+      complete: false,
+    };
+  }
+
+  /** The scripted charger speaks PD and QC; every other protocol is not supported. */
+  async triggerList(protocol: TriggerProtocol): Promise<ProtocolSection> {
+    const t = this.#openTrigger();
+    this.#triggerLog.push(`entry ${protocol}`);
+    if (protocol === "pd") {
+      this.#triggerLog.push("pdm parm");
+      t.entered = "pd";
+      return {
+        protocol,
+        supported: true,
+        offers: MOCK_TRIGGER_OFFERS.map((o) => ({ ...o })),
+        limits: [],
+        settings: { pd_type: "auto", emarker: "50v-240w-epr", sink: "pps-3a" },
+      };
+    }
+    t.entered = "legacy";
+    if (this.#mode === "trigger-all") {
+      const limits = (MOCK_ALL_LIMITS[protocol] ?? []).map((l) => ({ ...l }));
+      return { protocol, supported: true, offers: [], limits, settings: null };
+    }
+    return { protocol, supported: protocol === "qc", offers: [], limits: [], settings: null };
+  }
+
+  /** The voltage `request` asks for, mV; null for a PD position with no offer. */
+  #requestMv(request: TriggerRequest): number | null {
+    switch (request.protocol) {
+      case "pd": {
+        if (request.voltage_mv !== null) return request.voltage_mv;
+        const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === request.position);
+        return offer ? offer.max_voltage_mv : null;
+      }
+      case "qc":
+      case "fcp":
+      case "afc":
+      case "sfcp":
+        return request.volts * 1000;
+      default:
+        return request.voltage_mv;
+    }
+  }
+
+  /** Like the library classifier: above 5 V, or unknown, needs a confirmation. */
+  async triggerRisk(request: TriggerRequest): Promise<RiskClass> {
+    this.#openTrigger();
+    const mv = this.#requestMv(request);
+    return mv !== null && mv <= 5000 ? "at_most_5v" : "above_5v";
+  }
+
+  /** The command text the meter would receive for `request`. */
+  #commandText(request: TriggerRequest): string {
+    switch (request.protocol) {
+      case "pd":
+        if (request.voltage_mv !== null && request.current_ma !== null) {
+          return `pd req=${request.position},volt=${request.voltage_mv},cur=${request.current_ma}`;
+        }
+        return request.current_ma !== null
+          ? `pd req=${request.position},cur=${request.current_ma}`
+          : `pd req=${request.position}`;
+      case "qc":
+      case "fcp":
+      case "afc":
+      case "sfcp":
+        return `${request.protocol} ${request.volts}V`;
+      case "qc3":
+        return `qc3 volt=${request.voltage_mv}`;
+      case "ufcs":
+        return `ufcs req=${request.index},volt=${request.voltage_mv},cur=${request.current_ma}`;
+      default:
+        return `${request.protocol} volt=${request.voltage_mv},cur=${request.current_ma}`;
+    }
+  }
+
+  /** Why the protocol or the decoded limits refuse `request`, or null when they allow it. */
+  #refusal(request: TriggerRequest): string | null {
+    switch (request.protocol) {
+      case "pd":
+        return null;
+      case "qc":
+      case "fcp":
+      case "afc":
+      case "sfcp":
+        return MOCK_FIXED_VOLTS[request.protocol].includes(request.volts)
+          ? null
+          : `${request.protocol.toUpperCase()} does not offer ${request.volts} V.`;
+      case "qc3": {
+        const mv = request.voltage_mv;
+        return mv >= 3600 && mv <= 20000 && (mv - 3600) % 200 === 0
+          ? null
+          : "QC 3.0 runs from 3.6 to 20 V in 200 mV steps.";
+      }
+      default: {
+        const all = this.#mode === "trigger-all" ? (MOCK_ALL_LIMITS[request.protocol] ?? []) : [];
+        if (all.length === 0) return null;
+        const l = request.protocol === "ufcs" ? all.find((b) => b.index === request.index) : all[0];
+        if (!l) return "The charger reports no such capability.";
+        const { voltage_mv: v, current_ma: c } = request;
+        // Written so that NaN fails too.
+        if (!(v >= l.min_voltage_mv && v <= l.max_voltage_mv))
+          return "The voltage is outside the limits.";
+        if (!(c >= l.min_current_ma && c <= l.max_current_ma))
+          return "The current is outside the limits.";
+        if (l.max_power_mw !== null && v * c > l.max_power_mw * 1000) {
+          return "The request is above the capability's power.";
+        }
+        return null;
+      }
+    }
+  }
+
+  /** Refuses an unconfirmed above-5 V request before anything is sent. */
+  async triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply> {
+    this.#openTrigger();
+    const mv = this.#requestMv(request);
+    if (mv === null && request.protocol === "pd") {
+      throw usage(`The charger offers nothing at position ${request.position}.`);
+    }
+    const refusal = this.#refusal(request);
+    if (refusal !== null) throw usage(refusal);
+    if ((await this.triggerRisk(request)) === "above_5v" && !confirmed) {
+      throw usage("A request above 5 V needs your confirmation.");
+    }
+    const command = this.#commandText(request);
+    this.#triggerLog.push(command);
+    if (this.#mode === "trigger-out-of-sync") {
+      // The meter answers with another command's reply (`type=...`), like the backend's
+      // `OutOfSync` refusal.
+      throw outOfSyncError();
+    }
+    if (this.#mode === "trigger-req-error" && mv !== null && mv > 5000) {
+      // The charger answers every request above 5 V with `req error 252`, like the
+      // backend's failed request; the session stays usable.
+      throw {
+        kind: "protocol",
+        message: "The charger refused the request (req error 252).",
+        hint: null,
+      } satisfies UiError;
+    }
+    this.#openTrigger().entered = request.protocol === "pd" ? "pd" : "legacy";
+    if (this.#session && mv !== null) {
+      // The demo VBUS follows the request; `trigger-sag` keeps it 12 % below.
+      this.#session.triggerVbusV = (mv / 1000) * (this.#mode === "trigger-sag" ? 0.88 : 0.985);
+    }
+    if (request.protocol !== "pd") {
+      return {
+        command,
+        requested_mv: null,
+        requested_ma: null,
+        delivered_mv: null,
+        delivered_ma: null,
+        reply: "ready",
+      };
+    }
+    const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === request.position);
+    const requestedMv = mv ?? 5000;
+    return {
+      command,
+      requested_mv: requestedMv,
+      requested_ma: request.current_ma ?? offer?.max_current_ma ?? null,
+      delivered_mv: Math.round(requestedMv * 0.985),
+      delivered_ma: 0,
+      reply: null,
+    };
+  }
+
+  /** Back to 5 V: `pd req=1` after PD, `reset` after the others; the session stays. */
+  async triggerBackTo5v(): Promise<void> {
+    this.#returnTo5v(this.#openTrigger());
+  }
+
+  /** Back to 5 V, then `pdm close`; nothing when no session is open. */
+  async triggerClose(): Promise<void> {
+    this.#closeTrigger();
+  }
+
+  #returnTo5v(t: MockTrigger): void {
+    if (t.entered === "pd") this.#triggerLog.push("pd req=1");
+    else if (t.entered === "legacy") this.#triggerLog.push("reset");
+    if (this.#session) this.#session.triggerVbusV = null;
+  }
+
+  #closeTrigger(): void {
+    const t = this.#trigger;
+    if (!t) return;
+    this.#returnTo5v(t);
+    this.#triggerLog.push("pdm close");
+    this.#trigger = null;
+    const s = this.#session;
+    if (s && t.rateBefore !== null && !s.recording) {
+      s.rateSps = t.rateBefore;
+      s.carry = 0;
+      s.onEvent({
+        type: "status",
+        data: { state: "rate", rate_sps: t.rateBefore, rate_locked: false },
+      });
+    }
+  }
+
+  // ---- Custom PD messages and the raw console (FR DGSQ6T) ----
+
+  /** The library risk class of a built message; GoodCRC is refused with a reason. */
+  async triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass> {
+    this.#openTrigger();
+    renderMockMessage(message);
+    if (message.data_objects.length === 0) return "at_most_5v";
+    // Request / EPR_Request go by the requested position; every other data message
+    // is above 5 V, like the library classifier.
+    if (message.sop !== "sop" || (message.msg_type !== 2 && message.msg_type !== 9)) {
+      return "above_5v";
+    }
+    const position = (message.data_objects[0]! >>> 28) & 0xf;
+    const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === position);
+    return offer && offer.max_voltage_mv <= 5000 ? "at_most_5v" : "above_5v";
+  }
+
+  /** Sends a built message to the scripted charger (or the demo e-marked cable). */
+  async triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply> {
+    this.#openTrigger();
+    const command = renderMockMessage(message);
+    if ((await this.triggerMessageRisk(message)) === "above_5v" && !confirmed) {
+      throw usage("A message that can raise VBUS above 5 V needs your confirmation.");
+    }
+    this.#triggerLog.push(command);
+    // The demo e-marked cable (the session-2 240 W passive cable) answers a
+    // Discover Identity REQ to a cable plug.
+    const discover =
+      message.sop !== "sop" &&
+      message.msg_type === 15 &&
+      message.data_objects.length === 1 &&
+      message.data_objects[0] === DISCOVER_IDENTITY_CABLE.data_objects[0];
+    return {
+      command,
+      lines: [{ at_ms: Date.now(), direction: "tx", text: command, block: null }],
+      cable: discover ? { ...MOCK_CABLE } : null,
+    };
+  }
+
+  /** The library risk class of a raw console line. */
+  async triggerConsoleRisk(line: string): Promise<RiskClass> {
+    this.#openTrigger();
+    return mockLineRisk(line.trim());
+  }
+
+  /** Sends a raw console line to the scripted charger. */
+  async triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]> {
+    const t = this.#openTrigger();
+    const text = line.trim();
+    // Like the backend: GoodCRC is refused before anything is sent.
+    const refusal = lineRefusal(text);
+    if (refusal !== null) throw usage(refusal);
+    if (mockLineRisk(text) === "above_5v" && !confirmed) {
+      throw usage("A line that can raise VBUS above 5 V needs your confirmation.");
+    }
+    this.#triggerLog.push(text);
+    const at = Date.now();
+    const lines: ConsoleLine[] = [{ at_ms: at, direction: "tx", text, block: null }];
+    const rx = (reply: string, block: string | null = null): void => {
+      lines.push({ at_ms: at, direction: "rx", text: reply, block });
+    };
+    const req = /^pd req=(\d+)/.exec(text);
+    if (text === "pdm parm") {
+      rx("type=0,em=2,sink=0");
+    } else if (text === "entry pd") {
+      t.entered = "pd";
+      rx("ok");
+      rx("pdo:", mockPdoBlock());
+      rx("ready:5000mV,0mA");
+    } else if (/^entry \S+$/.test(text)) {
+      t.entered = "legacy";
+      rx("ok");
+    } else if (req) {
+      t.entered = "pd";
+      const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === Number(req[1]));
+      rx(offer ? `ready:${offer.max_voltage_mv}mV,0mA` : "fail");
+    }
+    return lines;
+  }
+
+  /** Every command the scripted charger received (`pd req=2`, `pd req=1`, `reset`,
+   * `pdm close`, ...), oldest first: what the UI suite checks Cancel against. */
+  triggerCommands(): string[] {
+    return [...this.#triggerLog];
   }
 }

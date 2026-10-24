@@ -257,6 +257,12 @@ rate. [static]
 - [device] On firmware 2.0.6 one reply holds at most 63 records (6-bit
   `chunk`); the backlog is kept between polls. At 1000 SPS poll at least every
   60 ms (the vendor app uses 32 ms) or samples are lost.
+- [device] On firmware 2.0.6 the first poll after a long pause (70 s at
+  50 SPS) can arrive cut short: the section declares 63 records (1260 bytes)
+  but only 1208 bytes come. We keep the whole records, drop the partial one,
+  and report the missing samples as a stream gap at the next record. Only a
+  last `ADC_QUEUE` section gets this leniency; any other cut section is an
+  error.
 
 Rate codes, as measured on firmware 2.0.6 (10 s per code at auth level 1):
 
@@ -491,9 +497,137 @@ Frame header (4 bytes):
 - The note says auto-upload stops after one hour or on unplug unless
   refreshed. [doc]
 
-Text trigger commands (`pdm open`, `entry pd`, `pd req=`, `qc 9V`, ...) are
-lowercase ASCII with no line terminator; they are documented separately and
-not yet tested on the device. [doc] [static]
+## PDM text session (protocol triggering)
+
+The CDC port also carries the "PDM" text commands that make the meter act
+as a sink and ask a charger for a voltage. [doc] [static] [device]
+(firmware 2.0.6, session 2)
+
+- Commands are lowercase ASCII, one per write. The vendor tools send no
+  terminator; a trailing `\r\n` or extra bytes are tolerated because the
+  firmware matches by prefix. Matching is case-sensitive and unknown text
+  gets no reply. Keep at least 60 ms between commands. [static] [device]
+- Replies are text lines ending in `\n` (no `\r`). Some replies embed a
+  binary capability block after a tag (`pdo:`, `ufcs:`, `scp:`, `vfcp:`,
+  `tfcp:`), so the stream must be read as bytes. Binary PUT_DATA replies and
+  ADCNEW frames can arrive between text lines at any time. [device]
+- Session: `pdm open` → `pdm mode entry` (and a version line) and the meter
+  presents Rd, so VBUS comes up at 5 V. `reset` → `ok`, VBUS stays at 5 V.
+  `pdm close` → `ok`, Rd is removed. A `busy` reply to `pdm open` is
+  answered with `reset`. [device]; `busy` [static] [doc]
+- The text session is tied to the open port: after the port is closed and
+  reopened, nothing is answered until `pdm open` (and `entry <protocol>`)
+  is sent again. [device]
+- `entry pd` → `ok`, `cc1 attach`, then a `pdo:` block, `ready:<mV>mV,<mA>mA`,
+  and, when the meter enters EPR, a second `pdo:` block and `ready:`. The
+  blocks arrive unprompted. [device]
+- `pdo:` block: tag, one ASCII byte (`'4'` SPR, `'9'` EPR: probably the
+  highest position in use; do not depend on it), a slot count (11), that
+  many u32 LE PDOs (0 = unused slot), `\n`. `pd req=<slot>` uses the slot
+  position. [device]
+- `pd req=<slot>` → `req:<mV>mV,<mA>mA` then `ready:<mV>mV,<mA>mA` with VBUS
+  and IBUS at PS_RDY. `pd req=<slot>,volt=<mV>,cur=<mA>` requests a PPS or
+  AVS level. `pd hrst` sends a Hard Reset and the charger renegotiates from
+  5 V. `pdm parm` → `type=<n>,em=<n>,sink=<n>`; the default `em=2` (EPR cable
+  emulation) makes the meter enter EPR by itself. [device]
+- A protocol the charger lacks answers `ok` then `timeout` (UFCS: three
+  `timeout` lines). [device]
+- Detection: `entry bc` and `entry apple` answer `true` or `false` [doc];
+  on the device `entry bc` answered only `ok` (read as unknown) and
+  `entry apple` answered `fail` on a non-Apple charger (not supported).
+  `entry list` (and `entry list+`, which adds VOOC and MTK PE and needs a
+  load [doc]) prints `starting`, then one `<protocol>:<true|null>
+  [<mV>mV,<mA>mA]` line per protocol, and then went silent for 45 s; `reset`
+  ends it with `ok`. How a full list ends is not known yet. [device]
+- The meter's own probing during `entry list` may raise VBUS on some
+  chargers, so nothing that cannot take it belongs on the output. [inferred]
+- The `ufcs:`, `scp:`, `vfcp:` and `tfcp:` block layouts come from the vendor
+  app only. [static]
+- A cut-short list ended on a bare `vfcp:` line [device]. We read `vfcp:`
+  then `\n` as that text line only when nothing or a printable line follows;
+  `scp:` / `tfcp:` then `\n` stay blocks (SCP's first data byte is its max
+  power's low byte, which can be 0x0A). [inferred]
+- Other protocols: `entry qc|fcp|afc|sfcp|scp|vfcp|tfcp|ufcs` → `ok` then
+  `ready` when the charger speaks it, followed by the protocol's capability
+  block for SCP, VFCP, TFCP and UFCS. Requests: `qc 5V|9V|12V|20V`,
+  `qc3 volt=<mV>` (3600-20000 mV in 200 mV steps), `qc3 inc=<n>` /
+  `qc3 dec=<n>`, `fcp|afc|sfcp 5V|9V|12V`, `scp|vfcp|tfcp volt=<mV>,cur=<mA>`,
+  `ufcs req=<n>,volt=<mV>,cur=<mA>` (capability n, counted from 1), and
+  `ufcs cmd=<n>` (a UFCS control message). [static] [doc] Only the timeout
+  answers have been seen on the device so far. `reset` is used to leave
+  them; that it returns VBUS to 5 V is seen after PD [device] and assumed
+  for the others. [inferred]
+- Seen on the device on 2026-10-23 (firmware 2.0.6) [device]:
+  - A new bulk CONNECT while a PDM session is open silences that session:
+    later commands get no reply. With the bulk session connected first and
+    polling, PDM and bulk work side by side.
+  - The EPR `pdo:` list follows the first `ready:` by about 2.7 s; a request
+    sent before it arrives is ignored. EPR needs the e-marked cable in the
+    path: with the meter's plug straight in the 140 W charger only the SPR
+    list came.
+  - `entry list` prints a full list ending in a blank line and `done`.
+    Supported protocols show what they offer instead of `true`
+    (`qc2.0:5V,9V,12V`, `qc3.0:QC3+ 3.6-12V`, `ufcs:63.0W,` with indented
+    `Num<n>:` lines), modes are bare lines (`Apple 2.4A`), and a `pd:` block
+    lists the PDOs. A list line may start with `A` (0x41) or a block tag,
+    so only a printable line up to `\n` is read as text. Cutting the list
+    short with `reset` while the meter probes left every later reply one
+    command late until the meter was power-cycled.
+  - `entry bc` / `entry apple` answered `fail` while the list reported
+    `bc1.2:true`. `entry fcp` / `entry afc` answered `ready` on chargers
+    whose list said `null`, and the requests that followed got no reply or
+    did not change VBUS: `ready` after an entry does not prove support.
+  - macOS lists the port twice (`/dev/cu.*` and `/dev/tty.*`); the `cu.`
+    one is used.
+  - `pd data=` with a SOP' Discover Identity (`018F1001A800FF`, and the
+    SVDM 1.0 form `018F1001A000FF`) goes out on the wire. A 240 W passive
+    e-marked cable behind an Apple 140 W charger answered it with GoodCRC
+    only, and the text channel printed no reply line. In the same bulk PD
+    capture the charger's own SOP' query got the full ACK (VID 0x050D, PID
+    0x8254, passive, 50 V, 5 A, EPR). The cable seems to answer only the
+    VCONN source. [inferred] The `pd data=` receive format is still
+    unconfirmed.
+  - The console answer to `pdm parm` is `type=0,em=2,sink=0`; after
+    `entry pd` the `pdo:` block arrives later than `ok` and `cc1 attach`.
+- Verified on the device with nothing on the output: PD fixed 9/15/20/28 V,
+  PPS, EPR AVS, hard reset, QC 2.0 and QC 3.0 voltage requests. Not yet
+  verified: QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS requests.
+- Our limits: a request must fit the capability block's voltage, current
+  and power; VFCP's two fixed modes are checked as one range plus the power
+  limit. [inferred] `qc3 inc` and every `ufcs cmd=<n>` count as above 5 V,
+  since no trusted table of UFCS control numbers is at hand.
+
+How our library sends them safely:
+
+- Every text write passes the same frame-type guard as binary requests (the
+  first byte is read as a frame type), so for example a line starting with
+  `H` (0x48, SET_DATA) is refused, and so are the CDC ADCNEW types.
+- Every command is classified before it is sent: read-only, 5 V or less, or
+  above 5 V, using the charger's last known offers. Unknown or unparsable
+  text, a request for an offer we have not seen, and a range request below
+  the offer's minimum all count as above 5 V. A command above 5 V is sent
+  only with an explicit confirmation made for that one command. Offers are
+  forgotten when the port is reopened.
+- GoodCRC is never sent: `pd cmd=1` and a `pd data` GoodCRC are refused in
+  any spelling (leading zeros, `0x`, either hex case), and a `pd cmd`/
+  `pd data` line that cannot be read is refused too. PD role swaps (DR,
+  PR, VCONN and FR_Swap) count as above 5 V. [inferred]
+- `pdm close` is always sent before the port is released.
+- Out of sync: a lagging meter was seen answering each command with the
+  previous command's reply [device] (2026-10-23). A line that only another
+  command gets (`pdm mode entry`, `type=`, `req:` / `req error`, a bare `ok`
+  to `pdm open` / `pdm parm`) latches the session: every later command is
+  refused until it is reopened. A late `ver<n>` after `pdm mode entry` is
+  not foreign; an unprompted `req:` is, on purpose (fail-closed). [inferred]
+- The way back to 5 V stays open when latched: only `pd hrst`, `pd req=1`
+  and `reset` may be written, blind (a short settle, no reply read or
+  trusted), then `pdm close`. VBUS is reported as not confirmed. [inferred]
+- After an `entry list` cut short by `reset`, a read-only `pdm parm` must get
+  its own `type=...` reply; anything else latches the session [device]. List
+  lines are checked for foreign replies as they arrive.
+- Known limits: a stale reply that starts with the awaited prefix cannot be
+  told apart, e.g. a late `fail` from `entry bc` answering `entry apple`, or
+  an unprompted `ready:` answering a legacy request. [inferred]
 
 ## PD capture
 
@@ -576,6 +710,9 @@ transport sends only the ADC snapshot. [device] [static]
 | type 0x4A | memory / SPI-flash write | [static] |
 | memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
 | any HID request other than the ADC snapshot (GET_DATA mask 0x001) | replies over 64 bytes hang and reboot the meter; control commands are ignored | [device] (firmware 2.0.6) |
+
+PDM text commands go through the same guard, and a request that could raise
+VBUS above 5 V needs a per-command confirmation (see PDM text session).
 
 Separate from the guard, one rule applies on CDC: there SYNC / CONNECT /
 DISCONNECT (0x01..0x03) start or stop the ADCNEW stream, so the CDC transport

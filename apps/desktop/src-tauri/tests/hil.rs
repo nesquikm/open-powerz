@@ -545,3 +545,88 @@ fn csv_round_trip_dry_run_against_the_demo_device() {
     let (rec_rows, export_rows) = record_and_export(&mut m, "demo:load-5v-1a", 50, 2);
     assert!(rec_rows > 0 && export_rows >= rec_rows);
 }
+
+// ---- AC-DGSQ6S.7: the Trigger panel's backend on the real meter ----
+
+/// The desktop Trigger panel's backend driven the way the panel drives it,
+/// on the real meter with the 140 W charger and NOTHING on the output: the
+/// bulk session first, then the trigger session; detection; the PD
+/// section; an unconfirmed request refused; confirmed 9 V (and 28 V when
+/// offered) seen in the meter stream; Back to 5 V; disconnect closes all.
+/// Needs `POWERZ_HIL=1` and `POWERZ_HIL_TRIGGER=1`.
+#[test]
+fn hil_trigger_panel_backend_drive() {
+    use open_powerz_desktop_lib::trigger::{TriggerProtocol, TriggerRequest};
+    if !hil_or_skip("hil_trigger_panel_backend_drive")
+        || std::env::var("POWERZ_HIL_TRIGGER").as_deref() != Ok("1")
+    {
+        return;
+    }
+    let _meter = one_at_a_time();
+    let mut m = manager();
+    let id = meter_id(&m);
+    let rx = connect(&mut m, &id, 50);
+    first_samples(&rx);
+    m.open_trigger()
+        .unwrap_or_else(|e| panic!("open_trigger: {}", e.message));
+    let c = m.trigger_control().expect("a trigger session is open");
+    let pd = |position: u8| TriggerRequest::Pd {
+        position,
+        voltage_mv: None,
+        current_ma: None,
+    };
+    let peak = |rx: &mpsc::Receiver<BackendEvent>, secs: u64| -> f64 {
+        let w = collect_for(rx, Duration::from_secs(secs));
+        assert!(w.errors.is_empty() && !w.disconnected, "{:?}", w.errors);
+        let n = w.samples.len();
+        let mut v: Vec<f64> = w.samples.iter().map(|s| s.vbus_v).collect();
+        v.sort_by(f64::total_cmp);
+        v.get(n.saturating_sub(n / 4 + 1)).copied().unwrap_or(0.0)
+    };
+
+    let det = c
+        .detect()
+        .unwrap_or_else(|e| panic!("detect: {}", e.message));
+    eprintln!(
+        "detect: bc12={} apple={} entries={} complete={}",
+        det.bc12,
+        det.apple,
+        det.entries.len(),
+        det.complete
+    );
+    let section = c
+        .list(TriggerProtocol::Pd)
+        .unwrap_or_else(|e| panic!("list pd: {}", e.message));
+    assert!(section.supported, "PD is not offered");
+    let positions: Vec<u8> = section.offers.iter().map(|o| o.position).collect();
+    eprintln!("pd offers at positions {positions:?}");
+
+    // The backend is the final gate: unconfirmed above 5 V is refused.
+    assert!(c.request(pd(2), false).is_err(), "unconfirmed 9 V was sent");
+    let v = peak(&rx, 2);
+    assert!(v < 5.6, "VBUS {v} V after a refused request");
+
+    let mut ladder = vec![(2u8, 9.0)];
+    if positions.contains(&8) {
+        ladder.push((8, 28.0));
+    }
+    for (position, want) in ladder {
+        let reply = c
+            .request(pd(position), true)
+            .unwrap_or_else(|e| panic!("request {position}: {}", e.message));
+        let v = peak(&rx, 3);
+        eprintln!(
+            "pd req={position}: ready {:?} mV, stream VBUS {v:.3} V",
+            reply.delivered_mv
+        );
+        assert!((v - want).abs() <= want * 0.05, "{v} V for {want} V");
+        c.back_to_5v()
+            .unwrap_or_else(|e| panic!("back to 5 V: {}", e.message));
+        let v = peak(&rx, 2);
+        eprintln!("back to 5 V: stream VBUS {v:.3} V");
+        assert!(v < 5.6, "VBUS {v} V after Back to 5 V");
+    }
+
+    m.disconnect().expect("disconnect");
+    assert!(!m.trigger_open(), "the trigger session is still open");
+}

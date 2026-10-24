@@ -9,6 +9,7 @@ pub mod pd_import;
 pub mod recording;
 pub mod stats;
 pub mod store;
+pub mod trigger;
 pub mod ui_error;
 pub mod worker;
 
@@ -225,6 +226,13 @@ async fn attach(
 ) -> Result<Option<AttachedSession>, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
+        // A reloaded page (e.g. after the web content process ended) starts
+        // without a trigger session, so one the old page left open returns
+        // to 5 V and closes now, outside the manager lock (FR DGSQ6S).
+        let leftover = state.manager().take_trigger();
+        if let Some(trigger) = leftover {
+            let _ = trigger.close();
+        }
         // Taken under the lock; the handover waits for the worker without it.
         let Some(attacher) = state.manager().attacher() else {
             return Ok(None);
@@ -242,9 +250,16 @@ async fn attach(
 async fn disconnect(state: Shared<'_>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        // Take the session under the lock; wait for the worker without it.
-        let session = state.manager().take_session()?;
-        session.disconnect();
+        // Take the sessions under the lock; wait for them without it.
+        let (trigger, session) = {
+            let mut manager = state.manager();
+            (manager.take_trigger(), manager.take_session())
+        };
+        // Back to 5 V and `pdm close` before the queue stops (FR DGSQ6S).
+        if let Some(trigger) = trigger {
+            let _ = trigger.close();
+        }
+        session?.disconnect();
         Ok(())
     })
     .await
@@ -279,8 +294,173 @@ async fn set_rate(state: Shared<'_>, rate_sps: u32) -> Result<(), UiError> {
 async fn pd_start(state: Shared<'_>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().control()?;
+        let control = {
+            let manager = state.manager();
+            // The PD capture waits while triggering (FR DGSQ6S). [inferred]
+            if manager.trigger_open() {
+                return Err(UiError::usage(
+                    "Close the trigger session to capture PD traffic.",
+                ));
+            }
+            manager.control()?
+        };
         control.start_pd()
+    })
+    .await
+}
+
+/// Open the trigger session on the connected meter (FR DGSQ6S).
+#[tauri::command]
+async fn trigger_open(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        // The port opens and the PDM handshake runs without the manager
+        // lock, so a slow meter never blocks disconnect or attach.
+        let opener = state.manager().trigger_opener()?;
+        let worker = opener.open()?;
+        state.manager().install_trigger(worker)
+    })
+    .await
+}
+
+/// BC 1.2, Apple and the automatic list; nothing above 5 V is asked.
+#[tauri::command]
+async fn trigger_detect(state: Shared<'_>) -> Result<trigger::Detection, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        // The handle is taken off the manager, so its lock is not held while
+        // the session thread answers.
+        let control = state.manager().trigger_control()?;
+        control.detect()
+    })
+    .await
+}
+
+/// One protocol's section; a protocol the charger lacks is `supported: false`.
+#[tauri::command]
+async fn trigger_list(
+    state: Shared<'_>,
+    protocol: trigger::TriggerProtocol,
+) -> Result<trigger::ProtocolSection, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.list(protocol)
+    })
+    .await
+}
+
+/// The library risk class of a request; `above_5v` needs the user's
+/// confirmation.
+#[tauri::command]
+async fn trigger_risk(
+    state: Shared<'_>,
+    request: trigger::TriggerRequest,
+) -> Result<trigger::RiskClass, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.risk(request)
+    })
+    .await
+}
+
+/// Send a request; above 5 V it is refused unless `confirmed` (the backend
+/// is the final gate).
+#[tauri::command]
+async fn trigger_request(
+    state: Shared<'_>,
+    request: trigger::TriggerRequest,
+    confirmed: bool,
+) -> Result<trigger::TriggerReply, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.request(request, confirmed)
+    })
+    .await
+}
+
+/// The library risk class of a built PD message (FR DGSQ6T); GoodCRC and
+/// malformed messages are a usage error with the reason.
+#[tauri::command]
+async fn trigger_message_risk(
+    state: Shared<'_>,
+    message: trigger::PdMessageRequest,
+) -> Result<trigger::RiskClass, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.message_risk(message)
+    })
+    .await
+}
+
+/// Send a built PD message; above 5 V it is refused unless `confirmed`.
+#[tauri::command]
+async fn trigger_message_send(
+    state: Shared<'_>,
+    message: trigger::PdMessageRequest,
+    confirmed: bool,
+) -> Result<trigger::PdSendReply, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.send_message(message, confirmed)
+    })
+    .await
+}
+
+/// The library risk class of a raw console line (FR DGSQ6T).
+#[tauri::command]
+async fn trigger_console_risk(
+    state: Shared<'_>,
+    line: String,
+) -> Result<trigger::RiskClass, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.console_risk(line)
+    })
+    .await
+}
+
+/// Send a raw console line; above 5 V (any unparsable line too) it is
+/// refused unless `confirmed`; GoodCRC is always refused.
+#[tauri::command]
+async fn trigger_console_send(
+    state: Shared<'_>,
+    line: String,
+    confirmed: bool,
+) -> Result<Vec<trigger::ConsoleLine>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.console_send(line, confirmed)
+    })
+    .await
+}
+
+/// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
+/// protocols `reset`. The session stays open.
+#[tauri::command]
+async fn trigger_back_to_5v(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = state.manager().trigger_control()?;
+        control.back_to_5v()
+    })
+    .await
+}
+
+/// Back to 5 V and close the trigger session, if one is open.
+#[tauri::command]
+async fn trigger_close(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        // Take the session under the lock; close it without it.
+        let trigger = state.manager().take_trigger();
+        trigger.map_or(Ok(()), trigger::TriggerWorker::close)
     })
     .await
 }
@@ -731,7 +911,18 @@ pub fn run() {
             pd_clear,
             pd_save,
             pd_open,
-            pd_import
+            pd_import,
+            trigger_open,
+            trigger_detect,
+            trigger_list,
+            trigger_risk,
+            trigger_request,
+            trigger_back_to_5v,
+            trigger_message_risk,
+            trigger_message_send,
+            trigger_console_risk,
+            trigger_console_send,
+            trigger_close
         ])
         .on_window_event(|window, event| {
             if window.label() == "main"

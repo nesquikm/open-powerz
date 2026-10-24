@@ -4,6 +4,21 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-10-24 — "Trigger Happy"
+
+### Added
+- PDM text session over the meter's virtual serial port: a safe command set, reply and capability-block parsing, a risk classifier, and a single-use confirmation for anything above 5 V; replies that belong to another command stop the session with a power-cycle hint (PR41FT)
+- USB PD triggering from the command line: list the charger's offers, request fixed, PPS and EPR AVS voltages, hard reset, and always end back at 5 V (DGSQ6P)
+- Legacy and vendor protocol triggering for QC 2.0/3.0, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS, each request entering its own protocol first (DGSQ6Q)
+- Charger protocol detection: BC1.2 and Apple checks, the meter's automatic list with a sync check after a cut list, and both sources named when they disagree (DGSQ6R)
+- Desktop trigger panel: detection, per-protocol request controls, a confirmation dialog above 5 V, failed requests with their reason, Back to 5 V, and a measurement stream that survives the list's pause (DGSQ6S)
+- Custom PD messages and a raw console: build control and data messages for SOP, SOP' and SOP'', a Discover Identity preset for e-marked cables, GoodCRC refused, `powerz pd send` and `powerz console` (DGSQ6T)
+
+### Fixed
+- Windows CI fails on every failing command and runs green (2BF5G6)
+
+Total test count at release: 2185 tests, 0 failures, 0 errors.
+
 ## [0.3.0] — 2026-10-23 — "Packet Sleuth"
 
 ### Added
