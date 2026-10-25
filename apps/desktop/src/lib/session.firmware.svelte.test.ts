@@ -17,6 +17,8 @@ function connected(): BackendEvent {
       bootloader_version: "2.5",
       mode: "application",
       warnings: ["outdated"],
+      update_required: false,
+      firmware_problems: [],
       serial: "123456",
       rate_sps: 50,
       rate_locked: false,

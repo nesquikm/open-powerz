@@ -64,6 +64,12 @@ pub struct ConnectedInfo {
     pub bootloader_version: String,
     /// Firmware warning codes (`too_old`, `outdated`, `update_required`).
     pub warnings: Vec<&'static str>,
+    /// The HEAD reply asked for a firmware update; `None` (JSON `null`)
+    /// when HEAD could not be read.
+    pub update_required: Option<bool>,
+    /// What could not be read while getting the firmware status, one line
+    /// per failed step (an info block or HEAD).
+    pub firmware_problems: Vec<String>,
     /// Serial number.
     pub serial: String,
     /// Queue rate in samples per second, when known.
@@ -260,6 +266,8 @@ fn connected_info(
             .as_ref()
             .map_or_else(String::new, |b| b.version().to_owned()),
         warnings: fw.warnings().into_iter().map(|w| w.code()).collect(),
+        update_required: fw.update_required,
+        firmware_problems: fw.problems.iter().map(|p| p.text.clone()).collect(),
         serial: info.serial.clone(),
         rate_sps: (!rate_locked).then(|| rate.sps()),
         rate_locked,
@@ -309,7 +317,7 @@ fn open_session<T: Transport, C: Clock>(
     let mut session = Session::with_clock(GuardedTransport::new(transport), clock);
     let mut run =
         || -> Result<(session::DeviceInfo, session::FirmwareStatus, bool), session::Error> {
-            // CONNECT, then HEAD and both info blocks (read-only, FR V9SK52).
+            // CONNECT, then both info blocks and HEAD (read-only, FR V9SK52).
             session.connect()?;
             // A HEAD or info block that timed out or did not decode only
             // costs the firmware status; an unplugged or refused meter

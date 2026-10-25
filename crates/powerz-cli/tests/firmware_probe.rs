@@ -224,6 +224,93 @@ fn probe_json_keeps_the_raw_reply_and_a_rejected_connect() {
     assert_eq!(v["head_raw"], "40020001", "{v}");
 }
 
+// ---------------------------------------------------------------- raw HEAD bytes in both modes
+
+/// A bootloader-mode identity: one vendor interface with string `BOOT`.
+fn boot_identity() -> UsbIdentity {
+    UsbIdentity {
+        vid: 0x5FC9,
+        pid: 0x0063,
+        product: Some("POWER-Z KM003C".to_owned()),
+        interfaces: vec![iface(0, 0xFF, Some("BOOT"))],
+    }
+}
+
+/// `firmware_probe` with `identity` on a fresh session over CONNECT →
+/// ACCEPT and HEAD → `head_reply`; returns the output.
+fn probe_head_as(identity: &UsbIdentity, head_reply: Vec<u8>, json: bool) -> String {
+    let mut s = session(MockTransport::new(vec![
+        Step::transact(frame::connect(1).to_vec(), accept(1)),
+        Step::transact(head::request(2).to_vec(), head_reply),
+    ]));
+    let mut out = Vec::new();
+    firmware_probe(&mut s, identity, json, &mut out)
+        .unwrap_or_else(|e| panic!("probe failed: {e}"));
+    text(&out)
+}
+
+fn both_modes() -> [(&'static str, UsbIdentity); 2] {
+    [
+        ("application", app_identity()),
+        ("bootloader", boot_identity()),
+    ]
+}
+
+/// A HEAD reply of another type (not 0x40, not REJECT).
+fn wrong_type(id: u8) -> Vec<u8> {
+    vec![0x41, id, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04]
+}
+
+#[test]
+fn probe_prints_the_raw_bytes_of_a_rejected_head_in_both_modes() {
+    for (mode, identity) in both_modes() {
+        let out = probe_head_as(&identity, reject(2), false);
+        assert!(
+            out.contains("HEAD reply (raw): 06 02 00 00"),
+            "{mode}: raw REJECT bytes:\n{out}"
+        );
+        assert!(
+            out.to_ascii_lowercase().contains("rejected"),
+            "{mode}: still says HEAD was rejected:\n{out}"
+        );
+        assert!(!out.contains("HEAD field:"), "{mode}: no field:\n{out}");
+    }
+}
+
+#[test]
+fn probe_json_keeps_the_raw_bytes_of_a_rejected_head_in_both_modes() {
+    for (mode, identity) in both_modes() {
+        let out = probe_head_as(&identity, reject(2), true);
+        let v: Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["head"], "rejected", "{mode}: {v}");
+        assert_eq!(v["head_field"], Value::Null, "{mode}: {v}");
+        assert_eq!(v["head_raw"], "06020000", "{mode}: {v}");
+    }
+}
+
+#[test]
+fn probe_prints_the_raw_bytes_of_a_wrong_type_head_in_both_modes() {
+    for (mode, identity) in both_modes() {
+        let out = probe_head_as(&identity, wrong_type(2), false);
+        assert!(
+            out.contains("HEAD reply (raw): 41 02 00 00 01 02 03 04"),
+            "{mode}: raw wrong-type bytes:\n{out}"
+        );
+        assert!(!out.contains("HEAD field:"), "{mode}: no field:\n{out}");
+    }
+}
+
+#[test]
+fn probe_json_keeps_the_raw_bytes_of_a_wrong_type_head_in_both_modes() {
+    for (mode, identity) in both_modes() {
+        let out = probe_head_as(&identity, wrong_type(2), true);
+        let v: Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["head"], "raw", "{mode}: {v}");
+        assert_eq!(v["head_field"], Value::Null, "{mode}: {v}");
+        assert_eq!(v["head_raw"], "4102000001020304", "{mode}: {v}");
+    }
+}
+
 // ---------------------------------------------------------------- the binary on the simulator
 
 const ENV_KNOBS: [&str; 6] = [

@@ -156,6 +156,8 @@ fn connected_status_carries_mode_both_versions_and_the_outdated_warning() {
     assert_eq!(v["firmware_version"], "2.0.6", "{v}");
     assert_eq!(v["bootloader_version"], "2.5", "{v}");
     assert_eq!(v["warnings"], json!(["outdated"]), "{v}");
+    assert_eq!(v["update_required"], false, "HEAD answered field 0: {v}");
+    assert_eq!(v["firmware_problems"], json!([]), "{v}");
 }
 
 #[test]
@@ -209,6 +211,8 @@ enum HeadFailure {
     Timeout,
     /// A reply with the right id that is too short to decode.
     Garbage,
+    /// A REJECT (`06 id 00 00`) with the right id.
+    Reject,
 }
 
 /// The simulated meter behind a pipe, except that HEAD (0x40) fails.
@@ -229,6 +233,7 @@ impl Transport for HeadFault {
             return match self.how {
                 HeadFailure::Timeout => Err(transport::Error::Timeout),
                 HeadFailure::Garbage => Ok(vec![0x40, request[1]]),
+                HeadFailure::Reject => Ok(vec![0x06, request[1], 0x00, 0x00]),
             };
         }
         self.pipe.transact(request, timeout)
@@ -275,15 +280,83 @@ fn an_undecodable_head_reply_still_connects_without_a_firmware_warning() {
 
 #[test]
 fn a_one_off_head_timeout_from_the_sim_still_connects() {
-    // Request 1 is CONNECT, request 2 is HEAD.
+    // Request 1 is CONNECT, 2 and 3 the info blocks, 4 the HEAD.
     let clock = clock();
-    let dev = sim(&clock).with_faults(FaultPlan::new().timeout_at(2));
+    let dev = sim(&clock).with_faults(FaultPlan::new().timeout_at(4));
     let (v, types) = connect(dev, &clock);
-    assert_eq!(types.first(), Some(&0x02), "{types:02x?}");
-    assert_eq!(types.get(1), Some(&0x40), "{types:02x?}");
+    assert_eq!(
+        types.get(..4),
+        Some(&[0x02, 0x44, 0x44, 0x40][..]),
+        "both info blocks before HEAD: {types:02x?}"
+    );
     assert_eq!(v["mode"], "application", "{v}");
     let warnings = v["warnings"].as_array().expect("warnings array");
     assert!(!warnings.contains(&json!("update_required")), "{v}");
+}
+
+// ---- AC-V9SK52.2 / .3: a failed HEAD keeps the versions (real-meter bug) ----
+
+/// The HEAD problem text in `v["firmware_problems"]`.
+fn head_problem(v: &Value) -> String {
+    let problems = v["firmware_problems"]
+        .as_array()
+        .unwrap_or_else(|| panic!("firmware_problems array: {v}"));
+    assert!(
+        problems.iter().all(Value::is_string),
+        "each problem is its text: {v}"
+    );
+    problems
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|p| p.contains("HEAD"))
+        .unwrap_or_else(|| panic!("a HEAD problem: {v}"))
+        .to_owned()
+}
+
+#[test]
+fn a_failed_head_keeps_versions_and_warnings_from_the_blocks() {
+    for how in [
+        HeadFailure::Timeout,
+        HeadFailure::Garbage,
+        HeadFailure::Reject,
+    ] {
+        let clock = clock();
+        let (v, _) = connect_with_head(how, &clock);
+        assert_eq!(v["firmware_version"], "2.0.6", "{v}");
+        assert_eq!(v["bootloader_version"], "2.5", "{v}");
+        assert_eq!(v["warnings"], json!(["outdated"]), "{v}");
+    }
+}
+
+#[test]
+fn a_failed_head_reports_update_required_as_unknown_and_lists_the_problem() {
+    for how in [
+        HeadFailure::Timeout,
+        HeadFailure::Garbage,
+        HeadFailure::Reject,
+    ] {
+        let clock = clock();
+        let (v, _) = connect_with_head(how, &clock);
+        assert_eq!(v["update_required"], Value::Null, "unknown, not false: {v}");
+        let p = head_problem(&v);
+        assert!(!p.trim().is_empty(), "{v}");
+    }
+}
+
+#[test]
+fn a_rejected_head_problem_names_the_reason_and_the_raw_reply() {
+    let clock = clock();
+    let (v, types) = connect_with_head(HeadFailure::Reject, &clock);
+    let p = head_problem(&v);
+    assert!(p.contains("the meter sent REJECT"), "{p:?}");
+    let squashed: String = p
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    assert!(squashed.contains("060400"), "the raw reply in hex: {p:?}");
+    // The queue still starts: the session is fully up.
+    assert!(types.contains(&0x0E), "queue never started: {types:02x?}");
 }
 
 // ---- AC-V9SK52.5 hardening: the backend refuses a bootloader-mode meter ----

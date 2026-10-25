@@ -269,7 +269,7 @@ pub fn device_info_steps(first: u8) -> Vec<Step> {
 }
 
 /// Script of `Session::firmware_status` from request id `first`: CONNECT,
-/// HEAD (old-firmware field 0), then the bootloader and application blocks.
+/// the bootloader and application blocks, then HEAD (old-firmware field 0).
 pub fn firmware_status_steps(first: u8) -> Vec<Step> {
     [
         vec![Step::transact(
@@ -282,16 +282,16 @@ pub fn firmware_status_steps(first: u8) -> Vec<Step> {
 }
 
 /// Script of `Session::read_firmware_status` (an already connected
-/// session) from request id `first`: HEAD (old-firmware field 0), then the
-/// bootloader and application blocks. No CONNECT.
+/// session) from request id `first`: the bootloader and application blocks,
+/// then HEAD (old-firmware field 0). No CONNECT.
 pub fn read_firmware_status_steps(first: u8) -> Vec<Step> {
     [
+        memread_steps(first, HW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_HW)),
+        memread_steps(first + 1, FW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_FW)),
         vec![Step::transact(
-            powerz_protocol::decode::head::request(first).to_vec(),
-            vec![0x40, first, 0x00, 0x01, 0, 0, 0, 0],
+            powerz_protocol::decode::head::request(first + 2).to_vec(),
+            vec![0x40, first + 2, 0x00, 0x01, 0, 0, 0, 0],
         )],
-        memread_steps(first + 1, HW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_HW)),
-        memread_steps(first + 2, FW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_FW)),
     ]
     .concat()
 }

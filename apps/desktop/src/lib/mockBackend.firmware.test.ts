@@ -34,6 +34,20 @@ describe("MockBackend firmware details", () => {
     });
   });
 
+  it("connected status says the update check was read and nothing went wrong", async () => {
+    const backend = new MockBackend();
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
+    await backend.disconnect();
+    const first = events[0];
+    expect(first?.type).toBe("status");
+    if (first?.type !== "status" || first.data.state !== "connected") {
+      throw new Error(`not a connected status: ${JSON.stringify(first)}`);
+    }
+    expect(first.data.update_required).toBe(false);
+    expect(first.data.firmware_problems).toEqual([]);
+  });
+
   it("`?mock=bootloader` is a mock mode", () => {
     expect(MOCK_MODES).toContain("bootloader");
     expect(mockModeFromUrl("?mock=bootloader")).toBe("bootloader");

@@ -46,7 +46,7 @@
     <section aria-label="Device details">
       <h3>Device details</h3>
       <dl>
-        {#each deviceDetailsRows(details) as row (row.label)}
+        {#each deviceDetailsRows(details) as row, i (`${row.label}:${i}`)}
           <dt>{row.label}</dt>
           <dd>{row.value}</dd>
         {/each}

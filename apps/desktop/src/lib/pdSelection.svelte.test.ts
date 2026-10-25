@@ -74,6 +74,8 @@ describe("PdSelection follows the capture's clears", () => {
         bootloader_version: "",
         mode: "application",
         warnings: [],
+        update_required: false,
+        firmware_problems: [],
         serial: "SIM",
         rate_sps: 50,
         rate_locked: false,

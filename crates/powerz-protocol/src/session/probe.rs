@@ -2,11 +2,8 @@
 //! and nothing else, in application or bootloader mode.
 
 use super::{Clock, Error, Session};
-use crate::decode::head::HeadReply;
+use crate::decode::head::{self, HeadReply};
 use crate::transport::{self, Transport};
-
-/// REJECT message type `[static]`.
-const REJECT: u8 = 0x06;
 
 /// How the meter answered CONNECT.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,8 +23,8 @@ pub enum HeadOutcome {
     Field(u32),
     /// A reply that does not decode as HEAD, kept as sent.
     Raw(Vec<u8>),
-    /// REJECT.
-    Rejected,
+    /// REJECT, kept as sent.
+    Rejected(Vec<u8>),
     /// No answer.
     TimedOut,
 }
@@ -54,7 +51,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
             Err(e) => return Err(e),
         };
         let head = match self.head_exchange() {
-            Ok(reply) if reply.first().map(|b| b & 0x7F) == Some(REJECT) => HeadOutcome::Rejected,
+            Ok(reply) if head::is_reject(&reply) => HeadOutcome::Rejected(reply),
             Ok(reply) => match HeadReply::decode(&reply) {
                 Ok(h) => HeadOutcome::Field(h.old_firmware_field()),
                 Err(_) => HeadOutcome::Raw(reply),

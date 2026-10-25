@@ -55,3 +55,25 @@ impl HeadReply {
         self.field != 0
     }
 }
+
+/// Whether `reply` is a REJECT (type 0x06, extend bit ignored) rather than
+/// a HEAD reply `[static]`.
+pub(crate) fn is_reject(reply: &[u8]) -> bool {
+    reply.first().map(|b| b & 0x7F) == Some(crate::frame::msg::REJECT)
+}
+
+/// `bytes` as lowercase hex pairs joined by `sep`: how raw HEAD replies
+/// are shown in error messages and probe output.
+///
+/// ```
+/// use powerz_protocol::decode::head::hex;
+/// assert_eq!(hex(&[0x40, 0x0a], " "), "40 0a");
+/// assert_eq!(hex(&[0x40, 0x0a], ""), "400a");
+/// ```
+pub fn hex(bytes: &[u8], sep: &str) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(sep)
+}

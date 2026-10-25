@@ -4,7 +4,7 @@ use std::io::Write;
 
 use powerz_protocol::decode::DeviceInfoBlock;
 use powerz_protocol::firmware::DeviceMode;
-use powerz_protocol::session::{Clock, Session};
+use powerz_protocol::session::{Clock, FirmwareProblemKind, Session};
 use powerz_protocol::transport::Transport;
 
 use crate::error::CliError;
@@ -15,7 +15,11 @@ use crate::output::write_json;
 ///
 /// JSON keys `model`, `mode`, `firmware_version`, `hardware_version`,
 /// `application` / `bootloader` (`{model, version, date}` or `null`),
-/// `update_required`, `warnings` (codes), `serial`, `uid`.
+/// `update_required` (`null` when HEAD was not read), `warnings` (codes),
+/// `firmware_problems` (what could not be read, one line each), `serial`,
+/// `uid`. Text output adds `Update check: unavailable (<reason>)` when
+/// HEAD was not read and one `Firmware status: <problem>` line per other
+/// status part (info block, recovery) that could not be read.
 ///
 /// Reports application mode: an open session is only answered by the
 /// application firmware. [`info_in_mode`] reports the opened meter's mode.
@@ -32,8 +36,8 @@ pub fn info<T: Transport, C: Clock>(
 ///
 /// Outside application mode only the mode is reported and nothing is sent.
 /// In application mode the session is already connected: the device info,
-/// then HEAD and both info blocks are read. A HEAD or info block that timed
-/// out or did not decode only costs the firmware status.
+/// then both info blocks and HEAD are read. A HEAD or info block that timed
+/// out or did not decode costs only that part, and is shown as a problem.
 pub fn info_in_mode<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     mode: DeviceMode,
@@ -53,6 +57,7 @@ pub fn info_in_mode<T: Transport, C: Clock>(
                     "bootloader": null,
                     "update_required": null,
                     "warnings": [],
+                    "firmware_problems": [],
                     "serial": null,
                     "uid": null,
                 }),
@@ -85,6 +90,7 @@ pub fn info_in_mode<T: Transport, C: Clock>(
                 "bootloader": block(&fw.bootloader),
                 "update_required": fw.update_required,
                 "warnings": warnings,
+                "firmware_problems": fw.problems.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
                 "serial": d.serial,
                 "uid": d.uid,
             }),
@@ -111,6 +117,21 @@ pub fn info_in_mode<T: Transport, C: Clock>(
     writeln!(out, "Hardware:   {}", d.hardware_version)?;
     writeln!(out, "Serial:     {}", d.serial)?;
     writeln!(out, "UID:        {}", d.uid)?;
+    if fw.update_required.is_none() {
+        let reason = fw
+            .problems
+            .iter()
+            .find(|p| p.kind == FirmwareProblemKind::Head)
+            .map_or("HEAD not read", |p| p.text.as_str());
+        writeln!(out, "Update check: unavailable ({reason})")?;
+    }
+    for p in fw
+        .problems
+        .iter()
+        .filter(|p| p.kind != FirmwareProblemKind::Head)
+    {
+        writeln!(out, "Firmware status: {p}")?;
+    }
     for w in fw.warnings() {
         writeln!(out, "Warning: {w}")?;
     }

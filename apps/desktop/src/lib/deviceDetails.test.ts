@@ -21,6 +21,8 @@ function info(over: Partial<ConnectedInfo> = {}): ConnectedInfo {
     bootloader_version: "2.5",
     mode: "application",
     warnings: ["outdated"],
+    update_required: false,
+    firmware_problems: [],
     serial: "123456",
     rate_sps: 50,
     rate_locked: false,
@@ -70,6 +72,43 @@ describe("deviceDetailsRows", () => {
   it("shows a dash for a version the meter did not report", () => {
     const rows = deviceDetailsRows(info({ bootloader_version: "" }));
     expect(rows.find((r) => r.label === "Bootloader")?.value).toBe("—");
+  });
+});
+
+describe("deviceDetailsRows firmware status (AC-V9SK52.4)", () => {
+  const value = (i: ConnectedInfo, label: string): string | undefined =>
+    deviceDetailsRows(i).find((r) => r.label === label)?.value;
+  const problemRows = (i: ConnectedInfo): string[] =>
+    deviceDetailsRows(i)
+      .filter((r) => r.label === "Firmware status")
+      .map((r) => r.value);
+
+  it('shows "Update check" as unavailable when HEAD was not read', () => {
+    expect(value(info({ update_required: null }), "Update check")).toBe("unavailable");
+  });
+
+  it("does not call a read update check unavailable", () => {
+    for (const update_required of [true, false]) {
+      const v = value(info({ update_required }), "Update check");
+      expect(v).toBeDefined();
+      expect(v).not.toBe("unavailable");
+    }
+    expect(value(info({ update_required: true }), "Update check")).not.toBe(
+      value(info({ update_required: false }), "Update check"),
+    );
+  });
+
+  it("lists each firmware-status problem, in order", () => {
+    const problems = [
+      "application info block (0x4420) not read: timeout",
+      "HEAD not read: the meter sent REJECT (reply: 06 07 00 00)",
+    ];
+    const rows = problemRows(info({ update_required: null, firmware_problems: problems }));
+    expect(rows).toEqual(problems);
+  });
+
+  it("lists no problem rows when the status was read in full", () => {
+    expect(problemRows(info())).toEqual([]);
   });
 });
 

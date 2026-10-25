@@ -1,0 +1,16 @@
+# Session 1 on the real KM003C (application firmware 2.0.6, bootloader 2.5),
+# over bulk, one frame per line, in send/receive order:
+#   CONNECT (out), ACCEPT (in),
+#   memory read 0x420 / 64: request (out), confirmation (in), data (in),
+#   memory read 0x4420 / 64: request (out), confirmation (in), data (in).
+# Data blocks are AES-128-ECB with key slot 0. Neither info block carries a
+# serial number or UID; the OTP and UID reads of that session are left out.
+# source: notes/device/vectors/t12_info_auth_bulk.jsonl, frames #1..#5 and #7..#9
+02010000
+05010000
+4402010133f8860c0054288cdc7e52729826872dd18b539a39c407d5c063d91102e36a9e
+c40201012004000040000000ffffffff1b8c1b24
+67d6a486f528d58fb7d9d36f0e735c788357cd30dc18a47608b2683593c2d75e9c8d969178ca9144c9dbec8352eb615c2752eb111dc105d1e37262f64682aece
+44030101636beaf3f0856506eee9a27e89722dcfd18b539a39c407d5c063d91102e36a9e
+c40301012044000040000000fffffffff49553f2
+179ceb821fc708a00d694078d647050af982aa90ec95766b1b481af7f45792ee26c27aa94bc7ec0312b7322c10b4b0e3825ed33d9d8ececde9e512770be88a26

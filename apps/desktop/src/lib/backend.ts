@@ -113,6 +113,10 @@ export interface ConnectedInfo {
   mode: DeviceMode;
   /** Firmware warnings for this meter, none when it is up to date. */
   warnings: FirmwareWarningCode[];
+  /** The HEAD "update required" flag, null when HEAD could not be read (FR V9SK52). */
+  update_required: boolean | null;
+  /** Why parts of the firmware status could not be read, empty when all of it was. */
+  firmware_problems: string[];
   serial: string;
   rate_sps: number | null;
   rate_locked: boolean;

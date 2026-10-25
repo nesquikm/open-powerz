@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use powerz_protocol::decode::head::hex;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::container::FirmwareContainer;
 use powerz_protocol::firmware::flash::{
@@ -72,8 +73,8 @@ pub fn firmware_info(
 /// answers.
 ///
 /// Text: the identity lines, then `CONNECT: accepted | rejected | timed
-/// out`, then `HEAD field: <n>`, `HEAD reply (raw): <hex bytes>`, `HEAD:
-/// rejected` or `HEAD: timed out`. The identity is written (and flushed)
+/// out`, then `HEAD field: <n>`, `HEAD reply (raw): <hex bytes>` (for a
+/// REJECT followed by `HEAD: rejected`) or `HEAD: timed out`. The identity is written (and flushed)
 /// before anything is sent. Any other failure of CONNECT or HEAD (the
 /// pipe would not open, I/O, unplugged) is returned as an error and no
 /// CONNECT / HEAD line or JSON report is written. JSON keys `vid`, `pid`, `product`, `mode`,
@@ -99,7 +100,7 @@ pub fn firmware_probe<T: Transport, C: Clock>(
     let (head, field, raw) = match &report.head {
         HeadOutcome::Field(f) => ("field".to_owned(), Some(*f), None),
         HeadOutcome::Raw(r) => ("raw".to_owned(), None, Some(r.as_slice())),
-        HeadOutcome::Rejected => ("rejected".to_owned(), None, None),
+        HeadOutcome::Rejected(r) => ("rejected".to_owned(), None, Some(r.as_slice())),
         HeadOutcome::TimedOut => ("timed out".to_owned(), None, None),
     };
     if json {
@@ -112,7 +113,12 @@ pub fn firmware_probe<T: Transport, C: Clock>(
     writeln!(out, "CONNECT: {connect}")?;
     match (field, raw) {
         (Some(f), _) => writeln!(out, "HEAD field: {f}")?,
-        (None, Some(r)) => writeln!(out, "HEAD reply (raw): {}", hex(r, " "))?,
+        (None, Some(r)) => {
+            writeln!(out, "HEAD reply (raw): {}", hex(r, " "))?;
+            if matches!(report.head, HeadOutcome::Rejected(_)) {
+                writeln!(out, "HEAD: {head}")?;
+            }
+        }
         (None, None) => writeln!(out, "HEAD: {head}")?,
     }
     Ok(())
@@ -172,15 +178,6 @@ fn probe_json(
         "head_field": head_field,
         "head_raw": head_raw,
     })
-}
-
-/// `bytes` as lowercase hex pairs joined by `sep`.
-fn hex(bytes: &[u8], sep: &str) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(sep)
 }
 
 /// What `firmware flash` says without `--i-understand`.

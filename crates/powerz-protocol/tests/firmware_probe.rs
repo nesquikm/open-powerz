@@ -201,7 +201,21 @@ fn probe_reports_a_rejected_head() {
     ]);
     let report = s.probe().expect("a REJECT is data");
     assert_eq!(report.connect, ConnectOutcome::Accepted);
-    assert_eq!(report.head, HeadOutcome::Rejected);
+    // The REJECT is kept as sent, so a hardware run records the bytes.
+    assert_eq!(report.head, HeadOutcome::Rejected(reject(2)));
+}
+
+#[test]
+fn probe_keeps_the_raw_bytes_of_a_rejected_head_as_sent() {
+    // A REJECT with trailing bytes: everything the meter sent is kept.
+    let raw = vec![0x06, 2, 0x00, 0x00, 0xAA, 0x55];
+    let mut s = session(vec![
+        Step::transact(frame::connect(1).to_vec(), accept(1)),
+        Step::transact(head::request(2).to_vec(), raw.clone()),
+    ]);
+    let report = s.probe().expect("a REJECT is data");
+    assert_eq!(report.head, HeadOutcome::Rejected(raw));
+    assert_eq!(types(&s), vec![0x02, 0x40]);
 }
 
 #[test]

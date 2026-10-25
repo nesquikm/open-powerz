@@ -83,6 +83,8 @@ fn info_json_has_mode_both_blocks_and_warnings() {
     assert_eq!(v["bootloader"]["date"], "2024.01.01");
     assert_eq!(v["update_required"], false);
     assert_eq!(v["warnings"], serde_json::json!(["outdated"]));
+    assert_eq!(v["firmware_problems"], serde_json::json!([]), "{v}");
+    assert!(v.get("status_problems").is_none(), "{v}");
     // The existing keys stay.
     assert_eq!(v["firmware_version"], "2.0.6");
     assert_eq!(v["serial"], "123456");

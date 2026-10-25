@@ -27,7 +27,10 @@ use crate::frame::{self, Attribute, FrameError, Reply, SequenceCounter};
 use crate::transport::{self, Transport};
 
 pub use auth::{auth_plaintext, auth_request};
-pub use memory::{DeviceInfo, FirmwareStatus, memory_read_plaintext, memory_read_request};
+pub use memory::{
+    DeviceInfo, FirmwareProblem, FirmwareProblemKind, FirmwareStatus, memory_read_plaintext,
+    memory_read_request,
+};
 pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer};
 pub use probe::{ConnectOutcome, HeadOutcome, ProbeReport};
 pub use stream::{Gap, SnapshotCadence, StreamPoll, Streamer};

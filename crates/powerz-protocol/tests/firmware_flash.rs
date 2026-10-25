@@ -1198,6 +1198,153 @@ fn a_non_zero_head_field_is_a_work_mode_error() {
     assert_eq!(bench.boot_writes().len(), 2, "no descriptor after HEAD");
 }
 
+// ---- AC-V9SK54.2 / .6: bootloader HEAD failures abort before any write ----
+//
+// On the real meter HEAD in bootloader mode is unproven, so every way HEAD
+// can fail must stop before the 0x42 descriptor or a payload write, carry
+// the recovery text and (for every reply) the raw reply bytes in hex.
+
+/// A HEAD reply whose type is neither 0x40 nor REJECT.
+fn other_type() -> Vec<u8> {
+    vec![0x41, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04]
+}
+
+/// A 0x40 reply too short to hold the u32 field.
+fn short_head() -> Vec<u8> {
+    vec![0x40, 0x00, 0x00, 0x01]
+}
+
+/// `bytes` as lowercase hex pairs joined by single spaces.
+fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The reply `template` as the meter sent it (byte 1 = the HEAD request's
+/// id, as the fake does), in lowercase spaced hex.
+fn head_reply_hex(bench: &Bench, template: &[u8]) -> String {
+    let ops = bench.boot_ops();
+    let id = match &ops[1] {
+        Op::Transact { req, .. } if req[0] & 0x7F == 0x40 => req[1],
+        other => panic!("expected HEAD second in bootloader mode, got {other:?}"),
+    };
+    let mut r = template.to_vec();
+    r[1] = id;
+    hex(&r)
+}
+
+/// Every HEAD failure in bootloader mode: name, reply, expected code.
+fn head_failures() -> Vec<(&'static str, Boot, i32)> {
+    vec![
+        ("timeout", Boot::Timeout, -108),
+        ("reject", Boot::Frame(reject()), -100),
+        ("other type", Boot::Frame(other_type()), -100),
+        ("short 0x40", Boot::Frame(short_head()), -100),
+        ("non-zero field", Boot::Frame(head(0x1234)), -111),
+    ]
+}
+
+#[test]
+fn every_bootloader_head_failure_stops_before_the_descriptor_with_the_recovery_text() {
+    for (name, reply, code) in head_failures() {
+        let (e, bench) = boot_failure(fail_at(P, AT_HEAD, reply));
+        assert_eq!(e.code(), code, "{name}: got {e:?}");
+        let writes = bench.boot_writes();
+        assert_eq!(
+            writes.len(),
+            2,
+            "{name}: only CONNECT and HEAD: {writes:02x?}"
+        );
+        assert_eq!(writes[0][0] & 0x7F, 0x02, "{name}: CONNECT first");
+        assert_eq!(writes[1][0] & 0x7F, 0x40, "{name}: HEAD second");
+        assert!(
+            !sent_write_capable(&bench.ops()),
+            "{name}: no jump, descriptor or payload write after HEAD"
+        );
+        assert!(
+            !bench.boot_ops()[2..]
+                .iter()
+                .any(|o| matches!(o, Op::Raw { .. })),
+            "{name}: no raw write after HEAD"
+        );
+        assert_eq!(bench.mode(), Some(DeviceMode::Bootloader), "{name}");
+        assert_recovery_text(&e);
+    }
+}
+
+#[test]
+fn a_head_timeout_in_the_bootloader_is_a_read_error() {
+    let (e, _) = boot_failure(fail_at(P, AT_HEAD, Boot::Timeout));
+    assert!(matches!(e, FlashError::Read { .. }), "got {e:?}");
+    assert_eq!(e.code(), -108);
+    assert!(e.to_string().contains("HEAD"), "names HEAD: {e}");
+}
+
+#[test]
+fn a_too_short_head_reply_is_a_product_error() {
+    let (e, _) = boot_failure(fail_at(P, AT_HEAD, Boot::Frame(short_head())));
+    assert!(matches!(e, FlashError::Product { .. }), "got {e:?}");
+    assert_eq!(e.code(), -100);
+}
+
+#[test]
+fn a_head_reply_of_a_non_reject_type_is_a_product_error() {
+    let (e, _) = boot_failure(fail_at(P, AT_HEAD, Boot::Frame(other_type())));
+    assert!(matches!(e, FlashError::Product { .. }), "got {e:?}");
+    assert_eq!(e.code(), -100);
+}
+
+#[test]
+fn every_head_failure_with_a_reply_carries_the_raw_reply_in_hex() {
+    for (name, reply, _) in head_failures() {
+        let Boot::Frame(template) = &reply else {
+            continue;
+        };
+        let (e, bench) = boot_failure(fail_at(P, AT_HEAD, reply.clone()));
+        let want = format!("head reply {}", head_reply_hex(&bench, template));
+        let msg = e.to_string();
+        assert!(
+            msg.to_ascii_lowercase().contains(&want),
+            "{name}: message lacks `{want}`: {msg}"
+        );
+    }
+}
+
+#[test]
+fn a_rejected_head_message_shows_the_reject_bytes() {
+    let (e, bench) = boot_failure(fail_at(P, AT_HEAD, Boot::Frame(reject())));
+    // e.g. `HEAD reply 06 02 00 00`.
+    let want = format!("head reply {}", head_reply_hex(&bench, &reject()));
+    assert!(want.starts_with("head reply 06 "), "{want}");
+    assert!(
+        e.to_string().to_ascii_lowercase().contains(&want),
+        "lacks `{want}`: {e}"
+    );
+}
+
+#[test]
+fn a_work_mode_error_names_the_field_in_hex_and_the_raw_reply() {
+    let (e, bench) = boot_failure(fail_at(P, AT_HEAD, Boot::Frame(head(0x1234))));
+    assert!(matches!(e, FlashError::WorkMode { .. }), "got {e:?}");
+    let msg = e.to_string().to_ascii_lowercase();
+    assert!(msg.contains("0x1234"), "field in hex: {msg}");
+    let want = format!("head reply {}", head_reply_hex(&bench, &head(0x1234)));
+    assert!(want.contains("34 12 00 00"), "{want}");
+    assert!(msg.contains(&want), "lacks `{want}`: {msg}");
+}
+
+#[test]
+fn a_head_timeout_message_has_no_reply_bytes() {
+    let (e, _) = boot_failure(fail_at(P, AT_HEAD, Boot::Timeout));
+    assert!(
+        !e.to_string().to_ascii_lowercase().contains("head reply "),
+        "a timeout has no reply to show: {e}"
+    );
+}
+
 #[test]
 fn a_descriptor_that_is_answered_is_a_write_error() {
     for reply in [

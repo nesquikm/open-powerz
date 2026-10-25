@@ -362,7 +362,7 @@ Firmware status (FR V9SK52). All requests below are read-only:
 | item | rule | tag |
 |---|---|---|
 | mode | the interface string (string 2) of the vendor-class (0xFF) interface, picked by class and read from the OS device list without opening the device: `APP` is application mode [device] (firmware 2.0.6), a string naming BOOT or DFU is boot-loader mode [inferred], and anything else (or no string) is reported as unknown | [static] [device] [inferred] |
-| sequence | CONNECT, wait 50 ms, HEAD, then the info blocks `0x420` (boot loader) and `0x4420` (application) | [static] |
+| sequence | CONNECT, the info blocks `0x420` (boot loader) and `0x4420` (application), then 50 ms later HEAD. The vendor app sends HEAD first; we read the blocks first so a failed HEAD cannot cost them. Each step that fails is reported as a problem (a HEAD problem includes the raw reply in hex), followed by one CONNECT to recover the pipe; what was read is kept, and the update check is reported as unknown when HEAD was not read | [static] [device] (firmware 2.0.6: HEAD in application mode did not decode; reply not yet recorded) |
 | warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated; HEAD field non-zero: update required | [static] [inferred] |
 
 ## Authentication

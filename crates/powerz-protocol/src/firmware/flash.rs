@@ -328,10 +328,12 @@ pub enum FlashError {
     },
     /// HEAD reported a non-zero work-mode field (only seen in bootloader
     /// mode, so the message always carries the recovery text).
-    #[error("work mode error: HEAD field is {field:#x}, expected 0; {RECOVERY}")]
+    #[error("work mode error: HEAD field is {field:#x}, expected 0 ({reply}); {RECOVERY}")]
     WorkMode {
         /// The HEAD field.
         field: u32,
+        /// The raw HEAD reply, as `HEAD reply <spaced hex>`.
+        reply: String,
     },
     /// The descriptor could not be written or was answered.
     #[error("write error: {detail}")]
@@ -899,6 +901,11 @@ fn describe(r: &Result<Vec<u8>, TransportError>) -> String {
     }
 }
 
+/// A HEAD reply as `HEAD reply <spaced lowercase hex>`, for error messages.
+fn head_hex(reply: &[u8]) -> String {
+    format!("HEAD reply {}", head::hex(reply, " "))
+}
+
 /// Whether `r` is a reply of type `ty`.
 fn is(r: &Result<Vec<u8>, TransportError>, ty: u8) -> bool {
     matches!(r, Ok(reply) if reply_type(reply) == Some(ty))
@@ -957,7 +964,11 @@ fn download<P: FlashTransport, C: Clock>(
         Ok(reply) if reply_type(&reply) == Some(HEAD) => reply,
         Ok(reply) => {
             return Err(FlashError::Product {
-                detail: format!("HEAD: {}", describe(&Ok(reply))),
+                detail: format!(
+                    "HEAD: {}; {}",
+                    describe(&Ok(reply.clone())),
+                    head_hex(&reply)
+                ),
             });
         }
         Err(e) => {
@@ -968,11 +979,14 @@ fn download<P: FlashTransport, C: Clock>(
     };
     let field = HeadReply::decode(&reply)
         .map_err(|e| FlashError::Product {
-            detail: format!("HEAD: {e}"),
+            detail: format!("HEAD: {e}; {}", head_hex(&reply)),
         })?
         .old_firmware_field();
     if field != 0 {
-        return Err(FlashError::WorkMode { field });
+        return Err(FlashError::WorkMode {
+            field,
+            reply: head_hex(&reply),
+        });
     }
 
     if stopped(stop) {

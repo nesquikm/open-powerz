@@ -50,6 +50,7 @@ Build order: V9SK52, V9SK53, V9SK54, V9SK55, then V9SK56 (stage 1 can run once V
 - The desktop UI copies the firmware thresholds (1.7.0, 2.0.7) by hand from the Rust constants. Have the backend send them, or pin both sides with one test (V9SK52 review).
 - `Version::parse` is strict: `v2.0.7` or `2.0.7-beta` give no warning. The meter reports plain `2.0.6`; settle a policy if other strings appear (V9SK52 review).
 - The firmware notice's live region mounts with its text already in it, so screen readers may not announce it (V9SK52 review).
+- `device_info()` reads the info blocks with `?`, so a block that fails there still aborts `powerz info` and the desktop connect before the tolerant status read, and each connect reads the blocks twice. Make it reuse the status read (V9SK52 HEAD fix review).
 
 **Device safety:** JUMP_DFU (09), JUMP_APROM (08), the 0x42 descriptor and payload writes stay forbidden on the real meter until the user approves the stage that needs them.
 

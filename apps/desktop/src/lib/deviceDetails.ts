@@ -28,7 +28,14 @@ export interface DetailRow {
   value: string;
 }
 
-/** The device details rows of the connected meter; a missing value shows a dash. */
+/** The update check in plain words: unavailable when HEAD was not read. */
+function updateCheckLabel(updateRequired: boolean | null): string {
+  if (updateRequired === null) return "unavailable";
+  return updateRequired ? "update required" : "up to date";
+}
+
+/** The device details rows of the connected meter; a missing value shows a dash,
+ * and each firmware-status problem gets its own row. */
 export function deviceDetailsRows(info: ConnectedInfo): DetailRow[] {
   const orDash = (s: string | undefined): string => (s === undefined || s.trim() === "" ? "—" : s);
   return [
@@ -37,6 +44,8 @@ export function deviceDetailsRows(info: ConnectedInfo): DetailRow[] {
     { label: "Firmware", value: orDash(info.firmware_version) },
     { label: "Bootloader", value: orDash(info.bootloader_version) },
     { label: "Serial", value: orDash(info.serial) },
+    { label: "Update check", value: updateCheckLabel(info.update_required) },
+    ...info.firmware_problems.map((value) => ({ label: "Firmware status", value })),
   ];
 }
 

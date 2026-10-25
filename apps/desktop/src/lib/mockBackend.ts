@@ -469,6 +469,8 @@ function connectedStatus(serial: string, rateSps: number | null): BackendEvent {
       bootloader_version: "2.5",
       mode: "application",
       warnings: ["outdated"],
+      update_required: false,
+      firmware_problems: [],
       serial,
       rate_sps: rateSps,
       rate_locked: rateSps === null,

@@ -12,7 +12,7 @@ use powerz_protocol::crypto::{self, KEYS};
 use powerz_protocol::decode::head::{self, HeadReply};
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::version::FirmwareWarning;
-use powerz_protocol::session::Session;
+use powerz_protocol::session::{FirmwareProblem, FirmwareProblemKind, Session};
 use powerz_protocol::transport::guard::FORBIDDEN_TYPES;
 use powerz_protocol::transport::{Error as TransportError, Transport};
 
@@ -128,7 +128,8 @@ fn firmware_status_reports_both_info_blocks() {
     assert_eq!(app.model(), "KM003C");
     assert_eq!(app.version(), "2.0.6");
     assert_eq!(app.date(), "2025.06.01");
-    assert!(!st.update_required);
+    assert_eq!(st.update_required, Some(false));
+    assert_eq!(st.problems, Vec::<FirmwareProblem>::new());
 }
 
 #[test]
@@ -166,7 +167,7 @@ fn firmware_status_reports_update_required_from_a_non_zero_head_field() {
     let dev = device(Persona::Bulk, Scenario::Idle, &clock).with_head_field(1);
     let mut s = logged_session(dev, &clock);
     let st = s.firmware_status().expect("firmware status");
-    assert!(st.update_required);
+    assert_eq!(st.update_required, Some(true));
     assert!(
         st.warnings().contains(&FirmwareWarning::UpdateRequired),
         "{:?}",
@@ -248,24 +249,35 @@ fn status_or_unknown_returns_the_full_status_when_everything_answers() {
         .expect("firmware status");
     assert_eq!(st.bootloader.as_ref().map(|b| b.version()), Some("2.5"));
     assert_eq!(st.application.as_ref().map(|b| b.version()), Some("2.0.6"));
-    assert!(!st.update_required);
+    assert_eq!(st.update_required, Some(false));
+    assert_eq!(st.problems, Vec::<FirmwareProblem>::new());
     let connects = s.transport().types().iter().filter(|&&t| t == 0x02).count();
     assert_eq!(connects, 1, "no recovery CONNECT when nothing failed");
 }
 
 #[test]
-fn status_or_unknown_degrades_and_reconnects_after_a_head_timeout() {
+fn status_or_unknown_keeps_the_blocks_and_reconnects_after_a_head_timeout() {
     let clock = clock();
-    // Request 1 is CONNECT, request 2 the HEAD.
+    // Request 1 is CONNECT, 2 and 3 the info blocks, 4 the HEAD.
     let dev =
-        device(Persona::Bulk, Scenario::Idle, &clock).with_faults(FaultPlan::new().timeout_at(2));
+        device(Persona::Bulk, Scenario::Idle, &clock).with_faults(FaultPlan::new().timeout_at(4));
     let mut s = connected_logged(dev, &clock);
     let st = s
         .read_firmware_status_or_unknown()
-        .expect("a HEAD timeout only costs the firmware status");
-    assert_eq!(st, powerz_protocol::session::FirmwareStatus::unknown());
+        .expect("a HEAD timeout only costs the update check");
+    assert_eq!(st.bootloader.as_ref().map(|b| b.version()), Some("2.5"));
+    assert_eq!(st.application.as_ref().map(|b| b.version()), Some("2.0.6"));
+    assert_eq!(st.update_required, None, "unknown, not false");
+    assert_eq!(st.warnings(), vec![FirmwareWarning::Outdated]);
+    assert!(
+        st.problems
+            .iter()
+            .any(|p| p.kind == FirmwareProblemKind::Head && p.text.contains("HEAD")),
+        "{:?}",
+        st.problems
+    );
     let types = s.transport().types();
-    assert_eq!(&types[..3], &[0x02, 0x40, 0x02], "{types:02x?}");
+    assert_eq!(&types[..5], &[0x02, 0x44, 0x44, 0x40, 0x02], "{types:02x?}");
     assert_eq!(
         types.iter().filter(|&&t| t == 0x02).count(),
         2,
@@ -275,9 +287,9 @@ fn status_or_unknown_degrades_and_reconnects_after_a_head_timeout() {
 }
 
 #[test]
-fn status_or_unknown_degrades_and_reconnects_after_an_info_block_timeout() {
-    // Request 3 is the bootloader block, request 4 the application block.
-    for n in [3, 4] {
+fn status_or_unknown_reports_a_timed_out_info_block_and_reconnects() {
+    // Request 2 is the bootloader block, request 3 the application block.
+    for (n, words) in [(2, ["bootloader", "0x420"]), (3, ["application", "0x4420"])] {
         let clock = clock();
         let dev = device(Persona::Bulk, Scenario::Idle, &clock)
             .with_faults(FaultPlan::new().timeout_at(n));
@@ -285,10 +297,29 @@ fn status_or_unknown_degrades_and_reconnects_after_an_info_block_timeout() {
         let st = s
             .read_firmware_status_or_unknown()
             .unwrap_or_else(|e| panic!("request {n}: {e:?}"));
+        let missing = if n == 2 {
+            &st.bootloader
+        } else {
+            &st.application
+        };
+        assert_eq!(*missing, None, "request {n}");
+        assert!(
+            st.problems
+                .iter()
+                .any(|p| words.iter().any(|w| p.text.to_lowercase().contains(w))),
+            "request {n}: a problem names the block: {:?}",
+            st.problems
+        );
+        let kind = if n == 2 {
+            FirmwareProblemKind::BootloaderBlock
+        } else {
+            FirmwareProblemKind::ApplicationBlock
+        };
         assert_eq!(
-            st,
-            powerz_protocol::session::FirmwareStatus::unknown(),
-            "request {n}"
+            st.problems.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![kind],
+            "request {n}: {:?}",
+            st.problems
         );
         let types = s.transport().types();
         let failed = n - 1;
@@ -302,6 +333,11 @@ fn status_or_unknown_degrades_and_reconnects_after_an_info_block_timeout() {
             types.iter().filter(|&&t| t == 0x02).count(),
             2,
             "request {n}: {types:02x?}"
+        );
+        assert_eq!(
+            types.iter().filter(|&&t| t == 0x40).count(),
+            1,
+            "request {n}: HEAD still runs: {types:02x?}"
         );
         s.read_adc()
             .unwrap_or_else(|e| panic!("request {n}: session dead after recovery: {e:?}"));
