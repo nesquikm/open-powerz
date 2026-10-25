@@ -1,0 +1,67 @@
+//! The read-only firmware probe (FR V9SK56, AC .6): CONNECT, then HEAD,
+//! and nothing else, in application or bootloader mode.
+
+use super::{Clock, Error, Session};
+use crate::decode::head::HeadReply;
+use crate::transport::{self, Transport};
+
+/// REJECT message type `[static]`.
+const REJECT: u8 = 0x06;
+
+/// How the meter answered CONNECT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectOutcome {
+    /// ACCEPT.
+    Accepted,
+    /// REJECT.
+    Rejected,
+    /// No answer, even after one recovery and retry.
+    TimedOut,
+}
+
+/// How the meter answered HEAD.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadOutcome {
+    /// A HEAD reply with this old-firmware field.
+    Field(u32),
+    /// A reply that does not decode as HEAD, kept as sent.
+    Raw(Vec<u8>),
+    /// REJECT.
+    Rejected,
+    /// No answer.
+    TimedOut,
+}
+
+/// What [`Session::probe`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeReport {
+    /// The answer to CONNECT.
+    pub connect: ConnectOutcome,
+    /// The answer to HEAD.
+    pub head: HeadOutcome,
+}
+
+impl<T: Transport, C: Clock> Session<T, C> {
+    /// Send CONNECT, then (whatever CONNECT gave) one HEAD, and report both
+    /// answers. Only CONNECT (0x02) and HEAD (0x40) frames are sent; a
+    /// REJECT, a timeout or an undecodable reply is data; any other error
+    /// is returned (no HEAD is sent after such a CONNECT failure).
+    pub fn probe(&mut self) -> Result<ProbeReport, Error> {
+        let connect = match self.connect() {
+            Ok(()) => ConnectOutcome::Accepted,
+            Err(Error::Rejected { .. }) => ConnectOutcome::Rejected,
+            Err(Error::Transport(transport::Error::Timeout)) => ConnectOutcome::TimedOut,
+            Err(e) => return Err(e),
+        };
+        let head = match self.head_exchange() {
+            Ok(reply) if reply.first().map(|b| b & 0x7F) == Some(REJECT) => HeadOutcome::Rejected,
+            Ok(reply) => match HeadReply::decode(&reply) {
+                Ok(h) => HeadOutcome::Field(h.old_firmware_field()),
+                Err(_) => HeadOutcome::Raw(reply),
+            },
+            Err(Error::Transport(transport::Error::Timeout)) => HeadOutcome::TimedOut,
+            Err(e) => return Err(e),
+        };
+        Ok(ProbeReport { connect, head })
+    }
+}

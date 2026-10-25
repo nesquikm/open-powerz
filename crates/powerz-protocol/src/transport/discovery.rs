@@ -121,6 +121,157 @@ fn vendor_interface_string(d: &nusb::DeviceInfo) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// One USB interface as the OS describes it (no handle held).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbInterface {
+    /// bInterfaceNumber.
+    pub number: u8,
+    /// bInterfaceClass (0xFF vendor, 0x02 CDC, 0x0A CDC data, 0x03 HID).
+    pub class: u8,
+    /// bInterfaceSubClass.
+    pub subclass: u8,
+    /// bInterfaceProtocol.
+    pub protocol: u8,
+    /// iInterface string, if the OS reported one.
+    pub string: Option<String>,
+}
+
+/// The USB identity of one meter: IDs, product string and every interface,
+/// read from descriptors without opening the device (FR V9SK56, AC .6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbIdentity {
+    /// idVendor.
+    pub vid: u16,
+    /// idProduct.
+    pub pid: u16,
+    /// iProduct string, if the OS reported one.
+    pub product: Option<String>,
+    /// The interfaces, in descriptor order.
+    pub interfaces: Vec<UsbInterface>,
+}
+
+impl UsbIdentity {
+    /// Application or bootloader mode, from the string of the vendor-class
+    /// (0xFF) interface, found by class, never by number.
+    pub fn mode(&self) -> DeviceMode {
+        DeviceMode::from_interface_string(self.vendor_interface().and_then(|i| i.string.as_deref()))
+    }
+
+    /// The first vendor-class (0xFF) interface, if any: the bulk pipe.
+    pub fn vendor_interface(&self) -> Option<&UsbInterface> {
+        self.interfaces.iter().find(|i| i.class == 0xFF)
+    }
+}
+
+impl std::fmt::Display for UsbIdentity {
+    /// Labelled lines: vendor and product IDs as `0x` hex, the product
+    /// string, then one `interface <n>` line per interface.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Vendor ID:   {:#06x}", self.vid)?;
+        writeln!(f, "Product ID:  {:#06x}", self.pid)?;
+        writeln!(
+            f,
+            "Product:     {}",
+            self.product.as_deref().unwrap_or("(no string)")
+        )?;
+        writeln!(f, "Mode:        {}", self.mode().name())?;
+        for i in &self.interfaces {
+            let string = i
+                .string
+                .as_deref()
+                .map_or_else(|| "(no string)".to_owned(), |s| format!("{s:?}"));
+            writeln!(
+                f,
+                "  interface {}: class {:#04x}, subclass {:#04x}, protocol {:#04x}, string {string}",
+                i.number, i.class, i.subclass, i.protocol
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Descriptor-level facts about one attached USB device, interfaces
+/// included, as the OS device list reports them (no handle held).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbDescriptor {
+    /// idVendor.
+    pub vid: u16,
+    /// idProduct.
+    pub pid: u16,
+    /// iSerialNumber string, if the OS reported one.
+    pub serial: Option<String>,
+    /// iProduct string, if the OS reported one.
+    pub product: Option<String>,
+    /// Bus identifier as reported by the OS.
+    pub bus: String,
+    /// Device address on the bus.
+    pub address: u8,
+    /// The interfaces, in descriptor order.
+    pub interfaces: Vec<UsbInterface>,
+}
+
+impl UsbIdentity {
+    /// The identity part of `d`: IDs, product string and every interface,
+    /// in descriptor order.
+    pub fn from_descriptor(d: &UsbDescriptor) -> UsbIdentity {
+        UsbIdentity {
+            vid: d.vid,
+            pid: d.pid,
+            product: d.product.clone(),
+            interfaces: d.interfaces.clone(),
+        }
+    }
+}
+
+/// The descriptor in `devices` that is the meter `device`: the POWER-Z
+/// vendor ID, the same product ID, bus and address, and the same serial
+/// when `device` has one. `None` when no descriptor matches.
+pub fn match_device<'a>(
+    device: &DeviceEntry,
+    devices: &'a [UsbDescriptor],
+) -> Option<&'a UsbDescriptor> {
+    devices.iter().find(|d| {
+        d.vid == crate::VID
+            && d.pid == device.pid
+            && d.bus == device.bus
+            && d.address == device.address
+            && device
+                .serial
+                .as_ref()
+                .is_none_or(|s| d.serial.as_ref() == Some(s))
+    })
+}
+
+/// The USB identity of the attached meter `device` (matched by
+/// [`match_device`]), read from the OS device list; nothing is opened or
+/// claimed. `None` when the meter is no longer listed.
+pub fn usb_identity(device: &DeviceEntry) -> Result<Option<UsbIdentity>, Error> {
+    use nusb::MaybeFuture;
+    let descriptors: Vec<UsbDescriptor> = nusb::list_devices()
+        .wait()
+        .map_err(|e| Error::Io(e.to_string()))?
+        .map(|d| UsbDescriptor {
+            vid: d.vendor_id(),
+            pid: d.product_id(),
+            serial: d.serial_number().map(str::to_owned),
+            product: d.product_string().map(str::to_owned),
+            bus: d.bus_id().to_owned(),
+            address: d.device_address(),
+            interfaces: d
+                .interfaces()
+                .map(|i| UsbInterface {
+                    number: i.interface_number(),
+                    class: i.class(),
+                    subclass: i.subclass(),
+                    protocol: i.protocol(),
+                    string: i.interface_string().map(str::to_owned),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(match_device(device, &descriptors).map(UsbIdentity::from_descriptor))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

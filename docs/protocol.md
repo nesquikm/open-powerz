@@ -159,7 +159,7 @@ Data types (main header type 0x40 and up):
 
 | type | request header | payload | purpose | tag |
 |---|---|---|---|---|
-| 0x40 HEAD | `40 id 00 01` | 16 zero bytes | read-only status check. The reply is type 0x40, and the u32 LE at offset 4 is 0 for normal firmware and non-zero for "original firmware, update required". The vendor app sends it 50 ms after CONNECT in application mode, and before a download in boot-loader mode, where the field must be 0 | [static]; meaning [inferred] |
+| 0x40 HEAD | `40 id 00 01` | 16 zero bytes | read-only status check. The reply is type 0x40, and the u32 LE at offset 4 is 0 for normal firmware and non-zero for "original firmware, update required". The vendor app sends it 50 ms after CONNECT in application mode, and before a download in boot-loader mode, where the field must be 0. Our `firmware probe` sends only CONNECT and HEAD, in either mode | [static]; meaning [inferred] |
 | 0x41 PUT_DATA | reply only | section chain | GET_DATA reply | [doc] [static] [device] |
 | 0x42 | `42 id 00 04` | 64-byte firmware descriptor | firmware download; never sent by us | [static] |
 | 0x44 | `44 id 01 01` | 32 encrypted bytes | memory read (see Memory read and device info) | [static] [device] |

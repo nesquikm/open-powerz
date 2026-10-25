@@ -24,6 +24,7 @@ pub use pd::PdScenario;
 pub use pdm::{SimCable, SimCharger, SimPdm, SimPdmPort};
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::Clock;
+use powerz_protocol::transport::discovery::{PID_KM003C, UsbIdentity, UsbInterface};
 use powerz_protocol::transport::{Error, Transport};
 
 /// Size of one HID report: longer replies "reboot" the HID persona.
@@ -408,6 +409,36 @@ impl SimDevice {
             DeviceMode::Application => "APP",
             DeviceMode::Bootloader => "BOOT",
             DeviceMode::Unknown => "POWER-Z",
+        }
+    }
+
+    /// The USB identity the simulated meter reports `[inferred]`: in
+    /// application mode the KM003C's four interfaces (vendor 0xFF and CDC
+    /// 0x02 named `APP`, CDC data 0x0A, HID 0x03) `[device]`; in bootloader
+    /// mode a single vendor interface named `BOOT`.
+    pub fn usb_identity(&self) -> UsbIdentity {
+        let iface = |number: u8, class: u8, string: Option<&str>| UsbInterface {
+            number,
+            class,
+            subclass: 0,
+            protocol: 0,
+            string: string.map(str::to_owned),
+        };
+        let vendor = self.interface_string();
+        let interfaces = match self.mode {
+            DeviceMode::Bootloader => vec![iface(0, 0xFF, Some(vendor))],
+            DeviceMode::Application | DeviceMode::Unknown => vec![
+                iface(0, 0xFF, Some(vendor)),
+                iface(1, 0x02, Some(vendor)),
+                iface(2, 0x0A, None),
+                iface(3, 0x03, None),
+            ],
+        };
+        UsbIdentity {
+            vid: powerz_protocol::VID,
+            pid: PID_KM003C,
+            product: Some(self.product_string().to_owned()),
+            interfaces,
         }
     }
 

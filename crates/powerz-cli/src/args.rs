@@ -162,7 +162,8 @@ pub enum Command {
         #[arg(long)]
         allow_high_voltage: bool,
     },
-    /// Work with firmware files; `info` needs no meter.
+    /// Work with firmware files (`info` needs no meter) and probe the
+    /// meter's firmware identity (`probe`, read-only).
     Firmware {
         /// What to do.
         #[command(subcommand)]
@@ -182,6 +183,14 @@ pub enum FirmwareAction {
         /// Firmware container file to inspect.
         #[arg(value_name = "FILE")]
         file: PathBuf,
+    },
+    /// Show the meter's USB identity, then send only CONNECT and HEAD over
+    /// the vendor bulk pipe and print the HEAD field; read-only, in
+    /// application or bootloader mode.
+    Probe {
+        /// Print one JSON object instead of labelled lines.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -649,6 +658,19 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
     if cli.pd_file.decode.is_some() {
         // `pd decode` reads a file and opens no device.
         return Ok(());
+    }
+    // The probe needs the vendor bulk pipe (a bootloader has no other).
+    if matches!(
+        cli.command,
+        Command::Firmware {
+            action: FirmwareAction::Probe { .. }
+        }
+    ) && matches!(cli.transport, TransportKind::Hid | TransportKind::Cdc)
+    {
+        return Err(CliError::Usage(
+            "`firmware probe` runs on the vendor bulk pipe only; use --transport bulk (or sim)"
+                .into(),
+        ));
     }
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
     // `pd send` talks to the meter's serial port like `trigger`.

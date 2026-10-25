@@ -8,7 +8,7 @@ the built-in help.
 | command | what it does | options |
 |---|---|---|
 | `list` | One line per attached meter: model, serial, USB bus/address. With none attached it prints `no POWER-Z devices found` to stderr and still exits 0. | `--json` (array of `model`, `serial`, `bus`, `address`), `--include-demo` (also list the simulated demo device) |
-| `info` | Model, firmware version, hardware version, serial and UID. | `--json` (`model`, `firmware_version`, `hardware_version`, `serial`, `uid`) |
+| `info` | Model, mode (`application`, `bootloader` or `unknown`), application firmware and bootloader versions with their dates, hardware version, serial and UID, then one `Warning:` line per firmware warning: older than 1.7.0, older than 2.0.7 (the newest version known), or the meter says an update is required. Outside application mode it prints only the mode and sends nothing. If the firmware status read fails, the rest is still printed, without warnings. | `--json` (top level: `model`, `mode`, `firmware_version`, `hardware_version`, `update_required`, `warnings` as codes `too_old` / `outdated` / `update_required`, `serial`, `uid`; plus `application` and `bootloader`, each an object with `model`, `version` and `date`, or null) |
 | `read` | One snapshot: VBUS (V), IBUS (A, signed), power (W), temperature (°C), D+, D−, CC1, CC2 (V). | `--json` (`vbus_v`, `ibus_a`, `power_w`, `temp_c` or null, `dp_v`, `dm_v`, `cc1_v`, `cc2_v`) |
 | `watch` | The `read` view, refreshed until Ctrl-C. Redraws in place on a terminal, one line per refresh otherwise. | `--interval MS` (default 200, minimum 50) |
 | `stream` | Records the ADC sample stream to CSV until Ctrl-C or `--duration`; prints the sample count and any gaps to stderr. | `--rate {2,10,50,1000}`, `--csv FILE` (created or overwritten), `--duration SECONDS` (device time, fractions allowed) |
@@ -18,6 +18,8 @@ the built-in help.
 | `trigger` | Asks a charger for a voltage through the meter (protocol triggering). One subcommand per protocol; see [Protocol triggering](#protocol-triggering). | `pd`, `qc`, `qc3`, `fcp`, `afc`, `sfcp`, `scp`, `vfcp`, `tfcp`, `ufcs` |
 | `detect` | Detects the charger's fast-charging protocols: BC1.2, Apple, and the automatic list on request. Never raises VBUS above 5 V. See [Detection](#detection). | `--list`, `--list-plus`, `--stall-secs N` (default 45), `--json` |
 | `console` | Raw PDM text console: sends the command lines it reads from stdin and prints what was sent and received, with times. See [Console](#console). | `--allow-high-voltage` |
+| `firmware info` | Reads a local firmware container file (`.mencrypt`) and prints its vendor, container version, model, version, date, CRC-32, size and English release notes. Needs no meter and never decrypts the file. A broken, oversized (over 8 MiB) or unreadable file is refused with exit code 2 and the reason, prefixed with the file name. | `FILE`, `--json` (`vendor`, `container_version`, `model`, `version`, `date`, `crc` as 8 hex digits, `size`, `release_notes_en`) |
+| `firmware probe` | Read-only check for either mode: prints the meter's USB identity (vendor and product IDs, product string, mode, and each interface's class and string) without opening it, then over the bulk pipe sends only CONNECT and HEAD and prints the results. It always uses the bulk pipe, whatever `--transport` says (except `sim`). If the meter has no vendor-class interface, it prints the identity and sends nothing. | `--json` (`vid`, `pid`, `product`, `mode`, `interfaces`, `connect`, `head`, `head_field`, `head_raw`) |
 
 ## Global options
 
@@ -187,3 +189,6 @@ These environment variables are for tests only. They work only with
 | `POWERZ_SIM_CABLE=epr-240w` | Puts an e-marked 240 W EPR cable on the simulated meter, so `pd send --preset discover-identity-cable` gets an answer. Unset, there is no cable. |
 | `POWERZ_SIM_ENTRY_BC=fail` | `entry bc` answers `fail`. |
 | `POWERZ_SIM_PDM_LAG=after-list` | The simulated meter answers one reply late after the `reset` that ends a stalled list, to test the out-of-step error. |
+| `POWERZ_SIM_HEAD=N` | The simulated meter's HEAD reply carries old-firmware field `N` (non-zero means update required). |
+| `POWERZ_SIM_APP_VERSION=V` | The simulated application info block reports version `V` (default `2.0.6`). |
+| `POWERZ_SIM_MODE` | `application` (default) or `bootloader`; read only by `firmware probe`. |

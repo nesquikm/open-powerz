@@ -177,9 +177,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// info blocks. A caller that sees an error here still has a connected
     /// session and may carry on without the firmware status.
     pub fn read_firmware_status(&mut self) -> Result<FirmwareStatus, Error> {
-        self.sleep(HEAD_DELAY);
-        let request = head::request(self.counter.next());
-        let reply = self.exchange(&request)?;
+        let reply = self.head_exchange()?;
         let update_required = HeadReply::decode(&reply)?.update_required();
         let bootloader = DeviceInfoBlock::decode(&self.read_block(HARDWARE_INFO)?)?;
         let application = DeviceInfoBlock::decode(&self.read_block(FIRMWARE_INFO)?)?;
@@ -188,6 +186,14 @@ impl<T: Transport, C: Clock> Session<T, C> {
             application,
             update_required,
         })
+    }
+
+    /// The HEAD step that follows CONNECT: wait [`HEAD_DELAY`], send one
+    /// HEAD (0x40) and return the raw reply, undecoded.
+    pub(super) fn head_exchange(&mut self) -> Result<Vec<u8>, Error> {
+        self.sleep(HEAD_DELAY);
+        let request = head::request(self.counter.next());
+        self.exchange(&request)
     }
 
     /// [`read_firmware_status`](Self::read_firmware_status) that only costs

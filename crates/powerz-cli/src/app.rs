@@ -16,7 +16,8 @@ use powerz_protocol::pdm::{self, FixedProtocol, PdmSession};
 use powerz_protocol::session::{Clock, Session, SystemClock};
 use powerz_protocol::transport::bulk::BulkTransport;
 use powerz_protocol::transport::cdc::CdcTransport;
-use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C};
+use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C, UsbIdentity};
+use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{
@@ -30,9 +31,10 @@ use crate::args::{
 };
 use crate::commands::{
     DetectOptions, LegacyRequestOptions, PdRequestOptions, PdSendOptions, PdSettingsChange,
-    StreamOptions, WatchOptions, console, detect, firmware_info, info_in_mode, list, pd, pd_decode,
-    pd_save, pd_send, read, select_device, stream, trigger_legacy_list, trigger_legacy_request,
-    trigger_pd_list, trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch,
+    StreamOptions, WatchOptions, console, detect, firmware_info, firmware_probe,
+    firmware_probe_unavailable, info_in_mode, list, pd, pd_decode, pd_save, pd_send, read,
+    select_device, stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list,
+    trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport};
@@ -103,6 +105,17 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     {
         return run_pdm(cli);
     }
+    if let Command::Firmware {
+        action: FirmwareAction::Probe { json },
+    } = cli.command
+    {
+        // The probe owns its exchange: no pre-dispatch CONNECT.
+        return if cli.transport == TransportKind::Sim {
+            probe_sim(cli, json)
+        } else {
+            probe_meter(cli, json)
+        };
+    }
     if cli.transport == TransportKind::Sim {
         return run_sim(cli);
     }
@@ -116,6 +129,109 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
         TransportKind::Hid => {
             with_transport(cli, mode, HidTransport::open(device.serial.as_deref())?)
         }
+    }
+}
+
+/// `firmware probe` on a real meter: read its USB identity from the OS
+/// device list (nothing opened), print it, then open the vendor bulk pipe
+/// and send only CONNECT and HEAD. Without a vendor-class interface (as a
+/// bootloader may have `[unknown]`) nothing is opened or sent.
+fn probe_meter(cli: &Cli, json: bool) -> Result<(), CliError> {
+    let devices = transport::discovery::list_devices()?;
+    let device = select_device(&devices, cli.device.as_deref())?;
+    let identity = transport::discovery::usb_identity(device)?
+        .ok_or_else(|| CliError::NoDevice("the meter is no longer attached".into()))?;
+    let mut out = std::io::stdout().lock();
+    if identity.vendor_interface().is_none() {
+        return firmware_probe_unavailable(&identity, json, &mut out, &mut std::io::stderr());
+    }
+    let pipe = LazyBulk {
+        device: device.clone(),
+        open: None,
+    };
+    run_probe(cli, &identity, pipe, SystemClock, json)
+}
+
+/// `firmware probe` on the demo device; `POWERZ_SIM_MODE` picks its mode.
+fn probe_sim(cli: &Cli, json: bool) -> Result<(), CliError> {
+    select_demo(cli)?;
+    let mode = sim_mode()?;
+    let faults = sim_faults()?;
+    let configure = |sim: SimDevice| -> Result<SimDevice, CliError> {
+        Ok(sim_firmware_knobs(sim)?.with_mode(mode).with_faults(faults))
+    };
+    if fake_sim_clock() {
+        let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+        let sim = configure(SimDevice::with_clock(
+            Persona::Bulk,
+            cli.scenario,
+            clock.clone(),
+        ))?;
+        run_probe(cli, &sim.usb_identity(), sim, clock, json)
+    } else {
+        let sim = configure(SimDevice::new(Persona::Bulk, cli.scenario))?;
+        run_probe(cli, &sim.usb_identity(), sim, SystemClock, json)
+    }
+}
+
+/// Run [`firmware_probe`] over `t` (wrapped for `--trace` if asked) on a
+/// fresh, unconnected session.
+fn run_probe<T: Transport, C: Clock>(
+    cli: &Cli,
+    identity: &UsbIdentity,
+    t: T,
+    clock: C,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut out = std::io::stdout().lock();
+    if cli.trace {
+        let t = TraceTransport::new(t, std::io::stderr());
+        firmware_probe(&mut Session::with_clock(t, clock), identity, json, &mut out)
+    } else {
+        firmware_probe(&mut Session::with_clock(t, clock), identity, json, &mut out)
+    }
+}
+
+/// The vendor bulk pipe of `device`, opened on its first transfer, so the
+/// probe prints the identity before the device is claimed.
+struct LazyBulk {
+    device: DeviceEntry,
+    open: Option<GuardedTransport<BulkTransport>>,
+}
+
+impl LazyBulk {
+    fn pipe(&mut self) -> Result<&mut GuardedTransport<BulkTransport>, transport::Error> {
+        match &mut self.open {
+            Some(pipe) => Ok(pipe),
+            open @ None => Ok(open.insert(BulkTransport::open(&self.device)?)),
+        }
+    }
+}
+
+impl Transport for LazyBulk {
+    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact(request, timeout)
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.read(timeout)
+    }
+
+    fn recover(&mut self) -> Result<(), transport::Error> {
+        self.pipe()?.recover()
+    }
+}
+
+/// Honour `POWERZ_SIM_MODE` (test-only, read by `firmware probe --transport
+/// sim` alone): `bootloader` runs the simulated meter's bootloader,
+/// `application` (or unset) its application firmware.
+fn sim_mode() -> Result<DeviceMode, CliError> {
+    match std::env::var("POWERZ_SIM_MODE").as_deref() {
+        Err(_) | Ok("application") => Ok(DeviceMode::Application),
+        Ok("bootloader") => Ok(DeviceMode::Bootloader),
+        Ok(other) => Err(CliError::Usage(format!(
+            "invalid POWERZ_SIM_MODE {other:?}: expected application or bootloader"
+        ))),
     }
 }
 
