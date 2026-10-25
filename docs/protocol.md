@@ -751,6 +751,11 @@ step follows the vendor app; none of it is confirmed on our meter yet. [static]
   the writes after one descriptor total at most its size plus 4080 bytes, and
   JUMP_APROM or a new CONNECT ends that allowance. Everything else is refused
   before it is written.
+- `powerz firmware jump` sends only the switch or return step on its own
+  (one JUMP_DFU from application mode or one JUMP_APROM from boot-loader
+  mode, through the same guard, with no CONNECT, HEAD or info read), then
+  waits up to 5 s and reports the mode the meter comes back in. [static]
+  [inferred]
 
 ## Never-send commands
 

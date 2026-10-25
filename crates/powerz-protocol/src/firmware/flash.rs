@@ -371,6 +371,16 @@ pub enum FlashError {
         /// Where it stopped.
         detail: String,
     },
+    /// A [`jump`] to the mode the meter is already in; nothing was sent.
+    #[error("the meter is already in {} mode; nothing was sent", mode.name())]
+    AlreadyInMode {
+        /// The mode it is in.
+        mode: DeviceMode,
+    },
+    /// A [`jump`] from a mode that is neither application nor bootloader;
+    /// nothing was sent.
+    #[error("the meter's mode is unknown, so no jump is chosen; nothing was sent")]
+    UnknownMode,
 }
 
 impl FlashError {
@@ -387,7 +397,9 @@ impl FlashError {
             // shares its device/abort code.
             FlashError::NotInBootloader { .. }
             | FlashError::Device { .. }
-            | FlashError::Interrupted { .. } => -110,
+            | FlashError::Interrupted { .. }
+            | FlashError::AlreadyInMode { .. }
+            | FlashError::UnknownMode => -110,
             FlashError::WorkMode { .. } => -111,
         }
     }
@@ -443,20 +455,21 @@ pub fn flash<O: MeterOpener, C: Clock>(
     let mut pipe = FlashGuard::new(meter.pipe);
     download(&mut pipe, container, &mut clock, &mut ids, stop, progress).map_err(in_bootloader)?;
     progress(FlashProgress::Returning);
-    match pipe.write_raw(&[JUMP_APROM, ids.next(), 0x00, 0x00], WRITE_WAIT) {
-        // The meter resets as it jumps, so the write may see it vanish.
-        Ok(()) | Err(TransportError::Disconnected) => {}
-        Err(e) => {
-            // A failed jump leaves the meter in its bootloader.
-            return Err(in_bootloader(FlashError::Device {
-                detail: format!("JUMP_APROM: {e}"),
-            }));
-        }
-    }
+    // A failed jump leaves the meter in its bootloader.
+    send_jump(&mut pipe, JUMP_APROM, ids.next()).map_err(in_bootloader)?;
     drop(pipe);
-    let Some(mut app) = wait_for(opener, &mut clock, DeviceMode::Application, RETURN_TIMEOUT)
-    else {
-        return Ok(FlashOutcome::PowerCycleNeeded);
+    let mut app = match wait_for(opener, &mut clock, DeviceMode::Application, RETURN_TIMEOUT) {
+        Ok(app) => app,
+        Err(None) => return Ok(FlashOutcome::PowerCycleNeeded),
+        // FINISHED has already confirmed the image, so say so plainly.
+        Err(Some(e)) => {
+            return Err(FlashError::Device {
+                detail: format!(
+                    "the image was written and verified, but the meter could not be found \
+                     again because {e}; unplug it and plug it back in, then check its version"
+                ),
+            });
+        }
     };
     let verify = |detail: String| FlashError::Verify {
         detail: format!("reading the application info block: {detail}"),
@@ -527,11 +540,13 @@ fn in_bootloader(e: FlashError) -> FlashError {
         FlashError::NotInBootloader { seen } => FlashError::NotInBootloader { seen },
         // Its message carries the recovery text already.
         e @ FlashError::WorkMode { .. } => e,
+        // Raised by `jump` only, before anything is sent.
+        e @ (FlashError::AlreadyInMode { .. } | FlashError::UnknownMode) => e,
     }
 }
 
 /// What to do when the meter does not reach its bootloader on its own.
-const BACK_BUTTON_HINT: &str = "hold the Back button while plugging the meter in to start it \
+pub const BACK_BUTTON_HINT: &str = "hold the Back button while plugging the meter in to start it \
      in bootloader mode, then retry";
 
 /// From application mode: check the meter's model from its application
@@ -556,28 +571,156 @@ fn switch_to_bootloader<O: MeterOpener, C: Clock>(
         .map_err(|e| FlashError::Product {
             detail: e.to_string(),
         })?;
-    let mut pipe = FlashGuard::new(meter.pipe);
-    match pipe.write_raw(&[JUMP_DFU, 0x01, 0x00, 0x00], WRITE_WAIT) {
-        // The meter resets as it jumps, so the write may see it vanish.
-        Ok(()) | Err(TransportError::Disconnected) => {}
-        Err(e) => {
-            return Err(FlashError::Device {
-                detail: format!("JUMP_DFU: {e}"),
-            });
+    let target = JumpTarget::Bootloader;
+    let seen = match jump_and_wait(meter.pipe, target, opener, clock)? {
+        Waited::Reached(boot) => return Ok(boot),
+        Waited::Seen(Some(mode)) => format!("{} mode", mode.name()),
+        Waited::Seen(None) => "no meter".into(),
+        Waited::OpenError(e) => format!("the meter could not be opened: {e}"),
+    };
+    Err(FlashError::NotInBootloader {
+        seen: format!("{seen} after {}; {BACK_BUTTON_HINT}", target.frame_name()),
+    })
+}
+
+/// How the wait after a jump ended.
+enum Waited<P> {
+    /// The meter came back in the target mode.
+    Reached(Meter<P>),
+    /// It did not; a last look shows this mode (`None`: no meter attached).
+    Seen(Option<DeviceMode>),
+    /// It did not, and opening it kept failing with this error (not "no
+    /// device yet"); the last such error.
+    OpenError(TransportError),
+}
+
+/// Send the jump frame for `target` through the strict flash guard, wait
+/// for the meter to come back in `target` mode (for [`SWITCH_TIMEOUT`] or
+/// [`RETURN_TIMEOUT`]) and, if it does not, look once more at what is
+/// attached.
+fn jump_and_wait<O: MeterOpener, C: Clock>(
+    pipe: O::Pipe,
+    target: JumpTarget,
+    opener: &mut O,
+    clock: &mut C,
+) -> Result<Waited<O::Pipe>, FlashError> {
+    let (ty, limit) = match target {
+        JumpTarget::Bootloader => (JUMP_DFU, SWITCH_TIMEOUT),
+        JumpTarget::Application => (JUMP_APROM, RETURN_TIMEOUT),
+    };
+    send_jump(&mut FlashGuard::new(pipe), ty, 0x01)?;
+    Ok(match wait_for(opener, clock, target.mode(), limit) {
+        Ok(m) => Waited::Reached(m),
+        Err(Some(e)) => Waited::OpenError(e),
+        Err(None) => match opener.open() {
+            Ok(m) => Waited::Seen(m.map(|m| m.mode)),
+            Err(e) if no_device_yet(&e) => Waited::Seen(None),
+            Err(e) => Waited::OpenError(e),
+        },
+    })
+}
+
+/// Send the write-only jump frame `ty` (JUMP_DFU or JUMP_APROM) with
+/// transaction id `id` as one raw write. The meter resets as it jumps, so a
+/// write that sees it vanish ([`TransportError::Disconnected`]) counts as
+/// sent; any other failure is a device error naming the jump.
+fn send_jump<P: FlashTransport>(pipe: &mut P, ty: u8, id: u8) -> Result<(), FlashError> {
+    match pipe.write_raw(&[ty, id, 0x00, 0x00], WRITE_WAIT) {
+        Ok(()) | Err(TransportError::Disconnected) => Ok(()),
+        Err(e) => Err(FlashError::Device {
+            detail: format!("{}: {e}", jump_name(ty)),
+        }),
+    }
+}
+
+/// The name of jump frame type `ty`.
+fn jump_name(ty: u8) -> &'static str {
+    if ty == JUMP_DFU {
+        JumpTarget::Bootloader.frame_name()
+    } else {
+        JumpTarget::Application.frame_name()
+    }
+}
+
+/// The mode a [`jump`] asks the meter to switch to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpTarget {
+    /// The bootloader, with JUMP_DFU (from application mode).
+    Bootloader,
+    /// The application firmware, with JUMP_APROM (from bootloader mode).
+    Application,
+}
+
+impl JumpTarget {
+    /// The device mode this target names.
+    pub fn mode(self) -> DeviceMode {
+        match self {
+            JumpTarget::Bootloader => DeviceMode::Bootloader,
+            JumpTarget::Application => DeviceMode::Application,
         }
     }
-    drop(pipe);
-    match wait_for(opener, clock, DeviceMode::Bootloader, SWITCH_TIMEOUT) {
-        Some(boot) => Ok(boot),
-        None => {
-            let seen = match opener.open() {
-                Ok(Some(m)) => format!("{} mode", m.mode.name()),
-                _ => "no meter".into(),
-            };
-            Err(FlashError::NotInBootloader {
-                seen: format!("{seen} after JUMP_DFU; {BACK_BUTTON_HINT}"),
-            })
+
+    /// The name of the jump frame that reaches this target: `JUMP_DFU` for
+    /// the bootloader, `JUMP_APROM` for the application.
+    pub fn frame_name(self) -> &'static str {
+        match self {
+            JumpTarget::Bootloader => "JUMP_DFU",
+            JumpTarget::Application => "JUMP_APROM",
         }
+    }
+}
+
+/// How a [`jump`] that was sent ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpOutcome {
+    /// The meter came back in the target mode.
+    Reached(DeviceMode),
+    /// The meter did not come back in the target mode within the wait;
+    /// `seen` is the mode it shows afterwards (`None`: no meter attached).
+    NotReached {
+        /// The mode seen after the wait.
+        seen: Option<DeviceMode>,
+    },
+}
+
+/// Switch the meter `opener` finds to `target` with one write-only jump
+/// frame, then report the mode it comes back in.
+///
+/// From application mode only JUMP_DFU is sent, from bootloader mode only
+/// JUMP_APROM, as a raw write through the strict [`FlashGuard`]; nothing
+/// else (no CONNECT, HEAD, descriptor or info read). A meter already in the
+/// target mode ([`FlashError::AlreadyInMode`]), in an unknown mode
+/// ([`FlashError::UnknownMode`]) or a `stop` already requested sends
+/// nothing. After the jump the meter is looked for on clock time, for
+/// [`SWITCH_TIMEOUT`] (to the bootloader) or [`RETURN_TIMEOUT`] (to the
+/// application).
+pub fn jump<O: MeterOpener, C: Clock>(
+    _ack: FlashAck,
+    target: JumpTarget,
+    opener: &mut O,
+    mut clock: C,
+    stop: &AtomicBool,
+) -> Result<JumpOutcome, FlashError> {
+    let meter = opener.open().map_err(device)?.ok_or(FlashError::Device {
+        detail: "no meter found".into(),
+    })?;
+    if stopped(stop) {
+        return Err(interrupted("before the jump"));
+    }
+    match meter.mode {
+        DeviceMode::Unknown => return Err(FlashError::UnknownMode),
+        mode if mode == target.mode() => return Err(FlashError::AlreadyInMode { mode }),
+        _ => {}
+    }
+    match jump_and_wait(meter.pipe, target, opener, &mut clock)? {
+        Waited::Reached(m) => Ok(JumpOutcome::Reached(m.mode)),
+        Waited::Seen(seen) => Ok(JumpOutcome::NotReached { seen }),
+        Waited::OpenError(e) => Err(FlashError::Device {
+            detail: format!(
+                "{} was sent, but the meter could not be opened afterwards: {e}",
+                target.frame_name()
+            ),
+        }),
     }
 }
 
@@ -708,25 +851,37 @@ fn check_container(container: &FirmwareContainer<'_>) -> Result<(), FlashError> 
 }
 
 /// Poll `opener` until the meter is in `mode`, for up to `limit` of clock
-/// time (measured, so slow opens count toward the wait).
+/// time (measured, so slow opens count toward the wait). If the wait ends
+/// without it, the error is the last opener error that is not "no device
+/// yet" (`None`: there was none).
 fn wait_for<O: MeterOpener, C: Clock>(
     opener: &mut O,
     clock: &mut C,
     mode: DeviceMode,
     limit: Duration,
-) -> Option<Meter<O::Pipe>> {
+) -> Result<Meter<O::Pipe>, Option<TransportError>> {
     let start = clock.now_ms();
     let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
+    let mut last_error = None;
     while clock.now_ms().saturating_sub(start) < limit_ms {
         clock.sleep(POLL_INTERVAL);
         // A meter that is re-enumerating may fail to open; look again.
-        if let Ok(Some(m)) = opener.open()
-            && m.mode == mode
-        {
-            return Some(m);
+        match opener.open() {
+            Ok(Some(m)) if m.mode == mode => return Ok(m),
+            // A later successful open supersedes an earlier opener error:
+            // the final observation wins.
+            Ok(_) => last_error = None,
+            Err(e) if no_device_yet(&e) => {}
+            Err(e) => last_error = Some(e),
         }
     }
-    None
+    Err(last_error)
+}
+
+/// Whether an opener error only means the meter is not back yet (it is
+/// re-enumerating).
+fn no_device_yet(e: &TransportError) -> bool {
+    matches!(e, TransportError::Disconnected)
 }
 
 /// Message type of a reply, if it has one.

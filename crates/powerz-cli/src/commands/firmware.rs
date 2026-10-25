@@ -1,15 +1,23 @@
 //! `powerz firmware info FILE` (FR V9SK53), `powerz firmware probe`
-//! (FR V9SK56, AC .6) and `powerz firmware flash FILE --i-understand`
-//! (FR V9SK54, AC .7).
+//! (FR V9SK56, AC .6), `powerz firmware flash FILE --i-understand`
+//! (FR V9SK54, AC .7) and `powerz firmware jump --to MODE --i-understand`
+//! (FR V9SK56, AC .7).
 
+use std::cell::Cell;
 use std::io::Write;
+use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
+use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::container::FirmwareContainer;
-use powerz_protocol::firmware::flash::{FlashAck, FlashOutcome, FlashProgress, MeterOpener, flash};
+use powerz_protocol::firmware::flash::{
+    BACK_BUTTON_HINT, FlashAck, FlashOutcome, FlashProgress, FlashTransport, JumpOutcome,
+    JumpTarget, Meter, MeterOpener, flash, jump,
+};
 use powerz_protocol::session::{Clock, ConnectOutcome, HeadOutcome, Session};
-use powerz_protocol::transport::Transport;
 use powerz_protocol::transport::discovery::{DeviceEntry, UsbIdentity};
+use powerz_protocol::transport::{Error as TransportError, Transport};
 
 use crate::error::CliError;
 use crate::output::write_json;
@@ -277,4 +285,118 @@ pub fn firmware_flash<O: MeterOpener, C: Clock>(
         )?,
     }
     Ok(())
+}
+
+/// What `firmware jump` says without `--i-understand`.
+pub const JUMP_RISK: &str = "refusing to jump without --i-understand: switching the meter's mode \
+     is a risk; in its bootloader the meter takes no measurements until it is jumped back to \
+     application mode or power-cycled. Re-run with --i-understand to accept the risk";
+
+/// `powerz firmware jump`: send the one jump frame for `target` to the
+/// meter `opener` finds and print the mode it was in and the mode it came
+/// back in. The `Was in:` line is printed once the jump write was attempted,
+/// before the outcome, so a failed write still shows it. A refusal
+/// (already there, unknown mode, Ctrl-C before the jump) prints nothing. A
+/// refusal, a failed write, or a meter that does not come back in `target`
+/// mode is a device error; the last names the mode seen (and, for the
+/// bootloader, how to start it by hand).
+pub fn firmware_jump<O: MeterOpener, C: Clock>(
+    ack: FlashAck,
+    target: JumpTarget,
+    opener: &mut O,
+    clock: C,
+    stop: &AtomicBool,
+    out: &mut impl Write,
+) -> Result<(), CliError> {
+    let frame = target.frame_name();
+    let to = target.mode().name();
+    let seen_first = Rc::new(Cell::new(None));
+    let sent = Rc::new(Cell::new(false));
+    let mut watched = Watched {
+        inner: opener,
+        first: Rc::clone(&seen_first),
+        sent: Rc::clone(&sent),
+    };
+    let result = jump(ack, target, &mut watched, clock, stop);
+    if sent.get() {
+        // Only a meter that is not in `target` mode is sent the jump.
+        let from = seen_first.get().unwrap_or(DeviceMode::Unknown);
+        writeln!(out, "Was in:  {} mode (sent {frame})", from.name())?;
+    }
+    let outcome =
+        result.map_err(|e| CliError::Device(format!("jump failed ({}): {e}", e.code())))?;
+    match outcome {
+        JumpOutcome::Reached(mode) => {
+            writeln!(out, "Now in:  {} mode", mode.name())?;
+            Ok(())
+        }
+        JumpOutcome::NotReached { seen } => {
+            let seen = seen.map_or("no meter".to_owned(), |m| format!("{} mode", m.name()));
+            let hint = match target {
+                JumpTarget::Bootloader => format!("; {BACK_BUTTON_HINT}"),
+                JumpTarget::Application => {
+                    "; unplug the meter and plug it back in to restart it".to_owned()
+                }
+            };
+            Err(CliError::Device(format!(
+                "the meter did not come back in {to} mode after {frame}: {seen} seen{hint}"
+            )))
+        }
+    }
+}
+
+/// [`MeterOpener`] wrapper of [`firmware_jump`]: remembers the mode of the
+/// first meter opened and whether a raw write (the jump) was attempted.
+struct Watched<'a, O> {
+    inner: &'a mut O,
+    first: Rc<Cell<Option<DeviceMode>>>,
+    sent: Rc<Cell<bool>>,
+}
+
+impl<O: MeterOpener> MeterOpener for Watched<'_, O> {
+    type Pipe = WatchedPipe<O::Pipe>;
+
+    fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, TransportError> {
+        let meter = self.inner.open()?;
+        if let Some(m) = &meter
+            && self.first.get().is_none()
+        {
+            self.first.set(Some(m.mode));
+        }
+        Ok(meter.map(|m| Meter {
+            mode: m.mode,
+            model: m.model,
+            pipe: WatchedPipe {
+                inner: m.pipe,
+                sent: Rc::clone(&self.sent),
+            },
+        }))
+    }
+}
+
+/// A pipe of [`Watched`].
+struct WatchedPipe<P> {
+    inner: P,
+    sent: Rc<Cell<bool>>,
+}
+
+impl<P: Transport> Transport for WatchedPipe<P> {
+    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, TransportError> {
+        self.inner.transact(request, timeout)
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, TransportError> {
+        self.inner.read(timeout)
+    }
+
+    fn recover(&mut self) -> Result<(), TransportError> {
+        self.inner.recover()
+    }
+}
+
+impl<P: FlashTransport> FlashTransport for WatchedPipe<P> {
+    fn write_raw(&mut self, data: &[u8], timeout: Duration) -> Result<(), TransportError> {
+        self.sent.set(true);
+        self.inner.write_raw(data, timeout)
+    }
 }

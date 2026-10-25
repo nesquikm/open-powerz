@@ -9,7 +9,9 @@ use std::time::Duration;
 use powerz_protocol::decode::AdcSnapshot;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::container::read_container_file;
-use powerz_protocol::firmware::flash::{FlashAck, FlashGuard, FlashTransport, Meter, MeterOpener};
+use powerz_protocol::firmware::flash::{
+    FlashAck, FlashGuard, FlashTransport, JumpTarget, Meter, MeterOpener,
+};
 use powerz_protocol::frame;
 use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
 use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
@@ -27,16 +29,16 @@ use powerz_sim::{
 };
 
 use crate::args::{
-    Cli, Command, FirmwareAction, FixedAction, LimitsAction, PdAction, PdDecode, Qc3Action,
+    Cli, Command, FirmwareAction, FixedAction, JumpTo, LimitsAction, PdAction, PdDecode, Qc3Action,
     QcAction, RequestFlags, TransportKind, TriggerProtocol, UfcsAction, needs_connect,
     rate_from_sps, validate,
 };
 use crate::commands::{
-    DetectOptions, FLASH_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
+    DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
     PdSettingsChange, StreamOptions, WatchOptions, console, detect, find_flashed_meter,
-    firmware_flash, firmware_info, firmware_probe, firmware_probe_unavailable, info_in_mode,
-    inspect_flash_file, list, pd, pd_decode, pd_save, pd_send, read, select_device, stream,
-    trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
+    firmware_flash, firmware_info, firmware_jump, firmware_probe, firmware_probe_unavailable,
+    info_in_mode, inspect_flash_file, list, pd, pd_decode, pd_save, pd_send, read, select_device,
+    stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
     trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
@@ -87,6 +89,12 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     } = &cli.command
     {
         return flash_file(cli, file, *i_understand);
+    }
+    if let Command::Firmware {
+        action: FirmwareAction::Jump { to, i_understand },
+    } = &cli.command
+    {
+        return jump_mode(cli, *to, *i_understand);
     }
     validate(cli)?;
     if let Command::List { json, include_demo } = cli.command {
@@ -231,9 +239,10 @@ impl Transport for LazyBulk {
     }
 }
 
-/// Honour `POWERZ_SIM_MODE` (test-only, read by `firmware probe --transport
-/// sim` alone): `bootloader` runs the simulated meter's bootloader,
-/// `application` (or unset) its application firmware.
+/// Honour `POWERZ_SIM_MODE` (test-only, read by `firmware probe`, `flash`
+/// and `jump` with `--transport sim` alone): `bootloader` runs the
+/// simulated meter's bootloader, `application` (or unset) its application
+/// firmware.
 fn sim_mode() -> Result<DeviceMode, CliError> {
     match std::env::var("POWERZ_SIM_MODE").as_deref() {
         Err(_) | Ok("application") => Ok(DeviceMode::Application),
@@ -287,17 +296,12 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
     let mut out = std::io::stdout().lock();
     if cli.transport == TransportKind::Sim {
         select_demo(cli)?;
-        let configure = |sim: SimDevice| -> Result<SimMeter, CliError> {
-            Ok(SimMeter::new(
-                sim_flash_fault(sim_firmware_knobs(sim)?)?.with_mode(sim_mode()?),
-            ))
-        };
         // Ctrl-C stops the flash at the engine's next safe point.
         let stop = ctrl_c_flag()?;
         let after = sim_ctrl_c_after_writes()?;
         return if fake_sim_clock() {
             let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-            let meter = configure(SimDevice::with_clock(
+            let meter = sim_meter(SimDevice::with_clock(
                 Persona::Bulk,
                 cli.scenario,
                 clock.clone(),
@@ -312,7 +316,7 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
                 &mut out,
             )
         } else {
-            let meter = configure(SimDevice::new(Persona::Bulk, cli.scenario))?;
+            let meter = sim_meter(SimDevice::new(Persona::Bulk, cli.scenario))?;
             let mut meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
             firmware_flash(
                 FlashAck::acknowledge(),
@@ -324,14 +328,8 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
             )
         };
     }
-    // Choose the meter now, so an ambiguous choice is refused up front.
-    let devices = transport::discovery::list_devices()?;
-    select_device(&devices, cli.device.as_deref())?;
+    let mut opener = discovery_opener(cli)?;
     let stop = ctrl_c_flag()?;
-    let mut opener = DiscoveryOpener {
-        serial: cli.device.clone(),
-        ack: FlashAck::acknowledge(),
-    };
     firmware_flash(
         FlashAck::acknowledge(),
         &container,
@@ -342,8 +340,65 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
     )
 }
 
-/// Honour `POWERZ_SIM_CTRL_C_AFTER=K` for `firmware flash` (test-only):
-/// stand in for Ctrl-C once K payload writes have been sent.
+/// The real-meter opener of `firmware flash` / `firmware jump`. The meter
+/// is chosen now, so an ambiguous choice is refused before anything is sent.
+fn discovery_opener(cli: &Cli) -> Result<DiscoveryOpener, CliError> {
+    let devices = transport::discovery::list_devices()?;
+    select_device(&devices, cli.device.as_deref())?;
+    Ok(DiscoveryOpener {
+        serial: cli.device.clone(),
+        ack: FlashAck::acknowledge(),
+    })
+}
+
+/// The simulated meter of `firmware flash` / `firmware jump`: `sim` with
+/// the firmware knobs, `POWERZ_SIM_FLASH_FAULT` and `POWERZ_SIM_MODE`.
+fn sim_meter(sim: SimDevice) -> Result<SimMeter, CliError> {
+    Ok(SimMeter::new(
+        sim_flash_fault(sim_firmware_knobs(sim)?)?.with_mode(sim_mode()?),
+    ))
+}
+
+/// `firmware jump --to MODE`: check the acknowledgement before any device
+/// is chosen or opened, then send the one jump to the meter (or, with
+/// `--transport sim`, the simulated one) and report its mode.
+fn jump_mode(cli: &Cli, to: JumpTo, i_understand: bool) -> Result<(), CliError> {
+    if !i_understand {
+        return Err(CliError::Usage(JUMP_RISK.into()));
+    }
+    validate(cli)?;
+    let target = match to {
+        JumpTo::Bootloader => JumpTarget::Bootloader,
+        JumpTo::Application => JumpTarget::Application,
+    };
+    let mut out = std::io::stdout().lock();
+    // Ctrl-C before the jump stops it; the jump itself is one write.
+    let stop = ctrl_c_flag()?;
+    let ack = FlashAck::acknowledge;
+    if cli.transport == TransportKind::Sim {
+        select_demo(cli)?;
+        // `POWERZ_SIM_CTRL_C_AFTER=0` stands in for a Ctrl-C before the
+        // start; a jump sends no payload writes, so other counts never fire.
+        if sim_ctrl_c_after_writes()? == Some(0) {
+            stop.store(true, Ordering::SeqCst);
+        }
+        return if fake_sim_clock() {
+            let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+            let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+            firmware_jump(ack(), target, &mut sim_meter(sim)?, clock, &stop, &mut out)
+        } else {
+            let sim = SimDevice::new(Persona::Bulk, cli.scenario);
+            let mut meter = sim_meter(sim)?;
+            firmware_jump(ack(), target, &mut meter, SystemClock, &stop, &mut out)
+        };
+    }
+    let mut opener = discovery_opener(cli)?;
+    firmware_jump(ack(), target, &mut opener, SystemClock, &stop, &mut out)
+}
+
+/// Honour `POWERZ_SIM_CTRL_C_AFTER=K` for `firmware flash` and `firmware
+/// jump` (test-only): stand in for Ctrl-C once K payload writes have been
+/// sent (for a jump only K = 0, a stop before the start, applies).
 fn sim_ctrl_c_after_writes() -> Result<Option<usize>, CliError> {
     match std::env::var("POWERZ_SIM_CTRL_C_AFTER") {
         Ok(n) => n
@@ -941,8 +996,9 @@ fn sim_firmware_knobs(mut sim: SimDevice) -> Result<SimDevice, CliError> {
 }
 
 /// Honour `POWERZ_SIM_FLASH_FAULT=<fault>` (test-only, read by `firmware
-/// flash --transport sim` alone): the simulated bootloader injects that
-/// [`FlashFault`], named in kebab-case (`missing-sync@N`, `no-finished`, ...).
+/// flash` and `firmware jump` with `--transport sim` alone): the simulated
+/// bootloader injects that [`FlashFault`], named in kebab-case
+/// (`missing-sync@N`, `no-finished`, ...).
 fn sim_flash_fault(sim: SimDevice) -> Result<SimDevice, CliError> {
     let Ok(spec) = std::env::var("POWERZ_SIM_FLASH_FAULT") else {
         return Ok(sim);

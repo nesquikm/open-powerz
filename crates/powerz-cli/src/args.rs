@@ -163,8 +163,9 @@ pub enum Command {
         allow_high_voltage: bool,
     },
     /// Work with firmware files (`info` needs no meter), probe the meter's
-    /// firmware identity (`probe`, read-only) and flash a firmware file
-    /// (`flash`, needs `--i-understand`).
+    /// firmware identity (`probe`, read-only), flash a firmware file
+    /// (`flash`, needs `--i-understand`) and switch the meter's mode (`jump`,
+    /// needs `--i-understand`).
     Firmware {
         /// What to do.
         #[command(subcommand)]
@@ -205,6 +206,28 @@ pub enum FirmwareAction {
         #[arg(long)]
         i_understand: bool,
     },
+    /// Switch the meter between application and bootloader mode with one
+    /// write-only jump (JUMP_DFU or JUMP_APROM) over the vendor bulk pipe,
+    /// then report the mode it comes back in; nothing is sent without
+    /// `--i-understand`.
+    Jump {
+        /// The mode to switch to.
+        #[arg(long, value_enum)]
+        to: JumpTo,
+        /// Accept the risk: in its bootloader the meter takes no
+        /// measurements until it is jumped back or power-cycled.
+        #[arg(long)]
+        i_understand: bool,
+    },
+}
+
+/// `firmware jump --to` targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum JumpTo {
+    /// The bootloader (JUMP_DFU, from application mode).
+    Bootloader,
+    /// The application firmware (JUMP_APROM, from bootloader mode).
+    Application,
 }
 
 /// `trigger` protocols.
@@ -676,12 +699,15 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
     if let Command::Firmware { action } = &cli.command
         && matches!(
             action,
-            FirmwareAction::Probe { .. } | FirmwareAction::Flash { .. }
+            FirmwareAction::Probe { .. }
+                | FirmwareAction::Flash { .. }
+                | FirmwareAction::Jump { .. }
         )
         && matches!(cli.transport, TransportKind::Hid | TransportKind::Cdc)
     {
         let name = match action {
             FirmwareAction::Flash { .. } => "flash",
+            FirmwareAction::Jump { .. } => "jump",
             _ => "probe",
         };
         return Err(CliError::Usage(format!(

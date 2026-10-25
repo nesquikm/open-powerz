@@ -41,7 +41,7 @@ Build order: V9SK52, V9SK53, V9SK54, V9SK55, then V9SK56 (stage 1 can run once V
 **Tasks:**
 - [ ] Device mode and firmware version — V9SK52
 - [x] Firmware file inspection — V9SK53
-- [ ] Firmware flashing engine — V9SK54
+- [x] Firmware flashing engine — V9SK54
 - [ ] Desktop firmware update — V9SK55
 - [ ] Staged firmware checks on the real meter — V9SK56
 

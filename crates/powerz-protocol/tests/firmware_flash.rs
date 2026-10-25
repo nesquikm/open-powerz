@@ -185,6 +185,23 @@ struct State {
     open_cost_ms: u64,
     /// Clock time of each jump write: (frame type, now_ms).
     jump_at: Vec<(u8, u64)>,
+    /// After a jump of this frame type the meter obeys, this many `open`
+    /// calls fail with this error (an ambiguous device list, an I/O error)
+    /// before the device list is read again; `usize::MAX`: every one.
+    open_err_after: Option<(u8, TransportError, usize)>,
+    /// The armed opener error and how many opens it has left.
+    open_errs: Option<(TransportError, usize)>,
+}
+
+impl State {
+    /// Arm the opener error for a jump of type `ty` the meter obeyed.
+    fn arm_open_err(&mut self, ty: u8) {
+        if let Some((t, e, n)) = &self.open_err_after
+            && *t == ty
+        {
+            self.open_errs = Some((e.clone(), *n));
+        }
+    }
 }
 
 impl State {
@@ -295,6 +312,7 @@ impl FlashTransport for Pipe {
                 let fail = s.dfu_fail.clone();
                 if jump_happens(&fail) {
                     s.upcoming = s.after_dfu.clone().into();
+                    s.arm_open_err(0x09);
                 }
                 fail.map_or(Ok(()), Err)
             }
@@ -303,6 +321,7 @@ impl FlashTransport for Pipe {
                 if jump_happens(&fail) {
                     s.app_version = s.new_version.clone();
                     s.upcoming = s.after_aprom.clone().into();
+                    s.arm_open_err(0x08);
                 }
                 fail.map_or(Ok(()), Err)
             }
@@ -337,6 +356,12 @@ impl MeterOpener for Opener {
         s.opens += 1;
         let cost = s.open_cost_ms;
         s.clock.0.borrow_mut().now_ms += cost;
+        if let Some((e, left)) = s.open_errs.take() {
+            if left > 1 {
+                s.open_errs = Some((e.clone(), left - 1));
+            }
+            return Err(e);
+        }
         if let Some(next) = s.upcoming.pop_front() {
             s.set_mode(next);
         }
@@ -383,6 +408,8 @@ impl Bench {
             clock: clock.clone(),
             open_cost_ms: 0,
             jump_at: Vec::new(),
+            open_err_after: None,
+            open_errs: None,
         };
         state.set_mode(Some(mode));
         Bench {
@@ -463,6 +490,13 @@ impl Bench {
     /// Set the stop flag (Ctrl-C) before the flash starts.
     fn stopped(self) -> Bench {
         self.s.borrow().stop.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// After the jump of type `ty`, `times` opens fail with `e`
+    /// (`usize::MAX`: all of them).
+    fn open_err_after(self, ty: u8, e: TransportError, times: usize) -> Bench {
+        self.s.borrow_mut().open_err_after = Some((ty, e, times));
         self
     }
 
@@ -781,6 +815,115 @@ fn no_meter_at_all_after_jump_dfu_stops_with_the_back_button_fallback() {
     let e = r.expect_err("no meter after the jump stops the flash");
     assert_recovery_text(&e);
     assert!(payload_writes(&bench.ops()).is_empty());
+}
+
+/// An opener error that is not "no device yet": the device list is
+/// ambiguous after the re-enumeration.
+fn ambiguous() -> TransportError {
+    TransportError::Io("two meters match; pass --device SERIAL".into())
+}
+
+#[test]
+fn an_opener_error_through_the_switch_wait_is_named_not_called_no_meter() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app().open_err_after(0x09, ambiguous(), usize::MAX);
+    let (r, _) = bench.run(&c);
+    let e = r.expect_err("no bootloader reached");
+    assert!(matches!(e, FlashError::NotInBootloader { .. }), "got {e:?}");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("two meters match"),
+        "names the opener's reason: {msg}"
+    );
+    assert!(!msg.contains("no meter"), "a meter was found: {msg}");
+    assert_recovery_text(&e);
+    assert!(payload_writes(&bench.ops()).is_empty());
+}
+
+#[test]
+fn opener_errors_that_clear_inside_the_switch_wait_still_flash() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app()
+        .open_err_after(0x09, ambiguous(), 3)
+        .script(boot_ok(P));
+    let (r, _) = bench.run(&c);
+    assert!(matches!(r, Ok(FlashOutcome::Verified { .. })), "got {r:?}");
+}
+
+#[test]
+fn an_opener_error_through_the_return_wait_is_named_not_a_plain_power_cycle() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::boot()
+        .script(boot_ok(P))
+        .open_err_after(0x08, ambiguous(), usize::MAX);
+    let (r, _) = bench.run(&c);
+    assert!(
+        !matches!(r, Ok(FlashOutcome::PowerCycleNeeded)),
+        "an opener error is not \"the meter stayed in its bootloader\": got {r:?}"
+    );
+    let e = r.expect_err("the return failure names the opener error");
+    assert!(
+        e.to_string().contains("two meters match"),
+        "names the opener's reason: {e}"
+    );
+    let ops = bench.ops();
+    let aprom = ops
+        .iter()
+        .filter(|o| matches!(o, Op::Raw { data, .. } if data.len() == 4 && data[0] & 0x7F == 0x08))
+        .count();
+    assert_eq!(aprom, 1, "JUMP_APROM is not retried");
+    assert!(
+        memread_addrs(&ops).is_empty(),
+        "no info read without the app"
+    );
+}
+
+#[test]
+fn an_opener_error_then_application_mode_through_the_switch_wait_names_application_mode() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app()
+        .after_dfu(vec![Some(DeviceMode::Application)])
+        .open_err_after(0x09, ambiguous(), 1);
+    let (r, _) = bench.run(&c);
+    let e = r.expect_err("a meter that stays in application mode stops the flash");
+    assert!(matches!(e, FlashError::NotInBootloader { .. }), "got {e:?}");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("application mode"),
+        "says the meter is still in application mode: {msg}"
+    );
+    assert!(
+        !msg.contains("two meters match"),
+        "a later successful open forgets the earlier opener error: {msg}"
+    );
+    assert_recovery_text(&e);
+    assert!(payload_writes(&bench.ops()).is_empty());
+}
+
+#[test]
+fn an_opener_error_then_the_bootloader_through_the_return_wait_asks_for_a_power_cycle() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::boot()
+        .script(boot_ok(P))
+        .after_aprom(vec![Some(DeviceMode::Bootloader)])
+        .open_err_after(0x08, ambiguous(), 1);
+    let (r, _) = bench.run(&c);
+    assert!(
+        matches!(r, Ok(FlashOutcome::PowerCycleNeeded)),
+        "a later successful open forgets the earlier opener error: got {r:?}"
+    );
+    let ops = bench.ops();
+    let aprom = framed_types(&ops).iter().filter(|t| **t == 0x08).count();
+    assert_eq!(aprom, 1, "JUMP_APROM is not retried");
+    assert!(
+        memread_addrs(&ops).is_empty(),
+        "no info read without the app"
+    );
 }
 
 #[test]
