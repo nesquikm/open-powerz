@@ -118,7 +118,7 @@ impl SimDevice {
     }
 
     /// Four-byte control reply.
-    fn control(&self, ty: u8, id: u8) -> Vec<u8> {
+    pub(crate) fn control(&self, ty: u8, id: u8) -> Vec<u8> {
         self.header(ty, id, false, 0).to_vec()
     }
 
@@ -128,6 +128,9 @@ impl SimDevice {
             return Vec::new();
         };
         let id = req.get(1).copied().unwrap_or(0);
+        if self.mode == powerz_protocol::firmware::DeviceMode::Bootloader {
+            return self.bootloader_request(req, id);
+        }
         if self.persona == Persona::Cdc && matches!(b0 & 0x7F, 0x01..=0x03) {
             // ADCNEW framing on CDC: out of scope, no reply.
             return Vec::new();
@@ -156,7 +159,7 @@ impl SimDevice {
 
     /// HEAD: after CONNECT, `40 id 00 01`, the old-firmware u32 at offset
     /// 4, zero padding to 20 bytes; REJECT before CONNECT `[inferred]`.
-    fn head(&self, id: u8) -> Vec<u8> {
+    pub(crate) fn head(&self, id: u8) -> Vec<u8> {
         if !self.link_open() {
             return self.control(msg::REJECT, id);
         }
@@ -246,7 +249,7 @@ impl SimDevice {
     /// 0x44: confirmation, then the block encrypted with key 0.
     fn memory_read(&mut self, req: &[u8], id: u8) -> Vec<Vec<u8>> {
         let reject = || vec![self.control(msg::REJECT, id)];
-        if !self.link_open() || req.len() < 4 + CRYPT_LEN {
+        if !self.link_open() || req.len() < 4 + CRYPT_LEN || self.info_read_fails() {
             return reject();
         }
         let plain = crypto::decrypt(&KEYS[0], &req[4..4 + CRYPT_LEN]);

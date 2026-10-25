@@ -144,8 +144,8 @@ Control types (main header type below 0x40):
 | 0x05 | ACCEPT | reply only | | [doc] [static] [device] |
 | 0x06 | REJECT | reply only | | [doc] [static] [device] |
 | 0x07 | FINISHED | reply only | acknowledges flash-write chunks | [doc] [static] |
-| 0x08 | JUMP_APROM | 0 | none; leaves DFU mode; never sent by us | [doc] [static] |
-| 0x09 | JUMP_DFU | 0 | none; enters firmware-update mode; never sent by us | [doc] [static] |
+| 0x08 | JUMP_APROM | 0 | none; leaves DFU mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
+| 0x09 | JUMP_DFU | 0 | none; enters firmware-update mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
 | 0x0A | GET_STATUS | | no handler in the vendor app | [doc] |
 | 0x0B | ERROR | | no handler in the vendor app | [doc] |
 | 0x0C | GET_DATA | attribute bit mask | PUT_DATA (0x41) | [doc] [static] [device] |
@@ -161,7 +161,7 @@ Data types (main header type 0x40 and up):
 |---|---|---|---|---|
 | 0x40 HEAD | `40 id 00 01` | 16 zero bytes | read-only status check. The reply is type 0x40, and the u32 LE at offset 4 is 0 for normal firmware and non-zero for "original firmware, update required". The vendor app sends it 50 ms after CONNECT in application mode, and before a download in boot-loader mode, where the field must be 0. Our `firmware probe` sends only CONNECT and HEAD, in either mode | [static]; meaning [inferred] |
 | 0x41 PUT_DATA | reply only | section chain | GET_DATA reply | [doc] [static] [device] |
-| 0x42 | `42 id 00 04` | 64-byte firmware descriptor | firmware download; never sent by us | [static] |
+| 0x42 | `42 id 00 04` | 64-byte firmware descriptor | firmware download; sent only by the firmware flash path (see Firmware download) | [static] |
 | 0x44 | `44 id 01 01` | 32 encrypted bytes | memory read (see Memory read and device info) | [static] [device] |
 | 0x48 SET_DATA | varies | section header + plain data | writes a setting or calibration value; never sent by us | [static] |
 | 0x4A | varies | encrypted block header + data | memory / SPI-flash write; never sent by us | [static] |
@@ -720,13 +720,48 @@ layout is a Qt data stream, big-endian. [static]
   or size, or a model that differs from the meter, before any device command
   is sent. [static]
 
+## Firmware download
+
+The application firmware is updated from the boot loader, in this order. Every
+step follows the vendor app; none of it is confirmed on our meter yet. [static]
+
+| step | host sends | expects | on failure (vendor code) | tag |
+|---|---|---|---|---|
+| switch | in application mode: JUMP_DFU `09 id 00 00`, write only, then wait up to 5 s for the meter to come back in boot-loader mode | a device in boot-loader mode | stop; hold Back while plugging the meter in | [static] |
+| connect | CONNECT `02 id 00 00` (1000 ms) | ACCEPT | Read (−108) | [static] |
+| check | HEAD `40 id 00 01` + 16 zero bytes | type 0x40 and field 0 | Product (−100), WorkMode (−111) | [static] |
+| descriptor | `42 id 00 04` + 64 bytes: start 0x4000, end = start + size, size, CRC, model, version, date, a random nonce | no reply: the 20 ms read must time out, because the meter is erasing | Write (−107) | [static] |
+| erase wait | N−1 reads of 10 ms (N = whole 4080-byte blocks of the payload), then one of 1000 ms | timeouts, then ACCEPT | Erase (−105) | [static]; which length N counts is [inferred] |
+| data | the stored payload, unchanged, in raw 4080-byte bulk writes and then the remainder; a zero-length packet after a write that is a multiple of 64 bytes | SYNC `01` after each write | Download (−106) | [static] |
+| verify | read for 1000 ms | FINISHED `07` | Verify (−103) | [static] |
+| return | JUMP_APROM `08 id 00 00`, write only; wait for application mode; read the info block `0x4420` | the new version | ask for a power cycle if the meter stays in its boot loader | [static] [inferred] |
+
+- The boot loader lives below 0x4000 and is never written: the descriptor's
+  start is always 0x4000. [static] [inferred]
+- There is no automatic retry. After a failure the meter stays in its boot
+  loader; the update can be run again from there. [static]
+- Write-capable frames (JUMP_DFU, JUMP_APROM, the descriptor and the raw
+  payload writes) can only be sent through the flash path. It needs a
+  `FlashAck` marker, which the CLI creates only after `--i-understand`; the
+  marker prevents accidental use, it is not a capability against a determined
+  caller. The flash path runs every frame through its own strict guard: only
+  CONNECT, HEAD, the two jumps, a descriptor with start 0x4000 and an end
+  inside the application area, the payload writes after that descriptor, and
+  the `0x4420` info read pass it. Each payload write is at most 4080 bytes,
+  the writes after one descriptor total at most its size plus 4080 bytes, and
+  JUMP_APROM or a new CONNECT ends that allowance. Everything else is refused
+  before it is written.
+
 ## Never-send commands
 
 Our library refuses to send these requests, so a bug or a CLI typo cannot
 brick, decalibrate or reboot a device. Three checks run before any byte
 reaches the meter: the transport-layer guard refuses the six frame types, the
 session refuses memory reads outside the four known blocks, and the HID
-transport sends only the ADC snapshot. [device] [static]
+transport sends only the ADC snapshot. [device] [static] The one exception
+is the firmware flash path, which may send JUMP_DFU, JUMP_APROM and the 0x42
+descriptor under its own stricter guard (see Firmware download). RESET,
+SET_DATA and memory writes are never sent on any path. [static]
 
 | request | why | tag |
 |---|---|---|

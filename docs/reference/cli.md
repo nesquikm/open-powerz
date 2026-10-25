@@ -20,6 +20,7 @@ the built-in help.
 | `console` | Raw PDM text console: sends the command lines it reads from stdin and prints what was sent and received, with times. See [Console](#console). | `--allow-high-voltage` |
 | `firmware info` | Reads a local firmware container file (`.mencrypt`) and prints its vendor, container version, model, version, date, CRC-32, size and English release notes. Needs no meter and never decrypts the file. A broken, oversized (over 8 MiB) or unreadable file is refused with exit code 2 and the reason, prefixed with the file name. | `FILE`, `--json` (`vendor`, `container_version`, `model`, `version`, `date`, `crc` as 8 hex digits, `size`, `release_notes_en`) |
 | `firmware probe` | Read-only check for either mode: prints the meter's USB identity (vendor and product IDs, product string, mode, and each interface's class and string) without opening it, then over the bulk pipe sends only CONNECT and HEAD and prints the results. It always uses the bulk pipe, whatever `--transport` says (except `sim`). If the meter has no vendor-class interface, it prints the identity and sends nothing. | `--json` (`vid`, `pid`, `product`, `mode`, `interfaces`, `connect`, `head`, `head_field`, `head_raw`) |
+| `firmware flash` | Flashes a firmware container onto the meter's application area through its bootloader, over the bulk pipe only (`--transport bulk` or `sim`). Refused with exit code 2 and nothing sent unless `--i-understand` is given; the file is then inspected (as `firmware info` does) before any meter is chosen or opened, and a broken or truncated file is refused with exit code 2, prefixed with the file name. From application mode it checks that the file's model matches the meter, switches the meter to its bootloader and waits for it to come back. Prints each stage on its own line (switch, erase, write as bytes done / total about every tenth of the image, verify, finished, return to application mode), then the new version the meter reports, or asks you to unplug and replug the meter if it stays in its bootloader. A failed flash exits 5 with the vendor error number and how to recover. See [Firmware flashing](#firmware-flashing). | `FILE`, `--i-understand` |
 
 ## Global options
 
@@ -147,6 +148,33 @@ classified before it is written:
   incomplete automatic list, `detect` checks with a read-only command that
   the meter is still in step before it sends anything else.
 
+## Firmware flashing
+
+`powerz firmware flash FILE --i-understand` is the only command that writes
+to the meter's flash.
+
+- **`--i-understand`.** Without it the command exits 2, explains the risk
+  and opens no meter.
+- **The file is checked first.** It must parse as a firmware container
+  (header fields and sizes) before any meter is chosen or opened, and its
+  model must match the meter's.
+- **The bootloader is never written.** Only the application area (from
+  0x4000) can be named; every other command is refused before it is sent.
+- **No automatic retry.** If a step fails once the meter is in its
+  bootloader, nothing more is sent and the meter stays there. Keep it
+  plugged in and run the command again; if the meter does not reach its
+  bootloader on its own, hold the Back button while plugging it in.
+- **Ctrl-C** stops the flash at its next safe point: before the switch to
+  the bootloader, before the descriptor, or between two payload writes.
+  The command then exits 5 saying the flash was interrupted, with the same
+  recovery text as a failure; once the meter is in its bootloader nothing
+  more is sent and it stays there until you flash again.
+- **Finding the meter again.** After the switch the meter is looked up
+  afresh: the one with the `--device` serial, else the only POWER-Z
+  attached, even if its serial changed. With several other meters attached
+  the command stops and names them; unplug the others.
+- **Do not unplug the meter** while the flash runs.
+
 ## Output formats
 
 - Human views print 3 decimals, temperature 1 decimal (`30.5 °C`).
@@ -170,10 +198,10 @@ classified before it is written:
 | code | meaning |
 |---|---|
 | 0 | success |
-| 2 | usage error, including an ambiguous device choice, a request the charger does not offer or allow, and a command above 5 V without `--allow-high-voltage` |
+| 2 | usage error, including an ambiguous device choice, `firmware flash` without `--i-understand` or with a file that fails inspection, a request the charger does not offer or allow, and a command above 5 V without `--allow-high-voltage` |
 | 3 | no matching device (or no POWER-Z serial port) |
 | 4 | permission denied (on Linux the message names the udev rule) |
-| 5 | device or protocol error, including a protocol the charger does not support, a failed request, a meter out of step, and a failed return to 5 V |
+| 5 | device or protocol error, including a failed firmware flash, a protocol the charger does not support, a failed request, a meter out of step, and a failed return to 5 V |
 
 ## Test knobs (demo device)
 
@@ -191,4 +219,5 @@ These environment variables are for tests only. They work only with
 | `POWERZ_SIM_PDM_LAG=after-list` | The simulated meter answers one reply late after the `reset` that ends a stalled list, to test the out-of-step error. |
 | `POWERZ_SIM_HEAD=N` | The simulated meter's HEAD reply carries old-firmware field `N` (non-zero means update required). |
 | `POWERZ_SIM_APP_VERSION=V` | The simulated application info block reports version `V` (default `2.0.6`). |
-| `POWERZ_SIM_MODE` | `application` (default) or `bootloader`; read only by `firmware probe`. |
+| `POWERZ_SIM_MODE` | `application` (default) or `bootloader`; read only by `firmware probe` and `firmware flash`. |
+| `POWERZ_SIM_FLASH_FAULT` | The simulated bootloader injects one flash fault; read only by `firmware flash`: `jump-dfu-ignored`, `jump-dfu-write-fails`, `jump-dfu-disconnects`, `connect-no-accept`, `head-wrong-type`, `descriptor-answered`, `early-accept-during-erase`, `no-accept-after-erase`, `missing-sync@N` or `write-fails@N` (payload write `N`, 1-based), `no-finished`, `wrong-verify-reply`, `jump-aprom-ignored`, `jump-aprom-disconnects`, `info-read-fails-after-return`, `image-not-taken`. |

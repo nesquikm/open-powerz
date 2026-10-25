@@ -9,6 +9,7 @@ use std::time::Duration;
 use powerz_protocol::decode::AdcSnapshot;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::container::read_container_file;
+use powerz_protocol::firmware::flash::{FlashAck, FlashGuard, FlashTransport, Meter, MeterOpener};
 use powerz_protocol::frame;
 use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
 use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
@@ -21,7 +22,8 @@ use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{
-    FaultPlan, PdScenario, Persona, SIM_SERIAL, SimCable, SimCharger, SimClock, SimDevice, SimPdm,
+    FaultPlan, FlashFault, PdScenario, Persona, SIM_SERIAL, SimCable, SimCharger, SimClock,
+    SimDevice, SimMeter, SimPdm,
 };
 
 use crate::args::{
@@ -30,11 +32,12 @@ use crate::args::{
     rate_from_sps, validate,
 };
 use crate::commands::{
-    DetectOptions, LegacyRequestOptions, PdRequestOptions, PdSendOptions, PdSettingsChange,
-    StreamOptions, WatchOptions, console, detect, firmware_info, firmware_probe,
-    firmware_probe_unavailable, info_in_mode, list, pd, pd_decode, pd_save, pd_send, read,
-    select_device, stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list,
-    trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch,
+    DetectOptions, FLASH_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
+    PdSettingsChange, StreamOptions, WatchOptions, console, detect, find_flashed_meter,
+    firmware_flash, firmware_info, firmware_probe, firmware_probe_unavailable, info_in_mode,
+    inspect_flash_file, list, pd, pd_decode, pd_save, pd_send, read, select_device, stream,
+    trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
+    trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport};
@@ -78,6 +81,12 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     {
         // Reads a local file; no device is opened, whatever `--transport` says.
         return firmware_info_file(file, *json);
+    }
+    if let Command::Firmware {
+        action: FirmwareAction::Flash { file, i_understand },
+    } = &cli.command
+    {
+        return flash_file(cli, file, *i_understand);
     }
     validate(cli)?;
     if let Command::List { json, include_demo } = cli.command {
@@ -262,6 +271,188 @@ fn firmware_info_file(file: &std::path::Path, json: bool) -> Result<(), CliError
     let name = file.display().to_string();
     let bytes = read_container_file(file).map_err(|e| CliError::Usage(e.to_string()))?;
     firmware_info(&bytes, &name, json, &mut std::io::stdout().lock())
+}
+
+/// `firmware flash FILE`: check the acknowledgement and inspect the file
+/// before any device is chosen or opened, then flash the meter (or, with
+/// `--transport sim`, the simulated one).
+fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(), CliError> {
+    if !i_understand {
+        return Err(CliError::Usage(FLASH_RISK.into()));
+    }
+    let name = file.display().to_string();
+    let bytes = read_container_file(file).map_err(|e| CliError::Usage(e.to_string()))?;
+    let container = inspect_flash_file(&bytes, &name)?;
+    validate(cli)?;
+    let mut out = std::io::stdout().lock();
+    if cli.transport == TransportKind::Sim {
+        select_demo(cli)?;
+        let configure = |sim: SimDevice| -> Result<SimMeter, CliError> {
+            Ok(SimMeter::new(
+                sim_flash_fault(sim_firmware_knobs(sim)?)?.with_mode(sim_mode()?),
+            ))
+        };
+        // Ctrl-C stops the flash at the engine's next safe point.
+        let stop = ctrl_c_flag()?;
+        let after = sim_ctrl_c_after_writes()?;
+        return if fake_sim_clock() {
+            let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+            let meter = configure(SimDevice::with_clock(
+                Persona::Bulk,
+                cli.scenario,
+                clock.clone(),
+            ))?;
+            let mut meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
+            firmware_flash(
+                FlashAck::acknowledge(),
+                &container,
+                &mut meter,
+                clock,
+                &stop,
+                &mut out,
+            )
+        } else {
+            let meter = configure(SimDevice::new(Persona::Bulk, cli.scenario))?;
+            let mut meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
+            firmware_flash(
+                FlashAck::acknowledge(),
+                &container,
+                &mut meter,
+                SystemClock,
+                &stop,
+                &mut out,
+            )
+        };
+    }
+    // Choose the meter now, so an ambiguous choice is refused up front.
+    let devices = transport::discovery::list_devices()?;
+    select_device(&devices, cli.device.as_deref())?;
+    let stop = ctrl_c_flag()?;
+    let mut opener = DiscoveryOpener {
+        serial: cli.device.clone(),
+        ack: FlashAck::acknowledge(),
+    };
+    firmware_flash(
+        FlashAck::acknowledge(),
+        &container,
+        &mut opener,
+        SystemClock,
+        &stop,
+        &mut out,
+    )
+}
+
+/// Honour `POWERZ_SIM_CTRL_C_AFTER=K` for `firmware flash` (test-only):
+/// stand in for Ctrl-C once K payload writes have been sent.
+fn sim_ctrl_c_after_writes() -> Result<Option<usize>, CliError> {
+    match std::env::var("POWERZ_SIM_CTRL_C_AFTER") {
+        Ok(n) => n
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|e| CliError::Usage(format!("invalid POWERZ_SIM_CTRL_C_AFTER {n:?}: {e}"))),
+        Err(_) => Ok(None),
+    }
+}
+
+/// [`MeterOpener`] wrapper that sets the stop flag once `after` payload
+/// writes have been sent through its pipes (`None`: never). A payload write
+/// is a raw write longer than a 4-byte jump that follows the descriptor
+/// (the first such write).
+struct CtrlCAfterWrites<O> {
+    inner: O,
+    counter: Arc<WriteCounter>,
+}
+
+/// The shared count of [`CtrlCAfterWrites`].
+struct WriteCounter {
+    after: Option<usize>,
+    long_writes: std::sync::atomic::AtomicUsize,
+    stop: Arc<AtomicBool>,
+}
+
+impl<O> CtrlCAfterWrites<O> {
+    fn new(inner: O, after: Option<usize>, stop: Arc<AtomicBool>) -> Self {
+        CtrlCAfterWrites {
+            inner,
+            counter: Arc::new(WriteCounter {
+                after,
+                long_writes: std::sync::atomic::AtomicUsize::new(0),
+                stop,
+            }),
+        }
+    }
+}
+
+impl<O: MeterOpener> MeterOpener for CtrlCAfterWrites<O> {
+    type Pipe = CountingPipe<O::Pipe>;
+
+    fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, transport::Error> {
+        Ok(self.inner.open()?.map(|m| Meter {
+            mode: m.mode,
+            model: m.model,
+            pipe: CountingPipe {
+                inner: m.pipe,
+                counter: Arc::clone(&self.counter),
+            },
+        }))
+    }
+}
+
+/// A pipe of [`CtrlCAfterWrites`].
+struct CountingPipe<P> {
+    inner: P,
+    counter: Arc<WriteCounter>,
+}
+
+impl<P: Transport> Transport for CountingPipe<P> {
+    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact(request, timeout)
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        self.inner.read(timeout)
+    }
+}
+
+impl<P: FlashTransport> FlashTransport for CountingPipe<P> {
+    fn write_raw(&mut self, data: &[u8], timeout: Duration) -> Result<(), transport::Error> {
+        self.inner.write_raw(data, timeout)?;
+        if data.len() > 4 {
+            let n = self.counter.long_writes.fetch_add(1, Ordering::SeqCst) + 1;
+            // The first long write is the descriptor.
+            if self.counter.after.is_some_and(|k| n > k) {
+                self.counter.stop.store(true, Ordering::SeqCst);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The flash engine's [`MeterOpener`] for a real meter: each open lists
+/// the devices again (the meter re-enumerates between modes), picks the
+/// meter with [`find_flashed_meter`] and opens its bulk pipe behind the strict flash guard.
+struct DiscoveryOpener {
+    serial: Option<String>,
+    /// The acknowledgement `--i-understand` gave, needed to open the pipe.
+    ack: FlashAck,
+}
+
+impl MeterOpener for DiscoveryOpener {
+    type Pipe = FlashGuard<BulkTransport>;
+
+    fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, transport::Error> {
+        let devices = transport::discovery::list_devices()?;
+        let device = find_flashed_meter(&devices, self.serial.as_deref())
+            .map_err(|e| transport::Error::Io(e.to_string()))?;
+        let Some(device) = device else {
+            return Ok(None);
+        };
+        Ok(Some(Meter {
+            mode: device.mode(),
+            model: device.model,
+            pipe: BulkTransport::open_for_flash(device, &self.ack)?,
+        }))
+    }
 }
 
 /// `trigger` / `detect`: open the meter's serial port (or, with
@@ -747,6 +938,53 @@ fn sim_firmware_knobs(mut sim: SimDevice) -> Result<SimDevice, CliError> {
         sim = sim.with_app_version(&v);
     }
     Ok(sim)
+}
+
+/// Honour `POWERZ_SIM_FLASH_FAULT=<fault>` (test-only, read by `firmware
+/// flash --transport sim` alone): the simulated bootloader injects that
+/// [`FlashFault`], named in kebab-case (`missing-sync@N`, `no-finished`, ...).
+fn sim_flash_fault(sim: SimDevice) -> Result<SimDevice, CliError> {
+    let Ok(spec) = std::env::var("POWERZ_SIM_FLASH_FAULT") else {
+        return Ok(sim);
+    };
+    let invalid = || {
+        CliError::Usage(format!(
+            "invalid POWERZ_SIM_FLASH_FAULT {spec:?}: expected one of jump-dfu-ignored, \
+             connect-no-accept, descriptor-answered, early-accept-during-erase, \
+             no-accept-after-erase, missing-sync@N, no-finished, wrong-verify-reply, \
+             jump-aprom-ignored, image-not-taken, head-wrong-type, write-fails@N, \
+             jump-dfu-write-fails, info-read-fails-after-return, jump-dfu-disconnects, \
+             jump-aprom-disconnects"
+        ))
+    };
+    let write_no = |n: &str| n.parse::<usize>().ok().filter(|&n| n > 0);
+    let fault = match spec.split_once('@') {
+        Some(("missing-sync", n)) => FlashFault::MissingSync {
+            write: write_no(n).ok_or_else(invalid)?,
+        },
+        Some(("write-fails", n)) => FlashFault::WriteFails {
+            write: write_no(n).ok_or_else(invalid)?,
+        },
+        Some(_) => return Err(invalid()),
+        None => match spec.as_str() {
+            "jump-dfu-ignored" => FlashFault::JumpDfuIgnored,
+            "connect-no-accept" => FlashFault::ConnectNoAccept,
+            "descriptor-answered" => FlashFault::DescriptorAnswered,
+            "early-accept-during-erase" => FlashFault::EarlyAcceptDuringErase,
+            "no-accept-after-erase" => FlashFault::NoAcceptAfterErase,
+            "no-finished" => FlashFault::NoFinished,
+            "wrong-verify-reply" => FlashFault::WrongVerifyReply,
+            "jump-aprom-ignored" => FlashFault::JumpApromIgnored,
+            "image-not-taken" => FlashFault::ImageNotTaken,
+            "head-wrong-type" => FlashFault::HeadWrongType,
+            "jump-dfu-write-fails" => FlashFault::JumpDfuWriteFails,
+            "info-read-fails-after-return" => FlashFault::InfoReadFailsAfterReturn,
+            "jump-dfu-disconnects" => FlashFault::JumpDfuDisconnects,
+            "jump-aprom-disconnects" => FlashFault::JumpApromDisconnects,
+            _ => return Err(invalid()),
+        },
+    };
+    Ok(sim.with_flash_fault(fault))
 }
 
 /// Honour `POWERZ_SIM_FAULT=<plan>` (test-only, [`FaultPlan::parse`] syntax).

@@ -9,6 +9,7 @@ use nusb::transfer::{Buffer, Bulk, In, Out, TransferError};
 use super::discovery::DeviceEntry;
 use super::select::{EndpointDesc, InterfaceDesc, select_interfaces};
 use super::{Error, GuardedTransport, Transport, map_io_error};
+use crate::firmware::flash::{FlashAck, FlashGuard, FlashTransport};
 
 /// Bulk max packet size of the meter's endpoints.
 pub const MAX_PACKET: usize = 64;
@@ -49,6 +50,49 @@ impl BulkTransport {
     /// Open `device`, claim its vendor interface (detaching a kernel driver
     /// first) and drain stale IN data.
     pub fn open(device: &DeviceEntry) -> Result<GuardedTransport<BulkTransport>, Error> {
+        Ok(GuardedTransport::new(BulkTransport::open_raw(device)?))
+    }
+
+    /// Open `device` like [`open`](Self::open), but behind the strict flash
+    /// guard instead of the shared one: the pipe the flash engine's
+    /// [`MeterOpener`](crate::firmware::flash::MeterOpener) hands out.
+    ///
+    /// This pipe can carry JUMP_DFU, so it needs the user's explicit
+    /// [`FlashAck`]. The raw pipe never leaves this module: the flash
+    /// engine wraps what an opener hands it in its own [`FlashGuard`], so on
+    /// that path this guard is a second, identical line of defence.
+    ///
+    /// Without the acknowledgement it does not compile:
+    ///
+    /// ```compile_fail
+    /// use powerz_protocol::transport::bulk::BulkTransport;
+    /// use powerz_protocol::transport::discovery::DeviceEntry;
+    ///
+    /// fn try_it(device: &DeviceEntry) {
+    ///     let _ = BulkTransport::open_for_flash(device);
+    /// }
+    /// ```
+    ///
+    /// With it, it does (not run here: it would open a real meter):
+    ///
+    /// ```no_run
+    /// use powerz_protocol::firmware::flash::FlashAck;
+    /// use powerz_protocol::transport::bulk::BulkTransport;
+    /// use powerz_protocol::transport::discovery::DeviceEntry;
+    ///
+    /// fn try_it(device: &DeviceEntry, ack: &FlashAck) {
+    ///     let _ = BulkTransport::open_for_flash(device, ack);
+    /// }
+    /// ```
+    pub fn open_for_flash(
+        device: &DeviceEntry,
+        _ack: &FlashAck,
+    ) -> Result<FlashGuard<BulkTransport>, Error> {
+        Ok(FlashGuard::new(BulkTransport::open_raw(device)?))
+    }
+
+    /// Open `device` with no guard; never leaves this module unwrapped.
+    fn open_raw(device: &DeviceEntry) -> Result<BulkTransport, Error> {
         let info = nusb::list_devices()
             .wait()
             .map_err(nusb_error)?
@@ -103,7 +147,7 @@ impl BulkTransport {
             max_packet,
         };
         drain_stale(&mut t, DRAIN_TIMEOUT)?;
-        Ok(GuardedTransport::new(t))
+        Ok(t)
     }
 
     fn write(&mut self, data: &[u8], timeout: Duration) -> Result<(), Error> {
@@ -142,6 +186,15 @@ impl Transport for BulkTransport {
         self.in_ep.clear_halt().wait().map_err(nusb_error)?;
         drain_stale(self, DRAIN_TIMEOUT)?;
         Ok(())
+    }
+}
+
+/// Raw writes for the flash path only: [`BulkTransport`] leaves this module
+/// wrapped in the shared guard (which is not a [`FlashTransport`]) or in the
+/// strict [`FlashGuard`].
+impl FlashTransport for BulkTransport {
+    fn write_raw(&mut self, data: &[u8], timeout: Duration) -> Result<(), Error> {
+        self.write(data, timeout)
     }
 }
 

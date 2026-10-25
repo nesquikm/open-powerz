@@ -162,8 +162,9 @@ pub enum Command {
         #[arg(long)]
         allow_high_voltage: bool,
     },
-    /// Work with firmware files (`info` needs no meter) and probe the
-    /// meter's firmware identity (`probe`, read-only).
+    /// Work with firmware files (`info` needs no meter), probe the meter's
+    /// firmware identity (`probe`, read-only) and flash a firmware file
+    /// (`flash`, needs `--i-understand`).
     Firmware {
         /// What to do.
         #[command(subcommand)]
@@ -191,6 +192,18 @@ pub enum FirmwareAction {
         /// Print one JSON object instead of labelled lines.
         #[arg(long)]
         json: bool,
+    },
+    /// Flash a firmware container onto the meter through its bootloader
+    /// (bulk pipe only). The file is inspected before any meter is opened;
+    /// nothing is sent without `--i-understand`.
+    Flash {
+        /// Firmware container file to flash.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Accept the risk: a failed or interrupted flash leaves the meter in
+        /// its bootloader until the flash is retried.
+        #[arg(long)]
+        i_understand: bool,
     },
 }
 
@@ -660,17 +673,20 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
         return Ok(());
     }
     // The probe needs the vendor bulk pipe (a bootloader has no other).
-    if matches!(
-        cli.command,
-        Command::Firmware {
-            action: FirmwareAction::Probe { .. }
-        }
-    ) && matches!(cli.transport, TransportKind::Hid | TransportKind::Cdc)
+    if let Command::Firmware { action } = &cli.command
+        && matches!(
+            action,
+            FirmwareAction::Probe { .. } | FirmwareAction::Flash { .. }
+        )
+        && matches!(cli.transport, TransportKind::Hid | TransportKind::Cdc)
     {
-        return Err(CliError::Usage(
-            "`firmware probe` runs on the vendor bulk pipe only; use --transport bulk (or sim)"
-                .into(),
-        ));
+        let name = match action {
+            FirmwareAction::Flash { .. } => "flash",
+            _ => "probe",
+        };
+        return Err(CliError::Usage(format!(
+            "`firmware {name}` runs on the vendor bulk pipe only; use --transport bulk (or sim)"
+        )));
     }
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
     // `pd send` talks to the meter's serial port like `trigger`.

@@ -1,12 +1,15 @@
-//! `powerz firmware info FILE` (FR V9SK53) and `powerz firmware probe`
-//! (FR V9SK56, AC .6).
+//! `powerz firmware info FILE` (FR V9SK53), `powerz firmware probe`
+//! (FR V9SK56, AC .6) and `powerz firmware flash FILE --i-understand`
+//! (FR V9SK54, AC .7).
 
 use std::io::Write;
+use std::sync::atomic::AtomicBool;
 
 use powerz_protocol::firmware::container::FirmwareContainer;
+use powerz_protocol::firmware::flash::{FlashAck, FlashOutcome, FlashProgress, MeterOpener, flash};
 use powerz_protocol::session::{Clock, ConnectOutcome, HeadOutcome, Session};
 use powerz_protocol::transport::Transport;
-use powerz_protocol::transport::discovery::UsbIdentity;
+use powerz_protocol::transport::discovery::{DeviceEntry, UsbIdentity};
 
 use crate::error::CliError;
 use crate::output::write_json;
@@ -170,4 +173,108 @@ fn hex(bytes: &[u8], sep: &str) -> String {
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(sep)
+}
+
+/// What `firmware flash` says without `--i-understand`.
+pub const FLASH_RISK: &str = "refusing to flash without --i-understand: flashing firmware is a \
+     risk; a failed or interrupted flash leaves the meter in its bootloader (no measurements) \
+     until the flash is retried. Keep the meter plugged in, then re-run with --i-understand to \
+     accept the risk";
+
+/// The parsed container of the firmware file `name`, or a usage error
+/// naming the file and the reason. Runs before any device is chosen.
+pub fn inspect_flash_file<'a>(
+    bytes: &'a [u8],
+    name: &str,
+) -> Result<FirmwareContainer<'a>, CliError> {
+    FirmwareContainer::parse(bytes).map_err(|e| CliError::Usage(format!("{name}: {e}")))
+}
+
+/// The meter a flash talks to, from the device list as it is now: the one
+/// with the `--device` serial, else the only POWER-Z attached, whatever its
+/// serial (`[inferred]` the bootloader may enumerate with another serial or
+/// none). `None` while no meter is attached; two or more without that
+/// serial are ambiguous, a usage error naming them.
+pub fn find_flashed_meter<'a>(
+    devices: &'a [DeviceEntry],
+    serial: Option<&str>,
+) -> Result<Option<&'a DeviceEntry>, CliError> {
+    if let Some(serial) = serial
+        && let Some(d) = devices.iter().find(|d| d.serial.as_deref() == Some(serial))
+    {
+        return Ok(Some(d));
+    }
+    match devices {
+        [] => Ok(None),
+        [only] => Ok(Some(only)),
+        several => {
+            let serials: Vec<&str> = several
+                .iter()
+                .map(|d| d.serial.as_deref().unwrap_or("-"))
+                .collect();
+            Err(CliError::Usage(format!(
+                "several POWER-Z devices attached and none is the flashed meter; unplug the \
+                 others: {}",
+                serials.join(", ")
+            )))
+        }
+    }
+}
+
+/// `powerz firmware flash`: flash `container` onto the meter `opener`
+/// finds, printing each stage on its own line (payload writes about every
+/// tenth of the image) and the outcome. `stop` (set by Ctrl-C) stops the
+/// flash at the engine's next safe point. A failure, a stop included, is a
+/// device error carrying the engine's message, which says how to recover.
+pub fn firmware_flash<O: MeterOpener, C: Clock>(
+    ack: FlashAck,
+    container: &FirmwareContainer<'_>,
+    opener: &mut O,
+    clock: C,
+    stop: &AtomicBool,
+    out: &mut impl Write,
+) -> Result<(), CliError> {
+    writeln!(
+        out,
+        "Flashing {} firmware {} ({} bytes)",
+        container.model(),
+        container.firmware_version(),
+        container.payload().len()
+    )?;
+    let mut io: Result<(), std::io::Error> = Ok(());
+    let mut last_tenth = None;
+    let mut progress = |p: FlashProgress| {
+        let line = match p {
+            FlashProgress::Switching => "Switching the meter to its bootloader".to_owned(),
+            FlashProgress::Erasing => "Erasing the application area".to_owned(),
+            FlashProgress::Writing { done, total } => {
+                let tenth = (done * 10).checked_div(total).unwrap_or(10);
+                if last_tenth == Some(tenth) {
+                    return;
+                }
+                last_tenth = Some(tenth);
+                format!("Writing {done} / {total} bytes")
+            }
+            FlashProgress::Verifying => "Verifying".to_owned(),
+            FlashProgress::Finished => "The bootloader accepted the image".to_owned(),
+            FlashProgress::Returning => "Returning the meter to application mode".to_owned(),
+        };
+        if io.is_ok() {
+            io = writeln!(out, "{line}").and_then(|()| out.flush());
+        }
+    };
+    let outcome = flash(ack, container, opener, clock, stop, &mut progress)
+        .map_err(|e| CliError::Device(format!("flash failed ({}): {e}", e.code())))?;
+    io?;
+    match outcome {
+        FlashOutcome::Verified { version } => {
+            writeln!(out, "Done: the meter now runs firmware {version}")?;
+        }
+        FlashOutcome::PowerCycleNeeded => writeln!(
+            out,
+            "The image was accepted, but the meter stayed in its bootloader: unplug it and \
+             plug it back in"
+        )?,
+    }
+    Ok(())
 }

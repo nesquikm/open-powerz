@@ -2,6 +2,7 @@
 //! or bootloader) and the firmware version checks. See `docs/protocol.md`.
 
 pub mod container;
+pub mod flash;
 pub mod version;
 
 /// What the meter is running, from the interface string of its vendor

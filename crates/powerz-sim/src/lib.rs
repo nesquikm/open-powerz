@@ -10,6 +10,7 @@
 //! made-up UID; never a real meter's.
 
 mod device;
+mod flash;
 mod memory;
 mod pd;
 mod pdm;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+pub use flash::{FlashFault, SimMeter, SimMeterPipe};
 pub use pd::PdScenario;
 pub use pdm::{SimCable, SimCharger, SimPdm, SimPdmPort};
 use powerz_protocol::firmware::DeviceMode;
@@ -314,6 +316,10 @@ pub struct SimDevice {
     head_field: u32,
     /// Application firmware version in the 0x4420 info block.
     app_version: String,
+    /// The simulated bootloader's flash state.
+    boot: flash::Bootloader,
+    /// Injected bootloader failure, if any.
+    flash_fault: Option<FlashFault>,
 }
 
 impl SimDevice {
@@ -354,6 +360,8 @@ impl SimDevice {
             mode: DeviceMode::Application,
             head_field: 0,
             app_version: memory::SIM_APP_VERSION.to_string(),
+            boot: flash::Bootloader::default(),
+            flash_fault: None,
         }
     }
 
@@ -509,11 +517,15 @@ impl Transport for SimDevice {
         self.pending.pop_front().ok_or(Error::Timeout)
     }
 
-    fn read(&mut self, _timeout: Duration) -> Result<Vec<u8>, Error> {
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
         if let Some(e) = self.blocked() {
             return Err(e);
         }
-        self.pending.pop_front().ok_or(Error::Timeout)
+        match self.pending.pop_front() {
+            Some(reply) => Ok(reply),
+            None if self.mode == DeviceMode::Bootloader => self.bootloader_read(timeout),
+            None => Err(Error::Timeout),
+        }
     }
 }
 
