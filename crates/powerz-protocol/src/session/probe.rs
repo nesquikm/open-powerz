@@ -44,21 +44,36 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// REJECT, a timeout or an undecodable reply is data; any other error
     /// is returned (no HEAD is sent after such a CONNECT failure).
     pub fn probe(&mut self) -> Result<ProbeReport, Error> {
+        self.probe_with_head_reply().map(|(report, _)| report)
+    }
+
+    /// [`Session::probe`], also returning the HEAD reply exactly as the
+    /// meter sent it (`None` when HEAD timed out), so a caller can show the
+    /// raw bytes next to a decoded field.
+    pub fn probe_with_head_reply(&mut self) -> Result<(ProbeReport, Option<Vec<u8>>), Error> {
         let connect = match self.connect() {
             Ok(()) => ConnectOutcome::Accepted,
             Err(Error::Rejected { .. }) => ConnectOutcome::Rejected,
             Err(Error::Transport(transport::Error::Timeout)) => ConnectOutcome::TimedOut,
             Err(e) => return Err(e),
         };
-        let head = match self.head_exchange() {
-            Ok(reply) if head::is_reject(&reply) => HeadOutcome::Rejected(reply),
+        let (head, reply) = match self.head_exchange() {
+            Ok(reply) if head::is_reject(&reply) => (HeadOutcome::Rejected(reply.clone()), reply),
             Ok(reply) => match HeadReply::decode(&reply) {
-                Ok(h) => HeadOutcome::Field(h.old_firmware_field()),
-                Err(_) => HeadOutcome::Raw(reply),
+                Ok(h) => (HeadOutcome::Field(h.old_firmware_field()), reply),
+                Err(_) => (HeadOutcome::Raw(reply.clone()), reply),
             },
-            Err(Error::Transport(transport::Error::Timeout)) => HeadOutcome::TimedOut,
+            Err(Error::Transport(transport::Error::Timeout)) => {
+                return Ok((
+                    ProbeReport {
+                        connect,
+                        head: HeadOutcome::TimedOut,
+                    },
+                    None,
+                ));
+            }
             Err(e) => return Err(e),
         };
-        Ok(ProbeReport { connect, head })
+        Ok((ProbeReport { connect, head }, Some(reply)))
     }
 }

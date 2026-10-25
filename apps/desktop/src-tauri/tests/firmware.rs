@@ -169,11 +169,17 @@ fn connected_status_warns_too_old_below_1_7_0() {
 }
 
 #[test]
-fn connected_status_warns_when_head_reports_update_required() {
+fn a_non_zero_head_field_is_an_unrecognised_reply_not_update_required() {
+    // AC-V9SK52.3: in application mode only field 0 is understood (current);
+    // any other value is unrecognised until confirmed on the device.
     let clock = clock();
     let (v, types) = connect(sim(&clock).with_head_field(1), &clock);
+    assert_eq!(v["update_required"], Value::Null, "unknown, not true: {v}");
     let warnings = v["warnings"].as_array().expect("warnings array");
-    assert!(warnings.contains(&json!("update_required")), "{v}");
+    assert!(!warnings.contains(&json!("update_required")), "{v}");
+    let p = head_problem(&v);
+    assert!(p.contains("not recognised"), "{p:?}");
+    assert!(p.contains("0x00000001"), "the field in hex: {p:?}");
     let connect_at = types.iter().position(|&t| t == 0x02).unwrap();
     let head_at = types
         .iter()

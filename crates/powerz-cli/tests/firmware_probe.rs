@@ -311,6 +311,78 @@ fn probe_json_keeps_the_raw_bytes_of_a_wrong_type_head_in_both_modes() {
     }
 }
 
+// ---------------------------------------------------------------- id-0 HEAD replies (AC-V9SK52.3)
+//
+// The real meter answers HEAD with type 0x40 and id 0 (field 0x00001000 on
+// 2.0.6, then 12 stale bytes). The probe reports what it got without
+// judging it: the field and the raw reply, in both modes.
+
+/// The real application-mode HEAD reply: `40 00 00 01 00 10 00 00` and 12
+/// stale bytes (synthesised from a memory-read confirmation tail).
+fn real_id0_reply() -> Vec<u8> {
+    vec![
+        0x40, 0x00, 0x00, 0x01, 0x00, 0x10, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
+        0xff, 0xf4, 0x95, 0x53, 0xf2,
+    ]
+}
+
+#[test]
+fn probe_prints_the_field_and_raw_bytes_of_an_id_0_head_reply_in_both_modes() {
+    for (mode, identity) in both_modes() {
+        let out = probe_head_as(&identity, real_id0_reply(), false);
+        assert!(
+            out.contains("HEAD field: 4096"),
+            "{mode}: the field:
+{out}"
+        );
+        assert!(
+            out.contains(
+                "HEAD reply (raw): 40 00 00 01 00 10 00 00 40 00 00 00 ff ff ff ff f4 95 53 f2"
+            ),
+            "{mode}: the raw reply:
+{out}"
+        );
+        assert!(
+            !out.contains("HEAD: timed out"),
+            "{mode}: no timeout:
+{out}"
+        );
+        let lower = out.to_lowercase();
+        assert!(
+            !lower.contains("update required") && !lower.contains("unrecognised"),
+            "{mode}: the probe does not judge the field:
+{out}"
+        );
+    }
+}
+
+#[test]
+fn probe_json_keeps_the_field_and_raw_bytes_of_an_id_0_head_reply_in_both_modes() {
+    for (mode, identity) in both_modes() {
+        let out = probe_head_as(&identity, real_id0_reply(), true);
+        let v: Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["head"], "field", "{mode}: {v}");
+        assert_eq!(v["head_field"], 0x1000, "{mode}: {v}");
+        assert_eq!(
+            v["head_raw"], "400000010010000040000000fffffffff49553f2",
+            "{mode}: {v}"
+        );
+    }
+}
+
+#[test]
+fn probe_sends_one_head_for_an_id_0_reply() {
+    let (out, types) = probe(
+        vec![
+            Step::transact(frame::connect(1).to_vec(), accept(1)),
+            Step::transact(head::request(2).to_vec(), real_id0_reply()),
+        ],
+        false,
+    );
+    assert!(out.contains("HEAD field: 4096"), "{out}");
+    assert_eq!(types, vec![0x02, 0x40], "one HEAD, no re-send");
+}
+
 // ---------------------------------------------------------------- the binary on the simulator
 
 const ENV_KNOBS: [&str; 6] = [

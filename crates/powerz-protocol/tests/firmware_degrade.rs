@@ -496,3 +496,142 @@ fn a_link_fatal_recovery_connect_is_still_returned() {
         assert_eq!(types(&s), vec![0x02, 0x44, 0x02], "{err:?}");
     }
 }
+
+// ---------------------------------------------------------------- HEAD in application mode
+//
+// AC-V9SK52.3 (changed 2026-10-26): the meter answers HEAD with type 0x40
+// and id 0. That reply, arriving as the first transfer after the request,
+// is the HEAD answer. Field 0 means current; any other field is an
+// unrecognised reply (field and raw bytes shown), never "update required".
+
+/// A 20-byte HEAD reply with id `id` and field `field`.
+fn head_reply(id: u8, field: u32) -> Vec<u8> {
+    let mut f = vec![0x40, id, 0x00, 0x01];
+    f.extend(field.to_le_bytes());
+    f.extend([0u8; 12]);
+    f
+}
+
+#[test]
+fn an_id_0_head_reply_with_field_0_is_accepted_and_the_pipe_stays_in_step() {
+    let mut s = connected(
+        [
+            both_blocks(),
+            vec![
+                Step::transact(head::request(4).to_vec(), head_reply(0, 0)),
+                Step::transact(get_data(5, 0x001), with_id(vector(ADC_52), 5)),
+            ],
+        ]
+        .concat(),
+    );
+    let st = s
+        .read_firmware_status_or_unknown()
+        .expect("an id-0 HEAD reply is the answer");
+    assert_eq!(st.update_required, Some(false), "{st:?}");
+    assert_eq!(st.problems, Vec::<FirmwareProblem>::new());
+    assert!(st.warnings().iter().all(|w| w.code() != "update_required"));
+    assert_eq!(
+        types(&s),
+        vec![0x02, 0x44, 0x44, 0x40],
+        "one HEAD, no recovery CONNECT"
+    );
+    s.read_adc().expect("the next request (id 5) works");
+    assert_eq!(s.transport().remaining(), 0);
+}
+
+#[test]
+fn an_id_0_head_reply_with_a_non_zero_field_is_unrecognised_not_update_required() {
+    let reply = head_reply(0, 0x0000_1000);
+    let mut s = connected(
+        [
+            both_blocks(),
+            vec![Step::transact(head::request(4).to_vec(), reply.clone())],
+        ]
+        .concat(),
+    );
+    let st = s
+        .read_firmware_status_or_unknown()
+        .expect("an unrecognised HEAD only costs the update check");
+    assert_eq!(st.bootloader.as_ref().map(|b| b.version()), Some("2.5"));
+    assert_eq!(st.application.as_ref().map(|b| b.version()), Some("2.0.6"));
+    assert_eq!(st.update_required, None, "never Some(true): {st:?}");
+    assert!(
+        st.warnings().iter().all(|w| w.code() != "update_required"),
+        "{:?}",
+        st.warnings()
+    );
+    assert_eq!(
+        kinds(&st),
+        vec![FirmwareProblemKind::Head],
+        "{:?}",
+        st.problems
+    );
+    let p = &problem_of(&st, FirmwareProblemKind::Head).text;
+    assert!(p.contains("HEAD"), "{p:?}");
+    assert!(p.to_lowercase().contains("recognised"), "{p:?}");
+    assert!(p.contains("0x00001000"), "{p:?}");
+    let squashed: String = p.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        squashed.contains(&head::hex(&reply, "")),
+        "raw reply: {p:?}"
+    );
+    assert_eq!(
+        types(&s),
+        vec![0x02, 0x44, 0x44, 0x40],
+        "no recovery CONNECT"
+    );
+    assert_eq!(s.transport().remaining(), 0);
+}
+
+#[test]
+fn a_non_zero_field_with_the_request_id_is_unrecognised_too() {
+    let reply = head_reply(4, 3);
+    let mut s = connected(
+        [
+            both_blocks(),
+            vec![Step::transact(head::request(4).to_vec(), reply.clone())],
+        ]
+        .concat(),
+    );
+    let st = s.read_firmware_status_or_unknown().expect("status");
+    assert_eq!(st.update_required, None, "never Some(true): {st:?}");
+    assert!(
+        st.warnings().iter().all(|w| w.code() != "update_required"),
+        "{:?}",
+        st.warnings()
+    );
+    let p = &problem_of(&st, FirmwareProblemKind::Head).text;
+    assert!(p.to_lowercase().contains("recognised"), "{p:?}");
+    assert!(p.contains("0x00000003"), "{p:?}");
+}
+
+#[test]
+fn the_strict_status_read_never_reports_update_required_for_a_non_zero_field() {
+    for (id, field) in [(0u8, 0x0000_1000u32), (4, 0x0000_1000), (4, 1)] {
+        let mut s = connected(
+            [
+                both_blocks(),
+                vec![Step::transact(
+                    head::request(4).to_vec(),
+                    head_reply(id, field),
+                )],
+            ]
+            .concat(),
+        );
+        let r = s.read_firmware_status();
+        if let Ok(st) = &r {
+            assert_ne!(st.update_required, Some(true), "id {id} field {field:#x}");
+            assert!(
+                st.warnings().iter().all(|w| w.code() != "update_required"),
+                "id {id} field {field:#x}"
+            );
+        }
+        assert!(
+            !matches!(
+                &r,
+                Err(session::Error::Transport(transport::Error::Mock(_)))
+            ),
+            "id {id}: the reply was taken, no re-read: {r:?}"
+        );
+    }
+}

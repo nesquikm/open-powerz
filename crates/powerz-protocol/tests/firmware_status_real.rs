@@ -394,3 +394,154 @@ fn three_failures_in_a_row_each_recover_and_each_is_a_problem() {
     assert_eq!(types, vec![0x02, 0x44, 0x02, 0x44, 0x02, 0x40, 0x02]);
     assert_eq!(s.transport().remaining(), 0);
 }
+
+// ---- AC-V9SK52.3 (changed 2026-10-26): HEAD in application mode ----
+//
+// The real meter answers HEAD (id 8 there, id 4 here) with type 0x40, id 0
+// and field 0x00001000, then 12 stale bytes. That reply is the HEAD answer:
+// it is taken from the first transfer, with no re-read, no timeout and no
+// recovery CONNECT. Field 0 means current; any other field is shown as an
+// unrecognised reply and never as "update required".
+
+const HEAD_APP: &str = include_str!("vectors/firmware_head_app_mode.hex");
+
+/// The real application-mode HEAD reply: 8 bytes as received, then 12
+/// stale bytes equal to the tail of the last captured 0xC4 frame.
+fn real_head_reply() -> Vec<u8> {
+    let f = frames(HEAD_APP);
+    assert_eq!(f.len(), 1, "one fixture line");
+    let r = f[0].clone();
+    assert_eq!(r.len(), 20, "{r:02x?}");
+    assert_eq!(&r[..8], &[0x40, 0x00, 0x00, 0x01, 0x00, 0x10, 0x00, 0x00]);
+    let c4 = &captured()[6];
+    assert_eq!(c4[0], 0xC4, "the last 0xC4 frame of session 1");
+    assert_eq!(&r[8..], &c4[c4.len() - 12..], "stale tail");
+    r
+}
+
+/// The real reply with the field at offset 4 replaced by `field`.
+fn id0_reply(field: u32) -> Vec<u8> {
+    let mut r = real_head_reply();
+    r[4..8].copy_from_slice(&field.to_le_bytes());
+    r
+}
+
+/// The frame types sent so far.
+fn sent_types(s: &Session<MockTransport, FakeClock>) -> Vec<u8> {
+    s.transport()
+        .written()
+        .iter()
+        .map(|f| f[0] & 0x7F)
+        .collect()
+}
+
+#[test]
+fn an_id_0_head_reply_with_field_0_is_the_answer_and_the_firmware_is_current() {
+    let (st, s) = status_after(
+        Step::transact(head::request(4).to_vec(), id0_reply(0)),
+        vec![],
+    );
+    assert_real_blocks(&st, "id-0 HEAD, field 0");
+    assert_eq!(st.update_required, Some(false), "{st:?}");
+    assert_eq!(st.problems, Vec::<FirmwareProblem>::new());
+    assert_eq!(
+        sent_types(&s),
+        vec![0x02, 0x44, 0x44, 0x40],
+        "one HEAD, no re-read, no recovery CONNECT"
+    );
+    assert_eq!(s.transport().remaining(), 0);
+}
+
+#[test]
+fn the_real_application_mode_head_reply_is_unrecognised_not_update_required() {
+    let real = real_head_reply();
+    let (st, s) = status_after(
+        Step::transact(head::request(4).to_vec(), real.clone()),
+        vec![],
+    );
+    assert_real_blocks(&st, "real HEAD reply");
+    assert_eq!(
+        st.update_required, None,
+        "unknown, never Some(true): {st:?}"
+    );
+    assert!(
+        !st.warnings().contains(&FirmwareWarning::UpdateRequired),
+        "{:?}",
+        st.warnings()
+    );
+    assert_eq!(
+        kinds(&st),
+        vec![FirmwareProblemKind::Head],
+        "{:?}",
+        st.problems
+    );
+    let p = head_problem(&st, "real HEAD reply");
+    assert!(
+        p.to_lowercase().contains("recognised"),
+        "says the reply was not recognised: {p:?}"
+    );
+    assert!(p.contains("0x00001000"), "names the field: {p:?}");
+    assert!(
+        squash(p).contains(&head::hex(&real, "")),
+        "the raw reply: {p:?}"
+    );
+    assert!(!p.contains("timed out"), "no timeout: {p:?}");
+    assert_eq!(
+        sent_types(&s),
+        vec![0x02, 0x44, 0x44, 0x40],
+        "one HEAD, no re-read, no recovery CONNECT"
+    );
+    assert_eq!(s.transport().remaining(), 0);
+}
+
+#[test]
+fn a_long_unrecognised_id_0_head_reply_is_capped_at_32_bytes() {
+    let mut reply = real_head_reply();
+    reply.extend((0..180u32).map(|i| (i % 251) as u8));
+    assert_eq!(reply.len(), 200);
+    let (st, _) = status_after(
+        Step::transact(head::request(4).to_vec(), reply.clone()),
+        vec![],
+    );
+    assert_eq!(st.update_required, None);
+    let p = head_problem(&st, "200-byte id-0 reply");
+    assert!(p.contains("0x00001000"), "{p:?}");
+    let shown = squash(p);
+    assert!(shown.contains(&head::hex(&reply[..32], "")), "{p:?}");
+    assert!(!shown.contains(&head::hex(&reply[..33], "")), "{p:?}");
+    assert!(p.contains('\u{2026}') || p.contains("..."), "{p:?}");
+}
+
+#[test]
+fn a_head_reply_with_neither_id_0_nor_the_request_id_is_still_re_read() {
+    let (st, s) = status_after(
+        Step::transact(
+            head::request(4).to_vec(),
+            vec![0x40, 0x07, 0x00, 0x01, 0x00, 0x10, 0x00, 0x00],
+        ),
+        vec![Step::read(vec![0x40, 0x04, 0x00, 0x01, 0, 0, 0, 0])],
+    );
+    assert_eq!(st.update_required, Some(false), "the re-read reply: {st:?}");
+    assert_eq!(st.problems, Vec::<FirmwareProblem>::new());
+    assert_eq!(sent_types(&s), vec![0x02, 0x44, 0x44, 0x40]);
+    assert_eq!(
+        s.transport().remaining(),
+        0,
+        "the stale id-7 reply was skipped"
+    );
+}
+
+#[test]
+fn a_reply_of_another_type_with_id_0_is_not_taken_as_head() {
+    let (st, s) = status_after(
+        Step::transact(
+            head::request(4).to_vec(),
+            vec![0x41, 0x00, 0x00, 0x01, 0x00, 0x10, 0x00, 0x00],
+        ),
+        vec![Step::read(vec![0x40, 0x04, 0x00, 0x01, 0, 0, 0, 0])],
+    );
+    assert_eq!(st.update_required, Some(false), "the re-read reply: {st:?}");
+    assert_eq!(st.problems, Vec::<FirmwareProblem>::new());
+    assert_eq!(sent_types(&s), vec![0x02, 0x44, 0x44, 0x40]);
+    assert_eq!(s.transport().remaining(), 0, "the id-0 0x41 was skipped");
+}

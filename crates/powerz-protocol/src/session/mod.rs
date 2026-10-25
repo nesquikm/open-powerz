@@ -206,8 +206,23 @@ impl<T: Transport, C: Clock> Session<T, C> {
 
     /// [`exchange`](Self::exchange) waiting `timeout` for each transfer.
     fn exchange_within(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        self.exchange_taking_first(request, timeout, |_| false)
+    }
+
+    /// [`exchange_within`](Self::exchange_within) that also takes the first
+    /// transfer when `take_first` accepts it, whatever its id. Re-reads still
+    /// need the request id.
+    fn exchange_taking_first(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+        take_first: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>, Error> {
         let expected_id = if request[0] == 0x4C { 0 } else { request[1] };
         let mut reply = self.transport.transact(request, timeout)?;
+        if take_first(&reply) {
+            return Ok(reply);
+        }
         let mut rereads = 0;
         while reply.get(1) != Some(&expected_id) {
             if rereads == MAX_STALE_REPLIES {

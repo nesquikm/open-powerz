@@ -53,8 +53,10 @@ pub struct FirmwareStatus {
     pub bootloader: Option<DeviceInfoBlock>,
     /// Application info block (0x4420), if not blank.
     pub application: Option<DeviceInfoBlock>,
-    /// The HEAD reply asked for a firmware update; `None` when HEAD
-    /// could not be read.
+    /// Whether the HEAD reply asked for a firmware update: `Some(false)`
+    /// for a field of 0; `None` when HEAD could not be read or its field was
+    /// not recognised. Never `Some(true)` while the meaning of a non-zero
+    /// field is unconfirmed on the device `[inferred]`.
     pub update_required: Option<bool>,
     /// What could not be read, one entry per failed step (a block, HEAD or
     /// the recovery CONNECT after one), in the order they failed.
@@ -220,22 +222,21 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// already connected: reads both info blocks, waits 50 ms, then sends
     /// HEAD. Any failure is returned; a caller that sees an error here still
     /// has a connected session and may carry on without the firmware status.
+    /// A non-zero HEAD field leaves `update_required` as `None` with a
+    /// [`FirmwareProblemKind::Head`] problem.
     pub fn read_firmware_status(&mut self) -> Result<FirmwareStatus, Error> {
         let bootloader = DeviceInfoBlock::decode(&self.read_block(HARDWARE_INFO)?)?;
         let application = DeviceInfoBlock::decode(&self.read_block(FIRMWARE_INFO)?)?;
-        let update_required = Some(self.read_update_required()?);
+        let reply = self.head_exchange()?;
+        let field = HeadReply::decode(&reply)?.old_firmware_field();
+        let mut problems = Vec::new();
+        let update_required = head_flag(field, &reply, &mut problems);
         Ok(FirmwareStatus {
             bootloader,
             application,
             update_required,
-            problems: Vec::new(),
+            problems,
         })
-    }
-
-    /// Send HEAD and decode its old-firmware flag.
-    fn read_update_required(&mut self) -> Result<bool, Error> {
-        let reply = self.head_exchange()?;
-        Ok(HeadReply::decode(&reply)?.update_required())
     }
 
     /// After a failed step: record `problem` and send one recovery CONNECT.
@@ -289,14 +290,16 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// The HEAD step for [`read_firmware_status_or_unknown`](Self::read_firmware_status_or_unknown):
     /// a timeout, a REJECT or an undecodable reply records a problem
     /// (with up to 32 bytes of the reply's hex, when there is one), sends
-    /// one recovery CONNECT and gives `None`.
+    /// one recovery CONNECT and gives `None`. A decoded reply with a
+    /// non-zero field records an unrecognised-reply problem without a
+    /// recovery CONNECT (the pipe is in step) and gives `None`.
     fn head_or_problem(
         &mut self,
         problems: &mut Vec<FirmwareProblem>,
     ) -> Result<Option<bool>, Error> {
         let text = match self.head_exchange() {
-            Ok(reply) => match head_reply_flag(&reply) {
-                Ok(u) => return Ok(Some(u)),
+            Ok(reply) => match head_reply_field(&reply) {
+                Ok(field) => return Ok(head_flag(field, &reply, problems)),
                 Err(reason) => format!("HEAD not read: {reason} (reply: {})", capped_hex(&reply)),
             },
             Err(e) if e.is_link_fatal() => return Err(e),
@@ -348,10 +351,15 @@ impl<T: Transport, C: Clock> Session<T, C> {
 
     /// The HEAD step that follows CONNECT: wait [`HEAD_DELAY`], send one
     /// HEAD (0x40) and return the raw reply, undecoded.
+    ///
+    /// In application mode the meter answers HEAD with type 0x40 and id 0
+    /// `[device]`, so a type-0x40 id-0 first transfer is taken as the answer;
+    /// anything else must carry the request id as usual.
     pub(super) fn head_exchange(&mut self) -> Result<Vec<u8>, Error> {
         self.sleep(HEAD_DELAY);
         let request = head::request(self.counter.next());
-        self.exchange(&request)
+        let timeout = transport::default_timeout(&request);
+        self.exchange_taking_first(&request, timeout, is_id_0_head)
     }
 }
 
@@ -364,13 +372,37 @@ fn capped_hex(reply: &[u8]) -> String {
     }
 }
 
-/// The old-firmware flag of a raw HEAD reply, or why it does not give one:
+/// Whether `reply` is a HEAD reply (type 0x40, extend bit ignored) with
+/// id 0, as the meter sends in application mode `[device]`.
+fn is_id_0_head(reply: &[u8]) -> bool {
+    matches!(reply, [ty, 0, ..] if ty & 0x7F == 0x40)
+}
+
+/// The old-firmware field of a raw HEAD reply, or why it does not give one:
 /// a REJECT from the meter or a reply that does not decode.
-fn head_reply_flag(reply: &[u8]) -> Result<bool, String> {
+fn head_reply_field(reply: &[u8]) -> Result<u32, String> {
     if head::is_reject(reply) {
         return Err("the meter sent REJECT".into());
     }
     HeadReply::decode(reply)
-        .map(|h| h.update_required())
+        .map(|h| h.old_firmware_field())
         .map_err(|e| e.to_string())
+}
+
+/// The update flag for HEAD field `field`: `Some(false)` for 0 (current);
+/// any other value is unrecognised until confirmed on the device, so it
+/// records a [`FirmwareProblemKind::Head`] problem with the field and the
+/// raw `reply`, and gives `None` (never "update required").
+fn head_flag(field: u32, reply: &[u8], problems: &mut Vec<FirmwareProblem>) -> Option<bool> {
+    if field == 0 {
+        return Some(false);
+    }
+    problems.push(FirmwareProblem::new(
+        FirmwareProblemKind::Head,
+        format!(
+            "HEAD reply not recognised: field {field:#010x} (reply: {})",
+            capped_hex(reply)
+        ),
+    ));
+    None
 }

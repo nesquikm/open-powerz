@@ -73,8 +73,9 @@ pub fn firmware_info(
 /// answers.
 ///
 /// Text: the identity lines, then `CONNECT: accepted | rejected | timed
-/// out`, then `HEAD field: <n>`, `HEAD reply (raw): <hex bytes>` (for a
-/// REJECT followed by `HEAD: rejected`) or `HEAD: timed out`. The identity is written (and flushed)
+/// out`, then `HEAD field: <n>` (plus `HEAD reply (raw): <hex bytes>` for an
+/// id-0 reply),
+/// `HEAD reply (raw): <hex bytes>` alone (for a REJECT followed by `HEAD: rejected`) or `HEAD: timed out`. The identity is written (and flushed)
 /// before anything is sent. Any other failure of CONNECT or HEAD (the
 /// pipe would not open, I/O, unplugged) is returned as an error and no
 /// CONNECT / HEAD line or JSON report is written. JSON keys `vid`, `pid`, `product`, `mode`,
@@ -91,14 +92,20 @@ pub fn firmware_probe<T: Transport, C: Clock>(
         write!(out, "{identity}")?;
         out.flush()?;
     }
-    let report = session.probe()?;
+    let (report, head_reply) = session.probe_with_head_reply()?;
     let connect = match &report.connect {
         ConnectOutcome::Accepted => "accepted".to_owned(),
         ConnectOutcome::Rejected => "rejected".to_owned(),
         ConnectOutcome::TimedOut => "timed out".to_owned(),
     };
     let (head, field, raw) = match &report.head {
-        HeadOutcome::Field(f) => ("field".to_owned(), Some(*f), None),
+        // An id-0 reply (the real meter's answer `[device]`) keeps its raw
+        // bytes next to the field: they are not an echo of our request.
+        HeadOutcome::Field(f) => (
+            "field".to_owned(),
+            Some(*f),
+            head_reply.as_deref().filter(|r| r.get(1) == Some(&0)),
+        ),
         HeadOutcome::Raw(r) => ("raw".to_owned(), None, Some(r.as_slice())),
         HeadOutcome::Rejected(r) => ("rejected".to_owned(), None, Some(r.as_slice())),
         HeadOutcome::TimedOut => ("timed out".to_owned(), None, None),
@@ -112,7 +119,12 @@ pub fn firmware_probe<T: Transport, C: Clock>(
     }
     writeln!(out, "CONNECT: {connect}")?;
     match (field, raw) {
-        (Some(f), _) => writeln!(out, "HEAD field: {f}")?,
+        (Some(f), raw) => {
+            writeln!(out, "HEAD field: {f}")?;
+            if let Some(r) = raw {
+                writeln!(out, "HEAD reply (raw): {}", hex(r, " "))?;
+            }
+        }
         (None, Some(r)) => {
             writeln!(out, "HEAD reply (raw): {}", hex(r, " "))?;
             if matches!(report.head, HeadOutcome::Rejected(_)) {

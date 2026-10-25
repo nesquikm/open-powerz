@@ -362,8 +362,10 @@ Firmware status (FR V9SK52). All requests below are read-only:
 | item | rule | tag |
 |---|---|---|
 | mode | the interface string (string 2) of the vendor-class (0xFF) interface, picked by class and read from the OS device list without opening the device: `APP` is application mode [device] (firmware 2.0.6), a string naming BOOT or DFU is boot-loader mode [inferred], and anything else (or no string) is reported as unknown | [static] [device] [inferred] |
-| sequence | CONNECT, the info blocks `0x420` (boot loader) and `0x4420` (application), then 50 ms later HEAD. The vendor app sends HEAD first; we read the blocks first so a failed HEAD cannot cost them. Each step that fails is reported as a problem (a HEAD problem includes the raw reply in hex), followed by one CONNECT to recover the pipe; what was read is kept, and the update check is reported as unknown when HEAD was not read | [static] [device] (firmware 2.0.6: HEAD in application mode did not decode; reply not yet recorded) |
-| warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated; HEAD field non-zero: update required | [static] [inferred] |
+| sequence | CONNECT, the info blocks `0x420` (boot loader) and `0x4420` (application), then 50 ms later HEAD. The vendor app sends HEAD first; we read the blocks first so a failed HEAD cannot cost them. Each step that fails is reported as a problem (a HEAD problem includes the raw reply in hex), followed by one CONNECT to recover the pipe; what was read is kept, and the update check is reported as unknown when HEAD was not read | [static] [device] (firmware 2.0.6: blocks read; HEAD answered with id 0, see the HEAD rows below) |
+| warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated | [static] [inferred] |
+| HEAD in application mode | the meter answers with reply id 0 (not the request's id) and a u32 at offset 4 of 0x00001000 on firmware 2.0.6, followed by stale bytes from its own buffer. We accept a type-0x40, id-0 reply only as the first transfer after our HEAD. A field of 0 means current; any other value is reported as an unrecognised reply, never as "update required", because the vendor's reading (non-zero = update required) does not fit a meter on normal firmware | [device] (firmware 2.0.6) [static] |
+| HEAD in boot-loader mode | the flash path accepts only a reply that echoes its own request id, with field 0; anything else stops before the descriptor | [static]; the meter's real reply is not yet recorded |
 
 ## Authentication
 

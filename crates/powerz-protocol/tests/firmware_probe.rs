@@ -166,6 +166,36 @@ fn probe_reports_a_non_zero_head_field() {
 }
 
 #[test]
+fn probe_takes_an_id_0_head_reply_as_the_answer() {
+    // The real meter answers HEAD with id 0 (AC-V9SK52.3); the probe
+    // reports its field without re-reading or judging it.
+    let mut s = session(vec![
+        Step::transact(frame::connect(1).to_vec(), accept(1)),
+        Step::transact(head::request(2).to_vec(), head_reply(0, 0x0000_1000)),
+    ]);
+    let report = s.probe().expect("an id-0 HEAD reply is data");
+    assert_eq!(report.connect, ConnectOutcome::Accepted);
+    assert_eq!(report.head, HeadOutcome::Field(0x0000_1000));
+    assert_eq!(types(&s), vec![0x02, 0x40], "one HEAD");
+    assert_eq!(s.transport().remaining(), 0);
+}
+
+#[test]
+fn probe_does_not_take_an_id_0_reply_of_another_type_as_head() {
+    let mut s = session(vec![
+        Step::transact(frame::connect(1).to_vec(), accept(1)),
+        Step::transact(
+            head::request(2).to_vec(),
+            vec![0x41, 0x00, 0x00, 0x01, 0x00, 0x10, 0x00, 0x00],
+        ),
+        Step::read(head_reply(2, 0)),
+    ]);
+    let report = s.probe().expect("probe");
+    assert_eq!(report.head, HeadOutcome::Field(0), "the re-read reply");
+    assert_eq!(s.transport().remaining(), 0);
+}
+
+#[test]
 fn probe_keeps_the_raw_head_reply_when_it_does_not_decode() {
     // Header only: too short for the field (a bootloader may answer so).
     let raw = vec![0x40, 2, 0x00, 0x01];

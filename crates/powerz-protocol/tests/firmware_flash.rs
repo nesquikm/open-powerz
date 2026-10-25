@@ -138,6 +138,8 @@ impl Op {
 enum Boot {
     /// This frame; byte 1 becomes the id of the last framed request.
     Frame(Vec<u8>),
+    /// This frame exactly as given (byte 1 kept, e.g. id 0).
+    Exact(Vec<u8>),
     /// No reply (`Error::Timeout`).
     Timeout,
     /// This transport error.
@@ -220,6 +222,7 @@ impl State {
                 }
                 Ok(f)
             }
+            Some(Boot::Exact(f)) => Ok(f),
             Some(Boot::Timeout) | None => Err(TransportError::Timeout),
             Some(Boot::Fail(e)) => Err(e),
         }
@@ -1334,6 +1337,84 @@ fn a_work_mode_error_names_the_field_in_hex_and_the_raw_reply() {
     let want = format!("head reply {}", head_reply_hex(&bench, &head(0x1234)));
     assert!(want.contains("34 12 00 00"), "{want}");
     assert!(msg.contains(&want), "lacks `{want}`: {msg}");
+}
+
+// ---- AC-V9SK52.3 (changed 2026-10-26): id-0 HEAD replies stay fail-closed ----
+//
+// In application mode the meter answers HEAD with id 0 (field 0x1000 on
+// 2.0.6). The flash path in the bootloader never takes such a reply as a
+// go-ahead: an id-0 reply, or a field of 0x1000, stops before the 0x42
+// descriptor with a typed error that names the raw reply.
+
+/// A HEAD reply with id 0 and `field`, kept as given (not re-stamped).
+fn id0_head(field: u32) -> Vec<u8> {
+    head(field)
+}
+
+fn assert_stops_before_the_descriptor(name: &str, e: &FlashError, bench: &Bench, raw: &[u8]) {
+    let writes = bench.boot_writes();
+    assert_eq!(
+        writes.len(),
+        2,
+        "{name}: only CONNECT and HEAD: {writes:02x?}"
+    );
+    assert_eq!(writes[1][0] & 0x7F, 0x40, "{name}: HEAD second");
+    assert_ne!(writes[1][1], 0, "{name}: the HEAD request id is not 0");
+    assert!(
+        !sent_write_capable(&bench.ops()),
+        "{name}: no 0x42 descriptor or payload write"
+    );
+    assert!(
+        !bench.boot_ops()[2..]
+            .iter()
+            .any(|o| matches!(o, Op::Raw { .. })),
+        "{name}: no raw write after HEAD"
+    );
+    let want = format!("head reply {}", hex(raw));
+    let msg = e.to_string().to_ascii_lowercase();
+    assert!(msg.contains(&want), "{name}: lacks `{want}`: {msg}");
+    assert_recovery_text(e);
+}
+
+#[test]
+fn an_id_0_head_reply_with_field_0_in_the_bootloader_aborts_before_the_descriptor() {
+    let raw = id0_head(0);
+    let (e, bench) = boot_failure(fail_at(P, AT_HEAD, Boot::Exact(raw.clone())));
+    assert!(
+        matches!(
+            e,
+            FlashError::Product { .. } | FlashError::Read { .. } | FlashError::WorkMode { .. }
+        ),
+        "a typed HEAD error: {e:?}"
+    );
+    assert_stops_before_the_descriptor("id 0, field 0", &e, &bench, &raw);
+}
+
+#[test]
+fn an_id_0_head_reply_with_field_0x1000_in_the_bootloader_aborts_before_the_descriptor() {
+    let raw = id0_head(0x1000);
+    let (e, bench) = boot_failure(fail_at(P, AT_HEAD, Boot::Exact(raw.clone())));
+    assert!(
+        matches!(
+            e,
+            FlashError::Product { .. } | FlashError::Read { .. } | FlashError::WorkMode { .. }
+        ),
+        "a typed HEAD error: {e:?}"
+    );
+    assert_stops_before_the_descriptor("id 0, field 0x1000", &e, &bench, &raw);
+}
+
+#[test]
+fn a_head_field_of_0x1000_with_the_request_id_in_the_bootloader_is_a_work_mode_error() {
+    let (e, bench) = boot_failure(fail_at(P, AT_HEAD, Boot::Frame(head(0x1000))));
+    assert!(
+        matches!(e, FlashError::WorkMode { field: 0x1000, .. }),
+        "got {e:?}"
+    );
+    assert!(e.to_string().contains("0x1000"), "{e}");
+    let mut bytes = head(0x1000);
+    bytes[1] = bench.boot_writes()[1][1];
+    assert_stops_before_the_descriptor("request id, field 0x1000", &e, &bench, &bytes);
 }
 
 #[test]

@@ -116,19 +116,25 @@ fn info_warns_when_firmware_is_older_than_1_7_0() {
 }
 
 #[test]
-fn info_warns_when_the_meter_reports_update_required() {
+fn a_non_zero_head_field_is_an_unrecognised_reply_not_update_required() {
+    // AC-V9SK52.3 (changed 2026-10-26): any field other than 0 is shown as
+    // an unrecognised reply with the field, never as "update required".
     let (out, _) = info(false, &[("POWERZ_SIM_HEAD", "1")]);
-    let w = warning_lines(&out);
     assert!(
-        w.iter()
-            .any(|l| l.to_lowercase().contains("update required")),
-        "an update-required warning: {out}"
+        !out.to_lowercase().contains("update required"),
+        "no update-required warning: {out}"
     );
+    let check = line(&out, "Update check:");
+    assert!(check.starts_with("Update check: unavailable ("), "{out}");
+    assert!(check.contains("0x00000001"), "names the field: {out}");
     let (json, _) = info(true, &[("POWERZ_SIM_HEAD", "1")]);
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v["update_required"], true);
+    assert_eq!(v["update_required"], serde_json::Value::Null, "{v}");
     let codes = v["warnings"].as_array().unwrap();
-    assert!(codes.contains(&serde_json::json!("update_required")), "{v}");
+    assert!(
+        !codes.contains(&serde_json::json!("update_required")),
+        "{v}"
+    );
 }
 
 #[test]

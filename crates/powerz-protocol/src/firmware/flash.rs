@@ -958,10 +958,22 @@ fn download<P: FlashTransport, C: Clock>(
         });
     }
 
-    // HEAD: type 0x40 (else −100), field 0 (else −111).
-    let r = pipe.transact(&head::request(ids.next()), HEAD_WAIT);
+    // HEAD: type 0x40 (else −100), echoing the request id (else −108, a reply
+    // we could not read as ours), field 0 (else −111). Fail closed: a reply
+    // that cannot be tied to this request (any other id, 0 included) is never
+    // trusted, whatever its field says.
+    let head_id = ids.next();
+    let r = pipe.transact(&head::request(head_id), HEAD_WAIT);
     let reply = match r {
-        Ok(reply) if reply_type(&reply) == Some(HEAD) => reply,
+        Ok(reply) if reply_type(&reply) == Some(HEAD) && reply.get(1) == Some(&head_id) => reply,
+        Ok(reply) if reply_type(&reply) == Some(HEAD) => {
+            return Err(FlashError::Read {
+                detail: format!(
+                    "HEAD: the reply id is not the request id {head_id:#04x}; {}",
+                    head_hex(&reply)
+                ),
+            });
+        }
         Ok(reply) => {
             return Err(FlashError::Product {
                 detail: format!(

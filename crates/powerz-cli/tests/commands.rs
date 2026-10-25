@@ -1484,3 +1484,87 @@ fn info_json_with_a_failed_recovery_connect_lists_both_problems_as_text() {
         "{problems:?}"
     );
 }
+
+// ---- AC-V9SK52.3 (changed 2026-10-26): the real application-mode HEAD reply ----
+
+/// The real meter's HEAD reply in application mode: type 0x40, id 0, field
+/// 0x00001000, then 12 stale bytes (synthesised from a 0xC4 tail).
+fn real_id0_head_reply() -> Vec<u8> {
+    vec![
+        0x40, 0x00, 0x00, 0x01, 0x00, 0x10, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
+        0xff, 0xf4, 0x95, 0x53, 0xf2,
+    ]
+}
+
+/// Device info (ids 1..4), both info blocks (ids 5, 6), then HEAD (id 7)
+/// answered with the real id-0 reply; nothing after it.
+fn real_head_script() -> Vec<Step> {
+    [
+        device_info_steps(1),
+        memread_steps(5, HW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_HW)),
+        memread_steps(6, FW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_FW)),
+        vec![Step::transact(
+            powerz_protocol::decode::head::request(7).to_vec(),
+            real_id0_head_reply(),
+        )],
+    ]
+    .concat()
+}
+
+#[test]
+fn info_with_the_real_head_reply_says_the_update_check_is_unavailable_naming_the_field() {
+    let (r, out, sent) = info_mode(DeviceMode::Application, false, real_head_script());
+    assert!(r.is_ok(), "{r:?}");
+    let check = line_of(&out, "Update check:");
+    assert!(
+        check.starts_with("Update check: unavailable ("),
+        "{check:?}"
+    );
+    assert!(check.ends_with(')'), "{check:?}");
+    assert!(check.contains("0x00001000"), "the field: {check:?}");
+    assert!(
+        squash(check).contains("400000010010000040000000fffffffff49553f2"),
+        "the raw reply: {check:?}"
+    );
+    assert!(!check.contains("timed out"), "no timeout: {check:?}");
+    assert!(
+        !out.to_lowercase().contains("update required"),
+        "no update-required warning: {out}"
+    );
+    let types: Vec<u8> = sent.iter().map(|f| f[0]).collect();
+    assert_eq!(
+        types,
+        vec![0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x40],
+        "one HEAD, no recovery CONNECT"
+    );
+}
+
+#[test]
+fn info_json_with_the_real_head_reply_has_update_required_null() {
+    let (r, out, _) = info_mode(DeviceMode::Application, true, real_head_script());
+    assert!(r.is_ok(), "{r:?}");
+    let v: Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(
+        v["update_required"],
+        Value::Null,
+        "unknown, never true: {v}"
+    );
+    let codes = v["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !codes.contains(&serde_json::json!("update_required")),
+        "{v}"
+    );
+    let head = v["firmware_problems"]
+        .as_array()
+        .unwrap_or_else(|| panic!("firmware_problems array: {v}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|p| p.contains("HEAD"))
+        .unwrap_or_else(|| panic!("a HEAD problem: {v}"))
+        .to_owned();
+    assert!(head.contains("0x00001000"), "{head:?}");
+    assert!(
+        squash(&head).contains("400000010010000040000000fffffffff49553f2"),
+        "{head:?}"
+    );
+}

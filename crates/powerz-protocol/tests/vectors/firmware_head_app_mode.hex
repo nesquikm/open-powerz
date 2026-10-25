@@ -1,0 +1,10 @@
+# HEAD reply of the real KM003C in application mode (firmware 2.0.6,
+# bootloader 2.5), 2026-10-26, answering HEAD `40 08 00 01` + 16 zero bytes
+# (request id 8): type 0x40, id 0 (not the request id), u32 at offset 4 =
+# 0x00001000.
+# Bytes 0..8 are as received. Bytes 8..20 were stale buffer content equal to
+# the tail of the meter's previous memory-read confirmation (0xC4); here they
+# are synthesised from the tail of the last 0xC4 frame of
+# firmware_status_session1.hex.
+# source: qa-runs/V9SK52.6-20261026-0150 (trace not kept; header bytes recorded)
+400000010010000040000000fffffffff49553f2

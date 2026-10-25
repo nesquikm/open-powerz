@@ -162,14 +162,19 @@ fn firmware_status_sends_connect_then_waits_then_head() {
 }
 
 #[test]
-fn firmware_status_reports_update_required_from_a_non_zero_head_field() {
+fn a_non_zero_head_field_is_never_reported_as_update_required() {
+    // AC-V9SK52.3 (changed 2026-10-26): a non-zero field is an unrecognised
+    // reply, not "update required".
     let clock = clock();
     let dev = device(Persona::Bulk, Scenario::Idle, &clock).with_head_field(1);
     let mut s = logged_session(dev, &clock);
-    let st = s.firmware_status().expect("firmware status");
-    assert_eq!(st.update_required, Some(true));
+    s.connect().expect("CONNECT");
+    let st = s
+        .read_firmware_status_or_unknown()
+        .expect("firmware status");
+    assert_eq!(st.update_required, None, "{st:?}");
     assert!(
-        st.warnings().contains(&FirmwareWarning::UpdateRequired),
+        !st.warnings().contains(&FirmwareWarning::UpdateRequired),
         "{:?}",
         st.warnings()
     );
