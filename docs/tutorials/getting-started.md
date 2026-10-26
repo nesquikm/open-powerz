@@ -6,7 +6,8 @@ device stands in for one.
 
 ## Prerequisites
 
-- [Rust](https://www.rust-lang.org/tools/install) 1.96 or newer.
+- [Rust](https://www.rust-lang.org/tools/install) through rustup. It installs
+  the version pinned in `rust-toolchain.toml` on the first cargo command.
 - For the desktop app: [Bun](https://bun.sh) and the
   [Tauri 2 system prerequisites](https://v2.tauri.app/start/prerequisites/)
   for your OS.

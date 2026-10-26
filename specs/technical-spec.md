@@ -63,7 +63,8 @@ specs/                           # SDD specs (this file)
 | Build new vs. fork | Build new; laPower, km003c-rs and other prior art are references only | Full control and a strict clean room |
 | GUI stack | Tauri 2 + Svelte 5 + TS + uPlot | Rich tables/trees, i18n, CJK text and a larger contributor pool; shares the Rust core with the CLI |
 | USB stack | `nusb` (bulk, primary), `serialport` (CDC, second pipe), `hidapi` (HID, read-only ADC fallback) | Pure Rust bulk with hotplug and no libusb DLL; HID limited because multi-report replies reboot the meter (device session 1) |
-| MSRV | Current stable (1.96) | New project; an older MSRV only holds dependencies back |
+| MSRV | 1.96 (`rust-version`) | New project; an older MSRV only holds dependencies back |
+| Build toolchain | One exact version in `rust-toolchain.toml` (1.99.1), used locally, in CI and in release builds; workflows never name their own | A new Rust on the runners can't break a green branch with new lints; moving it is a reviewed one-line change |
 | AES keys | Shipped in the repository | User decision: authenticated features work out of the box |
 | JS tooling | Bun (package manager + script runner), Vite 8, Vitest 5 | Fast installs; Vite is Tauri's reference bundler |
 | License | MIT | User decision |

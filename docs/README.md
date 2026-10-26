@@ -19,6 +19,7 @@ Recipes for one task each, in [how-to/](how-to/):
 - [Analyze USB PD traffic](how-to/analyze-pd-traffic.md): capture, filter and read PD messages, see them on the power chart, save and open captures
 - [Trigger a charger](how-to/trigger-a-charger.md): detect protocols, request a voltage safely, send PD messages and console commands, read a cable's e-marker
 - [Update the meter's firmware](how-to/update-firmware.md) from a ChargerLAB firmware file, from the CLI or the desktop app, and recover from a failed update
+- [Install a release](how-to/install-a-release.md): download, check and open the unsigned builds on macOS, Windows and Linux
 - [Set up Linux permissions](linux.md) (udev rule, `powerz` hwmon driver)
 
 ## Reference {#reference}
