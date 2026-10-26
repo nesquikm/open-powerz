@@ -7,32 +7,40 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use powerz_protocol::decode::AdcSnapshot;
+use powerz_protocol::firmware::DeviceMode;
+use powerz_protocol::firmware::container::read_container_file;
+use powerz_protocol::firmware::flash::{FlashAck, FlashTransport, JumpTarget, Meter, MeterOpener};
 use powerz_protocol::frame;
 use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
 use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
 use powerz_protocol::pdm::{self, FixedProtocol, PdmSession};
 use powerz_protocol::session::{Clock, Session, SystemClock};
-use powerz_protocol::transport::bulk::BulkTransport;
+use powerz_protocol::transport::bulk::{BulkFlashOpener, BulkTransport};
 use powerz_protocol::transport::cdc::CdcTransport;
-use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C};
+use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C, UsbIdentity};
+use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{
-    FaultPlan, PdScenario, Persona, SIM_SERIAL, SimCable, SimCharger, SimClock, SimDevice, SimPdm,
+    FaultPlan, FlashFault, PdScenario, Persona, SIM_SERIAL, SimCable, SimCharger, SimClock,
+    SimDevice, SimMeter, SimPdm,
 };
 
 use crate::args::{
-    Cli, Command, FixedAction, LimitsAction, PdAction, PdDecode, Qc3Action, QcAction, RequestFlags,
-    TransportKind, TriggerProtocol, UfcsAction, needs_connect, rate_from_sps, validate,
+    Cli, Command, FirmwareAction, FixedAction, JumpTo, LimitsAction, PdAction, PdDecode, Qc3Action,
+    QcAction, RequestFlags, TransportKind, TriggerProtocol, UfcsAction, needs_connect,
+    rate_from_sps, validate,
 };
 use crate::commands::{
-    DetectOptions, LegacyRequestOptions, PdRequestOptions, PdSendOptions, PdSettingsChange,
-    StreamOptions, WatchOptions, console, detect, info, list, pd, pd_decode, pd_save, pd_send,
-    read, select_device, stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list,
-    trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch,
+    DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
+    PdSettingsChange, StreamOptions, WatchOptions, console, detect, firmware_flash, firmware_info,
+    firmware_jump, firmware_probe, firmware_probe_unavailable, info_in_mode, inspect_flash_file,
+    list, pd, pd_decode, pd_save, pd_send, read, select_device, stream, trigger_legacy_list,
+    trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
+    trigger_pd_settings, watch,
 };
 use crate::error::CliError;
-use crate::trace::{TracePort, TraceTransport};
+use crate::trace::{TracePort, TraceTransport, TracedOpener};
 
 /// Run the parsed command line against real devices; returns the exit code.
 pub fn run(cli: Cli) -> i32 {
@@ -55,6 +63,8 @@ fn demo_entry() -> DeviceEntry {
         model: Model::Km003c,
         pid: PID_KM003C,
         serial: Some(SIM_SERIAL.to_string()),
+        product: Some("POWER-Z KM003C".to_owned()),
+        interface_string: Some("APP".to_owned()),
         bus: "demo".to_string(),
         address: 0,
     }
@@ -64,6 +74,25 @@ fn demo_entry() -> DeviceEntry {
 fn try_run(cli: &Cli) -> Result<(), CliError> {
     if let Some(d) = &cli.pd_file.decode {
         return decode_file(d);
+    }
+    if let Command::Firmware {
+        action: FirmwareAction::Info { json, file },
+    } = &cli.command
+    {
+        // Reads a local file; no device is opened, whatever `--transport` says.
+        return firmware_info_file(file, *json);
+    }
+    if let Command::Firmware {
+        action: FirmwareAction::Flash { file, i_understand },
+    } = &cli.command
+    {
+        return flash_file(cli, file, *i_understand);
+    }
+    if let Command::Firmware {
+        action: FirmwareAction::Jump { to, i_understand },
+    } = &cli.command
+    {
+        return jump_mode(cli, *to, *i_understand);
     }
     validate(cli)?;
     if let Command::List { json, include_demo } = cli.command {
@@ -91,16 +120,134 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     {
         return run_pdm(cli);
     }
+    if let Command::Firmware {
+        action: FirmwareAction::Probe { json },
+    } = cli.command
+    {
+        // The probe owns its exchange: no pre-dispatch CONNECT.
+        return if cli.transport == TransportKind::Sim {
+            probe_sim(cli, json)
+        } else {
+            probe_meter(cli, json)
+        };
+    }
     if cli.transport == TransportKind::Sim {
         return run_sim(cli);
     }
     let devices = transport::discovery::list_devices()?;
     let device = select_device(&devices, cli.device.as_deref())?;
+    let mode = device.mode();
     match cli.transport {
         TransportKind::Sim => unreachable!("the simulator is handled above"),
-        TransportKind::Bulk => with_transport(cli, BulkTransport::open(device)?),
-        TransportKind::Cdc => with_transport(cli, open_cdc(device)?),
-        TransportKind::Hid => with_transport(cli, HidTransport::open(device.serial.as_deref())?),
+        TransportKind::Bulk => with_transport(cli, mode, BulkTransport::open(device)?),
+        TransportKind::Cdc => with_transport(cli, mode, open_cdc(device)?),
+        TransportKind::Hid => {
+            with_transport(cli, mode, HidTransport::open(device.serial.as_deref())?)
+        }
+    }
+}
+
+/// `firmware probe` on a real meter: read its USB identity from the OS
+/// device list (nothing opened), print it, then open the vendor bulk pipe
+/// and send only CONNECT and HEAD. Without a vendor-class interface (as a
+/// bootloader may have `[unknown]`) nothing is opened or sent.
+fn probe_meter(cli: &Cli, json: bool) -> Result<(), CliError> {
+    let devices = transport::discovery::list_devices()?;
+    let device = select_device(&devices, cli.device.as_deref())?;
+    let identity = transport::discovery::usb_identity(device)?
+        .ok_or_else(|| CliError::NoDevice("the meter is no longer attached".into()))?;
+    let mut out = std::io::stdout().lock();
+    if identity.vendor_interface().is_none() {
+        return firmware_probe_unavailable(&identity, json, &mut out, &mut std::io::stderr());
+    }
+    let pipe = LazyBulk {
+        device: device.clone(),
+        open: None,
+    };
+    run_probe(cli, &identity, pipe, SystemClock, json)
+}
+
+/// `firmware probe` on the demo device; `POWERZ_SIM_MODE` picks its mode.
+fn probe_sim(cli: &Cli, json: bool) -> Result<(), CliError> {
+    select_demo(cli)?;
+    let mode = sim_mode()?;
+    let faults = sim_faults()?;
+    let configure = |sim: SimDevice| -> Result<SimDevice, CliError> {
+        Ok(sim_firmware_knobs(sim)?.with_mode(mode).with_faults(faults))
+    };
+    if fake_sim_clock() {
+        let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+        let sim = configure(SimDevice::with_clock(
+            Persona::Bulk,
+            cli.scenario,
+            clock.clone(),
+        ))?;
+        run_probe(cli, &sim.usb_identity(), sim, clock, json)
+    } else {
+        let sim = configure(SimDevice::new(Persona::Bulk, cli.scenario))?;
+        run_probe(cli, &sim.usb_identity(), sim, SystemClock, json)
+    }
+}
+
+/// Run [`firmware_probe`] over `t` (wrapped for `--trace` if asked) on a
+/// fresh, unconnected session.
+fn run_probe<T: Transport, C: Clock>(
+    cli: &Cli,
+    identity: &UsbIdentity,
+    t: T,
+    clock: C,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut out = std::io::stdout().lock();
+    if cli.trace {
+        let t = TraceTransport::new(t, std::io::stderr());
+        firmware_probe(&mut Session::with_clock(t, clock), identity, json, &mut out)
+    } else {
+        firmware_probe(&mut Session::with_clock(t, clock), identity, json, &mut out)
+    }
+}
+
+/// The vendor bulk pipe of `device`, opened on its first transfer, so the
+/// probe prints the identity before the device is claimed.
+struct LazyBulk {
+    device: DeviceEntry,
+    open: Option<GuardedTransport<BulkTransport>>,
+}
+
+impl LazyBulk {
+    fn pipe(&mut self) -> Result<&mut GuardedTransport<BulkTransport>, transport::Error> {
+        match &mut self.open {
+            Some(pipe) => Ok(pipe),
+            open @ None => Ok(open.insert(BulkTransport::open(&self.device)?)),
+        }
+    }
+}
+
+impl Transport for LazyBulk {
+    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact(request, timeout)
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.read(timeout)
+    }
+
+    fn recover(&mut self) -> Result<(), transport::Error> {
+        self.pipe()?.recover()
+    }
+}
+
+/// Honour `POWERZ_SIM_MODE` (test-only, read by `firmware probe`, `flash`
+/// and `jump` with `--transport sim` alone): `bootloader` runs the
+/// simulated meter's bootloader, `application` (or unset) its application
+/// firmware.
+fn sim_mode() -> Result<DeviceMode, CliError> {
+    match std::env::var("POWERZ_SIM_MODE").as_deref() {
+        Err(_) | Ok("application") => Ok(DeviceMode::Application),
+        Ok("bootloader") => Ok(DeviceMode::Bootloader),
+        Ok(other) => Err(CliError::Usage(format!(
+            "invalid POWERZ_SIM_MODE {other:?}: expected application or bootloader"
+        ))),
     }
 }
 
@@ -123,6 +270,244 @@ fn decode_file(d: &PdDecode) -> Result<(), CliError> {
         d.json,
         &mut std::io::stdout().lock(),
     )
+}
+
+/// `firmware info FILE`: print a firmware container's metadata; no device
+/// is opened.
+fn firmware_info_file(file: &std::path::Path, json: bool) -> Result<(), CliError> {
+    let name = file.display().to_string();
+    let bytes = read_container_file(file).map_err(|e| CliError::Usage(e.to_string()))?;
+    firmware_info(&bytes, &name, json, &mut std::io::stdout().lock())
+}
+
+/// `firmware flash FILE`: check the acknowledgement and inspect the file
+/// before any device is chosen or opened, then flash the meter (or, with
+/// `--transport sim`, the simulated one).
+fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(), CliError> {
+    if !i_understand {
+        return Err(CliError::Usage(FLASH_RISK.into()));
+    }
+    let name = file.display().to_string();
+    let bytes = read_container_file(file).map_err(|e| CliError::Usage(e.to_string()))?;
+    let container = inspect_flash_file(&bytes, &name)?;
+    validate(cli)?;
+    let mut out = std::io::stdout().lock();
+    if cli.transport == TransportKind::Sim {
+        select_demo(cli)?;
+        // Ctrl-C stops the flash at the engine's next safe point.
+        let stop = ctrl_c_flag()?;
+        let after = sim_ctrl_c_after_writes()?;
+        return if fake_sim_clock() {
+            let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+            let meter = sim_meter(SimDevice::with_clock(
+                Persona::Bulk,
+                cli.scenario,
+                clock.clone(),
+            ))?;
+            let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
+            flash_on(cli, &container, meter, clock, &stop, &mut out)
+        } else {
+            let meter = sim_meter(SimDevice::new(Persona::Bulk, cli.scenario))?;
+            let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
+            flash_on(cli, &container, meter, SystemClock, &stop, &mut out)
+        };
+    }
+    let opener = discovery_opener(cli)?;
+    let stop = ctrl_c_flag()?;
+    flash_on(cli, &container, opener, SystemClock, &stop, &mut out)
+}
+
+/// Run [`firmware_flash`] on `opener` (traced with `--trace`).
+fn flash_on<O: MeterOpener, C: Clock>(
+    cli: &Cli,
+    container: &powerz_protocol::firmware::container::FirmwareContainer<'_>,
+    mut opener: O,
+    clock: C,
+    stop: &AtomicBool,
+    out: &mut impl std::io::Write,
+) -> Result<(), CliError> {
+    let ack = FlashAck::acknowledge();
+    if cli.trace {
+        let mut opener = TracedOpener(opener);
+        firmware_flash(ack, container, &mut opener, clock, stop, out)
+    } else {
+        firmware_flash(ack, container, &mut opener, clock, stop, out)
+    }
+}
+
+/// Run [`firmware_jump`] on `opener` (traced with `--trace`).
+fn jump_on<O: MeterOpener, C: Clock>(
+    cli: &Cli,
+    target: JumpTarget,
+    mut opener: O,
+    clock: C,
+    stop: &AtomicBool,
+    out: &mut impl std::io::Write,
+) -> Result<(), CliError> {
+    let ack = FlashAck::acknowledge();
+    if cli.trace {
+        let mut opener = TracedOpener(opener);
+        firmware_jump(ack, target, &mut opener, clock, stop, out)
+    } else {
+        firmware_jump(ack, target, &mut opener, clock, stop, out)
+    }
+}
+
+/// The real-meter opener of `firmware flash` / `firmware jump`. The meter
+/// is chosen now, so an ambiguous choice is refused before anything is sent.
+fn discovery_opener(cli: &Cli) -> Result<BulkFlashOpener, CliError> {
+    let devices = transport::discovery::list_devices()?;
+    select_device(&devices, cli.device.as_deref())?;
+    Ok(BulkFlashOpener::new(
+        cli.device.clone(),
+        FlashAck::acknowledge(),
+    ))
+}
+
+/// The simulated meter of `firmware flash` / `firmware jump`: `sim` with
+/// the firmware knobs, `POWERZ_SIM_FLASH_FAULT`, `POWERZ_SIM_MODE` and
+/// `POWERZ_SIM_REPLUG_AFTER`.
+fn sim_meter(sim: SimDevice) -> Result<SimMeter, CliError> {
+    let sim = sim_flash_fault(sim_firmware_knobs(sim)?)?.with_mode(sim_mode()?);
+    Ok(match sim_replug_after()? {
+        Some(n) => SimMeter::new(sim.with_jump_at_power_up()).with_replug_after(n),
+        None => SimMeter::new(sim),
+    })
+}
+
+/// Honour `POWERZ_SIM_REPLUG_AFTER=N` (test-only): the simulated meter
+/// takes a jump at the next power-up instead of live, and the user
+/// replugs it after N looks at it.
+fn sim_replug_after() -> Result<Option<usize>, CliError> {
+    match std::env::var("POWERZ_SIM_REPLUG_AFTER") {
+        Ok(n) => n
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|e| CliError::Usage(format!("invalid POWERZ_SIM_REPLUG_AFTER {n:?}: {e}"))),
+        Err(_) => Ok(None),
+    }
+}
+
+/// `firmware jump --to MODE`: check the acknowledgement before any device
+/// is chosen or opened, then send the one jump to the meter (or, with
+/// `--transport sim`, the simulated one) and report its mode.
+fn jump_mode(cli: &Cli, to: JumpTo, i_understand: bool) -> Result<(), CliError> {
+    if !i_understand {
+        return Err(CliError::Usage(JUMP_RISK.into()));
+    }
+    validate(cli)?;
+    let target = match to {
+        JumpTo::Bootloader => JumpTarget::Bootloader,
+        JumpTo::Application => JumpTarget::Application,
+    };
+    let mut out = std::io::stdout().lock();
+    // Ctrl-C before the jump stops it; the jump itself is one write.
+    let stop = ctrl_c_flag()?;
+    if cli.transport == TransportKind::Sim {
+        select_demo(cli)?;
+        // `POWERZ_SIM_CTRL_C_AFTER=0` stands in for a Ctrl-C before the
+        // start; a jump sends no payload writes, so other counts never fire.
+        if sim_ctrl_c_after_writes()? == Some(0) {
+            stop.store(true, Ordering::SeqCst);
+        }
+        return if fake_sim_clock() {
+            let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
+            let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+            jump_on(cli, target, sim_meter(sim)?, clock, &stop, &mut out)
+        } else {
+            let sim = SimDevice::new(Persona::Bulk, cli.scenario);
+            jump_on(cli, target, sim_meter(sim)?, SystemClock, &stop, &mut out)
+        };
+    }
+    let opener = discovery_opener(cli)?;
+    jump_on(cli, target, opener, SystemClock, &stop, &mut out)
+}
+
+/// Honour `POWERZ_SIM_CTRL_C_AFTER=K` for `firmware flash` and `firmware
+/// jump` (test-only): stand in for Ctrl-C once K payload writes have been
+/// sent (for a jump only K = 0, a stop before the start, applies).
+fn sim_ctrl_c_after_writes() -> Result<Option<usize>, CliError> {
+    match std::env::var("POWERZ_SIM_CTRL_C_AFTER") {
+        Ok(n) => n
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|e| CliError::Usage(format!("invalid POWERZ_SIM_CTRL_C_AFTER {n:?}: {e}"))),
+        Err(_) => Ok(None),
+    }
+}
+
+/// [`MeterOpener`] wrapper that sets the stop flag once `after` payload
+/// writes have been sent through its pipes (`None`: never). A payload write
+/// is a raw write longer than a 4-byte jump that follows the descriptor
+/// (the first such write).
+struct CtrlCAfterWrites<O> {
+    inner: O,
+    counter: Arc<WriteCounter>,
+}
+
+/// The shared count of [`CtrlCAfterWrites`].
+struct WriteCounter {
+    after: Option<usize>,
+    long_writes: std::sync::atomic::AtomicUsize,
+    stop: Arc<AtomicBool>,
+}
+
+impl<O> CtrlCAfterWrites<O> {
+    fn new(inner: O, after: Option<usize>, stop: Arc<AtomicBool>) -> Self {
+        CtrlCAfterWrites {
+            inner,
+            counter: Arc::new(WriteCounter {
+                after,
+                long_writes: std::sync::atomic::AtomicUsize::new(0),
+                stop,
+            }),
+        }
+    }
+}
+
+impl<O: MeterOpener> MeterOpener for CtrlCAfterWrites<O> {
+    type Pipe = CountingPipe<O::Pipe>;
+
+    fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, transport::Error> {
+        Ok(self.inner.open()?.map(|m| Meter {
+            mode: m.mode,
+            model: m.model,
+            pipe: CountingPipe {
+                inner: m.pipe,
+                counter: Arc::clone(&self.counter),
+            },
+        }))
+    }
+}
+
+/// A pipe of [`CtrlCAfterWrites`].
+struct CountingPipe<P> {
+    inner: P,
+    counter: Arc<WriteCounter>,
+}
+
+impl<P: Transport> Transport for CountingPipe<P> {
+    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact(request, timeout)
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        self.inner.read(timeout)
+    }
+}
+
+impl<P: FlashTransport> FlashTransport for CountingPipe<P> {
+    fn write_raw(&mut self, data: &[u8], timeout: Duration) -> Result<(), transport::Error> {
+        self.inner.write_raw(data, timeout)?;
+        if data.len() > 4 {
+            let n = self.counter.long_writes.fetch_add(1, Ordering::SeqCst) + 1;
+            // The first long write is the descriptor.
+            if self.counter.after.is_some_and(|k| n > k) {
+                self.counter.stop.store(true, Ordering::SeqCst);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `trigger` / `detect`: open the meter's serial port (or, with
@@ -571,6 +956,7 @@ fn ctrl_c_hold() -> impl FnMut(Duration) {
 /// without touching USB; `--device` must name its synthetic serial.
 fn run_sim(cli: &Cli) -> Result<(), CliError> {
     select_demo(cli)?;
+    let mode = demo_entry().mode();
     let faults = sim_faults()?;
     // `pd` on the demo device plays the PD capture scenario.
     let with_pd = |sim: SimDevice| match cli.command {
@@ -584,11 +970,77 @@ fn run_sim(cli: &Cli) -> Result<(), CliError> {
             cli.scenario,
             clock.clone(),
         ));
-        with_ctrl_c_after(cli, sim.with_faults(faults), clock)
+        let sim = sim_firmware_knobs(sim)?;
+        with_ctrl_c_after(cli, mode, sim.with_faults(faults), clock)
     } else {
-        let sim = with_pd(SimDevice::new(Persona::Bulk, cli.scenario));
-        with_ctrl_c_after(cli, sim.with_faults(faults), SystemClock)
+        let sim = sim_firmware_knobs(with_pd(SimDevice::new(Persona::Bulk, cli.scenario)))?;
+        with_ctrl_c_after(cli, mode, sim.with_faults(faults), SystemClock)
     }
+}
+
+/// Honour the firmware test knobs (test-only):
+///
+/// - `POWERZ_SIM_HEAD=<n>`: HEAD answers with old-firmware field `n`.
+/// - `POWERZ_SIM_APP_VERSION=<v>`: the application info block reports `v`.
+fn sim_firmware_knobs(mut sim: SimDevice) -> Result<SimDevice, CliError> {
+    if let Ok(n) = std::env::var("POWERZ_SIM_HEAD") {
+        let field = n
+            .parse::<u32>()
+            .map_err(|e| CliError::Usage(format!("invalid POWERZ_SIM_HEAD {n:?}: {e}")))?;
+        sim = sim.with_head_field(field);
+    }
+    if let Ok(v) = std::env::var("POWERZ_SIM_APP_VERSION") {
+        sim = sim.with_app_version(&v);
+    }
+    Ok(sim)
+}
+
+/// Honour `POWERZ_SIM_FLASH_FAULT=<fault>` (test-only, read by `firmware
+/// flash` and `firmware jump` with `--transport sim` alone): the simulated
+/// bootloader injects that [`FlashFault`], named in kebab-case
+/// (`missing-sync@N`, `no-finished`, ...).
+fn sim_flash_fault(sim: SimDevice) -> Result<SimDevice, CliError> {
+    let Ok(spec) = std::env::var("POWERZ_SIM_FLASH_FAULT") else {
+        return Ok(sim);
+    };
+    let invalid = || {
+        CliError::Usage(format!(
+            "invalid POWERZ_SIM_FLASH_FAULT {spec:?}: expected one of jump-dfu-ignored, \
+             connect-no-accept, descriptor-answered, early-accept-during-erase, \
+             no-accept-after-erase, missing-sync@N, no-finished, wrong-verify-reply, \
+             jump-aprom-ignored, image-not-taken, head-wrong-type, write-fails@N, \
+             jump-dfu-write-fails, info-read-fails-after-return, jump-dfu-disconnects, \
+             jump-aprom-disconnects"
+        ))
+    };
+    let write_no = |n: &str| n.parse::<usize>().ok().filter(|&n| n > 0);
+    let fault = match spec.split_once('@') {
+        Some(("missing-sync", n)) => FlashFault::MissingSync {
+            write: write_no(n).ok_or_else(invalid)?,
+        },
+        Some(("write-fails", n)) => FlashFault::WriteFails {
+            write: write_no(n).ok_or_else(invalid)?,
+        },
+        Some(_) => return Err(invalid()),
+        None => match spec.as_str() {
+            "jump-dfu-ignored" => FlashFault::JumpDfuIgnored,
+            "connect-no-accept" => FlashFault::ConnectNoAccept,
+            "descriptor-answered" => FlashFault::DescriptorAnswered,
+            "early-accept-during-erase" => FlashFault::EarlyAcceptDuringErase,
+            "no-accept-after-erase" => FlashFault::NoAcceptAfterErase,
+            "no-finished" => FlashFault::NoFinished,
+            "wrong-verify-reply" => FlashFault::WrongVerifyReply,
+            "jump-aprom-ignored" => FlashFault::JumpApromIgnored,
+            "image-not-taken" => FlashFault::ImageNotTaken,
+            "head-wrong-type" => FlashFault::HeadWrongType,
+            "jump-dfu-write-fails" => FlashFault::JumpDfuWriteFails,
+            "info-read-fails-after-return" => FlashFault::InfoReadFailsAfterReturn,
+            "jump-dfu-disconnects" => FlashFault::JumpDfuDisconnects,
+            "jump-aprom-disconnects" => FlashFault::JumpApromDisconnects,
+            _ => return Err(invalid()),
+        },
+    };
+    Ok(sim.with_flash_fault(fault))
 }
 
 /// Honour `POWERZ_SIM_FAULT=<plan>` (test-only, [`FaultPlan::parse`] syntax).
@@ -602,7 +1054,12 @@ fn sim_faults() -> Result<FaultPlan, CliError> {
 
 /// Honour `POWERZ_SIM_CTRL_C_AFTER=N` (test-only): stand in for Ctrl-C once
 /// the simulator has answered N GET_DATA requests.
-fn with_ctrl_c_after<C: Clock>(cli: &Cli, sim: SimDevice, clock: C) -> Result<(), CliError> {
+fn with_ctrl_c_after<C: Clock>(
+    cli: &Cli,
+    mode: DeviceMode,
+    sim: SimDevice,
+    clock: C,
+) -> Result<(), CliError> {
     match std::env::var("POWERZ_SIM_CTRL_C_AFTER") {
         Ok(n) => {
             let after = n.parse::<usize>().map_err(|e| {
@@ -613,9 +1070,9 @@ fn with_ctrl_c_after<C: Clock>(cli: &Cli, sim: SimDevice, clock: C) -> Result<()
                 remaining: after,
                 stop: stop_flag(),
             };
-            with_clock(cli, t, clock)
+            with_clock(cli, mode, t, clock)
         }
-        Err(_) => with_clock(cli, sim, clock),
+        Err(_) => with_clock(cli, mode, sim, clock),
     }
 }
 
@@ -645,40 +1102,56 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
 }
 
 /// [`with_clock`] on the system clock.
-fn with_transport<T: Transport>(cli: &Cli, t: T) -> Result<(), CliError> {
-    with_clock(cli, t, SystemClock)
+fn with_transport<T: Transport>(cli: &Cli, mode: DeviceMode, t: T) -> Result<(), CliError> {
+    with_clock(cli, mode, t, SystemClock)
 }
 
 /// Wrap `t` for `--trace` if asked, open a session on `clock`, send CONNECT
 /// where the pipe needs it and run.
-fn with_clock<T: Transport, C: Clock>(cli: &Cli, t: T, clock: C) -> Result<(), CliError> {
+fn with_clock<T: Transport, C: Clock>(
+    cli: &Cli,
+    mode: DeviceMode,
+    t: T,
+    clock: C,
+) -> Result<(), CliError> {
     if cli.trace {
         start(
             cli,
+            mode,
             Session::with_clock(TraceTransport::new(t, std::io::stderr()), clock),
         )
     } else {
-        start(cli, Session::with_clock(t, clock))
+        start(cli, mode, Session::with_clock(t, clock))
     }
 }
 
 /// CONNECT (bulk only) then dispatch.
-fn start<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Result<(), CliError> {
+fn start<T: Transport, C: Clock>(
+    cli: &Cli,
+    mode: DeviceMode,
+    mut session: Session<T, C>,
+) -> Result<(), CliError> {
     if needs_connect(cli.transport) {
         session.connect()?;
     }
-    dispatch(cli, session)
+    dispatch(cli, mode, session)
 }
 
-/// Run one device subcommand on an open session.
-fn dispatch<T: Transport, C: Clock>(cli: &Cli, mut session: Session<T, C>) -> Result<(), CliError> {
+/// Run one device subcommand on an open session; `mode` is the opened
+/// meter's mode, from its vendor interface's USB string.
+fn dispatch<T: Transport, C: Clock>(
+    cli: &Cli,
+    mode: DeviceMode,
+    mut session: Session<T, C>,
+) -> Result<(), CliError> {
     let mut out = std::io::stdout().lock();
     match &cli.command {
         Command::List { .. } => unreachable!("list is handled before opening a device"),
         Command::Trigger { .. } | Command::Detect { .. } | Command::Console { .. } => {
             unreachable!("trigger, detect and console are handled before opening a device")
         }
-        Command::Info { json } => info(&mut session, *json, &mut out),
+        Command::Firmware { .. } => unreachable!("firmware is handled before opening a device"),
+        Command::Info { json } => info_in_mode(&mut session, mode, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
         Command::Watch { interval } => {
             let stop = ctrl_c_flag()?;

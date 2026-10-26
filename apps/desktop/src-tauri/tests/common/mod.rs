@@ -27,8 +27,9 @@ pub const ALLOWED_READS: [(u32, u32); 4] = [
 ];
 
 /// Frame types of the safe command set (`docs/protocol.md`): CONNECT,
-/// DISCONNECT, GET_DATA, start / stop queue, memory read, auth.
-pub const SAFE_TYPES: [u8; 7] = [0x02, 0x03, 0x0C, 0x0E, 0x0F, 0x44, 0x4C];
+/// DISCONNECT, GET_DATA, start / stop queue, HEAD (read-only old-firmware
+/// check, FR V9SK52), memory read, auth.
+pub const SAFE_TYPES: [u8; 8] = [0x02, 0x03, 0x0C, 0x0E, 0x0F, 0x40, 0x44, 0x4C];
 
 pub fn clock() -> SimClock {
     SimClock::new(T0)

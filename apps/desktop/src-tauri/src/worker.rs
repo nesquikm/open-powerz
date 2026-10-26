@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use powerz_protocol::decode::pd_packet::CaptureClock;
 use powerz_protocol::decode::{QueueRecord, Rate};
+use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::pdcap;
 use powerz_protocol::session::{
     self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer,
@@ -34,6 +35,19 @@ pub struct WorkerConfig {
     pub rate: Rate,
     /// Session history this connection appends to.
     pub session_id: u64,
+    /// Device mode the `connected` status reports, from the listing.
+    pub mode: DeviceMode,
+}
+
+impl WorkerConfig {
+    /// Settings for a meter in application mode.
+    pub fn new(rate: Rate, session_id: u64) -> Self {
+        Self {
+            rate,
+            session_id,
+            mode: DeviceMode::Application,
+        }
+    }
 }
 
 /// What the `connected` status reports.
@@ -43,6 +57,19 @@ pub struct ConnectedInfo {
     pub model: String,
     /// Firmware version, e.g. `2.0.6`.
     pub firmware_version: String,
+    /// Device mode name, from the listing (`unknown` when the interface
+    /// string did not say).
+    pub mode: &'static str,
+    /// Bootloader version, e.g. `2.5`; empty when the block is blank.
+    pub bootloader_version: String,
+    /// Firmware warning codes (`too_old`, `outdated`, `update_required`).
+    pub warnings: Vec<&'static str>,
+    /// The HEAD reply asked for a firmware update; `None` (JSON `null`)
+    /// when HEAD could not be read.
+    pub update_required: Option<bool>,
+    /// What could not be read while getting the firmware status, one line
+    /// per failed step (an info block or HEAD).
+    pub firmware_problems: Vec<String>,
     /// Serial number.
     pub serial: String,
     /// Queue rate in samples per second, when known.
@@ -221,13 +248,26 @@ fn disconnected(error: Option<UiError>) -> BackendEvent {
 /// rate is unknown until measured from record timestamps.
 fn connected_info(
     info: &session::DeviceInfo,
-    rate: Rate,
+    fw: &session::FirmwareStatus,
+    config: &WorkerConfig,
     rate_locked: bool,
-    session_id: u64,
 ) -> ConnectedInfo {
+    let WorkerConfig {
+        rate,
+        session_id,
+        mode,
+    } = *config;
     ConnectedInfo {
         model: info.model.clone(),
         firmware_version: info.firmware_version.clone(),
+        mode: mode.name(),
+        bootloader_version: fw
+            .bootloader
+            .as_ref()
+            .map_or_else(String::new, |b| b.version().to_owned()),
+        warnings: fw.warnings().into_iter().map(|w| w.code()).collect(),
+        update_required: fw.update_required,
+        firmware_problems: fw.problems.iter().map(|p| p.text.clone()).collect(),
         serial: info.serial.clone(),
         rate_sps: (!rate_locked).then(|| rate.sps()),
         rate_locked,
@@ -275,28 +315,34 @@ fn open_session<T: Transport, C: Clock>(
     config: WorkerConfig,
 ) -> Result<(Session<GuardedTransport<T>, C>, ConnectedInfo), UiError> {
     let mut session = Session::with_clock(GuardedTransport::new(transport), clock);
-    let mut run = || -> Result<(session::DeviceInfo, bool), session::Error> {
-        session.connect()?;
-        let info = session.device_info()?;
-        let started = session.authenticate(1).and_then(|_| {
-            match session.start_stream(config.rate) {
-                // A queue started by an earlier session still runs [device]:
-                // stop it and start again, once.
-                Err(session::Error::Rejected { .. }) => {
-                    session.stop_stream()?;
-                    session.start_stream(config.rate)
+    let mut run =
+        || -> Result<(session::DeviceInfo, session::FirmwareStatus, bool), session::Error> {
+            // CONNECT, then both info blocks and HEAD (read-only, FR V9SK52).
+            session.connect()?;
+            // A HEAD or info block that timed out or did not decode only
+            // costs the firmware status; an unplugged or refused meter
+            // still fails the connect.
+            let fw = session.read_firmware_status_or_unknown()?;
+            let info = session.device_info()?;
+            let started = session.authenticate(1).and_then(|_| {
+                match session.start_stream(config.rate) {
+                    // A queue started by an earlier session still runs [device]:
+                    // stop it and start again, once.
+                    Err(session::Error::Rejected { .. }) => {
+                        session.stop_stream()?;
+                        session.start_stream(config.rate)
+                    }
+                    other => other,
                 }
-                other => other,
+            });
+            match started {
+                Ok(()) => Ok((info, fw, false)),
+                Err(e) if is_rate_refusal(&e) => Ok((info, fw, true)),
+                Err(e) => Err(e),
             }
-        });
-        match started {
-            Ok(()) => Ok((info, false)),
-            Err(e) if is_rate_refusal(&e) => Ok((info, true)),
-            Err(e) => Err(e),
-        }
-    };
-    let (info, locked) = run().map_err(|e| session_error(&e))?;
-    let info = connected_info(&info, config.rate, locked, config.session_id);
+        };
+    let (info, fw, locked) = run().map_err(|e| session_error(&e))?;
+    let info = connected_info(&info, &fw, &config, locked);
     Ok((session, info))
 }
 
@@ -1918,10 +1964,7 @@ mod tests {
         let handle = spawn_metered(
             || Ok(SimDevice::new(Persona::Bulk, Scenario::Load5v1a)),
             SystemClock,
-            WorkerConfig {
-                rate: Rate::Sps1000,
-                session_id: 1,
-            },
+            WorkerConfig::new(Rate::Sps1000, 1),
             store.clone(),
             |_event: BackendEvent| {},
             Arc::new(AtomicBool::new(false)),

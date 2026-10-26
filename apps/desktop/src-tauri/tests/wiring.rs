@@ -14,6 +14,7 @@ use open_powerz_desktop_lib::devices::{AppOpener, DeviceListing, DeviceManager, 
 use open_powerz_desktop_lib::ui_error::ErrorKind;
 use open_powerz_desktop_lib::worker::{self, BackendEvent, Status, WorkerConfig};
 use powerz_protocol::decode::Rate;
+use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::frame;
 use powerz_protocol::transport::{self, Transport, discovery::DeviceEntry, discovery::Model};
 use powerz_sim::{Persona, Scenario, SimClock, SimDevice};
@@ -120,6 +121,8 @@ fn watcher_reports_plug_events_to_the_ui() {
                     model: Model::Km003c,
                     pid: 0x0063,
                     serial: Some("SERIAL-0002".to_owned()),
+                    product: Some("POWER-Z KM003C".to_owned()),
+                    interface_string: Some("APP".to_owned()),
                     bus: "2".to_owned(),
                     address: 4,
                 }])
@@ -173,6 +176,7 @@ fn app_opener_reports_a_vanished_meter_as_not_found() {
         bus: Some("99".to_owned()),
         address: Some(250),
         demo_scenario: None,
+        mode: DeviceMode::Application,
     };
     match AppOpener.open(&gone) {
         Err(transport::Error::NotFound) => {}
@@ -206,10 +210,7 @@ fn a_worker_panic_ends_the_session_with_a_plain_internal_error() {
     let handle = worker::spawn(
         || Ok(PanickingPipe),
         clock(),
-        WorkerConfig {
-            rate: Rate::Sps50,
-            session_id: 1,
-        },
+        WorkerConfig::new(Rate::Sps50, 1),
         move |e: BackendEvent| {
             keep.lock().unwrap().push(e.clone());
             let _ = tx.send(e);
@@ -241,10 +242,7 @@ fn demo_spawn(
         let clock = clock.clone();
         move || Ok(SimDevice::with_clock(Persona::Bulk, Scenario::Idle, clock))
     };
-    let config = WorkerConfig {
-        rate: Rate::Sps50,
-        session_id: 1,
-    };
+    let config = WorkerConfig::new(Rate::Sps50, 1);
     let handle = match stop {
         Some(stop) => worker::spawn_with_stop(open, clock, config, sink, stop),
         None => worker::spawn(open, clock, config, sink),

@@ -37,10 +37,7 @@ use powerz_sim::PdScenario;
 use serde_json::Value;
 
 fn config() -> WorkerConfig {
-    WorkerConfig {
-        rate: Rate::Sps50,
-        session_id: 1,
-    }
+    WorkerConfig::new(Rate::Sps50, 1)
 }
 
 /// A worker on a simulator that plays the PD negotiation scenario.
@@ -667,10 +664,7 @@ fn a_running_pd_capture_does_not_starve_the_1000_sps_queue() {
     };
     let pipe = Pipe::new(dev, &clock, opts);
     let (events, sink) = capture(&clock);
-    let config = WorkerConfig {
-        rate: Rate::Sps1000,
-        session_id: 1,
-    };
+    let config = WorkerConfig::new(Rate::Sps1000, 1);
     let mut worker = Worker::start(pipe, clock.clone(), config, sink)
         .unwrap_or_else(|e| panic!("worker did not start: {e:?}"));
     run_for(&mut worker, &clock, 500);

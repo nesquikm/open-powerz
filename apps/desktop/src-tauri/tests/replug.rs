@@ -28,6 +28,8 @@ fn meter(serial: &str, bus: &str, address: u8) -> DeviceEntry {
         model: Model::Km003c,
         pid: 0x0063,
         serial: Some(serial.to_owned()),
+        product: Some("POWER-Z KM003C".to_owned()),
+        interface_string: Some("APP".to_owned()),
         bus: bus.to_owned(),
         address,
     }
@@ -599,6 +601,73 @@ fn picking_another_device_cancels_the_wait_before_any_connect() {
             .iter()
             .all(|e| !matches!(e, BackendEvent::Status(Status::Connected(_))))
     );
+}
+
+// ---- AC-V9SK52.5: a meter that comes back in bootloader mode ----
+
+/// Meter `serial` listed in bootloader mode (IF0 interface string `BOOT`).
+fn boot_meter(serial: &str, bus: &str, address: u8) -> DeviceEntry {
+    DeviceEntry {
+        interface_string: Some("BOOT".to_owned()),
+        ..meter(serial, bus, address)
+    }
+}
+
+#[test]
+fn the_same_serial_back_in_bootloader_mode_is_not_reconnected_and_is_listed_as_such() {
+    let mut rig = Rig::new();
+    let (rx, _) = stream_meter_a(&mut rig, 50);
+    unplug_and_wait(&mut rig, &rx);
+
+    // The waited-for meter re-enumerates with its serial, but in bootloader
+    // mode: the bootloader answers no measurement request, so no session
+    // may be opened to it.
+    assert!(
+        !rig.plug(vec![boot_meter(SERIAL_A, "1", 9)]),
+        "a bootloader-mode meter was reconnected automatically"
+    );
+    let opens = rig.opens();
+    assert_eq!(
+        opens.len(),
+        1,
+        "the bootloader-mode meter was opened (frames sent): {opens:?}"
+    );
+    assert!(
+        collect_for(&rx, Duration::from_millis(300))
+            .iter()
+            .all(|e| !matches!(e, BackendEvent::Status(Status::Connected(_)))),
+        "a connected status was sent for a bootloader-mode meter"
+    );
+    // Still waiting for the meter, which is listed as present in
+    // bootloader mode.
+    assert_eq!(rig.m.waiting_for().as_deref(), Some(SERIAL_A));
+    let listed = rig
+        .m
+        .list_devices()
+        .into_iter()
+        .find(|d| d.serial.as_deref() == Some(SERIAL_A))
+        .expect("the bootloader-mode meter is listed");
+    let v = serde_json::to_value(&listed).unwrap();
+    assert_eq!(v["mode"], "bootloader", "{v}");
+
+    // Every later watcher report of the same list still opens nothing.
+    rig.clock.advance(Duration::from_secs(2));
+    assert!(!rig.relist(), "a later report reconnected the bootloader");
+    assert_eq!(rig.opens().len(), 1);
+
+    // Back in application mode: the meter reconnects as before.
+    assert!(
+        rig.plug(vec![meter(SERIAL_A, "1", 10)]),
+        "the meter back in application mode was not reconnected"
+    );
+    recv_until(&rx, |e| {
+        matches!(e, BackendEvent::Status(Status::Connected(_)))
+    });
+    let reopened = rig.opens().last().cloned().expect("nothing reopened");
+    assert_eq!(reopened.serial.as_deref(), Some(SERIAL_A));
+    assert_eq!(reopened.id, "usb:1:10");
+    assert_eq!(rig.m.waiting_for(), None);
+    rig.m.disconnect().unwrap();
 }
 
 // ---- AC-TGE839.6: a running recording ends at the unplug ----

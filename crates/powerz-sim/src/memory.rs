@@ -51,13 +51,18 @@ fn otp_block() -> Vec<u8> {
     b
 }
 
+/// Default application firmware version in the 0x4420 info block.
+pub(crate) const SIM_APP_VERSION: &str = "2.0.6";
+
 /// Plain contents of `(addr, len)`, or `None` for anything not allowed.
-pub(crate) fn block(addr: u32, len: u32) -> Option<Vec<u8>> {
+/// `app_version` is the application firmware version the 0x4420 block
+/// reports.
+pub(crate) fn block(addr: u32, len: u32, app_version: &str) -> Option<Vec<u8>> {
     match (addr, len) {
         HARDWARE_INFO => Some(info_block([0x0000_0000, 0x4000, 0], "2.5", "2024.01.01")),
         FIRMWARE_INFO => Some(info_block(
             [0x4000, 0x0002_0000, 0x1234_5678],
-            "2.0.6",
+            app_version,
             "2025.06.01",
         )),
         OTP => Some(otp_block()),

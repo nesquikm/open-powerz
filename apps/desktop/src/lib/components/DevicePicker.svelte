@@ -36,7 +36,7 @@
   <select
     aria-label="Device"
     title={selectedLabel}
-    disabled={session.active || session.devices.length === 0}
+    disabled={session.active || session.flashing || session.devices.length === 0}
     value={session.selectedId ?? ""}
     onchange={(e) => {
       if (session.select(e.currentTarget.value)) {

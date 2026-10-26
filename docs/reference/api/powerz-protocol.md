@@ -14,11 +14,12 @@ This page is a map of the public modules.
 |---|---|
 | crate root | `VID` (`0x5FC9`, the ChargerLAB USB vendor ID); `VERSION` (the library's version); `pd`, a re-export of the [`powerz-pd`](powerz-pd.md) decoder crate (`pub use powerz_pd as pd`) |
 | `frame` | Pure framing over byte slices: `MainHeader`, `ControlHeader`, `DataHeader`, `SectionHeader`, `Attribute`, `Section`, `Reply`; `classify_reply`, `parse_put_data`; request builders `get_data`, `connect`, `start_queue`, `stop_queue`, `start_pd_sniffer`, `stop_analyzer`; `Attribute::PD_PACKET`; `SequenceCounter`; `FrameError` |
-| `decode` | Payload decoders: `AdcSnapshot`, `QueueRecord` (also built from raw units with `QueueRecord::from_raw`), `Rate`, `Settings`, `DeviceInfoBlock`, `OtpBlock`, `Uid`; `DecodeError`; the `pd_packet` module (see below) |
+| `decode` | Payload decoders: `AdcSnapshot`, `QueueRecord` (also built from raw units with `QueueRecord::from_raw`), `Rate`, `Settings`, `DeviceInfoBlock`, `OtpBlock`, `Uid`; `DecodeError`; the `pd_packet` module (see below); the `head` module (`HeadReply`, the old-firmware check) |
 | `transport` | The `Transport` trait and its pipes: `bulk` (`nusb`), `cdc` (`serialport`; `cdc::without_tty_twins` drops the macOS `/dev/tty.*` twin of each `/dev/cu.*` port), `hid` (`hidapi`, ADC snapshot only); `discovery` and `select` for finding meters; `GuardedTransport` (refuses commands outside the safe set before they are sent); `MockTransport` for tests; `FIRST_CONNECT_TIMEOUT` (wait for the first ACCEPT before `Transport::recover` and a retry); `Error` |
 | `session` | `Session` over a transport: CONNECT, memory read (`DeviceInfo`), authentication, and ADC-queue streaming (`Streamer`, `StreamPoll`, `Gap`, and `SnapshotCadence` for the side snapshot that refreshes temperature at 1000 SPS); PD capture (`PdSniffer`, `PdOptions`, `PdPoll`, `CapturedRecord`, and the `Session` methods `start_pd_sniffer`, `stop_pd_sniffer`, `poll_pd_sniffer`; see below); `Clock` / `SystemClock`; `OwnedSection`; `Error` |
 | `pdcap` | The [pdcap](../pdcap.md) capture file format: `Header`, `Entry`, `Writer`, `Reader`, `load` / `Loaded`, `Error` / `ErrorKind`, `FORMAT_VERSION`, `MAX_LINE_BYTES` (see below) |
 | `pdm` | The PDM text session on the virtual serial port, for protocol triggering: `PdmSession`, `HighVoltageConfirmation`, `Command`, `Protocol`, `Risk` and `classify`, `ReplyReader`, `Capabilities`, `find_port` / `open_port`, `Error`; submodules `pd`, `legacy`, `detect`, `message`, `console` (see below) |
+| `firmware` | Mode detection, firmware versions, firmware container inspection and the flash engine: `DeviceMode`; submodules `version`, `container` and `flash` (see below) |
 | `crypto` | AES-128-ECB with 0xFF padding (`pad_ff`, `encrypt`, `decrypt`), `crc32`, and the shipped `KEYS` |
 
 Decoders and framing are pure functions (`&[u8] → Result<T, _>`), so they can
@@ -107,3 +108,37 @@ port.
 
 The text protocol itself is described in
 [docs/protocol.md](../../protocol.md#pdm-text-session-protocol-triggering).
+
+## Firmware update
+
+`firmware` reads versions and firmware files and runs the update. Only
+`flash` can send write-capable frames, and only with a `FlashAck`.
+
+| item | signature or contents |
+|---|---|
+| `DeviceMode` | `Application`, `Bootloader`, `Unknown`; `DeviceMode::from_interface_string(interface: Option<&str>) -> DeviceMode` (`APP` or `BOOT`), `name(self) -> &'static str` |
+| `version` | `Version` (`parse(s: &str) -> Option<Version>`), `MIN_SUPPORTED` (1.7.0), `KNOWN_LATEST` (2.0.7), `FirmwareWarning` (`code(self) -> &'static str`), `warnings(version: &str, update_required: bool) -> Vec<FirmwareWarning>` |
+| `container` | `FirmwareContainer::parse(bytes: &[u8]) -> Result<FirmwareContainer, ContainerError>` with `vendor`, `container_version`, `model`, `firmware_version`, `date`, `crc` / `crc_hex`, `size` (the declared image size), `release_notes_en` / `release_notes_cn`, `payload`, `check_model(meter: &str)`; `read_container_file(path: &Path)`; `MAX_CONTAINER_BYTES` (8 MiB). The image is never decrypted. |
+| `flash::flash` | `flash(ack: FlashAck, container: &FirmwareContainer, opener: &mut impl MeterOpener, clock: impl Clock, stop: &AtomicBool, progress: &mut dyn FnMut(FlashProgress)) -> Result<FlashOutcome, FlashError>` |
+| `flash::jump` | `jump(ack: FlashAck, target: JumpTarget, opener: &mut impl MeterOpener, clock: impl Clock, stop: &AtomicBool, sent: &mut dyn FnMut(&JumpSent)) -> Result<JumpOutcome, FlashError>` |
+| `FlashAck` | `FlashAck::acknowledge()`: the marker that the user explicitly asked for a flash or a jump |
+| `MeterOpener`, `Meter`, `FlashTransport` | Finds and opens the meter again after each re-enumeration (`open(&mut self) -> Result<Option<Meter<Self::Pipe>>, transport::Error>`); `FlashTransport::write_raw` writes without awaiting a reply. `transport::bulk::BulkFlashOpener` is the real one. |
+| `FlashGuard` | The strict guard of the flash path: CONNECT, HEAD, the info and UID reads, a level-1 authentication, the two jumps, a descriptor starting at 0x4000 and the payload writes after it; everything else is refused before it is sent |
+| `FlashProgress` | `Switching`, `Erasing`, `Writing { done, total }`, `Verifying`, `Finished`, `Returning`, `Replug { to, reply }` |
+| `FlashOutcome` | `Verified { version }` or `PowerCycleNeeded` |
+| `FlashError` | One variant per step (`Product`, `Read`, `Write`, `Erase`, `Download`, `Verify`, `Device`, `Interrupted`, `NotInBootloader`, `WorkMode`, `AlreadyInMode`, `UnknownMode`); `code(&self) -> i32` gives the vendor error number |
+| `JumpTarget`, `JumpReply`, `JumpSent`, `JumpOutcome` | The mode asked for, the meter's reply to the jump (`Accept`, `Reject`, `Other`, `NoReply`, `Disconnected`), what was sent, and the mode the meter came back in |
+| constants | `APP_START` (0x4000), `BLOCK_LEN` (4080), `MAX_APP_END`, `SWITCH_TIMEOUT` and `RETURN_TIMEOUT` (120 s), `JUMP_REPLY_WAIT` (500 ms), `POLL_INTERVAL`, `BACK_BUTTON_HINT` |
+
+Related items elsewhere:
+
+- `Session::firmware_status`, `read_firmware_status` and
+  `read_firmware_status_or_unknown` read both versions and the HEAD reply;
+  `Session::probe` / `probe_with_head_reply` send only CONNECT and HEAD
+  (`ProbeReport`, `ConnectOutcome`, `HeadOutcome`). A SYNC reply is
+  `session::Error::BootloaderMidDownload`.
+- `transport::discovery::find_flashed_meter` and `follow_flashed_meter` pick
+  the meter by its USB serial, which is the same in both modes.
+
+The firmware download sequence is described in
+[docs/protocol.md](../../protocol.md#firmware-download).

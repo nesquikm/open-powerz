@@ -93,10 +93,7 @@ fn stream(slow_from: usize, delay: Duration, want: usize) -> Run {
     let handle = worker::spawn_metered(
         open,
         clock.clone(),
-        WorkerConfig {
-            rate: Rate::Sps1000,
-            session_id: 1,
-        },
+        WorkerConfig::new(Rate::Sps1000, 1),
         SessionStore::new(),
         sink,
         Arc::new(AtomicBool::new(false)),

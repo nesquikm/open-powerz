@@ -134,6 +134,7 @@ describe("device picker labels (AC-AH2AEK.3)", () => {
     bus: "1",
     address: 4,
     demo_scenario: null,
+    mode: "application",
   };
   const demo: DeviceListing = {
     id: "demo:pd-negotiation",
@@ -143,6 +144,7 @@ describe("device picker labels (AC-AH2AEK.3)", () => {
     bus: null,
     address: null,
     demo_scenario: "pd-negotiation",
+    mode: "application",
   };
 
   it("names real meters by model and serial", () => {

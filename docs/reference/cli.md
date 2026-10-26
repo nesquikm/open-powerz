@@ -8,7 +8,7 @@ the built-in help.
 | command | what it does | options |
 |---|---|---|
 | `list` | One line per attached meter: model, serial, USB bus/address. With none attached it prints `no POWER-Z devices found` to stderr and still exits 0. | `--json` (array of `model`, `serial`, `bus`, `address`), `--include-demo` (also list the simulated demo device) |
-| `info` | Model, firmware version, hardware version, serial and UID. | `--json` (`model`, `firmware_version`, `hardware_version`, `serial`, `uid`) |
+| `info` | Model, mode (`application`, `bootloader` or `unknown`), application firmware and bootloader versions with their dates, hardware version, serial and UID, then one `Warning:` line per firmware warning: older than 1.7.0, or older than 2.0.7 (the newest version known). Outside application mode it prints only the mode and sends nothing. Each part of the firmware status (the bootloader block, the application block, then HEAD) that cannot be read costs only that part: the rest, the dated versions and the version warnings are still printed. When HEAD cannot be read it adds `Update check: unavailable (<reason>)`, with the reason and the raw reply. A HEAD field of 0 means the firmware is current; any other value (2.0.6 answers `0x00001000`) is reported the same way as an unrecognised reply naming the field and the raw bytes, never as "update required", because what that field means is not yet confirmed on a real meter. Each info block that cannot be read adds one `Firmware status: <problem>` line naming the block, its address and why (the versions shown for it then come from the device info). If the meter cannot be reconnected after a failed step, the remaining steps are skipped and one `Firmware status:` line says so; `info` still succeeds. | `--json` (top level: `model`, `mode`, `firmware_version`, `hardware_version`, `update_required` (null when HEAD was not read or its field was not 0), `warnings` as codes `too_old` / `outdated`, `firmware_problems` (one line per status part that could not be read, empty when all were read), `serial`, `uid`; plus `application` and `bootloader`, each an object with `model`, `version` and `date`, or null) |
 | `read` | One snapshot: VBUS (V), IBUS (A, signed), power (W), temperature (°C), D+, D−, CC1, CC2 (V). | `--json` (`vbus_v`, `ibus_a`, `power_w`, `temp_c` or null, `dp_v`, `dm_v`, `cc1_v`, `cc2_v`) |
 | `watch` | The `read` view, refreshed until Ctrl-C. Redraws in place on a terminal, one line per refresh otherwise. | `--interval MS` (default 200, minimum 50) |
 | `stream` | Records the ADC sample stream to CSV until Ctrl-C or `--duration`; prints the sample count and any gaps to stderr. | `--rate {2,10,50,1000}`, `--csv FILE` (created or overwritten), `--duration SECONDS` (device time, fractions allowed) |
@@ -18,6 +18,10 @@ the built-in help.
 | `trigger` | Asks a charger for a voltage through the meter (protocol triggering). One subcommand per protocol; see [Protocol triggering](#protocol-triggering). | `pd`, `qc`, `qc3`, `fcp`, `afc`, `sfcp`, `scp`, `vfcp`, `tfcp`, `ufcs` |
 | `detect` | Detects the charger's fast-charging protocols: BC1.2, Apple, and the automatic list on request. Never raises VBUS above 5 V. See [Detection](#detection). | `--list`, `--list-plus`, `--stall-secs N` (default 45), `--json` |
 | `console` | Raw PDM text console: sends the command lines it reads from stdin and prints what was sent and received, with times. See [Console](#console). | `--allow-high-voltage` |
+| `firmware info` | Reads a local firmware container file (`.mencrypt`) and prints its vendor, container version, model, version, date, CRC-32, size and English release notes. Needs no meter and never decrypts the file. A broken, oversized (over 8 MiB) or unreadable file is refused with exit code 2 and the reason, prefixed with the file name. | `FILE`, `--json` (`vendor`, `container_version`, `model`, `version`, `date`, `crc` as 8 hex digits, `size`, `release_notes_en`) |
+| `firmware probe` | Read-only check for either mode: prints the meter's USB identity (vendor and product IDs, product string, mode, and each interface's class and string) without opening it, then over the bulk pipe sends only CONNECT and HEAD and prints the results. It always uses the bulk pipe, whatever `--transport` says (except `sim`). If the meter has no vendor-class interface, it prints the identity and sends nothing. A SYNC reply to CONNECT or HEAD means a bootloader left mid-download by an interrupted update: the probe sends nothing more and exits 5, asking you to unplug the meter and hold Back while plugging it back in. | `--json` (`vid`, `pid`, `product`, `mode`, `interfaces`, `connect`, `head`, `head_field`, `head_raw`). `head_raw` holds the reply in hex when it did not decode, and also next to `head_field` when the meter answered with reply id 0 (as it does in application mode), so a run records exactly what it said |
+| `firmware flash` | Flashes a firmware container onto the meter's application area through its bootloader, over the bulk pipe only (`--transport bulk` or `sim`). Refused with exit code 2 and nothing sent unless `--i-understand` is given; the file is then inspected (as `firmware info` does) before any meter is chosen or opened, and a broken or truncated file is refused with exit code 2, prefixed with the file name. From application mode it checks that the file's model matches the meter, opens a session (CONNECT, the UID read and authentication at level 1) and sends the switch to its bootloader, prints the meter's reply to it and asks you to unplug the meter and plug it back in if it does not restart by itself, then waits up to 120 s for the bootloader. A failed authentication stops before the switch is sent. After the image is accepted it asks for a replug again on the way back to application mode. Prints each stage on its own line (switch, erase, write as bytes done / total about every tenth of the image, verify, finished, return to application mode), then the new version the meter reports, or asks you to unplug and replug the meter if it stays in its bootloader. A failed flash exits 5 with the vendor error number and how to recover. See [Firmware flashing](#firmware-flashing). | `FILE`, `--i-understand` |
+| `firmware jump` | Switches the meter between modes with one write-only jump over the bulk pipe only (`--transport bulk` or `sim`): `--to bootloader` (from application mode) sends CONNECT, the UID read and authentication at level 1, then JUMP_DFU, and a failed authentication stops before JUMP_DFU; `--to application` (from bootloader mode) sends only JUMP_APROM. Both go through the same strict guard as `firmware flash`; no HEAD or info read is sent. Refused with exit code 2 and nothing sent unless `--i-understand` is given. A meter already in the target mode, or in an unknown mode, is refused with exit code 5 and nothing sent. Once the jump is sent it prints the mode the meter was in, the meter's reply to the jump (`ACCEPT`, `REJECT`, another type or `none`) and asks you to unplug the meter and plug it back in (no buttons) if it does not restart by itself. It then waits up to 120 s and prints the mode the meter is in now; if the meter does not come back in the target mode it exits 5 naming the mode seen (after `--to bootloader`, with the hold-Back hint). See [Firmware flashing](#firmware-flashing). | `--to bootloader\|application`, `--i-understand` |
 
 ## Global options
 
@@ -26,7 +30,7 @@ the built-in help.
 | `--device SERIAL` | The meter to use. Required when several are attached. |
 | `--transport bulk\|cdc\|hid\|sim` | The USB pipe. `bulk` (default) supports every measuring command; `cdc` and `hid` support only `read` and `watch` (and `pd decode`, which needs no meter); `sim` is the demo device. `trigger`, `detect`, `console` and `pd send` always talk to the meter's virtual serial port, whatever pipe is chosen; with `sim` they talk to a simulated meter and charger instead. For `detect`, the pipe also takes the one ADC snapshot behind the D+/D− hint. |
 | `--scenario NAME` | What the demo device plays: `idle` (default), `load-5v-1a`, `pd-9v-2a`, `noisy-negative`. |
-| `--trace` | Logs every frame to stderr as hex: `>` sent, `<` received, `x` refused by the safety guard before sending. |
+| `--trace` | Logs every frame to stderr as hex: `>` sent, `<` received, `x` refused by the safety guard before sending. Covers the raw writes of `firmware jump` and `firmware flash` (the jumps, the descriptor and the payload blocks). |
 
 ## Protocol triggering
 
@@ -145,6 +149,54 @@ classified before it is written:
   incomplete automatic list, `detect` checks with a read-only command that
   the meter is still in step before it sends anything else.
 
+## Firmware flashing
+
+`powerz firmware flash FILE --i-understand` is the only command that writes
+to the meter's flash. `powerz firmware jump --to bootloader|application
+--i-understand` writes nothing to flash, but it is the only other command
+that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) or one JUMP_APROM.
+
+- **`--i-understand`.** Without it the command exits 2, explains the risk
+  and opens no meter.
+- **The file is checked first.** It must parse as a firmware container
+  (header fields and sizes) before any meter is chosen or opened, and its
+  model must match the meter's.
+- **The bootloader is never written.** Only the application area (from
+  0x4000) can be named; every other command is refused before it is sent.
+- **No automatic retry.** If a step fails once the meter is in its
+  bootloader, nothing more is sent and the meter stays there. Keep it
+  plugged in and run the command again; if the meter does not reach its
+  bootloader on its own, hold the Back button while plugging it in.
+- **Ctrl-C** stops the flash at its next safe point: before the switch to
+  the bootloader, before the descriptor, or between two payload writes.
+  The command then exits 5 saying the flash was interrupted, with the same
+  recovery text as a failure; once the meter is in its bootloader nothing
+  more is sent and it stays there until you flash again.
+- **Finding the meter again.** After the switch the meter is looked up
+  afresh by its USB serial, which stays the same in application and
+  bootloader mode: the `--device` serial, else the serial of the meter the
+  flash first opened. Another meter is never picked, even when it is the
+  only one attached; the command keeps waiting for yours. Without
+  `--device`, several meters attached at the start stop the command with
+  their serials; unplug the others.
+- **Replug only when asked.** After each jump the meter normally restarts
+  by itself. If it does not, the command asks you to unplug it and plug it
+  back in (no buttons), and waits up to 120 s. Do not unplug it at any other
+  time while the flash runs.
+- **`firmware jump`** needs `--i-understand` as well (exit 2, nothing sent
+  without it) and runs on the bulk pipe only. It sends exactly one jump
+  frame through the flash guard, only from the opposite mode; from
+  application mode that frame follows CONNECT, the UID read and a level-1
+  authentication, and nothing is jumped if the authentication fails.
+  Ctrl-C applies only before the jump frame is sent: it then sends
+  nothing and exits as interrupted; once the frame is written the jump
+  cannot be undone, and the command waits for the meter as usual. The
+  `Was in:` line, the meter's reply and the replug prompt are printed as
+  soon as the jump frame is written, before the wait; the `Was in:` line
+  shows even when that write fails. In its bootloader the meter
+  takes no measurements: run `firmware jump --to application
+  --i-understand`, or unplug the meter and plug it back in.
+
 ## Output formats
 
 - Human views print 3 decimals, temperature 1 decimal (`30.5 °C`).
@@ -168,10 +220,10 @@ classified before it is written:
 | code | meaning |
 |---|---|
 | 0 | success |
-| 2 | usage error, including an ambiguous device choice, a request the charger does not offer or allow, and a command above 5 V without `--allow-high-voltage` |
+| 2 | usage error, including an ambiguous device choice, `firmware flash` or `firmware jump` without `--i-understand` or with a file that fails inspection, a request the charger does not offer or allow, and a command above 5 V without `--allow-high-voltage` |
 | 3 | no matching device (or no POWER-Z serial port) |
 | 4 | permission denied (on Linux the message names the udev rule) |
-| 5 | device or protocol error, including a protocol the charger does not support, a failed request, a meter out of step, and a failed return to 5 V |
+| 5 | device or protocol error, including a failed firmware flash, a protocol the charger does not support, a failed request, a meter out of step, and a failed return to 5 V |
 
 ## Test knobs (demo device)
 
@@ -182,8 +234,13 @@ These environment variables are for tests only. They work only with
 |---|---|
 | `POWERZ_SIM_CLOCK=fake` | Deterministic simulated time. |
 | `POWERZ_SIM_FAULT` | Injects faults, for example `timeout@2,disconnect@3,wrong-id@4,permission`. |
-| `POWERZ_SIM_CTRL_C_AFTER=N` | Acts as if Ctrl-C was pressed after `N` polls. |
+| `POWERZ_SIM_CTRL_C_AFTER=N` | Acts as if Ctrl-C was pressed after `N` polls (`firmware flash`: after `N` payload writes; `firmware jump`: only `0` applies, a Ctrl-C before the jump). |
 | `POWERZ_SIM_CHARGER` | The simulated charger behind `trigger`, `detect`, `console` and `pd send`: `epr-140w` (default), `pps-65w` or `multi-protocol`. |
 | `POWERZ_SIM_CABLE=epr-240w` | Puts an e-marked 240 W EPR cable on the simulated meter, so `pd send --preset discover-identity-cable` gets an answer. Unset, there is no cable. |
 | `POWERZ_SIM_ENTRY_BC=fail` | `entry bc` answers `fail`. |
 | `POWERZ_SIM_PDM_LAG=after-list` | The simulated meter answers one reply late after the `reset` that ends a stalled list, to test the out-of-step error. |
+| `POWERZ_SIM_HEAD=N` | The simulated meter's HEAD reply carries old-firmware field `N` (0 means current; anything else is shown as an unrecognised reply). |
+| `POWERZ_SIM_APP_VERSION=V` | The simulated application info block reports version `V` (default `2.0.6`). |
+| `POWERZ_SIM_MODE` | `application` (default) or `bootloader`; read only by `firmware probe`, `firmware flash` and `firmware jump`. |
+| `POWERZ_SIM_REPLUG_AFTER=N` | The simulated meter takes a jump at its next power-up instead of live, and is unplugged and plugged back in after `N` looks at it; read only by `firmware flash` and `firmware jump`. |
+| `POWERZ_SIM_FLASH_FAULT` | The simulated bootloader injects one flash fault; read only by `firmware flash` and `firmware jump`: `jump-dfu-ignored`, `jump-dfu-write-fails`, `jump-dfu-disconnects`, `connect-no-accept`, `head-wrong-type`, `descriptor-answered`, `early-accept-during-erase`, `no-accept-after-erase`, `missing-sync@N` or `write-fails@N` (payload write `N`, 1-based), `no-finished`, `wrong-verify-reply`, `jump-aprom-ignored`, `jump-aprom-disconnects`, `info-read-fails-after-return`, `image-not-taken`. |

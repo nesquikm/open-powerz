@@ -7,6 +7,7 @@
 
 pub mod crypto;
 pub mod decode;
+pub mod firmware;
 pub mod frame;
 pub mod pdcap;
 pub mod pdm;

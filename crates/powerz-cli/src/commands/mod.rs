@@ -15,6 +15,7 @@ use crate::error::CliError;
 
 mod console;
 mod detect;
+mod firmware;
 mod info;
 mod list;
 mod pd;
@@ -26,7 +27,11 @@ mod watch;
 
 pub use console::console;
 pub use detect::{DetectOptions, detect};
-pub use info::info;
+pub use firmware::{
+    FLASH_RISK, JUMP_RISK, find_flashed_meter, firmware_flash, firmware_info, firmware_jump,
+    firmware_probe, firmware_probe_unavailable, inspect_flash_file,
+};
+pub use info::{info, info_in_mode};
 pub use list::{list, select_device};
 pub use pd::{pd, pd_decode, pd_save};
 pub use pd_send::{PdSendOptions, pd_send};

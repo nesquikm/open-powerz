@@ -95,11 +95,28 @@ export interface DeviceListing {
   bus: string | null;
   address: number | null;
   demo_scenario: string | null;
+  /** What the meter runs, from its vendor interface's USB string (FR V9SK52). */
+  mode: DeviceMode;
 }
+
+/** Application firmware, bootloader, or not known (mirrors `firmware::DeviceMode`). */
+export type DeviceMode = "application" | "bootloader" | "unknown";
+
+/** Firmware warning codes (mirrors `version::FirmwareWarning::code`). */
+export type FirmwareWarningCode = "too_old" | "outdated" | "update_required";
 
 export interface ConnectedInfo {
   model: string;
   firmware_version: string;
+  /** Bootloader version, empty when the meter did not report one (FR V9SK52). */
+  bootloader_version: string;
+  mode: DeviceMode;
+  /** Firmware warnings for this meter, none when it is up to date. */
+  warnings: FirmwareWarningCode[];
+  /** The HEAD "update required" flag, null when HEAD could not be read (FR V9SK52). */
+  update_required: boolean | null;
+  /** Why parts of the firmware status could not be read, empty when all of it was. */
+  firmware_problems: string[];
   serial: string;
   rate_sps: number | null;
   rate_locked: boolean;
@@ -459,6 +476,77 @@ export async function pdOpen(): Promise<PdOpened | null> {
 export async function pdImport(): Promise<PdOpened | null> {
   if (mock) return mock.pdImport();
   return invoke<PdOpened | null>("pd_import");
+}
+
+/** A local firmware container's metadata (FR V9SK53, AC .3). The image itself is never
+ * decrypted; `crc` is 8 uppercase hex digits and `size` the declared image length in bytes. */
+export interface FirmwareFileInfo {
+  vendor: string;
+  container_version: string;
+  model: string;
+  version: string;
+  date: string;
+  crc: string;
+  size: number;
+  release_notes_en: string;
+}
+
+/** Reads the firmware container at `path` and resolves to its metadata; needs no meter.
+ * A corrupt file or one that is not a firmware container rejects with a usage error. */
+export async function firmwareInspect(path: string): Promise<FirmwareFileInfo> {
+  if (mock) return mock.firmwareInspect(path);
+  return invoke<FirmwareFileInfo>("firmware_inspect", { path });
+}
+
+/** Opens the open dialog filtered to firmware containers (`.mencrypt`) (FR V9SK55,
+ * AC .2). Resolves to the chosen path, or `null` when the dialog was cancelled. */
+export async function firmwareChoose(): Promise<string | null> {
+  if (mock) return mock.firmwareChoose();
+  return invoke<string | null>("firmware_choose");
+}
+
+/** One stage of a firmware update as the backend reports it (FR V9SK55, AC .4); the
+ * write stage carries the bytes written so far and the image length. */
+export type FlashStage =
+  | { stage: "switching" }
+  | { stage: "erasing" }
+  | { stage: "writing"; done: number; total: number }
+  | { stage: "verifying" }
+  | { stage: "finished" }
+  | { stage: "returning" };
+
+/** A jump was sent and the meter needs a replug if it does not restart by itself;
+ * `reply` is its answer to the jump. */
+export type FlashReplug = { stage: "replug"; to: "bootloader" | "application"; reply: string };
+
+/** What the backend reports during an update: a stage, or a replug prompt. */
+export type FlashEvent = FlashStage | FlashReplug;
+
+/** How a firmware update ended (FR V9SK55, AC .5): the version read back from the meter,
+ * or an image accepted while the meter stays in its bootloader until it is replugged. */
+export type FlashDone =
+  { outcome: "verified"; version: string } | { outcome: "power_cycle_needed" };
+
+/** Updates the meter `deviceId` with the firmware file at `path` (FR V9SK55, AC .4): the
+ * backend holds the meter for the update, re-checks that `confirmation` is the file's
+ * version before anything is sent, and reports each stage (and each replug prompt) to
+ * `onStage`. Resolves to the
+ * outcome, or rejects with the error and its recovery steps. */
+export async function firmwareFlash(
+  deviceId: string,
+  path: string,
+  confirmation: string,
+  onStage: (stage: FlashEvent) => void,
+): Promise<FlashDone> {
+  if (mock) return mock.firmwareFlash(deviceId, path, confirmation, onStage);
+  const channel = new Channel<FlashEvent>();
+  channel.onmessage = onStage;
+  return invoke<FlashDone>("firmware_flash", {
+    deviceId,
+    path,
+    confirmation,
+    onProgress: channel,
+  });
 }
 
 /** Drops every captured PD record; resolves to the index of the next record. Rows

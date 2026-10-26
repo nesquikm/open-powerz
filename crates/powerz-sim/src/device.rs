@@ -19,6 +19,7 @@ pub(crate) mod msg {
     pub const STOP_QUEUE: u8 = 0x0F;
     pub const START_ANALYZER: u8 = 0x10;
     pub const STOP_ANALYZER: u8 = 0x11;
+    pub const HEAD: u8 = 0x40;
     pub const PUT_DATA: u8 = 0x41;
     pub const MEM_READ: u8 = 0x44;
     pub const AUTH: u8 = 0x4C;
@@ -117,7 +118,7 @@ impl SimDevice {
     }
 
     /// Four-byte control reply.
-    fn control(&self, ty: u8, id: u8) -> Vec<u8> {
+    pub(crate) fn control(&self, ty: u8, id: u8) -> Vec<u8> {
         self.header(ty, id, false, 0).to_vec()
     }
 
@@ -127,6 +128,9 @@ impl SimDevice {
             return Vec::new();
         };
         let id = req.get(1).copied().unwrap_or(0);
+        if self.mode == powerz_protocol::firmware::DeviceMode::Bootloader {
+            return self.bootloader_request(req, id);
+        }
         if self.persona == Persona::Cdc && matches!(b0 & 0x7F, 0x01..=0x03) {
             // ADCNEW framing on CDC: out of scope, no reply.
             return Vec::new();
@@ -146,10 +150,23 @@ impl SimDevice {
                 let code = req.get(2).copied().unwrap_or(0) >> 1;
                 vec![self.queue_control(ty, id, code)]
             }
+            msg::HEAD => vec![self.head(id)],
             msg::MEM_READ => self.memory_read(req, id),
             msg::AUTH => vec![self.auth(req, id)],
             _ => vec![self.control(msg::REJECT, id)],
         }
+    }
+
+    /// HEAD: after CONNECT, `40 id 00 01`, the old-firmware u32 at offset
+    /// 4, zero padding to 20 bytes; REJECT before CONNECT `[inferred]`.
+    pub(crate) fn head(&self, id: u8) -> Vec<u8> {
+        if !self.link_open() {
+            return self.control(msg::REJECT, id);
+        }
+        let mut r = vec![msg::HEAD, id, 0x00, 0x01];
+        r.extend(self.head_field.to_le_bytes());
+        r.extend([0u8; 12]);
+        r
     }
 
     /// GET_DATA: one PUT_DATA frame with a section per known attribute.
@@ -232,7 +249,7 @@ impl SimDevice {
     /// 0x44: confirmation, then the block encrypted with key 0.
     fn memory_read(&mut self, req: &[u8], id: u8) -> Vec<Vec<u8>> {
         let reject = || vec![self.control(msg::REJECT, id)];
-        if !self.link_open() || req.len() < 4 + CRYPT_LEN {
+        if !self.link_open() || req.len() < 4 + CRYPT_LEN || self.info_read_fails() {
             return reject();
         }
         let plain = crypto::decrypt(&KEYS[0], &req[4..4 + CRYPT_LEN]);
@@ -241,7 +258,7 @@ impl SimDevice {
         if word(12) != crypto::crc32(&plain[..12]) {
             return reject();
         }
-        let Some(block) = memory::block(addr, len) else {
+        let Some(block) = memory::block(addr, len, &self.app_version) else {
             return reject();
         };
         let mut confirm = self.header(msg::MEM_READ | 0x80, id, true, 4).to_vec();

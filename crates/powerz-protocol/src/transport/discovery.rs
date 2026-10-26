@@ -1,6 +1,7 @@
 //! Device discovery: list attached POWER-Z meters without opening them.
 
 use super::Error;
+use crate::firmware::DeviceMode;
 
 /// USB product ID of the KM003C.
 pub const PID_KM003C: u16 = 0x0063;
@@ -38,6 +39,11 @@ pub struct UsbDeviceInfo {
     pub pid: u16,
     /// iSerialNumber string, if the OS reported one.
     pub serial: Option<String>,
+    /// iProduct string, if the OS reported one (the model name).
+    pub product: Option<String>,
+    /// Interface string of the vendor-class (0xFF) interface, if the OS
+    /// reported one (`APP` in application mode `[device]`).
+    pub interface_string: Option<String>,
     /// Bus identifier as reported by the OS.
     pub bus: String,
     /// Device address on the bus.
@@ -53,10 +59,21 @@ pub struct DeviceEntry {
     pub pid: u16,
     /// Serial string.
     pub serial: Option<String>,
+    /// USB product string, if the OS reported one.
+    pub product: Option<String>,
+    /// Vendor-interface string, if the OS reported one; decides the mode.
+    pub interface_string: Option<String>,
     /// Bus identifier.
     pub bus: String,
     /// Device address on the bus.
     pub address: u8,
+}
+
+impl DeviceEntry {
+    /// Application or bootloader mode, from the vendor-interface string.
+    pub fn mode(&self) -> DeviceMode {
+        DeviceMode::from_interface_string(self.interface_string.as_deref())
+    }
 }
 
 /// Keep every device with the POWER-Z vendor ID, in input order.
@@ -68,6 +85,8 @@ pub fn filter_devices(devices: &[UsbDeviceInfo]) -> Vec<DeviceEntry> {
             model: Model::from_pid(d.pid),
             pid: d.pid,
             serial: d.serial.clone(),
+            product: d.product.clone(),
+            interface_string: d.interface_string.clone(),
             bus: d.bus.clone(),
             address: d.address,
         })
@@ -84,11 +103,227 @@ pub fn list_devices() -> Result<Vec<DeviceEntry>, Error> {
             vid: d.vendor_id(),
             pid: d.product_id(),
             serial: d.serial_number().map(str::to_owned),
+            product: d.product_string().map(str::to_owned),
+            interface_string: vendor_interface_string(&d),
             bus: d.bus_id().to_owned(),
             address: d.device_address(),
         })
         .collect();
     Ok(filter_devices(&infos))
+}
+
+/// Interface string of the vendor-class (0xFF) interface, picked by class,
+/// never by number; read from the OS device list, nothing is opened.
+fn vendor_interface_string(d: &nusb::DeviceInfo) -> Option<String> {
+    d.interfaces()
+        .filter(|i| i.class() == 0xFF)
+        .find_map(|i| i.interface_string())
+        .map(str::to_owned)
+}
+
+/// One USB interface as the OS describes it (no handle held).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbInterface {
+    /// bInterfaceNumber.
+    pub number: u8,
+    /// bInterfaceClass (0xFF vendor, 0x02 CDC, 0x0A CDC data, 0x03 HID).
+    pub class: u8,
+    /// bInterfaceSubClass.
+    pub subclass: u8,
+    /// bInterfaceProtocol.
+    pub protocol: u8,
+    /// iInterface string, if the OS reported one.
+    pub string: Option<String>,
+}
+
+/// The USB identity of one meter: IDs, product string and every interface,
+/// read from descriptors without opening the device (FR V9SK56, AC .6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbIdentity {
+    /// idVendor.
+    pub vid: u16,
+    /// idProduct.
+    pub pid: u16,
+    /// iProduct string, if the OS reported one.
+    pub product: Option<String>,
+    /// The interfaces, in descriptor order.
+    pub interfaces: Vec<UsbInterface>,
+}
+
+impl UsbIdentity {
+    /// Application or bootloader mode, from the string of the vendor-class
+    /// (0xFF) interface, found by class, never by number.
+    pub fn mode(&self) -> DeviceMode {
+        DeviceMode::from_interface_string(self.vendor_interface().and_then(|i| i.string.as_deref()))
+    }
+
+    /// The first vendor-class (0xFF) interface, if any: the bulk pipe.
+    pub fn vendor_interface(&self) -> Option<&UsbInterface> {
+        self.interfaces.iter().find(|i| i.class == 0xFF)
+    }
+}
+
+impl std::fmt::Display for UsbIdentity {
+    /// Labelled lines: vendor and product IDs as `0x` hex, the product
+    /// string, then one `interface <n>` line per interface.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Vendor ID:   {:#06x}", self.vid)?;
+        writeln!(f, "Product ID:  {:#06x}", self.pid)?;
+        writeln!(
+            f,
+            "Product:     {}",
+            self.product.as_deref().unwrap_or("(no string)")
+        )?;
+        writeln!(f, "Mode:        {}", self.mode().name())?;
+        for i in &self.interfaces {
+            let string = i
+                .string
+                .as_deref()
+                .map_or_else(|| "(no string)".to_owned(), |s| format!("{s:?}"));
+            writeln!(
+                f,
+                "  interface {}: class {:#04x}, subclass {:#04x}, protocol {:#04x}, string {string}",
+                i.number, i.class, i.subclass, i.protocol
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Descriptor-level facts about one attached USB device, interfaces
+/// included, as the OS device list reports them (no handle held).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbDescriptor {
+    /// idVendor.
+    pub vid: u16,
+    /// idProduct.
+    pub pid: u16,
+    /// iSerialNumber string, if the OS reported one.
+    pub serial: Option<String>,
+    /// iProduct string, if the OS reported one.
+    pub product: Option<String>,
+    /// Bus identifier as reported by the OS.
+    pub bus: String,
+    /// Device address on the bus.
+    pub address: u8,
+    /// The interfaces, in descriptor order.
+    pub interfaces: Vec<UsbInterface>,
+}
+
+impl UsbIdentity {
+    /// The identity part of `d`: IDs, product string and every interface,
+    /// in descriptor order.
+    pub fn from_descriptor(d: &UsbDescriptor) -> UsbIdentity {
+        UsbIdentity {
+            vid: d.vid,
+            pid: d.pid,
+            product: d.product.clone(),
+            interfaces: d.interfaces.clone(),
+        }
+    }
+}
+
+/// The descriptor in `devices` that is the meter `device`: the POWER-Z
+/// vendor ID, the same product ID, bus and address, and the same serial
+/// when `device` has one. `None` when no descriptor matches.
+pub fn match_device<'a>(
+    device: &DeviceEntry,
+    devices: &'a [UsbDescriptor],
+) -> Option<&'a UsbDescriptor> {
+    devices.iter().find(|d| {
+        d.vid == crate::VID
+            && d.pid == device.pid
+            && d.bus == device.bus
+            && d.address == device.address
+            && device
+                .serial
+                .as_ref()
+                .is_none_or(|s| d.serial.as_ref() == Some(s))
+    })
+}
+
+/// Two or more POWER-Z devices are attached and no serial was chosen, so
+/// the flash cannot tell which one to talk to.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "several POWER-Z devices attached and no serial chosen; pick one with its serial or unplug the others: {}",
+    .serials.join(", ")
+)]
+pub struct AmbiguousMeter {
+    /// Each candidate's serial, `-` for one without.
+    pub serials: Vec<String>,
+}
+
+/// The meter a flash talks to, from the device list as it is now. With
+/// `serial`, only the meter with that serial (`[device]` the USB serial is
+/// the same in application and bootloader mode), never another one: `None`
+/// while it is not attached. Without `serial`, the only POWER-Z attached;
+/// two or more are [`AmbiguousMeter`]. `None` while no meter is attached.
+pub fn find_flashed_meter<'a>(
+    devices: &'a [DeviceEntry],
+    serial: Option<&str>,
+) -> Result<Option<&'a DeviceEntry>, AmbiguousMeter> {
+    if let Some(serial) = serial {
+        return Ok(devices.iter().find(|d| d.serial.as_deref() == Some(serial)));
+    }
+    match devices {
+        [] => Ok(None),
+        [only] => Ok(Some(only)),
+        several => Err(AmbiguousMeter {
+            serials: several
+                .iter()
+                .map(|d| d.serial.clone().unwrap_or_else(|| "-".to_owned()))
+                .collect(),
+        }),
+    }
+}
+
+/// [`find_flashed_meter`] across the opens of one flash: when `serial` is
+/// `None`, the serial of the first meter found is latched into it, so every
+/// later open (after the meter re-enumerates in another mode) finds that
+/// same meter again and never picks another one. A meter without a serial
+/// latches nothing and the single-meter rule keeps applying.
+pub fn follow_flashed_meter<'a>(
+    devices: &'a [DeviceEntry],
+    serial: &mut Option<String>,
+) -> Result<Option<&'a DeviceEntry>, AmbiguousMeter> {
+    let found = find_flashed_meter(devices, serial.as_deref())?;
+    if serial.is_none()
+        && let Some(d) = found
+    {
+        serial.clone_from(&d.serial);
+    }
+    Ok(found)
+}
+
+/// The USB identity of the attached meter `device` (matched by
+/// [`match_device`]), read from the OS device list; nothing is opened or
+/// claimed. `None` when the meter is no longer listed.
+pub fn usb_identity(device: &DeviceEntry) -> Result<Option<UsbIdentity>, Error> {
+    use nusb::MaybeFuture;
+    let descriptors: Vec<UsbDescriptor> = nusb::list_devices()
+        .wait()
+        .map_err(|e| Error::Io(e.to_string()))?
+        .map(|d| UsbDescriptor {
+            vid: d.vendor_id(),
+            pid: d.product_id(),
+            serial: d.serial_number().map(str::to_owned),
+            product: d.product_string().map(str::to_owned),
+            bus: d.bus_id().to_owned(),
+            address: d.device_address(),
+            interfaces: d
+                .interfaces()
+                .map(|i| UsbInterface {
+                    number: i.interface_number(),
+                    class: i.class(),
+                    subclass: i.subclass(),
+                    protocol: i.protocol(),
+                    string: i.interface_string().map(str::to_owned),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(match_device(device, &descriptors).map(UsbIdentity::from_descriptor))
 }
 
 #[cfg(test)]
@@ -102,6 +337,8 @@ mod tests {
             vid,
             pid,
             serial: serial.map(str::to_owned),
+            product: None,
+            interface_string: None,
             bus: bus.to_owned(),
             address,
         }
@@ -133,6 +370,8 @@ mod tests {
                     model: Model::Km003c,
                     pid: 0x0063,
                     serial: Some(PLACEHOLDER_SERIAL.to_owned()),
+                    product: None,
+                    interface_string: None,
                     bus: "1".to_owned(),
                     address: 7,
                 },
@@ -140,6 +379,8 @@ mod tests {
                     model: Model::Km002c,
                     pid: 0x0061,
                     serial: Some("SERIAL-0002".to_owned()),
+                    product: None,
+                    interface_string: None,
                     bus: "2".to_owned(),
                     address: 3,
                 },
@@ -147,6 +388,8 @@ mod tests {
                     model: Model::Unknown(0x00AA),
                     pid: 0x00AA,
                     serial: None,
+                    product: None,
+                    interface_string: None,
                     bus: "3".to_owned(),
                     address: 9,
                 },

@@ -31,6 +31,11 @@ function connected(rate_locked = false, rate_sps: number | null = 50): BackendEv
       state: "connected",
       model: "KM003C",
       firmware_version: "2.0.6",
+      bootloader_version: "",
+      mode: "application",
+      warnings: [],
+      update_required: false,
+      firmware_problems: [],
       serial: "12345678",
       rate_sps,
       rate_locked,
@@ -48,6 +53,7 @@ function listing(id: string): DeviceListing {
     bus: "1",
     address: 1,
     demo_scenario: null,
+    mode: "application",
   };
 }
 
@@ -212,6 +218,11 @@ describe("Session lifecycle edges (review round 1)", () => {
       state: "connected",
       model: "KM003C",
       firmware_version: "2.0.6",
+      bootloader_version: "",
+      mode: "application",
+      warnings: [],
+      update_required: false,
+      firmware_problems: [],
       serial: "1",
       rate_sps: 1000,
       rate_locked: false,
@@ -378,6 +389,7 @@ describe("Session waits for an unplugged meter (AC-TGE839.1–AC-TGE839.5)", () 
       bus: "1",
       address: Number(id.split(":").at(-1)),
       demo_scenario: null,
+      mode: "application",
     };
   }
 
@@ -390,6 +402,7 @@ describe("Session waits for an unplugged meter (AC-TGE839.1–AC-TGE839.5)", () 
       bus: null,
       address: null,
       demo_scenario: name,
+      mode: "application",
     };
   }
 
@@ -402,6 +415,11 @@ describe("Session waits for an unplugged meter (AC-TGE839.1–AC-TGE839.5)", () 
         state: "connected",
         model: "KM003C",
         firmware_version: "2.0.6",
+        bootloader_version: "",
+        mode: "application",
+        warnings: [],
+        update_required: false,
+        firmware_problems: [],
         serial,
         rate_sps,
         rate_locked: false,

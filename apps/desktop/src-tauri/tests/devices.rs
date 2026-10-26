@@ -22,6 +22,8 @@ fn meter(serial: &str, bus: &str, address: u8) -> DeviceEntry {
         model: Model::Km003c,
         pid: 0x0063,
         serial: Some(serial.to_owned()),
+        product: Some("POWER-Z KM003C".to_owned()),
+        interface_string: Some("APP".to_owned()),
         bus: bus.to_owned(),
         address,
     }

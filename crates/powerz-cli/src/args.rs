@@ -162,6 +162,72 @@ pub enum Command {
         #[arg(long)]
         allow_high_voltage: bool,
     },
+    /// Work with firmware files (`info` needs no meter), probe the meter's
+    /// firmware identity (`probe`, read-only), flash a firmware file
+    /// (`flash`, needs `--i-understand`) and switch the meter's mode (`jump`,
+    /// needs `--i-understand`).
+    Firmware {
+        /// What to do.
+        #[command(subcommand)]
+        action: FirmwareAction,
+    },
+}
+
+/// `firmware` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum FirmwareAction {
+    /// Show a firmware file's model, version, date, CRC, size and English
+    /// release notes; no meter needed, nothing is decrypted.
+    Info {
+        /// Print one JSON object instead of labelled lines.
+        #[arg(long)]
+        json: bool,
+        /// Firmware container file to inspect.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+    /// Show the meter's USB identity, then send only CONNECT and HEAD over
+    /// the vendor bulk pipe and print the HEAD field; read-only, in
+    /// application or bootloader mode.
+    Probe {
+        /// Print one JSON object instead of labelled lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Flash a firmware container onto the meter through its bootloader
+    /// (bulk pipe only). The file is inspected before any meter is opened;
+    /// nothing is sent without `--i-understand`.
+    Flash {
+        /// Firmware container file to flash.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Accept the risk: a failed or interrupted flash leaves the meter in
+        /// its bootloader until the flash is retried.
+        #[arg(long)]
+        i_understand: bool,
+    },
+    /// Switch the meter between application and bootloader mode with one
+    /// write-only jump (JUMP_DFU or JUMP_APROM) over the vendor bulk pipe,
+    /// then report the mode it comes back in; nothing is sent without
+    /// `--i-understand`.
+    Jump {
+        /// The mode to switch to.
+        #[arg(long, value_enum)]
+        to: JumpTo,
+        /// Accept the risk: in its bootloader the meter takes no
+        /// measurements until it is jumped back or power-cycled.
+        #[arg(long)]
+        i_understand: bool,
+    },
+}
+
+/// `firmware jump --to` targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum JumpTo {
+    /// The bootloader (JUMP_DFU, from application mode).
+    Bootloader,
+    /// The application firmware (JUMP_APROM, from bootloader mode).
+    Application,
 }
 
 /// `trigger` protocols.
@@ -438,6 +504,7 @@ impl Command {
             Command::Trigger { .. } => "trigger",
             Command::Detect { .. } => "detect",
             Command::Console { .. } => "console",
+            Command::Firmware { .. } => "firmware",
         }
     }
 }
@@ -627,6 +694,25 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
     if cli.pd_file.decode.is_some() {
         // `pd decode` reads a file and opens no device.
         return Ok(());
+    }
+    // The probe needs the vendor bulk pipe (a bootloader has no other).
+    if let Command::Firmware { action } = &cli.command
+        && matches!(
+            action,
+            FirmwareAction::Probe { .. }
+                | FirmwareAction::Flash { .. }
+                | FirmwareAction::Jump { .. }
+        )
+        && matches!(cli.transport, TransportKind::Hid | TransportKind::Cdc)
+    {
+        let name = match action {
+            FirmwareAction::Flash { .. } => "flash",
+            FirmwareAction::Jump { .. } => "jump",
+            _ => "probe",
+        };
+        return Err(CliError::Usage(format!(
+            "`firmware {name}` runs on the vendor bulk pipe only; use --transport bulk (or sim)"
+        )));
     }
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
     // `pd send` talks to the meter's serial port like `trigger`.

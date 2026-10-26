@@ -4,6 +4,7 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
+use powerz_protocol::firmware::flash::{FlashTransport, Meter, MeterOpener};
 use powerz_protocol::transport::{Error, Transport};
 
 /// Wraps a transport and writes each frame sent as `> <hex>`, each frame
@@ -66,6 +67,44 @@ impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
         let frame = self.inner.read(timeout)?;
         self.log('<', &frame);
         Ok(frame)
+    }
+
+    fn recover(&mut self) -> Result<(), Error> {
+        self.inner.recover()
+    }
+}
+
+/// The flash path's raw writes (jumps, the descriptor, payload blocks):
+/// `>` once written, `x` when the flash guard refused them before sending.
+impl<T: FlashTransport, W: Write> FlashTransport for TraceTransport<T, W> {
+    fn write_raw(&mut self, data: &[u8], timeout: Duration) -> Result<(), Error> {
+        match self.inner.write_raw(data, timeout) {
+            Err(e @ Error::Forbidden { .. }) => {
+                self.log('x', data);
+                Err(e)
+            }
+            result => {
+                self.log('>', data);
+                result
+            }
+        }
+    }
+}
+
+/// A [`MeterOpener`] whose opened pipes are traced to stderr, for
+/// `firmware jump` and `firmware flash` with `--trace`.
+#[derive(Debug)]
+pub struct TracedOpener<O>(pub O);
+
+impl<O: MeterOpener> MeterOpener for TracedOpener<O> {
+    type Pipe = TraceTransport<O::Pipe, std::io::Stderr>;
+
+    fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, Error> {
+        Ok(self.0.open()?.map(|m| Meter {
+            mode: m.mode,
+            model: m.model,
+            pipe: TraceTransport::new(m.pipe, std::io::stderr()),
+        }))
     }
 }
 
@@ -168,5 +207,62 @@ mod tests {
         }
         let text = String::from_utf8(sink).unwrap();
         assert_eq!(text, "> entry pd\n< pdo:4\\x0b\\nok\\n\n");
+    }
+    /// A flash pipe that refuses one raw frame type and counts recovers.
+    #[derive(Default)]
+    struct Pipe {
+        refuse: Option<u8>,
+        recovers: usize,
+    }
+
+    impl Transport for Pipe {
+        fn transact(&mut self, _request: &[u8], _timeout: Duration) -> Result<Vec<u8>, Error> {
+            Ok(vec![0x05, 0x01, 0x00, 0x00])
+        }
+
+        fn read(&mut self, _timeout: Duration) -> Result<Vec<u8>, Error> {
+            Err(Error::Timeout)
+        }
+
+        fn recover(&mut self) -> Result<(), Error> {
+            self.recovers += 1;
+            Ok(())
+        }
+    }
+
+    impl FlashTransport for Pipe {
+        fn write_raw(&mut self, data: &[u8], _timeout: Duration) -> Result<(), Error> {
+            match self.refuse {
+                Some(ty) if data.first() == Some(&ty) => Err(Error::Forbidden { ty }),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    const T: Duration = Duration::from_millis(10);
+
+    // ---- AC-V9SK56.8: raw writes of the flash path are traced ----
+
+    #[test]
+    fn raw_writes_are_traced_as_sent_and_refused_ones_as_refused() {
+        let mut sink = Vec::new();
+        {
+            let pipe = Pipe {
+                refuse: Some(0x42),
+                ..Pipe::default()
+            };
+            let mut t = TraceTransport::new(pipe, &mut sink);
+            t.write_raw(&[0x09, 0x01, 0x00, 0x00], T).unwrap();
+            assert!(t.write_raw(&[0x42, 0x02], T).is_err());
+        }
+        let text = String::from_utf8(sink).unwrap();
+        assert_eq!(text, "> 09 01 00 00\nx 42 02\n");
+    }
+
+    #[test]
+    fn recover_reaches_the_wrapped_transport() {
+        let mut t = TraceTransport::new(Pipe::default(), Vec::new());
+        t.recover().unwrap();
+        assert_eq!(t.inner().recovers, 1);
     }
 }

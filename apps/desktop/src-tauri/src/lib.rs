@@ -3,6 +3,8 @@ pub mod batch;
 pub mod devices;
 #[cfg(feature = "e2e")]
 pub mod e2e;
+pub mod firmware_file;
+pub mod firmware_flash;
 pub mod history;
 pub mod pd_capture;
 pub mod pd_import;
@@ -623,6 +625,90 @@ async fn pd_import(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<Pd
     .await
 }
 
+/// Inspect the firmware container at `path` (FR V9SK53, AC .3); needs no
+/// meter. Resolves to its metadata with the English release notes.
+#[tauri::command]
+async fn firmware_inspect(path: String) -> Result<firmware_file::FirmwareFileInfo, UiError> {
+    blocking(move || firmware_file::inspect_firmware_file(std::path::Path::new(&path))).await
+}
+
+/// Ask for a firmware container to update the meter with (FR V9SK55, AC .2);
+/// resolves to its path, or `null` when the dialog was cancelled.
+#[tauri::command]
+async fn firmware_choose(app: tauri::AppHandle) -> Result<Option<String>, UiError> {
+    blocking(move || {
+        let path = choose_open_path(&app, "Firmware file", &["mencrypt"])?;
+        Ok(path.map(|p| p.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
+/// Update the meter `device_id` with the firmware container at `path`
+/// (FR V9SK55, AC .4): takes the meter from every other use for the
+/// update, re-checks that `confirmation` is the file's version before
+/// anything is sent, streams each stage over `on_progress` (the write
+/// stage about every percent) and releases the meter afterwards.
+#[tauri::command]
+async fn firmware_flash(
+    state: Shared<'_>,
+    device_id: String,
+    path: String,
+    confirmation: String,
+    on_progress: Channel<firmware_flash::FlashStage>,
+) -> Result<firmware_flash::FlashDone, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let lease = state.manager().begin_flash(&device_id)?;
+        let device = lease.device().clone();
+        let stop = AtomicBool::new(false);
+        let mut last_step = None;
+        let mut progress = move |stage: firmware_flash::FlashStage| {
+            if let firmware_flash::FlashStage::Writing { done, total } = stage {
+                // One message per percent, plus the last write.
+                let step = done.saturating_mul(100) / total.max(1);
+                if last_step == Some(step) && done < total {
+                    return;
+                }
+                last_step = Some(step);
+            }
+            let _ = on_progress.send(stage);
+        };
+        let path = Path::new(&path);
+        let done = match device.demo_scenario.as_deref() {
+            Some(name) => {
+                let scenario = powerz_sim::Scenario::from_name(name)
+                    .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
+                let mut meter = powerz_sim::SimMeter::new(powerz_sim::SimDevice::new(
+                    powerz_sim::Persona::Bulk,
+                    scenario,
+                ));
+                firmware_flash::flash_file(
+                    path,
+                    &confirmation,
+                    &mut meter,
+                    SystemClock,
+                    &stop,
+                    &mut progress,
+                )
+            }
+            None => {
+                let mut opener = firmware_flash::UsbFlashOpener::new(device.serial.clone());
+                firmware_flash::flash_file(
+                    path,
+                    &confirmation,
+                    &mut opener,
+                    SystemClock,
+                    &stop,
+                    &mut progress,
+                )
+            }
+        };
+        drop(lease);
+        done
+    })
+    .await
+}
+
 /// The save dialog's file type for a proposed file name: a PD capture for
 /// `.pdcap`, CSV otherwise.
 fn save_filter(suggested_name: &str) -> (&'static str, &'static [&'static str]) {
@@ -912,6 +998,9 @@ pub fn run() {
             pd_save,
             pd_open,
             pd_import,
+            firmware_inspect,
+            firmware_choose,
+            firmware_flash,
             trigger_open,
             trigger_detect,
             trigger_list,
@@ -925,6 +1014,16 @@ pub fn run() {
             trigger_close
         ])
         .on_window_event(|window, event| {
+            // A firmware update in flight must not be cut short by closing the
+            // window: refuse the close until it ends.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+                && let Some(state) = tauri::Manager::try_state::<Arc<AppState>>(window)
+                && !state.manager().close_allowed()
+            {
+                api.prevent_close();
+                return;
+            }
             if window.label() == "main"
                 && matches!(
                     event,
@@ -948,6 +1047,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building the open-powerz desktop app")
         .run(|app, event| {
+            // Quitting (Cmd+Q) is refused during a firmware update, as closing is.
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event
+                && let Some(state) = tauri::Manager::try_state::<Arc<AppState>>(app)
+                && !state.manager().close_allowed()
+            {
+                api.prevent_exit();
+                return;
+            }
             if matches!(
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit

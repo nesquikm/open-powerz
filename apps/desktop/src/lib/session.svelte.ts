@@ -1,11 +1,13 @@
 import type {
   AttachedSession,
   BackendEvent,
+  ConnectedInfo,
   DeviceListing,
   Sample,
   StatsSnapshot,
   UiError,
 } from "./backend";
+import { canConnectTo } from "./deviceDetails";
 import { sortDevices, type ConnectionState } from "./format";
 
 /** Reactive UI state of the live session. */
@@ -27,8 +29,13 @@ export class Session {
   /** Statistics of the latest batch, null until the first one. They stay after a
    * disconnect, so the final totals remain readable. */
   stats = $state<StatsSnapshot | null>(null);
+  /** The connected meter's details (mode, versions, firmware warnings), null while
+   * no meter is connected. */
+  details = $state.raw<ConnectedInfo | null>(null);
   /** Serial of the unplugged meter the backend waits for, null when none. */
   waitingSerial = $state<string | null>(null);
+  /** A firmware update holds the meter (FR V9SK55, AC .4): no switching, no connect. */
+  flashing = $state(false);
 
   /** The backend zeroed the statistics: show none until the next batch. */
   statsReset(): void {
@@ -43,8 +50,11 @@ export class Session {
   /** Connect / Disconnect is available: not while a connect is still pending, and
    * connecting needs a picked device. */
   get canToggleConnect(): boolean {
-    if (this.state === "connecting") return false;
-    return this.active || this.selectedId !== null;
+    if (this.flashing || this.state === "connecting") return false;
+    if (this.active) return true;
+    // A meter in bootloader mode is listed but never connected (FR V9SK52, AC .5).
+    const picked = this.devices.find((d) => d.id === this.selectedId);
+    return picked === undefined ? this.selectedId !== null : canConnectTo(picked);
   }
 
   /** Replaces the device list; keeps the selection while it is still present. While the
@@ -130,6 +140,7 @@ export class Session {
           this.latest = null;
           this.tempC = null;
           this.rateSps = null;
+          this.details = null;
           this.error = event.data.error;
           this.state = event.data.error ? "error" : "disconnected";
         } else if (event.data.state === "waiting") {
@@ -139,6 +150,7 @@ export class Session {
           // A meter that came back takes its unplug message with it.
           if (this.waitingSerial !== null && this.error?.kind === "disconnected") this.error = null;
           this.waitingSerial = null;
+          if (event.data.state === "connected") this.details = event.data;
           this.rateSps = event.data.rate_sps;
           this.state = event.data.rate_locked ? "rate_locked" : "streaming";
         }

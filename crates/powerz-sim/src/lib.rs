@@ -10,6 +10,7 @@
 //! made-up UID; never a real meter's.
 
 mod device;
+mod flash;
 mod memory;
 mod pd;
 mod pdm;
@@ -20,9 +21,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+pub use flash::{FlashFault, SimMeter, SimMeterPipe};
 pub use pd::PdScenario;
 pub use pdm::{SimCable, SimCharger, SimPdm, SimPdmPort};
+use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::Clock;
+use powerz_protocol::transport::discovery::{PID_KM003C, UsbIdentity, UsbInterface};
 use powerz_protocol::transport::{Error, Transport};
 
 /// Size of one HID report: longer replies "reboot" the HID persona.
@@ -306,6 +310,21 @@ pub struct SimDevice {
     unplugged: bool,
     /// The PD sniffer (0x10 / 0x11) and its capture scenario.
     pd: pd::PdSniffer,
+    /// Application or bootloader mode (sets the USB interface string).
+    mode: DeviceMode,
+    /// Old-firmware field of the HEAD reply (0 = normal firmware).
+    head_field: u32,
+    /// Application firmware version in the 0x4420 info block.
+    app_version: String,
+    /// The simulated bootloader's flash state.
+    boot: flash::Bootloader,
+    /// Injected bootloader failure, if any.
+    flash_fault: Option<FlashFault>,
+    /// Jumps take effect at the next power-up instead of live (a test
+    /// knob for the replug path).
+    jump_at_power_up: bool,
+    /// The mode the next power-up starts in, set by such a jump.
+    power_up_mode: Option<DeviceMode>,
 }
 
 impl SimDevice {
@@ -343,6 +362,13 @@ impl SimDevice {
             polls: 0,
             unplugged: false,
             pd: pd::PdSniffer::default(),
+            mode: DeviceMode::Application,
+            head_field: 0,
+            app_version: memory::SIM_APP_VERSION.to_string(),
+            boot: flash::Bootloader::default(),
+            flash_fault: None,
+            jump_at_power_up: false,
+            power_up_mode: None,
         }
     }
 
@@ -360,6 +386,75 @@ impl SimDevice {
     pub fn with_pd_scenario(mut self, scenario: PdScenario) -> SimDevice {
         self.pd.set_scenario(scenario);
         self
+    }
+
+    /// Run in `mode` (application by default): changes the USB interface
+    /// string the simulated meter reports.
+    pub fn with_mode(mut self, mode: DeviceMode) -> SimDevice {
+        self.mode = mode;
+        self
+    }
+
+    /// Answer HEAD with old-firmware field `field` (default 0).
+    pub fn with_head_field(mut self, field: u32) -> SimDevice {
+        self.head_field = field;
+        self
+    }
+
+    /// Report application firmware `version` in the 0x4420 info block.
+    /// The version field is 12 bytes; a longer string is cut to fit.
+    pub fn with_app_version(mut self, version: &str) -> SimDevice {
+        let mut end = version.len().min(12);
+        while !version.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.app_version = version[..end].to_string();
+        self
+    }
+
+    /// The USB iProduct string: the model name `[device]`.
+    pub fn product_string(&self) -> &'static str {
+        "POWER-Z KM003C"
+    }
+
+    /// The interface string of the vendor interface (string 2): `APP` in
+    /// application mode `[device]`, `BOOT` in bootloader mode `[inferred]`.
+    pub fn interface_string(&self) -> &'static str {
+        match self.mode {
+            DeviceMode::Application => "APP",
+            DeviceMode::Bootloader => "BOOT",
+            DeviceMode::Unknown => "POWER-Z",
+        }
+    }
+
+    /// The USB identity the simulated meter reports `[inferred]`: in
+    /// application mode the KM003C's four interfaces (vendor 0xFF and CDC
+    /// 0x02 named `APP`, CDC data 0x0A, HID 0x03) `[device]`; in bootloader
+    /// mode a single vendor interface named `BOOT`.
+    pub fn usb_identity(&self) -> UsbIdentity {
+        let iface = |number: u8, class: u8, string: Option<&str>| UsbInterface {
+            number,
+            class,
+            subclass: 0,
+            protocol: 0,
+            string: string.map(str::to_owned),
+        };
+        let vendor = self.interface_string();
+        let interfaces = match self.mode {
+            DeviceMode::Bootloader => vec![iface(0, 0xFF, Some(vendor))],
+            DeviceMode::Application | DeviceMode::Unknown => vec![
+                iface(0, 0xFF, Some(vendor)),
+                iface(1, 0x02, Some(vendor)),
+                iface(2, 0x0A, None),
+                iface(3, 0x03, None),
+            ],
+        };
+        UsbIdentity {
+            vid: powerz_protocol::VID,
+            pid: PID_KM003C,
+            product: Some(self.product_string().to_owned()),
+            interfaces,
+        }
     }
 
     /// Inject `faults`.
@@ -429,11 +524,15 @@ impl Transport for SimDevice {
         self.pending.pop_front().ok_or(Error::Timeout)
     }
 
-    fn read(&mut self, _timeout: Duration) -> Result<Vec<u8>, Error> {
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
         if let Some(e) = self.blocked() {
             return Err(e);
         }
-        self.pending.pop_front().ok_or(Error::Timeout)
+        match self.pending.pop_front() {
+            Some(reply) => Ok(reply),
+            None if self.mode == DeviceMode::Bootloader => self.bootloader_read(timeout),
+            None => Err(Error::Timeout),
+        }
     }
 }
 

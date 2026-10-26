@@ -14,7 +14,8 @@ down in [docs/protocol.md](../protocol.md), where each fact is tagged
 ```
 powerz-pd         library: USB PD r3.2 message decoder (no dependencies)
 powerz-protocol   library: framing, decoders, transports, session, crypto,
-                  PD capture, pdcap files, PDM text session   uses pd
+                  PD capture, pdcap files, PDM text session,
+                  firmware update                             uses pd
 powerz-sim        demo device: a simulated KM003C behind the Transport trait
 powerz-record     vendor-compatible CSV writer
 
@@ -53,6 +54,15 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
 - **A safety guard in front of every transport.** `GuardedTransport` refuses
   anything outside the safe command set (no firmware, flash or calibration
   writes) before a byte is sent, and `--trace` shows refused frames with `x`.
+- **Firmware writes take a separate, stricter path.** The firmware update is
+  the only code that sends write-capable frames (the jumps, the descriptor
+  and the payload). It needs a `FlashAck` marker, which the CLI creates only
+  after `--i-understand` and the desktop app only after the typed version,
+  and every frame goes through `FlashGuard`, which names nothing below the
+  bootloader's 0x4000 boundary and bounds the payload by the declared size.
+  Nothing is retried automatically: after a failure the meter stays in its
+  bootloader, which can always be flashed again. The engine was checked step
+  by step on a real KM003C, each step only after the user approved it.
 - **Auth keys ship in the repository.** Authenticated features (queue
   streaming, device info) need the meter's AES keys; shipping them makes those
   features work out of the box.

@@ -6,6 +6,9 @@
     connect,
     disconnect,
     exportSession,
+    firmwareChoose,
+    firmwareFlash,
+    firmwareInspect,
     pdClear,
     pdDetails,
     pdImport,
@@ -43,10 +46,15 @@
     pdSaveNoticeText,
   } from "./lib/pdSave";
   import { attachSession } from "./lib/attach";
+  import { firmwareWarningText } from "./lib/deviceDetails";
   import { AutoDismiss, type HoldReason } from "./lib/autoDismiss";
   import About from "./lib/components/About.svelte";
+  import { loadAdvancedFirmware, saveAdvancedFirmware } from "./lib/settings";
   import Chart from "./lib/components/Chart.svelte";
   import ErrorBanner from "./lib/components/ErrorBanner.svelte";
+  import FirmwareNotice from "./lib/components/FirmwareNotice.svelte";
+  import FirmwareView from "./lib/components/FirmwareView.svelte";
+  import { FirmwareUpdate, flashMeter } from "./lib/firmwareUpdate.svelte";
   import Notice from "./lib/components/Notice.svelte";
   import PdAnalyzer from "./lib/components/PdAnalyzer.svelte";
   import { PdCapture } from "./lib/pdCapture.svelte";
@@ -108,13 +116,50 @@
     });
   });
   /** The view the tabs show. */
-  let view: "meter" | "pd" | "trigger" = $state("meter");
-  const VIEWS = ["meter", "pd", "trigger"] as const;
-  const VIEW_TABS = [
+  let view: "meter" | "pd" | "trigger" | "firmware" = $state("meter");
+  const ALL_VIEWS = ["meter", "pd", "trigger", "firmware"] as const;
+  const ALL_VIEW_TABS = [
     { id: "meter", label: "Meter" },
     { id: "pd", label: "PD analyzer" },
     { id: "trigger", label: "Trigger" },
+    { id: "firmware", label: "Firmware" },
   ] as const;
+  /** The Advanced firmware switch shows the Firmware tab (FR V9SK55, AC .1). */
+  let advancedFirmware = $state(loadAdvancedFirmware(browserStorage()));
+  const VIEWS = $derived(ALL_VIEWS.filter((v) => advancedFirmware || v !== "firmware"));
+  const VIEW_TABS = $derived(ALL_VIEW_TABS.filter((t) => advancedFirmware || t.id !== "firmware"));
+  function setAdvancedFirmware(on: boolean): void {
+    // Progress is never hidden: the switch stays on while an update runs.
+    if (!on && firmware.busy) return;
+    advancedFirmware = on;
+    saveAdvancedFirmware(on, browserStorage());
+    if (!on && view === "firmware") view = "meter";
+  }
+  /** The firmware view's state (FR V9SK55), kept across tab switches. */
+  const firmware = new FirmwareUpdate({
+    choose: firmwareChoose,
+    inspect: firmwareInspect,
+    flash: firmwareFlash,
+  });
+  /** While an update runs the meter is held for it (AC .4): no device switching, no
+   * connect, and the PD analyzer and Trigger tabs are disabled. */
+  $effect(() => {
+    session.flashing = firmware.busy;
+  });
+  function tabDisabled(id: string): boolean {
+    return firmware.busy && (id === "pd" || id === "trigger");
+  }
+  function selectView(id: string): void {
+    if (tabDisabled(id)) return;
+    view = VIEWS.find((v) => v === id) ?? "meter";
+  }
+  /** The meter an update would go to: the picked device, with its versions while connected. */
+  const firmwareMeter = $derived(
+    flashMeter(
+      session.devices.find((d) => d.id === session.selectedId),
+      session.details,
+    ),
+  );
   /** The trigger view's state (FR DGSQ6S). */
   const trigger = new TriggerPanel({
     open: triggerOpen,
@@ -138,7 +183,7 @@
   });
 
   // Leaving the Trigger tab returns to 5 V and closes the trigger session.
-  let lastView: (typeof VIEWS)[number] = "meter";
+  let lastView: (typeof ALL_VIEWS)[number] = "meter";
   $effect(() => {
     const now = view;
     untrack(() => {
@@ -156,7 +201,7 @@
       e.preventDefault();
       e.stopPropagation();
       const id = (e.currentTarget as HTMLElement).id.replace(/^tab-/, "");
-      view = VIEWS.find((v) => v === id) ?? "meter";
+      selectView(id);
       return;
     }
     if (e.key === "ArrowRight") next = (i + 1) % VIEWS.length;
@@ -165,6 +210,7 @@
     else if (e.key === "End") next = VIEWS.length - 1;
     if (next === null) return;
     e.preventDefault();
+    if (tabDisabled(VIEWS[next] ?? "meter")) return;
     view = VIEWS[next] ?? "meter";
     document.getElementById(`tab-${view}`)?.focus();
   }
@@ -196,6 +242,13 @@
       },
     );
   }
+
+  /** The connected meter's firmware warnings, worded (FR V9SK52, AC .4). */
+  const firmwareWarnings = $derived.by(() => {
+    const info = session.details;
+    if (info === null) return [];
+    return info.warnings.map((code) => firmwareWarningText(code, info));
+  });
 
   /** The last PD capture save (FR TGE83E), while its notice shows. */
   let pdSaved = $state<ExportResult | null>(null);
@@ -573,8 +626,9 @@
             id="tab-{tab.id}"
             aria-selected={view === tab.id}
             aria-controls="view-{tab.id}"
+            aria-disabled={tabDisabled(tab.id) ? "true" : undefined}
             tabindex={view === tab.id ? 0 : -1}
-            onclick={() => (view = tab.id)}
+            onclick={() => selectView(tab.id)}
             onkeydown={onTabKeydown}
           >
             {tab.label}
@@ -623,6 +677,9 @@
           if (leftStack(e)) holdNotices("focus", false);
         }}
       >
+        {#if firmwareWarnings.length > 0}
+          <FirmwareNotice warnings={firmwareWarnings} />
+        {/if}
         {#if recording.notice !== null || recording.error !== null}
           <Notice
             tone={recording.error ? "error" : "info"}
@@ -717,12 +774,25 @@
         </div>
       </div>
     {/if}
+    {#if view === "firmware" && advancedFirmware}
+      <div class="firmware-view" role="tabpanel" id="view-firmware" aria-labelledby="tab-firmware">
+        <h2>Firmware</h2>
+        <FirmwareView {firmware} meter={firmwareMeter} />
+      </div>
+    {/if}
   </main>
   {#if helpOpen}
     <ShortcutHelp onClose={() => (helpOpen = false)} />
   {/if}
   {#if aboutOpen}
-    <About opener={aboutOpener} onClose={() => (aboutOpen = false)} />
+    <About
+      opener={aboutOpener}
+      details={session.details}
+      {advancedFirmware}
+      advancedFirmwareLocked={firmware.busy}
+      onAdvancedFirmware={setAdvancedFirmware}
+      onClose={() => (aboutOpen = false)}
+    />
   {/if}
 </div>
 
@@ -779,6 +849,10 @@
     cursor: pointer;
     color: var(--muted);
   }
+  .view-tabs [role="tab"][aria-disabled="true"] {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
   .view-tabs [role="tab"][aria-selected="true"] {
     background: var(--surface);
     border-color: var(--border);
@@ -787,6 +861,9 @@
   }
   .content[hidden] {
     display: none;
+  }
+  .firmware-view {
+    padding: 1rem;
   }
   .pd-view {
     /* A definite height, so the packet grid scrolls itself instead of the page. */

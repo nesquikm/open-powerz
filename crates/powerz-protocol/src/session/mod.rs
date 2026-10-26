@@ -17,6 +17,7 @@
 mod auth;
 mod memory;
 mod pd;
+mod probe;
 mod stream;
 
 use std::time::Duration;
@@ -26,8 +27,13 @@ use crate::frame::{self, Attribute, FrameError, Reply, SequenceCounter};
 use crate::transport::{self, Transport};
 
 pub use auth::{auth_plaintext, auth_request};
-pub use memory::{DeviceInfo, memory_read_plaintext, memory_read_request};
+pub(crate) use memory::UID;
+pub use memory::{
+    DeviceInfo, FirmwareProblem, FirmwareProblemKind, FirmwareStatus, memory_read_plaintext,
+    memory_read_request,
+};
 pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer};
+pub use probe::{ConnectOutcome, HeadOutcome, ProbeReport};
 pub use stream::{Gap, SnapshotCadence, StreamPoll, Streamer};
 
 /// Errors from a [`Session`].
@@ -56,12 +62,31 @@ pub enum Error {
     /// Authentication did not succeed.
     #[error("authentication failed")]
     AuthFailed,
+    /// The meter answered SYNC (`01 id 00 00`): a bootloader left in its
+    /// download phase `[device]`, which answers every frame that way. Only a
+    /// power cycle into the bootloader gets it out.
+    #[error(
+        "the meter answered SYNC: its bootloader was left mid-download and answers nothing \
+         else; unplug the meter, then hold Back while plugging it back in"
+    )]
+    BootloaderMidDownload,
     /// A reply could not be decoded.
     #[error(transparent)]
     Decode(#[from] DecodeError),
     /// A reply frame was malformed.
     #[error(transparent)]
     Frame(#[from] FrameError),
+}
+
+impl Error {
+    /// The meter was unplugged or the OS refused access: retrying on this
+    /// link cannot help.
+    pub fn is_link_fatal(&self) -> bool {
+        matches!(
+            self,
+            Error::Transport(transport::Error::Disconnected | transport::Error::Permission(_))
+        )
+    }
 }
 
 /// Source of wall-clock time, randomness and sleeping, injected so that
@@ -117,6 +142,12 @@ fn unexpected_reply(request: &[u8], what: &str, reply: Reply) -> Error {
         },
         other => Error::Protocol(format!("unexpected reply to {what}: {other:?}")),
     }
+}
+
+/// Whether `reply` is SYNC (`01 id 00 00`), what a bootloader in its
+/// download phase answers to every frame `[device]`.
+fn is_sync(reply: &[u8]) -> bool {
+    matches!(reply, [0x01, _, 0x00, 0x00])
 }
 
 /// A session with the meter over `T`.
@@ -190,8 +221,23 @@ impl<T: Transport, C: Clock> Session<T, C> {
 
     /// [`exchange`](Self::exchange) waiting `timeout` for each transfer.
     fn exchange_within(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        self.exchange_taking_first(request, timeout, |_| false)
+    }
+
+    /// [`exchange_within`](Self::exchange_within) that also takes the first
+    /// transfer when `take_first` accepts it, whatever its id. Re-reads still
+    /// need the request id.
+    fn exchange_taking_first(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+        take_first: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>, Error> {
         let expected_id = if request[0] == 0x4C { 0 } else { request[1] };
         let mut reply = self.transport.transact(request, timeout)?;
+        if take_first(&reply) {
+            return Ok(reply);
+        }
         let mut rereads = 0;
         while reply.get(1) != Some(&expected_id) {
             if rereads == MAX_STALE_REPLIES {
@@ -219,7 +265,22 @@ impl<T: Transport, C: Clock> Session<T, C> {
         what: &str,
         timeout: Duration,
     ) -> Result<(), Error> {
+        self.expect_accept_checked(request, what, timeout, false)
+    }
+
+    /// [`expect_accept_within`](Self::expect_accept_within); with
+    /// `stop_on_sync`, a SYNC reply is [`Error::BootloaderMidDownload`].
+    fn expect_accept_checked(
+        &mut self,
+        request: &[u8],
+        what: &str,
+        timeout: Duration,
+        stop_on_sync: bool,
+    ) -> Result<(), Error> {
         let reply = self.exchange_within(request, timeout)?;
+        if stop_on_sync && is_sync(&reply) {
+            return Err(Error::BootloaderMidDownload);
+        }
         match frame::classify_reply(&reply)? {
             Reply::Accept(_) => Ok(()),
             other => Err(unexpected_reply(request, what, other)),
@@ -232,11 +293,19 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// recovered once ([`Transport::recover`]) and CONNECT is retried once.
     /// A REJECT is returned at once.
     pub fn connect(&mut self) -> Result<(), Error> {
+        self.connect_checked(false)
+    }
+
+    /// [`connect`](Self::connect); with `stop_on_sync`, a SYNC reply to
+    /// either CONNECT is [`Error::BootloaderMidDownload`] and nothing more
+    /// is sent.
+    fn connect_checked(&mut self, stop_on_sync: bool) -> Result<(), Error> {
         let request = frame::connect(self.counter.next());
-        let first = match self.expect_accept_within(
+        let first = match self.expect_accept_checked(
             &request,
             "CONNECT",
             transport::FIRST_CONNECT_TIMEOUT,
+            stop_on_sync,
         ) {
             Ok(()) => return Ok(()),
             // No reply, or only stale frames: the pipe may be stuck.
@@ -249,7 +318,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
             return Err(first);
         }
         let request = frame::connect(self.counter.next());
-        self.expect_accept(&request, "CONNECT")
+        let timeout = transport::default_timeout(&request);
+        self.expect_accept_checked(&request, "CONNECT", timeout, stop_on_sync)
     }
 
     /// GET_DATA with `mask`; a DISCONNECT reply gives an empty list.

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use common::*;
+use powerz_cli::commands::info_in_mode;
 use powerz_cli::record::CSV_HEADER;
 use powerz_cli::trace::TraceTransport;
 use powerz_cli::{
@@ -15,7 +16,8 @@ use powerz_cli::{
     select_device, stream, validate, watch,
 };
 use powerz_protocol::decode::Rate;
-use powerz_protocol::session::{self, Gap, Streamer};
+use powerz_protocol::firmware::DeviceMode;
+use powerz_protocol::session::{self, Gap, Streamer, memory_read_request};
 use powerz_protocol::transport::discovery::Model;
 use powerz_protocol::transport::mock::{MockTransport, Step};
 use powerz_protocol::transport::{self, Transport, permission_error};
@@ -100,7 +102,9 @@ fn list_json_with_no_meter_is_empty_array() {
 
 #[test]
 fn info_prints_model_versions_serial_and_uid() {
-    let mut s = session(MockTransport::new(device_info_steps(1)));
+    let mut s = session(MockTransport::new(
+        [device_info_steps(1), read_firmware_status_steps(5)].concat(),
+    ));
     let mut out = Vec::new();
     info(&mut s, false, &mut out).unwrap();
     let out = text(&out);
@@ -112,7 +116,9 @@ fn info_prints_model_versions_serial_and_uid() {
 
 #[test]
 fn info_json_is_one_object() {
-    let mut s = session(MockTransport::new(device_info_steps(1)));
+    let mut s = session(MockTransport::new(
+        [device_info_steps(1), read_firmware_status_steps(5)].concat(),
+    ));
     let mut out = Vec::new();
     info(&mut s, true, &mut out).unwrap();
     let v: Value = serde_json::from_slice(&out).expect("valid JSON");
@@ -122,6 +128,388 @@ fn info_json_is_one_object() {
     assert_eq!(v["hardware_version"], SYNTH_HW);
     assert_eq!(v["serial"], SYNTH_SERIAL);
     assert_eq!(v["uid"], SYNTH_UID_HEX);
+    assert_eq!(v["update_required"], false, "HEAD answered field 0: {v}");
+    assert_eq!(v["firmware_problems"], serde_json::json!([]), "{v}");
+    assert!(
+        v.get("status_problems").is_none(),
+        "renamed to firmware_problems: {v}"
+    );
+}
+
+// ---- AC-V9SK52.2 / .4: info by mode ----
+
+/// `info_in_mode` on `script`; the call's result, its stdout text and the
+/// frames it sent.
+fn info_mode(
+    mode: DeviceMode,
+    json: bool,
+    script: Vec<Step>,
+) -> (Result<(), CliError>, String, Vec<Vec<u8>>) {
+    let mut s = session(MockTransport::new(script));
+    let mut out = Vec::new();
+    let r = info_in_mode(&mut s, mode, json, &mut out);
+    (r, text(&out), s.transport().written().to_vec())
+}
+
+#[test]
+fn info_outside_application_mode_reports_the_mode_and_sends_nothing() {
+    for mode in [DeviceMode::Bootloader, DeviceMode::Unknown] {
+        let (r, out, sent) = info_mode(mode, false, vec![]);
+        assert!(r.is_ok(), "{mode:?}: {r:?}");
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("Mode:"))
+            .unwrap_or_else(|| panic!("{mode:?}: no Mode line in:\n{out}"));
+        assert!(line.contains(mode.name()), "{mode:?}: {out}");
+        assert_eq!(
+            sent,
+            Vec::<Vec<u8>>::new(),
+            "{mode:?}: no HEAD, no memory read"
+        );
+
+        let (r, out, sent) = info_mode(mode, true, vec![]);
+        assert!(r.is_ok(), "{mode:?} --json: {r:?}");
+        let v: Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["mode"], mode.name(), "{v}");
+        assert_eq!(v["firmware_problems"], serde_json::json!([]), "{v}");
+        assert!(v.get("status_problems").is_none(), "{v}");
+        assert_eq!(sent, Vec::<Vec<u8>>::new(), "{mode:?} --json sends nothing");
+    }
+}
+
+#[test]
+fn info_in_application_mode_sends_no_connect_of_its_own() {
+    for json in [false, true] {
+        let (r, out, sent) = info_mode(
+            DeviceMode::Application,
+            json,
+            [device_info_steps(1), read_firmware_status_steps(5)].concat(),
+        );
+        assert!(r.is_ok(), "json={json}: {r:?}");
+        assert!(out.contains(SYNTH_FW), "{out}");
+        let connects = sent.iter().filter(|f| f.first() == Some(&0x02)).count();
+        assert_eq!(connects, 0, "the session is already connected: {sent:02x?}");
+        let heads = sent.iter().filter(|f| f.first() == Some(&0x40)).count();
+        assert_eq!(heads, 1, "one HEAD: {sent:02x?}");
+    }
+}
+
+/// HEAD at request id 7 (after the device-info reads and both info
+/// blocks) fails as `head`; the recovery CONNECT (id 8) that follows a
+/// failed HEAD is accepted.
+fn info_with_bad_head(json: bool, head: Step) -> (Result<(), CliError>, String) {
+    let (r, out, _) = info_mode(DeviceMode::Application, json, bad_head_script(head));
+    (r, out)
+}
+
+/// Device info (ids 1..4), both info blocks (ids 5, 6), the failing `head`
+/// (id 7), then the recovery CONNECT (id 8) the shared degrade helper sends.
+fn bad_head_script(head: Step) -> Vec<Step> {
+    [
+        device_info_steps(1),
+        memread_steps(5, HW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_HW)),
+        memread_steps(6, FW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_FW)),
+        vec![
+            head,
+            Step::transact(powerz_protocol::frame::connect(8).to_vec(), accept(8)),
+        ],
+    ]
+    .concat()
+}
+
+fn bad_heads() -> Vec<(&'static str, Step)> {
+    let req = powerz_protocol::decode::head::request(7).to_vec();
+    vec![
+        (
+            "timeout",
+            Step::transact_err(req.clone(), transport::Error::Timeout),
+        ),
+        // Header only: too short for the old-firmware field.
+        (
+            "undecodable",
+            Step::transact(req, vec![0x40, 7, 0x00, 0x01]),
+        ),
+    ]
+}
+
+#[test]
+fn info_degrades_when_head_times_out_or_is_undecodable() {
+    for (what, head) in bad_heads() {
+        let (r, out) = info_with_bad_head(false, head);
+        assert!(r.is_ok(), "{what}: info still succeeds: {r:?}");
+        for want in [SYNTH_MODEL, SYNTH_FW, SYNTH_HW, SYNTH_SERIAL] {
+            assert!(out.contains(want), "{what}: missing {want} in:\n{out}");
+        }
+        assert!(
+            !out.to_lowercase().contains("update required"),
+            "{what}: no update-required warning:\n{out}"
+        );
+    }
+    for (what, head) in bad_heads() {
+        let (r, out) = info_with_bad_head(true, head);
+        assert!(r.is_ok(), "{what} --json: {r:?}");
+        let v: Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["model"], SYNTH_MODEL, "{v}");
+        assert_eq!(v["firmware_version"], SYNTH_FW, "{v}");
+        assert_eq!(v["hardware_version"], SYNTH_HW, "{v}");
+        assert_eq!(
+            v["update_required"],
+            Value::Null,
+            "{what}: unknown, not false: {v}"
+        );
+        let codes = v["warnings"].as_array().cloned().unwrap_or_default();
+        assert!(
+            !codes.contains(&serde_json::json!("update_required")),
+            "{what}: {v}"
+        );
+    }
+}
+
+#[test]
+fn info_reconnects_once_after_a_failed_head_before_continuing() {
+    for json in [false, true] {
+        for (what, head) in bad_heads() {
+            let mut s = session(MockTransport::new(bad_head_script(head)));
+            let mut out = Vec::new();
+            let r = info_in_mode(&mut s, DeviceMode::Application, json, &mut out);
+            assert!(r.is_ok(), "{what} json={json}: {r:?}");
+            let sent = s.transport().written();
+            let head_at = sent
+                .iter()
+                .position(|f| f.first() == Some(&0x40))
+                .unwrap_or_else(|| panic!("{what}: no HEAD: {sent:02x?}"));
+            let after: Vec<u8> = sent[head_at + 1..].iter().map(|f| f[0]).collect();
+            assert_eq!(
+                after,
+                vec![0x02],
+                "{what} json={json}: one recovery CONNECT after the failed HEAD"
+            );
+            assert_eq!(
+                s.transport().remaining(),
+                0,
+                "{what} json={json}: the recovery CONNECT was not sent"
+            );
+        }
+    }
+}
+
+// ---- AC-V9SK52.2 / .3: a failed HEAD keeps the dated blocks (real-meter bug) ----
+
+/// Lowercase with every space removed, so a hex dump matches however it
+/// is spaced.
+fn squash(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// A 2.0.6 / 2.5 meter (dated `20260101`): device info (ids 1..4), both
+/// info blocks (ids 5, 6), HEAD (id 7) answered with REJECT, then the
+/// recovery CONNECT (id 8).
+fn rejected_head_script() -> Vec<Step> {
+    let boot = info_block(SYNTH_MODEL, "2.5");
+    let app = info_block(SYNTH_MODEL, "2.0.6");
+    [
+        memread_steps(1, HW_INFO_ADDR, &boot),
+        memread_steps(2, FW_INFO_ADDR, &app),
+        memread_steps(3, OTP_ADDR, &otp_block()),
+        memread_steps(4, UID_ADDR, &SYNTH_UID),
+        memread_steps(5, HW_INFO_ADDR, &boot),
+        memread_steps(6, FW_INFO_ADDR, &app),
+        vec![
+            Step::transact(
+                powerz_protocol::decode::head::request(7).to_vec(),
+                vec![0x06, 0x07, 0x00, 0x00],
+            ),
+            Step::transact(powerz_protocol::frame::connect(8).to_vec(), accept(8)),
+        ],
+    ]
+    .concat()
+}
+
+fn line_of<'a>(out: &'a str, label: &str) -> &'a str {
+    out.lines()
+        .find(|l| l.starts_with(label))
+        .unwrap_or_else(|| panic!("no `{label}` line in:\n{out}"))
+}
+
+#[test]
+fn info_with_a_rejected_head_still_prints_dated_versions_and_the_outdated_warning() {
+    let (r, out, _) = info_mode(DeviceMode::Application, false, rejected_head_script());
+    assert!(r.is_ok(), "{r:?}");
+    let fw = line_of(&out, "Firmware:");
+    assert!(
+        fw.contains("2.0.6 (20260101)"),
+        "dated firmware line: {out}"
+    );
+    let boot = line_of(&out, "Bootloader:");
+    assert!(
+        boot.contains("2.5 (20260101)"),
+        "dated bootloader line: {out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("Warning:") && l.contains("2.0.7")),
+        "the outdated warning: {out}"
+    );
+    assert!(
+        !out.to_lowercase().contains("update required"),
+        "no update-required warning: {out}"
+    );
+}
+
+#[test]
+fn info_with_a_rejected_head_says_the_update_check_is_unavailable_and_why() {
+    let (_, out, _) = info_mode(DeviceMode::Application, false, rejected_head_script());
+    let check = line_of(&out, "Update check:");
+    assert!(
+        check.starts_with("Update check: unavailable ("),
+        "{check:?}"
+    );
+    assert!(check.ends_with(')'), "{check:?}");
+    assert!(
+        check.contains("the meter sent REJECT"),
+        "the reason: {check:?}"
+    );
+    assert!(
+        squash(check).contains("06070000"),
+        "the raw reply: {check:?}"
+    );
+}
+
+#[test]
+fn info_json_with_a_rejected_head_keeps_both_blocks_and_lists_the_problem() {
+    let (r, out, _) = info_mode(DeviceMode::Application, true, rejected_head_script());
+    assert!(r.is_ok(), "{r:?}");
+    let v: Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["application"]["model"], SYNTH_MODEL, "{v}");
+    assert_eq!(v["application"]["version"], "2.0.6", "{v}");
+    assert_eq!(v["application"]["date"], "20260101", "{v}");
+    assert_eq!(v["bootloader"]["version"], "2.5", "{v}");
+    assert_eq!(v["bootloader"]["date"], "20260101", "{v}");
+    assert_eq!(v["update_required"], Value::Null, "unknown, not false: {v}");
+    assert_eq!(v["warnings"], serde_json::json!(["outdated"]), "{v}");
+    assert!(v.get("status_problems").is_none(), "{v}");
+    let problems = v["firmware_problems"]
+        .as_array()
+        .unwrap_or_else(|| panic!("firmware_problems array: {v}"));
+    assert!(
+        problems.iter().all(Value::is_string),
+        "each problem is its text: {v}"
+    );
+    let head = problems
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|p| p.contains("HEAD"))
+        .unwrap_or_else(|| panic!("a HEAD problem: {v}"));
+    assert!(head.contains("the meter sent REJECT"), "{head:?}");
+    assert!(squash(head).contains("06070000"), "{head:?}");
+}
+
+#[test]
+fn info_with_a_rejected_head_reads_the_blocks_before_head_and_reconnects_once() {
+    let (_, _, sent) = info_mode(DeviceMode::Application, true, rejected_head_script());
+    let types: Vec<u8> = sent.iter().map(|f| f[0]).collect();
+    assert_eq!(
+        types,
+        vec![0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x40, 0x02],
+        "device info, both blocks, HEAD, one recovery CONNECT"
+    );
+}
+
+// ---- AC-V9SK52.4: every firmware-status problem is shown in text ----
+
+/// Device info (ids 1..4), the bootloader block (id 5) or its timeout,
+/// the application block (id 6, 0x4420) timing out, one recovery CONNECT
+/// per failed step, then HEAD answered or rejected.
+fn bad_block_script(boot_fails: bool, head_rejected: bool) -> Vec<Step> {
+    let timeout = |id: u8, addr: u32| {
+        Step::transact_err(memory_read_request(id, addr, 64), transport::Error::Timeout)
+    };
+    let connect = |id: u8| Step::transact(powerz_protocol::frame::connect(id).to_vec(), accept(id));
+    let mut steps = device_info_steps(1);
+    if boot_fails {
+        steps.extend([timeout(5, HW_INFO_ADDR), connect(6)]);
+    } else {
+        steps.extend(memread_steps(
+            5,
+            HW_INFO_ADDR,
+            &info_block(SYNTH_MODEL, SYNTH_HW),
+        ));
+    }
+    let app_id = if boot_fails { 7 } else { 6 };
+    steps.extend([timeout(app_id, FW_INFO_ADDR), connect(app_id + 1)]);
+    let head_id = app_id + 2;
+    let head_req = powerz_protocol::decode::head::request(head_id).to_vec();
+    if head_rejected {
+        steps.extend([
+            Step::transact(head_req, vec![0x06, head_id, 0x00, 0x00]),
+            connect(head_id + 1),
+        ]);
+    } else {
+        steps.push(Step::transact(
+            head_req,
+            vec![0x40, head_id, 0x00, 0x01, 0, 0, 0, 0],
+        ));
+    }
+    steps
+}
+
+fn status_lines(out: &str) -> Vec<&str> {
+    out.lines()
+        .filter(|l| l.starts_with("Firmware status: "))
+        .collect()
+}
+
+#[test]
+fn info_with_an_unread_application_block_says_why_the_version_is_a_fallback() {
+    let (r, out, _) = info_mode(
+        DeviceMode::Application,
+        false,
+        bad_block_script(false, false),
+    );
+    assert!(r.is_ok(), "{r:?}");
+    assert!(
+        line_of(&out, "Firmware:").contains(SYNTH_FW),
+        "the device-info fallback: {out}"
+    );
+    let lines = status_lines(&out);
+    assert_eq!(lines.len(), 1, "one problem, one line:\n{out}");
+    let line = lines[0].to_lowercase();
+    assert!(line.contains("application"), "{line:?}");
+    assert!(line.contains("0x4420"), "{line:?}");
+    assert!(line.contains("not read"), "{line:?}");
+    assert!(
+        !out.lines().any(|l| l.starts_with("Update check:")),
+        "HEAD was read: {out}"
+    );
+}
+
+#[test]
+fn info_prints_each_block_problem_once_and_keeps_head_on_the_update_check_line() {
+    let (r, out, _) = info_mode(DeviceMode::Application, false, bad_block_script(true, true));
+    assert!(r.is_ok(), "{r:?}");
+    let lines = status_lines(&out);
+    assert_eq!(lines.len(), 2, "two block problems:\n{out}");
+    assert!(
+        lines[0].contains("bootloader") && lines[0].contains("0x420"),
+        "{out}"
+    );
+    assert!(
+        lines[1].contains("application") && lines[1].contains("0x4420"),
+        "{out}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.contains("HEAD")),
+        "the HEAD problem stays on its own line: {out}"
+    );
+    let check = line_of(&out, "Update check:");
+    assert!(
+        check.starts_with("Update check: unavailable ("),
+        "{check:?}"
+    );
+    assert!(check.to_lowercase().contains("reject"), "{check:?}");
 }
 
 // ---- AC-STQEA1.3: read ----
@@ -1020,5 +1408,163 @@ fn stream_unix_zero_uses_wall_clock_at_first_record() {
     assert!(
         unix >= before - 0.001 && unix <= after + 0.001,
         "{unix} not in [{before}, {after}]"
+    );
+}
+
+// ---- AC-V9SK52.4: a failed recovery CONNECT is shown, routed by kind ----
+
+/// Device info (ids 1..4), both blocks (ids 5, 6), HEAD (id 7) rejected,
+/// then the recovery CONNECT (id 8) rejected too.
+fn rejected_recovery_script() -> Vec<Step> {
+    let boot = info_block(SYNTH_MODEL, "2.5");
+    let app = info_block(SYNTH_MODEL, "2.0.6");
+    [
+        memread_steps(1, HW_INFO_ADDR, &boot),
+        memread_steps(2, FW_INFO_ADDR, &app),
+        memread_steps(3, OTP_ADDR, &otp_block()),
+        memread_steps(4, UID_ADDR, &SYNTH_UID),
+        memread_steps(5, HW_INFO_ADDR, &boot),
+        memread_steps(6, FW_INFO_ADDR, &app),
+        vec![
+            Step::transact(
+                powerz_protocol::decode::head::request(7).to_vec(),
+                vec![0x06, 0x07, 0x00, 0x00],
+            ),
+            Step::transact(
+                powerz_protocol::frame::connect(8).to_vec(),
+                vec![0x06, 0x08, 0x00, 0x00],
+            ),
+        ],
+    ]
+    .concat()
+}
+
+#[test]
+fn info_with_a_failed_recovery_connect_prints_it_as_a_firmware_status_line() {
+    let (r, out, _) = info_mode(DeviceMode::Application, false, rejected_recovery_script());
+    assert!(
+        r.is_ok(),
+        "a failed recovery is a problem, not an error: {r:?}"
+    );
+    let check = line_of(&out, "Update check:");
+    assert!(check.contains("the meter sent REJECT"), "{check:?}");
+    assert!(
+        !check.to_lowercase().contains("recovery"),
+        "the recovery problem is not the HEAD reason: {check:?}"
+    );
+    let lines = status_lines(&out);
+    assert_eq!(lines.len(), 1, "one recovery line:\n{out}");
+    let line = lines[0].to_lowercase();
+    assert!(
+        line.contains("recovery connect") && line.contains("failed"),
+        "{out}"
+    );
+    assert!(
+        line_of(&out, "Firmware:").contains("2.0.6"),
+        "the versions still print: {out}"
+    );
+}
+
+#[test]
+fn info_json_with_a_failed_recovery_connect_lists_both_problems_as_text() {
+    let (r, out, _) = info_mode(DeviceMode::Application, true, rejected_recovery_script());
+    assert!(r.is_ok(), "{r:?}");
+    let v: Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["application"]["version"], "2.0.6", "{v}");
+    let problems: Vec<&str> = v["firmware_problems"]
+        .as_array()
+        .unwrap_or_else(|| panic!("firmware_problems array: {v}"))
+        .iter()
+        .map(|p| p.as_str().unwrap_or_else(|| panic!("text, not {p}")))
+        .collect();
+    assert_eq!(problems.len(), 2, "HEAD, then the recovery: {v}");
+    assert!(problems[0].contains("HEAD"), "{problems:?}");
+    assert!(
+        problems[1].to_lowercase().contains("recovery connect"),
+        "{problems:?}"
+    );
+}
+
+// ---- AC-V9SK52.3 (changed 2026-10-26): the real application-mode HEAD reply ----
+
+/// The real meter's HEAD reply in application mode: type 0x40, id 0, field
+/// 0x00001000, then 12 stale bytes (synthesised from a 0xC4 tail).
+fn real_id0_head_reply() -> Vec<u8> {
+    vec![
+        0x40, 0x00, 0x00, 0x01, 0x00, 0x10, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
+        0xff, 0xf4, 0x95, 0x53, 0xf2,
+    ]
+}
+
+/// Device info (ids 1..4), both info blocks (ids 5, 6), then HEAD (id 7)
+/// answered with the real id-0 reply; nothing after it.
+fn real_head_script() -> Vec<Step> {
+    [
+        device_info_steps(1),
+        memread_steps(5, HW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_HW)),
+        memread_steps(6, FW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_FW)),
+        vec![Step::transact(
+            powerz_protocol::decode::head::request(7).to_vec(),
+            real_id0_head_reply(),
+        )],
+    ]
+    .concat()
+}
+
+#[test]
+fn info_with_the_real_head_reply_says_the_update_check_is_unavailable_naming_the_field() {
+    let (r, out, sent) = info_mode(DeviceMode::Application, false, real_head_script());
+    assert!(r.is_ok(), "{r:?}");
+    let check = line_of(&out, "Update check:");
+    assert!(
+        check.starts_with("Update check: unavailable ("),
+        "{check:?}"
+    );
+    assert!(check.ends_with(')'), "{check:?}");
+    assert!(check.contains("0x00001000"), "the field: {check:?}");
+    assert!(
+        squash(check).contains("400000010010000040000000fffffffff49553f2"),
+        "the raw reply: {check:?}"
+    );
+    assert!(!check.contains("timed out"), "no timeout: {check:?}");
+    assert!(
+        !out.to_lowercase().contains("update required"),
+        "no update-required warning: {out}"
+    );
+    let types: Vec<u8> = sent.iter().map(|f| f[0]).collect();
+    assert_eq!(
+        types,
+        vec![0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x40],
+        "one HEAD, no recovery CONNECT"
+    );
+}
+
+#[test]
+fn info_json_with_the_real_head_reply_has_update_required_null() {
+    let (r, out, _) = info_mode(DeviceMode::Application, true, real_head_script());
+    assert!(r.is_ok(), "{r:?}");
+    let v: Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(
+        v["update_required"],
+        Value::Null,
+        "unknown, never true: {v}"
+    );
+    let codes = v["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !codes.contains(&serde_json::json!("update_required")),
+        "{v}"
+    );
+    let head = v["firmware_problems"]
+        .as_array()
+        .unwrap_or_else(|| panic!("firmware_problems array: {v}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|p| p.contains("HEAD"))
+        .unwrap_or_else(|| panic!("a HEAD problem: {v}"))
+        .to_owned();
+    assert!(head.contains("0x00001000"), "{head:?}");
+    assert!(
+        squash(&head).contains("400000010010000040000000fffffffff49553f2"),
+        "{head:?}"
     );
 }

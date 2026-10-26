@@ -2,8 +2,11 @@
 source: crates/powerz-cli/tests/e2e_sim.rs
 expression: out
 ---
-Model:     KM003C
-Firmware:  2.0.6
-Hardware:  2.5
-Serial:    123456
-UID:       5a17c30d9e426bf108a43ce5
+Model:      KM003C
+Mode:       application
+Firmware:   2.0.6 (2025.06.01)
+Bootloader: 2.5 (2024.01.01)
+Hardware:   2.5
+Serial:     123456
+UID:        5a17c30d9e426bf108a43ce5
+Warning: firmware is older than 2.0.7, the newest version known
