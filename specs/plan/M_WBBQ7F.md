@@ -34,10 +34,11 @@ codename: Special Delivery
 Build order: E1ZJ2M, then E1ZJ2N.
 
 **Tasks:**
-- [ ] Pinned Rust toolchain — E1ZJ2M
+- [x] Pinned Rust toolchain — E1ZJ2M
 - [ ] Release builds on a version tag — E1ZJ2N
 
 **M7 follow-ups:**
-- (none yet)
+- Toolchain-pin scan: an unpaired apostrophe in a run line keeps a trailing comment, so the line can be flagged falsely (fails safe; from E1ZJ2M review).
+- CLAUDE.md Tech Stack names only the MSRV (1.96); add the rust-toolchain.toml pin there (needs the user's OK to edit CLAUDE.md).
 
 **Gate:** same gating rule as CLAUDE.md.

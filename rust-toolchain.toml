@@ -1,0 +1,6 @@
+# The one Rust toolchain for local builds and every CI / release job.
+# rustup installs it from this file; workflows never name their own version.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -34,8 +34,10 @@ The USB protocol the meter speaks is documented in [docs/protocol.md](docs/proto
 
 ## Building
 
-Requirements: Rust (stable, 1.96 or newer), [Bun](https://bun.sh), and the
+Requirements: Rust from [rustup](https://rustup.rs), [Bun](https://bun.sh), and the
 [Tauri 2 system prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
+rustup installs the exact Rust version pinned in `rust-toolchain.toml` at the repo
+root. The minimum supported Rust stays 1.96 (`rust-version` in `Cargo.toml`).
 
 ```bash
 bun install
@@ -44,6 +46,23 @@ cargo build --workspace       # library, CLI and desktop app
 cargo run -p powerz-cli       # the CLI
 bun run dev                   # desktop app with hot reload
 ```
+
+### Rust toolchain
+
+The Rust version is pinned in one place: `rust-toolchain.toml`. CI and release
+builds use the same file and never name their own version; the gate fails if a
+workflow does.
+
+To move to a newer Rust:
+
+1. Edit `channel` in `rust-toolchain.toml`.
+2. Fix any new clippy lints and `cargo fmt` changes.
+3. Open a pull request.
+
+A Homebrew-installed `rust` (cargo not managed by rustup) ignores
+`rust-toolchain.toml`. Put rustup's proxies first on your `PATH` instead, for
+example `brew install rustup` and add `$(brew --prefix rustup)/bin` before
+Homebrew's `bin`.
 
 ## Try it without a meter
 
