@@ -57,6 +57,7 @@ Build order: V9SK52, V9SK53, V9SK54, V9SK55, then V9SK56 (stage 1 can run once V
 - The desktop update can't be cancelled: the engine's stop flag is never raised (V9SK55 audit).
 - Release notes that number their own lines ("1. …") show a bullet and a number. Drop the bullets when every line is numbered, once real 2.0.7 notes confirm the format (V9SK55 visual check).
 - The probe's SYNC stop only sees a SYNC whose id matches the request; one with another id is re-read as stale, so a stuck bootloader can still get the retried CONNECT and HEAD. Take the first SYNC whatever its id (V9SK56 review).
+- `HeadReply::update_required()` still documents (and a test pins) "non-zero field means update required", and the desktop's "update required" branches in `deviceDetails.ts` can no longer fire. Align both with AC-V9SK52.3 (spec review).
 - Trigger panel: a 'Don't ask again until I go back to 5 V or disconnect' checkbox in the >5 V confirmation. It resets on Back to 5 V, hard reset, disconnect or quit, and covers fixed/PPS/AVS requests up to 20 V only; EPR (>20 V) and the raw console always confirm; the CLI is unchanged (--allow-high-voltage). (User decision 2026-10-26.)
 
 **Device safety:** JUMP_DFU (09), JUMP_APROM (08), the 0x42 descriptor and payload writes stay forbidden on the real meter until the user approves the stage that needs them.

@@ -239,7 +239,7 @@ These environment variables are for tests only. They work only with
 | `POWERZ_SIM_CABLE=epr-240w` | Puts an e-marked 240 W EPR cable on the simulated meter, so `pd send --preset discover-identity-cable` gets an answer. Unset, there is no cable. |
 | `POWERZ_SIM_ENTRY_BC=fail` | `entry bc` answers `fail`. |
 | `POWERZ_SIM_PDM_LAG=after-list` | The simulated meter answers one reply late after the `reset` that ends a stalled list, to test the out-of-step error. |
-| `POWERZ_SIM_HEAD=N` | The simulated meter's HEAD reply carries old-firmware field `N` (non-zero means update required). |
+| `POWERZ_SIM_HEAD=N` | The simulated meter's HEAD reply carries old-firmware field `N` (0 means current; anything else is shown as an unrecognised reply). |
 | `POWERZ_SIM_APP_VERSION=V` | The simulated application info block reports version `V` (default `2.0.6`). |
 | `POWERZ_SIM_MODE` | `application` (default) or `bootloader`; read only by `firmware probe`, `firmware flash` and `firmware jump`. |
 | `POWERZ_SIM_REPLUG_AFTER=N` | The simulated meter takes a jump at its next power-up instead of live, and is unplugged and plugged back in after `N` looks at it; read only by `firmware flash` and `firmware jump`. |

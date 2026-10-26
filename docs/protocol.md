@@ -159,7 +159,7 @@ Data types (main header type 0x40 and up):
 
 | type | request header | payload | purpose | tag |
 |---|---|---|---|---|
-| 0x40 HEAD | `40 id 00 01` | 16 zero bytes | read-only status check. The reply is type 0x40, and the u32 LE at offset 4 is 0 for normal firmware and non-zero for "original firmware, update required". The vendor app sends it 50 ms after CONNECT in application mode, and before a download in boot-loader mode, where the field must be 0. Our `firmware probe` sends only CONNECT and HEAD, in either mode | [static]; meaning [inferred] |
+| 0x40 HEAD | `40 id 00 01` | 16 zero bytes | read-only status check. The reply is type 0x40, and the u32 LE at offset 4 is 0 for normal firmware; the vendor app reads non-zero as "original firmware, update required", which we do not (see the HEAD rows below). The vendor app sends it 50 ms after CONNECT in application mode, and before a download in boot-loader mode, where the field must be 0. Our `firmware probe` sends only CONNECT and HEAD, in either mode | [static]; meaning [inferred] |
 | 0x41 PUT_DATA | reply only | section chain | GET_DATA reply | [doc] [static] [device] |
 | 0x42 | `42 id 00 04` | 64-byte firmware descriptor | firmware download; sent only by the firmware flash path (see Firmware download) | [static] |
 | 0x44 | `44 id 01 01` | 32 encrypted bytes | memory read (see Memory read and device info) | [static] [device] |
@@ -365,7 +365,7 @@ Firmware status (FR V9SK52). All requests below are read-only:
 | sequence | CONNECT, the info blocks `0x420` (boot loader) and `0x4420` (application), then 50 ms later HEAD. The vendor app sends HEAD first; we read the blocks first so a failed HEAD cannot cost them. Each step that fails is reported as a problem (a HEAD problem includes the raw reply in hex), followed by one CONNECT to recover the pipe; what was read is kept, and the update check is reported as unknown when HEAD was not read | [static] [device] (firmware 2.0.6: blocks read; HEAD answered with id 0, see the HEAD rows below) |
 | warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated | [static] [inferred] |
 | HEAD in application mode | the meter answers with reply id 0 (not the request's id): `40 00 00 01 00 10 00 00`, i.e. type 0x40, id 0, and a u32 at offset 4 of 0x00001000 on firmware 2.0.6, followed by 12 stale bytes from its own transmit buffer (20 bytes in all). We accept a type-0x40, id-0 reply only as the first transfer after our HEAD. A field of 0 means current; any other value is reported as an unrecognised reply, never as "update required", because the vendor's reading (non-zero = update required) does not fit a meter on normal firmware | [device] (firmware 2.0.6) [static] |
-| HEAD in boot-loader mode | the flash path accepts only a reply that echoes its own request id, with field 0; anything else stops before the descriptor | [static]; the meter's real reply is not yet recorded |
+| HEAD in boot-loader mode | the flash path accepts only a reply that echoes its own request id, with field 0; anything else stops before the descriptor | [static]; boot loader 2.5 answers `c0 <id> 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00`, field 0, with or without a valid application [device] |
 
 ## Authentication
 
