@@ -179,14 +179,16 @@ that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) 
   only one attached; the command keeps waiting for yours. Without
   `--device`, several meters attached at the start stop the command with
   their serials; unplug the others.
-- **Replug only when asked.** After each jump the command asks you to
-  unplug the meter and plug it back in (no buttons), and waits up to 120 s.
-  Do not unplug it at any other time while the flash runs.
+- **Replug only when asked.** After each jump the meter normally restarts
+  by itself. If it does not, the command asks you to unplug it and plug it
+  back in (no buttons), and waits up to 120 s. Do not unplug it at any other
+  time while the flash runs.
 - **`firmware jump`** needs `--i-understand` as well (exit 2, nothing sent
   without it) and runs on the bulk pipe only. It sends exactly one jump
   frame through the flash guard, only from the opposite mode; from
   application mode that frame follows CONNECT, the UID read and a level-1
-  authentication, and nothing is jumped if the authentication fails. Ctrl-C applies only before the jump frame is sent: it then sends
+  authentication, and nothing is jumped if the authentication fails.
+  Ctrl-C applies only before the jump frame is sent: it then sends
   nothing and exits as interrupted; once the frame is written the jump
   cannot be undone, and the command waits for the meter as usual. The
   `Was in:` line, the meter's reply and the replug prompt are printed as

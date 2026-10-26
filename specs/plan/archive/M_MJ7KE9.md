@@ -7,6 +7,7 @@ kickoff_branch: null
 frozen_at: null
 migration: none
 codename: Flash Gordon
+shipped_in: v0.5.0
 ---
 
 # Implementation Plan

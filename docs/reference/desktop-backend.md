@@ -6,8 +6,8 @@ The desktop app's web UI talks to its Rust backend through one TypeScript
 module, `apps/desktop/src/lib/backend.ts`. Every function there calls a Tauri
 command, or the in-browser `MockBackend` when the UI is built with
 `VITE_BACKEND=mock`. Scripts and other front ends can use the same seam. This
-page lists the parts added for session gaps, replug, the PD analyzer and the
-trigger panel; the source has the rest.
+page lists the parts added for session gaps, replug, the PD analyzer, the
+trigger panel and the firmware update; the source has the rest.
 
 ## Session history
 
@@ -133,6 +133,46 @@ state: detection, the protocol sections, the pending confirmation, the last
 reply and the live VBUS check. `PdConsole` (in `console.svelte.ts`) holds the
 message builder and the console transcript.
 
+## Firmware
+
+Device mode and firmware version:
+
+| item | meaning |
+|---|---|
+| `DeviceMode` | `"application"`, `"bootloader"` or `"unknown"`, from the USB string of the meter's vendor interface (`APP` in application mode). |
+| `DeviceListing.mode` | A meter in bootloader mode is listed; `deviceOptionLabel` ends its picker label in "(bootloader mode)". `Session` will not connect to it, and the backend refuses that connect too. |
+| `ConnectedInfo` | Adds `mode`, `bootloader_version`, `warnings`, `update_required` (`boolean \| null`: `null` when the HEAD reply could not be read) and `firmware_problems` (one line per part of the firmware status that could not be read, shown as "Firmware status" rows). |
+| `FirmwareWarningCode` | `"too_old"` (below 1.7.0), `"outdated"` (below 2.0.7, the newest version known) and `"update_required"` (the HEAD reply says so). |
+
+Update commands:
+
+| function | what it does |
+|---|---|
+| `firmwareInspect(path: string): Promise<FirmwareFileInfo>` | Reads a local firmware container and answers its metadata; needs no meter. The file is never decrypted; files over 8 MiB are refused before they are read. A broken file rejects with `usage`, prefixed with the file name. |
+| `firmwareChoose(): Promise<string \| null>` | Opens the open dialog filtered to `.mencrypt` files; `null` when it was cancelled. |
+| `firmwareFlash(deviceId: string, path: string, confirmation: string, onStage: (event: FlashEvent) => void): Promise<FlashDone>` | Updates the meter with the file at `path`. Before anything is sent the backend checks that `confirmation` is the file's version and reads the file again. Each event goes to `onStage` over a channel, about one write message per percent. Rejects with the error and its recovery hint. |
+
+Types:
+
+| type | fields |
+|---|---|
+| `FirmwareFileInfo` | `vendor`, `container_version`, `model`, `version`, `date`, `crc` (8 uppercase hex digits), `size` (the declared image size in bytes), `release_notes_en` |
+| `FlashStage` | `{ stage: "switching" }`, `"erasing"`, `{ stage: "writing"; done; total }` (bytes), `"verifying"`, `"finished"`, `"returning"` |
+| `FlashReplug` | `{ stage: "replug"; to: "bootloader" \| "application"; reply }`: a jump was sent; `reply` is the meter's answer to it. The screen asks for a replug if the meter does not restart by itself. It does not change the stage. |
+| `FlashEvent` | `FlashStage \| FlashReplug` |
+| `FlashDone` | `{ outcome: "verified"; version }` (read back from the meter) or `{ outcome: "power_cycle_needed" }` (the image was accepted but the meter stays in its bootloader until it is replugged) |
+
+Behaviour:
+
+- **The meter is held for the whole update.** Connecting, PD capture,
+  recording, the rate, the trigger panel and hotplug reconnects are refused
+  until it ends, and closing the window or quitting is refused while it runs.
+  `Session.flashing` is set meanwhile, which disables the device picker and
+  Connect.
+- **The Firmware tab is opt-in.** It appears only when **Advanced firmware**
+  is switched on in About. The switch is stored in the browser, off by
+  default, and cannot be turned off while an update runs.
+
 ## Mock backend
 
 `MockBackend` (in `mockBackend.ts`) plays a demo session in the browser, with
@@ -148,4 +188,8 @@ it does:
 | `?mock=trigger-req-error` | The charger refuses every request above 5 V (`req error 252`); the session stays usable. |
 | `?mock=trigger-detect-disagree` | BC1.2 says not supported while the automatic list says supported. |
 | `?mock=trigger-list-lag` | Detection fails with an `out_of_sync` error after the list, as when the meter answers one command late. |
+| `?mock=bootloader` | One meter in bootloader mode is listed before the demo devices. |
+| `?mock=firmware-fail-<stage>` | A firmware update fails at `switching`, `erasing`, `writing`, `verifying` or `returning`, with the recovery steps. |
+| `?mock=firmware-other-model` | The chosen firmware file is for a KM002C. |
+| `?mock=firmware-bad-file` | The chosen firmware file fails inspection. |
 | `?pdsynthetic=<n>` | Seeds `n` PD records when the capture first starts, for performance checks. `pdSyntheticFromUrl` reads it into `MockOptions.pdSynthetic`. |

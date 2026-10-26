@@ -4,6 +4,17 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-10-26 — "Flash Gordon"
+
+### Added
+- Device mode and firmware version: application or bootloader mode from the USB interface string, both versions from the info blocks, the old-firmware check, and warnings in `powerz info` and the desktop app; a meter in bootloader mode is listed as such (V9SK52)
+- Firmware file inspection: `powerz firmware info` and the desktop app read a ChargerLAB firmware container's model, version, date, CRC and size without decrypting it, and refuse broken or oversized files (V9SK53)
+- Firmware flashing engine: `powerz firmware flash` signs in, switches the meter to its bootloader, erases, writes and verifies the image, and brings it back to its application; the bootloader is never written, nothing is retried on its own, and every failure says how to recover (V9SK54)
+- Desktop firmware update behind an Advanced firmware switch: file details, a typed version to confirm, each stage with its progress, replug prompts, and recovery steps after a failure (V9SK55)
+- Staged checks on a real KM003C, each approved by the user: `powerz firmware probe` and `powerz firmware jump`, and a 2.0.6 → 2.0.7 update confirmed on the meter's About screen (V9SK56)
+
+Total test count at release: 2756 tests, 0 failures, 0 errors.
+
 ## [0.4.0] — 2026-10-24 — "Trigger Happy"
 
 ### Added
