@@ -185,3 +185,30 @@ history test takes both of its limits from `historyPanBudget`: a pan step must
 finish within `HISTORY_PAN_BUDGET_MS` (100 ms), and the whole test within
 `HISTORY_PAN_TIMEOUT_MS` (5 s). With the `CI` environment variable set, both
 are three times larger. A failure message names the budget it used.
+
+## Builds and releases
+
+Every build uses one Rust version, pinned in `rust-toolchain.toml`. rustup
+installs it for local builds, and the CI and release workflows install it from
+the same file; a test in the gate fails when a workflow names its own Rust
+version. A new Rust release on the runners therefore can't turn a green branch
+red with new lints: moving the version is a reviewed change to that one file.
+
+Releases come from `.github/workflows/release.yml`. A pushed `vX.Y.Z` tag, or a
+manual run that names an existing tag, runs five jobs:
+
+- **check** compares the tag with the workspace, desktop and Tauri versions and
+  reads that version's CHANGELOG section, which becomes the release notes;
+- **desktop** builds the unsigned installers with tauri-action on macOS
+  (universal .dmg), Windows (.msi and setup .exe; the setup .exe alone for a
+  pre-release) and Linux (AppImage and .deb);
+- **cli** builds `powerz` in release mode and packs it with the LICENSE and
+  README;
+- **assemble** checks that every expected file is there and writes
+  `SHA256SUMS.txt`;
+- **publish** creates the release as a draft, attaches every file and only then
+  publishes it.
+
+Only the publish job can write to the repository. A pull request that changes
+the release setup runs the same jobs without publish, as a dry run whose files
+stay workflow artifacts.

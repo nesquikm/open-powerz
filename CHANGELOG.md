@@ -4,6 +4,16 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-10-27 — "Special Delivery"
+
+### Added
+- Release builds on a version tag: a `v*` tag, or a manual run for an existing tag, checks the versions and the CHANGELOG, builds unsigned desktop installers (macOS universal .dmg, Windows .msi and setup .exe, Linux AppImage and .deb) and the `powerz` CLI for all three systems, and publishes a GitHub Release with a SHA256SUMS.txt; pull requests that touch the release setup get a dry run, and an install guide explains the unsigned builds (E1ZJ2N)
+
+### Changed
+- One pinned Rust toolchain (1.99.1) in `rust-toolchain.toml` for local, CI and release builds; the gate fails when a workflow names its own Rust version (E1ZJ2M)
+
+Total test count at release: 2879 tests, 0 failures, 0 errors.
+
 ## [0.5.0] — 2026-10-26 — "Flash Gordon"
 
 ### Added

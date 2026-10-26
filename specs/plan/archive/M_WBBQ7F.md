@@ -7,6 +7,7 @@ kickoff_branch: null
 frozen_at: null
 migration: none
 codename: Special Delivery
+shipped_in: v0.6.0
 ---
 
 # Implementation Plan
