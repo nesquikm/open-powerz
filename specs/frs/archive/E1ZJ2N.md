@@ -1,8 +1,8 @@
 ---
 title: Release builds on a version tag
 milestone: M_WBBQ7F
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-26T21:32:10Z
 id: fr_01M5WNDAHHETCCVHSJK4E1ZJ2N
 created_at: 2026-10-26T17:51:25.233Z
 changelog_category: Added
@@ -47,3 +47,8 @@ Unit tests for the changelog extraction (normal, pre-release, missing section, l
 ## Notes
 
 User decision 2026-10-26: unsigned for now (no Apple Developer account or Windows certificate); signing comes later.
+
+## Implementation notes
+
+- publish step edits, uploads and deletes assets by tag rather than by release id — round 2; current gh resolves drafts by tag; M7 follow-up to switch to gh api by id
+- changelog heading parser takes a malformed date as an unquoted codename — round 2; cosmetic and unlikely; M7 follow-up

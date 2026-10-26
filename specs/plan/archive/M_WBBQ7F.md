@@ -1,8 +1,8 @@
 ---
 milestone: M_WBBQ7F
 id: fr_01M5WNDAHGTBR6V716Q5WBBQ7F
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-26T21:32:10Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -28,14 +28,14 @@ codename: Special Delivery
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [E1ZJ2M](../frs/E1ZJ2M.md) | Pinned Rust toolchain | n/a |
-| [E1ZJ2N](../frs/E1ZJ2N.md) | Release builds on a version tag | n/a |
+| [E1ZJ2M](../frs/archive/E1ZJ2M.md) | Pinned Rust toolchain | n/a |
+| [E1ZJ2N](../frs/archive/E1ZJ2N.md) | Release builds on a version tag | n/a |
 
 Build order: E1ZJ2M, then E1ZJ2N.
 
 **Tasks:**
 - [x] Pinned Rust toolchain — E1ZJ2M
-- [ ] Release builds on a version tag — E1ZJ2N
+- [x] Release builds on a version tag — E1ZJ2N (AC-E1ZJ2N.11 dry run + smoke test verified on the PR)
 
 **M7 follow-ups:**
 - Toolchain-pin scan: an unpaired apostrophe in a run line keeps a trailing comment, so the line can be flagged falsely (fails safe; from E1ZJ2M review).

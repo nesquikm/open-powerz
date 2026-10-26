@@ -1,8 +1,8 @@
 ---
 title: Pinned Rust toolchain
 milestone: M_WBBQ7F
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-26T21:32:10Z
 id: fr_01M5WNDAHHETCCVHSJK4E1ZJ2M
 created_at: 2026-10-26T17:51:25.233Z
 changelog_category: Changed
@@ -39,3 +39,7 @@ Unit tests for the workflow scan (a workflow with a hard-coded version fails, on
 ## Notes
 
 Prompted by M3 and M5: CI moved to clippy 1.99 while local builds were on 1.96, and new lints failed green branches.
+
+## Implementation notes
+
+- toolchain-pin scan: an unpaired apostrophe in a run line keeps a trailing comment, so the line can be flagged falsely — round 2; fails safe and rare; M7 follow-up
