@@ -34,6 +34,8 @@ export class Session {
   details = $state.raw<ConnectedInfo | null>(null);
   /** Serial of the unplugged meter the backend waits for, null when none. */
   waitingSerial = $state<string | null>(null);
+  /** A firmware update holds the meter (FR V9SK55, AC .4): no switching, no connect. */
+  flashing = $state(false);
 
   /** The backend zeroed the statistics: show none until the next batch. */
   statsReset(): void {
@@ -48,7 +50,7 @@ export class Session {
   /** Connect / Disconnect is available: not while a connect is still pending, and
    * connecting needs a picked device. */
   get canToggleConnect(): boolean {
-    if (this.state === "connecting") return false;
+    if (this.flashing || this.state === "connecting") return false;
     if (this.active) return true;
     // A meter in bootloader mode is listed but never connected (FR V9SK52, AC .5).
     const picked = this.devices.find((d) => d.id === this.selectedId);

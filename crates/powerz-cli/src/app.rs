@@ -9,15 +9,13 @@ use std::time::Duration;
 use powerz_protocol::decode::AdcSnapshot;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::container::read_container_file;
-use powerz_protocol::firmware::flash::{
-    FlashAck, FlashGuard, FlashTransport, JumpTarget, Meter, MeterOpener,
-};
+use powerz_protocol::firmware::flash::{FlashAck, FlashTransport, JumpTarget, Meter, MeterOpener};
 use powerz_protocol::frame;
 use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
 use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
 use powerz_protocol::pdm::{self, FixedProtocol, PdmSession};
 use powerz_protocol::session::{Clock, Session, SystemClock};
-use powerz_protocol::transport::bulk::BulkTransport;
+use powerz_protocol::transport::bulk::{BulkFlashOpener, BulkTransport};
 use powerz_protocol::transport::cdc::CdcTransport;
 use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C, UsbIdentity};
 use powerz_protocol::transport::guard::GuardedTransport;
@@ -35,11 +33,11 @@ use crate::args::{
 };
 use crate::commands::{
     DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
-    PdSettingsChange, StreamOptions, WatchOptions, console, detect, find_flashed_meter,
-    firmware_flash, firmware_info, firmware_jump, firmware_probe, firmware_probe_unavailable,
-    info_in_mode, inspect_flash_file, list, pd, pd_decode, pd_save, pd_send, read, select_device,
-    stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
-    trigger_pd_reset, trigger_pd_settings, watch,
+    PdSettingsChange, StreamOptions, WatchOptions, console, detect, firmware_flash, firmware_info,
+    firmware_jump, firmware_probe, firmware_probe_unavailable, info_in_mode, inspect_flash_file,
+    list, pd, pd_decode, pd_save, pd_send, read, select_device, stream, trigger_legacy_list,
+    trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
+    trigger_pd_settings, watch,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport};
@@ -342,13 +340,13 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
 
 /// The real-meter opener of `firmware flash` / `firmware jump`. The meter
 /// is chosen now, so an ambiguous choice is refused before anything is sent.
-fn discovery_opener(cli: &Cli) -> Result<DiscoveryOpener, CliError> {
+fn discovery_opener(cli: &Cli) -> Result<BulkFlashOpener, CliError> {
     let devices = transport::discovery::list_devices()?;
     select_device(&devices, cli.device.as_deref())?;
-    Ok(DiscoveryOpener {
-        serial: cli.device.clone(),
-        ack: FlashAck::acknowledge(),
-    })
+    Ok(BulkFlashOpener::new(
+        cli.device.clone(),
+        FlashAck::acknowledge(),
+    ))
 }
 
 /// The simulated meter of `firmware flash` / `firmware jump`: `sim` with
@@ -480,33 +478,6 @@ impl<P: FlashTransport> FlashTransport for CountingPipe<P> {
             }
         }
         Ok(())
-    }
-}
-
-/// The flash engine's [`MeterOpener`] for a real meter: each open lists
-/// the devices again (the meter re-enumerates between modes), picks the
-/// meter with [`find_flashed_meter`] and opens its bulk pipe behind the strict flash guard.
-struct DiscoveryOpener {
-    serial: Option<String>,
-    /// The acknowledgement `--i-understand` gave, needed to open the pipe.
-    ack: FlashAck,
-}
-
-impl MeterOpener for DiscoveryOpener {
-    type Pipe = FlashGuard<BulkTransport>;
-
-    fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, transport::Error> {
-        let devices = transport::discovery::list_devices()?;
-        let device = find_flashed_meter(&devices, self.serial.as_deref())
-            .map_err(|e| transport::Error::Io(e.to_string()))?;
-        let Some(device) = device else {
-            return Ok(None);
-        };
-        Ok(Some(Meter {
-            mode: device.mode(),
-            model: device.model,
-            pipe: BulkTransport::open_for_flash(device, &self.ack)?,
-        }))
     }
 }
 

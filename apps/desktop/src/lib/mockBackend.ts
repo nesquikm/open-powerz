@@ -15,6 +15,8 @@ import type {
   ExportProgress,
   ExportResult,
   FirmwareFileInfo,
+  FlashDone,
+  FlashStage,
   Gap,
   HistoryGap,
   HistorySeries,
@@ -57,6 +59,38 @@ const PROGRESS_MS = 500;
 
 function usage(message: string): UiError {
   return { kind: "usage", message, hint: null };
+}
+
+/** Why the mock refuses a request while a firmware update holds the meter (FR V9SK55). */
+const FLASH_REFUSAL = "A firmware update is running. Wait for it to finish before using the meter.";
+
+/** The recovery steps of a failed update, as the backend gives them (FR V9SK55, AC .5). */
+const FLASH_RECOVERY_HINT =
+  "Hold the Back button while plugging the meter in to start it in bootloader mode, then run the update again.";
+
+/** How long each stage of a mock update takes, ms: slow enough for the UI suite to see
+ * every stage and the blocked controls. The write stage takes `MOCK_FLASH_WRITES` steps. */
+const MOCK_FLASH_MS = {
+  switching: 800,
+  erasing: 800,
+  write: 120,
+  verifying: 600,
+  finished: 200,
+  returning: 800,
+} as const;
+const MOCK_FLASH_WRITES = 20;
+
+/** The engine's message for a mock failure at each stage. */
+const MOCK_FLASH_FAILURES: Record<string, string> = {
+  switching: "the meter is not in bootloader mode (application mode after JUMP_DFU)",
+  erasing: "erase error: no ACCEPT after the erase",
+  writing: "download error at write 3: no SYNC",
+  verifying: "verify error: no FINISHED after the last write",
+  returning: "verify error: the meter reports version 2.0.6 after the update but the file is 2.0.7",
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function scenarioOf(deviceId: string): Scenario | undefined {
@@ -407,6 +441,13 @@ export const MOCK_MODES = [
   "trigger-detect-disagree",
   "trigger-list-lag",
   "bootloader",
+  "firmware-fail-switching",
+  "firmware-fail-erasing",
+  "firmware-fail-writing",
+  "firmware-fail-verifying",
+  "firmware-fail-returning",
+  "firmware-other-model",
+  "firmware-bad-file",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -689,6 +730,10 @@ export class MockBackend {
   #savedPd: MockPdFile | null = null;
   #openedPd: MockPdFile | null = null;
   #mode: MockMode | null;
+  /** The updates run so far (FR V9SK55). */
+  #firmwareFlashes: { deviceId: string; path: string; confirmation: string }[] = [];
+  /** A firmware update holds the meter (FR V9SK55, AC .4). */
+  #flashing = false;
   #options: MockOptions;
   #revealed: string[] = [];
   /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
@@ -756,6 +801,7 @@ export class MockBackend {
     rateSps: number,
     onEvent: (event: BackendEvent) => void,
   ): Promise<void> {
+    if (this.#flashing) throw usage(FLASH_REFUSAL);
     if (this.#session) throw usage("A meter is already connected. Disconnect it first.");
     const isMeter = this.#listedMeter()?.id === deviceId;
     // A connect by hand ends any wait for the unplugged meter.
@@ -1063,6 +1109,7 @@ export class MockBackend {
   /** Starts the scripted PD capture: rows go out with every batch tick, like the
    * worker's at most 60 times a second. */
   async pdStart(): Promise<void> {
+    if (this.#flashing) throw usage(FLASH_REFUSAL);
     const s = this.#open();
     // The PD capture waits while triggering. [inferred]
     if (this.#trigger) throw usage("Close the trigger session to capture PD traffic.");
@@ -1189,16 +1236,90 @@ export class MockBackend {
    * read, like the backend it needs no meter. */
   async firmwareInspect(path: string): Promise<FirmwareFileInfo> {
     void path;
+    if (this.#mode === "firmware-bad-file") {
+      throw usage("This is not a firmware file: its header is not a firmware container.");
+    }
     return {
       vendor: "ChargerLab",
       container_version: "V1.0",
-      model: "KM003C",
+      model: this.#mode === "firmware-other-model" ? "KM002C" : "KM003C",
       version: "2.0.7",
       date: "2026.9.29",
       crc: "A175E4A0",
       size: 456896,
       release_notes_en: "1. Demo note: improved PD capture.\n2. Demo note: minor fixes.",
     };
+  }
+
+  /** There is no open dialog: "chooses" a synthetic firmware file (FR V9SK55). */
+  async firmwareChoose(): Promise<string | null> {
+    return "/mock/KM003C_V2.0.7.mencrypt";
+  }
+
+  /** Plays a firmware update like the backend (FR V9SK55, AC .4): the typed confirmation
+   * is re-checked first, then the meter is taken from the stream and everything else is
+   * refused until the update ends; each stage goes to `onStage`, the write stage with its
+   * progress. `firmware-fail-<stage>` fails at that stage with the recovery steps. */
+  async firmwareFlash(
+    deviceId: string,
+    path: string,
+    confirmation: string,
+    onStage: (stage: FlashStage) => void,
+  ): Promise<FlashDone> {
+    if (this.#flashing) throw usage(FLASH_REFUSAL);
+    const meter = this.#listedMeter();
+    const isMeter = meter?.id === deviceId;
+    if (!isMeter && !scenarioOf(deviceId)) throw usage("That meter is no longer attached.");
+    const info = await this.firmwareInspect(path);
+    if (confirmation.trim() !== info.version) {
+      throw usage(`Type the file's version, ${info.version}, to confirm the update.`);
+    }
+    this.#flashing = true;
+    this.#firmwareFlashes.push({ deviceId, path, confirmation });
+    // Like the backend: the trigger session and the stream let go of the meter first.
+    const s = this.#session;
+    if (s) {
+      this.#closeTrigger();
+      if (this.#replugTimer !== null) clearTimeout(this.#replugTimer);
+      this.#replugTimer = null;
+      this.#endSession(s, null);
+    }
+    const failAt = this.#mode?.startsWith("firmware-fail-")
+      ? this.#mode.slice("firmware-fail-".length)
+      : null;
+    const fail = (stage: string): UiError => ({
+      kind: "protocol",
+      message: `The firmware update failed: ${MOCK_FLASH_FAILURES[stage] ?? stage}.`,
+      hint: FLASH_RECOVERY_HINT,
+    });
+    try {
+      const fromBootloader = isMeter && meter?.mode === "bootloader";
+      for (const stage of ["switching", "erasing"] as const) {
+        if (stage === "switching" && fromBootloader) continue;
+        onStage({ stage });
+        await sleep(MOCK_FLASH_MS[stage]);
+        if (failAt === stage) throw fail(stage);
+      }
+      const total = info.size;
+      for (let k = 0; k <= MOCK_FLASH_WRITES; k++) {
+        onStage({ stage: "writing", done: Math.round((total * k) / MOCK_FLASH_WRITES), total });
+        if (failAt === "writing" && k === 3) throw fail("writing");
+        if (k < MOCK_FLASH_WRITES) await sleep(MOCK_FLASH_MS.write);
+      }
+      for (const stage of ["verifying", "finished", "returning"] as const) {
+        onStage({ stage });
+        await sleep(MOCK_FLASH_MS[stage]);
+        if (failAt === stage) throw fail(stage);
+      }
+      return { outcome: "verified", version: info.version };
+    } finally {
+      this.#flashing = false;
+    }
+  }
+
+  /** The updates this mock ran (FR V9SK55), for the UI tests to check nothing was sent. */
+  firmwareFlashLog(): { deviceId: string; path: string; confirmation: string }[] {
+    return this.#firmwareFlashes.map((f) => ({ ...f }));
   }
 
   /** There is no open dialog: imports a vendor log of one cycle of the demo PD
@@ -1236,6 +1357,7 @@ export class MockBackend {
 
   /** Opens the trigger session on the connected demo meter. */
   async triggerOpen(): Promise<void> {
+    if (this.#flashing) throw usage(FLASH_REFUSAL);
     if (!this.#session) throw usage("Connect a meter first.");
     if (this.#trigger) return;
     const s = this.#session;

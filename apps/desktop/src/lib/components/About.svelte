@@ -8,8 +8,16 @@
     onClose,
     opener,
     details = null,
+    advancedFirmware = false,
+    advancedFirmwareLocked = false,
+    onAdvancedFirmware,
   }: {
     onClose: () => void;
+    /** The Advanced firmware switch (FR V9SK55, AC .1): shows the Firmware tab. */
+    advancedFirmware?: boolean;
+    /** An update runs: the switch cannot be turned off. */
+    advancedFirmwareLocked?: boolean;
+    onAdvancedFirmware?: (on: boolean) => void;
     /** The connected meter's details (FR V9SK52, AC .5), null while none is connected. */
     details?: ConnectedInfo | null;
     /** The control that opened About; focus returns there on close (or to ⋯ when it is gone). */
@@ -53,6 +61,19 @@
       </dl>
     </section>
   {/if}
+  <section aria-label="Settings">
+    <h3>Settings</h3>
+    <button
+      type="button"
+      role="switch"
+      class="switch"
+      aria-checked={advancedFirmware}
+      disabled={advancedFirmwareLocked && advancedFirmware}
+      onclick={() => onAdvancedFirmware?.(!advancedFirmware)}
+    >
+      Advanced firmware
+    </button>
+  </section>
 </Panel>
 
 <style>
@@ -71,6 +92,43 @@
   }
   dt {
     color: var(--muted);
+  }
+  .switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font: inherit;
+    color: var(--text);
+    background: none;
+    border: none;
+    padding: 0.25rem 0;
+    cursor: pointer;
+  }
+  .switch::before {
+    content: "";
+    box-sizing: border-box;
+    width: 2rem;
+    height: 1.1rem;
+    border: 1px solid var(--control-border);
+    border-radius: 999px;
+    background: radial-gradient(
+      circle at 0.55rem 50%,
+      var(--control-border) 0.35rem,
+      transparent 0.37rem
+    );
+  }
+  .switch[aria-checked="true"]::before {
+    border-color: var(--accent);
+    background: radial-gradient(
+        circle at calc(100% - 0.55rem) 50%,
+        var(--bg) 0.35rem,
+        transparent 0.37rem
+      )
+      var(--accent);
+  }
+  .switch:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
   dd {
     margin: 0;

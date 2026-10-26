@@ -17,7 +17,7 @@ use powerz_protocol::firmware::flash::{
     JumpTarget, Meter, MeterOpener, flash, jump,
 };
 use powerz_protocol::session::{Clock, ConnectOutcome, HeadOutcome, Session};
-use powerz_protocol::transport::discovery::{DeviceEntry, UsbIdentity};
+use powerz_protocol::transport::discovery::{self, DeviceEntry, UsbIdentity};
 use powerz_protocol::transport::{Error as TransportError, Transport};
 
 use crate::error::CliError;
@@ -216,26 +216,7 @@ pub fn find_flashed_meter<'a>(
     devices: &'a [DeviceEntry],
     serial: Option<&str>,
 ) -> Result<Option<&'a DeviceEntry>, CliError> {
-    if let Some(serial) = serial
-        && let Some(d) = devices.iter().find(|d| d.serial.as_deref() == Some(serial))
-    {
-        return Ok(Some(d));
-    }
-    match devices {
-        [] => Ok(None),
-        [only] => Ok(Some(only)),
-        several => {
-            let serials: Vec<&str> = several
-                .iter()
-                .map(|d| d.serial.as_deref().unwrap_or("-"))
-                .collect();
-            Err(CliError::Usage(format!(
-                "several POWER-Z devices attached and none is the flashed meter; unplug the \
-                 others: {}",
-                serials.join(", ")
-            )))
-        }
-    }
+    discovery::find_flashed_meter(devices, serial).map_err(|e| CliError::Usage(e.to_string()))
 }
 
 /// `powerz firmware flash`: flash `container` onto the meter `opener`

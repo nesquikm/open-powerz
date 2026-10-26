@@ -16,7 +16,7 @@
 //! - `POWERZ_SIM_CTRL_C_AFTER=<k>`: with `firmware flash`, stands in for
 //!   Ctrl-C once the simulated bootloader has taken `k` payload writes.
 //!
-//! The real `DiscoveryOpener` cannot be driven without a meter, so its
+//! The real USB discovery cannot be driven without a meter, so its
 //! matching after the mode switch is tested through the pure
 //! `find_flashed_meter` over a hand-made device list.
 

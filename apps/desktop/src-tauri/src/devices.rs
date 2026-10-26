@@ -291,13 +291,41 @@ pub struct DeviceManager<O, C> {
     rate_sps: u32,
     /// The device the open (or awaited) session was connected to.
     device: Option<DeviceListing>,
-    /// The open trigger session (FR DGSQ6S).
     /// The open trigger session (FR DGSQ6S). Shared with the session's
     /// event sink, so a meter that drops out closes it too.
     trigger: Arc<Mutex<Option<crate::trigger::TriggerWorker>>>,
     /// The queue rate to restore when the trigger session closes, if it was
     /// capped for it.
     rate_before_trigger: Option<Rate>,
+    /// Raised while a firmware update holds the meter (FR V9SK55, AC .4);
+    /// shared with its [`FlashLease`].
+    flashing: Arc<AtomicBool>,
+}
+
+/// Why a request is refused while a firmware update runs.
+const FLASH_REFUSAL: &str =
+    "A firmware update is running. Wait for it to finish before using the meter.";
+
+/// Exclusive use of a meter for a firmware update (FR V9SK55, AC .4): while
+/// it is held the manager refuses the measurement stream, PD capture,
+/// recording, triggering and device switching. Dropping it releases them.
+#[derive(Debug)]
+pub struct FlashLease {
+    device: DeviceListing,
+    flashing: Arc<AtomicBool>,
+}
+
+impl FlashLease {
+    /// The meter the update was given.
+    pub fn device(&self) -> &DeviceListing {
+        &self.device
+    }
+}
+
+impl Drop for FlashLease {
+    fn drop(&mut self) {
+        self.flashing.store(false, Ordering::SeqCst);
+    }
 }
 
 /// The queue rate cap while a trigger session is open, SPS. [inferred]
@@ -561,7 +589,55 @@ where
             device: None,
             trigger: Arc::default(),
             rate_before_trigger: None,
+            flashing: Arc::default(),
         }
+    }
+
+    /// Refuse a request while a firmware update holds the meter.
+    fn ensure_not_flashing(&self) -> Result<(), UiError> {
+        if self.flashing.load(Ordering::SeqCst) {
+            return Err(UiError::usage(FLASH_REFUSAL));
+        }
+        Ok(())
+    }
+
+    /// Whether a firmware update holds the meter.
+    pub fn flashing(&self) -> bool {
+        self.flashing.load(Ordering::SeqCst)
+    }
+
+    /// Whether the main window may close now: not while a firmware update
+    /// holds the meter, since quitting would cut the flash short.
+    pub fn close_allowed(&self) -> bool {
+        close_allowed(self.flashing())
+    }
+
+    /// Take the listed device `id` for a firmware update (FR V9SK55,
+    /// AC .4): the trigger session and the measurement stream close first
+    /// (waiting for the worker to let go of the pipe), any wait for an
+    /// unplugged meter ends, and everything else that talks to a meter is
+    /// refused until the lease is dropped. A bootloader-mode meter can be
+    /// taken too.
+    pub fn begin_flash(&mut self, id: &str) -> Result<FlashLease, UiError> {
+        self.ensure_not_flashing()?;
+        let device = self
+            .list_devices()
+            .into_iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
+        self.flashing.store(true, Ordering::SeqCst);
+        self.rate_before_trigger = None;
+        if let Some(trigger) = take(&self.trigger) {
+            let _ = trigger.close();
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.disconnect();
+        }
+        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        Ok(FlashLease {
+            device,
+            flashing: Arc::clone(&self.flashing),
+        })
     }
 
     /// Serial of the unplugged meter the app waits for, if any.
@@ -582,6 +658,9 @@ where
     /// started a connect. A list without the awaited meter starts nothing,
     /// and nothing else is ever connected on its own.
     pub fn devices_changed(&mut self, devices: &[DeviceListing]) -> bool {
+        if self.flashing() {
+            return false;
+        }
         let Some(serial) = self.waiting_for() else {
             return false;
         };
@@ -658,6 +737,7 @@ where
         sink: impl EventSink,
         stop: Arc<AtomicBool>,
     ) -> Result<(), UiError> {
+        self.ensure_not_flashing()?;
         if self.running_worker().is_some() {
             return Err(UiError::usage(
                 "A meter is already connected. Disconnect it first.",
@@ -776,6 +856,7 @@ where
     /// Recording and export control of the open session, so a caller can
     /// wait for the worker's answer after releasing its lock on the manager.
     pub fn control(&self) -> Result<worker::WorkerControl, UiError> {
+        self.ensure_not_flashing()?;
         self.running_worker()
             .map(WorkerHandle::control)
             .ok_or_else(|| UiError::usage("No meter is connected."))
@@ -1000,6 +1081,7 @@ where
     /// so the caller can open the port and run the PDM handshake without it
     /// and then [`DeviceManager::install_trigger`] the result.
     pub fn trigger_opener(&self) -> Result<TriggerOpener, UiError> {
+        self.ensure_not_flashing()?;
         if self.running_worker().is_none() {
             return Err(UiError::usage("Connect a meter first."));
         }
@@ -1122,10 +1204,21 @@ impl Hotplug {
     }
 }
 
+/// A close request goes through unless a firmware update is running.
+pub fn close_allowed(flashing: bool) -> bool {
+    !flashing
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::batch::{Batch, Sample};
+
+    #[test]
+    fn closing_the_window_is_refused_only_while_a_firmware_update_runs() {
+        assert!(close_allowed(false));
+        assert!(!close_allowed(true));
+    }
 
     fn batch_at(t_ms: u32) -> BackendEvent {
         BackendEvent::Batch(Batch {

@@ -498,6 +498,49 @@ export async function firmwareInspect(path: string): Promise<FirmwareFileInfo> {
   return invoke<FirmwareFileInfo>("firmware_inspect", { path });
 }
 
+/** Opens the open dialog filtered to firmware containers (`.mencrypt`) (FR V9SK55,
+ * AC .2). Resolves to the chosen path, or `null` when the dialog was cancelled. */
+export async function firmwareChoose(): Promise<string | null> {
+  if (mock) return mock.firmwareChoose();
+  return invoke<string | null>("firmware_choose");
+}
+
+/** One stage of a firmware update as the backend reports it (FR V9SK55, AC .4); the
+ * write stage carries the bytes written so far and the image length. */
+export type FlashStage =
+  | { stage: "switching" }
+  | { stage: "erasing" }
+  | { stage: "writing"; done: number; total: number }
+  | { stage: "verifying" }
+  | { stage: "finished" }
+  | { stage: "returning" };
+
+/** How a firmware update ended (FR V9SK55, AC .5): the version read back from the meter,
+ * or an image accepted while the meter stays in its bootloader until it is replugged. */
+export type FlashDone =
+  { outcome: "verified"; version: string } | { outcome: "power_cycle_needed" };
+
+/** Updates the meter `deviceId` with the firmware file at `path` (FR V9SK55, AC .4): the
+ * backend holds the meter for the update, re-checks that `confirmation` is the file's
+ * version before anything is sent, and reports each stage to `onStage`. Resolves to the
+ * outcome, or rejects with the error and its recovery steps. */
+export async function firmwareFlash(
+  deviceId: string,
+  path: string,
+  confirmation: string,
+  onStage: (stage: FlashStage) => void,
+): Promise<FlashDone> {
+  if (mock) return mock.firmwareFlash(deviceId, path, confirmation, onStage);
+  const channel = new Channel<FlashStage>();
+  channel.onmessage = onStage;
+  return invoke<FlashDone>("firmware_flash", {
+    deviceId,
+    path,
+    confirmation,
+    onProgress: channel,
+  });
+}
+
 /** Drops every captured PD record; resolves to the index of the next record. Rows
  * numbered below it were sent before the clear and are stale. */
 export async function pdClear(): Promise<number> {

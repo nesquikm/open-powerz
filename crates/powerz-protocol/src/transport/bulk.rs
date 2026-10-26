@@ -6,10 +6,10 @@ use nusb::Endpoint;
 use nusb::MaybeFuture;
 use nusb::transfer::{Buffer, Bulk, In, Out, TransferError};
 
-use super::discovery::DeviceEntry;
+use super::discovery::{self, DeviceEntry};
 use super::select::{EndpointDesc, InterfaceDesc, select_interfaces};
 use super::{Error, GuardedTransport, Transport, map_io_error};
-use crate::firmware::flash::{FlashAck, FlashGuard, FlashTransport};
+use crate::firmware::flash::{FlashAck, FlashGuard, FlashTransport, Meter, MeterOpener};
 
 /// Bulk max packet size of the meter's endpoints.
 pub const MAX_PACKET: usize = 64;
@@ -55,7 +55,7 @@ impl BulkTransport {
 
     /// Open `device` like [`open`](Self::open), but behind the strict flash
     /// guard instead of the shared one: the pipe the flash engine's
-    /// [`MeterOpener`](crate::firmware::flash::MeterOpener) hands out.
+    /// [`MeterOpener`] hands out.
     ///
     /// This pipe can carry JUMP_DFU, so it needs the user's explicit
     /// [`FlashAck`]. The raw pipe never leaves this module: the flash
@@ -195,6 +195,43 @@ impl Transport for BulkTransport {
 impl FlashTransport for BulkTransport {
     fn write_raw(&mut self, data: &[u8], timeout: Duration) -> Result<(), Error> {
         self.write(data, timeout)
+    }
+}
+
+/// The flash engine's [`MeterOpener`] for a real meter: each open lists the
+/// devices again (the meter re-enumerates between modes), picks the meter
+/// with [`discovery::find_flashed_meter`] and opens its bulk pipe behind the
+/// strict flash guard. An ambiguous choice is an [`Error::Io`] naming the
+/// candidates.
+#[derive(Debug)]
+pub struct BulkFlashOpener {
+    serial: Option<String>,
+    ack: FlashAck,
+}
+
+impl BulkFlashOpener {
+    /// An opener for the meter with `serial` (else the only POWER-Z
+    /// attached); `ack` is the acknowledgement the opened pipes need.
+    pub fn new(serial: Option<String>, ack: FlashAck) -> BulkFlashOpener {
+        BulkFlashOpener { serial, ack }
+    }
+}
+
+impl MeterOpener for BulkFlashOpener {
+    type Pipe = FlashGuard<BulkTransport>;
+
+    fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, Error> {
+        let devices = discovery::list_devices()?;
+        let Some(device) = discovery::find_flashed_meter(&devices, self.serial.as_deref())
+            .map_err(|e| Error::Io(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Meter {
+            mode: device.mode(),
+            model: device.model,
+            pipe: BulkTransport::open_for_flash(device, &self.ack)?,
+        }))
     }
 }
 
