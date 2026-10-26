@@ -9,10 +9,15 @@
 //! not implement. The shared guard is unchanged for every other path.
 //!
 //! The bootloader sequence is `[static]` (see `docs/protocol.md`): CONNECT
-//! → ACCEPT; HEAD (field must be 0); the 0x42 descriptor as a raw write
+//! → ACCEPT (an unanswered first CONNECT is retried once after a recover,
+//! as the real bootloader ignores it `[device]`); HEAD (field must be 0); the 0x42 descriptor as a raw write
 //! (1000 ms write wait), then a separate 20 ms read that must time out; N−1 reads of 10 ms that must time out and a 1000 ms read
 //! that must be ACCEPT; the payload in raw 4080-byte writes, each acked by
-//! SYNC; FINISHED within 1000 ms. Nothing is retried automatically.
+//! SYNC; FINISHED within 1000 ms. Nothing else is retried automatically.
+//!
+//! On application firmware 2.0.6 a jump takes effect at the next power-up,
+//! not live `[device]`: after each jump the engine reports the meter's
+//! reply, asks for a replug and waits long enough for one.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -35,11 +40,16 @@ pub const BLOCK_LEN: usize = 4080;
 /// `[inferred]`.
 pub const MAX_APP_END: u32 = 0x0008_0000;
 /// How long to wait for the meter to come back in bootloader mode after
-/// JUMP_DFU (the vendor tool waits two seconds `[static]`).
-pub const SWITCH_TIMEOUT: Duration = Duration::from_millis(5000);
+/// JUMP_DFU. The vendor tool waits two seconds `[static]`, but on 2.0.6 the
+/// jump takes effect at the next power-up `[device]`, so this leaves time
+/// for the user to unplug the meter and plug it back in.
+pub const SWITCH_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long to wait for the meter to come back in application mode after
-/// JUMP_APROM `[inferred]`.
-pub const RETURN_TIMEOUT: Duration = Duration::from_millis(5000);
+/// JUMP_APROM, again with time for a replug `[inferred]`.
+pub const RETURN_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long to wait for the meter's reply to a jump frame. The vendor tool
+/// reads none `[static]`; this one read only records what the meter says.
+pub const JUMP_REPLY_WAIT: Duration = Duration::from_millis(500);
 
 /// Pause between two looks for the re-enumerated meter.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -63,6 +73,7 @@ const FINISHED_WAIT: Duration = Duration::from_millis(1000);
 /// Reply types the bootloader answers with `[static]`.
 const SYNC: u8 = 0x01;
 const ACCEPT: u8 = 0x05;
+const REJECT: u8 = 0x06;
 const FINISHED: u8 = 0x07;
 /// JUMP_APROM frame type `[static]`.
 const JUMP_APROM: u8 = 0x08;
@@ -289,6 +300,15 @@ pub enum FlashProgress {
     Finished,
     /// Returning the meter to application mode.
     Returning,
+    /// A jump to `to` was sent and answered with `reply`: unplug the meter
+    /// and plug it back in if it does not restart by itself. Sent after
+    /// [`Switching`](Self::Switching) and after [`Returning`](Self::Returning).
+    Replug {
+        /// The mode the meter should come back in.
+        to: DeviceMode,
+        /// The meter's reply to the jump frame.
+        reply: JumpReply,
+    },
 }
 
 /// How a successful flash ended.
@@ -440,7 +460,7 @@ pub fn flash<O: MeterOpener, C: Clock>(
         DeviceMode::Bootloader => meter,
         DeviceMode::Application => {
             progress(FlashProgress::Switching);
-            switch_to_bootloader(meter, container, opener, &mut clock)?
+            switch_to_bootloader(meter, container, opener, &mut clock, progress)?
         }
         DeviceMode::Unknown => {
             return Err(FlashError::NotInBootloader {
@@ -458,7 +478,11 @@ pub fn flash<O: MeterOpener, C: Clock>(
     download(&mut pipe, container, &mut clock, &mut ids, stop, progress).map_err(in_bootloader)?;
     progress(FlashProgress::Returning);
     // A failed jump leaves the meter in its bootloader.
-    send_jump(&mut pipe, JUMP_APROM, ids.next()).map_err(in_bootloader)?;
+    let reply = send_jump(&mut pipe, JUMP_APROM, ids.next()).map_err(in_bootloader)?;
+    progress(FlashProgress::Replug {
+        to: DeviceMode::Application,
+        reply,
+    });
     drop(pipe);
     let mut app = match wait_for(opener, &mut clock, DeviceMode::Application, RETURN_TIMEOUT) {
         Ok(app) => app,
@@ -559,6 +583,7 @@ fn switch_to_bootloader<O: MeterOpener, C: Clock>(
     container: &FirmwareContainer<'_>,
     opener: &mut O,
     clock: &mut C,
+    progress: &mut dyn FnMut(FlashProgress),
 ) -> Result<Meter<O::Pipe>, FlashError> {
     let info = read_app_info(&mut meter.pipe, &mut *clock).map_err(|detail| FlashError::Read {
         detail: format!("reading the application info block: {detail}"),
@@ -574,7 +599,13 @@ fn switch_to_bootloader<O: MeterOpener, C: Clock>(
             detail: e.to_string(),
         })?;
     let target = JumpTarget::Bootloader;
-    let seen = match jump_and_wait(meter.pipe, target, opener, clock)? {
+    let mut sent = |reply| {
+        progress(FlashProgress::Replug {
+            to: DeviceMode::Bootloader,
+            reply,
+        })
+    };
+    let seen = match jump_and_wait(meter.pipe, target, opener, clock, &mut sent)? {
         Waited::Reached(boot) => return Ok(boot),
         Waited::Seen(Some(mode)) => format!("{} mode", mode.name()),
         Waited::Seen(None) => "no meter".into(),
@@ -596,21 +627,26 @@ enum Waited<P> {
     OpenError(TransportError),
 }
 
-/// Send the jump frame for `target` through the strict flash guard, wait
-/// for the meter to come back in `target` mode (for [`SWITCH_TIMEOUT`] or
-/// [`RETURN_TIMEOUT`]) and, if it does not, look once more at what is
-/// attached.
+/// Send the jump frame for `target` through the strict flash guard, hand
+/// the meter's reply to `sent`, wait for the meter to come back in `target`
+/// mode (for [`SWITCH_TIMEOUT`] or [`RETURN_TIMEOUT`]) and, if it does not,
+/// look once more at what is attached.
 fn jump_and_wait<O: MeterOpener, C: Clock>(
     pipe: O::Pipe,
     target: JumpTarget,
     opener: &mut O,
     clock: &mut C,
+    sent: &mut dyn FnMut(JumpReply),
 ) -> Result<Waited<O::Pipe>, FlashError> {
     let (ty, limit) = match target {
         JumpTarget::Bootloader => (JUMP_DFU, SWITCH_TIMEOUT),
         JumpTarget::Application => (JUMP_APROM, RETURN_TIMEOUT),
     };
-    send_jump(&mut FlashGuard::new(pipe), ty, 0x01)?;
+    let mut pipe = FlashGuard::new(pipe);
+    let reply = send_jump(&mut pipe, ty, 0x01)?;
+    // Release the pipe before the meter re-enumerates.
+    drop(pipe);
+    sent(reply);
     Ok(match wait_for(opener, clock, target.mode(), limit) {
         Ok(m) => Waited::Reached(m),
         Err(Some(e)) => Waited::OpenError(e),
@@ -623,16 +659,75 @@ fn jump_and_wait<O: MeterOpener, C: Clock>(
 }
 
 /// Send the write-only jump frame `ty` (JUMP_DFU or JUMP_APROM) with
-/// transaction id `id` as one raw write. The meter resets as it jumps, so a
-/// write that sees it vanish ([`TransportError::Disconnected`]) counts as
-/// sent; any other failure is a device error naming the jump.
-fn send_jump<P: FlashTransport>(pipe: &mut P, ty: u8, id: u8) -> Result<(), FlashError> {
+/// transaction id `id` as one raw write, then read the meter's reply once
+/// for [`JUMP_REPLY_WAIT`]. The meter may reset as it jumps, so a write
+/// that sees it vanish ([`TransportError::Disconnected`]) counts as sent
+/// (and nothing is read); any other failure is a device error naming the
+/// jump.
+fn send_jump<P: FlashTransport>(pipe: &mut P, ty: u8, id: u8) -> Result<JumpReply, FlashError> {
     match pipe.write_raw(&[ty, id, 0x00, 0x00], WRITE_WAIT) {
-        Ok(()) | Err(TransportError::Disconnected) => Ok(()),
+        Ok(()) => Ok(JumpReply::from_read(pipe.read(JUMP_REPLY_WAIT))),
+        Err(TransportError::Disconnected) => Ok(JumpReply::Disconnected),
         Err(e) => Err(FlashError::Device {
             detail: format!("{}: {e}", jump_name(ty)),
         }),
     }
+}
+
+/// What the meter answered to a jump frame (the vendor tool reads nothing
+/// back `[static]`, so any answer is a finding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpReply {
+    /// ACCEPT (0x05).
+    Accept,
+    /// REJECT (0x06).
+    Reject,
+    /// A reply of another type (bits 0..6 of its first byte).
+    Other(u8),
+    /// Nothing within [`JUMP_REPLY_WAIT`].
+    NoReply,
+    /// The meter vanished from the bus (it reset as it jumped).
+    Disconnected,
+}
+
+impl JumpReply {
+    /// The reply as one read after the jump saw it. A read error other than
+    /// a disconnect counts as no reply.
+    fn from_read(r: Result<Vec<u8>, TransportError>) -> JumpReply {
+        match r {
+            Ok(reply) => match reply_type(&reply) {
+                Some(ACCEPT) => JumpReply::Accept,
+                Some(REJECT) => JumpReply::Reject,
+                Some(ty) => JumpReply::Other(ty),
+                None => JumpReply::NoReply,
+            },
+            Err(TransportError::Disconnected) => JumpReply::Disconnected,
+            Err(_) => JumpReply::NoReply,
+        }
+    }
+}
+
+impl std::fmt::Display for JumpReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JumpReply::Accept => f.write_str("ACCEPT"),
+            JumpReply::Reject => f.write_str("REJECT"),
+            JumpReply::Other(ty) => write!(f, "type {ty:#04x}"),
+            JumpReply::NoReply => f.write_str("none"),
+            JumpReply::Disconnected => f.write_str("none, the meter disconnected"),
+        }
+    }
+}
+
+/// A jump [`jump`] has sent, reported before it waits for the meter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JumpSent {
+    /// The mode the meter was in.
+    pub from: DeviceMode,
+    /// The mode it was asked to switch to.
+    pub target: JumpTarget,
+    /// Its reply to the jump frame.
+    pub reply: JumpReply,
 }
 
 /// The name of jump frame type `ty`.
@@ -690,8 +785,10 @@ pub enum JumpOutcome {
 ///
 /// From application mode only JUMP_DFU is sent, from bootloader mode only
 /// JUMP_APROM, as a raw write through the strict [`FlashGuard`]; nothing
-/// else (no CONNECT, HEAD, descriptor or info read). A meter already in the
-/// target mode ([`FlashError::AlreadyInMode`]), in an unknown mode
+/// else (no CONNECT, HEAD, descriptor or info read). The meter's reply is
+/// read once and handed to `sent` with the mode it was in, before the
+/// wait, so the caller can ask for a replug. A meter already in the target
+/// mode ([`FlashError::AlreadyInMode`]), in an unknown mode
 /// ([`FlashError::UnknownMode`]) or a `stop` already requested sends
 /// nothing. After the jump the meter is looked for on clock time, for
 /// [`SWITCH_TIMEOUT`] (to the bootloader) or [`RETURN_TIMEOUT`] (to the
@@ -702,6 +799,7 @@ pub fn jump<O: MeterOpener, C: Clock>(
     opener: &mut O,
     mut clock: C,
     stop: &AtomicBool,
+    sent: &mut dyn FnMut(&JumpSent),
 ) -> Result<JumpOutcome, FlashError> {
     let meter = opener.open().map_err(device)?.ok_or(FlashError::Device {
         detail: "no meter found".into(),
@@ -714,7 +812,15 @@ pub fn jump<O: MeterOpener, C: Clock>(
         mode if mode == target.mode() => return Err(FlashError::AlreadyInMode { mode }),
         _ => {}
     }
-    match jump_and_wait(meter.pipe, target, opener, &mut clock)? {
+    let from = meter.mode;
+    let mut report = |reply| {
+        sent(&JumpSent {
+            from,
+            target,
+            reply,
+        })
+    };
+    match jump_and_wait(meter.pipe, target, opener, &mut clock, &mut report)? {
         Waited::Reached(m) => Ok(JumpOutcome::Reached(m.mode)),
         Waited::Seen(seen) => Ok(JumpOutcome::NotReached { seen }),
         Waited::OpenError(e) => Err(FlashError::Device {
@@ -950,8 +1056,13 @@ fn download<P: FlashTransport, C: Clock>(
     stop: &AtomicBool,
     progress: &mut dyn FnMut(FlashProgress),
 ) -> Result<(), FlashError> {
-    // CONNECT → ACCEPT (else −108).
-    let r = pipe.transact(&frame::connect(ids.next()), CONNECT_WAIT);
+    // CONNECT → ACCEPT (else −108). The bootloader leaves the first CONNECT
+    // after an open unanswered `[device]`; like the session's connect, an
+    // unanswered one is retried once after a recover (no device command).
+    let mut r = pipe.transact(&frame::connect(ids.next()), CONNECT_WAIT);
+    if matches!(r, Err(TransportError::Timeout)) && pipe.recover().is_ok() {
+        r = pipe.transact(&frame::connect(ids.next()), CONNECT_WAIT);
+    }
     if !is(&r, ACCEPT) {
         return Err(FlashError::Read {
             detail: format!("CONNECT: {}", describe(&r)),

@@ -35,7 +35,7 @@ use powerz_cli::{Cli, CliError};
 use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C};
 
 /// Simulator knobs cleared before every run.
-const ENV_KNOBS: [&str; 7] = [
+const ENV_KNOBS: [&str; 8] = [
     "POWERZ_SIM_CLOCK",
     "POWERZ_SIM_FAULT",
     "POWERZ_SIM_CTRL_C_AFTER",
@@ -43,6 +43,7 @@ const ENV_KNOBS: [&str; 7] = [
     "POWERZ_SIM_APP_VERSION",
     "POWERZ_SIM_MODE",
     "POWERZ_SIM_FLASH_FAULT",
+    "POWERZ_SIM_REPLUG_AFTER",
 ];
 
 /// 3 whole blocks plus a remainder.
@@ -409,4 +410,59 @@ fn after_the_switch_no_power_z_at_all_is_none() {
     assert!(found.is_none());
     let found = find_flashed_meter(&[], None).expect("not an error");
     assert!(found.is_none());
+}
+
+// ---- AC-V9SK56.8: --trace for firmware flash; AC-V9SK54.1 / .5: replugs ----
+
+#[test]
+fn trace_logs_every_frame_of_the_flash_raw_writes_included() {
+    let file = valid_file("trace.mencrypt");
+    let mut c = Command::cargo_bin("powerz").expect("powerz binary is built");
+    for k in ENV_KNOBS {
+        c.env_remove(k);
+    }
+    c.env("POWERZ_SIM_CLOCK", "fake")
+        .timeout(Duration::from_secs(60))
+        .args(["--trace", "--transport", "sim", "firmware", "flash"])
+        .arg(&file)
+        .arg("--i-understand");
+    let (out, err, _) = output(&mut c, true);
+    let sent: Vec<&str> = err.lines().filter(|l| l.starts_with('>')).collect();
+    let types: Vec<&str> = sent
+        .iter()
+        .map(|l| l.split(' ').nth(1).unwrap_or(""))
+        .collect();
+    assert!(types.contains(&"09"), "JUMP_DFU traced: {err}");
+    assert!(types.contains(&"42"), "the raw descriptor traced: {err}");
+    assert!(types.contains(&"08"), "JUMP_APROM traced: {err}");
+    assert!(
+        sent.iter().filter(|l| l.len() > 3 * 4000).count() >= 3,
+        "the payload writes traced"
+    );
+    assert!(err.lines().any(|l| l.starts_with('<')), "replies traced");
+    assert!(out.contains("2.0.7"), "{out}");
+}
+
+#[test]
+fn flash_with_jumps_at_power_up_prompts_for_both_replugs_and_succeeds() {
+    let file = valid_file("replug.mencrypt");
+    let (out, err, _) = output(
+        &mut sim_flash(
+            &[("POWERZ_SIM_REPLUG_AFTER", "6")],
+            &[file.as_os_str(), "--i-understand".as_ref()],
+        ),
+        true,
+    );
+    let prompts: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("Unplug the meter and plug it back in"))
+        .collect();
+    assert_eq!(prompts.len(), 2, "stdout:\n{out}\nstderr:\n{err}");
+    assert!(prompts[0].contains("bootloader"), "{out}");
+    assert!(prompts[1].contains("application"), "{out}");
+    assert!(
+        out.lines().any(|l| l == "JUMP_DFU reply: none"),
+        "the reply to JUMP_DFU: {out}"
+    );
+    assert!(out.contains("2.0.7"), "{out}");
 }

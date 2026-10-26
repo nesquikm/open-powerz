@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BackendEvent, FlashDone, FlashStage, UiError } from "./backend";
+import type { BackendEvent, FlashDone, FlashEvent, UiError } from "./backend";
 import { MOCK_MODES, MockBackend, mockModeFromUrl, type MockMode } from "./mockBackend";
 
 const DEMO = "demo:load-5v-1a";
@@ -26,10 +26,10 @@ async function runFlash(
   backend: MockBackend,
   confirmation = "2.0.7",
   deviceId = DEMO,
-): Promise<{ done: FlashDone | null; error: UiError | null; stages: FlashStage[] }> {
+): Promise<{ done: FlashDone | null; error: UiError | null; stages: FlashEvent[] }> {
   const path = await backend.firmwareChoose();
   if (path === null) throw new Error("the mock chose no file");
-  const stages: FlashStage[] = [];
+  const stages: FlashEvent[] = [];
   let done: FlashDone | null = null;
   let error: UiError | null = null;
   const p = backend
@@ -43,7 +43,7 @@ async function runFlash(
   return { done, error, stages };
 }
 
-function names(stages: FlashStage[]): string[] {
+function names(stages: FlashEvent[]): string[] {
   const out: string[] = [];
   for (const s of stages) if (out.at(-1) !== s.stage) out.push(s.stage);
   return out;
@@ -72,13 +72,20 @@ describe("MockBackend firmware update", () => {
     const { done, error, stages } = await runFlash(new MockBackend());
     expect(error).toBeNull();
     expect(done).toEqual({ outcome: "verified", version: "2.0.7" });
+    // Like the backend, each jump is followed by a replug prompt (AC-V9SK55.4).
     expect(names(stages)).toEqual([
       "switching",
+      "replug",
       "erasing",
       "writing",
       "verifying",
       "finished",
       "returning",
+      "replug",
+    ]);
+    expect(stages.filter((s) => s.stage === "replug")).toEqual([
+      { stage: "replug", to: "bootloader", reply: "none" },
+      { stage: "replug", to: "application", reply: "none" },
     ]);
     const writes = stages.flatMap((s) => (s.stage === "writing" ? [s] : []));
     expect(writes.length).toBeGreaterThanOrEqual(3);

@@ -16,7 +16,7 @@ import type {
   ExportResult,
   FirmwareFileInfo,
   FlashDone,
-  FlashStage,
+  FlashEvent,
   Gap,
   HistoryGap,
   HistorySeries,
@@ -77,6 +77,7 @@ const MOCK_FLASH_MS = {
   verifying: 600,
   finished: 200,
   returning: 800,
+  replug: 1200,
 } as const;
 const MOCK_FLASH_WRITES = 20;
 
@@ -1264,7 +1265,7 @@ export class MockBackend {
     deviceId: string,
     path: string,
     confirmation: string,
-    onStage: (stage: FlashStage) => void,
+    onStage: (stage: FlashEvent) => void,
   ): Promise<FlashDone> {
     if (this.#flashing) throw usage(FLASH_REFUSAL);
     const meter = this.#listedMeter();
@@ -1299,6 +1300,11 @@ export class MockBackend {
         onStage({ stage });
         await sleep(MOCK_FLASH_MS[stage]);
         if (failAt === stage) throw fail(stage);
+        if (stage === "switching") {
+          // Like 2.0.6, the meter takes the jump at its next power-up.
+          onStage({ stage: "replug", to: "bootloader", reply: "none" });
+          await sleep(MOCK_FLASH_MS.replug);
+        }
       }
       const total = info.size;
       for (let k = 0; k <= MOCK_FLASH_WRITES; k++) {
@@ -1311,6 +1317,8 @@ export class MockBackend {
         await sleep(MOCK_FLASH_MS[stage]);
         if (failAt === stage) throw fail(stage);
       }
+      onStage({ stage: "replug", to: "application", reply: "none" });
+      await sleep(MOCK_FLASH_MS.replug);
       return { outcome: "verified", version: info.version };
     } finally {
       this.#flashing = false;

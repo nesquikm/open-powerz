@@ -101,7 +101,8 @@ fn json_stages(stages: &[FlashStage]) -> Vec<Value> {
         .collect()
 }
 
-/// The stage names in order, consecutive repeats folded.
+/// The stage names in order, consecutive repeats folded. A replug prompt is
+/// not a stage of its own: the UI keeps showing the stage it came in.
 fn stage_names(stages: &[FlashStage]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for v in json_stages(stages) {
@@ -109,7 +110,7 @@ fn stage_names(stages: &[FlashStage]) -> Vec<String> {
             .as_str()
             .unwrap_or_else(|| panic!("a stage without a name: {v}"))
             .to_owned();
-        if names.last() != Some(&name) {
+        if name != "replug" && names.last() != Some(&name) {
             names.push(name);
         }
     }
@@ -225,6 +226,17 @@ fn a_flash_from_application_mode_reports_each_stage_and_the_new_version() {
             "verifying",
             "finished",
             "returning"
+        ]
+    );
+    let replugs: Vec<Value> = json_stages(&stages)
+        .into_iter()
+        .filter(|v| v["stage"] == "replug")
+        .collect();
+    assert_eq!(
+        replugs,
+        [
+            json!({ "stage": "replug", "to": "bootloader", "reply": "none" }),
+            json!({ "stage": "replug", "to": "application", "reply": "none" }),
         ]
     );
 }

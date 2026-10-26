@@ -13,8 +13,8 @@ use powerz_protocol::decode::head::hex;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::container::FirmwareContainer;
 use powerz_protocol::firmware::flash::{
-    BACK_BUTTON_HINT, FlashAck, FlashOutcome, FlashProgress, FlashTransport, JumpOutcome,
-    JumpTarget, Meter, MeterOpener, flash, jump,
+    BACK_BUTTON_HINT, FlashAck, FlashOutcome, FlashProgress, FlashTransport, JumpOutcome, JumpSent,
+    JumpTarget, Meter, MeterOpener, RETURN_TIMEOUT, SWITCH_TIMEOUT, flash, jump,
 };
 use powerz_protocol::session::{Clock, ConnectOutcome, HeadOutcome, Session};
 use powerz_protocol::transport::discovery::{self, DeviceEntry, UsbIdentity};
@@ -256,6 +256,17 @@ pub fn firmware_flash<O: MeterOpener, C: Clock>(
             FlashProgress::Verifying => "Verifying".to_owned(),
             FlashProgress::Finished => "The bootloader accepted the image".to_owned(),
             FlashProgress::Returning => "Returning the meter to application mode".to_owned(),
+            FlashProgress::Replug { to, reply } => {
+                let frame = match to {
+                    DeviceMode::Bootloader => JumpTarget::Bootloader.frame_name(),
+                    _ => JumpTarget::Application.frame_name(),
+                };
+                let wait = match to {
+                    DeviceMode::Bootloader => SWITCH_TIMEOUT,
+                    _ => RETURN_TIMEOUT,
+                };
+                format!("{frame} reply: {reply}\n{}", replug_prompt(to, wait))
+            }
         };
         if io.is_ok() {
             io = writeln!(out, "{line}").and_then(|()| out.flush());
@@ -282,10 +293,23 @@ pub const JUMP_RISK: &str = "refusing to jump without --i-understand: switching 
      is a risk; in its bootloader the meter takes no measurements until it is jumped back to \
      application mode or power-cycled. Re-run with --i-understand to accept the risk";
 
+/// What to tell the user after a jump to `to`: on 2.0.6 a jump takes
+/// effect at the next power-up `[device]`, so ask for a replug, naming the
+/// wait.
+fn replug_prompt(to: DeviceMode, wait: Duration) -> String {
+    format!(
+        "Unplug the meter and plug it back in (no buttons) if it does not restart by itself; \
+         waiting up to {} s for {} mode",
+        wait.as_secs(),
+        to.name()
+    )
+}
+
 /// `powerz firmware jump`: send the one jump frame for `target` to the
 /// meter `opener` finds and print the mode it was in and the mode it came
-/// back in. The `Was in:` line is printed once the jump write was attempted,
-/// before the outcome, so a failed write still shows it. A refusal
+/// back in. Once the jump is sent, before the wait, it prints the `Was in:`
+/// line, the meter's reply and the replug prompt; a failed write still
+/// prints the `Was in:` line before the error. A refusal
 /// (already there, unknown mode, Ctrl-C before the jump) prints nothing. A
 /// refusal, a failed write, or a meter that does not come back in `target`
 /// mode is a device error; the last names the mode seen (and, for the
@@ -307,8 +331,22 @@ pub fn firmware_jump<O: MeterOpener, C: Clock>(
         first: Rc::clone(&seen_first),
         sent: Rc::clone(&sent),
     };
-    let result = jump(ack, target, &mut watched, clock, stop);
-    if sent.get() {
+    let wait = match target {
+        JumpTarget::Bootloader => SWITCH_TIMEOUT,
+        JumpTarget::Application => RETURN_TIMEOUT,
+    };
+    let mut io: Result<(), std::io::Error> = Ok(());
+    let reported = Cell::new(false);
+    let mut report = |s: &JumpSent| {
+        reported.set(true);
+        io = writeln!(out, "Was in:  {} mode (sent {frame})", s.from.name())
+            .and_then(|()| writeln!(out, "Reply:   {}", s.reply))
+            .and_then(|()| writeln!(out, "{}", replug_prompt(target.mode(), wait)))
+            .and_then(|()| out.flush());
+    };
+    let result = jump(ack, target, &mut watched, clock, stop, &mut report);
+    io?;
+    if sent.get() && !reported.get() {
         // Only a meter that is not in `target` mode is sent the jump.
         let from = seen_first.get().unwrap_or(DeviceMode::Unknown);
         writeln!(out, "Was in:  {} mode (sent {frame})", from.name())?;

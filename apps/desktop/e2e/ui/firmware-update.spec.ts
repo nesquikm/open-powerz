@@ -300,6 +300,10 @@ test.describe("firmware update (FR V9SK55)", () => {
 
     const progress = firmwarePanel(page).getByRole("region", { name: "Update progress" });
     await expect(progress).toBeVisible();
+    // After the jump the meter needs a replug (AC-V9SK55.4).
+    await expect(
+      progress.getByRole("status").filter({ hasText: /unplug the meter and plug it back in/i }),
+    ).toContainText(/bootloader/i);
     for (const stage of [/bootloader/i, /eras/i, /writ/i, /verif/i, /application/i]) {
       await expect(progress).toContainText(stage);
     }

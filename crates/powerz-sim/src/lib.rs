@@ -320,6 +320,11 @@ pub struct SimDevice {
     boot: flash::Bootloader,
     /// Injected bootloader failure, if any.
     flash_fault: Option<FlashFault>,
+    /// Jumps take effect at the next power-up, as on 2.0.6 `[device]`,
+    /// instead of live.
+    jump_at_power_up: bool,
+    /// The mode the next power-up starts in, set by such a jump.
+    power_up_mode: Option<DeviceMode>,
 }
 
 impl SimDevice {
@@ -362,6 +367,8 @@ impl SimDevice {
             app_version: memory::SIM_APP_VERSION.to_string(),
             boot: flash::Bootloader::default(),
             flash_fault: None,
+            jump_at_power_up: false,
+            power_up_mode: None,
         }
     }
 

@@ -10,6 +10,7 @@
     FLASH_STAGES,
     RECOVERY_STEPS,
     firmwareMeterRows,
+    replugPrompt,
     stageNameLabel,
     type FirmwareMeter,
     type FirmwareUpdate,
@@ -122,6 +123,12 @@
 {#if firmware.phase === "updating" || firmware.phase === "done" || firmware.phase === "failed"}
   <section class="progress" aria-label="Update progress" tabindex="-1" bind:this={progressEl}>
     <h3>Update progress</h3>
+    {#if firmware.replug}
+      <p class="replug" role="status">
+        {replugPrompt(firmware.replug)}
+        <span class="reply">The meter's reply to the jump: {firmware.replug.reply}.</span>
+      </p>
+    {/if}
     <ol>
       {#each stageRows as row (row.name)}
         <li data-state={row.state} aria-current={row.state === "current" ? "step" : undefined}>
@@ -208,6 +215,15 @@
   .progress,
   .outcome {
     margin-top: 1rem;
+  }
+  .replug {
+    margin: 0 0 0.5rem;
+    font-weight: 600;
+  }
+  .replug .reply {
+    display: block;
+    font-weight: normal;
+    color: var(--muted);
   }
   ol {
     margin: 0 0 0.5rem;

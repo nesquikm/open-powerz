@@ -12,7 +12,7 @@ import type {
   DeviceListing,
   FirmwareFileInfo,
   FlashDone,
-  FlashStage,
+  FlashEvent,
   UiError,
 } from "./backend";
 import {
@@ -22,6 +22,7 @@ import {
   UPDATE_WARNING,
   firmwareMeterRows,
   flashMeter,
+  replugPrompt,
   stageLabel,
   stageNameLabel,
   type FirmwareMeter,
@@ -74,11 +75,11 @@ const DETAILS: ConnectedInfo = {
 
 /** A controllable flash: the test reports stages and settles it. */
 function deferredFlash() {
-  let onStage: (s: FlashStage) => void = () => {};
+  let onStage: (s: FlashEvent) => void = () => {};
   let resolve: (d: FlashDone) => void = () => {};
   let reject: (e: UiError) => void = () => {};
   const flash = vi.fn(
-    (_id: string, _path: string, _confirmation: string, stage: (s: FlashStage) => void) => {
+    (_id: string, _path: string, _confirmation: string, stage: (s: FlashEvent) => void) => {
       onStage = stage;
       return new Promise<FlashDone>((res, rej) => {
         resolve = res;
@@ -88,7 +89,7 @@ function deferredFlash() {
   );
   return {
     flash,
-    stage: (s: FlashStage) => onStage(s),
+    stage: (s: FlashEvent) => onStage(s),
     resolve: (d: FlashDone) => resolve(d),
     reject: (e: UiError) => reject(e),
   };
@@ -215,6 +216,8 @@ describe("the typed confirmation (AC-V9SK55.3)", () => {
     expect(UPDATE_WARNING).toMatch(/connected/i);
     expect(UPDATE_WARNING).toMatch(/laptop/i);
     expect(UPDATE_WARNING).toMatch(/power/i);
+    // The only unplugging is the replug the screen asks for (AC-V9SK55.4).
+    expect(UPDATE_WARNING).toMatch(/only when the screen asks/i);
   });
 
   it("Update opens the confirmation; it does not flash yet", async () => {
@@ -469,5 +472,52 @@ describe("review fixes (AC-V9SK55.4, .5)", () => {
       "Writing 4,080 / 12,340 bytes",
     );
     expect(stageNameLabel("erasing", null)).toBe("Erasing the application area");
+  });
+});
+
+describe("the replug prompt (AC-V9SK55.4, AC-V9SK54.1 / .5)", () => {
+  it("a replug report shows the prompt without leaving the current stage", async () => {
+    const d = deferredFlash();
+    const fw = await withFile(api({ flash: d.flash }));
+    fw.requestUpdate(METER);
+    fw.confirmation = "2.0.7";
+    const running = fw.start(METER);
+    await settle();
+    expect(fw.replug).toBeNull();
+    d.stage({ stage: "switching" });
+    d.stage({ stage: "replug", to: "bootloader", reply: "none" });
+    expect(fw.stage).toEqual({ stage: "switching" });
+    expect(fw.replug).toEqual({ to: "bootloader", reply: "none" });
+    d.stage({ stage: "erasing" });
+    expect(fw.replug).toBeNull();
+    d.stage({ stage: "returning" });
+    d.stage({ stage: "replug", to: "application", reply: "none" });
+    expect(fw.stage).toEqual({ stage: "returning" });
+    expect(fw.replug?.to).toBe("application");
+    d.resolve({ outcome: "verified", version: "2.0.7" });
+    await running;
+    expect(fw.replug).toBeNull();
+  });
+
+  it("a failure while waiting for the replug clears the prompt and keeps the stage", async () => {
+    const d = deferredFlash();
+    const fw = await withFile(api({ flash: d.flash }));
+    fw.requestUpdate(METER);
+    fw.confirmation = "2.0.7";
+    const running = fw.start(METER);
+    await settle();
+    d.stage({ stage: "switching" });
+    d.stage({ stage: "replug", to: "bootloader", reply: "none" });
+    d.reject({ kind: "protocol", message: "not in bootloader mode", hint: null });
+    await running;
+    expect(fw.replug).toBeNull();
+    expect(fw.failedStage).toBe("switching");
+  });
+
+  it("tells the user to unplug and replug, naming the mode it waits for", () => {
+    const boot = replugPrompt({ to: "bootloader", reply: "none" });
+    expect(boot).toMatch(/unplug the meter and plug it back in/i);
+    expect(boot).toContain("bootloader");
+    expect(replugPrompt({ to: "application", reply: "none" })).toContain("application");
   });
 });

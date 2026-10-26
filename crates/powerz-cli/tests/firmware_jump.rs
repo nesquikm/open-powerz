@@ -14,6 +14,8 @@
 //! - `POWERZ_SIM_FLASH_FAULT=<fault>`: the simulated meter injects this
 //!   flash fault (`jump-dfu-ignored`, `jump-aprom-ignored`, ...).
 //! - `POWERZ_SIM_CTRL_C_AFTER=0`: Ctrl-C is pressed before the jump.
+//! - `POWERZ_SIM_REPLUG_AFTER=N`: like 2.0.6, the simulated meter takes a
+//!   jump at the next power-up, and is replugged after N looks at it.
 
 use std::time::Duration;
 
@@ -22,7 +24,7 @@ use clap::Parser;
 use powerz_cli::{Cli, validate};
 
 /// Simulator knobs cleared before every run.
-const ENV_KNOBS: [&str; 7] = [
+const ENV_KNOBS: [&str; 8] = [
     "POWERZ_SIM_CLOCK",
     "POWERZ_SIM_FAULT",
     "POWERZ_SIM_CTRL_C_AFTER",
@@ -30,6 +32,7 @@ const ENV_KNOBS: [&str; 7] = [
     "POWERZ_SIM_APP_VERSION",
     "POWERZ_SIM_MODE",
     "POWERZ_SIM_FLASH_FAULT",
+    "POWERZ_SIM_REPLUG_AFTER",
 ];
 
 /// `powerz --transport <transport> firmware jump <args>` on the fake sim
@@ -175,6 +178,8 @@ fn from_application_mode_it_jumps_to_the_bootloader_and_prints_both_modes() {
         lines,
         [
             "Was in:  application mode (sent JUMP_DFU)",
+            "Reply:   none",
+            REPLUG_TO_BOOTLOADER,
             "Now in:  bootloader mode"
         ],
         "stdout:\n{out}"
@@ -193,6 +198,8 @@ fn from_bootloader_mode_it_jumps_to_the_application_and_prints_both_modes() {
         lines,
         [
             "Was in:  bootloader mode (sent JUMP_APROM)",
+            "Reply:   none",
+            REPLUG_TO_APPLICATION,
             "Now in:  application mode"
         ],
         "stdout:\n{out}"
@@ -271,7 +278,11 @@ fn an_ignored_jump_still_prints_the_mode_it_was_in_before_the_error() {
     assert_eq!(code, Some(5), "stdout: {out}\nstderr: {err}");
     assert_eq!(
         out.lines().collect::<Vec<_>>(),
-        ["Was in:  application mode (sent JUMP_DFU)"],
+        [
+            "Was in:  application mode (sent JUMP_DFU)",
+            "Reply:   none",
+            REPLUG_TO_BOOTLOADER
+        ],
         "stdout:\n{out}"
     );
     assert!(!out.contains("Now in:"), "{out}");
@@ -308,5 +319,72 @@ fn ctrl_c_before_the_jump_sends_nothing_and_fails_as_interrupted() {
             !out.contains("sent JUMP") && !out.contains("Now in:"),
             "nothing sent: {out}"
         );
+    }
+}
+
+// ---- AC-V9SK56.7: the reply, the replug prompt, a jump at power-up ----
+
+/// The prompt printed after JUMP_DFU, before the wait.
+const REPLUG_TO_BOOTLOADER: &str = "Unplug the meter and plug it back in (no buttons) if it does not \
+     restart by itself; waiting up to 120 s for bootloader mode";
+/// The prompt printed after JUMP_APROM, before the wait.
+const REPLUG_TO_APPLICATION: &str = "Unplug the meter and plug it back in (no buttons) if it does \
+     not restart by itself; waiting up to 120 s for application mode";
+
+#[test]
+fn a_jump_taken_at_the_next_power_up_reaches_the_bootloader_after_the_replug() {
+    for (mode, to, want) in [
+        ("application", "bootloader", "Now in:  bootloader mode"),
+        ("bootloader", "application", "Now in:  application mode"),
+    ] {
+        let (out, err, code) = output(&mut sim_jump(
+            &[("POWERZ_SIM_MODE", mode), ("POWERZ_SIM_REPLUG_AFTER", "6")],
+            &["--to", to, "--i-understand"],
+        ));
+        assert_eq!(code, Some(0), "stdout: {out}\nstderr: {err}");
+        assert_eq!(out.lines().last(), Some(want), "stdout:\n{out}");
+    }
+}
+
+#[test]
+fn a_bad_replug_knob_is_a_usage_error() {
+    let (_, err, code) = output(&mut sim_jump(
+        &[("POWERZ_SIM_REPLUG_AFTER", "soon")],
+        &["--to", "bootloader", "--i-understand"],
+    ));
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("POWERZ_SIM_REPLUG_AFTER"), "{err}");
+}
+
+// ---- AC-V9SK56.8: --trace for firmware jump ----
+
+#[test]
+fn trace_logs_the_jump_frame_and_nothing_else_is_sent() {
+    for (mode, to, frame) in [
+        ("application", "bootloader", "> 09 01 00 00"),
+        ("bootloader", "application", "> 08 01 00 00"),
+    ] {
+        let mut c = Command::cargo_bin("powerz").expect("powerz binary is built");
+        for k in ENV_KNOBS {
+            c.env_remove(k);
+        }
+        c.env("POWERZ_SIM_CLOCK", "fake")
+            .env("POWERZ_SIM_MODE", mode)
+            .timeout(Duration::from_secs(60))
+            .args([
+                "--trace",
+                "--transport",
+                "sim",
+                "firmware",
+                "jump",
+                "--to",
+                to,
+            ])
+            .arg("--i-understand");
+        let (out, err, code) = output(&mut c);
+        assert_eq!(code, Some(0), "stdout: {out}\nstderr: {err}");
+        let sent: Vec<&str> = err.lines().filter(|l| l.starts_with('>')).collect();
+        assert_eq!(sent, [frame], "stderr:\n{err}");
+        assert!(!err.lines().any(|l| l.starts_with('x')), "{err}");
     }
 }

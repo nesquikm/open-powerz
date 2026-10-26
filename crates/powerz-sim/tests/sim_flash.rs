@@ -200,6 +200,7 @@ fn sim_progress_reports_every_stage_in_order() {
             FlashProgress::Verifying => "verifying",
             FlashProgress::Finished => "finished",
             FlashProgress::Returning => "returning",
+            FlashProgress::Replug { .. } => continue,
         };
         if stages.last() != Some(&s) {
             stages.push(s);
@@ -250,8 +251,8 @@ fn sim_connect_without_accept_is_a_read_error_and_nothing_follows() {
     assert_eq!(e.code(), -108);
     assert_eq!(
         framed_types(&m.writes()),
-        vec![0x02],
-        "one CONNECT, no retry"
+        vec![0x02, 0x02],
+        "an unanswered CONNECT is retried once, then nothing"
     );
     assert_left_in_bootloader(&e, &m);
 }
@@ -584,5 +585,36 @@ fn sim_a_jump_aprom_that_disconnects_as_the_meter_resets_is_still_verified() {
             .count(),
         1,
         "JUMP_APROM is not retried"
+    );
+}
+
+// ---- AC-V9SK54.1 / .5: jumps that take effect at the next power-up ----
+
+#[test]
+fn sim_flash_with_jumps_at_power_up_asks_for_two_replugs_and_verifies() {
+    let bytes = container();
+    let c = parse(&bytes);
+    let clock = clock();
+    let dev = device(Persona::Bulk, Scenario::Idle, &clock)
+        .with_mode(DeviceMode::Application)
+        .with_jump_at_power_up();
+    let m = SimMeter::new(dev).with_replug_after(8);
+    let (r, events) = run(&m, &clock, &c);
+    assert_eq!(
+        r,
+        Ok(FlashOutcome::Verified {
+            version: "2.0.7".into()
+        })
+    );
+    let replugs: Vec<DeviceMode> = events
+        .iter()
+        .filter_map(|e| match e {
+            FlashProgress::Replug { to, .. } => Some(*to),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replugs,
+        vec![DeviceMode::Bootloader, DeviceMode::Application]
     );
 }

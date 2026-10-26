@@ -137,6 +137,43 @@ impl SimDevice {
         self.flash_fault == Some(f)
     }
 
+    /// Make jumps take effect at the next power-up ([`SimMeter::replug`])
+    /// instead of live, as JUMP_DFU does on application firmware 2.0.6
+    /// `[device]`.
+    pub fn with_jump_at_power_up(mut self) -> SimDevice {
+        self.jump_at_power_up = true;
+        self
+    }
+
+    /// Switch to `mode` through a jump: live, or at the next power-up.
+    fn jump_to(&mut self, mode: DeviceMode) {
+        if self.jump_at_power_up {
+            self.power_up_mode = Some(mode);
+        } else {
+            self.enter(mode);
+            // The new firmware's stale frames belong to the next pipe, not
+            // to the one the jump was written on.
+            self.pending.clear();
+        }
+    }
+
+    /// Start running `mode` (a fresh pipe).
+    fn enter(&mut self, mode: DeviceMode) {
+        if mode == DeviceMode::Application && self.mode == DeviceMode::Bootloader {
+            self.boot.returned = true;
+        }
+        self.mode = mode;
+        self.reopen();
+    }
+
+    /// Unplug the meter and plug it back in: it starts in the mode a jump
+    /// left for the next power-up, else in its application (a plain
+    /// replug leaves the bootloader `[device]`).
+    pub(crate) fn power_cycle(&mut self) {
+        let mode = self.power_up_mode.take().unwrap_or(DeviceMode::Application);
+        self.enter(mode);
+    }
+
     /// The meter re-enumerated: a fresh pipe with nothing half-done. In
     /// application mode the bulk pipe starts with the stale DISCONNECT.
     pub(crate) fn reopen(&mut self) {
@@ -250,17 +287,14 @@ impl FlashTransport for SimDevice {
                 return Err(Error::Io("simulated JUMP_DFU write failure".into()));
             }
             if self.mode == DeviceMode::Application && !self.fault(FlashFault::JumpDfuIgnored) {
-                self.mode = DeviceMode::Bootloader;
-                self.reopen();
+                self.jump_to(DeviceMode::Bootloader);
             }
             if self.fault(FlashFault::JumpDfuDisconnects) {
                 return Err(Error::Disconnected);
             }
         } else if is_jump(data, JUMP_APROM) {
             if self.mode == DeviceMode::Bootloader && !self.fault(FlashFault::JumpApromIgnored) {
-                self.mode = DeviceMode::Application;
-                self.boot.returned = true;
-                self.reopen();
+                self.jump_to(DeviceMode::Application);
             }
             if self.fault(FlashFault::JumpApromDisconnects) {
                 return Err(Error::Disconnected);
@@ -305,6 +339,11 @@ pub struct SimMeter {
 struct Shared {
     device: SimDevice,
     writes: Vec<Vec<u8>>,
+    /// The user replugs the meter once this many opens have looked at it
+    /// since a jump left a mode for the next power-up.
+    replug_after: Option<usize>,
+    /// Opens since then.
+    opens_waiting: usize,
 }
 
 impl SimMeter {
@@ -314,8 +353,22 @@ impl SimMeter {
             shared: Arc::new(Mutex::new(Shared {
                 device,
                 writes: Vec::new(),
+                replug_after: None,
+                opens_waiting: 0,
             })),
         }
+    }
+
+    /// Stand in for the user: once a jump has left a mode for the next
+    /// power-up, replug the meter after `opens` more looks at it.
+    pub fn with_replug_after(self, opens: usize) -> SimMeter {
+        self.lock().replug_after = Some(opens);
+        self
+    }
+
+    /// Unplug the meter and plug it back in.
+    pub fn replug(&self) {
+        self.lock().device.power_cycle();
     }
 
     fn lock(&self) -> MutexGuard<'_, Shared> {
@@ -359,7 +412,19 @@ impl MeterOpener for SimMeter {
     fn open(&mut self) -> Result<Option<Meter<SimMeterPipe>>, Error> {
         let mode = {
             let mut s = self.lock();
+            if s.device.power_up_mode.is_some()
+                && let Some(after) = s.replug_after
+            {
+                s.opens_waiting += 1;
+                if s.opens_waiting >= after {
+                    s.opens_waiting = 0;
+                    s.device.power_cycle();
+                }
+            }
             s.device.reopen();
+            // Like the real opener, drain stale data (the application's
+            // DISCONNECT) at open.
+            s.device.pending.clear();
             s.device.mode
         };
         Ok(Some(Meter {

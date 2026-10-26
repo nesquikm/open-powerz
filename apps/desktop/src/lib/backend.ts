@@ -515,6 +515,13 @@ export type FlashStage =
   | { stage: "finished" }
   | { stage: "returning" };
 
+/** A jump was sent and the meter needs a replug if it does not restart by itself (on
+ * 2.0.6 a jump takes effect at the next power-up); `reply` is its answer to the jump. */
+export type FlashReplug = { stage: "replug"; to: "bootloader" | "application"; reply: string };
+
+/** What the backend reports during an update: a stage, or a replug prompt. */
+export type FlashEvent = FlashStage | FlashReplug;
+
 /** How a firmware update ended (FR V9SK55, AC .5): the version read back from the meter,
  * or an image accepted while the meter stays in its bootloader until it is replugged. */
 export type FlashDone =
@@ -522,16 +529,17 @@ export type FlashDone =
 
 /** Updates the meter `deviceId` with the firmware file at `path` (FR V9SK55, AC .4): the
  * backend holds the meter for the update, re-checks that `confirmation` is the file's
- * version before anything is sent, and reports each stage to `onStage`. Resolves to the
+ * version before anything is sent, and reports each stage (and each replug prompt) to
+ * `onStage`. Resolves to the
  * outcome, or rejects with the error and its recovery steps. */
 export async function firmwareFlash(
   deviceId: string,
   path: string,
   confirmation: string,
-  onStage: (stage: FlashStage) => void,
+  onStage: (stage: FlashEvent) => void,
 ): Promise<FlashDone> {
   if (mock) return mock.firmwareFlash(deviceId, path, confirmation, onStage);
-  const channel = new Channel<FlashStage>();
+  const channel = new Channel<FlashEvent>();
   channel.onmessage = onStage;
   return invoke<FlashDone>("firmware_flash", {
     deviceId,

@@ -725,18 +725,19 @@ layout is a Qt data stream, big-endian. [static]
 ## Firmware download
 
 The application firmware is updated from the boot loader, in this order. Every
-step follows the vendor app; none of it is confirmed on our meter yet. [static]
+step follows the vendor app. The switch, connect and check steps have been seen
+on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
 
 | step | host sends | expects | on failure (vendor code) | tag |
 |---|---|---|---|---|
-| switch | in application mode: JUMP_DFU `09 id 00 00`, write only, then wait up to 5 s for the meter to come back in boot-loader mode | a device in boot-loader mode | stop; hold Back while plugging the meter in | [static] |
-| connect | CONNECT `02 id 00 00` (1000 ms) | ACCEPT | Read (−108) | [static] |
-| check | HEAD `40 id 00 01` + 16 zero bytes | type 0x40 and field 0 | Product (−100), WorkMode (−111) | [static] |
+| switch | in application mode: JUMP_DFU `09 id 00 00`, write only; one 500 ms read records any reply; then ask for a replug and wait up to 120 s for the meter to come back in boot-loader mode | a device in boot-loader mode | stop; hold Back while plugging the meter in | [static]; the jump takes effect at the next power-up, and nothing visible happens until the replug [device] |
+| connect | CONNECT `02 id 00 00` (1000 ms); if it gets no reply, clear the halt, drain, and send one more | ACCEPT | Read (−108) | [static]; the boot loader leaves the first CONNECT unanswered and ACCEPTs the second [device] |
+| check | HEAD `40 id 00 01` + 16 zero bytes | type 0x40 (the extend bit may be set), the request id echoed, field 0 | Product (−100), WorkMode (−111) | [static]; boot-loader reply `c0 03 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00` to HEAD id 3 [device] |
 | descriptor | `42 id 00 04` + 64 bytes: start 0x4000, end = start + size, size, CRC, model, version, date, a random nonce | no reply: the 20 ms read must time out, because the meter is erasing | Write (−107) | [static] |
 | erase wait | N−1 reads of 10 ms (N = whole 4080-byte blocks of the payload), then one of 1000 ms | timeouts, then ACCEPT | Erase (−105) | [static]; which length N counts is [inferred] |
 | data | the stored payload, unchanged, in raw 4080-byte bulk writes and then the remainder; a zero-length packet after a write that is a multiple of 64 bytes | SYNC `01` after each write | Download (−106) | [static] |
 | verify | read for 1000 ms | FINISHED `07` | Verify (−103) | [static] |
-| return | JUMP_APROM `08 id 00 00`, write only; wait for application mode; read the info block `0x4420` | the new version | ask for a power cycle if the meter stays in its boot loader | [static] [inferred] |
+| return | JUMP_APROM `08 id 00 00`, write only; one 500 ms read records any reply; ask for a replug and wait up to 120 s for application mode; read the info block `0x4420` | the new version | ask for a power cycle if the meter stays in its boot loader | [static] [inferred]; a plain replug leaves the boot loader for the application [device] |
 
 - The boot loader lives below 0x4000 and is never written: the descriptor's
   start is always 0x4000. [static] [inferred]
@@ -755,9 +756,13 @@ step follows the vendor app; none of it is confirmed on our meter yet. [static]
   before it is written.
 - `powerz firmware jump` sends only the switch or return step on its own
   (one JUMP_DFU from application mode or one JUMP_APROM from boot-loader
-  mode, through the same guard, with no CONNECT, HEAD or info read), then
-  waits up to 5 s and reports the mode the meter comes back in. [static]
-  [inferred]
+  mode, through the same guard, with no CONNECT, HEAD or info read). It
+  reports the meter's reply to the jump, asks for a replug, waits up to
+  120 s and reports the mode the meter comes back in. [static] [inferred]
+- In boot-loader mode the meter keeps its USB vendor and product IDs
+  (0x5FC9 / 0x0063) and its product string; interface 0 (vendor 0xFF) and
+  the CDC interface report `BOOT` instead of `APP`, and there is no HID
+  interface. [device]
 
 ## Never-send commands
 

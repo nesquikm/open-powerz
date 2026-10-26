@@ -21,7 +21,7 @@ vi.mock("@tauri-apps/api/core", () => {
   return { invoke, Channel, isTauri: () => true };
 });
 
-import { firmwareChoose, firmwareFlash, type FlashDone, type FlashStage } from "./backend";
+import { firmwareChoose, firmwareFlash, type FlashDone, type FlashEvent } from "./backend";
 
 beforeEach(() => {
   invoke.mockReset();
@@ -45,7 +45,7 @@ describe("firmwareFlash", () => {
   it("invokes firmware_flash with the device, file and typed confirmation", async () => {
     const done: FlashDone = { outcome: "verified", version: "2.0.7" };
     invoke.mockResolvedValue(done);
-    const seen: FlashStage[] = [];
+    const seen: FlashEvent[] = [];
     await expect(
       firmwareFlash("usb:1:4", "/fw/a.mencrypt", "2.0.7", (s) => seen.push(s)),
     ).resolves.toEqual(done);
@@ -63,10 +63,10 @@ describe("firmwareFlash", () => {
   it("hands each stage from the channel to the caller in order", async () => {
     let resolve: (d: FlashDone) => void = () => {};
     invoke.mockReturnValue(new Promise<FlashDone>((r) => (resolve = r)));
-    const seen: FlashStage[] = [];
+    const seen: FlashEvent[] = [];
     const result = firmwareFlash("usb:1:4", "/fw/a.mencrypt", "2.0.7", (s) => seen.push(s));
     await Promise.resolve();
-    const stages: FlashStage[] = [
+    const stages: FlashEvent[] = [
       { stage: "switching" },
       { stage: "erasing" },
       { stage: "writing", done: 0, total: 8160 },

@@ -1,7 +1,9 @@
 //! The write-only mode switch of `powerz firmware jump` (FR V9SK56, AC .7):
 //! [`flash::jump`] sends exactly one JUMP_DFU (from application mode) or
 //! JUMP_APROM (from bootloader mode) as a raw write through the strict
-//! flash guard, then waits on clock time for the meter to come back and
+//! flash guard, reads the meter's reply to it once and reports it, then
+//! waits on clock time (long enough for a replug: on 2.0.6 the jump takes
+//! effect at the next power-up `[device]`) for the meter to come back and
 //! reports the mode it came back in. Nothing else is sent: no CONNECT, no
 //! HEAD, no descriptor, no info read.
 //!
@@ -20,8 +22,8 @@ use std::time::Duration;
 use common::FakeClock;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::flash::{
-    self, FlashAck, FlashError, FlashTransport, JumpOutcome, JumpTarget, Meter, MeterOpener,
-    POLL_INTERVAL, RETURN_TIMEOUT, SWITCH_TIMEOUT,
+    self, FlashAck, FlashError, FlashTransport, JUMP_REPLY_WAIT, JumpOutcome, JumpReply, JumpSent,
+    JumpTarget, Meter, MeterOpener, POLL_INTERVAL, RETURN_TIMEOUT, SWITCH_TIMEOUT,
 };
 use powerz_protocol::transport::discovery::Model;
 use powerz_protocol::transport::{Error as TransportError, Transport};
@@ -41,7 +43,7 @@ fn ms(n: u64) -> Duration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Op {
     Transact { req: Vec<u8> },
-    Read,
+    Read { timeout: Duration },
     Raw { data: Vec<u8> },
 }
 
@@ -70,6 +72,11 @@ struct State {
     open_err_after_jump: Option<(TransportError, usize)>,
     /// The armed copy of `open_err_after_jump`.
     open_errs: Option<(TransportError, usize)>,
+    /// What the first read after the jump write returns (default: no
+    /// reply, a timeout).
+    reply_to_jump: Option<Result<Vec<u8>, TransportError>>,
+    /// The armed copy of `reply_to_jump`.
+    reply_pending: Option<Result<Vec<u8>, TransportError>>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,9 +95,12 @@ impl Transport for Pipe {
         }
     }
 
-    fn read(&mut self, _timeout: Duration) -> Result<Vec<u8>, TransportError> {
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, TransportError> {
         let mut s = self.0.borrow_mut();
-        s.ops.push(Op::Read);
+        s.ops.push(Op::Read { timeout });
+        if let Some(reply) = s.reply_pending.take() {
+            return reply;
+        }
         match s.mode {
             None => Err(TransportError::Disconnected),
             Some(_) => Err(TransportError::Timeout),
@@ -116,6 +126,7 @@ impl FlashTransport for Pipe {
             let now = s.clock.0.borrow().now_ms;
             s.jump_at = Some(now);
             s.open_errs = s.open_err_after_jump.clone();
+            s.reply_pending = s.reply_to_jump.clone();
         }
         let fail = s.jump_fail.clone();
         let happens = matches!(fail, None | Some(TransportError::Disconnected));
@@ -159,6 +170,8 @@ struct Bench {
     s: Rc<RefCell<State>>,
     clock: FakeClock,
     stop: AtomicBool,
+    /// Each jump report and the clock time it came at.
+    sent: RefCell<Vec<(JumpSent, u64)>>,
 }
 
 impl Bench {
@@ -177,11 +190,14 @@ impl Bench {
             jump_at: None,
             open_err_after_jump: None,
             open_errs: None,
+            reply_to_jump: None,
+            reply_pending: None,
         };
         Bench {
             s: Rc::new(RefCell::new(state)),
             clock,
             stop: AtomicBool::new(false),
+            sent: RefCell::new(Vec::new()),
         }
     }
 
@@ -222,6 +238,12 @@ impl Bench {
         self
     }
 
+    /// The first read after the jump write returns `reply`.
+    fn reply(self, reply: Result<Vec<u8>, TransportError>) -> Bench {
+        self.s.borrow_mut().reply_to_jump = Some(reply);
+        self
+    }
+
     fn open_cost(self, ms: u64) -> Bench {
         self.s.borrow_mut().open_cost_ms = ms;
         self
@@ -234,13 +256,22 @@ impl Bench {
 
     fn run(&self, target: JumpTarget) -> Result<JumpOutcome, FlashError> {
         let mut opener = Opener(self.s.clone());
+        let clock = self.clock.clone();
         flash::jump(
             FlashAck::acknowledge(),
             target,
             &mut opener,
             self.clock.clone(),
             &self.stop,
+            &mut |sent| {
+                let now = clock.0.borrow().now_ms;
+                self.sent.borrow_mut().push((*sent, now));
+            },
         )
+    }
+
+    fn sent(&self) -> Vec<JumpSent> {
+        self.sent.borrow().iter().map(|(s, _)| *s).collect()
     }
 
     fn ops(&self) -> Vec<Op> {
@@ -260,9 +291,19 @@ impl Bench {
     }
 }
 
-/// The only op is one raw 4-byte write of frame type `ty`, `ty id 00 00`.
+/// The only write is one raw 4-byte write of frame type `ty`, `ty id 00
+/// 00`, followed by at most the one read of the meter's reply.
 fn assert_only_the_jump(ops: &[Op], ty: u8) {
-    assert_eq!(ops.len(), 1, "exactly one transfer, the jump: {ops:02x?}");
+    assert!(
+        matches!(ops.len(), 1 | 2),
+        "the jump and its reply read: {ops:02x?}"
+    );
+    if let Some(op) = ops.get(1) {
+        assert!(
+            matches!(op, Op::Read { .. }),
+            "then a read only: {ops:02x?}"
+        );
+    }
     match &ops[0] {
         Op::Raw { data } => {
             assert_eq!(data.len(), 4, "a 4-byte jump frame: {data:02x?}");
@@ -302,9 +343,8 @@ fn a_jump_sends_no_connect_head_descriptor_or_info_read() {
         bench.run(target).expect("the jump succeeds");
         let ops = bench.ops();
         assert!(
-            !ops.iter()
-                .any(|o| matches!(o, Op::Transact { .. } | Op::Read)),
-            "no framed request or read: {ops:02x?}"
+            !ops.iter().any(|o| matches!(o, Op::Transact { .. })),
+            "no framed request: {ops:02x?}"
         );
     }
 }
@@ -573,4 +613,141 @@ fn only_no_device_yet_through_the_wait_stays_not_reached_with_no_mode() {
 fn jump_targets_name_their_modes() {
     assert_eq!(JumpTarget::Bootloader.mode(), DeviceMode::Bootloader);
     assert_eq!(JumpTarget::Application.mode(), DeviceMode::Application);
+}
+
+// ---- AC-V9SK56.7: the meter's reply to the jump is reported ----
+
+#[test]
+fn the_reply_to_the_jump_is_read_once_and_reported_before_the_wait() {
+    let bench = Bench::app().reply(Ok(vec![0x06, 0x01, 0x00, 0x00]));
+    let r = bench.run(JumpTarget::Bootloader);
+    assert_eq!(r, Ok(JumpOutcome::Reached(DeviceMode::Bootloader)));
+    assert_eq!(
+        bench.sent(),
+        vec![JumpSent {
+            from: DeviceMode::Application,
+            target: JumpTarget::Bootloader,
+            reply: JumpReply::Reject,
+        }]
+    );
+    let at = bench.sent.borrow()[0].1;
+    assert_eq!(at, bench.jump_at(), "reported before the wait starts");
+    let ops = bench.ops();
+    assert_only_the_jump(&ops, JUMP_DFU);
+    assert_eq!(
+        ops[1],
+        Op::Read {
+            timeout: JUMP_REPLY_WAIT
+        },
+        "one short reply read"
+    );
+    assert!(JUMP_REPLY_WAIT <= ms(1000), "{JUMP_REPLY_WAIT:?}");
+}
+
+#[test]
+fn no_reply_accept_and_other_types_are_each_reported() {
+    for (reply, want) in [
+        (Err(TransportError::Timeout), JumpReply::NoReply),
+        (Ok(vec![0x05, 0x01, 0x00, 0x00]), JumpReply::Accept),
+        (Ok(vec![0x0B, 0x01, 0x00, 0x00]), JumpReply::Other(0x0B)),
+        (Err(TransportError::Disconnected), JumpReply::Disconnected),
+    ] {
+        let bench = Bench::boot().reply(reply.clone());
+        bench.run(JumpTarget::Application).expect("the jump runs");
+        assert_eq!(
+            bench.sent(),
+            vec![JumpSent {
+                from: DeviceMode::Bootloader,
+                target: JumpTarget::Application,
+                reply: want,
+            }],
+            "reply {reply:02x?}"
+        );
+    }
+    let bench = Bench::app();
+    bench.run(JumpTarget::Bootloader).expect("the jump runs");
+    assert_eq!(
+        bench.sent()[0].reply,
+        JumpReply::NoReply,
+        "default: silence"
+    );
+}
+
+#[test]
+fn a_jump_write_that_sees_the_meter_vanish_reports_it_and_reads_nothing() {
+    let bench = Bench::app().jump_fail(TransportError::Disconnected);
+    bench.run(JumpTarget::Bootloader).expect("the jump runs");
+    assert_eq!(bench.sent()[0].reply, JumpReply::Disconnected);
+    assert_eq!(bench.ops().len(), 1, "no read: {:02x?}", bench.ops());
+}
+
+#[test]
+fn replies_name_themselves_for_the_cli() {
+    assert_eq!(JumpReply::Accept.to_string(), "ACCEPT");
+    assert_eq!(JumpReply::Reject.to_string(), "REJECT");
+    assert_eq!(JumpReply::Other(0x0B).to_string(), "type 0x0b");
+    assert_eq!(JumpReply::NoReply.to_string(), "none");
+    assert!(
+        JumpReply::Disconnected.to_string().contains("disconnected"),
+        "{}",
+        JumpReply::Disconnected
+    );
+}
+
+#[test]
+fn a_refused_or_stopped_jump_reports_nothing() {
+    let bench = Bench::boot();
+    let _ = bench.run(JumpTarget::Bootloader);
+    let stopped = Bench::app().stopped();
+    let _ = stopped.run(JumpTarget::Bootloader);
+    let failed = Bench::app().jump_fail(TransportError::Io("pipe error".into()));
+    let _ = failed.run(JumpTarget::Bootloader);
+    assert!(bench.sent().is_empty() && stopped.sent().is_empty());
+    assert!(
+        failed.sent().is_empty(),
+        "a failed write is not a sent jump"
+    );
+}
+
+// ---- AC-V9SK56.7 / AC-V9SK54.1: the jump takes effect at the next power-up ----
+
+#[test]
+fn the_waits_leave_two_minutes_for_a_replug() {
+    assert!(SWITCH_TIMEOUT >= ms(120_000), "{SWITCH_TIMEOUT:?}");
+    assert!(RETURN_TIMEOUT >= ms(120_000), "{RETURN_TIMEOUT:?}");
+}
+
+/// The meter stays in `stay` for `secs` seconds of polling after the jump
+/// (2.0.6 does not switch live), then the user unplugs it and plugs it back
+/// in and it comes up in `then`.
+fn replugged_after(stay: DeviceMode, secs: u64, then: DeviceMode) -> Vec<Option<DeviceMode>> {
+    let polls = (secs * 1000 / POLL_INTERVAL.as_millis() as u64) as usize;
+    let mut v = vec![Some(stay); polls];
+    v.extend([None, None, Some(then)]);
+    v
+}
+
+#[test]
+fn a_jump_dfu_that_waits_for_a_replug_reaches_the_bootloader() {
+    let bench = Bench::app().after_jump(replugged_after(
+        DeviceMode::Application,
+        90,
+        DeviceMode::Bootloader,
+    ));
+    let r = bench.run(JumpTarget::Bootloader);
+    assert_eq!(r, Ok(JumpOutcome::Reached(DeviceMode::Bootloader)));
+    assert_only_the_jump(&bench.ops(), JUMP_DFU);
+    assert_eq!(bench.sent().len(), 1);
+}
+
+#[test]
+fn a_jump_aprom_that_waits_for_a_replug_reaches_the_application() {
+    let bench = Bench::boot().after_jump(replugged_after(
+        DeviceMode::Bootloader,
+        90,
+        DeviceMode::Application,
+    ));
+    let r = bench.run(JumpTarget::Application);
+    assert_eq!(r, Ok(JumpOutcome::Reached(DeviceMode::Application)));
+    assert_only_the_jump(&bench.ops(), JUMP_APROM);
 }

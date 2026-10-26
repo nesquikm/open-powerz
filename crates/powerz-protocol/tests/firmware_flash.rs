@@ -26,11 +26,13 @@ use std::time::Duration;
 use common::FakeClock;
 use fw_container::*;
 use powerz_protocol::crypto::{self, KEYS};
+use powerz_protocol::decode::head::HeadReply;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::container::FirmwareContainer;
 use powerz_protocol::firmware::flash::{
     self, APP_START, BLOCK_LEN, FlashAck, FlashError, FlashGuard, FlashOutcome, FlashProgress,
-    FlashTransport, MAX_APP_END, Meter, MeterOpener, POLL_INTERVAL, RETURN_TIMEOUT, SWITCH_TIMEOUT,
+    FlashTransport, JumpReply, MAX_APP_END, Meter, MeterOpener, POLL_INTERVAL, RETURN_TIMEOUT,
+    SWITCH_TIMEOUT,
 };
 use powerz_protocol::transport::bulk::BulkTransport;
 use powerz_protocol::transport::discovery::{DeviceEntry, Model};
@@ -120,6 +122,8 @@ enum Op {
     Read { timeout: Duration },
     /// `FlashTransport::write_raw`: bytes written with no reply awaited.
     Raw { data: Vec<u8>, timeout: Duration },
+    /// `Transport::recover`: clear the halt and drain (no device command).
+    Recover,
 }
 
 impl Op {
@@ -128,7 +132,7 @@ impl Op {
         match self {
             Op::Transact { req, .. } => Some(req),
             Op::Raw { data, .. } => Some(data),
-            Op::Read { .. } => None,
+            Op::Read { .. } | Op::Recover => None,
         }
     }
 }
@@ -284,6 +288,11 @@ impl Transport for Pipe {
             Some(DeviceMode::Bootloader) => s.next_boot(),
             Some(_) => s.app_pending.pop_front().ok_or(TransportError::Timeout),
         }
+    }
+
+    fn recover(&mut self) -> Result<(), TransportError> {
+        self.0.borrow_mut().ops.push(Op::Recover);
+        Ok(())
     }
 }
 
@@ -669,6 +678,7 @@ fn stages(events: &[FlashProgress]) -> Vec<&'static str> {
             FlashProgress::Verifying => "verifying",
             FlashProgress::Finished => "finished",
             FlashProgress::Returning => "returning",
+            FlashProgress::Replug { .. } => "replug",
         };
         if out.last() != Some(&name) {
             out.push(name);
@@ -1178,11 +1188,13 @@ fn boot_failure(script: Vec<Boot>) -> (FlashError, Bench) {
 
 #[test]
 fn connect_without_accept_is_a_read_error() {
-    for reply in [Boot::Timeout, Boot::Frame(reject())] {
+    // An unanswered CONNECT is retried once (the real bootloader ignores
+    // the first one `[device]`); a REJECT is not.
+    for (reply, connects) in [(Boot::Timeout, 2), (Boot::Frame(reject()), 1)] {
         let (e, bench) = boot_failure(fail_at(P, AT_CONNECT, reply.clone()));
         assert!(matches!(e, FlashError::Read { .. }), "{reply:?}: got {e:?}");
         assert_eq!(e.code(), -108);
-        assert_eq!(bench.boot_writes().len(), 1, "one CONNECT, no retry");
+        assert_eq!(bench.boot_writes().len(), connects, "{reply:?}");
     }
 }
 
@@ -1905,11 +1917,13 @@ fn progress_from_application_mode_is_switch_erase_write_verify_finished() {
         stages(&events),
         vec![
             "switching",
+            "replug",
             "erasing",
             "writing",
             "verifying",
             "finished",
-            "returning"
+            "returning",
+            "replug"
         ]
     );
 }
@@ -1923,7 +1937,14 @@ fn progress_from_bootloader_mode_has_no_switch_stage() {
     assert!(r.is_ok(), "got {r:?}");
     assert_eq!(
         stages(&events),
-        vec!["erasing", "writing", "verifying", "finished", "returning"]
+        vec![
+            "erasing",
+            "writing",
+            "verifying",
+            "finished",
+            "returning",
+            "replug"
+        ]
     );
 }
 
@@ -2056,7 +2077,8 @@ fn a_matching_version_after_the_return_is_verified() {
 #[test]
 fn after_any_bootloader_failure_nothing_more_is_sent_and_the_hint_is_given() {
     let cases: Vec<(&str, Vec<Boot>, usize)> = vec![
-        ("connect", fail_at(P, AT_CONNECT, Boot::Timeout), 1),
+        // Two CONNECTs: an unanswered one is retried once.
+        ("connect", fail_at(P, AT_CONNECT, Boot::Timeout), 2),
         ("head", fail_at(P, AT_HEAD, Boot::Frame(head(1))), 2),
         (
             "descriptor",
@@ -2088,8 +2110,8 @@ fn after_any_bootloader_failure_nothing_more_is_sent_and_the_hint_is_given() {
                 .iter()
                 .filter(|t| **t == 0x02)
                 .count(),
-            1,
-            "{name}: CONNECT is not retried"
+            if name == "connect" { 2 } else { 1 },
+            "{name}: only an unanswered CONNECT is retried, once"
         );
         assert_eq!(bench.mode(), Some(DeviceMode::Bootloader), "{name}");
         assert_recovery_text(&e);
@@ -2519,4 +2541,180 @@ fn the_bootloader_timeouts_are_pinned() {
         }
     }
     assert_eq!(writes, 4);
+}
+
+// ---- AC-V9SK54.1 / .5: each jump reports its reply and asks for a replug ----
+
+#[test]
+fn each_jump_is_followed_by_a_replug_prompt_naming_the_target_and_the_reply() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app().script(boot_ok(P));
+    let (r, events) = bench.run(&c);
+    assert!(r.is_ok(), "got {r:?}");
+    let replugs: Vec<&FlashProgress> = events
+        .iter()
+        .filter(|e| matches!(e, FlashProgress::Replug { .. }))
+        .collect();
+    assert_eq!(
+        replugs,
+        vec![
+            &FlashProgress::Replug {
+                to: DeviceMode::Bootloader,
+                reply: JumpReply::NoReply
+            },
+            &FlashProgress::Replug {
+                to: DeviceMode::Application,
+                reply: JumpReply::NoReply
+            },
+        ]
+    );
+    // The prompt follows the jump write, never precedes it: the first
+    // replug comes after the JUMP_DFU, the second after the JUMP_APROM.
+    let dfu = bench.jump_at(0x09);
+    let aprom = bench.jump_at(0x08);
+    assert!(dfu <= aprom);
+}
+
+/// After a jump the meter stays where it is for `secs` seconds (2.0.6
+/// switches at the next power-up `[device]`), then is unplugged and comes
+/// back in `then`.
+fn replugged_after(stay: DeviceMode, secs: u64, then: DeviceMode) -> Vec<Option<DeviceMode>> {
+    let polls = (secs * 1000 / POLL_INTERVAL.as_millis() as u64) as usize;
+    let mut v = vec![Some(stay); polls];
+    v.extend([None, None, Some(then)]);
+    v
+}
+
+#[test]
+fn a_jump_dfu_that_takes_effect_at_the_next_power_up_waits_for_the_replug() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app().script(boot_ok(P)).after_dfu(replugged_after(
+        DeviceMode::Application,
+        90,
+        DeviceMode::Bootloader,
+    ));
+    let (r, _) = bench.run(&c);
+    assert_eq!(
+        r,
+        Ok(FlashOutcome::Verified {
+            version: "2.0.7".into()
+        })
+    );
+}
+
+#[test]
+fn after_jump_aprom_a_replug_into_the_application_is_waited_for_and_verified() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::boot()
+        .script(boot_ok(P))
+        .after_aprom(replugged_after(
+            DeviceMode::Bootloader,
+            90,
+            DeviceMode::Application,
+        ));
+    let (r, _) = bench.run(&c);
+    assert_eq!(
+        r,
+        Ok(FlashOutcome::Verified {
+            version: "2.0.7".into()
+        })
+    );
+}
+
+// ---- AC-V9SK54.2: the real bootloader's CONNECT and HEAD (stage 1) ----
+
+/// The bootloader frames recorded in stage 1 on the real KM003C
+/// (`qa-runs/V9SK56.1-20261026-0928`, trace-boot.txt) `[device]`: the first
+/// CONNECT got no reply, the second ACCEPT; HEAD came back with the extend
+/// bit set, the request id echoed and field 0.
+const STAGE1_CONNECT_1: [u8; 4] = [0x02, 0x01, 0x00, 0x00];
+const STAGE1_CONNECT_2: [u8; 4] = [0x02, 0x02, 0x00, 0x00];
+const STAGE1_ACCEPT: [u8; 4] = [0x05, 0x02, 0x00, 0x00];
+const STAGE1_HEAD_REQ: [u8; 20] = [
+    0x40, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const STAGE1_HEAD_REPLY: [u8; 20] = [
+    0xc0, 0x03, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+    0x00, 0x00, 0x00, 0x00,
+];
+
+/// `boot_ok(stored)` with its CONNECT/HEAD replaced by the stage-1 frames.
+fn stage1_script(stored: usize) -> Vec<Boot> {
+    let mut v = vec![
+        Boot::Timeout,
+        Boot::Exact(STAGE1_ACCEPT.to_vec()),
+        Boot::Exact(STAGE1_HEAD_REPLY.to_vec()),
+    ];
+    v.extend(boot_ok(stored).into_iter().skip(2));
+    v
+}
+
+#[test]
+fn the_real_bootloader_head_reply_decodes_to_field_zero() {
+    let head = HeadReply::decode(&STAGE1_HEAD_REPLY).expect("type 0x40 with the extend bit");
+    assert_eq!(head.old_firmware_field(), 0);
+    assert!(!head.update_required());
+}
+
+#[test]
+fn the_stage1_bootloader_frames_pass_connect_and_head_and_the_flash_runs() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::boot().script(stage1_script(P));
+    let (r, _) = bench.run(&c);
+    assert_eq!(
+        r,
+        Ok(FlashOutcome::Verified {
+            version: "2.0.7".into()
+        })
+    );
+    let ops = bench.ops();
+    assert_eq!(
+        ops[..4],
+        [
+            Op::Transact {
+                req: STAGE1_CONNECT_1.to_vec(),
+                timeout: ms(1000)
+            },
+            Op::Recover,
+            Op::Transact {
+                req: STAGE1_CONNECT_2.to_vec(),
+                timeout: ms(1000)
+            },
+            Op::Transact {
+                req: STAGE1_HEAD_REQ.to_vec(),
+                timeout: ms(1000)
+            },
+        ],
+        "the same frames as the stage-1 trace"
+    );
+    assert!(is_raw_descriptor(ops[4].written().expect("the descriptor")));
+}
+
+#[test]
+fn an_unanswered_connect_is_retried_once_after_a_recover_and_not_again() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::boot().script(vec![Boot::Timeout, Boot::Timeout]);
+    let (r, _) = bench.run(&c);
+    let e = r.expect_err("two unanswered CONNECTs");
+    assert!(matches!(e, FlashError::Read { .. }), "got {e:?}");
+    assert_eq!(e.code(), -108);
+    assert_recovery_text(&e);
+    let types: Vec<u8> = framed_types(&bench.ops());
+    assert_eq!(types, vec![0x02, 0x02], "two CONNECTs, nothing else");
+    assert_eq!(bench.ops().iter().filter(|o| **o == Op::Recover).count(), 1);
+}
+
+#[test]
+fn a_rejected_connect_is_not_retried() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::boot().script(vec![Boot::Frame(reject())]);
+    let (r, _) = bench.run(&c);
+    assert!(matches!(r, Err(FlashError::Read { .. })), "got {r:?}");
+    assert_eq!(framed_types(&bench.ops()), vec![0x02], "one CONNECT only");
 }

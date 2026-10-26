@@ -10,7 +10,9 @@ use std::sync::atomic::AtomicBool;
 
 use common::*;
 use powerz_protocol::firmware::DeviceMode;
-use powerz_protocol::firmware::flash::{self, FlashAck, FlashError, JumpOutcome, JumpTarget};
+use powerz_protocol::firmware::flash::{
+    self, FlashAck, FlashError, JumpOutcome, JumpReply, JumpSent, JumpTarget,
+};
 use powerz_sim::{FlashFault, SimMeter};
 
 /// A simulated KM003C in `mode` with `fault` (if any) on a fake clock.
@@ -24,15 +26,27 @@ fn meter(mode: DeviceMode, fault: Option<FlashFault>) -> (SimMeter, SimClock) {
 }
 
 fn run(meter: &SimMeter, clock: &SimClock, target: JumpTarget) -> Result<JumpOutcome, FlashError> {
+    run_sent(meter, clock, target).0
+}
+
+/// [`run`], also returning each jump report.
+fn run_sent(
+    meter: &SimMeter,
+    clock: &SimClock,
+    target: JumpTarget,
+) -> (Result<JumpOutcome, FlashError>, Vec<JumpSent>) {
     let mut opener = meter.clone();
     let stop = AtomicBool::new(false);
-    flash::jump(
+    let mut sent = Vec::new();
+    let r = flash::jump(
         FlashAck::acknowledge(),
         target,
         &mut opener,
         clock.clone(),
         &stop,
-    )
+        &mut |s| sent.push(*s),
+    );
+    (r, sent)
 }
 
 /// Every write the meter saw is the one jump frame `ty id 00 00`.
@@ -151,4 +165,66 @@ fn sim_a_failing_jump_dfu_write_is_a_device_error() {
     assert!(matches!(e, FlashError::Device { .. }), "got {e:?}");
     assert_eq!(m.mode(), DeviceMode::Application);
     assert_only_the_jump(&m.writes(), 0x09);
+}
+
+// ---- AC-V9SK56.7: the reply to the jump, and a jump at the next power-up ----
+
+#[test]
+fn sim_the_jump_reply_is_none_and_no_stale_frame_is_taken_for_it() {
+    let (m, clock) = meter(DeviceMode::Application, None);
+    let (r, sent) = run_sent(&m, &clock, JumpTarget::Bootloader);
+    assert_eq!(r, Ok(JumpOutcome::Reached(DeviceMode::Bootloader)));
+    assert_eq!(
+        sent,
+        vec![JumpSent {
+            from: DeviceMode::Application,
+            target: JumpTarget::Bootloader,
+            reply: JumpReply::NoReply,
+        }]
+    );
+}
+
+/// A meter that, like 2.0.6, takes a jump at the next power-up, replugged
+/// after `opens` looks (`None`: never).
+fn power_up_meter(mode: DeviceMode, opens: Option<usize>) -> (SimMeter, SimClock) {
+    let clock = clock();
+    let dev = device(Persona::Bulk, Scenario::Idle, &clock)
+        .with_mode(mode)
+        .with_jump_at_power_up();
+    let m = SimMeter::new(dev);
+    (opens.map_or(m.clone(), |n| m.with_replug_after(n)), clock)
+}
+
+#[test]
+fn sim_a_jump_at_power_up_is_not_live_and_a_replug_applies_it() {
+    let (m, clock) = power_up_meter(DeviceMode::Application, None);
+    let r = run(&m, &clock, JumpTarget::Bootloader);
+    assert_eq!(
+        r,
+        Ok(JumpOutcome::NotReached {
+            seen: Some(DeviceMode::Application)
+        }),
+        "no live switch"
+    );
+    assert_eq!(m.mode(), DeviceMode::Application);
+    m.replug();
+    assert_eq!(m.mode(), DeviceMode::Bootloader, "the next power-up");
+    m.replug();
+    assert_eq!(
+        m.mode(),
+        DeviceMode::Application,
+        "a plain replug leaves it"
+    );
+}
+
+#[test]
+fn sim_a_jump_at_power_up_reaches_the_target_once_the_meter_is_replugged() {
+    let (m, clock) = power_up_meter(DeviceMode::Application, Some(8));
+    let r = run(&m, &clock, JumpTarget::Bootloader);
+    assert_eq!(r, Ok(JumpOutcome::Reached(DeviceMode::Bootloader)));
+    assert_only_the_jump(&m.writes(), 0x09);
+
+    let (m, clock) = power_up_meter(DeviceMode::Bootloader, Some(8));
+    let r = run(&m, &clock, JumpTarget::Application);
+    assert_eq!(r, Ok(JumpOutcome::Reached(DeviceMode::Application)));
 }

@@ -41,6 +41,16 @@ pub enum FlashStage {
     Finished,
     /// Returning the meter to application mode.
     Returning,
+    /// A jump was sent: unplug the meter and plug it back in if it does not
+    /// restart by itself. Not a stage of its own; the UI keeps showing the
+    /// stage it came in.
+    Replug {
+        /// The mode the meter should come back in: `bootloader` or
+        /// `application`.
+        to: &'static str,
+        /// The meter's reply to the jump frame (`none`, `ACCEPT`, ...).
+        reply: String,
+    },
 }
 
 impl From<FlashProgress> for FlashStage {
@@ -55,6 +65,10 @@ impl From<FlashProgress> for FlashStage {
             FlashProgress::Verifying => FlashStage::Verifying,
             FlashProgress::Finished => FlashStage::Finished,
             FlashProgress::Returning => FlashStage::Returning,
+            FlashProgress::Replug { to, reply } => FlashStage::Replug {
+                to: to.name(),
+                reply: reply.to_string(),
+            },
         }
     }
 }

@@ -10,6 +10,8 @@ import type {
   DeviceMode,
   FirmwareFileInfo,
   FlashDone,
+  FlashEvent,
+  FlashReplug,
   FlashStage,
   UiError,
 } from "./backend";
@@ -33,7 +35,7 @@ export interface FirmwareUpdateApi {
     deviceId: string,
     path: string,
     confirmation: string,
-    onStage: (stage: FlashStage) => void,
+    onStage: (stage: FlashEvent) => void,
   ) => Promise<FlashDone>;
 }
 
@@ -81,7 +83,7 @@ export const FLASH_STAGES: readonly FlashStage["stage"][] = [
 
 /** The warning shown with the typed confirmation (AC .3). */
 export const UPDATE_WARNING =
-  "Keep the meter connected and the laptop on power until the update finishes: an interrupted update leaves the meter in its bootloader.";
+  "Keep the meter connected and the laptop on power until the update finishes, and unplug the meter only when the screen asks you to replug it: an interrupted update leaves the meter in its bootloader.";
 
 /** How to recover the meter after a failed update (AC .5). */
 export const RECOVERY_STEPS: readonly string[] = [
@@ -110,6 +112,12 @@ export function stageLabel(stage: FlashStage): string {
   }
 }
 
+/** The replug prompt: on 2.0.6 a jump takes effect at the next power-up, so the user
+ * unplugs the meter and plugs it back in (AC .4). */
+export function replugPrompt(replug: Omit<FlashReplug, "stage">): string {
+  return `Unplug the meter and plug it back in (no buttons) if it does not restart by itself. Waiting for ${replug.to} mode.`;
+}
+
 /** The label of the stage `name`; the write stage with `progress`, without counts while none. */
 export function stageNameLabel(
   name: FlashStage["stage"],
@@ -135,6 +143,8 @@ export class FirmwareUpdate {
   result = $state.raw<FlashDone | null>(null);
   error = $state.raw<UiError | null>(null);
   failedStage = $state<FlashStage["stage"] | null>(null);
+  /** The replug the update waits for, null when none (AC .4). */
+  replug = $state.raw<Omit<FlashReplug, "stage"> | null>(null);
   /** The meter as it was when the update started; the update disconnects it. */
   #updating = $state.raw<FirmwareMeter | null>(null);
 
@@ -220,13 +230,20 @@ export class FirmwareUpdate {
     this.#clearOutcome();
     try {
       this.result = await this.#api.flash(meter.id, path, this.confirmation, (stage) => {
+        if (stage.stage === "replug") {
+          this.replug = { to: stage.to, reply: stage.reply };
+          return;
+        }
+        this.replug = null;
         this.stage = stage;
         if (stage.stage === "writing") {
           this.writeProgress = { done: stage.done, total: stage.total };
         }
       });
+      this.replug = null;
       this.phase = "done";
     } catch (e) {
+      this.replug = null;
       this.error = (e as UiError | null) ?? {
         kind: "internal",
         message: String(e),
@@ -261,5 +278,6 @@ export class FirmwareUpdate {
     this.result = null;
     this.error = null;
     this.failedStage = null;
+    this.replug = null;
   }
 }

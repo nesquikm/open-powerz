@@ -40,7 +40,7 @@ use crate::commands::{
     trigger_pd_settings, watch,
 };
 use crate::error::CliError;
-use crate::trace::{TracePort, TraceTransport};
+use crate::trace::{TracePort, TraceTransport, TracedOpener};
 
 /// Run the parsed command line against real devices; returns the exit code.
 pub fn run(cli: Cli) -> i32 {
@@ -304,38 +304,53 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
                 cli.scenario,
                 clock.clone(),
             ))?;
-            let mut meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
-            firmware_flash(
-                FlashAck::acknowledge(),
-                &container,
-                &mut meter,
-                clock,
-                &stop,
-                &mut out,
-            )
+            let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
+            flash_on(cli, &container, meter, clock, &stop, &mut out)
         } else {
             let meter = sim_meter(SimDevice::new(Persona::Bulk, cli.scenario))?;
-            let mut meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
-            firmware_flash(
-                FlashAck::acknowledge(),
-                &container,
-                &mut meter,
-                SystemClock,
-                &stop,
-                &mut out,
-            )
+            let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
+            flash_on(cli, &container, meter, SystemClock, &stop, &mut out)
         };
     }
-    let mut opener = discovery_opener(cli)?;
+    let opener = discovery_opener(cli)?;
     let stop = ctrl_c_flag()?;
-    firmware_flash(
-        FlashAck::acknowledge(),
-        &container,
-        &mut opener,
-        SystemClock,
-        &stop,
-        &mut out,
-    )
+    flash_on(cli, &container, opener, SystemClock, &stop, &mut out)
+}
+
+/// Run [`firmware_flash`] on `opener` (traced with `--trace`).
+fn flash_on<O: MeterOpener, C: Clock>(
+    cli: &Cli,
+    container: &powerz_protocol::firmware::container::FirmwareContainer<'_>,
+    mut opener: O,
+    clock: C,
+    stop: &AtomicBool,
+    out: &mut impl std::io::Write,
+) -> Result<(), CliError> {
+    let ack = FlashAck::acknowledge();
+    if cli.trace {
+        let mut opener = TracedOpener(opener);
+        firmware_flash(ack, container, &mut opener, clock, stop, out)
+    } else {
+        firmware_flash(ack, container, &mut opener, clock, stop, out)
+    }
+}
+
+/// Run [`firmware_jump`] on `opener` (traced with `--trace`).
+fn jump_on<O: MeterOpener, C: Clock>(
+    cli: &Cli,
+    target: JumpTarget,
+    mut opener: O,
+    clock: C,
+    stop: &AtomicBool,
+    out: &mut impl std::io::Write,
+) -> Result<(), CliError> {
+    let ack = FlashAck::acknowledge();
+    if cli.trace {
+        let mut opener = TracedOpener(opener);
+        firmware_jump(ack, target, &mut opener, clock, stop, out)
+    } else {
+        firmware_jump(ack, target, &mut opener, clock, stop, out)
+    }
 }
 
 /// The real-meter opener of `firmware flash` / `firmware jump`. The meter
@@ -350,11 +365,27 @@ fn discovery_opener(cli: &Cli) -> Result<BulkFlashOpener, CliError> {
 }
 
 /// The simulated meter of `firmware flash` / `firmware jump`: `sim` with
-/// the firmware knobs, `POWERZ_SIM_FLASH_FAULT` and `POWERZ_SIM_MODE`.
+/// the firmware knobs, `POWERZ_SIM_FLASH_FAULT`, `POWERZ_SIM_MODE` and
+/// `POWERZ_SIM_REPLUG_AFTER`.
 fn sim_meter(sim: SimDevice) -> Result<SimMeter, CliError> {
-    Ok(SimMeter::new(
-        sim_flash_fault(sim_firmware_knobs(sim)?)?.with_mode(sim_mode()?),
-    ))
+    let sim = sim_flash_fault(sim_firmware_knobs(sim)?)?.with_mode(sim_mode()?);
+    Ok(match sim_replug_after()? {
+        Some(n) => SimMeter::new(sim.with_jump_at_power_up()).with_replug_after(n),
+        None => SimMeter::new(sim),
+    })
+}
+
+/// Honour `POWERZ_SIM_REPLUG_AFTER=N` (test-only): like 2.0.6, the
+/// simulated meter takes a jump at the next power-up, and the user replugs
+/// it after N looks at it.
+fn sim_replug_after() -> Result<Option<usize>, CliError> {
+    match std::env::var("POWERZ_SIM_REPLUG_AFTER") {
+        Ok(n) => n
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|e| CliError::Usage(format!("invalid POWERZ_SIM_REPLUG_AFTER {n:?}: {e}"))),
+        Err(_) => Ok(None),
+    }
 }
 
 /// `firmware jump --to MODE`: check the acknowledgement before any device
@@ -372,7 +403,6 @@ fn jump_mode(cli: &Cli, to: JumpTo, i_understand: bool) -> Result<(), CliError> 
     let mut out = std::io::stdout().lock();
     // Ctrl-C before the jump stops it; the jump itself is one write.
     let stop = ctrl_c_flag()?;
-    let ack = FlashAck::acknowledge;
     if cli.transport == TransportKind::Sim {
         select_demo(cli)?;
         // `POWERZ_SIM_CTRL_C_AFTER=0` stands in for a Ctrl-C before the
@@ -383,15 +413,14 @@ fn jump_mode(cli: &Cli, to: JumpTo, i_understand: bool) -> Result<(), CliError> 
         return if fake_sim_clock() {
             let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
             let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
-            firmware_jump(ack(), target, &mut sim_meter(sim)?, clock, &stop, &mut out)
+            jump_on(cli, target, sim_meter(sim)?, clock, &stop, &mut out)
         } else {
             let sim = SimDevice::new(Persona::Bulk, cli.scenario);
-            let mut meter = sim_meter(sim)?;
-            firmware_jump(ack(), target, &mut meter, SystemClock, &stop, &mut out)
+            jump_on(cli, target, sim_meter(sim)?, SystemClock, &stop, &mut out)
         };
     }
-    let mut opener = discovery_opener(cli)?;
-    firmware_jump(ack(), target, &mut opener, SystemClock, &stop, &mut out)
+    let opener = discovery_opener(cli)?;
+    jump_on(cli, target, opener, SystemClock, &stop, &mut out)
 }
 
 /// Honour `POWERZ_SIM_CTRL_C_AFTER=K` for `firmware flash` and `firmware
