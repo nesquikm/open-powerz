@@ -730,7 +730,7 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
 
 | step | host sends | expects | on failure (vendor code) | tag |
 |---|---|---|---|---|
-| switch | in application mode: JUMP_DFU `09 id 00 00`, write only; one 500 ms read records any reply; then ask for a replug and wait up to 120 s for the meter to come back in boot-loader mode | a device in boot-loader mode | stop; hold Back while plugging the meter in | [static]; application 2.0.6 answers a cold JUMP_DFU with REJECT `06 01 00 00` and a replug brings it back in the application [device] |
+| switch | in application mode: a session first (CONNECT, the UID read, 0x4C at level 1), then JUMP_DFU `09 id 00 00`, write only; one 500 ms read records any reply; then ask for a replug if the meter does not restart by itself, and wait up to 120 s for boot-loader mode | a device in boot-loader mode | a failed authentication stops before JUMP_DFU; otherwise stop and hold Back while plugging the meter in | [static] (the vendor session); application 2.0.6 answers a cold JUMP_DFU, sent without that session, with REJECT `06 01 00 00` [device] |
 | connect | CONNECT `02 id 00 00` (1000 ms); if it gets no reply, clear the halt, drain, and send one more | ACCEPT | Read (−108) | [static]; the boot loader leaves the first CONNECT unanswered and ACCEPTs the second [device] |
 | check | HEAD `40 id 00 01` + 16 zero bytes | type 0x40 (the extend bit may be set), the request id echoed, field 0 | Product (−100), WorkMode (−111) | [static]; boot-loader reply `c0 03 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00` to HEAD id 3 [device] |
 | descriptor | `42 id 00 04` + 64 bytes: start 0x4000, end = start + size, size, CRC, model, version, date, a random nonce | no reply: the 20 ms read times out while the meter erases; an ACCEPT echoing the descriptor id means the erase is done | Write (−107) for any other reply | [static]; the ACCEPT [device] |
@@ -749,22 +749,31 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
   in (holding Back if the application is intact) to restart the boot loader
   before probing or flashing again. [device] (the SYNC replies) [inferred]
   (the power cycle resets it)
+- The boot loader's screen tells the two cases apart: "firmware details"
+  when a valid application is present, a blank screen with a blinking green
+  bar when there is none (after an erase). Both enumerate as `BOOT`. [device]
 - Write-capable frames (JUMP_DFU, JUMP_APROM, the descriptor and the raw
   payload writes) can only be sent through the flash path. It needs a
   `FlashAck` marker, which the CLI creates only after `--i-understand`; the
   marker prevents accidental use, it is not a capability against a determined
   caller. The flash path runs every frame through its own strict guard: only
-  CONNECT, HEAD, the two jumps, a descriptor with start 0x4000 and an end
+  CONNECT, HEAD, the UID read and a level-1 0x4C authentication (the session
+  before JUMP_DFU), the two jumps, a descriptor with start 0x4000 and an end
   inside the application area, the payload writes after that descriptor, and
   the `0x4420` info read pass it. Each payload write is at most 4080 bytes,
   the writes after one descriptor total at most its size plus 4080 bytes, and
   JUMP_APROM or a new CONNECT ends that allowance. Everything else is refused
   before it is written.
-- `powerz firmware jump` sends only the switch or return step on its own
-  (one JUMP_DFU from application mode or one JUMP_APROM from boot-loader
-  mode, through the same guard, with no CONNECT, HEAD or info read). It
-  reports the meter's reply to the jump, asks for a replug, waits up to
-  120 s and reports the mode the meter comes back in. [static] [inferred]
+- `powerz firmware jump` sends only the switch or return step on its own,
+  through the same guard: from application mode CONNECT, the UID read, the
+  level-1 authentication and one JUMP_DFU; from boot-loader mode one
+  JUMP_APROM and nothing else (no HEAD or info read either way). It reports
+  the meter's reply to the jump, asks for a replug if the meter does not
+  restart by itself, waits up to 120 s and reports the mode the meter comes
+  back in. [static] [inferred]
+- `powerz firmware probe` stops at the first SYNC reply to CONNECT or HEAD:
+  that is a boot loader left in its download phase, so it sends nothing more
+  and asks for a power cycle holding Back. [device]
 - In boot-loader mode the meter keeps its USB vendor and product IDs
   (0x5FC9 / 0x0063) and its product string; interface 0 (vendor 0xFF) and
   the CDC interface report `BOOT` instead of `APP`, and there is no HID

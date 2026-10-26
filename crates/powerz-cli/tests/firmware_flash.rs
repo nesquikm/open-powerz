@@ -17,8 +17,8 @@
 //!   Ctrl-C once the simulated bootloader has taken `k` payload writes.
 //!
 //! The real USB discovery cannot be driven without a meter, so its
-//! matching after the mode switch is tested through the pure
-//! `find_flashed_meter` over a hand-made device list.
+//! matching after the mode switch (AC .9: by USB serial only) is tested
+//! through the pure `find_flashed_meter` over a hand-made device list.
 
 #[path = "../../powerz-protocol/tests/support/fw_container.rs"]
 mod fw_container;
@@ -167,6 +167,33 @@ fn a_truncated_container_is_refused_before_any_device_is_opened() {
     assert_eq!(code, Some(2), "stderr: {err}");
     assert!(err.contains("truncated.mencrypt"), "{err}");
     assert!(out.is_empty(), "{out}");
+}
+
+#[test]
+fn the_first_line_names_the_image_size_the_file_declares() {
+    // Like the real 2.0.7 file: the stored payload is longer than the
+    // declared image (456912 stored, 456896 declared).
+    let stored: Vec<u8> = (0..P + 16).map(|i| (i * 29 + 3) as u8).collect();
+    let bytes = ContainerBuilder::new()
+        .payload(&stored)
+        .field(SIZE, &P.to_string())
+        .build();
+    let path = write_file("declared-size.mencrypt", &bytes);
+    let ack = std::ffi::OsStr::new("--i-understand");
+    let out = sim_flash(&[], &[path.as_os_str(), ack])
+        .output()
+        .expect("powerz runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first = stdout.lines().next().unwrap_or_default();
+    assert!(first.starts_with("Flashing"), "first line: {first:?}");
+    assert!(
+        first.contains(&P.to_string()),
+        "names the declared size {P}: {first:?}"
+    );
+    assert!(
+        !first.contains(&(P + 16).to_string()),
+        "not the stored payload length: {first:?}"
+    );
 }
 
 #[test]
@@ -370,28 +397,37 @@ fn after_the_switch_the_meter_with_the_selected_serial_is_picked() {
     assert_eq!(found.map(|d| d.address), Some(2));
 }
 
+// AC-V9SK54.9: the serial is the same in application and bootloader mode
+// [device], so a meter with another serial (or none) is another meter.
+
 #[test]
-fn after_the_switch_a_single_power_z_with_another_serial_is_picked() {
-    // [inferred] the bootloader may enumerate with a different serial.
+fn after_the_switch_a_single_power_z_with_another_serial_is_not_picked() {
     let devices = vec![entry(Some("BOOT0001"), 7)];
-    let found = find_flashed_meter(&devices, Some("222222")).expect("a match");
-    assert_eq!(found.map(|d| d.address), Some(7));
+    let found = find_flashed_meter(&devices, Some("222222")).expect("keep waiting, no error");
+    assert_eq!(found.map(|d| d.address), None, "never another meter");
 }
 
 #[test]
-fn after_the_switch_a_single_power_z_without_a_serial_is_picked() {
+fn after_the_switch_a_single_power_z_without_a_serial_is_picked_only_without_a_serial() {
     let devices = vec![entry(None, 9)];
-    let found = find_flashed_meter(&devices, Some("222222")).expect("a match");
-    assert_eq!(found.map(|d| d.address), Some(9));
+    let found = find_flashed_meter(&devices, Some("222222")).expect("keep waiting, no error");
+    assert_eq!(found.map(|d| d.address), None, "not the chosen meter");
     let found = find_flashed_meter(&devices, None).expect("a match");
     assert_eq!(found.map(|d| d.address), Some(9));
 }
 
 #[test]
-fn after_the_switch_two_candidates_without_the_serial_are_ambiguous_not_no_meter() {
+fn after_the_switch_other_meters_with_a_chosen_serial_are_none_not_ambiguous() {
     let devices = vec![entry(Some("333333"), 3), entry(None, 4)];
-    let e = find_flashed_meter(&devices, Some("222222"))
-        .expect_err("two other meters cannot be told apart");
+    let found = find_flashed_meter(&devices, Some("222222"))
+        .expect("not an error: the chosen meter is just not back yet");
+    assert_eq!(found.map(|d| d.address), None);
+}
+
+#[test]
+fn without_a_serial_two_candidates_are_ambiguous_not_no_meter() {
+    let devices = vec![entry(Some("333333"), 3), entry(None, 4)];
+    let e = find_flashed_meter(&devices, None).expect_err("two meters cannot be told apart");
     assert!(
         !matches!(e, CliError::NoDevice(_)),
         "an ambiguity, not `no meter`: {e:?}"

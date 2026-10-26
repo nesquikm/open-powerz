@@ -1,7 +1,7 @@
 //! The read-only firmware probe (FR V9SK56, AC .6): CONNECT, then HEAD,
 //! and nothing else, in application or bootloader mode.
 
-use super::{Clock, Error, Session};
+use super::{Clock, Error, Session, is_sync};
 use crate::decode::head::{self, HeadReply};
 use crate::transport::{self, Transport};
 
@@ -42,7 +42,9 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// Send CONNECT, then (whatever CONNECT gave) one HEAD, and report both
     /// answers. Only CONNECT (0x02) and HEAD (0x40) frames are sent; a
     /// REJECT, a timeout or an undecodable reply is data; any other error
-    /// is returned (no HEAD is sent after such a CONNECT failure).
+    /// is returned (no HEAD is sent after such a CONNECT failure). A SYNC
+    /// reply to either frame is [`Error::BootloaderMidDownload`]: nothing
+    /// more is sent.
     pub fn probe(&mut self) -> Result<ProbeReport, Error> {
         self.probe_with_head_reply().map(|(report, _)| report)
     }
@@ -51,13 +53,14 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// meter sent it (`None` when HEAD timed out), so a caller can show the
     /// raw bytes next to a decoded field.
     pub fn probe_with_head_reply(&mut self) -> Result<(ProbeReport, Option<Vec<u8>>), Error> {
-        let connect = match self.connect() {
+        let connect = match self.connect_checked(true) {
             Ok(()) => ConnectOutcome::Accepted,
             Err(Error::Rejected { .. }) => ConnectOutcome::Rejected,
             Err(Error::Transport(transport::Error::Timeout)) => ConnectOutcome::TimedOut,
             Err(e) => return Err(e),
         };
         let (head, reply) = match self.head_exchange() {
+            Ok(reply) if is_sync(&reply) => return Err(Error::BootloaderMidDownload),
             Ok(reply) if head::is_reject(&reply) => (HeadOutcome::Rejected(reply.clone()), reply),
             Ok(reply) => match HeadReply::decode(&reply) {
                 Ok(h) => (HeadOutcome::Field(h.old_firmware_field()), reply),

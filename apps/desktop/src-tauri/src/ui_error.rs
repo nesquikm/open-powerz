@@ -177,6 +177,11 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
             message: "The meter did not accept the app's sign-in.".to_owned(),
             hint: Some("Replug the meter and try again.".to_owned()),
         },
+        S::BootloaderMidDownload => UiError {
+            kind: ErrorKind::Protocol,
+            message: "The meter's bootloader was left mid-download.".to_owned(),
+            hint: Some("Unplug the meter, then hold Back while plugging it back in.".to_owned()),
+        },
     }
 }
 

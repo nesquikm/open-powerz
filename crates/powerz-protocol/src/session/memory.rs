@@ -16,7 +16,7 @@ const FIRMWARE_INFO: (u32, u32) = (0x0000_4420, 64);
 /// OTP block (serial number; its first 16 bytes are the level-2 credential).
 pub(super) const OTP: (u32, u32) = (0x0300_0C00, 64);
 /// MCU unique ID (the level-1 credential).
-pub(super) const UID: (u32, u32) = (0x4001_0450, 12);
+pub(crate) const UID: (u32, u32) = (0x4001_0450, 12);
 
 /// Most bytes of a raw HEAD reply shown in a problem text.
 const HEAD_HEX_MAX: usize = 32;

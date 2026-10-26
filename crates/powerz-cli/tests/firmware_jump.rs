@@ -358,33 +358,67 @@ fn a_bad_replug_knob_is_a_usage_error() {
 
 // ---- AC-V9SK56.8: --trace for firmware jump ----
 
-#[test]
-fn trace_logs_the_jump_frame_and_nothing_else_is_sent() {
-    for (mode, to, frame) in [
-        ("application", "bootloader", "> 09 01 00 00"),
-        ("bootloader", "application", "> 08 01 00 00"),
-    ] {
-        let mut c = Command::cargo_bin("powerz").expect("powerz binary is built");
-        for k in ENV_KNOBS {
-            c.env_remove(k);
-        }
-        c.env("POWERZ_SIM_CLOCK", "fake")
-            .env("POWERZ_SIM_MODE", mode)
-            .timeout(Duration::from_secs(60))
-            .args([
-                "--trace",
-                "--transport",
-                "sim",
-                "firmware",
-                "jump",
-                "--to",
-                to,
-            ])
-            .arg("--i-understand");
-        let (out, err, code) = output(&mut c);
-        assert_eq!(code, Some(0), "stdout: {out}\nstderr: {err}");
-        let sent: Vec<&str> = err.lines().filter(|l| l.starts_with('>')).collect();
-        assert_eq!(sent, [frame], "stderr:\n{err}");
-        assert!(!err.lines().any(|l| l.starts_with('x')), "{err}");
+/// `powerz --trace --transport sim firmware jump --to <to> --i-understand`
+/// with the meter starting in `mode`; returns the `>` lines of stderr.
+fn traced_jump(mode: &str, to: &str) -> Vec<String> {
+    let mut c = Command::cargo_bin("powerz").expect("powerz binary is built");
+    for k in ENV_KNOBS {
+        c.env_remove(k);
     }
+    c.env("POWERZ_SIM_CLOCK", "fake")
+        .env("POWERZ_SIM_MODE", mode)
+        .timeout(Duration::from_secs(60))
+        .args([
+            "--trace",
+            "--transport",
+            "sim",
+            "firmware",
+            "jump",
+            "--to",
+            to,
+        ])
+        .arg("--i-understand");
+    let (out, err, code) = output(&mut c);
+    assert_eq!(code, Some(0), "stdout: {out}\nstderr: {err}");
+    assert!(!err.lines().any(|l| l.starts_with('x')), "{err}");
+    err.lines()
+        .filter(|l| l.starts_with('>'))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn trace_from_application_mode_shows_connect_uid_read_auth_then_jump_dfu() {
+    let sent = traced_jump("application", "bootloader");
+    let types: Vec<String> = sent
+        .iter()
+        .map(|l| l.split_whitespace().nth(1).unwrap_or("").to_owned())
+        .collect();
+    assert_eq!(
+        types,
+        ["02", "44", "4c", "09"],
+        "CONNECT, the UID read, 0x4C, then JUMP_DFU:\n{sent:#?}"
+    );
+    assert_eq!(
+        sent[0].split_whitespace().skip(3).collect::<Vec<_>>(),
+        ["00", "00"],
+        "a bare CONNECT: {sent:#?}"
+    );
+    assert_eq!(
+        sent[2].split_whitespace().count(),
+        1 + 36,
+        "a 36-byte 0x4C request: {sent:#?}"
+    );
+    assert_eq!(
+        sent[3].split_whitespace().skip(3).collect::<Vec<_>>(),
+        ["00", "00"],
+        "a 4-byte JUMP_DFU: {sent:#?}"
+    );
+    assert_eq!(sent[3].split_whitespace().count(), 1 + 4, "{sent:#?}");
+}
+
+#[test]
+fn trace_from_bootloader_mode_shows_only_jump_aprom() {
+    let sent = traced_jump("bootloader", "application");
+    assert_eq!(sent, ["> 08 01 00 00"], "only JUMP_APROM: {sent:#?}");
 }

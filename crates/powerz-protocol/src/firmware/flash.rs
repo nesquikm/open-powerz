@@ -27,7 +27,7 @@ use crate::decode::head::{self, HeadReply};
 use crate::firmware::DeviceMode;
 use crate::firmware::container::FirmwareContainer;
 use crate::frame;
-use crate::session::{Clock, Session};
+use crate::session::{Clock, Session, UID};
 use crate::transport::discovery::Model;
 use crate::transport::{Error as TransportError, GuardedTransport, Transport};
 
@@ -89,6 +89,13 @@ const DESCRIPTOR_LEN: usize = 64;
 const FIELD_LEN: usize = 12;
 /// The application info block.
 const APP_INFO: (u32, u32) = (0x4420, 64);
+/// 0x4C authentication frame type.
+const AUTH: u8 = 0x4C;
+/// Length of a whole 0x4C request: header + 32 encrypted bytes.
+const AUTH_LEN: usize = 36;
+/// Bytes of a level-1 auth plaintext before its 0xFF padding:
+/// `u64 now ‖ 12-byte UID ‖ u64 random`.
+const AUTH_L1_USED: usize = 8 + UID.1 as usize + 8;
 
 /// Proof that the user explicitly asked for a firmware flash.
 ///
@@ -140,7 +147,8 @@ pub trait MeterOpener {
 }
 
 /// The strict guard of the flash path: only CONNECT, HEAD, the application
-/// info read, the jumps, a descriptor inside the application area and,
+/// info read, the UID read and a level-1 0x4C authentication (sent before
+/// JUMP_DFU), the jumps, a descriptor inside the application area and,
 /// after it, payload writes reach the pipe. Anything else is refused with
 /// [`TransportError::Forbidden`] before a byte is written.
 ///
@@ -220,7 +228,8 @@ fn valid_descriptor(request: &[u8]) -> Option<u32> {
 }
 
 /// Whether `request` is one of the fixed frames of the flash set: CONNECT,
-/// HEAD or the application info block read.
+/// HEAD, the application info block read, the UID read or a level-1 0x4C
+/// authentication.
 fn allowed_fixed(request: &[u8]) -> bool {
     let Some(&id) = request.get(1) else {
         return false;
@@ -228,6 +237,20 @@ fn allowed_fixed(request: &[u8]) -> bool {
     request == frame::connect(id)
         || request == head::request(id)
         || request == crate::session::memory_read_request(id, APP_INFO.0, APP_INFO.1)
+        || request == crate::session::memory_read_request(id, UID.0, UID.1)
+        || is_level1_auth(request)
+}
+
+/// Whether `request` is a 0x4C authentication whose plaintext has the
+/// level-1 shape (a 12-byte credential, then 0xFF padding).
+fn is_level1_auth(request: &[u8]) -> bool {
+    if request.len() != AUTH_LEN || request[0] != AUTH || request[2..4] != [0x00, 0x02] {
+        return false;
+    }
+    let plain = crate::crypto::decrypt(&crate::crypto::KEYS[3], &request[4..]);
+    plain
+        .get(AUTH_L1_USED..)
+        .is_some_and(|pad| pad.iter().all(|&b| b == 0xFF))
 }
 
 /// Whether `data` is a write-only JUMP_DFU or JUMP_APROM frame.
@@ -643,6 +666,13 @@ fn jump_and_wait<O: MeterOpener, C: Clock>(
         JumpTarget::Application => (JUMP_APROM, RETURN_TIMEOUT),
     };
     let mut pipe = FlashGuard::new(pipe);
+    if target == JumpTarget::Bootloader {
+        // Application firmware REJECTs a JUMP_DFU from an unauthenticated
+        // session `[device]`; a failed authentication sends no jump.
+        authenticate(&mut pipe, clock).map_err(|detail| FlashError::Device {
+            detail: format!("authentication before JUMP_DFU failed: {detail}; nothing was jumped"),
+        })?;
+    }
     let reply = send_jump(&mut pipe, ty, 0x01)?;
     // Release the pipe before the meter re-enumerates.
     drop(pipe);
@@ -884,6 +914,17 @@ fn read_app_info<P: FlashTransport, C: Clock>(
         .memory_read(APP_INFO.0, APP_INFO.1)
         .map_err(|e| e.to_string())?;
     DeviceInfoBlock::decode(&block).map_err(|e| e.to_string())
+}
+
+/// Open the session the vendor tool opens before JUMP_DFU: CONNECT, then a
+/// level-1 authentication (the UID read and one 0x4C request), over the
+/// shared read-only guard inside the strict flash guard.
+fn authenticate<P: FlashTransport, C: Clock>(pipe: &mut P, clock: &mut C) -> Result<(), String> {
+    let guarded = GuardedTransport::new(FlashGuard::new(ByRef(pipe)));
+    let mut session = Session::with_clock(guarded, ByRef(clock));
+    session.connect().map_err(|e| e.to_string())?;
+    session.authenticate(1).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Rolling transaction ids of the flash frames.

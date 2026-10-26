@@ -287,6 +287,13 @@ impl FlashTransport for SimDevice {
             if self.fault(FlashFault::JumpDfuWriteFails) {
                 return Err(Error::Io("simulated JUMP_DFU write failure".into()));
             }
+            // Application firmware 2.0.6 REJECTs a JUMP_DFU from a session
+            // that has not authenticated at level 1 `[device]`.
+            if self.mode == DeviceMode::Application && self.auth_level < 1 {
+                let reject = self.control(msg::REJECT, data[1]);
+                self.pending.push_back(reject);
+                return Ok(());
+            }
             if self.mode == DeviceMode::Application && !self.fault(FlashFault::JumpDfuIgnored) {
                 self.jump_to(DeviceMode::Bootloader);
             }

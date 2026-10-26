@@ -731,3 +731,76 @@ fn probe_help_says_it_uses_the_bulk_pipe() {
     let help = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
     assert!(help.contains("bulk pipe"), "{help}");
 }
+
+// ---------------------------------------------------------------- a bootloader left mid-download
+
+/// SYNC `01 id 00 00`: what a bootloader in its download phase answers to
+/// every frame `[device]` (2026-10-26, after an ACKed 0x42 descriptor).
+fn sync(id: u8) -> Vec<u8> {
+    vec![0x01, id, 0x00, 0x00]
+}
+
+/// Run `firmware_probe` over `script` expecting it to fail; return the
+/// output and error text together, and every frame written.
+fn probe_fails(script: Vec<Step>) -> (String, Vec<Vec<u8>>) {
+    let mut s = session(MockTransport::new(script));
+    let mut out = Vec::new();
+    let r = firmware_probe(&mut s, &app_identity(), false, &mut out);
+    let written = s.transport().written().to_vec();
+    let e = match r {
+        Ok(()) => panic!(
+            "a SYNC reply must fail the probe; output:\n{}\nwritten: {written:02x?}",
+            text(&out)
+        ),
+        Err(e) => e,
+    };
+    (format!("{}\n{e}", text(&out)), written)
+}
+
+/// The output or error tells the user to power-cycle the meter holding
+/// Back.
+fn assert_power_cycle_with_back(said: &str) {
+    let lower = said.to_ascii_lowercase();
+    assert!(lower.contains("unplug"), "names unplugging:\n{said}");
+    assert!(said.contains("Back"), "names the Back button:\n{said}");
+    assert!(lower.contains("hold"), "says to hold it:\n{said}");
+}
+
+#[test]
+fn a_sync_reply_to_connect_stops_the_probe_with_the_power_cycle_hint() {
+    let (said, written) = probe_fails(vec![Step::transact(frame::connect(1).to_vec(), sync(1))]);
+    assert_eq!(
+        written,
+        vec![frame::connect(1).to_vec()],
+        "no CONNECT retry and no HEAD after a SYNC"
+    );
+    assert_power_cycle_with_back(&said);
+}
+
+#[test]
+fn a_sync_reply_to_the_retried_connect_stops_the_probe_with_the_power_cycle_hint() {
+    let (said, written) = probe_fails(vec![
+        Step::transact_err(frame::connect(1).to_vec(), transport::Error::Timeout),
+        Step::transact(frame::connect(2).to_vec(), sync(2)),
+    ]);
+    assert_eq!(
+        written,
+        vec![frame::connect(1).to_vec(), frame::connect(2).to_vec()],
+        "no HEAD after the SYNC"
+    );
+    assert_power_cycle_with_back(&said);
+}
+
+#[test]
+fn a_sync_reply_to_head_stops_the_probe_with_the_power_cycle_hint() {
+    let (said, written) = probe_fails(vec![
+        Step::transact(frame::connect(1).to_vec(), accept(1)),
+        Step::transact(head::request(2).to_vec(), sync(2)),
+    ]);
+    assert_eq!(
+        written,
+        vec![frame::connect(1).to_vec(), head::request(2).to_vec()],
+        "nothing after the SYNC"
+    );
+    assert_power_cycle_with_back(&said);
+}

@@ -103,8 +103,9 @@ impl FlashOpener for SimMeter {
 }
 
 /// The real meter for an update: a [`BulkFlashOpener`] for the meter with
-/// `serial`, else the only POWER-Z attached, created only once the update
-/// is armed; until then every open is refused.
+/// `serial`, else the only POWER-Z attached at the first open (followed by
+/// its serial afterwards), created only once the update is armed; until
+/// then every open is refused.
 #[derive(Debug)]
 pub struct UsbFlashOpener {
     serial: Option<String>,

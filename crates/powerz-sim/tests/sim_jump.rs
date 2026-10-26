@@ -1,6 +1,9 @@
-//! FR V9SK56, AC .7 against the simulator: the library's write-only mode
-//! switch ([`flash::jump`]) moves a [`SimMeter`] between application and
-//! bootloader mode with one jump frame and nothing else.
+//! FR V9SK56, AC .7 against the simulator: the library's mode switch
+//! ([`flash::jump`]) moves a [`SimMeter`] between application and
+//! bootloader mode. From application mode it opens the session first
+//! (CONNECT, the UID read, a level-1 0x4C) because the meter REJECTs a cold
+//! JUMP_DFU `[device]` (application firmware 2.0.6); from bootloader mode
+//! it sends JUMP_APROM and nothing else.
 //!
 //! Only the simulator is used; no real device is opened.
 
@@ -10,9 +13,12 @@ use std::sync::atomic::AtomicBool;
 
 use common::*;
 use powerz_protocol::firmware::DeviceMode;
+use powerz_protocol::firmware::flash::FlashTransport;
 use powerz_protocol::firmware::flash::{
     self, FlashAck, FlashError, JumpOutcome, JumpReply, JumpSent, JumpTarget,
 };
+use powerz_protocol::session::memory_read_request;
+use powerz_protocol::transport::Transport;
 use powerz_sim::{FlashFault, SimMeter};
 
 /// A simulated KM003C in `mode` with `fault` (if any) on a fake clock.
@@ -49,10 +55,28 @@ fn run_sent(
     (r, sent)
 }
 
-/// Every write the meter saw is the one jump frame `ty id 00 00`.
+/// Every write the meter saw: before a JUMP_DFU (0x09) exactly CONNECT,
+/// the UID memory read and one 0x4C; before a JUMP_APROM nothing. Then the
+/// one jump frame `ty id 00 00`.
 fn assert_only_the_jump(writes: &[Vec<u8>], ty: u8) {
-    assert_eq!(writes.len(), 1, "exactly one write: {writes:02x?}");
-    let w = &writes[0];
+    let session: &[u8] = if ty == 0x09 { &[0x02, 0x44, 0x4C] } else { &[] };
+    assert_eq!(
+        writes.len(),
+        session.len() + 1,
+        "the session and one jump: {writes:02x?}"
+    );
+    let types: Vec<u8> = writes[..session.len()].iter().map(|w| w[0]).collect();
+    assert_eq!(types, session, "the session before the jump: {writes:02x?}");
+    if ty == 0x09 {
+        assert_eq!(
+            writes[1],
+            memory_read_request(writes[1][1], UID.0, UID.1),
+            "the UID read: {writes:02x?}"
+        );
+        assert_eq!(writes[2].len(), 36, "a 0x4C request: {writes:02x?}");
+        assert_eq!(&writes[2][2..4], &[0x00, 0x02], "{writes:02x?}");
+    }
+    let w = &writes[session.len()];
     assert_eq!(w.len(), 4, "{w:02x?}");
     assert_eq!(w[0], ty, "{w:02x?}");
     assert_eq!(&w[2..4], &[0, 0], "{w:02x?}");
@@ -88,7 +112,11 @@ fn sim_there_and_back_again() {
         Ok(JumpOutcome::Reached(DeviceMode::Application))
     );
     let types: Vec<u8> = m.writes().iter().map(|w| w[0]).collect();
-    assert_eq!(types, vec![0x09, 0x08], "only the two jumps were sent");
+    assert_eq!(
+        types,
+        vec![0x02, 0x44, 0x4C, 0x09, 0x08],
+        "the session, JUMP_DFU, then JUMP_APROM alone"
+    );
 }
 
 #[test]
@@ -227,4 +255,59 @@ fn sim_a_jump_at_power_up_reaches_the_target_once_the_meter_is_replugged() {
     let (m, clock) = power_up_meter(DeviceMode::Bootloader, Some(8));
     let r = run(&m, &clock, JumpTarget::Application);
     assert_eq!(r, Ok(JumpOutcome::Reached(DeviceMode::Application)));
+}
+
+// ---- AC-V9SK56.7: a cold JUMP_DFU is REJECTed, an authenticated one is taken ----
+
+/// JUMP_DFU `09 id 00 00` written raw to `d`; returns the meter's reply.
+fn raw_jump_dfu(d: &mut SimDevice, id: u8) -> Result<Vec<u8>, powerz_protocol::transport::Error> {
+    d.write_raw(&[0x09, id, 0x00, 0x00], T).expect("the write");
+    d.read(T)
+}
+
+#[test]
+fn sim_a_cold_jump_dfu_from_application_mode_is_rejected_and_stays() {
+    let clock = clock();
+    let mut d = raw_connected(Scenario::Idle, &clock).with_mode(DeviceMode::Application);
+    let reply = raw_jump_dfu(&mut d, 0x07).expect("a reply to the jump");
+    assert_eq!(reply, vec![0x06, 0x07, 0x00, 0x00], "REJECT: {reply:02x?}");
+    let m = SimMeter::new(d);
+    assert_eq!(m.mode(), DeviceMode::Application, "no switch");
+}
+
+#[test]
+fn sim_a_jump_dfu_without_connect_is_rejected_and_stays() {
+    let clock = clock();
+    let mut d = device(Persona::Bulk, Scenario::Idle, &clock).with_mode(DeviceMode::Application);
+    // Drain the stale DISCONNECT a fresh open leaves.
+    while d.read(T).is_ok() {}
+    let reply = raw_jump_dfu(&mut d, 0x05).expect("a reply to the jump");
+    assert_eq!(ty(&reply), 0x06, "REJECT: {reply:02x?}");
+    assert_eq!(SimMeter::new(d).mode(), DeviceMode::Application);
+}
+
+#[test]
+fn sim_a_jump_dfu_after_level_1_authentication_is_taken() {
+    let clock = clock();
+    let mut d = raw_connected(Scenario::Idle, &clock).with_mode(DeviceMode::Application);
+    let uid = credential(&mut d, 1);
+    let auth = raw_auth(&mut d, 0x10, &uid);
+    assert_eq!(permi(&auth), 1, "level 1 granted: {auth:02x?}");
+    if let Ok(reply) = raw_jump_dfu(&mut d, 0x11) {
+        assert_ne!(ty(&reply), 0x06, "not REJECTed: {reply:02x?}");
+    }
+    assert_eq!(SimMeter::new(d).mode(), DeviceMode::Bootloader);
+}
+
+#[test]
+fn sim_the_library_jump_from_application_mode_authenticates_first() {
+    let (m, clock) = meter(DeviceMode::Application, None);
+    let (r, sent) = run_sent(&m, &clock, JumpTarget::Bootloader);
+    assert_eq!(r, Ok(JumpOutcome::Reached(DeviceMode::Bootloader)));
+    assert_ne!(
+        sent[0].reply,
+        JumpReply::Reject,
+        "the authenticated jump is not REJECTed"
+    );
+    assert_only_the_jump(&m.writes(), 0x09);
 }

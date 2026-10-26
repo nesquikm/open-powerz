@@ -208,10 +208,10 @@ pub fn inspect_flash_file<'a>(
 }
 
 /// The meter a flash talks to, from the device list as it is now: the one
-/// with the `--device` serial, else the only POWER-Z attached, whatever its
-/// serial (`[inferred]` the bootloader may enumerate with another serial or
-/// none). `None` while no meter is attached; two or more without that
-/// serial are ambiguous, a usage error naming them.
+/// with the `--device` serial and never another one (`[device]` the serial
+/// is the same in application and bootloader mode), `None` while it is not
+/// attached; without a serial, the only POWER-Z attached, and two or more
+/// are ambiguous, a usage error naming them.
 pub fn find_flashed_meter<'a>(
     devices: &'a [DeviceEntry],
     serial: Option<&str>,
@@ -237,7 +237,7 @@ pub fn firmware_flash<O: MeterOpener, C: Clock>(
         "Flashing {} firmware {} ({} bytes)",
         container.model(),
         container.firmware_version(),
-        container.payload().len()
+        container.size()
     )?;
     let mut io: Result<(), std::io::Error> = Ok(());
     let mut last_tenth = None;

@@ -1,7 +1,8 @@
 //! The firmware flashing engine (FR V9SK54) over a hand-written fake meter.
 //!
 //! No test here opens a real device. The fake meter ([`Bench`]) answers
-//! like the application firmware (CONNECT, HEAD, the 0x4420 info block)
+//! like the application firmware (CONNECT, HEAD, the 0x4420 info block,
+//! the UID read and a 0x4C authentication: synthetic UID, shipped keys)
 //! and, in bootloader mode, replays a script of replies, recording every
 //! transfer with its timeout. Every container is synthetic, built by the
 //! shared test builder; no vendor firmware is read.
@@ -23,7 +24,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use common::FakeClock;
+use common::{FakeClock, SYNTH_UID, UID_ADDR, reply_key};
 use fw_container::*;
 use powerz_protocol::crypto::{self, KEYS};
 use powerz_protocol::decode::head::HeadReply;
@@ -113,6 +114,15 @@ fn info_block(model: &str, version: &str) -> Vec<u8> {
     b
 }
 
+/// How the fake application firmware answers a 0x4C request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthAnswer {
+    /// Echo the plaintext under the reply key, granting this level.
+    Grant(u8),
+    /// Answer REJECT.
+    Reject,
+}
+
 /// One transfer the fake saw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Op {
@@ -197,6 +207,8 @@ struct State {
     open_err_after: Option<(u8, TransportError, usize)>,
     /// The armed opener error and how many opens it has left.
     open_errs: Option<(TransportError, usize)>,
+    /// How the application firmware answers 0x4C (default: level 1).
+    auth: AuthAnswer,
 }
 
 impl State {
@@ -241,8 +253,12 @@ impl State {
             Some(0x44) if req.len() >= 36 => {
                 let plain = crypto::decrypt(&KEYS[0], &req[4..36]);
                 let word = |o: usize| u32::from_le_bytes(plain[o..o + 4].try_into().unwrap());
-                if (word(0), word(4)) == (0x4420, 64) {
-                    let block = info_block(&self.app_model, &self.app_version);
+                let data = match (word(0), word(4)) {
+                    (0x4420, 64) => Some(info_block(&self.app_model, &self.app_version)),
+                    (UID_ADDR, 12) => Some(SYNTH_UID.to_vec()),
+                    _ => None,
+                };
+                if let Some(block) = data {
                     self.app_pending
                         .push_back(crypto::encrypt(&KEYS[0], &block));
                     let mut c = vec![0xC4, 0x00, 0x01, 0x01];
@@ -252,6 +268,18 @@ impl State {
                     reject()
                 }
             }
+            Some(0x4C) if req.len() == 36 => match self.auth {
+                AuthAnswer::Reject => reject(),
+                AuthAnswer::Grant(level) => {
+                    // `4C 00 xx 02`: id 0, bit 16 set, level in bits 17..18;
+                    // the meter echoes the plaintext under the reply key.
+                    let plain = crypto::decrypt(&KEYS[3], &req[4..]);
+                    let word: u32 = 0x4C | (1 << 16) | (u32::from(level) << 17) | (8 << 22);
+                    let mut reply = word.to_le_bytes().to_vec();
+                    reply.extend(crypto::encrypt(&reply_key(), &plain));
+                    return Ok(reply);
+                }
+            },
             _ => reject(),
         };
         reply[1] = id;
@@ -422,6 +450,7 @@ impl Bench {
             jump_at: Vec::new(),
             open_err_after: None,
             open_errs: None,
+            auth: AuthAnswer::Grant(1),
         };
         state.set_mode(Some(mode));
         Bench {
@@ -509,6 +538,12 @@ impl Bench {
     /// (`usize::MAX`: all of them).
     fn open_err_after(self, ty: u8, e: TransportError, times: usize) -> Bench {
         self.s.borrow_mut().open_err_after = Some((ty, e, times));
+        self
+    }
+
+    /// How the application firmware answers 0x4C.
+    fn auth(self, answer: AuthAnswer) -> Bench {
+        self.s.borrow_mut().auth = answer;
         self
     }
 
@@ -736,6 +771,31 @@ fn memread(id: u8, addr: u32, len: u32) -> Vec<u8> {
     powerz_protocol::session::memory_read_request(id, addr, len)
 }
 
+/// A 0x4C request `4C id 00 02` carrying `plain` under key 3.
+fn auth_frame(id: u8, plain: &[u8; 32]) -> Vec<u8> {
+    let mut f = vec![0x4C, id, 0x00, 0x02];
+    f.extend(crypto::encrypt(&KEYS[3], plain));
+    f
+}
+
+/// A level-1 0x4C: `u64 now ‖ 12-byte UID ‖ u64 random`, then 0xFF.
+fn level1_auth(id: u8) -> Vec<u8> {
+    let mut p = [0xFFu8; 32];
+    p[0..8].copy_from_slice(&1_790_000_000_000u64.to_le_bytes());
+    p[8..20].copy_from_slice(&SYNTH_UID);
+    p[20..28].copy_from_slice(&0x0123_4567_89AB_CDEFu64.to_le_bytes());
+    auth_frame(id, &p)
+}
+
+/// A level-2 0x4C: a 16-byte OTP credential fills the block, no padding.
+fn level2_auth(id: u8) -> Vec<u8> {
+    let mut p = [0u8; 32];
+    p[0..8].copy_from_slice(&1_790_000_000_000u64.to_le_bytes());
+    p[8..24].copy_from_slice(b"123456 0f1e2d3c4");
+    p[24..32].copy_from_slice(&0x0123_4567_89AB_CDEFu64.to_le_bytes());
+    auth_frame(id, &p)
+}
+
 // ---- AC-V9SK54.1: JUMP_DFU from application mode, then bootloader ----
 
 #[test]
@@ -764,13 +824,119 @@ fn from_application_mode_sends_jump_dfu_write_only_then_flashes_in_bootloader() 
             .any(|o| matches!(o, Op::Transact { req, .. } if req[0] & 0x7F == 0x09)),
         "JUMP_DFU awaits no reply"
     );
-    // Nothing of the download goes out before the jump.
+    // Nothing of the download goes out before the jump: only the model
+    // check and the session the vendor tool opens.
     let before: Vec<u8> = framed_types(&ops[..dfu[0]]);
     assert!(
-        before.iter().all(|t| matches!(t, 0x02 | 0x40 | 0x44)),
-        "only read-only requests before JUMP_DFU, got {before:02x?}"
+        before
+            .iter()
+            .all(|t| matches!(t, 0x02 | 0x40 | 0x44 | 0x4C)),
+        "only read-only requests and the auth before JUMP_DFU, got {before:02x?}"
     );
     assert_eq!(payload_writes(&ops), payload_writes(&bench.boot_ops()));
+}
+
+/// The 0x4C requests the run sent, decrypted (key 3).
+fn auth_plaintexts(ops: &[Op]) -> Vec<Vec<u8>> {
+    ops.iter()
+        .filter_map(Op::written)
+        .filter(|w| w.len() == 36 && w[0] & 0x7F == 0x4C)
+        .map(|w| crypto::decrypt(&KEYS[3], &w[4..]))
+        .collect()
+}
+
+/// Index of the one JUMP_DFU raw write.
+fn dfu_index(ops: &[Op]) -> Option<usize> {
+    ops.iter().position(
+        |o| matches!(o, Op::Raw { data, .. } if data.len() == 4 && data[0] & 0x7F == 0x09),
+    )
+}
+
+#[test]
+fn from_application_mode_the_vendor_session_comes_right_before_jump_dfu() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app().script(boot_ok(P));
+    let (r, _) = bench.run(&c);
+    assert!(matches!(r, Ok(FlashOutcome::Verified { .. })), "got {r:?}");
+    let ops = bench.ops();
+    let dfu = dfu_index(&ops).expect("JUMP_DFU was sent");
+    let before = &ops[..dfu];
+    // The session: CONNECT, the UID read, then one 0x4C; JUMP_DFU follows.
+    let types = framed_types(before);
+    assert!(
+        types.ends_with(&[0x02, 0x44, 0x4C]),
+        "CONNECT, the UID read and 0x4C come right before JUMP_DFU, got {types:02x?}"
+    );
+    assert_eq!(
+        memread_addrs(before).last(),
+        Some(&(UID_ADDR, 12)),
+        "the read before 0x4C is the 12-byte UID"
+    );
+    // Exactly one level-1 auth: the UID as credential, 0xFF padding.
+    let auths = auth_plaintexts(before);
+    assert_eq!(auths.len(), 1, "one 0x4C before JUMP_DFU");
+    assert_eq!(&auths[0][8..20], &SYNTH_UID, "the UID is the credential");
+    assert!(
+        auths[0][28..].iter().all(|&b| b == 0xFF),
+        "level-1 padding: {:02x?}",
+        auths[0]
+    );
+    let auth_frame = before
+        .iter()
+        .filter_map(Op::written)
+        .rfind(|w| w.len() == 36)
+        .expect("the 0x4C frame");
+    assert_eq!(&auth_frame[2..4], &[0x00, 0x02], "a 0x4C request header");
+    // No 0x4C at all after the jump.
+    assert!(auth_plaintexts(&ops[dfu..]).is_empty());
+}
+
+/// A failed authentication before JUMP_DFU: no jump, nothing written, the
+/// meter stays in application mode and the error names the auth.
+fn assert_auth_failure_stops_before_jump_dfu(answer: AuthAnswer) {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app().auth(answer).script(boot_ok(P));
+    let (r, events) = bench.run(&c);
+    let e = r.expect_err("a failed authentication stops the flash");
+    assert!(
+        e.to_string().to_lowercase().contains("authenticat"),
+        "{answer:?}: names the authentication: {e}"
+    );
+    let ops = bench.ops();
+    assert_eq!(dfu_index(&ops), None, "{answer:?}: no JUMP_DFU: {ops:?}");
+    assert!(
+        !sent_write_capable(&ops),
+        "{answer:?}: nothing write-capable: {ops:?}"
+    );
+    assert_eq!(
+        auth_plaintexts(&ops).len(),
+        1,
+        "{answer:?}: the auth is not retried"
+    );
+    assert_eq!(bench.mode(), Some(DeviceMode::Application), "{answer:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|p| matches!(p, FlashProgress::Replug { .. })),
+        "{answer:?}: no replug prompt without a jump: {events:?}"
+    );
+}
+
+#[test]
+fn a_rejected_authentication_stops_the_flash_before_jump_dfu() {
+    assert_auth_failure_stops_before_jump_dfu(AuthAnswer::Reject);
+}
+
+#[test]
+fn an_authentication_granting_level_0_stops_the_flash_before_jump_dfu() {
+    assert_auth_failure_stops_before_jump_dfu(AuthAnswer::Grant(0));
+}
+
+#[test]
+fn the_switch_wait_leaves_two_minutes_for_the_replug() {
+    assert_eq!(SWITCH_TIMEOUT, Duration::from_secs(120));
 }
 
 #[test]
@@ -968,19 +1134,18 @@ fn a_model_mismatch_in_application_mode_sends_no_write_capable_frame() {
 }
 
 #[test]
-fn the_model_check_in_application_mode_reads_only_the_application_info_block() {
+fn application_mode_reads_only_the_application_info_block_and_the_uid() {
     let bytes = container_bytes(P, P);
     let c = parse(&bytes);
     let bench = Bench::app().script(boot_ok(P));
     let _ = bench.run(&c);
-    let addrs = memread_addrs(&bench.ops());
-    assert!(
-        !addrs.is_empty(),
-        "the meter's model comes from block 0x4420"
-    );
-    assert!(
-        addrs.iter().all(|a| *a == (0x4420, 64)),
-        "only the 0x4420 info block may be read, got {addrs:x?}"
+    let ops = bench.ops();
+    let dfu = dfu_index(&ops).expect("JUMP_DFU was sent");
+    let addrs = memread_addrs(&ops[..dfu]);
+    assert_eq!(
+        addrs,
+        vec![(0x4420, 64), (UID_ADDR, 12)],
+        "the model check reads 0x4420, the session reads the UID; nothing else"
     );
 }
 
@@ -1634,10 +1799,12 @@ fn the_flash_guard_refuses_everything_outside_the_flash_set() {
         vec![0x4A, 1, 0, 0],         // memory / flash write
         vec![0x0C, 1, 0x02, 0x00],   // GET_DATA
         vec![0x0E, 1, 0x00, 0x00],   // start queue
-        vec![0x4C, 1, 0x00, 0x02],   // auth
+        vec![0x4C, 1, 0x00, 0x02],   // a bare auth header
+        level2_auth(1),              // a level-2 (OTP credential) auth
         memread(1, 0x0420, 64),      // not the application info block
         memread(1, 0x0300_0C00, 64), // OTP
-        memread(1, 0x4001_0450, 12), // UID
+        memread(1, 0x4001_0450, 16), // not exactly the 12-byte UID
+        memread(1, 0x4001_0440, 12), // not the UID address
     ];
     for frame in refused {
         let mut g = FlashGuard::new(Recorder::default());
@@ -1651,11 +1818,13 @@ fn the_flash_guard_refuses_everything_outside_the_flash_set() {
 }
 
 #[test]
-fn the_flash_guard_allows_connect_head_and_the_application_info_read() {
+fn the_flash_guard_allows_connect_head_the_info_and_uid_reads_and_a_level_1_auth() {
     let allowed: Vec<Vec<u8>> = vec![
         vec![0x02, 1, 0, 0],
         powerz_protocol::decode::head::request(2).to_vec(),
         memread(3, 0x4420, 64),
+        memread(4, UID_ADDR, 12),
+        level1_auth(5),
     ];
     for frame in allowed {
         let mut g = FlashGuard::new(Recorder::default());
@@ -2845,4 +3014,148 @@ fn the_run2_bootloader_frames_flash_through_the_early_erase_ack() {
     assert!(is_raw_descriptor(desc));
     assert_eq!(desc[1], 0x03, "the descriptor id the ACK echoes");
     assert_eq!(payload_writes(&ops).len(), chunks);
+}
+
+// ---- AC-V9SK54.9: finding the meter again by its USB serial ----
+//
+// The real device list cannot be driven without a meter, so the opener's
+// choice is tested through the pure selection functions it uses:
+// `find_flashed_meter` (one lookup) and `follow_flashed_meter` (a lookup
+// that latches the serial of the first meter found when none was chosen;
+// `BulkFlashOpener` keeps that serial between opens).
+
+use powerz_protocol::transport::discovery::{PID_KM003C, find_flashed_meter, follow_flashed_meter};
+
+fn entry(serial: Option<&str>, address: u8) -> DeviceEntry {
+    DeviceEntry {
+        model: Model::Km003c,
+        pid: PID_KM003C,
+        serial: serial.map(str::to_owned),
+        product: None,
+        interface_string: None,
+        bus: "1".into(),
+        address,
+    }
+}
+
+fn addr(found: Option<&DeviceEntry>) -> Option<u8> {
+    found.map(|d| d.address)
+}
+
+#[test]
+fn with_a_serial_only_the_meter_with_that_serial_is_found() {
+    let devices = vec![entry(Some("111111"), 1), entry(Some("222222"), 2)];
+    let found = find_flashed_meter(&devices, Some("222222")).expect("a match");
+    assert_eq!(addr(found), Some(2));
+}
+
+#[test]
+fn with_a_serial_a_single_other_meter_is_never_picked() {
+    for other in [entry(Some("BOOT0001"), 7), entry(None, 9)] {
+        let devices = vec![other];
+        let found = find_flashed_meter(&devices, Some("222222"))
+            .expect("not an error: keep waiting for the meter");
+        assert_eq!(
+            addr(found),
+            None,
+            "{:?} is another meter",
+            devices[0].serial
+        );
+    }
+}
+
+#[test]
+fn with_a_serial_several_other_meters_are_none_not_ambiguous() {
+    let devices = vec![entry(Some("333333"), 3), entry(None, 4)];
+    let found = find_flashed_meter(&devices, Some("222222"))
+        .expect("not an error: the chosen meter is just not back yet");
+    assert_eq!(addr(found), None);
+}
+
+#[test]
+fn without_a_serial_the_single_attached_meter_is_found() {
+    for only in [entry(Some("111111"), 1), entry(None, 9)] {
+        let devices = vec![only];
+        let found = find_flashed_meter(&devices, None).expect("a match");
+        assert_eq!(addr(found), Some(devices[0].address));
+    }
+}
+
+#[test]
+fn without_a_serial_several_meters_are_ambiguous_naming_them() {
+    let devices = vec![entry(Some("333333"), 3), entry(Some("444444"), 4)];
+    let e = find_flashed_meter(&devices, None).expect_err("two meters cannot be told apart");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("333333") && msg.contains("444444"),
+        "names them: {msg}"
+    );
+}
+
+#[test]
+fn no_meter_at_all_is_none_with_or_without_a_serial() {
+    assert_eq!(
+        addr(find_flashed_meter(&[], Some("222222")).expect("ok")),
+        None
+    );
+    assert_eq!(addr(find_flashed_meter(&[], None).expect("ok")), None);
+}
+
+#[test]
+fn without_a_chosen_serial_the_first_meters_serial_is_kept() {
+    let mut serial: Option<String> = None;
+    let first = vec![entry(Some("111111"), 1)];
+    let found = follow_flashed_meter(&first, &mut serial).expect("a match");
+    assert_eq!(addr(found), Some(1));
+    assert_eq!(serial.as_deref(), Some("111111"), "the serial is latched");
+    // After the switch another meter alone is attached: never picked.
+    let other = vec![entry(Some("222222"), 2)];
+    let found = follow_flashed_meter(&other, &mut serial).expect("keep waiting");
+    assert_eq!(addr(found), None, "another meter is never picked");
+    assert_eq!(serial.as_deref(), Some("111111"));
+    // A meter without a serial is not the first one either.
+    let anon = vec![entry(None, 5)];
+    let found = follow_flashed_meter(&anon, &mut serial).expect("keep waiting");
+    assert_eq!(addr(found), None);
+    // The first meter back (in bootloader mode, same serial) among others.
+    let back = vec![entry(Some("222222"), 2), entry(Some("111111"), 8)];
+    let found = follow_flashed_meter(&back, &mut serial).expect("a match");
+    assert_eq!(addr(found), Some(8), "found again by its serial");
+}
+
+#[test]
+fn a_chosen_serial_is_kept_and_never_replaced() {
+    let mut serial = Some("222222".to_owned());
+    let other = vec![entry(Some("111111"), 1)];
+    let found = follow_flashed_meter(&other, &mut serial).expect("keep waiting");
+    assert_eq!(addr(found), None);
+    assert_eq!(serial.as_deref(), Some("222222"));
+    let back = vec![entry(Some("222222"), 2)];
+    let found = follow_flashed_meter(&back, &mut serial).expect("a match");
+    assert_eq!(addr(found), Some(2));
+    assert_eq!(serial.as_deref(), Some("222222"));
+}
+
+#[test]
+fn a_first_meter_without_a_serial_falls_back_to_the_single_meter_rule() {
+    let mut serial: Option<String> = None;
+    let first = vec![entry(None, 1)];
+    let found = follow_flashed_meter(&first, &mut serial).expect("a match");
+    assert_eq!(addr(found), Some(1));
+    assert_eq!(serial, None, "nothing to latch");
+    // Still nothing latched: the single attached meter is found again...
+    let again = vec![entry(None, 6)];
+    let found = follow_flashed_meter(&again, &mut serial).expect("a match");
+    assert_eq!(addr(found), Some(6));
+    // ...and several are ambiguous.
+    let several = vec![entry(None, 6), entry(None, 7)];
+    assert!(follow_flashed_meter(&several, &mut serial).is_err());
+}
+
+#[test]
+fn without_a_chosen_serial_several_meters_at_the_first_open_are_ambiguous() {
+    let mut serial: Option<String> = None;
+    let devices = vec![entry(Some("111111"), 1), entry(Some("222222"), 2)];
+    assert!(follow_flashed_meter(&devices, &mut serial).is_err());
+    assert_eq!(serial, None, "nothing latched from an ambiguous list");
 }

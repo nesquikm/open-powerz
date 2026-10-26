@@ -242,11 +242,11 @@ pub fn match_device<'a>(
     })
 }
 
-/// Two or more POWER-Z devices are attached and none has the flashed
-/// meter's serial, so the flash cannot tell which one to talk to.
+/// Two or more POWER-Z devices are attached and no serial was chosen, so
+/// the flash cannot tell which one to talk to.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "several POWER-Z devices attached and none is the flashed meter; unplug the others: {}",
+    "several POWER-Z devices attached and no serial chosen; pick one with its serial or unplug the others: {}",
     .serials.join(", ")
 )]
 pub struct AmbiguousMeter {
@@ -254,19 +254,17 @@ pub struct AmbiguousMeter {
     pub serials: Vec<String>,
 }
 
-/// The meter a flash talks to, from the device list as it is now: the one
-/// with `serial`, else the only POWER-Z attached, whatever its serial
-/// (`[inferred]` the bootloader may enumerate with another serial or none).
-/// `None` while no meter is attached; two or more without that serial are
-/// [`AmbiguousMeter`].
+/// The meter a flash talks to, from the device list as it is now. With
+/// `serial`, only the meter with that serial (`[device]` the USB serial is
+/// the same in application and bootloader mode), never another one: `None`
+/// while it is not attached. Without `serial`, the only POWER-Z attached;
+/// two or more are [`AmbiguousMeter`]. `None` while no meter is attached.
 pub fn find_flashed_meter<'a>(
     devices: &'a [DeviceEntry],
     serial: Option<&str>,
 ) -> Result<Option<&'a DeviceEntry>, AmbiguousMeter> {
-    if let Some(serial) = serial
-        && let Some(d) = devices.iter().find(|d| d.serial.as_deref() == Some(serial))
-    {
-        return Ok(Some(d));
+    if let Some(serial) = serial {
+        return Ok(devices.iter().find(|d| d.serial.as_deref() == Some(serial)));
     }
     match devices {
         [] => Ok(None),
@@ -278,6 +276,24 @@ pub fn find_flashed_meter<'a>(
                 .collect(),
         }),
     }
+}
+
+/// [`find_flashed_meter`] across the opens of one flash: when `serial` is
+/// `None`, the serial of the first meter found is latched into it, so every
+/// later open (after the meter re-enumerates in another mode) finds that
+/// same meter again and never picks another one. A meter without a serial
+/// latches nothing and the single-meter rule keeps applying.
+pub fn follow_flashed_meter<'a>(
+    devices: &'a [DeviceEntry],
+    serial: &mut Option<String>,
+) -> Result<Option<&'a DeviceEntry>, AmbiguousMeter> {
+    let found = find_flashed_meter(devices, serial.as_deref())?;
+    if serial.is_none()
+        && let Some(d) = found
+    {
+        serial.clone_from(&d.serial);
+    }
+    Ok(found)
 }
 
 /// The USB identity of the attached meter `device` (matched by

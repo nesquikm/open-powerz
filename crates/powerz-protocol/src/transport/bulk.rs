@@ -200,8 +200,9 @@ impl FlashTransport for BulkTransport {
 
 /// The flash engine's [`MeterOpener`] for a real meter: each open lists the
 /// devices again (the meter re-enumerates between modes), picks the meter
-/// with [`discovery::find_flashed_meter`] and opens its bulk pipe behind the
-/// strict flash guard. An ambiguous choice is an [`Error::Io`] naming the
+/// with [`discovery::follow_flashed_meter`] (by its serial, latched from the
+/// first meter opened when none was chosen) and opens its bulk pipe behind
+/// the strict flash guard. An ambiguous choice is an [`Error::Io`] naming the
 /// candidates.
 #[derive(Debug)]
 pub struct BulkFlashOpener {
@@ -211,7 +212,8 @@ pub struct BulkFlashOpener {
 
 impl BulkFlashOpener {
     /// An opener for the meter with `serial` (else the only POWER-Z
-    /// attached); `ack` is the acknowledgement the opened pipes need.
+    /// attached at the first open, followed by its serial afterwards);
+    /// `ack` is the acknowledgement the opened pipes need.
     pub fn new(serial: Option<String>, ack: FlashAck) -> BulkFlashOpener {
         BulkFlashOpener { serial, ack }
     }
@@ -222,7 +224,7 @@ impl MeterOpener for BulkFlashOpener {
 
     fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, Error> {
         let devices = discovery::list_devices()?;
-        let Some(device) = discovery::find_flashed_meter(&devices, self.serial.as_deref())
+        let Some(device) = discovery::follow_flashed_meter(&devices, &mut self.serial)
             .map_err(|e| Error::Io(e.to_string()))?
         else {
             return Ok(None);

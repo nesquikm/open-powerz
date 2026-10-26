@@ -1,15 +1,23 @@
-//! The write-only mode switch of `powerz firmware jump` (FR V9SK56, AC .7):
-//! [`flash::jump`] sends exactly one JUMP_DFU (from application mode) or
-//! JUMP_APROM (from bootloader mode) as a raw write through the strict
-//! flash guard, reads the meter's reply to it once and reports it, then
-//! waits on clock time (long enough for a replug: on 2.0.6 the jump takes
-//! effect at the next power-up `[device]`) for the meter to come back and
-//! reports the mode it came back in. Nothing else is sent: no CONNECT, no
-//! HEAD, no descriptor, no info read.
+//! The mode switch of `powerz firmware jump` (FR V9SK56, AC .7):
+//! [`flash::jump`] sends one JUMP_DFU (from application mode) or JUMP_APROM
+//! (from bootloader mode) as a raw write through the strict flash guard,
+//! reads the meter's reply to it once and reports it, then waits on clock
+//! time (long enough for a replug: on 2.0.6 the jump takes effect at the
+//! next power-up `[device]`) for the meter to come back and reports the
+//! mode it came back in.
+//!
+//! From application mode the JUMP_DFU comes after the session the vendor
+//! tool opens first: CONNECT, the UID memory read and a level-1 0x4C
+//! authentication (application firmware 2.0.6 REJECTs a cold JUMP_DFU
+//! `[device]`); a failed authentication stops before JUMP_DFU. From
+//! bootloader mode only JUMP_APROM is sent. Nothing else is sent: no HEAD,
+//! no descriptor, no info read.
 //!
 //! No test here opens a real device. The fake meter ([`Bench`]) records
-//! every transfer and switches mode on a jump write the way the meter
-//! re-enumerates (`[static]` frame types 0x09 / 0x08, `docs/protocol.md`).
+//! every transfer, answers CONNECT, the UID read and 0x4C the way the meter
+//! does (synthetic UID, shipped keys) and switches mode on a jump write the
+//! way the meter re-enumerates (`[static]` frame types 0x09 / 0x08,
+//! `docs/protocol.md`).
 
 mod common;
 
@@ -19,7 +27,10 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use common::FakeClock;
+use common::{
+    FakeClock, SYNTH_UID, UID_ADDR, accept, memread_confirm, memread_request, reject, reply_key,
+};
+use powerz_protocol::crypto::{self, KEYS};
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::flash::{
     self, FlashAck, FlashError, FlashTransport, JUMP_REPLY_WAIT, JumpOutcome, JumpReply, JumpSent,
@@ -34,6 +45,20 @@ use powerz_protocol::transport::{Error as TransportError, Transport};
 /// library `[static]`.
 const JUMP_DFU: u8 = 0x09;
 const JUMP_APROM: u8 = 0x08;
+
+/// CONNECT and 0x4C frame types, written out independently of the library.
+const CONNECT: u8 = 0x02;
+const MEM_READ: u8 = 0x44;
+const AUTH: u8 = 0x4C;
+
+/// How the fake meter answers a 0x4C request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthAnswer {
+    /// Echo the plaintext under the reply key, granting this level.
+    Grant(u8),
+    /// Answer REJECT.
+    Reject,
+}
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
@@ -77,6 +102,12 @@ struct State {
     reply_to_jump: Option<Result<Vec<u8>, TransportError>>,
     /// The armed copy of `reply_to_jump`.
     reply_pending: Option<Result<Vec<u8>, TransportError>>,
+    /// How 0x4C is answered (default: level 1 granted).
+    auth: AuthAnswer,
+    /// Transfers queued for the next reads (the UID read's data).
+    reads: VecDeque<Vec<u8>>,
+    /// Decrypted (key 3) plaintexts of the 0x4C requests.
+    auth_plaintexts: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,16 +119,42 @@ impl Transport for Pipe {
         s.ops.push(Op::Transact {
             req: request.to_vec(),
         });
-        match s.mode {
-            None => Err(TransportError::Disconnected),
-            // Answer anything with REJECT: a jump must not ask for replies.
-            Some(_) => Ok(vec![0x06, request.get(1).copied().unwrap_or(0), 0, 0]),
+        if s.mode.is_none() {
+            return Err(TransportError::Disconnected);
+        }
+        let id = request.get(1).copied().unwrap_or(0);
+        match request.first().copied() {
+            Some(CONNECT) if request.len() == 4 => Ok(accept(id)),
+            // Only the UID block is served; any other read is REJECTed.
+            Some(MEM_READ) if request == memread_request(id, UID_ADDR, 12).as_slice() => {
+                s.reads.push_back(crypto::encrypt(&KEYS[0], &SYNTH_UID));
+                Ok(memread_confirm(id, UID_ADDR, 12))
+            }
+            Some(AUTH) if request.len() == 36 => {
+                let plain = crypto::decrypt(&KEYS[3], &request[4..]);
+                s.auth_plaintexts.push(plain.clone());
+                match s.auth {
+                    AuthAnswer::Reject => Ok(reject(id)),
+                    AuthAnswer::Grant(level) => {
+                        // `4C 00 xx 02`: id 0, bit 16 set, level in bits 17..18.
+                        let word: u32 = 0x4C | (1 << 16) | (u32::from(level) << 17) | (8 << 22);
+                        let mut reply = word.to_le_bytes().to_vec();
+                        reply.extend(crypto::encrypt(&reply_key(), &plain));
+                        Ok(reply)
+                    }
+                }
+            }
+            // Anything else (HEAD, a descriptor, an info read): REJECT.
+            _ => Ok(reject(id)),
         }
     }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, TransportError> {
         let mut s = self.0.borrow_mut();
         s.ops.push(Op::Read { timeout });
+        if let Some(data) = s.reads.pop_front() {
+            return Ok(data);
+        }
         if let Some(reply) = s.reply_pending.take() {
             return reply;
         }
@@ -192,6 +249,9 @@ impl Bench {
             open_errs: None,
             reply_to_jump: None,
             reply_pending: None,
+            auth: AuthAnswer::Grant(1),
+            reads: VecDeque::new(),
+            auth_plaintexts: Vec::new(),
         };
         Bench {
             s: Rc::new(RefCell::new(state)),
@@ -244,6 +304,11 @@ impl Bench {
         self
     }
 
+    fn auth(self, answer: AuthAnswer) -> Bench {
+        self.s.borrow_mut().auth = answer;
+        self
+    }
+
     fn open_cost(self, ms: u64) -> Bench {
         self.s.borrow_mut().open_cost_ms = ms;
         self
@@ -282,6 +347,10 @@ impl Bench {
         self.s.borrow().mode
     }
 
+    fn auth_plaintexts(&self) -> Vec<Vec<u8>> {
+        self.s.borrow().auth_plaintexts.clone()
+    }
+
     fn now_ms(&self) -> u64 {
         self.clock.0.borrow().now_ms
     }
@@ -291,9 +360,41 @@ impl Bench {
     }
 }
 
-/// The only write is one raw 4-byte write of frame type `ty`, `ty id 00
-/// 00`, followed by at most the one read of the meter's reply.
+/// The session opened before JUMP_DFU, exactly: a CONNECT `02 id 00 00`,
+/// the UID memory read (12 bytes at 0x4001_0450) and the one read of its
+/// data, then one 0x4C request `4C id 00 02` + 32 bytes. Returns the ops
+/// after it.
+fn after_the_session(ops: &[Op]) -> &[Op] {
+    assert!(ops.len() >= 4, "CONNECT, UID read, data, 0x4C: {ops:02x?}");
+    match &ops[0] {
+        Op::Transact { req } if req.len() == 4 && req[0] == CONNECT && req[2..4] == [0, 0] => {}
+        other => panic!("first a CONNECT, not {other:02x?} in {ops:02x?}"),
+    }
+    match &ops[1] {
+        Op::Transact { req } if *req == memread_request(req[1], UID_ADDR, 12) => {}
+        other => panic!("then the UID memory read, not {other:02x?} in {ops:02x?}"),
+    }
+    assert!(
+        matches!(ops[2], Op::Read { .. }),
+        "then the UID data read: {ops:02x?}"
+    );
+    match &ops[3] {
+        Op::Transact { req } if req.len() == 36 && req[0] == AUTH && req[2..4] == [0x00, 0x02] => {}
+        other => panic!("then one 0x4C request, not {other:02x?} in {ops:02x?}"),
+    }
+    &ops[4..]
+}
+
+/// The only raw write is one 4-byte write of frame type `ty`, `ty id 00
+/// 00`, followed by at most the one read of the meter's reply. Before a
+/// JUMP_DFU comes exactly the session of [`after_the_session`]; before a
+/// JUMP_APROM, nothing.
 fn assert_only_the_jump(ops: &[Op], ty: u8) {
+    let ops = if ty == JUMP_DFU {
+        after_the_session(ops)
+    } else {
+        ops
+    };
     assert!(
         matches!(ops.len(), 1 | 2),
         "the jump and its reply read: {ops:02x?}"
@@ -314,10 +415,10 @@ fn assert_only_the_jump(ops: &[Op], ty: u8) {
     }
 }
 
-// ---- AC-V9SK56.7: from application mode, JUMP_DFU only ----
+// ---- AC-V9SK56.7: from application mode, the session then JUMP_DFU ----
 
 #[test]
-fn from_application_mode_it_sends_only_jump_dfu_and_reports_the_bootloader() {
+fn from_application_mode_it_authenticates_then_sends_jump_dfu_and_reports_the_bootloader() {
     let bench = Bench::app();
     let r = bench.run(JumpTarget::Bootloader);
     assert_eq!(r, Ok(JumpOutcome::Reached(DeviceMode::Bootloader)));
@@ -335,18 +436,87 @@ fn from_bootloader_mode_it_sends_only_jump_aprom_and_reports_the_application() {
 }
 
 #[test]
-fn a_jump_sends_no_connect_head_descriptor_or_info_read() {
-    for (bench, target) in [
-        (Bench::app(), JumpTarget::Bootloader),
-        (Bench::boot(), JumpTarget::Application),
-    ] {
-        bench.run(target).expect("the jump succeeds");
-        let ops = bench.ops();
-        assert!(
-            !ops.iter().any(|o| matches!(o, Op::Transact { .. })),
-            "no framed request: {ops:02x?}"
-        );
-    }
+fn from_bootloader_mode_it_sends_no_connect_uid_read_or_auth() {
+    let bench = Bench::boot();
+    bench
+        .run(JumpTarget::Application)
+        .expect("the jump succeeds");
+    let ops = bench.ops();
+    assert!(
+        !ops.iter().any(|o| matches!(o, Op::Transact { .. })),
+        "no framed request: {ops:02x?}"
+    );
+    assert!(bench.auth_plaintexts().is_empty());
+}
+
+#[test]
+fn from_application_mode_the_only_framed_requests_are_connect_uid_read_and_auth() {
+    let bench = Bench::app();
+    bench
+        .run(JumpTarget::Bootloader)
+        .expect("the jump succeeds");
+    let types: Vec<u8> = bench
+        .ops()
+        .iter()
+        .filter_map(|o| match o {
+            Op::Transact { req } => Some(req[0]),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        types,
+        vec![CONNECT, MEM_READ, AUTH],
+        "no HEAD, descriptor or info read: {:02x?}",
+        bench.ops()
+    );
+}
+
+#[test]
+fn the_authentication_is_level_1_with_the_uid_as_credential() {
+    let bench = Bench::app();
+    bench
+        .run(JumpTarget::Bootloader)
+        .expect("the jump succeeds");
+    let plains = bench.auth_plaintexts();
+    assert_eq!(plains.len(), 1, "one 0x4C request");
+    assert_eq!(&plains[0][8..20], &SYNTH_UID, "the UID is the credential");
+    assert_eq!(&plains[0][28..32], &[0xFF; 4], "level-1 padding");
+}
+
+// ---- AC-V9SK56.7: a failed authentication stops before JUMP_DFU ----
+
+/// No raw write at all: the jump was never sent.
+fn assert_no_jump(bench: &Bench) {
+    let ops = bench.ops();
+    assert!(
+        !ops.iter().any(|o| matches!(o, Op::Raw { .. })),
+        "no JUMP_DFU: {ops:02x?}"
+    );
+    assert!(bench.sent().is_empty(), "no jump reported");
+    assert_eq!(bench.mode(), Some(DeviceMode::Application));
+}
+
+#[test]
+fn a_rejected_authentication_is_an_error_and_sends_no_jump_dfu() {
+    let bench = Bench::app().auth(AuthAnswer::Reject);
+    let r = bench.run(JumpTarget::Bootloader);
+    assert!(r.is_err(), "a REJECTed 0x4C fails the jump: {r:?}");
+    assert_eq!(
+        bench.auth_plaintexts().len(),
+        1,
+        "the 0x4C was tried: {:02x?}",
+        bench.ops()
+    );
+    assert_no_jump(&bench);
+}
+
+#[test]
+fn an_authentication_granting_level_0_is_an_error_and_sends_no_jump_dfu() {
+    let bench = Bench::app().auth(AuthAnswer::Grant(0));
+    let r = bench.run(JumpTarget::Bootloader);
+    assert!(r.is_err(), "level 0 fails the jump: {r:?}");
+    assert_eq!(bench.auth_plaintexts().len(), 1);
+    assert_no_jump(&bench);
 }
 
 // ---- AC-V9SK56.7: refusals that send nothing ----
@@ -634,8 +804,9 @@ fn the_reply_to_the_jump_is_read_once_and_reported_before_the_wait() {
     assert_eq!(at, bench.jump_at(), "reported before the wait starts");
     let ops = bench.ops();
     assert_only_the_jump(&ops, JUMP_DFU);
+    let after = after_the_session(&ops);
     assert_eq!(
-        ops[1],
+        after[1],
         Op::Read {
             timeout: JUMP_REPLY_WAIT
         },
@@ -678,7 +849,8 @@ fn a_jump_write_that_sees_the_meter_vanish_reports_it_and_reads_nothing() {
     let bench = Bench::app().jump_fail(TransportError::Disconnected);
     bench.run(JumpTarget::Bootloader).expect("the jump runs");
     assert_eq!(bench.sent()[0].reply, JumpReply::Disconnected);
-    assert_eq!(bench.ops().len(), 1, "no read: {:02x?}", bench.ops());
+    let ops = bench.ops();
+    assert_eq!(after_the_session(&ops).len(), 1, "no read: {ops:02x?}");
 }
 
 #[test]
