@@ -40,5 +40,8 @@ Build order: E1ZJ2M, then E1ZJ2N.
 **M7 follow-ups:**
 - Toolchain-pin scan: an unpaired apostrophe in a run line keeps a trailing comment, so the line can be flagged falsely (fails safe; from E1ZJ2M review).
 - CLAUDE.md Tech Stack names only the MSRV (1.96); add the rust-toolchain.toml pin there (needs the user's OK to edit CLAUDE.md).
+- Release publish step: switch the edit, upload and delete-asset calls from the tag to the release id (`gh api`), so draft handling never depends on the gh version (from E1ZJ2N review).
+- Changelog parser: an unquoted codename branch also accepts a malformed date as a codename; tighten the heading pattern (cosmetic; from E1ZJ2N review).
+- Release AppImage loses its executable bit through the workflow artifact; the install guide says `chmod +x` (consider packing it, or noting it in the release notes).
 
 **Gate:** same gating rule as CLAUDE.md.

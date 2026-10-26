@@ -12,6 +12,13 @@ modern UI.
 
 **Status: early development.** Nothing talks to a device yet.
 
+## Install
+
+Download the desktop app or the `powerz` CLI for macOS, Windows or Linux from the
+[latest release](https://github.com/nesquikm/open-powerz/releases/latest). The builds
+are not signed yet; [Install a release](docs/how-to/install-a-release.md) shows how to
+check the download and open the app past the macOS and Windows warnings.
+
 ## Planned features
 
 - Live meter: VBUS, IBUS, power, D+/D−, CC1/CC2, temperature
