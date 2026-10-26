@@ -44,5 +44,6 @@ Build order: E1ZJ2M, then E1ZJ2N.
 - Release publish step: switch the edit, upload and delete-asset calls from the tag to the release id (`gh api`), so draft handling never depends on the gh version (from E1ZJ2N review).
 - Changelog parser: an unquoted codename branch also accepts a malformed date as a codename; tighten the heading pattern (cosmetic; from E1ZJ2N review).
 - Release AppImage loses its executable bit through the workflow artifact; the install guide says `chmod +x` (consider packing it, or noting it in the release notes).
+- MSRV 1.96 (`rust-version`) is no longer built anywhere now that CI uses the 1.99.1 pin; add an MSRV check job or move `rust-version` up (from the M_WBBQ7F spec review).
 
 **Gate:** same gating rule as CLAUDE.md.
