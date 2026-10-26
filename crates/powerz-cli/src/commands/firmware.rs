@@ -293,9 +293,8 @@ pub const JUMP_RISK: &str = "refusing to jump without --i-understand: switching 
      is a risk; in its bootloader the meter takes no measurements until it is jumped back to \
      application mode or power-cycled. Re-run with --i-understand to accept the risk";
 
-/// What to tell the user after a jump to `to`: on 2.0.6 a jump takes
-/// effect at the next power-up `[device]`, so ask for a replug, naming the
-/// wait.
+/// What to tell the user after a jump to `to`: a replug if the meter does
+/// not restart by itself, naming the wait.
 fn replug_prompt(to: DeviceMode, wait: Duration) -> String {
     format!(
         "Unplug the meter and plug it back in (no buttons) if it does not restart by itself; \

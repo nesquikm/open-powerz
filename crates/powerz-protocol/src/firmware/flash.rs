@@ -15,9 +15,10 @@
 //! that must be ACCEPT; the payload in raw 4080-byte writes, each acked by
 //! SYNC; FINISHED within 1000 ms. Nothing else is retried automatically.
 //!
-//! On application firmware 2.0.6 a jump takes effect at the next power-up,
-//! not live `[device]`: after each jump the engine reports the meter's
-//! reply, asks for a replug and waits long enough for one.
+//! JUMP_DFU follows a level-1 authentication: without it the application
+//! answers REJECT `[device]`. After each jump the engine reports the
+//! meter's reply and waits long enough for a replug, in case the meter does
+//! not restart by itself (once authenticated it does `[device]`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -40,9 +41,9 @@ pub const BLOCK_LEN: usize = 4080;
 /// `[inferred]`.
 pub const MAX_APP_END: u32 = 0x0008_0000;
 /// How long to wait for the meter to come back in bootloader mode after
-/// JUMP_DFU. The vendor tool waits two seconds `[static]`, but on 2.0.6 the
-/// jump takes effect at the next power-up `[device]`, so this leaves time
-/// for the user to unplug the meter and plug it back in.
+/// JUMP_DFU. The vendor tool waits two seconds `[static]`; this leaves time
+/// for the user to unplug the meter and plug it back in if it does not
+/// restart by itself.
 pub const SWITCH_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long to wait for the meter to come back in application mode after
 /// JUMP_APROM, again with time for a replug `[inferred]`.

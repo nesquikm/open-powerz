@@ -212,7 +212,7 @@ fn sim_the_jump_reply_is_none_and_no_stale_frame_is_taken_for_it() {
     );
 }
 
-/// A meter that, like 2.0.6, takes a jump at the next power-up, replugged
+/// A meter that takes a jump at the next power-up instead of live, replugged
 /// after `opens` looks (`None`: never).
 fn power_up_meter(mode: DeviceMode, opens: Option<usize>) -> (SimMeter, SimClock) {
     let clock = clock();

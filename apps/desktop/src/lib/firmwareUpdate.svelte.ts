@@ -112,8 +112,8 @@ export function stageLabel(stage: FlashStage): string {
   }
 }
 
-/** The replug prompt: on 2.0.6 a jump takes effect at the next power-up, so the user
- * unplugs the meter and plugs it back in (AC .4). */
+/** The replug prompt: if the meter does not restart by itself after a jump, the user
+ * unplugs it and plugs it back in (AC .4). */
 export function replugPrompt(replug: Omit<FlashReplug, "stage">): string {
   return `Unplug the meter and plug it back in (no buttons) if it does not restart by itself. Waiting for ${replug.to} mode.`;
 }

@@ -2,9 +2,8 @@
 //! [`flash::jump`] sends one JUMP_DFU (from application mode) or JUMP_APROM
 //! (from bootloader mode) as a raw write through the strict flash guard,
 //! reads the meter's reply to it once and reports it, then waits on clock
-//! time (long enough for a replug: on 2.0.6 the jump takes effect at the
-//! next power-up `[device]`) for the meter to come back and reports the
-//! mode it came back in.
+//! time (long enough for a replug, if the meter does not restart by
+//! itself) for the meter to come back and reports the mode it came back in.
 //!
 //! From application mode the JUMP_DFU comes after the session the vendor
 //! tool opens first: CONNECT, the UID memory read and a level-1 0x4C

@@ -515,8 +515,8 @@ export type FlashStage =
   | { stage: "finished" }
   | { stage: "returning" };
 
-/** A jump was sent and the meter needs a replug if it does not restart by itself (on
- * 2.0.6 a jump takes effect at the next power-up); `reply` is its answer to the jump. */
+/** A jump was sent and the meter needs a replug if it does not restart by itself;
+ * `reply` is its answer to the jump. */
 export type FlashReplug = { stage: "replug"; to: "bootloader" | "application"; reply: string };
 
 /** What the backend reports during an update: a stage, or a replug prompt. */

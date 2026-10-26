@@ -14,8 +14,8 @@
 //! - `POWERZ_SIM_FLASH_FAULT=<fault>`: the simulated meter injects this
 //!   flash fault (`jump-dfu-ignored`, `jump-aprom-ignored`, ...).
 //! - `POWERZ_SIM_CTRL_C_AFTER=0`: Ctrl-C is pressed before the jump.
-//! - `POWERZ_SIM_REPLUG_AFTER=N`: like 2.0.6, the simulated meter takes a
-//!   jump at the next power-up, and is replugged after N looks at it.
+//! - `POWERZ_SIM_REPLUG_AFTER=N`: the simulated meter takes a jump at the
+//!   next power-up, and is replugged after N looks at it.
 
 use std::time::Duration;
 

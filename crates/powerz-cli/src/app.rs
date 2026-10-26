@@ -375,9 +375,9 @@ fn sim_meter(sim: SimDevice) -> Result<SimMeter, CliError> {
     })
 }
 
-/// Honour `POWERZ_SIM_REPLUG_AFTER=N` (test-only): like 2.0.6, the
-/// simulated meter takes a jump at the next power-up, and the user replugs
-/// it after N looks at it.
+/// Honour `POWERZ_SIM_REPLUG_AFTER=N` (test-only): the simulated meter
+/// takes a jump at the next power-up instead of live, and the user
+/// replugs it after N looks at it.
 fn sim_replug_after() -> Result<Option<usize>, CliError> {
     match std::env::var("POWERZ_SIM_REPLUG_AFTER") {
         Ok(n) => n

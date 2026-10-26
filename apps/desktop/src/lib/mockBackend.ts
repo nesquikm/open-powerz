@@ -1301,7 +1301,7 @@ export class MockBackend {
         await sleep(MOCK_FLASH_MS[stage]);
         if (failAt === stage) throw fail(stage);
         if (stage === "switching") {
-          // Like 2.0.6, the meter takes the jump at its next power-up.
+          // The prompt shows whether or not the meter restarts by itself.
           onStage({ stage: "replug", to: "bootloader", reply: "none" });
           await sleep(MOCK_FLASH_MS.replug);
         }

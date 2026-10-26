@@ -2813,9 +2813,8 @@ fn each_jump_is_followed_by_a_replug_prompt_naming_the_target_and_the_reply() {
     assert!(dfu <= aprom);
 }
 
-/// After a jump the meter stays where it is for `secs` seconds (2.0.6
-/// switches at the next power-up `[device]`), then is unplugged and comes
-/// back in `then`.
+/// After a jump the meter stays where it is for `secs` seconds (it does not
+/// restart by itself), then is unplugged and comes back in `then`.
 fn replugged_after(stay: DeviceMode, secs: u64, then: DeviceMode) -> Vec<Option<DeviceMode>> {
     let polls = (secs * 1000 / POLL_INTERVAL.as_millis() as u64) as usize;
     let mut v = vec![Some(stay); polls];
