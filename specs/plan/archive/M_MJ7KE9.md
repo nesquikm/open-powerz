@@ -1,8 +1,8 @@
 ---
 milestone: M_MJ7KE9
 id: fr_01M5PHM08GH7R61TR259MJ7KE9
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-26T15:04:25Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -30,20 +30,20 @@ codename: Flash Gordon
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [V9SK52](../frs/V9SK52.md) | Device mode and firmware version | n/a |
-| [V9SK53](../frs/V9SK53.md) | Firmware file inspection | n/a |
-| [V9SK54](../frs/V9SK54.md) | Firmware flashing engine | n/a |
-| [V9SK55](../frs/V9SK55.md) | Desktop firmware update | n/a |
-| [V9SK56](../frs/V9SK56.md) | Staged firmware checks on the real meter | n/a |
+| [V9SK52](../frs/archive/V9SK52.md) | Device mode and firmware version | n/a |
+| [V9SK53](../frs/archive/V9SK53.md) | Firmware file inspection | n/a |
+| [V9SK54](../frs/archive/V9SK54.md) | Firmware flashing engine | n/a |
+| [V9SK55](../frs/archive/V9SK55.md) | Desktop firmware update | n/a |
+| [V9SK56](../frs/archive/V9SK56.md) | Staged firmware checks on the real meter | n/a |
 
 Build order: V9SK52, V9SK53, V9SK54, V9SK55, then V9SK56 (stage 1 can run once V9SK52 is done).
 
 **Tasks:**
-- [ ] Device mode and firmware version — V9SK52
+- [x] Device mode and firmware version — V9SK52
 - [x] Firmware file inspection — V9SK53
 - [x] Firmware flashing engine — V9SK54
 - [x] Desktop firmware update — V9SK55
-- [ ] Staged firmware checks on the real meter — V9SK56
+- [x] Staged firmware checks on the real meter — V9SK56
 
 **M7 follow-ups:**
 - `.claude/settings.json` has no `Bash(claude:*)` allow rule, so gate probe `spawn_pattern_allowlist` fails. It has failed since the bootstrap commit, and the fix is a settings change only the user can approve.
