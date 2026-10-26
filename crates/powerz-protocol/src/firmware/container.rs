@@ -198,8 +198,10 @@ impl<'a> Reader<'a> {
         let len = usize::try_from(len).map_err(|_| self.truncated(what))?;
         let raw = self.take(len, what)?;
         let units: Vec<u16> = raw
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
         String::from_utf16(&units).map_err(|_| ContainerError::BadString { index })
     }
