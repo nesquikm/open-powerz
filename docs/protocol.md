@@ -730,11 +730,11 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
 
 | step | host sends | expects | on failure (vendor code) | tag |
 |---|---|---|---|---|
-| switch | in application mode: JUMP_DFU `09 id 00 00`, write only; one 500 ms read records any reply; then ask for a replug and wait up to 120 s for the meter to come back in boot-loader mode | a device in boot-loader mode | stop; hold Back while plugging the meter in | [static]; the jump takes effect at the next power-up, and nothing visible happens until the replug [device] |
+| switch | in application mode: JUMP_DFU `09 id 00 00`, write only; one 500 ms read records any reply; then ask for a replug and wait up to 120 s for the meter to come back in boot-loader mode | a device in boot-loader mode | stop; hold Back while plugging the meter in | [static]; application 2.0.6 answers a cold JUMP_DFU with REJECT `06 01 00 00` and a replug brings it back in the application [device] |
 | connect | CONNECT `02 id 00 00` (1000 ms); if it gets no reply, clear the halt, drain, and send one more | ACCEPT | Read (−108) | [static]; the boot loader leaves the first CONNECT unanswered and ACCEPTs the second [device] |
 | check | HEAD `40 id 00 01` + 16 zero bytes | type 0x40 (the extend bit may be set), the request id echoed, field 0 | Product (−100), WorkMode (−111) | [static]; boot-loader reply `c0 03 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00` to HEAD id 3 [device] |
-| descriptor | `42 id 00 04` + 64 bytes: start 0x4000, end = start + size, size, CRC, model, version, date, a random nonce | no reply: the 20 ms read must time out, because the meter is erasing | Write (−107) | [static] |
-| erase wait | N−1 reads of 10 ms (N = whole 4080-byte blocks of the payload), then one of 1000 ms | timeouts, then ACCEPT | Erase (−105) | [static]; which length N counts is [inferred] |
+| descriptor | `42 id 00 04` + 64 bytes: start 0x4000, end = start + size, size, CRC, model, version, date, a random nonce | no reply: the 20 ms read times out while the meter erases; an ACCEPT echoing the descriptor id means the erase is done | Write (−107) for any other reply | [static]; the ACCEPT [device] |
+| erase wait | N−1 reads of 10 ms (N = whole 4080-byte blocks of the payload), then one of 1000 ms | timeouts, then ACCEPT; an ACCEPT echoing the descriptor id ends the wait early | Erase (−105) for any other reply | [static]; the boot loader ACKed the descriptor with `05 03 00 00` during the 10 ms reads [device]; which length N counts is [inferred] |
 | data | the stored payload, unchanged, in raw 4080-byte bulk writes and then the remainder; a zero-length packet after a write that is a multiple of 64 bytes | SYNC `01` after each write | Download (−106) | [static] |
 | verify | read for 1000 ms | FINISHED `07` | Verify (−103) | [static] |
 | return | JUMP_APROM `08 id 00 00`, write only; one 500 ms read records any reply; ask for a replug and wait up to 120 s for application mode; read the info block `0x4420` | the new version | ask for a power cycle if the meter stays in its boot loader | [static] [inferred]; a plain replug leaves the boot loader for the application [device] |
@@ -743,6 +743,12 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
   start is always 0x4000. [static] [inferred]
 - There is no automatic retry. After a failure the meter stays in its boot
   loader; the update can be run again from there. [static]
+- Once the descriptor is ACKed the boot loader is in its download phase: it
+  takes every later frame as payload and answers it with SYNC `01`. After a
+  flash that stopped there, send nothing; unplug the meter and plug it back
+  in (holding Back if the application is intact) to restart the boot loader
+  before probing or flashing again. [device] (the SYNC replies) [inferred]
+  (the power cycle resets it)
 - Write-capable frames (JUMP_DFU, JUMP_APROM, the descriptor and the raw
   payload writes) can only be sent through the flash path. It needs a
   `FlashAck` marker, which the CLI creates only after `--i-understand`; the

@@ -37,7 +37,8 @@ pub enum FlashFault {
     JumpDfuIgnored,
     /// CONNECT in bootloader mode gets no reply.
     ConnectNoAccept,
-    /// The descriptor is answered (ACCEPT) instead of left unanswered.
+    /// The descriptor is answered with REJECT instead of left unanswered (an
+    /// ACCEPT with its id is the real erase-done signal `[device]`).
     DescriptorAnswered,
     /// ACCEPT arrives on the first erase wait, before the erase is done.
     EarlyAcceptDuringErase,
@@ -220,7 +221,7 @@ impl SimDevice {
             returned: false,
         };
         if self.fault(FlashFault::DescriptorAnswered) {
-            vec![self.control(msg::ACCEPT, id)]
+            vec![self.control(msg::REJECT, id)]
         } else {
             Vec::new()
         }

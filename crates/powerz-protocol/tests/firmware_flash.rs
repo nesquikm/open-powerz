@@ -1440,8 +1440,12 @@ fn a_head_timeout_message_has_no_reply_bytes() {
 
 #[test]
 fn a_descriptor_that_is_answered_is_a_write_error() {
+    // An ACCEPT with the descriptor id is the erase done (see the erase-wait
+    // tests); any other answer is still a write error.
     for reply in [
-        Boot::Frame(accept()),
+        Boot::Exact(vec![0x05, 0x00, 0x00, 0x00]),
+        Boot::Frame(reject()),
+        Boot::Frame(sync()),
         Boot::Fail(TransportError::Disconnected),
     ] {
         let (e, bench) = boot_failure(fail_at(P, AT_DESCRIPTOR, reply.clone()));
@@ -1454,12 +1458,76 @@ fn a_descriptor_that_is_answered_is_a_write_error() {
     }
 }
 
+/// `boot_ok(stored)` with the erase wait ended at short read `at` (0-based,
+/// counting the descriptor read as 0) by `ack`: the reads after it are not
+/// scripted, the payload SYNCs and FINISHED follow.
+fn early_ack_script(stored: usize, at: usize, ack: Boot) -> Vec<Boot> {
+    let n = stored / B;
+    let chunks = stored.div_ceil(B);
+    let mut v = vec![Boot::Frame(accept()), Boot::Frame(head(0))];
+    v.extend((0..at).map(|_| Boot::Timeout));
+    v.push(ack);
+    assert!(at < n, "the ack must come before the final erase read");
+    v.extend((0..chunks).map(|_| Boot::Frame(sync())));
+    v.push(Boot::Frame(finished()));
+    v
+}
+
 #[test]
-fn an_early_accept_during_the_erase_wait_is_an_erase_error() {
-    let (e, bench) = boot_failure(fail_at(P, AT_ERASE_SHORT, Boot::Frame(accept())));
-    assert!(matches!(e, FlashError::Erase { .. }), "got {e:?}");
-    assert_eq!(e.code(), -105);
-    assert!(payload_writes(&bench.boot_ops()).is_empty());
+fn an_accept_with_the_descriptor_id_during_the_erase_wait_ends_it() {
+    // The real bootloader ACKs the descriptor as soon as the erase is done,
+    // before the vendor's N−1 short reads are over `[device]`.
+    for at in [0, 1] {
+        let bytes = container_bytes(P, P);
+        let c = parse(&bytes);
+        let bench = Bench::boot().script(early_ack_script(P, at, Boot::Frame(accept())));
+        let (r, _) = bench.run(&c);
+        assert_eq!(
+            r,
+            Ok(FlashOutcome::Verified {
+                version: "2.0.7".into()
+            }),
+            "ACCEPT at read {at}"
+        );
+        let ops = bench.boot_ops();
+        let desc = ops
+            .iter()
+            .position(|o| o.written().is_some_and(is_raw_descriptor))
+            .expect("the descriptor");
+        let reads = ops[desc + 1..]
+            .iter()
+            .take_while(|o| matches!(o, Op::Read { .. }))
+            .count();
+        assert_eq!(reads, at + 1, "no read after the ACCEPT before the payload");
+        assert_eq!(payload_writes(&ops).len(), P.div_ceil(B));
+    }
+}
+
+#[test]
+fn an_accept_with_another_id_during_the_erase_wait_is_an_erase_error() {
+    for id in [0x00, 0x02, 0x04] {
+        let (e, bench) = boot_failure(early_ack_script(P, 1, Boot::Exact(vec![0x05, id, 0, 0])));
+        assert!(matches!(e, FlashError::Erase { .. }), "id {id}: got {e:?}");
+        assert_eq!(e.code(), -105);
+        assert!(payload_writes(&bench.boot_ops()).is_empty());
+    }
+}
+
+#[test]
+fn other_replies_during_the_erase_wait_are_an_erase_error() {
+    for reply in [
+        Boot::Frame(reject()),
+        Boot::Frame(sync()),
+        Boot::Frame(finished()),
+    ] {
+        let (e, bench) = boot_failure(fail_at(P, AT_ERASE_SHORT, reply.clone()));
+        assert!(
+            matches!(e, FlashError::Erase { .. }),
+            "{reply:?}: got {e:?}"
+        );
+        assert_eq!(e.code(), -105);
+        assert!(payload_writes(&bench.boot_ops()).is_empty());
+    }
 }
 
 #[test]
@@ -2082,12 +2150,12 @@ fn after_any_bootloader_failure_nothing_more_is_sent_and_the_hint_is_given() {
         ("head", fail_at(P, AT_HEAD, Boot::Frame(head(1))), 2),
         (
             "descriptor",
-            fail_at(P, AT_DESCRIPTOR, Boot::Frame(accept())),
+            fail_at(P, AT_DESCRIPTOR, Boot::Frame(reject())),
             3,
         ),
         (
             "early erase",
-            fail_at(P, AT_ERASE_SHORT, Boot::Frame(accept())),
+            fail_at(P, AT_ERASE_SHORT, Boot::Frame(reject())),
             3,
         ),
         ("erase", fail_at(P, AT_ERASE_ACCEPT, Boot::Timeout), 3),
@@ -2717,4 +2785,64 @@ fn a_rejected_connect_is_not_retried() {
     let (r, _) = bench.run(&c);
     assert!(matches!(r, Err(FlashError::Read { .. })), "got {r:?}");
     assert_eq!(framed_types(&bench.ops()), vec![0x02], "one CONNECT only");
+}
+
+// ---- AC-V9SK54.2: the real bootloader's erase ACK (stage 3, run 2) ----
+
+/// The frames recorded in stage 3 run 2 on the real KM003C
+/// (`qa-runs/V9SK56.3-20261026-1305`, flash-trace.txt) `[device]`: CONNECT
+/// answered first time, HEAD with id 2 and field 0, and the descriptor
+/// (id 3) ACKed with `05 03 00 00` during the erase wait.
+const RUN2_CONNECT: [u8; 4] = [0x02, 0x01, 0x00, 0x00];
+const RUN2_ACCEPT: [u8; 4] = [0x05, 0x01, 0x00, 0x00];
+const RUN2_HEAD_REQ: [u8; 20] = [
+    0x40, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const RUN2_HEAD_REPLY: [u8; 20] = [
+    0xc0, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+    0x00, 0x00, 0x00, 0x00,
+];
+const RUN2_ERASE_ACK: [u8; 4] = [0x05, 0x03, 0x00, 0x00];
+
+#[test]
+fn the_run2_bootloader_frames_flash_through_the_early_erase_ack() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let chunks = P.div_ceil(B);
+    let mut script = vec![
+        Boot::Exact(RUN2_ACCEPT.to_vec()),
+        Boot::Exact(RUN2_HEAD_REPLY.to_vec()),
+        // The descriptor read times out, the first erase read gets the ACK.
+        Boot::Timeout,
+        Boot::Exact(RUN2_ERASE_ACK.to_vec()),
+    ];
+    script.extend((0..chunks).map(|_| Boot::Frame(sync())));
+    script.push(Boot::Frame(finished()));
+    let bench = Bench::boot().script(script);
+    let (r, _) = bench.run(&c);
+    assert_eq!(
+        r,
+        Ok(FlashOutcome::Verified {
+            version: "2.0.7".into()
+        })
+    );
+    let ops = bench.ops();
+    assert_eq!(
+        ops[..2],
+        [
+            Op::Transact {
+                req: RUN2_CONNECT.to_vec(),
+                timeout: ms(1000)
+            },
+            Op::Transact {
+                req: RUN2_HEAD_REQ.to_vec(),
+                timeout: ms(1000)
+            },
+        ],
+        "the same frames as the run-2 trace"
+    );
+    let desc = ops[2].written().expect("the descriptor");
+    assert!(is_raw_descriptor(desc));
+    assert_eq!(desc[1], 0x03, "the descriptor id the ACK echoes");
+    assert_eq!(payload_writes(&ops).len(), chunks);
 }

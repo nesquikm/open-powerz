@@ -1117,19 +1117,24 @@ fn download<P: FlashTransport, C: Clock>(
     }
     progress(FlashProgress::Erasing);
     // The descriptor: a raw write, then a short read that must time out
-    // (else −107).
-    let desc = descriptor(ids.next(), container, clock.random_u64() as u32)?;
+    // (else −107). An ACCEPT echoing the descriptor id there or during the
+    // erase wait means the erase is done: the real bootloader ACKs as soon
+    // as it has erased, before the vendor's short reads are over `[device]`.
+    let desc_id = ids.next();
+    let desc = descriptor(desc_id, container, clock.random_u64() as u32)?;
     pipe.write_raw(&desc, WRITE_WAIT)
         .map_err(|e| FlashError::Write {
             detail: format!("descriptor: {e}"),
         })?;
-    match pipe.read(DESCRIPTOR_WAIT) {
-        Err(TransportError::Timeout) => {}
-        r => {
-            return Err(FlashError::Write {
-                detail: format!("descriptor: {}", describe(&r)),
-            });
-        }
+    let erased = |r: &Result<Vec<u8>, TransportError>| {
+        is(r, ACCEPT) && matches!(r, Ok(reply) if reply.get(1) == Some(&desc_id))
+    };
+    let r = pipe.read(DESCRIPTOR_WAIT);
+    let mut erase_done = erased(&r);
+    if !erase_done && !matches!(r, Err(TransportError::Timeout)) {
+        return Err(FlashError::Write {
+            detail: format!("descriptor: {}", describe(&r)),
+        });
     }
 
     // Erase wait: N−1 short reads that time out, then ACCEPT (else −105).
@@ -1137,20 +1142,24 @@ fn download<P: FlashTransport, C: Clock>(
     let payload = container.payload();
     let blocks = payload.len() / BLOCK_LEN;
     for _ in 1..blocks {
-        match pipe.read(ERASE_SHORT_WAIT) {
-            Err(TransportError::Timeout) => {}
-            r => {
-                return Err(FlashError::Erase {
-                    detail: format!("during the erase wait: {}", describe(&r)),
-                });
-            }
+        if erase_done {
+            break;
+        }
+        let r = pipe.read(ERASE_SHORT_WAIT);
+        erase_done = erased(&r);
+        if !erase_done && !matches!(r, Err(TransportError::Timeout)) {
+            return Err(FlashError::Erase {
+                detail: format!("during the erase wait: {}", describe(&r)),
+            });
         }
     }
-    let r = pipe.read(ERASE_FINAL_WAIT);
-    if !is(&r, ACCEPT) {
-        return Err(FlashError::Erase {
-            detail: format!("no ACCEPT after the erase: {}", describe(&r)),
-        });
+    if !erase_done {
+        let r = pipe.read(ERASE_FINAL_WAIT);
+        if !is(&r, ACCEPT) {
+            return Err(FlashError::Erase {
+                detail: format!("no ACCEPT after the erase: {}", describe(&r)),
+            });
+        }
     }
 
     // Data phase: raw writes of the stored bytes, each acked by SYNC.
