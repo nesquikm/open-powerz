@@ -304,7 +304,8 @@ impl SimDevice {
         let record = (self.auth_level >= 1)
             .then(|| records::samples(addr, len))
             .flatten();
-        let Some(block) = memory::block(addr, len, &self.app_version).or(record) else {
+        let Some(block) = memory::block(addr, len, &self.app_version, &self.serial).or(record)
+        else {
             return reject();
         };
         let mut confirm = level0(msg::MEM_READ | 0x80, true, 4);
@@ -321,7 +322,7 @@ impl SimDevice {
             return self.control(msg::REJECT, id);
         }
         let plain = crypto::decrypt(&KEYS[3], &req[4..4 + CRYPT_LEN]);
-        let otp = memory::otp_credential();
+        let otp = memory::otp_credential(&self.serial);
         let granted = if plain[8..8 + memory::SIM_UID.len()] == memory::SIM_UID {
             1
         } else if plain[8..8 + otp.len()] == otp[..] {

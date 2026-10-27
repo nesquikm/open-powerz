@@ -50,6 +50,7 @@ import type {
   TriggerRequest,
   UiError,
   MeasurementSource,
+  MeterCommands,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
 import { DISCOVER_IDENTITY_CABLE, lineRefusal, messageRefusal } from "./console.svelte";
@@ -398,8 +399,15 @@ interface MockPdFile {
 }
 
 interface Running {
-  /** The picker id the session was connected with. */
+  /** The picker id the session was connected with; it keeps naming the session after a
+   * replug moved the meter to another address, like the backend's. */
+  id: string;
+  /** The picker id the meter is listed under now. */
   deviceId: string;
+  /** The serial the meter reports; a second demo meter gets one of its own (FR 1HHT03). */
+  serial: string;
+  /** The session id, as in the `connected` status. */
+  sessionId: number;
   /** Where the measurements come from (FR 1HHT02). */
   source: MeasurementSource;
   scenario: Scenario;
@@ -426,6 +434,8 @@ interface Running {
   pd: MockPdCapture;
   /** The VBUS a trigger request moved the demo charger to, V; null at its own. */
   triggerVbusV: number | null;
+  /** This meter's open trigger session (FR DGSQ6S), null when none (FR 1HHT03). */
+  trigger: MockTrigger | null;
 }
 
 interface MockRecording {
@@ -510,7 +520,7 @@ function replugMeter(address: number): DeviceListing {
 }
 
 /** The status event of a mock session that just connected; a null rate is a locked one. */
-function connectedStatus(serial: string, rateSps: number | null): BackendEvent {
+function connectedStatus(serial: string, rateSps: number | null, sessionId = 1): BackendEvent {
   return {
     type: "status",
     data: {
@@ -525,7 +535,7 @@ function connectedStatus(serial: string, rateSps: number | null): BackendEvent {
       serial,
       rate_sps: rateSps,
       rate_locked: rateSps === null,
-      session_id: 1,
+      session_id: sessionId,
     },
   };
 }
@@ -807,8 +817,18 @@ const DEMO_RECORDS: readonly { entry: OfflineRecordEntry; samples: OfflineRecord
     };
   });
 
+/** The commands of one meter's tile (FR 1HHT03), as {@link MockBackend.meter} hands them out. */
+export type MockMeter = MeterCommands;
+
+/** The demo meters' serial; a second demo meter counts up from it (FR 1HHT03). */
+const DEMO_SERIAL = "123456";
+
 export class MockBackend {
+  /** The session the commands without a device id act on: the meter connected last. */
   #session: Running | null = null;
+  /** Every running session, in the order the meters were connected (FR 1HHT03). */
+  #sessions: Running[] = [];
+  #nextSessionId = 1;
   /** The PD capture saved last in the page, and the one opened (FR TGE83E). */
   #savedPd: MockPdFile | null = null;
   #openedPd: MockPdFile | null = null;
@@ -826,13 +846,18 @@ export class MockBackend {
   /** `replug`: the meter is unplugged only once per page. */
   #unplugDone = false;
   #replugTimer: ReturnType<typeof setTimeout> | null = null;
+  /** `replug`: the session the unplug script runs for. */
+  #replugFor: Running | null = null;
   #watchers = new Set<(devices: DeviceListing[]) => void>();
   /** Settings reads so far (FR 1HHT01). */
   #meterSettingsReads = 0;
   /** Offline-record downloads so far (FR 1HHT00). */
   #recordDownloads = 0;
-  /** The open trigger session (FR DGSQ6S), null when none. */
-  #trigger: MockTrigger | null = null;
+  /** The trigger session (FR DGSQ6S) of the meter the commands act on, null when none;
+   * each meter has its own (FR 1HHT03). */
+  get #trigger(): MockTrigger | null {
+    return this.#session?.trigger ?? null;
+  }
   /** Every command the scripted charger received. */
   #triggerLog: string[] = [];
 
@@ -862,7 +887,7 @@ export class MockBackend {
       id: `demo:${name}`,
       label: `Demo device — ${name}`,
       model: "KM003C",
-      serial: "123456",
+      serial: DEMO_SERIAL,
       bus: null,
       address: null,
       demo_scenario: name,
@@ -883,6 +908,75 @@ export class MockBackend {
     for (const w of this.#watchers) w(list);
   }
 
+  /** The device ids of the running sessions, in the order they were connected (FR 1HHT03). */
+  connectedIds(): string[] {
+    return this.#sessions.map((s) => s.deviceId);
+  }
+
+  /** The demo serial, or the next one up when a running demo meter already reports it. */
+  #freeDemoSerial(): string {
+    let n = Number(DEMO_SERIAL);
+    while (this.#sessions.some((s) => s.serial === String(n))) n += 1;
+    return String(n);
+  }
+
+  /** The commands of meter `deviceId` (FR 1HHT03): each acts on that meter's session,
+   * whichever meter the commands without a device id act on. */
+  meter(deviceId: string): MockMeter {
+    const on =
+      <A extends unknown[], R>(f: (...args: A) => Promise<R>) =>
+      (...args: A): Promise<R> => {
+        const s = this.#sessions.find((x) => x.id === deviceId || x.deviceId === deviceId);
+        if (!s) return Promise.reject(usage("No meter is connected."));
+        const before = this.#session;
+        // The command reads its session before its first await.
+        this.#session = s;
+        try {
+          return f.apply(this, args);
+        } finally {
+          this.#session =
+            before && this.#sessions.includes(before) ? before : (this.#sessions.at(-1) ?? null);
+        }
+      };
+    return {
+      disconnect: on(this.disconnect),
+      // Like the backend: ends this meter's wait only, also while its session is down.
+      cancelWait: async () => {
+        if (this.#waiting?.id === deviceId || this.#waiting?.deviceId === deviceId) {
+          this.#waiting = null;
+        }
+      },
+      setRate: on(this.setRate),
+      startRecording: on(this.startRecording),
+      stopRecording: on(this.stopRecording),
+      exportSession: on(this.exportSession),
+      stats: on(this.stats),
+      historyRange: on(this.historyRange) as MockBackend["historyRange"],
+      historyGaps: on(this.historyGaps),
+      resetStats: on(this.resetStats),
+      clearHistory: on(this.clearHistory),
+      pdStart: on(this.pdStart),
+      pdStop: on(this.pdStop),
+      pdDetails: on(this.pdDetails),
+      pdClear: on(this.pdClear),
+      pdSave: on(this.pdSave),
+      meterSettings: on(this.meterSettings),
+      recordsList: on(this.recordsList),
+      recordDownload: on(this.recordDownload),
+      triggerOpen: on(this.triggerOpen),
+      triggerDetect: on(this.triggerDetect),
+      triggerList: on(this.triggerList),
+      triggerRisk: on(this.triggerRisk),
+      triggerRequest: on(this.triggerRequest),
+      triggerBackTo5v: on(this.triggerBackTo5v),
+      triggerClose: on(this.triggerClose),
+      triggerMessageRisk: on(this.triggerMessageRisk),
+      triggerMessageSend: on(this.triggerMessageSend),
+      triggerConsoleRisk: on(this.triggerConsoleRisk),
+      triggerConsoleSend: on(this.triggerConsoleSend),
+    };
+  }
+
   /** The source the running session streams from, `null` when none runs (FR 1HHT02). */
   connectedSource(): MeasurementSource | null {
     return this.#session?.source ?? null;
@@ -895,16 +989,28 @@ export class MockBackend {
     source: MeasurementSource = "queue",
   ): Promise<void> {
     if (this.#flashing) throw usage(FLASH_REFUSAL);
-    if (this.#session) throw usage("A meter is already connected. Disconnect it first.");
+    if (this.#sessions.some((x) => x.id === deviceId || x.deviceId === deviceId)) {
+      throw usage("This meter is already connected. Disconnect it first.");
+    }
     const isMeter = this.#listedMeter()?.id === deviceId;
-    // A connect by hand ends any wait for the unplugged meter.
-    this.#waiting = null;
+    // Like the backend: a connect by hand ends the wait for the unplugged meter, unless
+    // it adds a meter beside running ones (FR 1HHT03); a connect of that meter itself
+    // always does.
+    const waited = this.#waiting;
+    if (
+      this.#sessions.length === 0 ||
+      (waited !== null && (waited.id === deviceId || waited.deviceId === deviceId || isMeter))
+    ) {
+      this.#waiting = null;
+    }
     const scenario = isMeter ? "load-5v-1a" : scenarioOf(deviceId);
     if (!scenario) throw usage("That meter is no longer attached.");
     if (this.#mode === "permission-denied") throw { ...LINUX_PERMISSION_DENIED };
     const locked = this.#mode === "rate-locked";
+    const serial = isMeter ? MOCK_REPLUG.serial : this.#freeDemoSerial();
+    const sessionId = this.#nextSessionId++;
     // Like the worker: a locked session's rate is unknown until measured.
-    onEvent(connectedStatus(isMeter ? MOCK_REPLUG.serial : "123456", locked ? null : rateSps));
+    onEvent(connectedStatus(serial, locked ? null : rateSps, sessionId));
     if (locked) {
       onEvent({
         type: "status",
@@ -912,7 +1018,10 @@ export class MockBackend {
       });
     }
     const session: Running = {
+      id: deviceId,
       deviceId,
+      serial,
+      sessionId,
       source,
       scenario,
       rateSps: locked ? LOCKED_RATE_SPS : rateSps,
@@ -926,6 +1035,7 @@ export class MockBackend {
       gaps: [],
       pendingGap: null,
       triggerVbusV: null,
+      trigger: null,
       stats: new MockStats(),
       pd: {
         timer: null,
@@ -939,11 +1049,13 @@ export class MockBackend {
       },
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
+    this.#sessions.push(session);
     this.#session = session;
     if (this.#mode === "outage") this.#seedOutage(session, MOCK_OUTAGE);
     if (this.#mode === "blip") this.#seedOutage(session, MOCK_BLIP);
     if (isMeter && !this.#unplugDone) {
       this.#unplugDone = true;
+      this.#replugFor = session;
       this.#replugTimer = setTimeout(() => this.#unplug(session), MOCK_REPLUG.beforeMs);
     }
     // The mock production build (the Playwright suite) honours it too.
@@ -959,7 +1071,7 @@ export class MockBackend {
    * list loses the meter; after `awayMs` the meter is back and the session goes on. */
   #unplug(s: Running): void {
     this.#replugTimer = null;
-    if (this.#session !== s) return;
+    if (!this.#sessions.includes(s)) return;
     this.#endSession(s, {
       kind: "disconnected",
       message: "The meter was unplugged.",
@@ -978,7 +1090,7 @@ export class MockBackend {
     this.#replugTimer = null;
     this.#meterAddress = 9;
     void this.#notifyDevices();
-    if (this.#waiting !== s || this.#session) return;
+    if (this.#waiting !== s) return;
     this.#waiting = null;
     const step = 1000 / s.rateSps;
     const from = Math.round(s.nextMs - step);
@@ -990,7 +1102,9 @@ export class MockBackend {
     s.pendingGap = { kind: "outage", ...gap };
     s.onEvent(connectedStatus(MOCK_REPLUG.serial, s.rateSps));
     s.timer = setInterval(() => this.#tick(s), BATCH_MS);
-    this.#session = s;
+    this.#sessions.push(s);
+    // Like the backend: the commands without a device id stay on a meter still running.
+    this.#session ??= s;
   }
 
   /** `outage` / `blip`: the run before the outage, then the live stream after it. */
@@ -1047,10 +1161,16 @@ export class MockBackend {
     }
   }
 
-  /** A new page asks for the running session; `null` when none is running.
-   * Later events go to `onEvent` only. */
-  async attach(onEvent: (event: BackendEvent) => void): Promise<AttachedSession | null> {
-    const s = this.#session;
+  /** A new page asks for the running session (the current one, or meter `deviceId`'s);
+   * `null` when none is running. Later events go to `onEvent` only. */
+  async attach(
+    onEvent: (event: BackendEvent) => void,
+    deviceId?: string,
+  ): Promise<AttachedSession | null> {
+    const s =
+      deviceId === undefined
+        ? this.#session
+        : (this.#sessions.find((x) => x.id === deviceId || x.deviceId === deviceId) ?? null);
     if (!s) return null;
     s.onEvent = onEvent;
     const rec = s.recording;
@@ -1058,10 +1178,10 @@ export class MockBackend {
       device_id: s.deviceId,
       model: "KM003C",
       firmware_version: "2.0.6",
-      serial: "123456",
+      serial: s.serial,
       rate_sps: s.rateSps,
       rate_locked: s.rateLocked,
-      session_id: 1,
+      session_id: s.sessionId,
       recording: rec ? { rows: rec.rows, elapsed_ms: rec.elapsedMs } : null,
     };
   }
@@ -1082,8 +1202,11 @@ export class MockBackend {
     const s = this.#open();
     // Like the backend: back to 5 V and `pdm close` before the queue stops.
     this.#closeTrigger();
-    if (this.#replugTimer !== null) clearTimeout(this.#replugTimer);
-    this.#replugTimer = null;
+    // Only the meter whose unplug is scripted cancels the script (FR 1HHT03).
+    if (this.#replugTimer !== null && this.#replugFor === s) {
+      clearTimeout(this.#replugTimer);
+      this.#replugTimer = null;
+    }
     this.#endSession(s, null);
   }
 
@@ -1093,7 +1216,8 @@ export class MockBackend {
     clearInterval(s.timer);
     // Like the worker: the sniffer stops before the session ends.
     this.#stopPd(s);
-    this.#session = null;
+    this.#sessions = this.#sessions.filter((x) => x !== s);
+    if (this.#session === s) this.#session = this.#sessions.at(-1) ?? null;
     if (s.recording) {
       const rows = s.recording.rows;
       s.recording = null;
@@ -1508,7 +1632,7 @@ export class MockBackend {
       rateBefore = s.rateSps;
       await this.setRate(TRIGGER_MAX_SPS);
     }
-    this.#trigger = { entered: null, rateBefore };
+    s.trigger = { entered: null, rateBefore };
     this.#triggerLog.push("pdm open");
   }
 
@@ -1727,8 +1851,8 @@ export class MockBackend {
     if (!t) return;
     this.#returnTo5v(t);
     this.#triggerLog.push("pdm close");
-    this.#trigger = null;
     const s = this.#session;
+    if (s) s.trigger = null;
     if (s && t.rateBefore !== null && !s.recording) {
       s.rateSps = t.rateBefore;
       s.carry = 0;

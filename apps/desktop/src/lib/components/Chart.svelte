@@ -97,6 +97,7 @@
     active = true,
     pd = null,
     onPdMarker,
+    history = { historyRange, historyGaps },
   }: {
     theme: ResolvedTheme;
     rateSps?: number | null;
@@ -106,6 +107,12 @@
     pd?: PdCapture | null;
     /** A PD marker (or count badge) was clicked: its record index (AC-TGE83D.2). */
     onPdMarker?: (index: number) => void;
+    /** Where the history comes from: the meter the chart shows (FR 1HHT03); the session
+     * the commands without a device id act on by default. */
+    history?: {
+      historyRange: typeof historyRange;
+      historyGaps: typeof historyGaps;
+    };
   } = $props();
 
   /** The PD marker layer: a canvas of its own over the top of the plot (FR TGE83D). */
@@ -767,7 +774,7 @@
     const generation = backfillGeneration;
     const [t0Ms, t1Ms] = backfillRange(first);
     if (!(t1Ms > t0Ms)) return;
-    fetchBackfill(first, { historyRange, historyGaps })
+    fetchBackfill(first, history)
       .then(({ samples, gaps }) => {
         if (generation !== backfillGeneration) return;
         buffer.prepend(samples);
@@ -834,9 +841,9 @@
     fetch: async (req) => {
       const generation = historyGeneration;
       const [buckets, gaps] = await Promise.all([
-        historyRange(req.series, req.t0Ms, req.t1Ms, req.buckets),
+        history.historyRange(req.series, req.t0Ms, req.t1Ms, req.buckets),
         // A failed gap query leaves the gaps already known; the buckets still draw.
-        historyGaps(req.t0Ms, req.t1Ms).catch(() => []),
+        history.historyGaps(req.t0Ms, req.t1Ms).catch(() => []),
       ]);
       if (generation === historyGeneration) for (const g of gaps) sessionGaps.push(g);
       return buckets;

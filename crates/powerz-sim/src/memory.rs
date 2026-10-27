@@ -40,14 +40,13 @@ fn info_block(head: [u32; 3], version: &str, date: &str) -> Vec<u8> {
     b
 }
 
-/// The synthetic OTP block: `SERIAL <hex id> <time> SIM`, 0xFF padded.
-fn otp_block() -> Vec<u8> {
-    let text = format!(
-        "{} 0123456789abcdef0123456789abcdef 1700000000 SIM",
-        crate::SIM_SERIAL
-    );
+/// The synthetic OTP block: `SERIAL <hex id> <time> SIM`, 0xFF padded
+/// (cut to the block's 64 bytes).
+fn otp_block(serial: &str) -> Vec<u8> {
+    let text = format!("{serial} 0123456789abcdef0123456789abcdef 1700000000 SIM");
     let mut b = vec![0xFF; 64];
-    b[..text.len()].copy_from_slice(text.as_bytes());
+    let n = text.len().min(b.len());
+    b[..n].copy_from_slice(&text.as_bytes()[..n]);
     b
 }
 
@@ -56,8 +55,8 @@ pub(crate) const SIM_APP_VERSION: &str = "2.0.6";
 
 /// Plain contents of `(addr, len)`, or `None` for anything not allowed.
 /// `app_version` is the application firmware version the 0x4420 block
-/// reports.
-pub(crate) fn block(addr: u32, len: u32, app_version: &str) -> Option<Vec<u8>> {
+/// reports, `serial` the serial the OTP block carries.
+pub(crate) fn block(addr: u32, len: u32, app_version: &str, serial: &str) -> Option<Vec<u8>> {
     match (addr, len) {
         HARDWARE_INFO => Some(info_block([0x0000_0000, 0x4000, 0], "2.5", "2024.01.01")),
         FIRMWARE_INFO => Some(info_block(
@@ -65,13 +64,13 @@ pub(crate) fn block(addr: u32, len: u32, app_version: &str) -> Option<Vec<u8>> {
             app_version,
             "2025.06.01",
         )),
-        OTP => Some(otp_block()),
+        OTP => Some(otp_block(serial)),
         UID => Some(SIM_UID.to_vec()),
         _ => None,
     }
 }
 
 /// The level-2 credential: the first 16 bytes of the OTP block.
-pub(crate) fn otp_credential() -> Vec<u8> {
-    otp_block()[..OTP_CREDENTIAL_LEN].to_vec()
+pub(crate) fn otp_credential(serial: &str) -> Vec<u8> {
+    otp_block(serial)[..OTP_CREDENTIAL_LEN].to_vec()
 }

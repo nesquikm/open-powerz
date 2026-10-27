@@ -360,6 +360,8 @@ pub struct SimDevice {
     adcnew_sent: usize,
     /// ADCNEW frames the host side dropped for a bad CRC or length.
     adcnew_crc_errors: u64,
+    /// The serial the OTP block reports ([`SIM_SERIAL`] by default).
+    serial: String,
     /// Echoing ADCNEW starts (the `echo-start` fault) since this uptime of
     /// the last host request; `None` once a quiet start got through.
     echo_since_ms: Option<u64>,
@@ -414,6 +416,7 @@ impl SimDevice {
             adcnew: None,
             adcnew_sent: 0,
             adcnew_crc_errors: 0,
+            serial: SIM_SERIAL.to_string(),
             echo_since_ms: None,
             adcnew_last_start: Vec::new(),
             adcnew_start_echoes: 0,
@@ -457,6 +460,14 @@ impl SimDevice {
             end -= 1;
         }
         self.app_version = version[..end].to_string();
+        self
+    }
+
+    /// Report `serial` instead of [`SIM_SERIAL`], so a second simulated
+    /// meter can run beside the first (FR 1HHT03). A serial longer than the
+    /// OTP block holds is cut to fit.
+    pub fn with_serial(mut self, serial: &str) -> SimDevice {
+        self.serial = serial.to_string();
         self
     }
 

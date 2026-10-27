@@ -266,12 +266,18 @@ impl Opener for AppOpener {
     ) -> Result<AppTransport, transport::Error> {
         if let Some(name) = &device.demo_scenario {
             let scenario = Scenario::from_name(name).ok_or(transport::Error::NotFound)?;
-            return Ok(AppTransport::Demo(Box::new(match source {
+            let sim = match source {
                 // The demo device also plays the simulator's PD capture (FR TGE83C).
                 MeasurementSource::Queue => SimDevice::new(Persona::Bulk, scenario)
                     .with_pd_scenario(PdScenario::Negotiation),
                 MeasurementSource::Cdc => SimDevice::new(Persona::Cdc, scenario),
-            })));
+            };
+            // A second demo meter reports a serial of its own (FR 1HHT03).
+            let sim = match &device.serial {
+                Some(serial) => sim.with_serial(serial),
+                None => sim,
+            };
+            return Ok(AppTransport::Demo(Box::new(sim)));
         }
         if source == MeasurementSource::Cdc {
             let serial = device.serial.as_deref().ok_or(transport::Error::NotFound)?;
@@ -320,41 +326,91 @@ impl Drop for WatchHandle {
     }
 }
 
-/// Owns every meter connection.
-pub struct DeviceManager<O, C> {
-    discover: Discover,
-    opener: Arc<O>,
-    clock: C,
+/// Meters the app waits for (FR TGE839): the id of the meter's session and
+/// the serial it waits to see again.
+type Waiting = Arc<Mutex<Vec<(String, String)>>>;
+
+/// One meter's session (FR 1HHT03): every connected meter has its own
+/// worker, data, page, trigger session and wait.
+struct Meter {
+    /// The id the meter was connected with; it keeps naming the session
+    /// after a replug moves the meter to another address.
+    id: String,
+    /// The session's worker, until it is disconnected.
     worker: Option<WorkerHandle>,
-    next_session_id: u64,
-    /// Session per meter serial (or device id when it has none): what the
-    /// outage gap needs, and the data every connection appends to.
-    histories: HashMap<String, (Arc<Mutex<History>>, SessionStore)>,
-    /// The data of the most recent session, kept readable after it ends.
-    last_store: Option<SessionStore>,
-    /// The open session's page: where its events go now, and what a new
-    /// page needs to pick it up.
-    live: Option<Arc<Mutex<Live>>>,
-    /// The open session's stop flag.
-    stop: Option<Arc<AtomicBool>>,
-    /// Serial of the meter whose session ended without being asked to, which
-    /// the app waits for (FR TGE839).
-    waiting: Arc<Mutex<Option<String>>>,
-    /// Rate the open (or awaited) session was connected at, SPS.
+    /// The session's data, kept readable after it ends.
+    store: SessionStore,
+    /// The session's page: where its events go now, and what a new page
+    /// needs to pick it up.
+    live: Arc<Mutex<Live>>,
+    /// The session's stop flag.
+    stop: Arc<AtomicBool>,
+    /// Rate the session was connected at, SPS.
     rate_sps: u32,
-    /// Where the open (or awaited) session's measurements come from.
+    /// Where the session's measurements come from.
     source: MeasurementSource,
-    /// The device the open (or awaited) session was connected to.
-    device: Option<DeviceListing>,
+    /// The device the session was (last) opened on.
+    device: DeviceListing,
     /// The open trigger session (FR DGSQ6S). Shared with the session's
     /// event sink, so a meter that drops out closes it too.
     trigger: Arc<Mutex<Option<crate::trigger::TriggerWorker>>>,
     /// The queue rate to restore when the trigger session closes, if it was
     /// capped for it.
     rate_before_trigger: Option<Rate>,
+}
+
+impl Meter {
+    /// Whether `id` names this meter: the id it was connected with, or the
+    /// one it is listed under now.
+    fn named(&self, id: &str) -> bool {
+        self.id == id || self.device.id == id
+    }
+
+    /// The session's worker, unless it has ended by itself.
+    fn running_worker(&self) -> Option<&WorkerHandle> {
+        self.worker.as_ref().filter(|w| !w.is_finished())
+    }
+
+    /// Let go of the meter: the trigger session returns to 5 V and closes,
+    /// then the worker stops. The session's data stays.
+    fn release(&mut self) {
+        self.rate_before_trigger = None;
+        if let Some(trigger) = take(&self.trigger) {
+            let _ = trigger.close();
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.disconnect();
+        }
+    }
+}
+
+/// Owns every meter connection: one session per connected meter (FR 1HHT03).
+pub struct DeviceManager<O, C> {
+    discover: Discover,
+    opener: Arc<O>,
+    clock: C,
+    next_session_id: u64,
+    /// Session per meter serial (or device id when it has none): what the
+    /// outage gap needs, and the data every connection appends to.
+    histories: HashMap<String, (Arc<Mutex<History>>, SessionStore)>,
+    /// Every meter's session, in the order they were connected.
+    meters: Vec<Meter>,
+    /// The meter connected last. The commands without a device id act on
+    /// it while it runs, else on the meter connected last that still runs
+    /// (see [`current_id`](Self::current_id)).
+    current: Option<String>,
+    /// Meters whose session ended without being asked to, which the app
+    /// waits for (FR TGE839).
+    waiting: Waiting,
     /// Raised while a firmware update holds the meter (FR V9SK55, AC .4);
     /// shared with its [`FlashLease`].
     flashing: Arc<AtomicBool>,
+    /// The meters the firmware update took (FR 1HHT03); empty while
+    /// flashing means every meter is held.
+    flash_targets: Arc<Mutex<Vec<String>>>,
+    /// The simulator serials given to second (third, ...) demo meters, by
+    /// serial: the demo device id that got each (FR 1HHT03).
+    demo_serials: HashMap<String, String>,
 }
 
 /// Why a request is refused while a firmware update runs.
@@ -368,6 +424,7 @@ const FLASH_REFUSAL: &str =
 pub struct FlashLease {
     device: DeviceListing,
     flashing: Arc<AtomicBool>,
+    targets: Arc<Mutex<Vec<String>>>,
 }
 
 impl FlashLease {
@@ -379,6 +436,11 @@ impl FlashLease {
 
 impl Drop for FlashLease {
     fn drop(&mut self) {
+        // Targets first: a flash begun in between keeps the ones it set.
+        self.targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.flashing.store(false, Ordering::SeqCst);
     }
 }
@@ -590,6 +652,14 @@ fn take(
     lock(slot).take()
 }
 
+/// Forget any wait for the meter whose session is `id`.
+fn forget_wait(waiting: &Waiting, id: &str) {
+    waiting
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|(slot, _)| slot != id);
+}
+
 /// Wrap `sink` so a session that ends (asked to or not, e.g. an unplug)
 /// first returns an open trigger session to 5 V and closes it (FR DGSQ6S):
 /// the page is told the meter disconnected only after that, so it can rely
@@ -610,9 +680,11 @@ fn trigger_sink(
 
 /// Wrap `sink` so a real meter's session that ends without being asked to,
 /// after it delivered samples, is followed by a waiting status for `serial`,
-/// and the manager remembers that serial (FR TGE839).
+/// and the manager remembers that session `id` waits for that serial
+/// (FR TGE839).
 fn waiting_sink(
-    waiting: Arc<Mutex<Option<String>>>,
+    waiting: Waiting,
+    id: String,
     serial: String,
     history: Arc<Mutex<History>>,
     mut sink: impl EventSink,
@@ -629,13 +701,19 @@ fn waiting_sink(
             .unwrap_or_else(PoisonError::into_inner)
             .outage;
         if outage {
-            *waiting.lock().unwrap_or_else(PoisonError::into_inner) = Some(serial.clone());
+            let mut waits = waiting.lock().unwrap_or_else(PoisonError::into_inner);
+            waits.retain(|(slot, _)| slot != &id);
+            waits.push((id.clone(), serial.clone()));
+            drop(waits);
             sink(BackendEvent::Status(Status::Waiting {
                 serial: serial.clone(),
             }));
         }
     }
 }
+
+/// Why a request names no connected meter.
+const NOT_CONNECTED: &str = "No meter is connected.";
 
 impl<O, C> DeviceManager<O, C>
 where
@@ -652,19 +730,14 @@ where
             discover: Arc::new(discover),
             opener: Arc::new(opener),
             clock,
-            worker: None,
             next_session_id: 1,
             histories: HashMap::new(),
-            last_store: None,
-            live: None,
-            stop: None,
-            waiting: Arc::new(Mutex::new(None)),
-            rate_sps: 0,
-            source: MeasurementSource::Queue,
-            device: None,
-            trigger: Arc::default(),
-            rate_before_trigger: None,
+            meters: Vec::new(),
+            current: None,
+            waiting: Arc::default(),
             flashing: Arc::default(),
+            flash_targets: Arc::default(),
+            demo_serials: HashMap::new(),
         }
     }
 
@@ -674,6 +747,60 @@ where
             return Err(UiError::usage(FLASH_REFUSAL));
         }
         Ok(())
+    }
+
+    /// Refuse a request for meter `id` while a firmware update holds it
+    /// (FR 1HHT03): the other meters stay usable.
+    fn ensure_not_flashing_for(&self, id: &str) -> Result<(), UiError> {
+        if self.flashing.load(Ordering::SeqCst) {
+            let targets = self
+                .flash_targets
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if targets.is_empty() || targets.iter().any(|t| t == id) {
+                return Err(UiError::usage(FLASH_REFUSAL));
+            }
+        }
+        Ok(())
+    }
+
+    /// The session `id` names, if any.
+    fn meter(&self, id: &str) -> Option<&Meter> {
+        self.meters.iter().find(|m| m.named(id))
+    }
+
+    /// The session `id` names, if any, to change.
+    fn meter_mut(&mut self, id: &str) -> Option<&mut Meter> {
+        self.meters.iter_mut().find(|m| m.named(id))
+    }
+
+    /// The id of that session ("" before any connect, which names none):
+    /// the meter connected last while it runs, else the meter connected
+    /// last that still runs, so ending one of several meters never leaves
+    /// these commands on the ended one (FR 1HHT03). With none running it
+    /// stays the meter connected last, whose data stays readable.
+    fn current_id(&self) -> String {
+        let last = self.current.as_deref().unwrap_or_default();
+        let runs = |m: &&Meter| m.running_worker().is_some();
+        if self.meter(last).is_some_and(|m| runs(&m)) {
+            return last.to_owned();
+        }
+        self.meters
+            .iter()
+            .rev()
+            .find(runs)
+            .map_or_else(|| last.to_owned(), |m| m.id.clone())
+    }
+
+    /// The meter a command acts on (FR 1HHT03): the one it names, or the
+    /// session the commands without a device id act on.
+    pub fn target(&self, id: Option<&str>) -> String {
+        id.map_or_else(|| self.current_id(), str::to_owned)
+    }
+
+    /// Forget any wait for the meter whose session is `id`.
+    fn stop_waiting_for(&self, id: &str) {
+        forget_wait(&self.waiting, id);
     }
 
     /// Whether a firmware update holds the meter.
@@ -688,11 +815,10 @@ where
     }
 
     /// Take the listed device `id` for a firmware update (FR V9SK55,
-    /// AC .4): the trigger session and the measurement stream close first
-    /// (waiting for the worker to let go of the pipe), any wait for an
-    /// unplugged meter ends, and everything else that talks to a meter is
-    /// refused until the lease is dropped. A bootloader-mode meter can be
-    /// taken too.
+    /// AC .4): that meter's trigger session and measurement stream close
+    /// first (waiting for the worker to let go of the pipe), its wait for an
+    /// unplug ends, and everything else that talks to a meter is refused
+    /// until the lease is dropped. A bootloader-mode meter can be taken too.
     pub fn begin_flash(&mut self, id: &str) -> Result<FlashLease, UiError> {
         self.ensure_not_flashing()?;
         let device = self
@@ -700,91 +826,133 @@ where
             .into_iter()
             .find(|d| d.id == id)
             .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
+        // The session of that meter (by id, or by serial after a replug);
+        // when none matches, every session lets go of its meter.
+        let same = |m: &Meter| {
+            m.named(id)
+                || (device.demo_scenario.is_none()
+                    && m.device.demo_scenario.is_none()
+                    && device.serial.is_some()
+                    && m.device.serial == device.serial)
+        };
+        let any = self.meters.iter().any(same);
+        // The targets are in place before the flag is raised, so the other
+        // meters are never refused, not even for a moment.
+        *self
+            .flash_targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = if any {
+            self.meters
+                .iter()
+                .filter(|m| same(m))
+                .map(|m| m.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.flashing.store(true, Ordering::SeqCst);
-        self.rate_before_trigger = None;
-        if let Some(trigger) = take(&self.trigger) {
-            let _ = trigger.close();
+        for m in self.meters.iter_mut().filter(|m| !any || same(m)) {
+            m.release();
+            forget_wait(&self.waiting, &m.id);
         }
-        if let Some(worker) = self.worker.take() {
-            worker.disconnect();
-        }
-        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = None;
         Ok(FlashLease {
             device,
             flashing: Arc::clone(&self.flashing),
+            targets: Arc::clone(&self.flash_targets),
         })
     }
 
     /// Serial of the unplugged meter the app waits for, if any.
     pub fn waiting_for(&self) -> Option<String> {
+        self.waiting_serials().into_iter().next()
+    }
+
+    /// Serials of every unplugged meter the app waits for (FR 1HHT03).
+    pub fn waiting_serials(&self) -> Vec<String> {
         self.waiting
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .iter()
+            .map(|(_, serial)| serial.clone())
+            .collect()
     }
 
-    /// Stop waiting for the unplugged meter: the user picked another device,
+    /// Stop waiting for unplugged meters: the user picked another device,
     /// so a meter that comes back later is listed but not reconnected.
     pub fn cancel_wait(&mut self) {
-        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Stop waiting for meter `id` only (FR 1HHT03); the others' waits stay.
+    pub fn cancel_wait_for(&mut self, id: &str) {
+        self.stop_waiting_for(id);
     }
 
     /// The hotplug watcher's changed device list; returns whether it
-    /// started a connect. A list without the awaited meter starts nothing,
-    /// and nothing else is ever connected on its own.
+    /// started a connect. Only an awaited meter that is listed again is
+    /// reconnected, into its own session; nothing else is ever connected on
+    /// its own.
     pub fn devices_changed(&mut self, devices: &[DeviceListing]) -> bool {
         if self.flashing() {
             return false;
         }
-        let Some(serial) = self.waiting_for() else {
-            return false;
-        };
-        if self.running_worker().is_some() {
-            return false;
-        }
-        let (Some(live), Some(stop)) = (self.live.clone(), self.stop.clone()) else {
-            return false;
-        };
-        if stop.load(Ordering::SeqCst) {
-            // The page that waited is gone.
-            return false;
-        }
-        let Some(device) = devices
-            .iter()
-            .find(|d| d.demo_scenario.is_none() && d.serial.as_deref() == Some(serial.as_str()))
-            .cloned()
-        else {
-            return false;
-        };
-        // A meter back in bootloader mode is listed but not opened; keep
-        // waiting for its application-mode return.
-        if device.ensure_connectable().is_err() {
-            return false;
-        }
-        // Resume at the rate the session last ran at. The ended session's info
-        // is only dropped once the reconnect is certain to start.
-        let (rate_sps, rate) = {
-            let mut l = live.lock().unwrap_or_else(PoisonError::into_inner);
-            let rate_sps = l
-                .info
-                .as_ref()
-                .and_then(|i| i.rate_sps)
-                .unwrap_or(self.rate_sps);
-            let Ok(rate) = supported_rate(rate_sps) else {
-                return false;
+        let waits = self
+            .waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut started = false;
+        for (id, serial) in waits {
+            let Some(index) = self.meters.iter().position(|m| m.id == id) else {
+                continue;
             };
-            l.info = None;
-            l.device_id = device.id.clone();
-            (rate_sps, rate)
-        };
-        self.rate_sps = rate_sps;
-        // The ended worker shares the page's stop flag: let it go without
-        // raising that flag, and without joining it under the manager lock.
-        if let Some(old) = self.worker.take() {
-            old.retire();
+            let meter = &mut self.meters[index];
+            if meter.running_worker().is_some() || meter.stop.load(Ordering::SeqCst) {
+                // Still running, or the page that waited is gone.
+                continue;
+            }
+            let Some(device) = devices
+                .iter()
+                .find(|d| d.demo_scenario.is_none() && d.serial.as_deref() == Some(serial.as_str()))
+                .cloned()
+            else {
+                continue;
+            };
+            // A meter back in bootloader mode is listed but not opened; keep
+            // waiting for its application-mode return.
+            if device.ensure_connectable().is_err() {
+                continue;
+            }
+            // Resume at the rate the session last ran at. The ended session's
+            // info is only dropped once the reconnect is certain to start.
+            let rate = {
+                let mut l = meter.live.lock().unwrap_or_else(PoisonError::into_inner);
+                let rate_sps = l
+                    .info
+                    .as_ref()
+                    .and_then(|i| i.rate_sps)
+                    .unwrap_or(meter.rate_sps);
+                let Ok(rate) = supported_rate(rate_sps) else {
+                    continue;
+                };
+                l.info = None;
+                l.device_id = device.id.clone();
+                meter.rate_sps = rate_sps;
+                rate
+            };
+            // The ended worker shares the page's stop flag: let it go without
+            // raising that flag, and without joining it under the manager lock.
+            if let Some(old) = meter.worker.take() {
+                old.retire();
+            }
+            meter.device = device;
+            self.open_session(index, rate);
+            started = true;
         }
-        self.open_session(device, rate, live, stop);
-        true
+        started
     }
 
     /// Every attached meter plus the demo entries; never opens a device.
@@ -793,7 +961,8 @@ where
     }
 
     /// Connect to the device with id `id` at `rate_sps` on a dedicated worker
-    /// thread; events go to `sink`. Refused while a session is open.
+    /// thread; events go to `sink`. Several meters can be connected at once
+    /// (FR 1HHT03), each with its own session; the same one twice is refused.
     pub fn connect(
         &mut self,
         id: &str,
@@ -838,54 +1007,123 @@ where
         stop: Arc<AtomicBool>,
     ) -> Result<(), UiError> {
         self.ensure_not_flashing()?;
-        if self.running_worker().is_some() {
+        if self.meter(id).is_some_and(|m| m.running_worker().is_some()) {
             return Err(UiError::usage(
-                "A meter is already connected. Disconnect it first.",
+                "This meter is already connected. Disconnect it first.",
             ));
         }
         let rate = supported_rate(rate_sps)?;
-        self.rate_sps = rate_sps;
-        self.source = source;
-        let device = self
+        let mut device = self
             .list_devices()
             .into_iter()
             .find(|d| d.id == id)
             .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
         device.ensure_connectable()?;
+        // Sessions that ended (unplugged, failed or disconnected) make way,
+        // and their waits end, as with a single meter. While other meters
+        // run, a meter added beside them keeps the waits for unplugged ones
+        // (FR 1HHT03); only an earlier session of this very meter goes.
+        let adding = self.meters.iter().any(|m| m.running_worker().is_some());
+        let waits = self
+            .waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let keep = |m: &Meter| {
+            if m.running_worker().is_some() {
+                return true;
+            }
+            let same_meter = m.named(id)
+                || (device.demo_scenario.is_none()
+                    && m.device.demo_scenario.is_none()
+                    && device.serial.is_some()
+                    && m.device.serial == device.serial);
+            let waited =
+                waits.iter().any(|(slot, _)| slot == &m.id) && !m.stop.load(Ordering::SeqCst);
+            adding && waited && !same_meter
+        };
+        let (kept, ended): (Vec<Meter>, Vec<Meter>) =
+            std::mem::take(&mut self.meters).into_iter().partition(keep);
+        self.meters = kept;
+        for mut m in ended {
+            self.stop_waiting_for(&m.id);
+            m.release();
+        }
+        // A second demo meter reports a serial of its own, so the two never
+        // share a session; a demo meter connected again gets the one it had,
+        // even once the shared demo serial is free again.
+        if device.demo_scenario.is_some()
+            && (self.serial_in_use(device.serial.as_deref())
+                || self.owned_demo_serial(&device.id).is_some())
+        {
+            device.serial = Some(self.free_demo_serial(&device.id));
+        }
+        let (_, store) = self.history(&device);
         let live = Arc::new(Mutex::new(Live {
             device_id: device.id.clone(),
             info: None,
             sink: Box::new(sink),
         }));
-        self.open_session(device, rate, live, stop);
+        self.meters.push(Meter {
+            id: device.id.clone(),
+            worker: None,
+            store,
+            live,
+            stop,
+            rate_sps,
+            source,
+            device: device.clone(),
+            trigger: Arc::default(),
+            rate_before_trigger: None,
+        });
+        self.current = Some(device.id);
+        self.open_session(self.meters.len() - 1, rate);
         Ok(())
     }
 
-    /// Open `device` at `rate` on a new worker whose events go to `live`'s
-    /// page; the session id and data follow the meter's serial, so a
-    /// reconnect continues the same session.
-    fn open_session(
-        &mut self,
-        device: DeviceListing,
-        rate: Rate,
-        live: Arc<Mutex<Live>>,
-        stop: Arc<AtomicBool>,
-    ) {
-        // A new bulk CONNECT silences an open PDM session [device], so the
-        // trigger session (if any) returns to 5 V and closes first.
-        self.rate_before_trigger = None;
-        if let Some(trigger) = take(&self.trigger) {
-            let _ = trigger.close();
+    /// Whether a connected meter reports `serial`.
+    fn serial_in_use(&self, serial: Option<&str>) -> bool {
+        serial.is_some_and(|s| {
+            self.meters
+                .iter()
+                .any(|m| m.device.serial.as_deref() == Some(s))
+        })
+    }
+
+    /// The serial demo meter `id` was given when it shared the demo device
+    /// with another demo meter, if any.
+    fn owned_demo_serial(&self, id: &str) -> Option<String> {
+        self.demo_serials
+            .iter()
+            .find(|(_, owner)| owner.as_str() == id)
+            .map(|(serial, _)| serial.clone())
+    }
+
+    /// A simulator serial for demo meter `id` that no connected meter
+    /// reports: the one `id` got before, else the next number after
+    /// [`powerz_sim::SIM_SERIAL`] that no other demo meter got, so a new
+    /// demo meter never continues another one's session and data.
+    fn free_demo_serial(&mut self, id: &str) -> String {
+        if let Some(serial) = self
+            .owned_demo_serial(id)
+            .filter(|s| !self.serial_in_use(Some(s)))
+        {
+            return serial;
         }
-        if let Some(old) = self.worker.take() {
-            old.disconnect();
+        let mut n: u64 = powerz_sim::SIM_SERIAL.parse().unwrap_or(123_456);
+        loop {
+            n += 1;
+            let serial = n.to_string();
+            if !self.serial_in_use(Some(&serial)) && !self.demo_serials.contains_key(&serial) {
+                self.demo_serials.insert(serial.clone(), id.to_owned());
+                return serial;
+            }
         }
-        // A new connection ends any wait for an unplugged meter.
-        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        let waits_for = match (&device.demo_scenario, &device.serial) {
-            (None, Some(serial)) => Some(serial.clone()),
-            _ => None,
-        };
+    }
+
+    /// The history of `device`'s session: it follows the meter's serial, so
+    /// a reconnect continues the same session.
+    fn history(&mut self, device: &DeviceListing) -> (Arc<Mutex<History>>, SessionStore) {
         let key = device.serial.clone().unwrap_or_else(|| device.id.clone());
         let next_session_id = &mut self.next_session_id;
         let (history, store) = self.histories.entry(key).or_insert_with(|| {
@@ -898,79 +1136,128 @@ where
             };
             (Arc::new(Mutex::new(history)), SessionStore::new())
         });
-        let (history, store) = (Arc::clone(history), store.clone());
-        self.last_store = Some(store.clone());
+        (Arc::clone(history), store.clone())
+    }
+
+    /// Open the device of session `index` at `rate` on a new worker whose
+    /// events go to that session's page; the session id and data follow the
+    /// meter's serial, so a reconnect continues the same session.
+    fn open_session(&mut self, index: usize, rate: Rate) {
+        let (history, store) = self.history(&self.meters[index].device.clone());
+        let opener = Arc::clone(&self.opener);
+        let clock = self.clock.clone();
+        let waiting = Arc::clone(&self.waiting);
+        let m = &mut self.meters[index];
+        // A new bulk CONNECT silences an open PDM session [device], so the
+        // trigger session (if any) returns to 5 V and closes first.
+        m.release();
+        // A new connection ends the wait for this meter.
+        forget_wait(&waiting, &m.id);
+        let device = m.device.clone();
+        let waits_for = match (&device.demo_scenario, &device.serial) {
+            (None, Some(serial)) => Some(serial.clone()),
+            _ => None,
+        };
+        m.store = store.clone();
         let session_id = history
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .session_id;
-        self.device = Some(device.clone());
-        let opener = Arc::clone(&self.opener);
-        let source = self.source;
+        let source = m.source;
         let config = WorkerConfig {
             mode: device.mode,
             source,
             ..WorkerConfig::new(rate, session_id)
         };
-        self.live = Some(Arc::clone(&live));
-        self.stop = Some(Arc::clone(&stop));
         let sink = trigger_sink(
-            Arc::clone(&self.trigger),
+            Arc::clone(&m.trigger),
             history_sink(
                 Arc::clone(&history),
-                listing_sink(device.clone(), live_sink(live)),
+                listing_sink(device.clone(), live_sink(Arc::clone(&m.live))),
             ),
         );
         let sink: Box<dyn FnMut(BackendEvent) + Send> = match waits_for {
-            Some(serial) => Box::new(waiting_sink(
-                Arc::clone(&self.waiting),
-                serial,
-                history,
-                sink,
-            )),
+            Some(serial) => Box::new(waiting_sink(waiting, m.id.clone(), serial, history, sink)),
             None => Box::new(sink),
         };
-        self.worker = Some(worker::spawn_with_store(
+        m.worker = Some(worker::spawn_with_store(
             move || opener.open_source(&device, source),
-            self.clock.clone(),
+            clock,
             config,
             store,
             sink,
-            stop,
+            Arc::clone(&m.stop),
         ));
+    }
+
+    /// The ids of the meters whose session runs, in the order they were
+    /// connected (FR 1HHT03).
+    pub fn connected_ids(&self) -> Vec<String> {
+        self.meters
+            .iter()
+            .filter(|m| m.running_worker().is_some())
+            .map(|m| m.id.clone())
+            .collect()
+    }
+
+    /// The ids a new page names the running meters by, in the order they
+    /// were connected (FR 1HHT03): each one's current listing, which a
+    /// replug may have moved, as its attach snapshot reports it.
+    pub fn running_ids(&self) -> Vec<String> {
+        self.meters
+            .iter()
+            .filter(|m| m.running_worker().is_some())
+            .map(|m| m.device.id.clone())
+            .collect()
     }
 
     /// Restart the open session's queue at `rate_sps`.
     pub fn set_rate(&mut self, rate_sps: u32) -> Result<(), UiError> {
-        let (control, rate) = self.rate_control(rate_sps)?;
+        let id = self.current_id();
+        self.set_rate_for(&id, rate_sps)
+    }
+
+    /// Restart meter `id`'s queue at `rate_sps`.
+    pub fn set_rate_for(&mut self, id: &str, rate_sps: u32) -> Result<(), UiError> {
+        let (control, rate) = self.rate_control_for(id, rate_sps)?;
         control.set_rate(rate)
     }
 
     /// What [`DeviceManager::set_rate`] needs, so a caller can wait for the
     /// worker's answer after releasing its lock on the manager.
     pub fn rate_control(&self, rate_sps: u32) -> Result<(worker::WorkerControl, Rate), UiError> {
+        self.rate_control_for(&self.current_id(), rate_sps)
+    }
+
+    /// [`DeviceManager::rate_control`] of meter `id`.
+    pub fn rate_control_for(
+        &self,
+        id: &str,
+        rate_sps: u32,
+    ) -> Result<(worker::WorkerControl, Rate), UiError> {
         let rate = supported_rate(rate_sps)?;
         // The queue stays at 50 SPS or less while triggering. [inferred]
-        if rate_sps > TRIGGER_MAX_SPS && lock(&self.trigger).is_some() {
+        if rate_sps > TRIGGER_MAX_SPS && self.trigger_open_for(id) {
             return Err(UiError::usage(
                 "The rate stays at 50 samples/s or less while the trigger panel is open.",
             ));
         }
-        Ok((self.control()?, rate))
+        Ok((self.control_for(id)?, rate))
     }
 
     /// Recording and export control of the open session, so a caller can
     /// wait for the worker's answer after releasing its lock on the manager.
     pub fn control(&self) -> Result<worker::WorkerControl, UiError> {
-        self.ensure_not_flashing()?;
-        self.running_worker()
-            .map(WorkerHandle::control)
-            .ok_or_else(|| UiError::usage("No meter is connected."))
+        self.control_for(&self.current_id())
     }
 
-    /// The open session's worker, unless it has ended by itself.
-    fn running_worker(&self) -> Option<&WorkerHandle> {
-        self.worker.as_ref().filter(|w| !w.is_finished())
+    /// [`DeviceManager::control`] of meter `id`.
+    pub fn control_for(&self, id: &str) -> Result<worker::WorkerControl, UiError> {
+        self.ensure_not_flashing_for(id)?;
+        self.meter(id)
+            .and_then(Meter::running_worker)
+            .map(WorkerHandle::control)
+            .ok_or_else(|| UiError::usage(NOT_CONNECTED))
     }
 
     /// Record the open session's stream to a new file at `path`.
@@ -978,24 +1265,44 @@ where
         self.control()?.record_to(path)
     }
 
+    /// Record meter `id`'s stream to a new file at `path`.
+    pub fn start_recording_for(&self, id: &str, path: &Path) -> Result<(), UiError> {
+        self.control_for(id)?.record_to(path)
+    }
+
     /// Stop the recording and return what it wrote.
     pub fn stop_recording(&self) -> Result<RecordingSummary, UiError> {
         self.control()?.stop_recording()
     }
 
+    /// Stop meter `id`'s recording and return what it wrote.
+    pub fn stop_recording_for(&self, id: &str) -> Result<RecordingSummary, UiError> {
+        self.control_for(id)?.stop_recording()
+    }
+
     /// The data of the open session, or of the last one once the meter is
     /// gone (unplugging keeps the data). Refused only before any connect.
     pub fn session_store(&self) -> Result<SessionStore, UiError> {
-        self.last_store
-            .clone()
-            .ok_or_else(|| UiError::usage("No meter is connected."))
+        self.session_store_for(&self.current_id())
+    }
+
+    /// The data of meter `id`'s session, kept readable after it ends.
+    pub fn session_store_for(&self, id: &str) -> Result<SessionStore, UiError> {
+        self.meter(id)
+            .map(|m| m.store.clone())
+            .ok_or_else(|| UiError::usage(NOT_CONNECTED))
     }
 
     /// What [`DeviceManager::export_session`] needs, so a caller can wait
     /// for the worker's answer after releasing its lock on the manager.
     pub fn exporter(&self) -> Result<worker::Exporter, UiError> {
-        let store = self.session_store()?;
-        let control = self.control().ok();
+        self.exporter_for(&self.current_id())
+    }
+
+    /// [`DeviceManager::exporter`] of meter `id`.
+    pub fn exporter_for(&self, id: &str) -> Result<worker::Exporter, UiError> {
+        let store = self.session_store_for(id)?;
+        let control = self.control_for(id).ok();
         Ok(worker::Exporter::new(
             control,
             store,
@@ -1017,6 +1324,11 @@ where
     /// Statistics of the session.
     pub fn stats(&self) -> Result<StatsSnapshot, UiError> {
         Ok(self.session_store()?.stats())
+    }
+
+    /// Statistics of meter `id`'s session.
+    pub fn stats_for(&self, id: &str) -> Result<StatsSnapshot, UiError> {
+        Ok(self.session_store_for(id)?.stats())
     }
 
     /// The gaps between measuring runs of the session's history.
@@ -1050,9 +1362,15 @@ where
     /// Take the open session out of the manager, so a caller can close it
     /// (which waits for the worker thread) without holding its lock.
     pub fn take_session(&mut self) -> Result<WorkerHandle, UiError> {
-        self.worker
-            .take()
-            .ok_or_else(|| UiError::usage("No meter is connected."))
+        let id = self.current_id();
+        self.take_session_for(&id)
+    }
+
+    /// [`DeviceManager::take_session`] of meter `id`; its data stays.
+    pub fn take_session_for(&mut self, id: &str) -> Result<WorkerHandle, UiError> {
+        self.meter_mut(id)
+            .and_then(|m| m.worker.take())
+            .ok_or_else(|| UiError::usage(NOT_CONNECTED))
     }
 
     /// Watch for plugged and unplugged meters on a thread of its own:
@@ -1081,10 +1399,10 @@ where
                 // While the app waits for a meter, report every poll, changed or
                 // not: a replug seen before the wait was armed, or a reconnect
                 // that failed to open, gets another try (FR TGE839).
-                if waiting
+                if !waiting
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .is_some()
+                    .is_empty()
                 {
                     hotplug.forget();
                 }
@@ -1112,21 +1430,35 @@ where
     /// it over without holding the manager. `None` when no session is
     /// running.
     pub fn attacher(&self) -> Option<Attacher> {
-        let worker = self.running_worker()?;
+        self.attacher_for(&self.current_id())
+    }
+
+    /// [`DeviceManager::attacher`] of meter `id` (FR 1HHT03): a reload
+    /// hands every running meter to the new page, each with its own sink.
+    pub fn attacher_for(&self, id: &str) -> Option<Attacher> {
+        let meter = self.meter(id)?;
+        let worker = meter.running_worker()?;
         Some(Attacher {
             control: worker.control(),
-            live: Arc::clone(self.live.as_ref()?),
-            stop: self.stop.clone().unwrap_or_default(),
+            live: Arc::clone(&meter.live),
+            stop: Arc::clone(&meter.stop),
         })
     }
 
     /// Stop the queue and close the open session.
     pub fn disconnect(&mut self) -> Result<(), UiError> {
+        let id = self.current_id();
+        self.disconnect_for(&id)
+    }
+
+    /// Stop meter `id`'s queue and close its session; the other meters run
+    /// on, and its data stays readable.
+    pub fn disconnect_for(&mut self, id: &str) -> Result<(), UiError> {
         // Back to 5 V and `pdm close` before the queue stops.
-        if let Some(trigger) = self.take_trigger() {
+        if let Some(trigger) = self.take_trigger_for(id) {
             let _ = trigger.close();
         }
-        self.take_session()?.disconnect();
+        self.take_session_for(id)?.disconnect();
         Ok(())
     }
 
@@ -1135,43 +1467,54 @@ where
     /// queue is kept at 50 SPS or less while it is open. [inferred]
     pub fn install_trigger(
         &mut self,
+        worker: crate::trigger::TriggerWorker,
+    ) -> Result<(), UiError> {
+        let id = self.current_id();
+        self.install_trigger_for(&id, worker)
+    }
+
+    /// [`DeviceManager::install_trigger`] on meter `id`.
+    pub fn install_trigger_for(
+        &mut self,
+        id: &str,
         mut worker: crate::trigger::TriggerWorker,
     ) -> Result<(), UiError> {
-        // A session that ended on its own (unplug) may have left this set.
-        if lock(&self.trigger).is_none() {
-            self.rate_before_trigger = None;
-        }
-        let Some(control) = self.running_worker().map(WorkerHandle::control) else {
+        let Some(meter) = self.meter_mut(id) else {
             let _ = worker.close();
             return Err(UiError::usage("Connect a meter first."));
         };
-        if lock(&self.trigger).is_some() {
+        // A session that ended on its own (unplug) may have left this set.
+        if lock(&meter.trigger).is_none() {
+            meter.rate_before_trigger = None;
+        }
+        let Some(control) = meter.running_worker().map(WorkerHandle::control) else {
+            let _ = worker.close();
+            return Err(UiError::usage("Connect a meter first."));
+        };
+        if lock(&meter.trigger).is_some() {
             let _ = worker.close();
             return Err(UiError::usage("A trigger session is already open."));
         }
         // The PD capture pauses while triggering. [inferred]
         let _ = control.stop_pd();
-        let current = self
+        let current = meter
             .live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .info
             .as_ref()
-            .and_then(|l| {
-                l.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .info
-                    .as_ref()
-                    .and_then(|i| i.rate_sps)
-            })
-            .unwrap_or(self.rate_sps);
+            .and_then(|i| i.rate_sps)
+            .unwrap_or(meter.rate_sps);
         if current > TRIGGER_MAX_SPS
             && let (Some(capped), Some(before)) =
                 (Rate::from_sps(TRIGGER_MAX_SPS), Rate::from_sps(current))
             && control.set_rate(capped).is_ok()
         {
-            self.rate_before_trigger = Some(before);
+            meter.rate_before_trigger = Some(before);
         }
         // Polling pauses while the automatic list runs (AC-DGSQ6S.11).
         worker.pause_during_list(control);
-        *lock(&self.trigger) = Some(worker);
+        *lock(&meter.trigger) = Some(worker);
         Ok(())
     }
 
@@ -1187,48 +1530,70 @@ where
     /// so the caller can open the port and run the PDM handshake without it
     /// and then [`DeviceManager::install_trigger`] the result.
     pub fn trigger_opener(&self) -> Result<TriggerOpener, UiError> {
-        self.ensure_not_flashing()?;
-        if self.running_worker().is_none() {
+        self.trigger_opener_for(&self.current_id())
+    }
+
+    /// [`DeviceManager::trigger_opener`] of meter `id`.
+    pub fn trigger_opener_for(&self, id: &str) -> Result<TriggerOpener, UiError> {
+        self.ensure_not_flashing_for(id)?;
+        let Some(meter) = self.meter(id).filter(|m| m.running_worker().is_some()) else {
             return Err(UiError::usage("Connect a meter first."));
-        }
-        if lock(&self.trigger).is_some() {
+        };
+        if lock(&meter.trigger).is_some() {
             return Err(UiError::usage("A trigger session is already open."));
         }
-        if self.source == MeasurementSource::Cdc {
+        if meter.source == MeasurementSource::Cdc {
             // The serial stream already holds the CDC port the trigger needs.
             return Err(UiError::usage(
                 "The serial stream uses the meter's serial port; reconnect with the USB queue source to trigger.",
             ));
         }
-        let device = self
-            .device
-            .clone()
-            .ok_or_else(|| UiError::usage("Connect a meter first."))?;
         Ok(TriggerOpener {
-            demo: device.demo_scenario.is_some(),
-            serial: device.serial,
+            demo: meter.device.demo_scenario.is_some(),
+            serial: meter.device.serial.clone(),
             now_ms: self.clock.clone().now_ms(),
         })
     }
 
     /// The open trigger session's handle.
     pub fn trigger_control(&self) -> Result<crate::trigger::TriggerControl, UiError> {
-        lock(&self.trigger)
-            .as_ref()
-            .map(crate::trigger::TriggerWorker::control)
+        self.trigger_control_for(&self.current_id())
+    }
+
+    /// The handle of meter `id`'s trigger session.
+    pub fn trigger_control_for(&self, id: &str) -> Result<crate::trigger::TriggerControl, UiError> {
+        self.meter(id)
+            .and_then(|m| {
+                lock(&m.trigger)
+                    .as_ref()
+                    .map(crate::trigger::TriggerWorker::control)
+            })
             .ok_or_else(|| UiError::usage("No trigger session is open."))
     }
 
     /// Whether a trigger session is open.
     pub fn trigger_open(&self) -> bool {
-        lock(&self.trigger).is_some()
+        self.trigger_open_for(&self.current_id())
+    }
+
+    /// Whether meter `id` has a trigger session open.
+    pub fn trigger_open_for(&self, id: &str) -> bool {
+        self.meter(id).is_some_and(|m| lock(&m.trigger).is_some())
     }
 
     /// Take the open trigger session out of the manager, so a caller can
     /// close it without holding its lock; the capped queue rate is restored.
     pub fn take_trigger(&mut self) -> Option<crate::trigger::TriggerWorker> {
-        let trigger = take(&self.trigger)?;
-        if let (Some(rate), Some(worker)) = (self.rate_before_trigger.take(), self.running_worker())
+        let id = self.current_id();
+        self.take_trigger_for(&id)
+    }
+
+    /// [`DeviceManager::take_trigger`] of meter `id`.
+    pub fn take_trigger_for(&mut self, id: &str) -> Option<crate::trigger::TriggerWorker> {
+        let meter = self.meter_mut(id)?;
+        let trigger = take(&meter.trigger)?;
+        if let Some(rate) = meter.rate_before_trigger.take()
+            && let Some(worker) = meter.running_worker()
         {
             let _ = worker.set_rate(rate);
         }
@@ -1243,24 +1608,30 @@ where
         }
     }
 
-    /// End the open session, if any, on quit or window close (FR X2SPDW):
-    /// stops the queue and releases the interface. Events go through the
+    /// End every open session on quit or window close (FR X2SPDW): stops
+    /// the queues and releases the interfaces. Events go through the
     /// forwarder thread, so a slow page never holds this up.
     pub fn shutdown(&mut self) {
-        // Back to 5 V and `pdm close` first, while the meter is still there.
-        // Bounded, but generously: a contract left above 5 V outlives the
-        // app (the PD contract continues after the port closes [device]), so
-        // returning to 5 V is worth more than the 1 s quit budget here.
-        if let Some(trigger) = take(&self.trigger) {
-            self.rate_before_trigger = None;
-            let _ = trigger.close_within(TRIGGER_SHUTDOWN_WAIT);
+        // Back to 5 V and `pdm close` first, while the meters are still
+        // there. Bounded, but generously: a contract left above 5 V outlives
+        // the app (the PD contract continues after the port closes
+        // [device]), so returning to 5 V is worth more than the 1 s quit
+        // budget here.
+        for m in &mut self.meters {
+            if let Some(trigger) = take(&m.trigger) {
+                m.rate_before_trigger = None;
+                let _ = trigger.close_within(TRIGGER_SHUTDOWN_WAIT);
+            }
+            m.stop.store(true, Ordering::SeqCst);
         }
-        if let Some(stop) = &self.stop {
-            stop.store(true, Ordering::SeqCst);
-        }
-        if let Some(worker) = self.worker.take() {
-            // Called on the main thread at quit: never hold it past the AC's 1 s.
-            worker.disconnect_within(SHUTDOWN_WAIT);
+        // Called on the main thread at quit: never hold it past the AC's 1 s,
+        // however many meters are open.
+        let deadline = std::time::Instant::now() + SHUTDOWN_WAIT;
+        for m in &mut self.meters {
+            if let Some(worker) = m.worker.take() {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                worker.disconnect_within(left);
+            }
         }
     }
 }

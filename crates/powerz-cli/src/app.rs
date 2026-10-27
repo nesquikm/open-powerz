@@ -22,8 +22,8 @@ use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{
-    FaultPlan, FlashFault, PdScenario, Persona, SIM_SERIAL, SimCable, SimCharger, SimClock,
-    SimDevice, SimMeter, SimPdm,
+    FaultPlan, FlashFault, PdScenario, Persona, SIM_SERIAL, Scenario, SimCable, SimCharger,
+    SimClock, SimDevice, SimMeter, SimPdm,
 };
 
 use crate::args::{
@@ -63,7 +63,7 @@ fn demo_entry() -> DeviceEntry {
     DeviceEntry {
         model: Model::Km003c,
         pid: PID_KM003C,
-        serial: Some(SIM_SERIAL.to_string()),
+        serial: Some(sim_serial()),
         product: Some("POWER-Z KM003C".to_owned()),
         interface_string: Some("APP".to_owned()),
         bus: "demo".to_string(),
@@ -182,14 +182,10 @@ fn probe_sim(cli: &Cli, json: bool) -> Result<(), CliError> {
     };
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-        let sim = configure(SimDevice::with_clock(
-            Persona::Bulk,
-            cli.scenario,
-            clock.clone(),
-        ))?;
+        let sim = configure(sim_device_clock(Persona::Bulk, cli.scenario, clock.clone()))?;
         run_probe(cli, &sim.usb_identity(), sim, clock, json)
     } else {
-        let sim = configure(SimDevice::new(Persona::Bulk, cli.scenario))?;
+        let sim = configure(sim_device(Persona::Bulk, cli.scenario))?;
         run_probe(cli, &sim.usb_identity(), sim, SystemClock, json)
     }
 }
@@ -304,15 +300,11 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
         let after = sim_ctrl_c_after_writes()?;
         return if fake_sim_clock() {
             let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-            let meter = sim_meter(SimDevice::with_clock(
-                Persona::Bulk,
-                cli.scenario,
-                clock.clone(),
-            ))?;
+            let meter = sim_meter(sim_device_clock(Persona::Bulk, cli.scenario, clock.clone()))?;
             let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
             flash_on(cli, &container, meter, clock, &stop, &mut out)
         } else {
-            let meter = sim_meter(SimDevice::new(Persona::Bulk, cli.scenario))?;
+            let meter = sim_meter(sim_device(Persona::Bulk, cli.scenario))?;
             let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
             flash_on(cli, &container, meter, SystemClock, &stop, &mut out)
         };
@@ -417,10 +409,10 @@ fn jump_mode(cli: &Cli, to: JumpTo, i_understand: bool) -> Result<(), CliError> 
         }
         return if fake_sim_clock() {
             let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-            let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+            let sim = sim_device_clock(Persona::Bulk, cli.scenario, clock.clone());
             jump_on(cli, target, sim_meter(sim)?, clock, &stop, &mut out)
         } else {
-            let sim = SimDevice::new(Persona::Bulk, cli.scenario);
+            let sim = sim_device(Persona::Bulk, cli.scenario);
             jump_on(cli, target, sim_meter(sim)?, SystemClock, &stop, &mut out)
         };
     }
@@ -553,14 +545,10 @@ fn detect_hint(cli: &Cli) -> Result<Option<Hint>, CliError> {
         TransportKind::Sim => {
             if fake_sim_clock() {
                 let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-                let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+                let sim = sim_device_clock(Persona::Bulk, cli.scenario, clock.clone());
                 adc_snapshot(cli, sim, clock)?
             } else {
-                adc_snapshot(
-                    cli,
-                    SimDevice::new(Persona::Bulk, cli.scenario),
-                    SystemClock,
-                )?
+                adc_snapshot(cli, sim_device(Persona::Bulk, cli.scenario), SystemClock)?
             }
         }
         kind => {
@@ -619,6 +607,22 @@ fn select_demo(cli: &Cli) -> Result<(), CliError> {
     let demo = [demo_entry()];
     select_device(&demo, cli.device.as_deref())?;
     Ok(())
+}
+
+/// Honour `POWERZ_SIM_SERIAL=<serial>` (test-only): the demo device reports
+/// that serial instead of [`SIM_SERIAL`], standing in for a second meter.
+fn sim_serial() -> String {
+    std::env::var("POWERZ_SIM_SERIAL").unwrap_or_else(|_| SIM_SERIAL.to_string())
+}
+
+/// The demo device, with the `POWERZ_SIM_SERIAL` override applied.
+fn sim_device(persona: Persona, scenario: Scenario) -> SimDevice {
+    SimDevice::new(persona, scenario).with_serial(&sim_serial())
+}
+
+/// [`sim_device`] on the given simulated clock.
+fn sim_device_clock(persona: Persona, scenario: Scenario, clock: SimClock) -> SimDevice {
+    SimDevice::with_clock(persona, scenario, clock).with_serial(&sim_serial())
 }
 
 /// `POWERZ_SIM_CLOCK=fake` (test-only): run the simulator on a fake clock.
@@ -976,11 +980,11 @@ fn run_sim(cli: &Cli) -> Result<(), CliError> {
     };
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-        let sim = with_pd(SimDevice::with_clock(persona, cli.scenario, clock.clone()));
+        let sim = with_pd(sim_device_clock(persona, cli.scenario, clock.clone()));
         let sim = sim_firmware_knobs(sim)?;
         with_ctrl_c_after(cli, mode, sim.with_faults(faults), clock)
     } else {
-        let sim = sim_firmware_knobs(with_pd(SimDevice::new(persona, cli.scenario)))?;
+        let sim = sim_firmware_knobs(with_pd(sim_device(persona, cli.scenario)))?;
         with_ctrl_c_after(cli, mode, sim.with_faults(faults), SystemClock)
     }
 }

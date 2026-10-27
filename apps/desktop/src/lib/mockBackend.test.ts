@@ -60,11 +60,12 @@ describe("MockBackend (scripted demo backend for the browser build)", () => {
     }
   });
 
-  it("changes the rate of a running session and refuses a second connect", async () => {
+  it("changes the rate of a running session and refuses the same meter twice", async () => {
     const backend = new MockBackend();
     const events: BackendEvent[] = [];
     await backend.connect("demo:pd-9v-2a", 10, (e) => events.push(e));
-    await expect(backend.connect("demo:idle", 10, () => {})).rejects.toMatchObject({
+    // AC-1HHT03.1: another meter may join, but not the same one twice.
+    await expect(backend.connect("demo:pd-9v-2a", 10, () => {})).rejects.toMatchObject({
       kind: "usage",
     });
     await backend.setRate(1000);

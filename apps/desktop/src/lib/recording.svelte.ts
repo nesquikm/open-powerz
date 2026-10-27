@@ -223,6 +223,16 @@ export class Recording {
     this.#end();
   }
 
+  /** Lets go of a running recording without ending it (FR 1HHT03): its meter leaves the
+   * full view and records on. Returns where it stood, to {@link adopt} when the meter
+   * comes back; null (and nothing changes) when no recording runs. */
+  detach(): RecordingSnapshot | null {
+    if (this.phase !== "recording") return null;
+    const snapshot = { rows: this.rows, elapsed_ms: this.elapsedMs };
+    this.#end();
+    return snapshot;
+  }
+
   /** Hides the notice and the error. */
   dismiss(): void {
     this.notice = null;

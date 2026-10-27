@@ -2,42 +2,23 @@
   import {
     attach,
     backendAvailable,
-    clearHistory,
     connect,
-    disconnect,
-    exportSession,
+    connectedMeters,
+    currentMeterCommands,
+    meterBackend,
     firmwareChoose,
     firmwareFlash,
     firmwareInspect,
-    meterSettings,
-    recordDownload,
-    recordsList,
-    pdClear,
-    pdDetails,
     pdImport,
     pdOpen,
-    pdSave,
-    pdStart,
-    pdStop,
-    resetStats as resetStatsCommand,
     revealPath,
-    setRate,
-    startRecording,
-    stopRecording,
     toUiError,
-    triggerBackTo5v,
-    triggerClose,
-    triggerConsoleRisk,
-    triggerConsoleSend,
-    triggerDetect,
-    triggerList,
-    triggerMessageRisk,
-    triggerMessageSend,
-    triggerOpen,
-    triggerRequest,
-    triggerRisk,
+    type AttachedSession,
     type BackendEvent,
+    type DeviceListing,
     type ExportResult,
+    type HistorySeries,
+    type MeterCommands,
     type MeasurementSource,
     type PdDetails,
     type PdOpened,
@@ -83,6 +64,10 @@
     revealActionLabel,
   } from "./lib/recording.svelte";
   import { Session } from "./lib/session.svelte";
+  import { copyLive, Meters, type MeterEntry } from "./lib/meters.svelte";
+  import MeterGrid from "./lib/components/MeterGrid.svelte";
+  import AddMeterDialog from "./lib/components/AddMeterDialog.svelte";
+  import { canConnectTo } from "./lib/deviceDetails";
   import { StatsControls } from "./lib/stats.svelte";
   import { shortcutFor, type ShortcutAction } from "./lib/shortcuts";
   import {
@@ -103,18 +88,184 @@
   } from "./lib/theme";
 
   const session = new Session();
+  /** Every connected meter (FR 1HHT03): the one the full view shows, then each one added
+   * beside it, which runs a session and stream of its own. */
+  const meters = new Meters();
+  /** The listing of a meter a reload picked up before the device list arrived. */
+  let attachedListing: DeviceListing | null = null;
+  // The meter of the full view joins the meters while its session runs, and stays while
+  // it waits for an unplugged meter to come back.
+  $effect(() => {
+    const id = meters.fullViewId;
+    void session.state;
+    untrack(() => {
+      const listing =
+        session.devices.find((d) => d.id === id) ??
+        (attachedListing?.id === id ? attachedListing : undefined);
+      meters.syncFullView(session, listing);
+    });
+  });
+  /** The meter the full single-meter view shows and acts on (FR 1HHT03). */
+  const primaryId = $derived(session.active ? meters.fullViewId : null);
+  /** The commands of meter `id`: named by its device id while several meters run, so an
+   * action never reaches another meter; with one meter, the commands as before. */
+  function commandsOf(id: string | null): MeterCommands {
+    return id !== null && meters.entries.length > 1 ? meterBackend(id) : currentMeterCommands;
+  }
+  /** The commands of the meter the full view shows. */
+  function act(): MeterCommands {
+    return commandsOf(primaryId);
+  }
+  /** The chart's history, from the meter the full view shows. */
+  const chartHistory = {
+    historyRange: <const S extends readonly HistorySeries[]>(
+      series: S,
+      t0Ms: number,
+      t1Ms: number,
+      buckets: number,
+    ) => act().historyRange(series, t0Ms, t1Ms, buckets),
+    historyGaps: (t0Ms: number, t1Ms: number) => act().historyGaps(t0Ms, t1Ms),
+  };
+
+  /** Every event of meter `id`: to the full view's pipeline when it shows that meter
+   * (followed by the id it connected with, through an unplug and the replug), to its tile's
+   * store otherwise. A meter the user disconnected leaves the grid; an unplugged one stays
+   * to show its wait. When the full view's meter ends, a running meter takes its place. */
+  function routeEvent(id: string, event: BackendEvent): void {
+    if (!meters.inFullView(id)) {
+      meters.handleTileEvent(id, event);
+      return;
+    }
+    onBackendEvent(event);
+    meters.fullViewEvent(event);
+    if (event.type !== "status" || event.data.state !== "disconnected") return;
+    const unplugged = event.data.error !== null;
+    const others = meters.entries.filter((e) => e.listing.id !== id && e.session !== session);
+    // An unplugged meter gives the view to a running one and waits in its tile; one the
+    // user disconnected gives it to any other meter, which may be waiting itself.
+    const next = others.find((e) => e.session.active) ?? (unplugged ? undefined : others[0]);
+    if (!next) return;
+    if (!unplugged) meters.remove(id);
+    showInFullView(next, unplugged);
+  }
+
+  /** Moves meter `entry` into the full single-meter view: the meter shown so far keeps
+   * its own store as a tile (unless `keepShown` is false, when it ended), and the chart,
+   * statistics, recording and PD views follow the meter shown. */
+  function showInFullView(entry: MeterEntry, keepShown: boolean): void {
+    if (entry.session === session) return;
+    const shownId = meters.fullViewId;
+    if (keepShown && shownId !== null) {
+      const away = new Session();
+      copyLive(session, away);
+      away.selectedId = shownId;
+      const rec = recording.detach();
+      if (rec) meters.park(shownId, rec);
+      // The PD view shows one meter's capture: the meter leaving it stops its
+      // own, unless it left because it ended (an unplug ended its capture).
+      if (pd.capturing && session.active) {
+        void commandsOf(shownId)
+          .pdStop()
+          .catch((err: unknown) => session.reportError(toUiError(err)));
+      }
+      meters.replace(shownId, away);
+      // An expanded meter that leaves the view goes back to the grid.
+      if (meters.expandedId === shownId) meters.collapse();
+    }
+    const id = entry.listing.id;
+    meters.fullViewId = id;
+    copyLive(entry.session, session);
+    session.selectedId = id;
+    meters.replace(id, session);
+    const rec = meters.unpark(id);
+    if (rec) recording.adopt(rec);
+    if (entry.session.details !== null) {
+      pd.handleEvent({ type: "status", data: { state: "connected", ...entry.session.details } });
+    }
+    pd.capturing = false;
+    chart?.reset();
+    chart?.backfillFromHistory();
+  }
+
+  /** "Expand" on a tile: that meter in the full single-meter view. */
+  function expandMeter(id: string): void {
+    const entry = meters.get(id);
+    if (!entry) return;
+    showInFullView(entry, true);
+    meters.expand(id);
+  }
+
+  /** "Disconnect" on a tile: ends that meter's session only. A tile whose meter is
+   * unplugged (or whose session failed) stops waiting for it and leaves the grid. */
+  function disconnectMeter(id: string): void {
+    const entry = meters.get(id);
+    if (entry && !entry.session.active) {
+      void commandsOf(id)
+        .cancelWait()
+        .catch((err: unknown) => session.reportError(toUiError(err)));
+      if (meters.inFullView(id)) {
+        meters.fullViewId = null;
+        session.waitingSerial = null;
+        if (session.state === "waiting") session.state = "disconnected";
+      }
+      meters.remove(id);
+      return;
+    }
+    void commandsOf(id)
+      .disconnect()
+      .catch((err: unknown) => session.reportError(toUiError(err)));
+  }
+
+  /** Another meter can be added while one streams. */
+  const canAddMeter = $derived(
+    !session.flashing && (session.state === "streaming" || session.state === "rate_locked"),
+  );
+  let addMeterOpen = $state(false);
+  /** The devices "Add meter" offers: every connectable one not connected yet. */
+  const addableDevices = $derived(
+    session.devices.filter((d) => canConnectTo(d) && meters.get(d.id) === undefined),
+  );
+
+  /** Enter and Space press the "Add meter" control, as on a button. */
+  function onAddMeterKeydown(e: KeyboardEvent): void {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    // Space must not also start a recording.
+    e.preventDefault();
+    e.stopPropagation();
+    addMeterOpen = true;
+  }
+
+  /** Connects one more meter beside those connected, with a session store of its own. */
+  async function addMeter(id: string): Promise<void> {
+    addMeterOpen = false;
+    const listing = session.devices.find((d) => d.id === id);
+    if (!listing) return;
+    const added = meters.add(listing);
+    added.session.beginConnect();
+    try {
+      await connect(id, requestedRateSps, (e) => routeEvent(id, e), requestedSource);
+    } catch (err) {
+      meters.remove(id);
+      session.reportError(toUiError(err));
+    }
+  }
   const recording = new Recording();
   /** A stream is running that can be recorded. */
   const canRecord = $derived(session.state === "streaming" || session.state === "rate_locked");
   const exportJob = new ExportJob();
   /** The read-only Meter settings panel (FR 1HHT01): read on connect, cleared on
    * disconnect. */
-  const settingsPanel = new MeterSettingsPanel(meterSettings);
+  const settingsPanel = new MeterSettingsPanel(() => act().meterSettings());
   /** The Records view (FR 1HHT00): the offline records, listed on connect. */
-  const recordsPanel = new RecordsPanel(recordsList, recordDownload);
+  const recordsPanel = new RecordsPanel(
+    () => act().recordsList(),
+    (index) => act().recordDownload(index),
+  );
   const meterConnected = $derived(session.details !== null);
+  /** The meter the panels read from: they read again when another one takes the view. */
+  const panelMeter = $derived(meterConnected ? primaryId : null);
   $effect(() => {
-    const on = meterConnected;
+    const on = panelMeter !== null;
     untrack(() => {
       if (on) {
         void settingsPanel.connected();
@@ -189,20 +340,20 @@
   );
   /** The trigger view's state (FR DGSQ6S). */
   const trigger = new TriggerPanel({
-    open: triggerOpen,
-    detect: triggerDetect,
-    list: triggerList,
-    risk: triggerRisk,
-    request: triggerRequest,
-    backTo5v: triggerBackTo5v,
-    close: triggerClose,
+    open: () => act().triggerOpen(),
+    detect: () => act().triggerDetect(),
+    list: (protocol) => act().triggerList(protocol),
+    risk: (request) => act().triggerRisk(request),
+    request: (request, confirmed) => act().triggerRequest(request, confirmed),
+    backTo5v: () => act().triggerBackTo5v(),
+    close: () => act().triggerClose(),
   });
   /** The PD message builder and raw console on the trigger session (FR DGSQ6T). */
   const pdConsole = new PdConsole({
-    messageRisk: triggerMessageRisk,
-    messageSend: triggerMessageSend,
-    consoleRisk: triggerConsoleRisk,
-    consoleSend: triggerConsoleSend,
+    messageRisk: (message) => act().triggerMessageRisk(message),
+    messageSend: (message, confirmed) => act().triggerMessageSend(message, confirmed),
+    consoleRisk: (line) => act().triggerConsoleRisk(line),
+    consoleSend: (line, confirmed) => act().triggerConsoleSend(line, confirmed),
   });
   // A closed trigger session takes the console's transcript, cable and error with it.
   $effect(() => {
@@ -245,11 +396,15 @@
   /** A capture opened from a file leaves the view first: the live one starts empty. */
   function startPd(): void {
     const cleared = pd.opened ? clearPdNow() : Promise.resolve();
-    void cleared.then(() => pdStart()).catch((err: unknown) => session.reportError(toUiError(err)));
+    void cleared
+      .then(() => act().pdStart())
+      .catch((err: unknown) => session.reportError(toUiError(err)));
   }
 
   function stopPd(): void {
-    void pdStop().catch((err: unknown) => session.reportError(toUiError(err)));
+    void act()
+      .pdStop()
+      .catch((err: unknown) => session.reportError(toUiError(err)));
   }
 
   /** The table empties at once and the backend drops its records; rows that arrive
@@ -261,13 +416,15 @@
 
   function clearPdNow(): Promise<void> {
     const ticket = pd.beginClear();
-    return pdClear().then(
-      (from) => pd.endClear(from, ticket),
-      (err: unknown) => {
-        pd.endClear(0, ticket);
-        throw err;
-      },
-    );
+    return act()
+      .pdClear()
+      .then(
+        (from) => pd.endClear(from, ticket),
+        (err: unknown) => {
+          pd.endClear(0, ticket);
+          throw err;
+        },
+      );
   }
 
   /** The connected meter's firmware warnings, worded (FR V9SK52, AC .4). */
@@ -288,7 +445,7 @@
     pdSaving = true;
     pdSaveError = null;
     try {
-      const result = await pdSave(defaultPdCaptureName(new Date()));
+      const result = await act().pdSave(defaultPdCaptureName(new Date()));
       if (result !== null) pdSaved = result;
     } catch (err) {
       pdSaveError = toUiError(err);
@@ -341,10 +498,12 @@
   }
 
   function loadPdDetails(index: number): Promise<PdDetails | null> {
-    return pdDetails(index, pd.opened).catch((err: unknown) => {
-      session.reportError(toUiError(err));
-      return null;
-    });
+    return act()
+      .pdDetails(index, pd.opened)
+      .catch((err: unknown) => {
+        session.reportError(toUiError(err));
+        return null;
+      });
   }
   // Information notices leave by themselves; errors stay until dismissed (AC-AKNVND.8).
   const recordingNoticeTimer = new AutoDismiss(() => recording.dismiss());
@@ -392,10 +551,10 @@
   const statsControls = new StatsControls();
   const statsDeps = {
     resetStats: async () => {
-      await resetStatsCommand();
+      await act().resetStats();
       session.statsReset();
     },
-    clearHistory,
+    clearHistory: () => act().clearHistory(),
     // The backend history is gone: the chart drops what it still holds (FR 5X154V).
     clearChart: () => chart?.clearHistory(),
   };
@@ -455,19 +614,80 @@
     }
   }
 
+  /** The meter a reload picked up, whose events route like a connected one's. */
+  let attachedId: string | null = null;
+  function routeAttached(event: BackendEvent): void {
+    if (attachedId === null) onBackendEvent(event);
+    else routeEvent(attachedId, event);
+  }
+
+  /** A picker entry for meter `snapshot` when the device list has none (yet). */
+  function listingOf(snapshot: AttachedSession): DeviceListing {
+    const id = snapshot.device_id;
+    const listed = session.devices.find((d) => d.id === id);
+    if (listed) return listed;
+    const demo = id.startsWith("demo:") ? id.slice("demo:".length) : null;
+    return {
+      id,
+      label: demo ? `Demo device — ${demo}` : `${snapshot.model} — ${snapshot.serial ?? id}`,
+      model: snapshot.model,
+      serial: snapshot.serial,
+      bus: null,
+      address: null,
+      demo_scenario: demo,
+      mode: "application",
+    };
+  }
+
+  /** After a reload, picks up every other running meter in a tile of its own (FR 1HHT03):
+   * each one's events go to the new page, not to the old one's gone channel. */
+  async function attachOtherMeters(): Promise<void> {
+    let ids: string[];
+    try {
+      ids = await connectedMeters();
+    } catch (err) {
+      console.warn("open-powerz: listing the running meters failed", err);
+      return;
+    }
+    // All at once: each meter's events go to the old page until it is attached.
+    await Promise.all(
+      ids
+        .filter((id) => !meters.inFullView(id) && meters.get(id) === undefined)
+        .map((id) =>
+          attachSession(
+            (onEvent) => attach(onEvent, id),
+            (e) => routeEvent(id, e),
+            (snapshot) => {
+              const tile = new Session();
+              tile.adopt(snapshot);
+              meters.add(listingOf(snapshot), tile);
+              if (snapshot.recording) meters.park(id, snapshot.recording);
+            },
+          ),
+        ),
+    );
+  }
+
   // On load, ask the backend whether a session is still running (a reload);
   // with none, the app starts disconnected as on a first launch (FR VEDDFD).
   onMount(() => {
     if (!backendAvailable()) return;
-    void attachSession(attach, onBackendEvent, (snapshot) => {
-      session.adopt(snapshot);
-      // The new page's buffer is empty: fill the live windows from the history.
-      chart?.backfillFromHistory();
-      if (snapshot.recording) recording.adopt(snapshot.recording);
-      if (!snapshot.rate_locked && snapshot.rate_sps !== null) {
-        requestedRateSps = snapshot.rate_sps;
-      }
-    });
+    void attachSession(
+      attach,
+      (e) => routeAttached(e),
+      (snapshot) => {
+        attachedId = snapshot.device_id;
+        attachedListing = listingOf(snapshot);
+        meters.fullViewId = snapshot.device_id;
+        session.adopt(snapshot);
+        // The new page's buffer is empty: fill the live windows from the history.
+        chart?.backfillFromHistory();
+        if (snapshot.recording) recording.adopt(snapshot.recording);
+        if (!snapshot.rate_locked && snapshot.rate_sps !== null) {
+          requestedRateSps = snapshot.rate_sps;
+        }
+      },
+    ).then(() => (attachedId === null ? undefined : attachOtherMeters()));
   });
 
   async function toggleConnection(): Promise<void> {
@@ -477,7 +697,8 @@
       if (disconnecting) return;
       disconnecting = true;
       // A refused disconnect leaves the stream running: show the error, keep the state.
-      await disconnect()
+      await act()
+        .disconnect()
         .catch((err: unknown) => session.reportError(toUiError(err)))
         .finally(() => (disconnecting = false));
       return;
@@ -485,11 +706,13 @@
     const id = session.selectedId;
     if (id === null) return;
     session.beginConnect();
+    meters.fullViewId = id;
     chart?.reset();
     try {
-      await connect(id, requestedRateSps, onBackendEvent, requestedSource);
+      await connect(id, requestedRateSps, (e) => routeEvent(id, e), requestedSource);
     } catch (err) {
       session.failConnect(toUiError(err));
+      if (meters.fullViewId === id) meters.fullViewId = null;
     }
   }
 
@@ -507,13 +730,18 @@
     requestedRateSps = sps;
     if (session.state !== "streaming" && session.state !== "rate_locked") return;
     // A failed rate change leaves the stream running; just surface the error.
-    await setRate(sps).catch((err: unknown) => session.reportError(toUiError(err)));
+    await act()
+      .setRate(sps)
+      .catch((err: unknown) => session.reportError(toUiError(err)));
   }
 
   /** Export button: save dialog, then the session history so far, off the UI thread. */
   function exportHistory(): void {
     if (!canExport) return;
-    void exportJob.run({ exportSession, now: () => new Date() });
+    void exportJob.run({
+      exportSession: (name, onProgress) => act().exportSession(name, onProgress),
+      now: () => new Date(),
+    });
   }
 
   /** "Reveal in Finder" on macOS, "Show in folder" elsewhere. */
@@ -533,7 +761,12 @@
 
   /** Record button / Space: start (save dialog first) or stop the CSV recording. */
   function toggleRecording(): void {
-    void recording.toggle({ canRecord, startRecording, stopRecording, now: () => new Date() });
+    void recording.toggle({
+      canRecord,
+      startRecording: (name) => act().startRecording(name),
+      stopRecording: () => act().stopRecording(),
+      now: () => new Date(),
+    });
   }
 
   /** R shortcut: zero the session statistics. */
@@ -666,6 +899,18 @@
           </div>
         {/each}
       </div>
+      {#if canAddMeter}
+        <!-- Not <button>, like the tabs: the top bar's one-row layout counts its buttons. -->
+        <div
+          role="button"
+          class="add-meter"
+          tabindex="0"
+          onclick={() => (addMeterOpen = true)}
+          onkeydown={onAddMeterKeydown}
+        >
+          Add meter
+        </div>
+      {/if}
     {/snippet}
   </TopBar>
   <ErrorBanner {session} />
@@ -675,13 +920,24 @@
       role="tabpanel"
       id="view-meter"
       aria-labelledby="tab-meter"
-      hidden={view !== "meter"}
+      hidden={view !== "meter" || meters.showGrid}
     >
       <div class="main-area">
-        <Readout {session} />
+        {#if meters.focused && meters.expandedId !== null}
+          <!-- One tile of the grid expanded (AC-1HHT03.2): its readout, and the way back. -->
+          <div class="expanded-meter">
+            <button type="button" class="all-meters" onclick={() => meters.collapse()}>
+              All meters
+            </button>
+            <Readout session={meters.focused.session} />
+          </div>
+        {:else}
+          <Readout {session} />
+        {/if}
         <section class="chart panel" aria-label="Chart">
           <Chart
             bind:this={chart}
+            history={chartHistory}
             theme={resolvedTheme}
             rateSps={session.rateSps}
             active={session.active}
@@ -749,6 +1005,9 @@
         </StatsPanel>
       </div>
     </div>
+    {#if view === "meter" && meters.showGrid}
+      <MeterGrid {meters} onExpand={expandMeter} onDisconnect={disconnectMeter} />
+    {/if}
     {#if view === "trigger"}
       <div class="trigger-view" role="tabpanel" id="view-trigger" aria-labelledby="tab-trigger">
         <TriggerView panel={trigger} connected={canRecord} {pdConsole} />
@@ -819,6 +1078,13 @@
       </div>
     {/if}
   </main>
+  {#if addMeterOpen}
+    <AddMeterDialog
+      devices={addableDevices}
+      onCancel={() => (addMeterOpen = false)}
+      onConnect={(id) => void addMeter(id)}
+    />
+  {/if}
   {#if helpOpen}
     <ShortcutHelp onClose={() => (helpOpen = false)} />
   {/if}
@@ -877,6 +1143,17 @@
     display: flex;
     gap: 0.25rem;
   }
+  /* At the right end of the view tabs' strip. */
+  .add-meter {
+    margin-left: auto;
+    margin-bottom: 0.25rem;
+    font-size: 0.875rem;
+    padding: 0.2rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    background: var(--surface);
+    cursor: pointer;
+  }
   .view-tabs [role="tab"] {
     font-size: 0.875rem;
     padding: 0.3rem 0.8rem;
@@ -928,6 +1205,16 @@
     gap: 1rem;
     padding: 1rem;
     min-width: 0;
+  }
+  .expanded-meter {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+  .expanded-meter > :global(*:last-child) {
+    align-self: stretch;
   }
   .main-area {
     grid-area: main;
