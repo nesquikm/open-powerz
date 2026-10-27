@@ -775,6 +775,100 @@ fn offline_records_doc_states_the_download_window_and_its_bounds() {
 }
 
 #[test]
+fn offline_records_doc_states_the_device_facts_of_the_real_meter_run() {
+    let text = doc();
+    let section = offline_records_section(&text);
+    let body = section.join("\n").to_lowercase();
+    assert!(
+        contains_token(&body, "256"),
+        "the 256-byte memory-read reply limit is stated"
+    );
+    assert!(
+        body.contains("chunk") || body.contains("consecutive"),
+        "the download is a run of consecutive reads"
+    );
+    assert!(body.contains("capacity"), "the 0x14 capacity is named");
+    assert!(body.contains("timestamp"), "no start timestamp is said");
+    assert!(
+        body.contains("magnitude") && body.contains("negative"),
+        "the sign of charge and energy and the magnitude display are stated"
+    );
+    let rows: Vec<String> = units(&section)
+        .into_iter()
+        .filter(|u| u.starts_with('|'))
+        .collect();
+    assert_layout_row(&rows, "entry", "0x14", "capacity");
+    for (off, kw) in [
+        ("0x00", "vbus"),
+        ("0x04", "ibus"),
+        ("0x08", "charge"),
+        ("0x0c", "energy"),
+    ] {
+        let ok = rows.iter().any(|r| {
+            let l = r.to_lowercase();
+            contains_token(&l, off)
+                && l.contains(kw)
+                && l.contains("[device]")
+                && !l.contains("[inferred]")
+        });
+        assert!(ok, "sample: {kw} at {off} is now [device]");
+    }
+}
+
+#[test]
+fn memory_read_doc_states_the_256_byte_reply_limit() {
+    let text = doc();
+    let body = section(&text, "memory read").join("\n").to_lowercase();
+    assert!(
+        contains_token(&body, "256") && body.contains("[device]"),
+        "Memory read must state the 256-byte reply limit with a [device] tag"
+    );
+}
+
+/// The settings-field table row naming `keyword`, lowercase.
+fn settings_field_row(rows: &[String], keyword: &str) -> String {
+    rows.iter()
+        .map(|r| r.to_lowercase())
+        .find(|l| l.starts_with(&format!("| {keyword}")))
+        .unwrap_or_else(|| panic!("no settings-field row for {keyword:?}"))
+}
+
+#[test]
+fn settings_doc_marks_the_screen_checked_fields_device_and_rotation_inferred() {
+    let text = doc();
+    let rows: Vec<String> = units(&section(&text, "settings"))
+        .into_iter()
+        .filter(|u| u.starts_with('|'))
+        .collect();
+    for kw in [
+        "language",
+        "brightness",
+        "dim",
+        "startup logo",
+        "theme",
+        "auto-rotate",
+        "rate",
+    ] {
+        let row = settings_field_row(&rows, kw);
+        assert!(row.contains("[device]"), "{kw} is screen-checked: {row}");
+        assert!(
+            row.contains("[static]"),
+            "{kw} keeps its [static] map tag: {row}"
+        );
+        assert!(!row.contains("meaning [inferred]"), "{kw}: {row}");
+    }
+    for kw in ["rotation", "voltage", "current", "offset"] {
+        let row = settings_field_row(&rows, kw);
+        assert!(row.contains("[inferred]"), "{kw} stays inferred: {row}");
+    }
+    let body = section(&text, "settings").join("\n").to_lowercase();
+    assert!(
+        body.contains("0°") && body.contains("90°") && body.contains("auto-rotate on"),
+        "the rotation mismatch (screen 0°, bits read 90°, auto-rotate on) is noted"
+    );
+}
+
+#[test]
 fn never_send_allows_only_the_record_window_besides_the_four_blocks() {
     let text = doc();
     let body = section(&text, "never send").join("\n").to_lowercase();

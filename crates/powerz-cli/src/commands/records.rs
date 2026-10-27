@@ -22,7 +22,10 @@ pub enum RecordSelection {
 }
 
 /// `powerz records list`: authenticate, read the record list once and print
-/// one table row (or JSON object) per record.
+/// one table row (or JSON object) per record. Charge and energy are shown as
+/// magnitudes, as the meter's screen shows them; the meter stores them
+/// signed (negative for one current direction), and `--json` also gives
+/// those raw values as `charge_raw_uah` / `energy_raw_uwh`.
 pub fn records_list<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     json: bool,
@@ -39,9 +42,12 @@ pub fn records_list<T: Transport, C: Clock>(
                     "name": e.name,
                     "interval_s": e.interval_s,
                     "points": e.points,
+                    "capacity_points": e.capacity_points,
                     "duration_s": e.duration_s,
-                    "charge_ah": e.charge_ah(),
-                    "energy_wh": e.energy_wh(),
+                    "charge_ah": e.charge_magnitude_ah(),
+                    "energy_wh": e.energy_magnitude_wh(),
+                    "charge_raw_uah": e.charge_uah,
+                    "energy_raw_uwh": e.energy_uwh,
                     "offset": e.offset,
                 })
             })
@@ -62,8 +68,8 @@ pub fn records_list<T: Transport, C: Clock>(
                 format!("{} s", e.interval_s),
                 e.points.to_string(),
                 format_duration(e.duration_s),
-                format!("{} Ah", sig8(e.charge_ah())),
-                format!("{} Wh", sig8(e.energy_wh())),
+                format!("{} Ah", sig8(e.charge_magnitude_ah())),
+                format!("{} Wh", sig8(e.energy_magnitude_wh())),
                 format!("{:#010x}", e.offset),
             ]
         })
@@ -102,7 +108,8 @@ pub fn records_list<T: Transport, C: Clock>(
 }
 
 /// `powerz records get`: read the record list once, then download the
-/// selected records (one memory read each) and write each as
+/// selected records (consecutive memory reads of at most 256 bytes each)
+/// and write each as
 /// `NN_<name>.csv` in `dir`, in the recorder CSV layout. `--all` skips
 /// records with no samples; an index outside the list is a usage error and
 /// nothing is read or written.
@@ -188,8 +195,9 @@ fn file_name(index: usize, name: &str) -> String {
 }
 
 /// The record as recorder CSV: elapsed time from the entry's interval, no
-/// `Unix` time (the start is unknown), VBUS/IBUS/charge/energy from the
-/// samples, power = VBUS × IBUS; D+/D-/CC/TEMP are not recorded.
+/// `Unix` time (the meter stores no start time), VBUS/IBUS/charge/energy
+/// from the samples with their sign kept (raw measurements, like the live
+/// recorder), power = VBUS × IBUS; D+/D-/CC/TEMP are not recorded.
 fn record_csv(entry: &RecordEntry, samples: &[RecordSample]) -> String {
     let mut csv = format!("{CSV_HEADER}\n");
     for (k, s) in samples.iter().enumerate() {

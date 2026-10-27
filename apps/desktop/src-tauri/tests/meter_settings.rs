@@ -61,8 +61,14 @@ fn read_settings_returns_every_field_with_a_tag() {
     for f in fields {
         assert!(f["label"].as_str().is_some_and(|l| !l.is_empty()), "{f}");
         assert!(f["value"].as_str().is_some_and(|l| !l.is_empty()), "{f}");
-        let tag = f["tag"].as_str().unwrap_or("");
-        assert!(tag == "inferred" || tag == "confirmed", "{f}");
+        // Screen-checked (1HHT04): all but rotation and the calibration.
+        let inferred = ["rotation", "voltage_cal", "current_cal", "offset_cal"];
+        let want = if inferred.iter().any(|k| f["key"] == *k) {
+            "inferred"
+        } else {
+            "confirmed"
+        };
+        assert_eq!(f["tag"], want, "{f}");
     }
     let lang = fields.iter().find(|f| f["key"] == "language").unwrap();
     assert_eq!(

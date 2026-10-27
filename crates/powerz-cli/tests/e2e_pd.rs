@@ -61,7 +61,7 @@ fn last_sent_type(stderr: &str) -> Option<String> {
     stderr
         .lines()
         .rfind(|l| l.starts_with('>'))
-        .and_then(|l| l[1..].split_whitespace().next().map(str::to_lowercase))
+        .and_then(|l| l.split_whitespace().nth(2).map(str::to_lowercase))
 }
 
 #[test]
@@ -136,7 +136,8 @@ fn ctrl_c_sends_stop_last() {
         .success();
     let err = stderr_of(&a);
     assert!(
-        err.lines().any(|l| l.starts_with("> 10 ")),
+        err.lines()
+            .any(|l| l.starts_with('>') && l.split_whitespace().nth(2) == Some("10")),
         "0x10 start sent:\n{err}"
     );
     assert_eq!(

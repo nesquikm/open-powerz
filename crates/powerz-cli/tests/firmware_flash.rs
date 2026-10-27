@@ -466,7 +466,7 @@ fn trace_logs_every_frame_of_the_flash_raw_writes_included() {
     let sent: Vec<&str> = err.lines().filter(|l| l.starts_with('>')).collect();
     let types: Vec<&str> = sent
         .iter()
-        .map(|l| l.split(' ').nth(1).unwrap_or(""))
+        .map(|l| l.split(' ').nth(2).unwrap_or(""))
         .collect();
     assert!(types.contains(&"09"), "JUMP_DFU traced: {err}");
     assert!(types.contains(&"42"), "the raw descriptor traced: {err}");

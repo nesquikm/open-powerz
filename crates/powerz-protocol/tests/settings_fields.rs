@@ -2,8 +2,10 @@
 //! 180-byte SETTINGS block, the CRC refusal, and the read-only command set.
 //!
 //! Field map: research control notes §3.4 (PDM settings dialog, static
-//! analysis). Every field is `[inferred]` until the hardware FR compares it
-//! with the meter's screen.
+//! analysis). The hardware FR's screen check (2026-10-27) confirmed seven
+//! fields; rotation (the screen showed 0° with auto-rotate on while the bits
+//! read 90°) and the calibration values (not shown on the meter) stay
+//! `[inferred]`.
 
 mod common;
 
@@ -273,23 +275,40 @@ fn ac2_sample_rate_bits_2_3_of_0x60() {
     }
 }
 
+/// Keys of the fields the screen check confirmed (2026-10-27, 1HHT04).
+const CONFIRMED: [&str; 7] = [
+    "language",
+    "brightness",
+    "dim_timeout",
+    "startup_logo",
+    "theme",
+    "auto_rotate",
+    "sample_rate",
+];
+
 #[test]
-fn ac2_every_field_is_tagged_inferred_until_the_screen_check() {
+fn ac5_screen_checked_fields_are_confirmed_rotation_and_calibration_stay_inferred() {
     let m = decode(&captured());
-    let tags = [
+    let confirmed = [
         m.language.tag,
         m.brightness.tag,
         m.dim_timeout.tag,
         m.startup_logo.tag,
         m.theme.tag,
         m.auto_rotate.tag,
-        m.rotation.tag,
         m.sample_rate.tag,
+    ];
+    assert!(
+        confirmed.iter().all(|t| *t == Tag::Confirmed),
+        "{confirmed:?}"
+    );
+    let inferred = [
+        m.rotation.tag,
         m.voltage_cal.tag,
         m.current_cal.tag,
         m.offset_cal.tag,
     ];
-    assert!(tags.iter().all(|t| *t == Tag::Inferred), "{tags:?}");
+    assert!(inferred.iter().all(|t| *t == Tag::Inferred), "{inferred:?}");
     assert_eq!(Tag::Inferred.as_str(), "inferred");
     assert_eq!(Tag::Confirmed.as_str(), "confirmed");
 }
@@ -336,7 +355,12 @@ fn ac2_rows_list_every_field_with_label_value_and_tag() {
     assert_eq!(value("offset_cal"), "80");
     for r in &rows {
         assert!(!r.label.is_empty(), "{} has no label", r.key);
-        assert_eq!(r.tag, Tag::Inferred, "{}", r.key);
+        let want = if CONFIRMED.contains(&r.key) {
+            Tag::Confirmed
+        } else {
+            Tag::Inferred
+        };
+        assert_eq!(r.tag, want, "{}", r.key);
     }
 }
 

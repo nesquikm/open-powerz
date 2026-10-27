@@ -1,7 +1,9 @@
 //! AC-1HHT00.6: the demo meter keeps a few synthetic offline records. The
 //! RecordList (GET_DATA 0x200) is served only at auth level 1 or above, and
-//! each record's samples come back through its own 0x98100000 + offset
-//! window in transfers of at most 4096 bytes; any other window is REJECTed.
+//! each record's samples come back through memory reads inside its own
+//! 0x98100000 + offset window; any read outside a listed window is REJECTed.
+//! Like the real meter `[device]`, a memory read returns at most 256 bytes:
+//! a longer one gets its confirmation and the first 256 bytes, then nothing.
 
 mod common;
 
@@ -38,6 +40,27 @@ fn the_demo_meter_lists_at_least_three_records() {
     }
     let downloadable: Vec<_> = list.iter().filter(|r| r.read_window().is_some()).collect();
     assert!(downloadable.len() >= 3, "{list:?}");
+}
+
+#[test]
+fn entries_carry_a_capacity_and_one_record_is_stored_negative_like_the_meter() {
+    // [device] The real meter stores capacity 10000 at 0x14 and negative
+    // charge and energy for the load direction it was checked with.
+    let (mut s, list) = listed();
+    for r in &list {
+        assert_eq!(r.capacity_points, 10_000, "{}", r.name);
+        assert!(r.points as u32 <= r.capacity_points, "{}", r.name);
+    }
+    let neg = list
+        .iter()
+        .find(|r| r.charge_uah < 0 && r.energy_uwh < 0)
+        .expect("one record with negative totals");
+    let samples = s.download_record(neg).expect("download");
+    assert!(
+        samples.iter().skip(1).all(|x| x.ibus_ua < 0),
+        "{}",
+        neg.name
+    );
 }
 
 #[test]
@@ -114,8 +137,16 @@ fn level_1_gets_a_0x200_section_of_48_byte_entries() {
     );
 }
 
+/// Raw device at auth level 1.
+fn raw_authed(clock: &SimClock) -> SimDevice {
+    let mut d = raw_connected(Scenario::Idle, clock);
+    let uid = credential(&mut d, 1);
+    raw_auth(&mut d, 0x22, &uid);
+    d
+}
+
 #[test]
-fn record_data_arrives_in_transfers_of_at_most_4096_bytes() {
+fn a_read_longer_than_256_bytes_gets_the_confirmation_and_256_bytes_then_nothing() {
     let (_s, list) = listed();
     let biggest = list
         .iter()
@@ -124,41 +155,63 @@ fn record_data_arrives_in_transfers_of_at_most_4096_bytes() {
         .unwrap();
     let (addr, len) = biggest.read_window().unwrap();
     assert!(
-        len > 4096,
-        "the demo meter needs one record over 4096 bytes to exercise chunking ({len})"
+        len > 256,
+        "the demo meter needs a record over 256 bytes ({len})"
     );
     let clock = clock();
-    let mut d = raw_connected(Scenario::Idle, &clock);
-    let uid = credential(&mut d, 1);
-    raw_auth(&mut d, 0x22, &uid);
+    let mut d = raw_authed(&clock);
     let confirm = d
         .transact(&memory_read_request(0x24, addr, len), T)
         .unwrap();
     assert_eq!(&confirm[..4], &[0xC4, 0x24, 0x01, 0x01]);
-    let mut data = Vec::new();
-    while data.len() < len as usize {
-        let chunk = d.read(T).expect("record data");
-        assert!(chunk.len() <= 4096, "transfer of {} bytes", chunk.len());
-        assert_eq!(chunk.len() % 16, 0);
-        data.extend(chunk);
-    }
-    assert_eq!(data.len(), len as usize);
+    let data = d.read(T).expect("the first 256 bytes");
+    assert_eq!(data.len(), 256);
+    assert!(d.read(T).is_err(), "nothing after the first 256 bytes");
     let plain = crypto::decrypt(&KEYS[0], &data);
     let vbus = i32::from_le_bytes(plain[0..4].try_into().unwrap());
     assert!(vbus > 0, "first sample VBUS {vbus} µV");
 }
 
 #[test]
-fn any_other_window_is_rejected() {
+fn consecutive_reads_of_at_most_256_bytes_return_the_whole_record() {
+    let (mut s, list) = listed();
+    let biggest = list
+        .iter()
+        .filter(|r| r.read_window().is_some())
+        .max_by_key(|r| r.points)
+        .unwrap()
+        .clone();
+    let (addr, len) = biggest.read_window().unwrap();
+    let clock = clock();
+    let mut d = raw_authed(&clock);
+    let mut plain = Vec::new();
+    for (k, at) in (addr..addr + len).step_by(256).enumerate() {
+        let n = (addr + len - at).min(256);
+        let id = 0x30u8.wrapping_add(k as u8);
+        let confirm = d.transact(&memory_read_request(id, at, n), T).unwrap();
+        assert_eq!(&confirm[..4], &[0xC4, id, 0x01, 0x01], "{at:#x}");
+        let data = d.read(T).expect("chunk data");
+        assert_eq!(data.len(), n as usize, "{at:#x}");
+        plain.extend(crypto::decrypt(&KEYS[0], &data));
+    }
+    assert_eq!(plain.len(), len as usize);
+    let want = s.download_record(&biggest).unwrap();
+    assert_eq!(
+        plain,
+        want.iter().flat_map(|x| x.raw).collect::<Vec<u8>>(),
+        "the chunks are the record's samples in order"
+    );
+}
+
+#[test]
+fn any_read_reaching_outside_a_listed_window_is_rejected() {
     let (_s, list) = listed();
     let (addr, len) = list.iter().find_map(RecordEntry::read_window).unwrap();
     let clock = clock();
-    let mut d = raw_connected(Scenario::Idle, &clock);
-    let uid = credential(&mut d, 1);
-    raw_auth(&mut d, 0x22, &uid);
+    let mut d = raw_authed(&clock);
     for (i, (a, l)) in [
         (addr, len + 16),
-        (addr, len - 16),
+        (addr + len - 16, 32),
         (addr + 16, len),
         (0x9810_0000 - 16, 16),
         (0x9830_0000, 16),

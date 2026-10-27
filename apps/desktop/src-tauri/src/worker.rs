@@ -194,9 +194,10 @@ pub struct RecordEntryView {
     pub points: u16,
     /// Recorded time in seconds.
     pub duration_s: u32,
-    /// Charge in Ah.
+    /// Charge in Ah as stored: signed, negative for one current direction
+    /// (the Records view shows the magnitude, as the meter does).
     pub charge_ah: f64,
-    /// Energy in Wh.
+    /// Energy in Wh as stored: signed like the charge.
     pub energy_wh: f64,
     /// Offset of the samples in the record area.
     pub offset: u32,
@@ -1136,7 +1137,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     }
 
     /// Download offline record `index` (1-based): a fresh record list, then
-    /// one memory read of exactly that record's window (FR 1HHT00).
+    /// that record's window as consecutive memory reads of at most 256 bytes
+    /// (FR 1HHT00).
     pub fn download_record(&mut self, index: usize) -> Result<OfflineRecordView, UiError> {
         self.needs_queue_source()?;
         let Some(session) = self.session.as_mut() else {

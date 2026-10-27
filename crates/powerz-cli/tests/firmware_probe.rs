@@ -427,7 +427,8 @@ fn sent_types(trace: &str) -> Vec<u8> {
         .lines()
         .filter_map(|l| l.strip_prefix("> "))
         .map(|hex| {
-            let first = hex.split_whitespace().next().expect("a byte");
+            // `[len]` first, then the bytes.
+            let first = hex.split_whitespace().nth(1).expect("a byte");
             u8::from_str_radix(first, 16).expect("hex byte") & 0x7F
         })
         .collect()

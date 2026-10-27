@@ -50,6 +50,18 @@ const REC_B: E = E {
     offset: 0x0001_0000,
 };
 
+/// Like the real meter's record (1HHT04): charge and energy stored negative
+/// for the load direction used; the meter shows 37.251 mAh / 188.148 mWh.
+const REC_NEG: E = E {
+    name: "A01.d",
+    interval: 1,
+    points: 173,
+    duration: 172,
+    charge: -37_251,
+    energy: -188_148,
+    offset: 0x0000_0400,
+};
+
 fn entry_bytes(e: &E) -> Vec<u8> {
     let mut b = vec![0u8; 48];
     b[..e.name.len()].copy_from_slice(e.name.as_bytes());
@@ -93,14 +105,39 @@ fn window(e: &E) -> (u32, u32) {
     (0x9810_0000 + e.offset, u32::from(e.points) * 16)
 }
 
-fn download_steps(id: u8, e: &E) -> Vec<Step> {
+/// The memory reads of a download of `e`: consecutive chunks of at most
+/// 256 bytes, the most the meter returns per read `[device]`.
+fn chunks(e: &E) -> Vec<(u32, u32)> {
     let (addr, len) = window(e);
-    let mut confirm = vec![0xC4, id, 0x01, 0x01];
-    confirm.extend(&powerz_protocol::session::memory_read_plaintext(addr, len)[..16]);
-    let data = crypto::encrypt(&KEYS[0], &samples(e.points));
-    let mut steps = vec![Step::transact(memory_read_request(id, addr, len), confirm)];
-    for c in data.chunks(4096) {
-        steps.push(Step::read(c.to_vec()));
+    (0..len)
+        .step_by(256)
+        .map(|k| (addr + k, (len - k).min(256)))
+        .collect()
+}
+
+/// The request frames of a download of `e`, ids from `id` on.
+fn download_requests(id: u8, e: &E) -> Vec<Vec<u8>> {
+    chunks(e)
+        .into_iter()
+        .enumerate()
+        .map(|(k, (a, l))| memory_read_request(id.wrapping_add(k as u8), a, l))
+        .collect()
+}
+
+/// The meter's answer to a download of `e`: per chunk, the confirmation
+/// and that chunk's encrypted samples.
+fn download_steps(id: u8, e: &E) -> Vec<Step> {
+    let plain = samples(e.points);
+    let base = window(e).0;
+    let mut steps = Vec::new();
+    for (k, (addr, len)) in chunks(e).into_iter().enumerate() {
+        let id = id.wrapping_add(k as u8);
+        let mut confirm = vec![0xC4, id, 0x01, 0x01];
+        confirm.extend(&powerz_protocol::session::memory_read_plaintext(addr, len)[..16]);
+        let from = (addr - base) as usize;
+        let data = crypto::encrypt(&KEYS[0], &plain[from..from + len as usize]);
+        steps.push(Step::transact(memory_read_request(id, addr, len), confirm));
+        steps.push(Step::read(data));
     }
     steps
 }
@@ -245,6 +282,34 @@ fn records_list_prints_a_table_row_per_record() {
 }
 
 #[test]
+fn records_list_shows_charge_and_energy_as_magnitudes_like_the_meter() {
+    let mut s = session(Meter::new(script(&[&REC_NEG], vec![])));
+    let mut out = Vec::new();
+    records_list(&mut s, false, &mut out).unwrap();
+    let out = text(&out);
+    let row = out.lines().nth(1).unwrap_or_else(|| panic!("{out}"));
+    assert!(row.contains("0.037251 Ah"), "charge magnitude: {row}");
+    assert!(row.contains("0.188148 Wh"), "energy magnitude: {row}");
+    assert!(!row.contains('-'), "no sign in the table: {row}");
+}
+
+#[test]
+fn records_list_json_keeps_the_raw_signed_values_beside_the_magnitudes() {
+    let mut s = session(Meter::new(script(&[&REC_NEG, &REC_B], vec![])));
+    let mut out = Vec::new();
+    records_list(&mut s, true, &mut out).unwrap();
+    let v: Value = serde_json::from_str(&text(&out)).expect("valid JSON");
+    let r = &v["records"][0];
+    near("charge_ah", r["charge_ah"].as_f64().unwrap(), 0.037_251);
+    near("energy_wh", r["energy_wh"].as_f64().unwrap(), 0.188_148);
+    assert_eq!(r["charge_raw_uah"], -37_251);
+    assert_eq!(r["energy_raw_uwh"], -188_148);
+    let b = &v["records"][1];
+    assert_eq!(b["charge_raw_uah"], 2);
+    assert_eq!(b["energy_raw_uwh"], 10);
+}
+
+#[test]
 fn records_list_with_no_records_says_so() {
     let mut s = session(Meter::new(script(&[], vec![])));
     let mut out = Vec::new();
@@ -273,6 +338,10 @@ fn records_list_json_has_every_decoded_field() {
     near("charge_ah", a["charge_ah"].as_f64().unwrap(), 299e-6);
     near("energy_wh", a["energy_wh"].as_f64().unwrap(), 1495e-6);
     assert_eq!(a["offset"], 0x1000);
+    assert_eq!(
+        a["capacity_points"], 0,
+        "0x14 is zero in these synthetic entries"
+    );
     assert_eq!(recs[1]["index"], 2);
     assert_eq!(recs[1]["name"], "charger test");
 
@@ -360,19 +429,19 @@ fn records_get_all_writes_one_csv_per_record_and_json_reports_them() {
     let dir = out_dir("all");
     let mut s = session(Meter::new(script(
         &[&REC_A, &REC_B],
-        [download_steps(4, &REC_A), download_steps(5, &REC_B)].concat(),
+        // REC_A is 4800 bytes: 19 reads (ids 4..=22), then REC_B (id 23).
+        [download_steps(4, &REC_A), download_steps(23, &REC_B)].concat(),
     )));
     let mut out = Vec::new();
     records_get(&mut s, RecordSelection::All, &dir, true, &mut out).unwrap();
-    assert_eq!(
-        s.transport().inner.written(),
-        &[
-            memory_read_request(1, UID_ADDR, 12),
-            get_data(3, 0x200),
-            memory_read_request(4, 0x9810_1000, 300 * 16),
-            memory_read_request(5, 0x9811_0000, 48),
-        ]
-    );
+    let want: Vec<Vec<u8>> = [
+        vec![memory_read_request(1, UID_ADDR, 12), get_data(3, 0x200)],
+        download_requests(4, &REC_A),
+        vec![memory_read_request(23, 0x9811_0000, 48)],
+    ]
+    .concat();
+    assert_eq!(download_requests(4, &REC_A).len(), 19);
+    assert_eq!(s.transport().inner.written(), &want[..]);
     assert_eq!(s.transport().inner.remaining(), 0);
     assert_eq!(
         files_in(&dir),
@@ -395,6 +464,24 @@ fn records_get_all_writes_one_csv_per_record_and_json_reports_them() {
     let p = PathBuf::from(written[0]["path"].as_str().unwrap());
     assert_eq!(p.file_name().unwrap(), "01_REC001.csv");
     assert_eq!(written[1]["rows"], 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn records_get_of_a_173_point_record_reads_11_chunks_and_keeps_the_sample_sign() {
+    let dir = out_dir("chunks");
+    let mut s = session(Meter::new(script(&[&REC_NEG], download_steps(4, &REC_NEG))));
+    let mut out = Vec::new();
+    records_get(&mut s, RecordSelection::One(1), &dir, false, &mut out).unwrap();
+    let reads = &s.transport().inner.written()[2..];
+    assert_eq!(reads.len(), 11, "10 x 256 + 208 bytes");
+    assert_eq!(reads, &download_requests(4, &REC_NEG)[..]);
+    assert_eq!(chunks(&REC_NEG)[10], (0x9810_0400 + 10 * 256, 208));
+    let csv = std::fs::read_to_string(dir.join("01_A01_d.csv")).unwrap();
+    assert_eq!(csv.lines().count(), 174, "header + 173 rows");
+    // Samples are raw measurements, sign included (like the live recorder).
+    let last: Vec<&str> = csv.lines().last().unwrap().split(',').collect();
+    near("IBUS", last[3].parse().unwrap(), -0.172);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -1,14 +1,18 @@
 //! Synthetic offline records ("files") of the demo meter: the RecordList
 //! entries served for GET_DATA `0x200` and the 16-byte samples behind each
-//! entry's `0x98100000 + offset` memory-read window.
+//! entry's `0x98100000 + offset` memory-read window. A memory read may cover
+//! any part of a listed window; like the real meter, it returns at most
+//! [`MEMORY_READ_MAX_LEN`](powerz_protocol::decode::records::MEMORY_READ_MAX_LEN)
+//! bytes (see `device.rs`).
 //!
 //! Every record is made up and deterministic. Layouts follow
 //! `docs/protocol.md` (Offline records).
 
 use powerz_protocol::decode::records::{ENTRY_LEN, FLASH_WINDOW_BASE, SAMPLE_LEN};
 
-/// Largest bulk transfer the meter sends memory-read data in. \[static\]
-pub(crate) const MAX_TRANSFER: usize = 4096;
+/// Capacity in points written at 0x14 of every entry, as on the real meter
+/// [device].
+const CAPACITY_POINTS: u32 = 10_000;
 
 /// One synthetic record: name, interval and a load profile.
 struct Spec {
@@ -17,13 +21,14 @@ struct Spec {
     points: u16,
     /// Flash offset of the samples inside the record area.
     offset: u32,
-    /// Nominal VBUS (V) and IBUS (A).
+    /// Nominal VBUS (V) and IBUS (A); a negative IBUS stores negative
+    /// totals, as the real meter does for one current direction [device].
     vbus_v: f64,
     ibus_a: f64,
 }
 
-/// The demo meter's records. The first one is over 4096 bytes so a
-/// download spans several transfers; windows do not overlap.
+/// The demo meter's records. Each is over 256 bytes, so a download takes
+/// several memory reads; windows do not overlap.
 const SPECS: [Spec; 3] = [
     Spec {
         name: "PHONE_5V",
@@ -31,7 +36,7 @@ const SPECS: [Spec; 3] = [
         points: 300,
         offset: 0x0000_0000,
         vbus_v: 5.1,
-        ibus_a: 1.8,
+        ibus_a: -1.8,
     },
     Spec {
         name: "PD_9V_TEST",
@@ -81,6 +86,7 @@ fn entry(spec: &Spec) -> [u8; ENTRY_LEN] {
     e[..spec.name.len()].copy_from_slice(spec.name.as_bytes());
     e[0x11] = spec.interval_s;
     e[0x12..0x14].copy_from_slice(&spec.points.to_le_bytes());
+    e[0x14..0x18].copy_from_slice(&CAPACITY_POINTS.to_le_bytes());
     let duration = u32::from(spec.interval_s) * u32::from(spec.points.saturating_sub(1));
     e[0x18..0x1C].copy_from_slice(&duration.to_le_bytes());
     e[0x1C..0x20].copy_from_slice(&last[2].to_le_bytes());
@@ -94,16 +100,19 @@ pub(crate) fn list_payload() -> Vec<u8> {
     SPECS.iter().flat_map(entry).collect()
 }
 
-/// Plain samples of the record whose window is exactly `(addr, len)`, or
-/// `None` for any other window.
+/// Plain sample bytes `addr..addr + len` when that range lies wholly
+/// inside one record's window, or `None` for any other range.
 pub(crate) fn samples(addr: u32, len: u32) -> Option<Vec<u8>> {
+    let end = u64::from(addr) + u64::from(len);
     let spec = SPECS.iter().find(|s| {
-        addr == FLASH_WINDOW_BASE + s.offset && len == u32::from(s.points) * SAMPLE_LEN as u32
+        let start = FLASH_WINDOW_BASE + s.offset;
+        let window = u64::from(s.points) * SAMPLE_LEN as u64;
+        len > 0 && addr >= start && end <= u64::from(start) + window
     })?;
-    Some(
-        sample_values(spec)
-            .into_iter()
-            .flat_map(|w| w.into_iter().flat_map(i32::to_le_bytes))
-            .collect(),
-    )
+    let from = (addr - (FLASH_WINDOW_BASE + spec.offset)) as usize;
+    let all: Vec<u8> = sample_values(spec)
+        .into_iter()
+        .flat_map(|w| w.into_iter().flat_map(i32::to_le_bytes))
+        .collect();
+    all.get(from..from + len as usize).map(<[u8]>::to_vec)
 }

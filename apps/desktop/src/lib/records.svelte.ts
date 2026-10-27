@@ -42,7 +42,9 @@ export interface RecordRow {
   downloadable: boolean;
 }
 
-/** Every record of `list` as a table row. */
+/** Every record of `list` as a table row. Charge and energy show as magnitudes, as the
+ * meter's screen shows them: the meter stores them signed (negative for one current
+ * direction). Downloaded samples keep their sign (raw measurements). */
 export function recordRows(list: RecordList): RecordRow[] {
   return list.records.map((r) => ({
     index: r.index,
@@ -50,8 +52,8 @@ export function recordRows(list: RecordList): RecordRow[] {
     interval: `${r.interval_s} s`,
     points: String(r.points),
     duration: formatRecordDuration(r.duration_s),
-    charge: formatAmount(r.charge_ah, "Ah"),
-    energy: formatAmount(r.energy_wh, "Wh"),
+    charge: formatAmount(Math.abs(r.charge_ah), "Ah"),
+    energy: formatAmount(Math.abs(r.energy_wh), "Wh"),
     offset: `0x${r.offset.toString(16).toUpperCase().padStart(8, "0")}`,
     downloadable: r.points > 0,
   }));

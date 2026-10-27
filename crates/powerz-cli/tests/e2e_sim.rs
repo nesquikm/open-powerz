@@ -323,7 +323,11 @@ fn settings_against_the_simulator() {
     // The demo meter mirrors the captured FW 2.0.6 settings word.
     assert!(out.contains("English"), "{out}");
     assert!(out.contains("50%"), "{out}");
-    assert!(out.contains("[inferred]"), "{out}");
+    assert!(out.contains("[confirmed]"), "screen-checked fields: {out}");
+    assert!(
+        out.contains("[inferred]"),
+        "rotation and calibration: {out}"
+    );
     insta::assert_snapshot!("settings_sim", out);
 }
 
@@ -333,7 +337,11 @@ fn settings_json_and_raw_against_the_simulator() {
     let v: serde_json::Value = serde_json::from_str(&stdout_of(&a)).unwrap();
     let fields = v["fields"].as_array().expect("fields array");
     assert_eq!(fields.len(), 11);
-    assert!(fields.iter().all(|f| f["tag"] == "inferred"), "{v}");
+    // Seven fields were confirmed on the meter's screen (1HHT04); rotation
+    // and the three calibration fields stay inferred.
+    let confirmed = fields.iter().filter(|f| f["tag"] == "confirmed").count();
+    let inferred = fields.iter().filter(|f| f["tag"] == "inferred").count();
+    assert_eq!((confirmed, inferred), (7, 4), "{v}");
 
     let a = sim("idle").args(["settings", "--raw"]).assert().success();
     let out = stdout_of(&a);
@@ -351,12 +359,7 @@ fn settings_sends_no_write_against_the_simulator() {
     let sent: Vec<&str> = trace.lines().filter(|l| l.starts_with('>')).collect();
     assert!(!sent.is_empty(), "no frames traced:\n{trace}");
     for line in sent {
-        let first = line
-            .trim_start_matches('>')
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        let ty = u8::from_str_radix(first, 16).unwrap_or(0xFF) & 0x7F;
+        let ty = traced_bytes(line).first().copied().unwrap_or(0xFF) & 0x7F;
         assert_ne!(ty, 0x0A, "settings write sent: {line}");
         assert_ne!(ty, 0x48, "SET_DATA sent: {line}");
     }
@@ -462,11 +465,7 @@ fn records_get_sends_no_write_against_the_simulator() {
     assert!(!sent.is_empty(), "no frames traced:\n{trace}");
     let mut get_data_record_list = 0;
     for line in sent {
-        let bytes: Vec<u8> = line
-            .trim_start_matches('>')
-            .split_whitespace()
-            .filter_map(|t| u8::from_str_radix(t, 16).ok())
-            .collect();
+        let bytes = traced_bytes(line);
         let ty = bytes.first().copied().unwrap_or(0xFF) & 0x7F;
         assert!(
             [0x02, 0x03, 0x0C, 0x40, 0x44, 0x4C].contains(&ty),
@@ -499,11 +498,19 @@ fn watch_shape(line: &str) -> String {
         .join(" ")
 }
 
+/// The bytes of a `--trace` frame line `<marker> [<len>] <hex bytes>`;
+/// the `[len]` prefix must match.
 fn traced_bytes(line: &str) -> Vec<u8> {
-    line[1..]
-        .split_whitespace()
-        .filter_map(|t| u8::from_str_radix(t, 16).ok())
-        .collect()
+    let mut tokens = line.split_whitespace().skip(1);
+    let len: usize = tokens
+        .next()
+        .and_then(|t| t.strip_prefix('[')?.strip_suffix(']')?.parse().ok())
+        .unwrap_or_else(|| panic!("no [len] after the marker: {line}"));
+    let bytes: Vec<u8> = tokens
+        .map(|t| u8::from_str_radix(t, 16).unwrap_or_else(|_| panic!("not hex: {line}")))
+        .collect();
+    assert_eq!(bytes.len(), len, "[len] counts the bytes: {line}");
+    bytes
 }
 
 #[test]

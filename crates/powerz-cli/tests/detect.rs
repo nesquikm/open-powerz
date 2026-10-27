@@ -70,7 +70,8 @@ fn sent(a: &assert_cmd::assert::Assert) -> Vec<String> {
         .lines()
         .filter_map(|l| l.strip_prefix("> "))
         .map(|l| l.trim().to_string())
-        .filter(|l| !l.chars().all(|c| c.is_ascii_hexdigit() || c == ' '))
+        // Frame lines are `[len] <hex bytes>`.
+        .filter(|l| !l.starts_with('['))
         .collect()
 }
 

@@ -51,6 +51,7 @@ test.describe("meter settings panel (FR 1HHT01)", () => {
     ]) {
       await expect(p).toContainText(text);
     }
+    await expect(p.getByText("confirmed", { exact: true }).first()).toBeVisible();
     await expect(p.getByText("inferred", { exact: true }).first()).toBeVisible();
     await expect.poll(() => reads(page)).toBe(1);
   });

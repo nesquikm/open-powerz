@@ -3,6 +3,6 @@ source: crates/powerz-cli/tests/e2e_sim.rs
 expression: out
 ---
 #  Name        Interval  Points  Duration       Charge       Energy      Offset
-1  PHONE_5V         1 s     300   0:04:59    0.1383 Ah  0.705417 Wh  0x00000000
+1  PHONE_5V         1 s     300   0:04:59  0.138275 Ah   0.70529 Wh  0x00000000
 2  PD_9V_TEST       2 s     120   0:03:58  0.124289 Ah  1.118667 Wh  0x00002000
 3  LAPTOP_20V       5 s      60   0:04:55   0.22741 Ah  4.548307 Wh  0x00003000

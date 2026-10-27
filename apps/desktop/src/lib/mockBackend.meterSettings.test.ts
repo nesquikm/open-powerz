@@ -37,9 +37,12 @@ describe("MockBackend meter settings (AC-1HHT01.4)", () => {
     expect(value("theme")).toBe("blue");
     expect(value("rotation")).toBe("90°");
     expect(value("sample_rate")).toBe("50 SPS");
+    // Like the backend: the screen-checked fields are confirmed; rotation and the
+    // calibration values stay inferred.
+    const inferred = ["rotation", "voltage_cal", "current_cal", "offset_cal"];
     for (const f of s.fields) {
       expect(f.label.length).toBeGreaterThan(0);
-      expect(f.tag).toBe("inferred");
+      expect(f.tag).toBe(inferred.includes(f.key) ? "inferred" : "confirmed");
     }
     await b.meterSettings();
     expect(b.meterSettingsReads()).toBe(2);

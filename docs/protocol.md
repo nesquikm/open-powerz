@@ -315,21 +315,23 @@ first 96 bytes; device overrides its "96 bytes" reading.
 The vendor trigger tool's settings dialog reads the meter's own UI settings
 from two words of this section: the u32 at 0x00 and the u32 at 0x60. Which
 bits feed which control was worked out by static analysis of that dialog
-[static]; what each value means on the meter has not yet been compared with
-the meter's screen, so every meaning below stays [inferred] until it is. Bits
-1..2, 12..13, 19..26 and 28..31 of the u32 at 0x00 are not read by the dialog
-[static].
+[static]. On 2026-10-27 the decoded values were compared with the meter's own
+settings screen: language, brightness, dim timeout, startup logo, theme,
+auto-rotate and sample rate matched and are [device]; rotation did not match
+and stays [inferred]; the calibration values are not shown on the meter and
+stay [inferred]. Bits 1..2, 12..13, 19..26 and 28..31 of the u32 at 0x00 are
+not read by the dialog [static].
 
 | field | position | values | tag |
 |---|---|---|---|
-| language | u32 at 0x00, bit 0 | 0 = Chinese, 1 = English | [static] map; meaning [inferred] |
-| brightness | u32 at 0x00, bits 3..9 | percent, 1..100 | [static] map; meaning [inferred] |
-| dim (screen dimming timeout) | u32 at 0x00, bits 10..11 | 0 = off, 1 = 15 s, 2 = 30 s, 3 = 60 s | [static] map; meaning [inferred] |
-| startup logo | u32 at 0x00, bits 14..15 | 0 = off, 1 = 1 s, 2 = 3 s, 3 = 5 s (how long the logo shows) | [static] map; meaning [inferred] |
-| theme | u32 at 0x00, bits 16..18 (the low 3 bits of the u16 at 0x02) | 0 blue, 1 green, 2 pink, 3 orange, 4 yellow, 5 dark green, 6 cyan; 7 unknown | [static] map; meaning [inferred] |
-| auto-rotate | u32 at 0x00, bit 27 | 1 = on | [static] map; meaning [inferred] |
-| rotation (default screen angle) | u32 at 0x60, bits 0..1 | 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270° | [static] map; meaning [inferred] |
-| rate (sampling rate) | u32 at 0x60, bits 2..3 | 0 = 2 SPS, 1 = 10 SPS, 2 = 50 SPS, 3 = 1000 SPS | [static] [device] (queue rate code); screen label [inferred] |
+| language | u32 at 0x00, bit 0 | 0 = Chinese, 1 = English | [static] map; [device] (screen check) |
+| brightness | u32 at 0x00, bits 3..9 | percent, 1..100 | [static] map; [device] (screen check) |
+| dim (screen dimming timeout) | u32 at 0x00, bits 10..11 | 0 = off, 1 = 15 s, 2 = 30 s, 3 = 60 s | [static] map; [device] (screen check of 0 = off); labels for 1..3 [static] |
+| startup logo | u32 at 0x00, bits 14..15 | 0 = off, 1 = 1 s, 2 = 3 s, 3 = 5 s (how long the logo shows) | [static] map; [device] (screen check of 0 = off); labels for 1..3 [static] |
+| theme | u32 at 0x00, bits 16..18 (the low 3 bits of the u16 at 0x02) | 0 blue, 1 green, 2 pink, 3 orange, 4 yellow, 5 dark green, 6 cyan; 7 unknown | [static] map; [device] (screen check of 0 = blue); other colours [static] |
+| auto-rotate | u32 at 0x00, bit 27 | 1 = on | [static] map; [device] (screen check) |
+| rotation (default screen angle) | u32 at 0x60, bits 0..1 | 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270° | [static] map; meaning [inferred]: the screen showed 0° with auto-rotate on while these bits read 90° |
+| rate (sampling rate) | u32 at 0x60, bits 2..3 | 0 = 2 SPS, 1 = 10 SPS, 2 = 50 SPS, 3 = 1000 SPS | [static] [device] (queue rate code; screen check) |
 | voltage calibration | 5 x i32 at 0x1C, 0x20, 0x24, 0x28, 0x2C | signed, shown as plain integers | [static] map; meaning [inferred] |
 | current calibration | 10 x i32 from 0x30; the dialog shows the 5 at 0x30, 0x34, 0x38, 0x3C, 0x40 | signed, shown as plain integers | [static] map; meaning [inferred] |
 | offset calibration | i32 at 0x58 | signed | [static] map; meaning [inferred] |
@@ -337,8 +339,14 @@ the meter's screen, so every meaning below stays [inferred] until it is. Bits
 - [device] Our firmware 2.0.6 dump has 0xF8500191 in the u32 at 0x00 and
   0x849 in the u32 at 0x60. With the map above they read as English,
   brightness 50, dim off, startup logo off, theme blue, auto-rotate on,
-  rotation 90° and rate 50 SPS; those readings are [inferred] until compared
-  with the meter's screen.
+  rotation 90° and rate 50 SPS.
+- [device] Screen check (2026-10-27, firmware 2.0.6): the meter's settings
+  screen showed the same language, brightness, dim timeout, startup logo,
+  theme, auto-rotate and sample rate as the decoded block. Rotation did not
+  match: the screen showed 0° with auto-rotate on while bits 0..1 of the u32
+  at 0x60 read 90°. Perhaps the bits hold the angle used when auto-rotate is
+  off, or the screen shows the current angle; until that is settled rotation
+  stays [inferred].
 - The decoder checks both CRC-32 blocks first. On a CRC mismatch in either
   block it reports the mismatch as an error and decodes no field (our
   decoder's behaviour, pinned by its unit tests).
@@ -379,6 +387,13 @@ Reply, as seen on firmware 2.0.6: [device]
 | 1 | 20 | confirmation: header `C4 id 01 01` (type 0x44 with extend and encode set) + the plaintext first 16 request bytes | [device] (firmware 2.0.6) |
 | 2 | roundup16(length) | the data, AES-128-ECB with key slot 0, in a separate transfer with no header | [static] [device] (firmware 2.0.6) |
 
+[device] One memory read returns at most 256 bytes. For a 2768-byte request
+the meter sent the 20-byte confirmation (`C4 id 01 01`: the third byte 0x01
+is the encrypted flag, the header carries auth level 0), then one 256-byte
+transfer, then nothing. Longer data is read as consecutive reads of at most
+256 bytes each (address += 256); the library refuses a longer read before
+sending it.
+
 Known addresses (the only ones we ever read):
 
 | address | length | content | tag |
@@ -391,8 +406,8 @@ Known addresses (the only ones we ever read):
 - Keep reads at least 50 ms apart (100 ms in session 1). Third parties report
   that other peripheral addresses crash the meter. [inferred] (prior art)
 - The SPI-flash read window at `0x98000000 + flash address` holds the
-  offline recordings. Only the window of a listed record is allowed (see
-  Offline records). [static] [inferred]
+  offline recordings. Only the window of a listed record is allowed, read in
+  chunks of at most 256 bytes (see Offline records). [static] [device]
 
 Firmware status (FR V9SK52). All requests below are read-only:
 
@@ -418,56 +433,84 @@ multiple of 48 is a decode error. The 10-bit `size` field of the section
 header is too small for a long list, so the payload length is taken from the
 frame. [static] [device] (firmware 2.0.6: empty at level 0)
 
-Entry layout (48 bytes). The vendor list view reads only the fields below;
-the remaining bytes are kept raw in `RecordEntry::raw`. [static]
+Entry layout (48 bytes). The vendor list view reads the fields below
+[static]; a real entry read from the meter on 2026-10-27 (record `A01.d`,
+173 points at 1 s) confirmed them against the meter's record screen
+[device]. The unknown bytes are kept raw in `RecordEntry::raw`.
 
 | off | type | field | tag |
 |---|---|---|---|
-| 0x00 | 16 bytes | name, ASCII, ends at the first NUL (never read past 16 bytes) | [static] |
-| 0x10 | u8 | unknown; probably the NUL or padding after a 16-character name | [static] [inferred] |
-| 0x11 | u8 | sample interval in seconds | [static] |
-| 0x12 | u16 | point count (number of 16-byte samples) | [static] |
-| 0x14 | 4 bytes | unknown, kept raw; a start time here is possible but unconfirmed | [static] [inferred] |
-| 0x18 | u32 | duration in seconds | [static] |
-| 0x1C | i32 | charge in µAh (÷1e6 = Ah) | [static] |
-| 0x20 | i32 | energy in µWh (÷1e6 = Wh) | [static] |
-| 0x24 | u32 | flash offset of the samples inside the record area | [static] |
-| 0x28 | 8 bytes | unknown, kept raw | [static] [inferred] |
+| 0x00 | 16 bytes | name, ASCII, ends at the first NUL (never read past 16 bytes) | [static] [device] |
+| 0x10 | u8 | unknown, kept raw; 0x45 in the real entry | [device] (value); meaning unknown |
+| 0x11 | u8 | sample interval in seconds | [static] [device] |
+| 0x12 | u16 | point count (number of 16-byte samples) | [static] [device] |
+| 0x14 | u32 | capacity in points: the meter shows `points/capacity` (173/10000) | [device] |
+| 0x18 | u32 | duration in seconds | [static] [device] |
+| 0x1C | i32 | charge in µAh (÷1e6 = Ah), signed: negative for one current direction; the screen shows the magnitude of the sample totals, and this stored total is slightly larger | [static] [device] |
+| 0x20 | i32 | energy in µWh (÷1e6 = Wh), signed like the charge; shown as a magnitude like the charge | [static] [device] |
+| 0x24 | u32 | flash offset of the samples inside the record area | [static] [device] |
+| 0x28 | 4 bytes | unknown, kept raw; 0 in the real entry | [device] (value); meaning unknown |
+| 0x2C | 4 bytes | unknown, kept raw; not a Unix time (perhaps a checksum or an id) | [device] (value); meaning unknown |
 
-**Download window.** The samples of one entry are read with a single memory
-read (type 0x44, same request as in Memory read and device info) of
-`points x 16` bytes at `0x98100000 + offset`. The vendor app reads flash
-address `offset + 0x100000` through a window that maps flash address 0 to
-0x98000000. [static] The reply data arrives in bulk transfers of up to 4096
-bytes until the whole length is in. [static] Our bounds: [inferred]
+- [device] There is no start timestamp in the entry: no u32 of the real
+  entry is near the Unix time of the recording.
+- [device] The stored charge and energy are a little larger than the last
+  sample's totals (by 178 µAh and 896 µWh in the check, under a second
+  of the measured load). The
+  meter's record screen shows the last sample's totals.
+- [device] Charge and energy are stored negative for the load direction used
+  in the check (−37 251 µAh, −188 148 µWh); the meter's screen shows the
+  magnitude. `powerz records list` and the desktop Records view show
+  magnitudes too; `records list --json` gives the magnitudes as `charge_ah` /
+  `energy_wh` and the stored signed values as `charge_raw_uah` /
+  `energy_raw_uwh`.
+
+**Download window.** The samples of one entry are the `points x 16` bytes at
+`0x98100000 + offset`. The vendor app reads flash address
+`offset + 0x100000` through a window that maps flash address 0 to
+0x98000000, in a single memory read. [static] On the meter a memory read
+returns at most 256 bytes: a longer one gets its confirmation and the first
+256 bytes, then nothing. [device] So we read the window as consecutive
+chunks of at most 256 bytes (type 0x44, same request as in Memory read and
+device info), address += 256 each time; the last chunk is the rest (a
+173-point record is 10 reads of 256 bytes and one of 208). Every chunk lies
+inside the listed window. Reading the real record this way returned all 173
+samples correctly. [device] Our bounds: [inferred]
 
 - the window is computed only from an entry of the last record list; any
-  other address, even inside the record area, is refused before sending;
+  other address, even inside the record area, is refused before sending, and
+  no chunk reaches outside the window;
 - a record with 0 points is refused (nothing to read);
 - `offset + points x 16` must not pass 0x200000, the size of the record
   area: flash 0x100000..0x2FFFFF, below the logo area that starts at flash
   0x300000. The vendor app itself checks no bound. [static] [inferred]
 
 Sample layout (16 bytes, `points` of them back to back, all values signed
-little-endian i32). Evidence: the vendor chart loader converts each of the
-four words as a signed integer and divides it by 1e6, and fills only the
-VBUS, IBUS, charge and energy series; D+, D-, CC1, CC2 and temperature stay 0,
-so the format carries none of them. [static] No recording from our meter has
-been compared yet, so every field stays [inferred]; the raw 16 bytes are kept
+little-endian i32, one sample per interval). Evidence: the vendor chart
+loader converts each of the four words as a signed integer and divides it by
+1e6, and fills only the VBUS, IBUS, charge and energy series; D+, D-, CC1,
+CC2 and temperature stay 0, so the format carries none of them. [static] A
+recording made on our meter (2026-10-27, steady ~5.06 V / 0.76 A with the
+load unplugged once) confirmed every field: the last sample's totals equal
+the meter's record screen exactly (shown as 37.073 mAh and 187.252 mWh,
+stored as −37 073 µAh and −187 252 µWh). [device] The raw 16 bytes are kept
 in `RecordSample::raw`.
 
 | off | type | field | unit | tag |
 |---|---|---|---|---|
-| 0x00 | i32 | VBUS | µV (÷1e6 = V) | [static] [inferred] |
-| 0x04 | i32 | IBUS, signed | µA (÷1e6 = A) | [static] [inferred] |
-| 0x08 | i32 | charge, cumulative since the record start | µAh (÷1e6 = Ah) | [static] [inferred] |
-| 0x0C | i32 | energy, cumulative since the record start | µWh (÷1e6 = Wh) | [static] [inferred] |
+| 0x00 | i32 | VBUS | µV (÷1e6 = V) | [static] [device] |
+| 0x04 | i32 | IBUS, signed; negative for the load direction used in the check | µA (÷1e6 = A) | [static] [device] |
+| 0x08 | i32 | charge, running total since the record start, signed like IBUS | µAh (÷1e6 = Ah) | [static] [device] |
+| 0x0C | i32 | energy, running total since the record start, signed like IBUS | µWh (÷1e6 = Wh) | [static] [device] |
 
 - Samples carry no timestamp: sample i is at `interval x i` seconds from the
   record start (`RecordEntry::sample_time_s`). The record has no absolute
-  start time that we know of. [static]
+  start time. [static] [device]
 - The vendor app can show IBUS, charge and energy as absolute values (an
-  option on by default); we keep the signed values. [static]
+  option on by default). [static] We keep the samples signed: they are raw
+  measurements, written to the CSV and drawn in the chart with their sign,
+  like the live recorder's. Only the list's charge and energy are shown as
+  magnitudes, as on the meter's screen.
 - Delete exists in the vendor app (it rewrites the list with SET_DATA) and is
   never sent by this library. [static]
 
@@ -898,8 +941,9 @@ record window, and the HID transport sends only the ADC snapshot. [device] [stat
 is the firmware flash path, which may send JUMP_DFU, JUMP_APROM and the 0x42
 descriptor under its own stricter guard (see Firmware download). The one
 memory-read exception is an offline record: the window `0x98100000 + offset`,
-`points x 16` bytes, computed from an entry of the last record list and
-bounded by the record area (see Offline records). [inferred] RESET,
+`points x 16` bytes, computed from an entry of the last record list,
+bounded by the record area and read in chunks of at most 256 bytes that all
+lie inside it (see Offline records). [inferred] RESET,
 SET_DATA and memory writes are never sent on any path. [static]
 
 | request | why | tag |

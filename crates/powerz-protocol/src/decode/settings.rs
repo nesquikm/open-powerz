@@ -83,7 +83,11 @@ impl Settings {
         let i32_at = |off: usize| u32_at(&self.raw, off) as i32;
         let cal5 = |base: usize| core::array::from_fn(|i| i32_at(base + 4 * i));
         // Field map: research control notes §3.4 (PDM settings dialog,
-        // static analysis); every field is [inferred] until checked on screen.
+        // static analysis). The 2026-10-27 screen check confirmed language,
+        // brightness, dim timeout, startup logo, theme, auto-rotate and sample
+        // rate [device]. Rotation stays [inferred]: the screen showed 0° with
+        // auto-rotate on while bits 0..1 of 0x60 read 90°. The calibration
+        // values are not shown on the meter and stay [inferred].
         Ok(MeterSettings {
             language: Tagged {
                 value: if w0 & 1 == 0 {
@@ -91,11 +95,11 @@ impl Settings {
                 } else {
                     Language::English
                 },
-                tag: Tag::Inferred,
+                tag: Tag::Confirmed,
             },
             brightness: Tagged {
                 value: ((w0 >> 3) & 0x7F) as u8,
-                tag: Tag::Inferred,
+                tag: Tag::Confirmed,
             },
             dim_timeout: Tagged {
                 value: match (w0 >> 10) & 0b11 {
@@ -104,7 +108,7 @@ impl Settings {
                     2 => DimTimeout::Secs30,
                     _ => DimTimeout::Secs60,
                 },
-                tag: Tag::Inferred,
+                tag: Tag::Confirmed,
             },
             startup_logo: Tagged {
                 value: match (w0 >> 14) & 0b11 {
@@ -113,7 +117,7 @@ impl Settings {
                     2 => StartupLogo::Secs3,
                     _ => StartupLogo::Secs5,
                 },
-                tag: Tag::Inferred,
+                tag: Tag::Confirmed,
             },
             theme: Tagged {
                 value: match ((w0 >> 16) & 0b111) as u8 {
@@ -126,11 +130,11 @@ impl Settings {
                     6 => Theme::Cyan,
                     other => Theme::Unknown(other),
                 },
-                tag: Tag::Inferred,
+                tag: Tag::Confirmed,
             },
             auto_rotate: Tagged {
                 value: (w0 >> 27) & 1 == 1,
-                tag: Tag::Inferred,
+                tag: Tag::Confirmed,
             },
             rotation: Tagged {
                 value: match w60 & 0b11 {
@@ -148,7 +152,7 @@ impl Settings {
                     2 => Rate::Sps50,
                     _ => Rate::Sps1000,
                 },
-                tag: Tag::Inferred,
+                tag: Tag::Confirmed,
             },
             voltage_cal: Tagged {
                 value: cal5(0x1C),

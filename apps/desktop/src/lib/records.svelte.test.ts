@@ -106,6 +106,32 @@ describe("recordRows (AC-1HHT00.5)", () => {
     expect(rows[1]!.offset).toBe("0x00010000");
   });
 
+  it("shows charge and energy as magnitudes, as the meter's screen does", () => {
+    // The real meter stores them negative for one current direction (1HHT04).
+    const rows = recordRows({
+      records: [
+        {
+          index: 1,
+          name: "A01.d",
+          interval_s: 1,
+          points: 173,
+          duration_s: 172,
+          charge_ah: -0.037251,
+          energy_wh: -0.188148,
+          offset: 0x400,
+        },
+      ],
+    });
+    expect(rows[0]!.charge).toBe("0.037251 Ah");
+    expect(rows[0]!.energy).toBe("0.188148 Wh");
+  });
+
+  it("keeps the sign of the samples in the chart (raw measurements)", () => {
+    const [, , ibus, power] = recordChartData(REC_A);
+    expect(ibus[2]).toBeCloseTo(-0.5, 12);
+    expect(power[2]).toBeCloseTo(-3.5, 12);
+  });
+
   it("marks a record with no points as not downloadable", () => {
     const rows = recordRows(LIST);
     expect(rows.map((r) => r.downloadable)).toEqual([true, true, false]);

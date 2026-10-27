@@ -2,6 +2,7 @@
 //! transfers queued.
 
 use powerz_protocol::crypto::{self, KEYS};
+use powerz_protocol::decode::records::MEMORY_READ_MAX_LEN;
 use powerz_protocol::frame::{self, Attribute, DataHeader, SectionHeader};
 
 use crate::memory;
@@ -270,8 +271,10 @@ impl SimDevice {
         self.control(msg::ACCEPT, id)
     }
 
-    /// 0x44: confirmation, then the block encrypted with key 0 in
-    /// transfers of at most 4096 bytes. Its replies carry level 0 in the
+    /// 0x44: confirmation, then the block encrypted with key 0 in one
+    /// transfer. Like the meter `[device]`, a read longer than
+    /// [`MEMORY_READ_MAX_LEN`] bytes gets its confirmation and only the
+    /// first 256 bytes, then nothing. Its replies carry level 0 in the
     /// header whatever the session level (`C4 id 01 01`, `06 id 00 00`).
     fn memory_read(&mut self, req: &[u8], id: u8) -> Vec<Vec<u8>> {
         let level0 = |ty: u8, encode: bool, obj: u16| {
@@ -297,7 +300,7 @@ impl SimDevice {
         if word(12) != crypto::crc32(&plain[..12]) {
             return reject();
         }
-        // Record samples: only an exact listed window, from level 1.
+        // Record samples: only inside a listed window, from level 1.
         let record = (self.auth_level >= 1)
             .then(|| records::samples(addr, len))
             .flatten();
@@ -306,10 +309,9 @@ impl SimDevice {
         };
         let mut confirm = level0(msg::MEM_READ | 0x80, true, 4);
         confirm.extend_from_slice(&plain[..16]);
-        let data = crypto::encrypt(&KEYS[0], &block);
-        let mut replies = vec![confirm];
-        replies.extend(data.chunks(records::MAX_TRANSFER).map(<[u8]>::to_vec));
-        replies
+        let mut data = crypto::encrypt(&KEYS[0], &block);
+        data.truncate(MEMORY_READ_MAX_LEN as usize);
+        vec![confirm, data]
     }
 
     /// 0x4C: grant level 1 for the UID, 2 for the OTP credential, else 0.

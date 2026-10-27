@@ -735,16 +735,17 @@ const MOCK_CABLE: CableView = {
 };
 
 /** The demo meter's settings rows, as the backend decodes the captured FW 2.0.6
- * block (FR 1HHT01). */
+ * block (FR 1HHT01): the screen-checked fields confirmed, rotation and the
+ * calibration values inferred. */
 const DEMO_METER_SETTINGS: readonly MeterSettingField[] = [
-  { key: "language", label: "Language", value: "English", tag: "inferred" },
-  { key: "brightness", label: "Brightness", value: "50%", tag: "inferred" },
-  { key: "dim_timeout", label: "Dim screen after", value: "off", tag: "inferred" },
-  { key: "startup_logo", label: "Startup logo", value: "off", tag: "inferred" },
-  { key: "theme", label: "Theme", value: "blue", tag: "inferred" },
-  { key: "auto_rotate", label: "Auto-rotate", value: "on", tag: "inferred" },
+  { key: "language", label: "Language", value: "English", tag: "confirmed" },
+  { key: "brightness", label: "Brightness", value: "50%", tag: "confirmed" },
+  { key: "dim_timeout", label: "Dim screen after", value: "off", tag: "confirmed" },
+  { key: "startup_logo", label: "Startup logo", value: "off", tag: "confirmed" },
+  { key: "theme", label: "Theme", value: "blue", tag: "confirmed" },
+  { key: "auto_rotate", label: "Auto-rotate", value: "on", tag: "confirmed" },
   { key: "rotation", label: "Rotation", value: "90°", tag: "inferred" },
-  { key: "sample_rate", label: "Sample rate", value: "50 SPS", tag: "inferred" },
+  { key: "sample_rate", label: "Sample rate", value: "50 SPS", tag: "confirmed" },
   {
     key: "voltage_cal",
     label: "Voltage calibration (raw)",
@@ -761,9 +762,10 @@ const DEMO_METER_SETTINGS: readonly MeterSettingField[] = [
 ];
 
 /** The demo meter's offline records (FR 1HHT00, AC .6): the simulator's three load
- * profiles, each sample's charge and energy summed like the meter does. */
+ * profiles, each sample's charge and energy summed like the meter does; PHONE_5V
+ * stores negative totals like the real meter in one current direction. */
 const DEMO_RECORD_SPECS = [
-  { name: "PHONE_5V", interval_s: 1, points: 300, offset: 0x0000, vbus: 5.1, ibus: 1.8 },
+  { name: "PHONE_5V", interval_s: 1, points: 300, offset: 0x0000, vbus: 5.1, ibus: -1.8 },
   { name: "PD_9V_TEST", interval_s: 2, points: 120, offset: 0x2000, vbus: 9.0, ibus: 2.0 },
   { name: "LAPTOP_20V", interval_s: 5, points: 60, offset: 0x3000, vbus: 20.0, ibus: 3.0 },
 ] as const;

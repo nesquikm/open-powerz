@@ -200,16 +200,16 @@ answers the demo meter's fields and counts the reads
 | function | what it does |
 |---|---|
 | `recordsList(): Promise<RecordList>` | Lists the connected meter's offline records (Tauri command `records_list`). Only one GET_DATA for the record-list attribute (0x200) goes out, after level-1 authentication when the session is below it; the stream keeps running. Rejects with `usage` when no meter is connected. |
-| `recordDownload(index): Promise<OfflineRecord>` | Downloads record `index` (1-based) (Tauri command `record_download`): the list is read again, then one memory read of exactly that record's window. Rejects with `usage` for an index that is not listed or a record with no samples, without reading anything. The UI waits up to 30 s for it. |
+| `recordDownload(index): Promise<OfflineRecord>` | Downloads record `index` (1-based) (Tauri command `record_download`): the list is read again, then that record's window as consecutive memory reads of at most 256 bytes, all inside the window. Rejects with `usage` for an index that is not listed or a record with no samples, without reading anything. The UI waits up to 30 s for it. |
 
 Types:
 
 | type | fields |
 |---|---|
 | `RecordList` | `records`: every record, in the meter's order |
-| `OfflineRecordEntry` | `index` (1-based), `name`, `interval_s`, `points`, `duration_s`, `charge_ah`, `energy_wh`, `offset` (in the record area) |
+| `OfflineRecordEntry` | `index` (1-based), `name`, `interval_s`, `points`, `duration_s`, `charge_ah`, `energy_wh` (as stored: signed, negative for one current direction; the Records view shows their magnitude, as the meter does), `offset` (in the record area) |
 | `OfflineRecord` | `index`, `name`, `interval_s`, `samples` |
-| `OfflineRecordSample` | `t_s` (seconds from the record start), `vbus_v`, `ibus_a`, `charge_ah`, `energy_wh` (charge and energy summed so far) |
+| `OfflineRecordSample` | `t_s` (seconds from the record start), `vbus_v`, `ibus_a`, `charge_ah`, `energy_wh` (charge and energy summed so far); signed raw measurements, drawn in the chart with their sign |
 
 On the UI side, `RecordsPanel` (in `records.svelte.ts`) lists the records when
 a meter connects and on Refresh, downloads one or all of them (download-all

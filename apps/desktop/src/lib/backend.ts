@@ -494,7 +494,9 @@ export interface OfflineRecordEntry {
   interval_s: number;
   points: number;
   duration_s: number;
+  /** Charge in Ah as stored: signed, negative for one current direction. */
   charge_ah: number;
+  /** Energy in Wh as stored: signed like the charge. */
   energy_wh: number;
   /** Offset of the samples in the record area. */
   offset: number;
@@ -530,7 +532,8 @@ export async function recordsList(): Promise<RecordList> {
   return invoke<RecordList>("records_list");
 }
 
-/** Downloads offline record `index` (1-based): one memory read of its own window. */
+/** Downloads offline record `index` (1-based): its own window, read in chunks of at most
+ * 256 bytes. */
 export async function recordDownload(index: number): Promise<OfflineRecord> {
   if (mock) return mock.recordDownload(index);
   return invoke<OfflineRecord>("record_download", { index });

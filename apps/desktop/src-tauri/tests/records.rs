@@ -1,6 +1,7 @@
 //! Records view backend (FR 1HHT00, AC .5, .6 and .7): the worker lists the
 //! demo meter's offline records and downloads one at a time with
-//! GET_DATA 0x200 and one memory read of the record's own window; the live
+//! GET_DATA 0x200 and consecutive memory reads of at most 256 bytes inside
+//! the record's own window (the most the meter returns per read); the live
 //! session goes on afterwards.
 
 mod common;
@@ -165,8 +166,17 @@ fn list_sends_one_get_data_record_list_only() {
     assert_eq!(get_data_mask(sent[0]), RECORD_LIST);
 }
 
+/// The `(addr, len)` reads that download `window`: consecutive chunks of at
+/// most 256 bytes.
+fn chunks((addr, len): (u32, u32)) -> Vec<(u32, u32)> {
+    (0..len)
+        .step_by(256)
+        .map(|k| (addr + k, (len - k).min(256)))
+        .collect()
+}
+
 #[test]
-fn download_sends_one_memory_read_of_exactly_the_listed_window() {
+fn download_reads_exactly_the_listed_window_in_chunks_of_at_most_256_bytes() {
     let (mut worker, clock, log) = start();
     run_for(&mut worker, &clock, 500);
     let recs = list(&mut worker);
@@ -180,13 +190,17 @@ fn download_sends_one_memory_read_of_exactly_the_listed_window() {
         worker.download_record(index).expect("download failed");
         let log = log.lock().unwrap();
         let sent: Vec<&Vec<u8>> = log.frames[before..].iter().map(|(_, f)| f).collect();
-        let reads: Vec<&&Vec<u8>> = sent.iter().filter(|f| f[0] & 0x7F == 0x44).collect();
-        assert_eq!(reads.len(), 1, "record {index}: {sent:02x?}");
-        assert_eq!(memread_window(reads[0]), want, "record {index}");
+        let reads: Vec<(u32, u32)> = sent
+            .iter()
+            .filter(|f| f[0] & 0x7F == 0x44)
+            .map(|f| memread_window(f))
+            .collect();
+        assert!(want.1 > 256, "record {index} needs several reads");
+        assert_eq!(reads, chunks(want), "record {index}: {sent:02x?}");
         assert_eq!(
             sent.last().map(|f| f[0] & 0x7F),
             Some(0x44),
-            "the memory read is the last frame"
+            "the memory reads are the last frames"
         );
         for f in &sent {
             let ty = f[0] & 0x7F;
@@ -234,8 +248,11 @@ fn a_full_records_session_stays_inside_the_safe_command_set() {
             ),
             0x44 => {
                 let w = memread_window(f);
+                let in_a_window = windows.iter().any(|&(a, l)| {
+                    w.1 <= 256 && w.0 >= a && u64::from(w.0) + u64::from(w.1) <= u64::from(a + l)
+                });
                 assert!(
-                    ALLOWED_READS.contains(&w) || windows.contains(&w),
+                    ALLOWED_READS.contains(&w) || in_a_window,
                     "memory read {:#x}+{}",
                     w.0,
                     w.1

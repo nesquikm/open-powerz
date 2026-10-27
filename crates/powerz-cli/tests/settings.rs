@@ -97,7 +97,13 @@ fn settings_prints_every_field_with_its_value_and_tag() {
             .find(|l| l.to_lowercase().starts_with(&label.to_lowercase()))
             .unwrap_or_else(|| panic!("no {label} line in:\n{out}"));
         assert!(line.contains(value), "{label}: {line}");
-        assert!(line.contains("[inferred]"), "{label} has no tag: {line}");
+        // Screen-checked fields are confirmed; rotation and calibration not.
+        let tag = if ["Rotation", "Voltage", "Current", "Offset"].contains(&label) {
+            "[inferred]"
+        } else {
+            "[confirmed]"
+        };
+        assert!(line.contains(tag), "{label} is not {tag}: {line}");
     }
 }
 
@@ -132,7 +138,13 @@ fn settings_json_lists_fields_with_key_label_value_and_tag() {
     assert_eq!(by_key("sample_rate")["value"], "50 SPS");
     assert_eq!(by_key("offset_cal")["value"], "80");
     for f in fields {
-        assert_eq!(f["tag"], "inferred", "{f}");
+        let inferred = ["rotation", "voltage_cal", "current_cal", "offset_cal"];
+        let want = if inferred.iter().any(|k| f["key"] == *k) {
+            "inferred"
+        } else {
+            "confirmed"
+        };
+        assert_eq!(f["tag"], want, "{f}");
         assert!(f["label"].as_str().is_some_and(|l| !l.is_empty()), "{f}");
     }
 }

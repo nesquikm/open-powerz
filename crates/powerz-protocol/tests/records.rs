@@ -2,9 +2,11 @@
 //! entry decoder, the computed download window, the 16-byte sample decoder
 //! and the exact frames a list + download sends.
 //!
-//! Layouts: research control notes §4, §4.1, §4.2 (static analysis). Every
-//! sample field stays `[inferred]` until the hardware FR confirms it. All
-//! entries and samples here are synthetic.
+//! Layouts: research control notes §4, §4.1, §4.2 (static analysis), checked
+//! on the real meter in the hardware FR (1HHT04): the sample fields are
+//! `[device]`, a memory read returns at most 256 bytes, so a download is a run
+//! of consecutive reads. The entries and samples here are synthetic, except
+//! the one real RecordList entry below (no serial or UID in it).
 
 mod common;
 
@@ -12,8 +14,8 @@ use common::*;
 use powerz_protocol::crypto::{self, KEYS};
 use powerz_protocol::decode::DecodeError;
 use powerz_protocol::decode::records::{
-    ENTRY_LEN, FLASH_WINDOW_BASE, RECORD_AREA_LEN, RecordEntry, RecordSample, SAMPLE_FIELDS,
-    SAMPLE_LEN, decode_record_list, decode_samples,
+    ENTRY_LEN, FLASH_WINDOW_BASE, MEMORY_READ_MAX_LEN, RECORD_AREA_LEN, RecordEntry, RecordSample,
+    SAMPLE_FIELDS, SAMPLE_LEN, decode_record_list, decode_samples,
 };
 use powerz_protocol::decode::settings::Tag;
 use powerz_protocol::frame::{Attribute, SectionHeader};
@@ -113,18 +115,35 @@ fn samples(n: usize) -> Vec<u8> {
         .collect()
 }
 
-/// The meter's answer to a record download: confirmation, then the
-/// encrypted samples in transfers of at most 4096 bytes.
-fn download_steps(id: u8, e: &E) -> Vec<Step> {
+/// `(addr, len)` of every memory read a download of `e` sends: consecutive
+/// reads of at most 256 bytes from `0x98100000 + offset`.
+fn chunk_windows(e: &E) -> Vec<(u32, u32)> {
     let addr = FLASH_WINDOW_BASE + e.offset;
     let len = u32::from(e.points) * SAMPLE_LEN as u32;
-    let data = crypto::encrypt(&KEYS[0], &samples(usize::from(e.points)));
-    let mut steps = vec![Step::transact(
-        memread_request(id, addr, len),
-        memread_confirm(id, addr, len),
-    )];
-    for chunk in data.chunks(4096) {
-        steps.push(Step::read(chunk.to_vec()));
+    (0..len)
+        .step_by(256)
+        .map(|k| (addr + k, (len - k).min(256)))
+        .collect()
+}
+
+/// The meter's answer to a record download as it behaves on the device
+/// `[device]`: one memory read per chunk of at most 256 bytes (request ids
+/// from `id` on), each a confirmation then that chunk's encrypted samples.
+fn download_steps(id: u8, e: &E) -> Vec<Step> {
+    let plain = samples(usize::from(e.points));
+    let base = FLASH_WINDOW_BASE + e.offset;
+    let mut steps = Vec::new();
+    for (k, (addr, len)) in chunk_windows(e).into_iter().enumerate() {
+        let id = id.wrapping_add(k as u8);
+        let from = (addr - base) as usize;
+        steps.push(Step::transact(
+            memread_request(id, addr, len),
+            memread_confirm(id, addr, len),
+        ));
+        steps.push(Step::read(crypto::encrypt(
+            &KEYS[0],
+            &plain[from..from + len as usize],
+        )));
     }
     steps
 }
@@ -168,7 +187,50 @@ fn ac1_entry_keeps_all_48_bytes_raw_including_the_unknown_ones() {
     assert_eq!(r.raw.to_vec(), bytes);
     assert_eq!(r.raw[0x10], 0xA5);
     assert_eq!(&r.raw[0x14..0x18], &[0xDE, 0xAD, 0xBE, 0xEF]);
+    assert_eq!(r.capacity_points, 0xEFBE_ADDE, "0x14 is the u32 capacity");
     assert_eq!(&r.raw[0x28..0x30], &[1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+/// The real meter's RecordList entry from the hardware FR (1HHT04): record
+/// "A01.d", 173 points at 1 s, 172 s, charge and energy negative for the
+/// load direction used, capacity 10000, offset 0x400. No serial or UID; the unknown
+/// bytes at 0x2C are replaced with `aa bb cc dd` in case they derive from the meter.
+const REAL_ENTRY: [u8; ENTRY_LEN] = [
+    0x41, 0x30, 0x31, 0x2e, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x45, 0x01, 0xad, 0x00, 0x10, 0x27, 0x00, 0x00, 0xac, 0x00, 0x00, 0x00, 0x7d, 0x6e, 0xff, 0xff,
+    0x0c, 0x21, 0xfd, 0xff, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd,
+];
+
+#[test]
+fn ac1_the_real_meter_entry_decodes_every_field() {
+    let r = RecordEntry::decode(&REAL_ENTRY).unwrap();
+    assert_eq!(r.name, "A01.d");
+    assert_eq!(r.interval_s, 1);
+    assert_eq!(r.points, 173);
+    assert_eq!(r.capacity_points, 10_000, "the meter shows 173/10000");
+    assert_eq!(r.duration_s, 172, "00:02:52 on the meter");
+    assert_eq!(r.charge_uah, -37_251, "stored signed");
+    assert_eq!(r.energy_uwh, -188_148, "stored signed");
+    assert!((r.charge_ah() + 0.037_251).abs() < 1e-12);
+    assert!((r.energy_wh() + 0.188_148).abs() < 1e-12);
+    assert!((r.charge_magnitude_ah() - 0.037_251).abs() < 1e-12);
+    assert!((r.energy_magnitude_wh() - 0.188_148).abs() < 1e-12);
+    assert_eq!(r.offset, 0x400);
+    assert_eq!(r.raw, REAL_ENTRY, "unknown bytes are kept raw");
+    assert_eq!(r.raw[0x10], 0x45);
+    assert_eq!(&r.raw[0x28..0x30], &[0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd]);
+    assert_eq!(r.read_window(), Some((0x9810_0400, 173 * 16)));
+}
+
+#[test]
+fn ac1_magnitudes_never_overflow() {
+    let r = entry(&E {
+        charge: i32::MIN,
+        energy: i32::MIN,
+        ..REC_A
+    });
+    assert!((r.charge_magnitude_ah() - 2_147.483_648).abs() < 1e-9);
+    assert!((r.energy_magnitude_wh() - 2_147.483_648).abs() < 1e-9);
 }
 
 #[test]
@@ -338,7 +400,34 @@ fn ac2_read_window_is_bounded_by_the_record_area() {
 }
 
 #[test]
-fn ac2_download_reads_exactly_one_window_in_4096_byte_transfers() {
+fn ac2_a_memory_read_returns_at_most_256_bytes() {
+    assert_eq!(MEMORY_READ_MAX_LEN, 256);
+}
+
+#[test]
+fn ac2_read_chunks_cover_the_window_in_consecutive_reads_of_at_most_256_bytes() {
+    assert_eq!(entry(&REC_B).read_chunks(), vec![(0x9811_0000, 48)]);
+    let a = entry(&REC_A); // 4800 bytes: 18 x 256 + 192
+    let chunks = a.read_chunks();
+    assert_eq!(chunks, chunk_windows(&REC_A));
+    assert_eq!(chunks.len(), 19);
+    assert_eq!(chunks[0], (0x9810_1000, 256));
+    assert_eq!(chunks[18], (0x9810_1000 + 18 * 256, 192));
+    assert!(entry(&E { points: 0, ..REC_A }).read_chunks().is_empty());
+    assert!(
+        entry(&E {
+            offset: 0x1F_FFF0,
+            points: 2,
+            ..REC_A
+        })
+        .read_chunks()
+        .is_empty(),
+        "no chunks outside the record area"
+    );
+}
+
+#[test]
+fn ac2_download_reads_the_window_in_consecutive_reads_of_at_most_256_bytes() {
     let reply = list_reply(3, 1, &[entry_bytes(&REC_A), entry_bytes(&REC_B)]);
     let script = [
         vec![Step::transact(get_data(3, 0x200), reply)],
@@ -350,9 +439,66 @@ fn ac2_download_reads_exactly_one_window_in_4096_byte_transfers() {
     let got = s.download_record(&list[0]).unwrap();
     assert_eq!(got.len(), 300);
     assert_eq!(got[0].vbus_uv, 5_000_000);
+    assert_eq!(
+        got[16].vbus_uv, 5_016_000,
+        "first sample of the second chunk"
+    );
     assert_eq!(got[299].vbus_uv, 5_299_000);
     assert_eq!(got[299].ibus_ua, -299_000);
     assert_eq!(s.transport().inner.remaining(), 0);
+}
+
+#[test]
+fn ac2_a_173_point_record_downloads_in_11_reads() {
+    // The real meter's record: 173 x 16 = 2768 bytes = 10 x 256 + 208 [device].
+    let rec = E {
+        name: "A01.d",
+        interval: 1,
+        points: 173,
+        duration: 172,
+        charge: -37_251,
+        energy: -188_148,
+        offset: 0x400,
+    };
+    let reply = list_reply(3, 1, &[entry_bytes(&rec)]);
+    let script = [
+        vec![Step::transact(get_data(3, 0x200), reply)],
+        download_steps(4, &rec),
+    ]
+    .concat();
+    let mut s = authed_session(script);
+    let list = s.list_records().unwrap();
+    let got = s.download_record(&list[0]).unwrap();
+    assert_eq!(got.len(), 173);
+    assert_eq!(got[172].vbus_uv, 5_172_000);
+    let reads: Vec<Vec<u8>> = s.transport().inner.written()[2..].to_vec();
+    let want: Vec<Vec<u8>> = (0..11u32)
+        .map(|k| {
+            let len = if k < 10 { 256 } else { 208 };
+            memread_request(4 + k as u8, 0x9810_0400 + k * 256, len)
+        })
+        .collect();
+    assert_eq!(reads, want, "10 x 256 + 208 bytes, consecutive addresses");
+    assert_eq!(s.transport().inner.remaining(), 0);
+}
+
+#[test]
+fn ac2_no_download_read_is_longer_than_256_bytes() {
+    // A read longer than 256 bytes would get only its first 256 bytes back.
+    let reply = list_reply(3, 1, &[entry_bytes(&REC_A)]);
+    let script = [
+        vec![Step::transact(get_data(3, 0x200), reply)],
+        download_steps(4, &REC_A),
+    ]
+    .concat();
+    let mut s = authed_session(script);
+    let list = s.list_records().unwrap();
+    s.download_record(&list[0]).unwrap();
+    for f in &s.transport().inner.written()[2..] {
+        let plain = crypto::decrypt(&KEYS[0], &f[4..36]);
+        let len = u32::from_le_bytes(plain[4..8].try_into().unwrap());
+        assert!(len <= 256, "a read of {len} bytes");
+    }
 }
 
 #[test]
@@ -513,14 +659,19 @@ fn ac3_sample_time_is_interval_times_index_in_seconds() {
 }
 
 #[test]
-fn ac3_every_sample_field_is_documented_and_tagged_inferred() {
+fn ac3_every_sample_field_is_documented_and_confirmed_on_the_meter() {
     let keys: Vec<(&str, usize)> = SAMPLE_FIELDS.iter().map(|f| (f.key, f.offset)).collect();
     assert_eq!(
         keys,
         vec![("vbus", 0), ("ibus", 4), ("charge", 8), ("energy", 12)]
     );
     for f in SAMPLE_FIELDS.iter() {
-        assert_eq!(f.tag, Tag::Inferred, "{} must stay inferred", f.key);
+        assert_eq!(
+            f.tag,
+            Tag::Confirmed,
+            "{} was checked against a real recording (1HHT04)",
+            f.key
+        );
     }
 }
 
@@ -587,6 +738,19 @@ proptest! {
         prop_assert_eq!(r.charge_uah, charge);
         prop_assert_eq!(r.energy_uwh, energy);
         prop_assert_eq!(r.offset, offset);
+        // The chunks tile the window exactly, at most 256 bytes each.
+        let chunks = r.read_chunks();
+        if let Some((addr, len)) = r.read_window() {
+            let mut at = addr;
+            for &(a, l) in &chunks {
+                prop_assert_eq!(a, at);
+                prop_assert!(l > 0 && l <= 256);
+                at += l;
+            }
+            prop_assert_eq!(at, addr + len);
+        } else {
+            prop_assert!(chunks.is_empty());
+        }
         // The window, when given, is always inside the record area.
         if let Some((addr, len)) = r.read_window() {
             prop_assert!(points > 0);

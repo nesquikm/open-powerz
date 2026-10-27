@@ -1,6 +1,6 @@
 //! Offline records, read-only: list the meter's records (GET_DATA `0x200`
 //! after level-1 authentication) and download one record's samples through
-//! the memory read. See `docs/protocol.md`.
+//! consecutive memory reads of at most 256 bytes. See `docs/protocol.md`.
 
 use super::{Clock, Error, Session};
 use crate::decode::records::{
@@ -29,10 +29,13 @@ impl<T: Transport, C: Clock> Session<T, C> {
     }
 
     /// Download the samples of a record from the last
-    /// [`list_records`](Self::list_records): one memory read of its
-    /// [`RecordEntry::read_window`]. A record with no samples, one outside
-    /// the record area or one that was not listed fails with
-    /// [`Error::Forbidden`] before anything is sent.
+    /// [`list_records`](Self::list_records): its
+    /// [`RecordEntry::read_window`] as consecutive memory reads of at most
+    /// [`MEMORY_READ_MAX_LEN`](crate::decode::records::MEMORY_READ_MAX_LEN)
+    /// bytes ([`RecordEntry::read_chunks`]), since
+    /// the meter returns no more than that per read `[device]`. A record
+    /// with no samples, one outside the record area or one that was not
+    /// listed fails with [`Error::Forbidden`] before anything is sent.
     pub fn download_record(&mut self, entry: &RecordEntry) -> Result<Vec<RecordSample>, Error> {
         let (addr, len) = entry
             .read_window()
@@ -41,7 +44,14 @@ impl<T: Transport, C: Clock> Session<T, C> {
                 addr: FLASH_WINDOW_BASE.wrapping_add(entry.offset),
                 len: u32::from(entry.points).saturating_mul(SAMPLE_LEN as u32),
             })?;
-        let data = self.memory_read_unchecked(addr, len)?;
+        let mut data = Vec::with_capacity(len as usize);
+        for (at, n) in entry.read_chunks() {
+            // Every chunk lies inside the listed window.
+            if at < addr || u64::from(at) + u64::from(n) > u64::from(addr) + u64::from(len) {
+                return Err(Error::Forbidden { addr: at, len: n });
+            }
+            data.extend(self.memory_read_unchecked(at, n)?);
+        }
         Ok(decode_samples(entry, &data)?)
     }
 }

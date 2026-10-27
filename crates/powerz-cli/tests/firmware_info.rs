@@ -169,7 +169,8 @@ fn info_sends_exactly_one_connect() {
     let sent: Vec<String> = trace
         .lines()
         .filter_map(|l| l.trim_start().strip_prefix('>'))
-        .map(|h| h.chars().filter(|c| !c.is_whitespace()).collect::<String>())
+        // Drop the `[len]` prefix, keep the bytes.
+        .map(|h| h.split_whitespace().skip(1).collect::<String>())
         .map(|h| h.to_lowercase())
         .collect();
     assert!(!sent.is_empty(), "trace shows sent frames:\n{trace}");
