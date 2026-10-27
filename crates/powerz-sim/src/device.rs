@@ -6,6 +6,7 @@ use powerz_protocol::frame::{self, Attribute, DataHeader, SectionHeader};
 
 use crate::memory;
 use crate::queue::RECORD_LEN;
+use crate::records;
 use crate::{Persona, Sample, SimDevice};
 
 /// Message type codes the simulator understands.
@@ -213,6 +214,10 @@ impl SimDevice {
         if mask & Attribute::SETTINGS.bits() != 0 {
             sections.push((Attribute::SETTINGS, 0, settings_payload(self.rate_code)));
         }
+        // RecordList: served from level 1; at level 0 the reply is empty.
+        if mask & Attribute::RECORD_LIST.bits() != 0 && self.auth_level >= 1 {
+            sections.push((Attribute::RECORD_LIST, 0, records::list_payload()));
+        }
         let mut body = Vec::new();
         let n = sections.len();
         for (i, (att, chunk, payload)) in sections.into_iter().enumerate() {
@@ -265,9 +270,24 @@ impl SimDevice {
         self.control(msg::ACCEPT, id)
     }
 
-    /// 0x44: confirmation, then the block encrypted with key 0.
+    /// 0x44: confirmation, then the block encrypted with key 0 in
+    /// transfers of at most 4096 bytes. Its replies carry level 0 in the
+    /// header whatever the session level (`C4 id 01 01`, `06 id 00 00`).
     fn memory_read(&mut self, req: &[u8], id: u8) -> Vec<Vec<u8>> {
-        let reject = || vec![self.control(msg::REJECT, id)];
+        let level0 = |ty: u8, encode: bool, obj: u16| {
+            DataHeader {
+                ty: ty & 0x7F,
+                extend: ty & 0x80 != 0,
+                id,
+                encode,
+                permi: 0,
+                obj,
+            }
+            .to_header()
+            .encode()
+            .to_vec()
+        };
+        let reject = || vec![level0(msg::REJECT, false, 0)];
         if !self.link_open() || req.len() < 4 + CRYPT_LEN || self.info_read_fails() {
             return reject();
         }
@@ -277,12 +297,19 @@ impl SimDevice {
         if word(12) != crypto::crc32(&plain[..12]) {
             return reject();
         }
-        let Some(block) = memory::block(addr, len, &self.app_version) else {
+        // Record samples: only an exact listed window, from level 1.
+        let record = (self.auth_level >= 1)
+            .then(|| records::samples(addr, len))
+            .flatten();
+        let Some(block) = memory::block(addr, len, &self.app_version).or(record) else {
             return reject();
         };
-        let mut confirm = self.header(msg::MEM_READ | 0x80, id, true, 4).to_vec();
+        let mut confirm = level0(msg::MEM_READ | 0x80, true, 4);
         confirm.extend_from_slice(&plain[..16]);
-        vec![confirm, crypto::encrypt(&KEYS[0], &block)]
+        let data = crypto::encrypt(&KEYS[0], &block);
+        let mut replies = vec![confirm];
+        replies.extend(data.chunks(records::MAX_TRANSFER).map(<[u8]>::to_vec));
+        replies
     }
 
     /// 0x4C: grant level 1 for the UID, 2 for the OTP credential, else 0.

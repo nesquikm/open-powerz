@@ -113,7 +113,7 @@ test.describe("firmware update (FR V9SK55)", () => {
     page,
   }) => {
     await open(page);
-    await expect(page.getByRole("tab")).toHaveCount(3);
+    await expect(page.getByRole("tab")).toHaveCount(4);
     await expect(firmwareTab(page)).toHaveCount(0);
     await expect(firmwarePanel(page)).toHaveCount(0);
     // Not reachable by keyboard either: End on the tabs stops at Trigger.
@@ -128,7 +128,7 @@ test.describe("firmware update (FR V9SK55)", () => {
     await expect(toggle).toHaveAttribute("aria-checked", "true");
     await page.keyboard.press("Escape");
     await expect(firmwareTab(page)).toBeVisible();
-    await expect(page.getByRole("tab")).toHaveCount(4);
+    await expect(page.getByRole("tab")).toHaveCount(5);
 
     // Remembered after a reload.
     await page.reload();

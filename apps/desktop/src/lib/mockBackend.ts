@@ -22,6 +22,10 @@ import type {
   HistorySeries,
   MeterSettingField,
   MeterSettings,
+  OfflineRecord,
+  OfflineRecordEntry,
+  OfflineRecordSample,
+  RecordList,
   MinMaxAvg,
   PdDetails,
   PdOpened,
@@ -753,6 +757,51 @@ const DEMO_METER_SETTINGS: readonly MeterSettingField[] = [
   { key: "offset_cal", label: "Offset calibration (raw)", value: "80", tag: "inferred" },
 ];
 
+/** The demo meter's offline records (FR 1HHT00, AC .6): the simulator's three load
+ * profiles, each sample's charge and energy summed like the meter does. */
+const DEMO_RECORD_SPECS = [
+  { name: "PHONE_5V", interval_s: 1, points: 300, offset: 0x0000, vbus: 5.1, ibus: 1.8 },
+  { name: "PD_9V_TEST", interval_s: 2, points: 120, offset: 0x2000, vbus: 9.0, ibus: 2.0 },
+  { name: "LAPTOP_20V", interval_s: 5, points: 60, offset: 0x3000, vbus: 20.0, ibus: 3.0 },
+] as const;
+
+/** Every sample of demo record `spec`. */
+function demoRecordSamples(spec: (typeof DEMO_RECORD_SPECS)[number]): OfflineRecordSample[] {
+  const dtH = spec.interval_s / 3600;
+  let charge = 0;
+  let energy = 0;
+  return Array.from({ length: spec.points }, (_, k) => {
+    const t = k * spec.interval_s;
+    const v = spec.vbus + 0.02 * Math.sin(t * 0.11);
+    const a = spec.ibus * (1 - 0.3 * Math.min(t / 600, 1)) + 0.01 * Math.sin(t * 0.37);
+    if (k > 0) {
+      charge += a * dtH;
+      energy += v * a * dtH;
+    }
+    return { t_s: t, vbus_v: v, ibus_a: a, charge_ah: charge, energy_wh: energy };
+  });
+}
+
+/** The demo records, downloaded form: entries and samples agree. */
+const DEMO_RECORDS: readonly { entry: OfflineRecordEntry; samples: OfflineRecordSample[] }[] =
+  DEMO_RECORD_SPECS.map((spec, i) => {
+    const samples = demoRecordSamples(spec);
+    const last = samples[samples.length - 1];
+    return {
+      entry: {
+        index: i + 1,
+        name: spec.name,
+        interval_s: spec.interval_s,
+        points: spec.points,
+        duration_s: spec.interval_s * Math.max(spec.points - 1, 0),
+        charge_ah: last?.charge_ah ?? 0,
+        energy_wh: last?.energy_wh ?? 0,
+        offset: spec.offset,
+      },
+      samples,
+    };
+  });
+
 export class MockBackend {
   #session: Running | null = null;
   /** The PD capture saved last in the page, and the one opened (FR TGE83E). */
@@ -775,6 +824,8 @@ export class MockBackend {
   #watchers = new Set<(devices: DeviceListing[]) => void>();
   /** Settings reads so far (FR 1HHT01). */
   #meterSettingsReads = 0;
+  /** Offline-record downloads so far (FR 1HHT00). */
+  #recordDownloads = 0;
   /** The open trigger session (FR DGSQ6S), null when none. */
   #trigger: MockTrigger | null = null;
   /** Every command the scripted charger received. */
@@ -1233,6 +1284,31 @@ export class MockBackend {
   /** How many times the settings were read (for the UI tests). */
   meterSettingsReads(): number {
     return this.#meterSettingsReads;
+  }
+
+  /** The demo meter's offline records (FR 1HHT00). */
+  async recordsList(): Promise<RecordList> {
+    this.#open();
+    return { records: DEMO_RECORDS.map((r) => ({ ...r.entry })) };
+  }
+
+  /** Downloads demo record `index` (1-based). */
+  async recordDownload(index: number): Promise<OfflineRecord> {
+    this.#open();
+    const r = DEMO_RECORDS[index - 1];
+    if (!r || r.entry.points === 0) throw usage("That record is not on the meter.");
+    this.#recordDownloads += 1;
+    return {
+      index: r.entry.index,
+      name: r.entry.name,
+      interval_s: r.entry.interval_s,
+      samples: r.samples.map((x) => ({ ...x })),
+    };
+  }
+
+  /** How many records were downloaded (for the UI tests). */
+  recordDownloads(): number {
+    return this.#recordDownloads;
   }
 
   /** Drops every captured PD record; a running capture goes on. Like the backend,

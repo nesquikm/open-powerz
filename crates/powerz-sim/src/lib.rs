@@ -15,6 +15,7 @@ mod memory;
 mod pd;
 mod pdm;
 mod queue;
+mod records;
 
 use std::collections::VecDeque;
 use std::sync::Arc;

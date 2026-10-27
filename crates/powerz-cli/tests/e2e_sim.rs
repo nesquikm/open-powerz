@@ -362,3 +362,120 @@ fn settings_sends_no_write_against_the_simulator() {
     }
     assert!(!trace.lines().any(|l| l.starts_with('x')), "{trace}");
 }
+
+// ---- AC-1HHT00.4 / .6 / .7: `powerz records` against the simulator ----
+
+#[test]
+fn records_list_against_the_simulator() {
+    let a = sim("idle").args(["records", "list"]).assert().success();
+    let out = stdout_of(&a);
+    assert_eq!(stderr_of(&a), "", "no stderr on success");
+    let rows = out.lines().filter(|l| !l.trim().is_empty()).count();
+    assert!(rows >= 4, "header + at least three demo records:\n{out}");
+    insta::assert_snapshot!("records_list_sim", out);
+}
+
+#[test]
+fn records_list_json_against_the_simulator() {
+    let a = sim("idle")
+        .args(["records", "list", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_str(&stdout_of(&a)).unwrap();
+    let recs = v["records"].as_array().expect("records array");
+    assert!(recs.len() >= 3, "{v}");
+    for (i, r) in recs.iter().enumerate() {
+        assert_eq!(r["index"], i + 1, "{r}");
+        assert!(r["name"].as_str().is_some_and(|n| !n.is_empty()), "{r}");
+        assert!(r["points"].as_u64().is_some(), "{r}");
+    }
+}
+
+#[test]
+fn records_get_all_against_the_simulator_writes_csv_files() {
+    let dir = std::env::temp_dir().join(format!("powerz-e2e-records-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = sim("idle")
+        .args(["records", "get", "--all", "--json", "--out"])
+        .arg(&dir)
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_str(&stdout_of(&a)).unwrap();
+    let written = v["written"].as_array().expect("written array");
+    assert!(written.len() >= 3, "{v}");
+    for w in written {
+        let path = PathBuf::from(w["path"].as_str().unwrap());
+        assert_eq!(path.parent(), Some(dir.as_path()), "{w}");
+        let csv = std::fs::read_to_string(&path).unwrap();
+        let mut lines = csv.lines();
+        assert_eq!(
+            lines.next(),
+            Some("ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR")
+        );
+        assert_eq!(lines.count() as u64, w["rows"].as_u64().unwrap(), "{w}");
+    }
+    // `get <n>` writes the same file for one record.
+    let first = PathBuf::from(written[0]["path"].as_str().unwrap());
+    let all_csv = std::fs::read_to_string(&first).unwrap();
+    std::fs::remove_file(&first).unwrap();
+    sim("idle")
+        .args(["records", "get", "1", "--out"])
+        .arg(&dir)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), all_csv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn records_get_out_of_range_against_the_simulator_is_exit_2() {
+    let dir = std::env::temp_dir().join(format!("powerz-e2e-records-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = sim("idle")
+        .args(["records", "get", "99", "--out"])
+        .arg(&dir)
+        .assert()
+        .code(2);
+    let err = stderr_of(&a);
+    assert!(
+        err.contains("99"),
+        "the error names the missing record: {err}"
+    );
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn records_get_sends_no_write_against_the_simulator() {
+    let dir = std::env::temp_dir().join(format!("powerz-e2e-records-tr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = sim("idle")
+        .args(["--trace", "records", "get", "--all", "--out"])
+        .arg(&dir)
+        .assert()
+        .success();
+    let trace = stderr_of(&a);
+    let sent: Vec<&str> = trace.lines().filter(|l| l.starts_with('>')).collect();
+    assert!(!sent.is_empty(), "no frames traced:\n{trace}");
+    let mut get_data_record_list = 0;
+    for line in sent {
+        let bytes: Vec<u8> = line
+            .trim_start_matches('>')
+            .split_whitespace()
+            .filter_map(|t| u8::from_str_radix(t, 16).ok())
+            .collect();
+        let ty = bytes.first().copied().unwrap_or(0xFF) & 0x7F;
+        assert!(
+            [0x02, 0x03, 0x0C, 0x40, 0x44, 0x4C].contains(&ty),
+            "outside the read-only set: {line}"
+        );
+        if ty == 0x0C && bytes.get(2..4) == Some(&[0x00, 0x04]) {
+            get_data_record_list += 1;
+        }
+    }
+    assert_eq!(get_data_record_list, 1, "one RecordList read:\n{trace}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

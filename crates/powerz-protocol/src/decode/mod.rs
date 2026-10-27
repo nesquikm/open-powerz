@@ -9,6 +9,7 @@ pub mod info;
 pub mod pd_packet;
 pub mod queue;
 pub mod rate;
+pub mod records;
 pub mod settings;
 
 pub use adc::AdcSnapshot;

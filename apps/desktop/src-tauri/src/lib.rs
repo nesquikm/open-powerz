@@ -509,6 +509,25 @@ async fn meter_settings(state: Shared<'_>) -> Result<worker::MeterSettingsView, 
     blocking(move || state.manager().control()?.read_settings()).await
 }
 
+/// List the connected meter's offline records (GET_DATA 0x200 only) for
+/// the Records view (FR 1HHT00).
+#[tauri::command]
+async fn records_list(state: Shared<'_>) -> Result<worker::RecordListView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || state.manager().control()?.list_records()).await
+}
+
+/// Download offline record `index` (1-based) for the Records view: one
+/// memory read of that record's own window (FR 1HHT00).
+#[tauri::command]
+async fn record_download(
+    state: Shared<'_>,
+    index: usize,
+) -> Result<worker::OfflineRecordView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || state.manager().control()?.download_record(index)).await
+}
+
 /// Drop every captured PD record; the answer is the index of the next one.
 /// A capture opened from a file is dropped too; with only that one and no
 /// meter, the answer is 0.
@@ -1004,6 +1023,8 @@ pub fn run() {
             pd_details,
             pd_clear,
             meter_settings,
+            records_list,
+            record_download,
             pd_save,
             pd_open,
             pd_import,

@@ -18,6 +18,7 @@ mod auth;
 mod memory;
 mod pd;
 mod probe;
+mod records;
 mod stream;
 
 use std::time::Duration;
@@ -163,6 +164,9 @@ pub struct Session<T: Transport, C: Clock = SystemClock> {
     meter_rate: Option<Rate>,
     /// Device time of the last record returned by `poll_stream`.
     last_record_ms: Option<u32>,
+    /// Read windows of the records in the last decoded RecordList: the only
+    /// record-area reads [`Session::download_record`] may send.
+    record_windows: Vec<(u32, u32)>,
 }
 
 impl<T: Transport> Session<T, SystemClock> {
@@ -184,6 +188,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
             stream: None,
             meter_rate: None,
             last_record_ms: None,
+            record_windows: Vec::new(),
         }
     }
 

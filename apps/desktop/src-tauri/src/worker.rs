@@ -164,6 +164,93 @@ impl From<&powerz_protocol::decode::settings::MeterSettings> for MeterSettingsVi
     }
 }
 
+/// One offline record as the Records view lists it (FR 1HHT00).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecordEntryView {
+    /// 1-based position in the meter's list.
+    pub index: usize,
+    /// The record's name.
+    pub name: String,
+    /// Seconds between samples.
+    pub interval_s: u8,
+    /// Number of samples.
+    pub points: u16,
+    /// Recorded time in seconds.
+    pub duration_s: u32,
+    /// Charge in Ah.
+    pub charge_ah: f64,
+    /// Energy in Wh.
+    pub energy_wh: f64,
+    /// Offset of the samples in the record area.
+    pub offset: u32,
+}
+
+impl RecordEntryView {
+    fn new(index: usize, e: &powerz_protocol::decode::records::RecordEntry) -> Self {
+        Self {
+            index,
+            name: e.name.clone(),
+            interval_s: e.interval_s,
+            points: e.points,
+            duration_s: e.duration_s,
+            charge_ah: e.charge_ah(),
+            energy_wh: e.energy_wh(),
+            offset: e.offset,
+        }
+    }
+}
+
+/// The meter's offline-record list (FR 1HHT00).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecordListView {
+    /// Records in the meter's order.
+    pub records: Vec<RecordEntryView>,
+}
+
+/// One sample of a downloaded offline record.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecordSampleView {
+    /// Seconds from the record start.
+    pub t_s: f64,
+    /// VBUS in V.
+    pub vbus_v: f64,
+    /// IBUS in A.
+    pub ibus_a: f64,
+    /// Charge so far in Ah.
+    pub charge_ah: f64,
+    /// Energy so far in Wh.
+    pub energy_wh: f64,
+}
+
+impl RecordSampleView {
+    fn new(
+        entry: &powerz_protocol::decode::records::RecordEntry,
+        index: usize,
+        s: &powerz_protocol::decode::records::RecordSample,
+    ) -> Self {
+        Self {
+            t_s: entry.sample_time_s(index) as f64,
+            vbus_v: s.vbus_v(),
+            ibus_a: s.ibus_a(),
+            charge_ah: s.charge_ah(),
+            energy_wh: s.energy_wh(),
+        }
+    }
+}
+
+/// A downloaded offline record with its samples (FR 1HHT00).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OfflineRecordView {
+    /// 1-based position in the meter's list.
+    pub index: usize,
+    /// The record's name.
+    pub name: String,
+    /// Seconds between samples.
+    pub interval_s: u8,
+    /// Samples in time order.
+    pub samples: Vec<RecordSampleView>,
+}
+
 /// Every event the backend sends to the UI.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -955,6 +1042,52 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Ok(MeterSettingsView::from(&settings))
     }
 
+    /// List the meter's offline records (GET_DATA 0x200 only) for the
+    /// Records view (FR 1HHT00); the stream goes on afterwards.
+    pub fn list_records(&mut self) -> Result<RecordListView, UiError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        let entries = blocked(self.meter.as_ref(), || session.list_records())
+            .map_err(|e| session_error(&e))?;
+        Ok(RecordListView {
+            records: entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| RecordEntryView::new(i + 1, e))
+                .collect(),
+        })
+    }
+
+    /// Download offline record `index` (1-based): a fresh record list, then
+    /// one memory read of exactly that record's window (FR 1HHT00).
+    pub fn download_record(&mut self, index: usize) -> Result<OfflineRecordView, UiError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        let meter = self.meter.as_ref();
+        let entries = blocked(meter, || session.list_records()).map_err(|e| session_error(&e))?;
+        let entry = index
+            .checked_sub(1)
+            .and_then(|i| entries.get(i))
+            .ok_or_else(|| UiError::usage("That record is not on the meter."))?;
+        if entry.points == 0 {
+            return Err(UiError::usage("That record has no samples."));
+        }
+        let samples =
+            blocked(meter, || session.download_record(entry)).map_err(|e| session_error(&e))?;
+        Ok(OfflineRecordView {
+            index,
+            name: entry.name.clone(),
+            interval_s: entry.interval_s,
+            samples: samples
+                .iter()
+                .enumerate()
+                .map(|(k, s)| RecordSampleView::new(entry, k, s))
+                .collect(),
+        })
+    }
+
     /// The PD capture so far, to be saved as a pdcap file (FR TGE83E) off
     /// this thread.
     pub fn pd_save(&self) -> PdSave {
@@ -1079,6 +1212,12 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::ReadSettings(reply) => {
                 let _ = reply.send(self.read_settings());
             }
+            Command::ListRecords(reply) => {
+                let _ = reply.send(self.list_records());
+            }
+            Command::DownloadRecord(index, reply) => {
+                let _ = reply.send(self.download_record(index));
+            }
             Command::HoldPolling(hold, reply) => {
                 self.hold_polling(hold);
                 let _ = reply.send(());
@@ -1114,6 +1253,8 @@ enum Command {
     ClearPd(mpsc::Sender<Result<u64, UiError>>),
     PdSave(mpsc::Sender<PdSave>),
     ReadSettings(mpsc::Sender<Result<MeterSettingsView, UiError>>),
+    ListRecords(mpsc::Sender<Result<RecordListView, UiError>>),
+    DownloadRecord(usize, mpsc::Sender<Result<OfflineRecordView, UiError>>),
     /// Hold or release the queue polling; answered between steps, so no
     /// poll is in flight once a hold is answered.
     HoldPolling(bool, mpsc::Sender<()>),
@@ -1136,6 +1277,10 @@ impl std::fmt::Debug for Command {
             Command::ClearPd(_) => f.write_str("ClearPd"),
             Command::PdSave(_) => f.write_str("PdSave"),
             Command::ReadSettings(_) => f.write_str("ReadSettings"),
+            Command::ListRecords(_) => f.write_str("ListRecords"),
+            Command::DownloadRecord(index, _) => {
+                f.debug_tuple("DownloadRecord").field(index).finish()
+            }
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::Handover(..) => f.write_str("Handover"),
         }
@@ -1316,6 +1461,9 @@ pub type ExportJob = JoinHandle<Result<u64, UiError>>;
 /// How long a request to the worker may take before the UI gives up.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long the UI waits for one offline-record download.
+const RECORD_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Sends rate, recording and export requests to a running worker and
 /// answers history and statistics queries from its session store. It works
 /// without the [`WorkerHandle`], so a caller can wait for the answer without
@@ -1456,6 +1604,23 @@ impl WorkerControl {
     pub fn read_settings(&self) -> Result<MeterSettingsView, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::ReadSettings(reply), &answer)?
+    }
+
+    /// List the meter's offline records.
+    pub fn list_records(&self) -> Result<RecordListView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::ListRecords(reply), &answer)?
+    }
+
+    /// Download offline record `index` (1-based). A full record area is
+    /// about 2 MB, so the wait is longer than for other commands.
+    pub fn download_record(&self, index: usize) -> Result<OfflineRecordView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask_within(
+            Command::DownloadRecord(index, reply),
+            &answer,
+            RECORD_DOWNLOAD_TIMEOUT,
+        )?
     }
 
     /// Save the PD capture to `path` as a pdcap file; returns the number of

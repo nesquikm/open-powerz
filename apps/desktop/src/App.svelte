@@ -10,6 +10,8 @@
     firmwareFlash,
     firmwareInspect,
     meterSettings,
+    recordDownload,
+    recordsList,
     pdClear,
     pdDetails,
     pdImport,
@@ -65,6 +67,8 @@
   import StatsPanel from "./lib/components/StatsPanel.svelte";
   import MeterSettingsView from "./lib/components/MeterSettingsView.svelte";
   import { MeterSettingsPanel } from "./lib/meterSettings.svelte";
+  import RecordsView from "./lib/components/RecordsView.svelte";
+  import { RecordsPanel } from "./lib/records.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
   import TriggerView from "./lib/components/TriggerView.svelte";
   import { TriggerPanel } from "./lib/trigger.svelte";
@@ -105,12 +109,19 @@
   /** The read-only Meter settings panel (FR 1HHT01): read on connect, cleared on
    * disconnect. */
   const settingsPanel = new MeterSettingsPanel(meterSettings);
+  /** The Records view (FR 1HHT00): the offline records, listed on connect. */
+  const recordsPanel = new RecordsPanel(recordsList, recordDownload);
   const meterConnected = $derived(session.details !== null);
   $effect(() => {
     const on = meterConnected;
     untrack(() => {
-      if (on) void settingsPanel.connected();
-      else settingsPanel.disconnected();
+      if (on) {
+        void settingsPanel.connected();
+        void recordsPanel.connected();
+      } else {
+        settingsPanel.disconnected();
+        recordsPanel.disconnected();
+      }
     });
   });
   /** The PD analyzer's capture (FR TGE83C). */
@@ -130,11 +141,12 @@
     });
   });
   /** The view the tabs show. */
-  let view: "meter" | "pd" | "trigger" | "firmware" = $state("meter");
-  const ALL_VIEWS = ["meter", "pd", "trigger", "firmware"] as const;
+  let view: "meter" | "pd" | "trigger" | "records" | "firmware" = $state("meter");
+  const ALL_VIEWS = ["meter", "pd", "records", "trigger", "firmware"] as const;
   const ALL_VIEW_TABS = [
     { id: "meter", label: "Meter" },
     { id: "pd", label: "PD analyzer" },
+    { id: "records", label: "Records" },
     { id: "trigger", label: "Trigger" },
     { id: "firmware", label: "Firmware" },
   ] as const;
@@ -156,12 +168,12 @@
     flash: firmwareFlash,
   });
   /** While an update runs the meter is held for it (AC .4): no device switching, no
-   * connect, and the PD analyzer and Trigger tabs are disabled. */
+   * connect, and the PD analyzer, Trigger and Records tabs are disabled. */
   $effect(() => {
     session.flashing = firmware.busy;
   });
   function tabDisabled(id: string): boolean {
-    return firmware.busy && (id === "pd" || id === "trigger");
+    return firmware.busy && (id === "pd" || id === "trigger" || id === "records");
   }
   function selectView(id: string): void {
     if (tabDisabled(id)) return;
@@ -790,6 +802,11 @@
         </div>
       </div>
     {/if}
+    {#if view === "records"}
+      <div class="records-view" role="tabpanel" id="view-records" aria-labelledby="tab-records">
+        <RecordsView panel={recordsPanel} connected={meterConnected} theme={resolvedTheme} />
+      </div>
+    {/if}
     {#if view === "firmware" && advancedFirmware}
       <div class="firmware-view" role="tabpanel" id="view-firmware" aria-labelledby="tab-firmware">
         <h2>Firmware</h2>
@@ -878,7 +895,8 @@
   .content[hidden] {
     display: none;
   }
-  .firmware-view {
+  .firmware-view,
+  .records-view {
     padding: 1rem;
   }
   .pd-view {

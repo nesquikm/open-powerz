@@ -147,6 +147,12 @@ impl<T: Transport, C: Clock> Session<T, C> {
         if !MEMORY_READ_ALLOWED.contains(&(addr, len)) {
             return Err(Error::Forbidden { addr, len });
         }
+        self.memory_read_unchecked(addr, len)
+    }
+
+    /// Memory read without the safe-block check; callers must have checked
+    /// `(addr, len)` against their own allow list.
+    pub(super) fn memory_read_unchecked(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, Error> {
         let request = memory_read_request(self.counter.next(), addr, len);
         let reply = self.exchange(&request)?;
         let plaintext = memory_read_plaintext(addr, len);

@@ -187,7 +187,7 @@ attribute, chained by `next`. [doc] [static] [device]
 | 0x040 | QC_PACKET | `0C id 80 00` | UFCS sniffer stream; idle: 12-byte status + 8 unknown constant bytes | 0 for polling | [doc] [static] [device] (firmware 2.0.6) |
 | 0x080 | TICK | `0C id 00 01` | 8 bytes: u32 device uptime in ms, u32 0 | 1 (empty at 0) | [doc] [device] (firmware 2.0.6) |
 | 0x100 | TICK2 | `0C id 00 02` | always empty | n/a | [doc] [device] |
-| 0x200 | RecordList | `0C id 00 04` | N x 48-byte offline-record entries | 1 (empty at 0) | [static] [device] (firmware 2.0.6) |
+| 0x200 | RecordList | `0C id 00 04` | N x 48-byte offline-record entries (see Offline records) | 1 (empty at 0) | [static] [device] (firmware 2.0.6) |
 | 0x400 | PDList | `0C id 00 08` | always empty | n/a | [static] [device] |
 
 - [device] On firmware 2.0.6, PD_STATUS declares size 0 in its section
@@ -390,8 +390,9 @@ Known addresses (the only ones we ever read):
 
 - Keep reads at least 50 ms apart (100 ms in session 1). Third parties report
   that other peripheral addresses crash the meter. [inferred] (prior art)
-- The SPI-flash read window at `0x98000000 + offset` holds offline
-  recordings; it is not on our allowed list yet. [static]
+- The SPI-flash read window at `0x98000000 + flash address` holds the
+  offline recordings. Only the window of a listed record is allowed (see
+  Offline records). [static] [inferred]
 
 Firmware status (FR V9SK52). All requests below are read-only:
 
@@ -402,6 +403,73 @@ Firmware status (FR V9SK52). All requests below are read-only:
 | warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated | [static] [inferred] |
 | HEAD in application mode | the meter answers with reply id 0 (not the request's id): `40 00 00 01 00 10 00 00`, i.e. type 0x40, id 0, and a u32 at offset 4 of 0x00001000 on firmware 2.0.6, followed by 12 stale bytes from its own transmit buffer (20 bytes in all). We accept a type-0x40, id-0 reply only as the first transfer after our HEAD. A field of 0 means current; any other value is reported as an unrecognised reply, never as "update required", because the vendor's reading (non-zero = update required) does not fit a meter on normal firmware | [device] (firmware 2.0.6) [static] |
 | HEAD in boot-loader mode | the flash path accepts only a reply that echoes its own request id, with field 0; anything else stops before the descriptor | [static]; boot loader 2.5 answers `c0 <id> 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00`, field 0, with or without a valid application [device] |
+
+## Offline records
+
+The meter can record on its own and keeps the recordings in its SPI flash.
+We only list and download them; nothing on the meter is deleted, renamed or
+written. Module `decode::records` decodes them, `Session::list_records` and
+`Session::download_record` read them. [static]
+
+**List.** GET_DATA mask 0x200 (RecordList, request `0C id 00 04`) at auth
+level 1 returns a section of N back-to-back 48-byte entries; at level 0 the
+reply is empty. A size-0 section is an empty list, a length that is not a
+multiple of 48 is a decode error. The 10-bit `size` field of the section
+header is too small for a long list, so the payload length is taken from the
+frame. [static] [device] (firmware 2.0.6: empty at level 0)
+
+Entry layout (48 bytes). The vendor list view reads only the fields below;
+the remaining bytes are kept raw in `RecordEntry::raw`. [static]
+
+| off | type | field | tag |
+|---|---|---|---|
+| 0x00 | 16 bytes | name, ASCII, ends at the first NUL (never read past 16 bytes) | [static] |
+| 0x10 | u8 | unknown; probably the NUL or padding after a 16-character name | [static] [inferred] |
+| 0x11 | u8 | sample interval in seconds | [static] |
+| 0x12 | u16 | point count (number of 16-byte samples) | [static] |
+| 0x14 | 4 bytes | unknown, kept raw; a start time here is possible but unconfirmed | [static] [inferred] |
+| 0x18 | u32 | duration in seconds | [static] |
+| 0x1C | i32 | charge in µAh (÷1e6 = Ah) | [static] |
+| 0x20 | i32 | energy in µWh (÷1e6 = Wh) | [static] |
+| 0x24 | u32 | flash offset of the samples inside the record area | [static] |
+| 0x28 | 8 bytes | unknown, kept raw | [static] [inferred] |
+
+**Download window.** The samples of one entry are read with a single memory
+read (type 0x44, same request as in Memory read and device info) of
+`points x 16` bytes at `0x98100000 + offset`. The vendor app reads flash
+address `offset + 0x100000` through a window that maps flash address 0 to
+0x98000000. [static] The reply data arrives in bulk transfers of up to 4096
+bytes until the whole length is in. [static] Our bounds: [inferred]
+
+- the window is computed only from an entry of the last record list; any
+  other address, even inside the record area, is refused before sending;
+- a record with 0 points is refused (nothing to read);
+- `offset + points x 16` must not pass 0x200000, the size of the record
+  area: flash 0x100000..0x2FFFFF, below the logo area that starts at flash
+  0x300000. The vendor app itself checks no bound. [static] [inferred]
+
+Sample layout (16 bytes, `points` of them back to back, all values signed
+little-endian i32). Evidence: the vendor chart loader converts each of the
+four words as a signed integer and divides it by 1e6, and fills only the
+VBUS, IBUS, charge and energy series; D+, D-, CC1, CC2 and temperature stay 0,
+so the format carries none of them. [static] No recording from our meter has
+been compared yet, so every field stays [inferred]; the raw 16 bytes are kept
+in `RecordSample::raw`.
+
+| off | type | field | unit | tag |
+|---|---|---|---|---|
+| 0x00 | i32 | VBUS | µV (÷1e6 = V) | [static] [inferred] |
+| 0x04 | i32 | IBUS, signed | µA (÷1e6 = A) | [static] [inferred] |
+| 0x08 | i32 | charge, cumulative since the record start | µAh (÷1e6 = Ah) | [static] [inferred] |
+| 0x0C | i32 | energy, cumulative since the record start | µWh (÷1e6 = Wh) | [static] [inferred] |
+
+- Samples carry no timestamp: sample i is at `interval x i` seconds from the
+  record start (`RecordEntry::sample_time_s`). The record has no absolute
+  start time that we know of. [static]
+- The vendor app can show IBUS, charge and energy as absolute values (an
+  option on by default); we keep the signed values. [static]
+- Delete exists in the vendor app (it rewrites the list with SET_DATA) and is
+  never sent by this library. [static]
 
 ## Authentication
 
@@ -820,10 +888,13 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
 Our library refuses to send these requests, so a bug or a CLI typo cannot
 brick, decalibrate or reboot a device. Three checks run before any byte
 reaches the meter: the transport-layer guard refuses the six frame types, the
-session refuses memory reads outside the four known blocks, and the HID
-transport sends only the ADC snapshot. [device] [static] The one exception
+session refuses memory reads outside the four known blocks and the offline
+record window, and the HID transport sends only the ADC snapshot. [device] [static] The one exception
 is the firmware flash path, which may send JUMP_DFU, JUMP_APROM and the 0x42
-descriptor under its own stricter guard (see Firmware download). RESET,
+descriptor under its own stricter guard (see Firmware download). The one
+memory-read exception is an offline record: the window `0x98100000 + offset`,
+`points x 16` bytes, computed from an entry of the last record list and
+bounded by the record area (see Offline records). [inferred] RESET,
 SET_DATA and memory writes are never sent on any path. [static]
 
 | request | why | tag |
@@ -834,7 +905,7 @@ SET_DATA and memory writes are never sent on any path. [static]
 | type 0x42 | firmware download descriptor (starts an erase) | [static] |
 | type 0x48 SET_DATA | writes settings and calibration | [static] |
 | type 0x4A | memory / SPI-flash write | [static] |
-| memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
+| memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` or the offline record window of a listed entry | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
 | any HID request other than the ADC snapshot (GET_DATA mask 0x001) | replies over 64 bytes hang and reboot the meter; control commands are ignored | [device] (firmware 2.0.6) |
 
 HEAD (0x40) is not on this list: it only reads a status word, so the

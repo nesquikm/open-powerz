@@ -107,6 +107,13 @@ pub enum Command {
         #[arg(long)]
         raw: bool,
     },
+    /// List the meter's offline records or download them as CSV files
+    /// (read-only; bulk pipe only).
+    Records {
+        /// What to do.
+        #[command(subcommand)]
+        action: RecordsAction,
+    },
     /// Show the `read` values live, refreshing until Ctrl-C.
     Watch {
         /// Refresh interval in milliseconds (minimum 50).
@@ -180,6 +187,35 @@ pub enum Command {
         /// What to do.
         #[command(subcommand)]
         action: FirmwareAction,
+    },
+}
+
+/// `records` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum RecordsAction {
+    /// Show the offline records stored on the meter: name, interval,
+    /// points, duration, charge, energy and offset.
+    List {
+        /// Print one JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download record N (as `list` numbers it) or every record as CSV files
+    /// named `NN_<name>.csv`, in the `stream` CSV layout.
+    #[command(group = clap::ArgGroup::new("which").required(true).args(["index", "all"]))]
+    Get {
+        /// Record number (1-based, as `list` shows it).
+        #[arg(value_name = "N")]
+        index: Option<usize>,
+        /// Download every record that has samples.
+        #[arg(long)]
+        all: bool,
+        /// Directory to write the CSV files into (must exist).
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        out: PathBuf,
+        /// Print one JSON object listing the written files instead of text lines.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -509,6 +545,7 @@ impl Command {
             Command::Info { .. } => "info",
             Command::Read { .. } => "read",
             Command::Settings { .. } => "settings",
+            Command::Records { .. } => "records",
             Command::Watch { .. } => "watch",
             Command::Stream { .. } => "stream",
             Command::Pd { .. } => "pd",

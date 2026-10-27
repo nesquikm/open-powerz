@@ -470,6 +470,57 @@ export async function meterSettings(): Promise<MeterSettings> {
   return invoke<MeterSettings>("meter_settings");
 }
 
+/** One offline record on the meter, with its decoded list columns (FR 1HHT00). */
+export interface OfflineRecordEntry {
+  /** 1-based position in the meter's list. */
+  index: number;
+  name: string;
+  /** Seconds between samples. */
+  interval_s: number;
+  points: number;
+  duration_s: number;
+  charge_ah: number;
+  energy_wh: number;
+  /** Offset of the samples in the record area. */
+  offset: number;
+}
+
+/** The meter's offline-record list (FR 1HHT00). */
+export interface RecordList {
+  records: OfflineRecordEntry[];
+}
+
+/** One sample of a downloaded offline record. */
+export interface OfflineRecordSample {
+  /** Seconds from the record start. */
+  t_s: number;
+  vbus_v: number;
+  ibus_a: number;
+  charge_ah: number;
+  energy_wh: number;
+}
+
+/** A downloaded offline record (FR 1HHT00). */
+export interface OfflineRecord {
+  index: number;
+  name: string;
+  interval_s: number;
+  samples: OfflineRecordSample[];
+}
+
+/** Lists the connected meter's offline records (GET_DATA 0x200 only); rejects with
+ * the backend's error, e.g. without a meter. */
+export async function recordsList(): Promise<RecordList> {
+  if (mock) return mock.recordsList();
+  return invoke<RecordList>("records_list");
+}
+
+/** Downloads offline record `index` (1-based): one memory read of its own window. */
+export async function recordDownload(index: number): Promise<OfflineRecord> {
+  if (mock) return mock.recordDownload(index);
+  return invoke<OfflineRecord>("record_download", { index });
+}
+
 /** A PD capture opened from a pdcap file (FR TGE83E): its rows and status samples,
  * numbered from 0. */
 export interface PdOpened {

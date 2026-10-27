@@ -28,16 +28,17 @@ use powerz_sim::{
 
 use crate::args::{
     Cli, Command, FirmwareAction, FixedAction, JumpTo, LimitsAction, PdAction, PdDecode, Qc3Action,
-    QcAction, RequestFlags, TransportKind, TriggerProtocol, UfcsAction, needs_connect,
-    rate_from_sps, validate,
+    QcAction, RecordsAction, RequestFlags, TransportKind, TriggerProtocol, UfcsAction,
+    needs_connect, rate_from_sps, validate,
 };
 use crate::commands::{
     DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
-    PdSettingsChange, SettingsOutput, StreamOptions, WatchOptions, console, detect, firmware_flash,
-    firmware_info, firmware_jump, firmware_probe, firmware_probe_unavailable, info_in_mode,
-    inspect_flash_file, list, pd, pd_decode, pd_save, pd_send, read, select_device, settings,
-    stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
-    trigger_pd_reset, trigger_pd_settings, watch,
+    PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions, console,
+    detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
+    firmware_probe_unavailable, info_in_mode, inspect_flash_file, list, pd, pd_decode, pd_save,
+    pd_send, read, records_get, records_list, select_device, settings, stream, trigger_legacy_list,
+    trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
+    trigger_pd_settings, watch,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport, TracedOpener};
@@ -1163,6 +1164,21 @@ fn dispatch<T: Transport, C: Clock>(
             };
             settings(&mut session, how, &mut out)
         }
+        Command::Records { action } => match action {
+            RecordsAction::List { json } => records_list(&mut session, *json, &mut out),
+            RecordsAction::Get {
+                index,
+                all,
+                out: dir,
+                json,
+            } => {
+                let which = match index {
+                    Some(n) if !*all => RecordSelection::One(*n),
+                    _ => RecordSelection::All,
+                };
+                records_get(&mut session, which, dir, *json, &mut out)
+            }
+        },
         Command::Watch { interval } => {
             let stop = ctrl_c_flag()?;
             let opts = WatchOptions {
