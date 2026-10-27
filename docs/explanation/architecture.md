@@ -206,7 +206,9 @@ manual run that names an existing tag, runs five jobs:
   README;
 - **assemble** checks that every expected file is there and writes
   `SHA256SUMS.txt`;
-- **publish** creates the release as a draft, attaches every file and only then
+- **publish** runs `apps/desktop/scripts/release/publish.ts`: it creates the
+  release as a draft (or finds the one an earlier run left), keeps that
+  release's id for every later call, attaches every file and only then
   publishes it.
 
 Only the publish job can write to the repository. A pull request that changes

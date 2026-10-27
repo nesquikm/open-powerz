@@ -7,6 +7,7 @@ kickoff_branch: null
 frozen_at: null
 migration: none
 codename: Return to Sender
+shipped_in: v0.6.1
 ---
 
 # Implementation Plan
