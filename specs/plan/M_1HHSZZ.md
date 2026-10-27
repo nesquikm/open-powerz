@@ -48,6 +48,7 @@ Build order: 1HHT01, 1HHT00, 1HHT02, 1HHT03, then 1HHT04 (its stages can run as 
 **M7 follow-ups:**
 - Release publish sends no tag_name in its updates; the v0.6.0 draft was published as "untagged-…" and repaired by hand. Send tag_name and check it after publishing (found after M_FW682R).
 - A manual release re-run of an older tag takes the Latest badge (make_latest true).
+- Settings rotation: bits 0–1 of u32@0x60 read 90° while the screen shows 0° with auto-rotate on. Re-check with auto-rotate off before trusting the mapping (found in 1HHT04 settings stage).
 
 **Device safety:** read-only. Forbidden: SET_DATA 0x48 (any att), 0x4A, settings writes 0x0A, RESET 04, JUMP 08/09, 0x42, memory reads outside the safe list plus the per-record window, triggering above 5 V.
 
