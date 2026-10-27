@@ -23,8 +23,9 @@ pub mod record;
 pub mod trace;
 
 pub use app::run;
-pub use args::{Cli, Command, TransportKind, validate};
+pub use args::{Cli, Command, TransportKind, WatchSource, validate};
 pub use commands::{
     StreamOptions, StreamSummary, WatchOptions, info, list, pd, read, select_device, stream, watch,
+    watch_cdc,
 };
 pub use error::CliError;

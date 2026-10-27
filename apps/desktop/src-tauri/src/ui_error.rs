@@ -147,7 +147,10 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
             message: "No meter was found.".to_owned(),
             hint: Some("Plug the meter in and try again.".to_owned()),
         },
-        T::Forbidden { .. } | T::UnsupportedOnHid | T::UnsupportedOnCdc { .. } => {
+        T::Forbidden { .. }
+        | T::UnsupportedOnHid
+        | T::UnsupportedOnCdc { .. }
+        | T::AdcnewNeedsCdc => {
             UiError::usage("This action is not available over the current connection.")
         }
         T::HidReplyTooLong { .. } => protocol(),

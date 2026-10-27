@@ -47,6 +47,14 @@ impl<T: Transport> Transport for GuardedTransport<T> {
     fn recover(&mut self) -> Result<(), Error> {
         self.inner.recover()
     }
+
+    fn adcnew_send(&mut self, request: crate::adcnew::Request) -> Result<(), Error> {
+        self.inner.adcnew_send(request)
+    }
+
+    fn adcnew_frames(&mut self) -> Result<Vec<crate::adcnew::Frame>, Error> {
+        self.inner.adcnew_frames()
+    }
 }
 
 #[cfg(test)]

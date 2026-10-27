@@ -46,7 +46,7 @@ pub use trigger::{
     trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
     trigger_pd_settings,
 };
-pub use watch::{WatchOptions, watch};
+pub use watch::{WatchOptions, watch, watch_cdc};
 
 /// Close the PDM `session` whatever `result` is; the first error wins.
 fn close_after<T, P: Read + Write, C: Clock>(

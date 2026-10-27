@@ -479,3 +479,124 @@ fn records_get_sends_no_write_against_the_simulator() {
     assert_eq!(get_data_record_list, 1, "one RecordList read:\n{trace}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- AC-1HHT02.4 / .5: `powerz watch --source cdc` against the simulator ----
+//
+// With `--source cdc`, `POWERZ_SIM_CTRL_C_AFTER=N` stands in for Ctrl-C after
+// N refreshes (the stream has no GET_DATA to count).
+
+/// A watch line with its numbers (and a missing value's `-`) as `#`.
+fn watch_shape(line: &str) -> String {
+    line.split_whitespace()
+        .map(|t| {
+            if t == "-" || t.parse::<f64>().is_ok() {
+                "#"
+            } else {
+                t
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn traced_bytes(line: &str) -> Vec<u8> {
+    line[1..]
+        .split_whitespace()
+        .filter_map(|t| u8::from_str_radix(t, 16).ok())
+        .collect()
+}
+
+#[test]
+fn watch_source_cdc_prints_the_polled_line_format() {
+    let a = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_CTRL_C_AFTER", "3")
+        .args(["watch", "--source", "cdc", "--interval", "50"])
+        .assert()
+        .success();
+    assert_eq!(stderr_of(&a), "");
+    let out = stdout_of(&a);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "one line per refresh:\n{out}");
+
+    let polled = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_CTRL_C_AFTER", "1")
+        .args(["watch", "--interval", "50"])
+        .assert()
+        .success();
+    let polled_out = stdout_of(&polled);
+    let polled_line = polled_out.lines().next().expect("a polled line");
+    for l in &lines {
+        assert_eq!(
+            watch_shape(l),
+            watch_shape(polled_line),
+            "\ncdc:    {l}\npolled: {polled_line}"
+        );
+        let vbus: f64 = l
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("{l}"));
+        near("VBUS", vbus, 5.0, 0.1);
+    }
+}
+
+#[test]
+fn watch_source_cdc_starts_and_stops_the_stream_with_adcnew_requests_only() {
+    let a = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_CTRL_C_AFTER", "3")
+        .args(["--trace", "watch", "--source", "cdc", "--interval", "50"])
+        .assert()
+        .success();
+    let trace = stderr_of(&a);
+    let sent: Vec<Vec<u8>> = trace
+        .lines()
+        .filter(|l| l.starts_with('>'))
+        .map(traced_bytes)
+        .collect();
+    assert!(!trace.lines().any(|l| l.starts_with('x')), "{trace}");
+    assert_eq!(
+        sent.first().and_then(|f| f.first()),
+        Some(&0x02),
+        "starts with ADCNEW start:\n{trace}"
+    );
+    assert_eq!(
+        sent.last(),
+        Some(&vec![0x03]),
+        "ends with ADCNEW stop:\n{trace}"
+    );
+    for f in &sent {
+        let ty = f.first().copied().unwrap_or(0xFF) & 0x7F;
+        // AC-1HHT02.5: on CDC, 0x01..0x03 only as 1–2 byte ADCNEW requests;
+        // no CONNECT, no queue start, no auth.
+        if (0x01..=0x03).contains(&ty) {
+            assert!(f.len() <= 2, "not an ADCNEW request: {f:02x?}\n{trace}");
+        }
+        assert!(
+            ![0x0E, 0x0F, 0x4C].contains(&ty),
+            "queue/auth request on the stream path: {f:02x?}\n{trace}"
+        );
+    }
+}
+
+#[test]
+fn polled_watch_never_sends_adcnew_or_disconnect_types() {
+    // AC-1HHT02.5: on bulk, 0x02 is CONNECT only; 0x01 and 0x03 are never sent.
+    let a = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_CTRL_C_AFTER", "3")
+        .args(["--trace", "watch", "--interval", "50"])
+        .assert()
+        .success();
+    let trace = stderr_of(&a);
+    for f in trace
+        .lines()
+        .filter(|l| l.starts_with('>'))
+        .map(traced_bytes)
+    {
+        let ty = f.first().copied().unwrap_or(0xFF) & 0x7F;
+        assert!(ty != 0x01 && ty != 0x03, "{f:02x?}\n{trace}");
+        if ty == 0x02 {
+            assert_eq!(f.len(), 4, "0x02 only as CONNECT: {f:02x?}");
+            assert_eq!(&f[2..], &[0x00, 0x00], "CONNECT: {f:02x?}");
+        }
+    }
+}

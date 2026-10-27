@@ -4,6 +4,7 @@ use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
 use super::{Error, GuardedTransport, Transport, map_io_error};
+use crate::adcnew::{CdcDemux, CdcItem, Frame, Request};
 use crate::frame::{DeclaredEnd, HEADER_LEN, MainHeader, declared_end, frame_type, msg};
 
 /// Wait after opening the port before the first frame.
@@ -73,7 +74,17 @@ pub struct CdcTransport<P> {
     port: P,
     /// Bytes read past the end of the last returned frame.
     pending: Vec<u8>,
+    /// Splits the byte stream once an ADCNEW stream was started: from then
+    /// on stream frames may sit between binary replies.
+    demux: Option<CdcDemux>,
+    /// Whether the ADCNEW stream runs (started and not stopped).
+    streaming: bool,
+    /// Stream frames read but not yet handed out.
+    frames: Vec<Frame>,
 }
+
+/// Stream frames kept between polls before the oldest are dropped.
+const MAX_HELD_FRAMES: usize = 4096;
 
 impl<P: Read + Write> CdcTransport<P> {
     /// Wrap an already-open, already-cleared port.
@@ -81,7 +92,78 @@ impl<P: Read + Write> CdcTransport<P> {
         GuardedTransport::new(CdcTransport {
             port,
             pending: Vec::new(),
+            demux: None,
+            streaming: false,
+            frames: Vec::new(),
         })
+    }
+
+    /// Write `bytes` and flush.
+    fn write_request(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let os = std::env::consts::OS;
+        self.port
+            .write_all(bytes)
+            .map_err(|e| map_io_error(&e, os))?;
+        self.port.flush().map_err(|e| map_io_error(&e, os))
+    }
+
+    /// One port read into `chunk`: `Ok(None)` when nothing arrived in the
+    /// port's own read timeout; end of stream means the port went away.
+    fn read_chunk(&mut self, chunk: &mut [u8]) -> Result<Option<usize>, Error> {
+        match self.port.read(chunk) {
+            Ok(0) => Err(Error::Disconnected),
+            Ok(n) => Ok(Some(n)),
+            Err(e) => match e.kind() {
+                io::ErrorKind::TimedOut
+                | io::ErrorKind::WouldBlock
+                | io::ErrorKind::Interrupted => Ok(None),
+                _ => Err(map_io_error(&e, std::env::consts::OS)),
+            },
+        }
+    }
+
+    /// Take every complete item out of the demux: stream frames are kept
+    /// (while streaming), text lines dropped; the first binary reply is
+    /// returned when `want_reply`, other replies are dropped.
+    fn drain_demux(&mut self, want_reply: bool) -> Option<Vec<u8>> {
+        let demux = self.demux.as_mut()?;
+        while let Some(item) = demux.next_item() {
+            match item {
+                Ok(CdcItem::Frame(frame)) if self.streaming => {
+                    // Callers that never poll must not grow this forever.
+                    if self.frames.len() >= MAX_HELD_FRAMES {
+                        self.frames.remove(0);
+                    }
+                    self.frames.push(frame);
+                }
+                Ok(CdcItem::Reply(bytes)) if want_reply => return Some(bytes),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Write `request` and read through the demux until a binary reply
+    /// arrives, keeping the stream frames read on the way.
+    fn transact_demuxed(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        // Replies still buffered answer an earlier request that timed out.
+        self.drain_demux(false);
+        self.write_request(request)?;
+        let deadline = Instant::now() + timeout;
+        let mut chunk = [0u8; READ_CHUNK];
+        loop {
+            if let Some(reply) = self.drain_demux(true) {
+                return Ok(reply);
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            if let Some(n) = self.read_chunk(&mut chunk)?
+                && let Some(demux) = self.demux.as_mut()
+            {
+                demux.push(&chunk[..n]);
+            }
+        }
     }
 
     /// Read until one frame is complete or `timeout` passes.
@@ -96,16 +178,8 @@ impl<P: Read + Write> CdcTransport<P> {
             if Instant::now() >= deadline {
                 return Err(Error::Timeout);
             }
-            match self.port.read(&mut chunk) {
-                // End of stream: the port went away.
-                Ok(0) => return Err(Error::Disconnected),
-                Ok(n) => self.pending.extend_from_slice(&chunk[..n]),
-                Err(e) => match e.kind() {
-                    io::ErrorKind::TimedOut
-                    | io::ErrorKind::WouldBlock
-                    | io::ErrorKind::Interrupted => {}
-                    _ => return Err(map_io_error(&e, std::env::consts::OS)),
-                },
+            if let Some(n) = self.read_chunk(&mut chunk)? {
+                self.pending.extend_from_slice(&chunk[..n]);
             }
         }
     }
@@ -172,7 +246,10 @@ pub(crate) fn open_serial(
     Ok(port)
 }
 
-impl CdcTransport<Box<dyn serialport::SerialPort>> {
+/// The CDC transport on an OS serial port, as [`CdcTransport::open`] opens it.
+pub type SerialCdcTransport = CdcTransport<Box<dyn serialport::SerialPort>>;
+
+impl SerialCdcTransport {
     /// Open the meter's port by serial number, clear input and wait
     /// [`FIRST_FRAME_DELAY`].
     pub fn open(serial: &str) -> Result<GuardedTransport<Self>, Error> {
@@ -200,40 +277,78 @@ fn serial_error(e: serialport::Error) -> Error {
 impl<P: Read + Write> Transport for CdcTransport<P> {
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         check_cdc(request)?;
+        if self.demux.is_some() {
+            return self.transact_demuxed(request, timeout);
+        }
         // One request in flight: anything still buffered belongs to an
         // earlier reply that timed out, so it must not prefix this one.
         self.pending.clear();
-        let os = std::env::consts::OS;
-        self.port
-            .write_all(request)
-            .map_err(|e| map_io_error(&e, os))?;
-        self.port.flush().map_err(|e| map_io_error(&e, os))?;
+        self.write_request(request)?;
         self.read_frame(timeout)
     }
 
     /// Follow-up transfers (memory-read data) carry no header, so they are
     /// returned raw: whatever is buffered, else the next chunk that arrives.
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
+        // Headerless data (a memory read's payload) cannot be told apart
+        // from stream frames; memory reads get no reply on CDC anyway.
+        if self.streaming {
+            return Err(Error::UnsupportedOnCdc { ty: 0x44 });
+        }
         if !self.pending.is_empty() {
             return Ok(std::mem::take(&mut self.pending));
         }
         let deadline = Instant::now() + timeout;
         let mut chunk = [0u8; READ_CHUNK];
         while Instant::now() < deadline {
-            match self.port.read(&mut chunk) {
-                Ok(0) => return Err(Error::Disconnected),
-                Ok(n) => return Ok(chunk[..n].to_vec()),
-                Err(e) => match e.kind() {
-                    io::ErrorKind::TimedOut
-                    | io::ErrorKind::WouldBlock
-                    | io::ErrorKind::Interrupted => {}
-                    _ => return Err(map_io_error(&e, std::env::consts::OS)),
-                },
+            if let Some(n) = self.read_chunk(&mut chunk)? {
+                return Ok(chunk[..n].to_vec());
             }
         }
         Err(Error::Timeout)
     }
+
+    fn adcnew_send(&mut self, request: Request) -> Result<(), Error> {
+        if self.demux.is_none() {
+            let mut demux = CdcDemux::new();
+            demux.push(&std::mem::take(&mut self.pending));
+            self.demux = Some(demux);
+        }
+        self.write_request(&request.encode())?;
+        match request {
+            Request::Stop => {
+                self.streaming = false;
+                self.frames.clear();
+            }
+            Request::Start { .. } | Request::StartDefault | Request::KeepAlive => {
+                self.streaming = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads until the port has nothing more buffered (at most
+    /// [`MAX_STREAM_READS`] reads, so a fast stream cannot hold it forever).
+    fn adcnew_frames(&mut self) -> Result<Vec<Frame>, Error> {
+        if self.demux.is_none() {
+            return Ok(Vec::new());
+        }
+        let mut chunk = [0u8; READ_CHUNK];
+        for _ in 0..MAX_STREAM_READS {
+            let Some(n) = self.read_chunk(&mut chunk)? else {
+                break;
+            };
+            if let Some(demux) = self.demux.as_mut() {
+                demux.push(&chunk[..n]);
+            }
+        }
+        self.drain_demux(false);
+        Ok(std::mem::take(&mut self.frames))
+    }
 }
+
+/// Port reads per [`Transport::adcnew_frames`] call at most.
+const MAX_STREAM_READS: usize = 64;
 
 #[cfg(test)]
 mod tests {
@@ -455,6 +570,38 @@ mod tests {
         let port = FakePort::with_chunks(vec![Ok(data.clone())]);
         let mut t = CdcTransport::with_port(port);
         assert_eq!(t.read(Duration::from_millis(50)).unwrap(), data);
+    }
+
+    #[test]
+    fn a_headerless_read_is_refused_while_streaming() {
+        let port = FakePort::with_chunks(vec![Ok(vec![0x5A; 16])]);
+        let mut t = CdcTransport::with_port(port);
+        t.adcnew_send(Request::StartDefault).unwrap();
+        assert_eq!(
+            t.read(Duration::from_millis(50)),
+            Err(Error::UnsupportedOnCdc { ty: 0x44 })
+        );
+    }
+
+    #[test]
+    fn frames_nobody_polls_are_capped_to_the_newest() {
+        let frame = |n: u32| {
+            let mut body = n.to_le_bytes().to_vec();
+            body.extend([0u8; 16]);
+            let mut f = vec![0x02, 0x12, 0x05, crate::adcnew::crc8(&body)];
+            f.extend(body);
+            f
+        };
+        let bytes: Vec<u8> = (0..MAX_HELD_FRAMES as u32 + 3).flat_map(frame).collect();
+        let port = FakePort::with_chunks(vec![Ok(bytes)]);
+        let mut t = CdcTransport::with_port(port);
+        t.adcnew_send(Request::StartDefault).unwrap();
+        let frames = t.adcnew_frames().unwrap();
+        assert_eq!(frames.len(), MAX_HELD_FRAMES);
+        match &frames[0] {
+            Frame::Records { records, .. } => assert_eq!(records[0].time_ms(), 3),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

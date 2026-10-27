@@ -5,6 +5,7 @@
 //! authentication land here milestone by milestone; see `specs/` for the
 //! plan. The wire format is documented in `docs/protocol.md`.
 
+pub mod adcnew;
 pub mod crypto;
 pub mod decode;
 pub mod firmware;

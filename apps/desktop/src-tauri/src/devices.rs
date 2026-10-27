@@ -10,10 +10,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use powerz_protocol::adcnew::{Frame as AdcnewFrame, Request as AdcnewRequest};
 use powerz_protocol::decode::Rate;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::Clock;
 use powerz_protocol::transport::bulk::BulkTransport;
+use powerz_protocol::transport::cdc::{CdcTransport, SerialCdcTransport};
 use powerz_protocol::transport::discovery::{self, DeviceEntry, Model};
 use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::{self, Transport};
@@ -26,7 +28,8 @@ use crate::stats::StatsSnapshot;
 use crate::store::SessionStore;
 use crate::ui_error::UiError;
 use crate::worker::{
-    self, BackendEvent, ConnectedInfo, EventSink, Gap, GapKind, Status, WorkerConfig, WorkerHandle,
+    self, BackendEvent, ConnectedInfo, EventSink, Gap, GapKind, MeasurementSource, Status,
+    WorkerConfig, WorkerHandle,
 };
 
 /// One entry of the device picker.
@@ -172,17 +175,31 @@ pub trait Opener {
     type Transport: Transport;
     /// Open `device`.
     fn open(&self, device: &DeviceListing) -> Result<Self::Transport, transport::Error>;
+
+    /// Open the pipe of `device` that `source` streams over (FR 1HHT02).
+    /// Default: the same pipe as [`Opener::open`].
+    fn open_source(
+        &self,
+        device: &DeviceListing,
+        source: MeasurementSource,
+    ) -> Result<Self::Transport, transport::Error> {
+        let _ = source;
+        self.open(device)
+    }
 }
 
 type Discover = Arc<dyn Fn() -> Result<Vec<DeviceEntry>, transport::Error> + Send + Sync>;
 
-/// The pipe the app opens: the demo device or a real meter over bulk.
+/// The pipe the app opens: the demo device, or a real meter over bulk or
+/// (for the ADCNEW stream) its CDC serial port.
 #[derive(Debug)]
 pub enum AppTransport {
     /// The simulated KM003C.
     Demo(Box<SimDevice>),
     /// A real meter on its vendor bulk interface.
     Usb(GuardedTransport<BulkTransport>),
+    /// A real meter on its CDC serial port.
+    Cdc(GuardedTransport<SerialCdcTransport>),
 }
 
 impl Transport for AppTransport {
@@ -190,6 +207,7 @@ impl Transport for AppTransport {
         match self {
             AppTransport::Demo(t) => t.transact(request, timeout),
             AppTransport::Usb(t) => t.transact(request, timeout),
+            AppTransport::Cdc(t) => t.transact(request, timeout),
         }
     }
 
@@ -197,6 +215,7 @@ impl Transport for AppTransport {
         match self {
             AppTransport::Demo(t) => t.read(timeout),
             AppTransport::Usb(t) => t.read(timeout),
+            AppTransport::Cdc(t) => t.read(timeout),
         }
     }
 
@@ -204,6 +223,23 @@ impl Transport for AppTransport {
         match self {
             AppTransport::Demo(t) => t.recover(),
             AppTransport::Usb(t) => t.recover(),
+            AppTransport::Cdc(t) => t.recover(),
+        }
+    }
+
+    fn adcnew_send(&mut self, request: AdcnewRequest) -> Result<(), transport::Error> {
+        match self {
+            AppTransport::Demo(t) => t.adcnew_send(request),
+            AppTransport::Usb(t) => t.adcnew_send(request),
+            AppTransport::Cdc(t) => t.adcnew_send(request),
+        }
+    }
+
+    fn adcnew_frames(&mut self) -> Result<Vec<AdcnewFrame>, transport::Error> {
+        match self {
+            AppTransport::Demo(t) => t.adcnew_frames(),
+            AppTransport::Usb(t) => t.adcnew_frames(),
+            AppTransport::Cdc(t) => t.adcnew_frames(),
         }
     }
 }
@@ -217,12 +253,29 @@ impl Opener for AppOpener {
     type Transport = AppTransport;
 
     fn open(&self, device: &DeviceListing) -> Result<AppTransport, transport::Error> {
+        self.open_source(device, MeasurementSource::Queue)
+    }
+
+    /// The queue opens the vendor bulk pipe, the CDC source the meter's
+    /// serial port (found by its USB serial number); the demo device plays
+    /// the matching simulator persona.
+    fn open_source(
+        &self,
+        device: &DeviceListing,
+        source: MeasurementSource,
+    ) -> Result<AppTransport, transport::Error> {
         if let Some(name) = &device.demo_scenario {
             let scenario = Scenario::from_name(name).ok_or(transport::Error::NotFound)?;
-            // The demo device also plays the simulator's PD capture (FR TGE83C).
-            return Ok(AppTransport::Demo(Box::new(
-                SimDevice::new(Persona::Bulk, scenario).with_pd_scenario(PdScenario::Negotiation),
-            )));
+            return Ok(AppTransport::Demo(Box::new(match source {
+                // The demo device also plays the simulator's PD capture (FR TGE83C).
+                MeasurementSource::Queue => SimDevice::new(Persona::Bulk, scenario)
+                    .with_pd_scenario(PdScenario::Negotiation),
+                MeasurementSource::Cdc => SimDevice::new(Persona::Cdc, scenario),
+            })));
+        }
+        if source == MeasurementSource::Cdc {
+            let serial = device.serial.as_deref().ok_or(transport::Error::NotFound)?;
+            return Ok(AppTransport::Cdc(CdcTransport::open(serial)?));
         }
         let (Some(bus), Some(address)) = (&device.bus, device.address) else {
             return Err(transport::Error::NotFound);
@@ -289,6 +342,8 @@ pub struct DeviceManager<O, C> {
     waiting: Arc<Mutex<Option<String>>>,
     /// Rate the open (or awaited) session was connected at, SPS.
     rate_sps: u32,
+    /// Where the open (or awaited) session's measurements come from.
+    source: MeasurementSource,
     /// The device the open (or awaited) session was connected to.
     device: Option<DeviceListing>,
     /// The open trigger session (FR DGSQ6S). Shared with the session's
@@ -360,6 +415,25 @@ fn live_sink(live: Arc<Mutex<Live>>) -> impl EventSink {
             _ => {}
         }
         (l.sink)(event);
+    }
+}
+
+/// A sink that fills the `connected` status's model and serial from the
+/// listing when the session could not read them (the CDC stream carries
+/// no device info, FR 1HHT02).
+fn listing_sink(device: DeviceListing, mut sink: impl EventSink) -> impl EventSink {
+    move |mut event: BackendEvent| {
+        if let BackendEvent::Status(Status::Connected(info)) = &mut event {
+            if info.model.is_empty() {
+                info.model.clone_from(&device.model);
+            }
+            if info.serial.is_empty()
+                && let Some(serial) = &device.serial
+            {
+                info.serial.clone_from(serial);
+            }
+        }
+        sink(event);
     }
 }
 
@@ -586,6 +660,7 @@ where
             stop: None,
             waiting: Arc::new(Mutex::new(None)),
             rate_sps: 0,
+            source: MeasurementSource::Queue,
             device: None,
             trigger: Arc::default(),
             rate_before_trigger: None,
@@ -725,7 +800,19 @@ where
         rate_sps: u32,
         sink: impl EventSink,
     ) -> Result<(), UiError> {
-        self.connect_with_stop(id, rate_sps, sink, Arc::new(AtomicBool::new(false)))
+        self.connect_source(id, rate_sps, MeasurementSource::Queue, sink)
+    }
+
+    /// [`DeviceManager::connect`] with the measurement `source` to stream
+    /// from (FR 1HHT02).
+    pub fn connect_source(
+        &mut self,
+        id: &str,
+        rate_sps: u32,
+        source: MeasurementSource,
+        sink: impl EventSink,
+    ) -> Result<(), UiError> {
+        self.connect_source_with_stop(id, rate_sps, source, sink, Arc::new(AtomicBool::new(false)))
     }
 
     /// [`DeviceManager::connect`] with a stop flag the caller also holds;
@@ -737,6 +824,19 @@ where
         sink: impl EventSink,
         stop: Arc<AtomicBool>,
     ) -> Result<(), UiError> {
+        self.connect_source_with_stop(id, rate_sps, MeasurementSource::Queue, sink, stop)
+    }
+
+    /// [`DeviceManager::connect_source`] with a stop flag the caller also
+    /// holds, as [`DeviceManager::connect_with_stop`].
+    pub fn connect_source_with_stop(
+        &mut self,
+        id: &str,
+        rate_sps: u32,
+        source: MeasurementSource,
+        sink: impl EventSink,
+        stop: Arc<AtomicBool>,
+    ) -> Result<(), UiError> {
         self.ensure_not_flashing()?;
         if self.running_worker().is_some() {
             return Err(UiError::usage(
@@ -745,6 +845,7 @@ where
         }
         let rate = supported_rate(rate_sps)?;
         self.rate_sps = rate_sps;
+        self.source = source;
         let device = self
             .list_devices()
             .into_iter()
@@ -805,15 +906,20 @@ where
             .session_id;
         self.device = Some(device.clone());
         let opener = Arc::clone(&self.opener);
+        let source = self.source;
         let config = WorkerConfig {
             mode: device.mode,
+            source,
             ..WorkerConfig::new(rate, session_id)
         };
         self.live = Some(Arc::clone(&live));
         self.stop = Some(Arc::clone(&stop));
         let sink = trigger_sink(
             Arc::clone(&self.trigger),
-            history_sink(Arc::clone(&history), live_sink(live)),
+            history_sink(
+                Arc::clone(&history),
+                listing_sink(device.clone(), live_sink(live)),
+            ),
         );
         let sink: Box<dyn FnMut(BackendEvent) + Send> = match waits_for {
             Some(serial) => Box::new(waiting_sink(
@@ -825,7 +931,7 @@ where
             None => Box::new(sink),
         };
         self.worker = Some(worker::spawn_with_store(
-            move || opener.open(&device),
+            move || opener.open_source(&device, source),
             self.clock.clone(),
             config,
             store,
@@ -1087,6 +1193,12 @@ where
         }
         if lock(&self.trigger).is_some() {
             return Err(UiError::usage("A trigger session is already open."));
+        }
+        if self.source == MeasurementSource::Cdc {
+            // The serial stream already holds the CDC port the trigger needs.
+            return Err(UiError::usage(
+                "The serial stream uses the meter's serial port; reconnect with the USB queue source to trigger.",
+            ));
         }
         let device = self
             .device

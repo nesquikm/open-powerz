@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use powerz_protocol::adcnew::Content;
 use powerz_protocol::decode::pd_packet::CaptureClock;
 use powerz_protocol::decode::{QueueRecord, Rate};
 use powerz_protocol::firmware::DeviceMode;
@@ -18,7 +19,7 @@ use powerz_protocol::session::{
     self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer,
 };
 use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Series, SeriesBuckets};
@@ -27,6 +28,19 @@ use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, Recording
 use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, temp_at};
 use crate::ui_error::{self, ErrorKind, UiError};
+
+/// Where the live measurements come from (FR 1HHT02), named on the wire
+/// `queue` / `cdc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeasurementSource {
+    /// The ADC queue polled over the vendor bulk pipe (CONNECT, auth).
+    #[default]
+    Queue,
+    /// The ADCNEW push stream on the CDC serial port: no CONNECT and no
+    /// sign-in; it carries no device info and no temperature.
+    Cdc,
+}
 
 /// Worker start-up settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,15 +51,18 @@ pub struct WorkerConfig {
     pub session_id: u64,
     /// Device mode the `connected` status reports, from the listing.
     pub mode: DeviceMode,
+    /// Where the measurements come from; the queue by default.
+    pub source: MeasurementSource,
 }
 
 impl WorkerConfig {
-    /// Settings for a meter in application mode.
+    /// Settings for a meter in application mode, polling the queue.
     pub fn new(rate: Rate, session_id: u64) -> Self {
         Self {
             rate,
             session_id,
             mode: DeviceMode::Application,
+            source: MeasurementSource::Queue,
         }
     }
 }
@@ -359,6 +376,7 @@ fn connected_info(
         rate,
         session_id,
         mode,
+        ..
     } = *config;
     ConnectedInfo {
         model: info.model.clone(),
@@ -409,10 +427,50 @@ fn sample(r: &QueueRecord) -> Sample {
     }
 }
 
+/// The `connected` status of a CDC stream session: the stream carries no
+/// device info, so model, firmware and serial are left blank for the
+/// caller (which knows the listing) to fill in.
+fn cdc_connected_info(config: &WorkerConfig) -> ConnectedInfo {
+    ConnectedInfo {
+        model: String::new(),
+        firmware_version: String::new(),
+        mode: config.mode.name(),
+        bootloader_version: String::new(),
+        warnings: Vec::new(),
+        update_required: None,
+        firmware_problems: Vec::new(),
+        serial: String::new(),
+        rate_sps: Some(config.rate.sps()),
+        rate_locked: false,
+        session_id: config.session_id,
+    }
+}
+
+/// Open the session `config.source` asks for: the queue (see
+/// [`open_queue_session`]) or the CDC ADCNEW stream, started at
+/// `config.rate` with ADC content only and nothing sent before it (no
+/// CONNECT, whose byte means something else there, and no sign-in).
+fn open_session<T: Transport, C: Clock>(
+    transport: T,
+    clock: C,
+    config: WorkerConfig,
+) -> Result<(Session<GuardedTransport<T>, C>, ConnectedInfo), UiError> {
+    match config.source {
+        MeasurementSource::Queue => open_queue_session(transport, clock, config),
+        MeasurementSource::Cdc => {
+            let mut session = Session::with_clock(GuardedTransport::new(transport), clock);
+            session
+                .start_adcnew(Content::Adc, config.rate)
+                .map_err(|e| session_error(&e))?;
+            Ok((session, cdc_connected_info(&config)))
+        }
+    }
+}
+
 /// CONNECT, read the device info, authenticate at level 1 and start the
 /// queue at `config.rate`. When the meter refuses the auth or the queue
 /// start, the session goes on with the rate locked to the meter's own.
-fn open_session<T: Transport, C: Clock>(
+fn open_queue_session<T: Transport, C: Clock>(
     transport: T,
     clock: C,
     config: WorkerConfig,
@@ -453,6 +511,8 @@ fn open_session<T: Transport, C: Clock>(
 pub struct Worker<T: Transport, C: Clock> {
     session: Option<Session<GuardedTransport<T>, C>>,
     clock: C,
+    /// Where the measurements come from.
+    source: MeasurementSource,
     rate: Rate,
     /// The rate cannot be changed (auth or queue start refused).
     rate_locked: bool,
@@ -561,6 +621,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let mut worker = Worker {
             session: Some(session),
             clock,
+            source: config.source,
             rate: config.rate,
             rate_locked: info.rate_locked,
             measured_sps: None,
@@ -604,7 +665,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Ok(());
         };
-        if !self.snapshots.take(self.clock.now_ms()) {
+        // The CDC stream is read without requests in between; it has no
+        // temperature to add.
+        if self.source == MeasurementSource::Cdc || !self.snapshots.take(self.clock.now_ms()) {
             return Ok(());
         }
         let adc = blocked(self.meter.as_ref(), || session.read_adc())?;
@@ -984,8 +1047,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         self.emit(BackendEvent::PdState(PdState { capturing: false }));
     }
 
+    /// Records and the PD sniffer use requests that were never checked on
+    /// the CDC pipe (memory reads, auth, 0x10), so a CDC session refuses them.
+    fn needs_queue_source(&self) -> Result<(), UiError> {
+        match self.source {
+            MeasurementSource::Queue => Ok(()),
+            MeasurementSource::Cdc => Err(UiError::usage(
+                "Not available with the serial stream; reconnect with the USB queue source.",
+            )),
+        }
+    }
+
     /// Start the PD sniffer (0x10, mode 1) and poll PD_PACKET from now on.
     pub fn start_pd(&mut self) -> Result<(), UiError> {
+        self.needs_queue_source()?;
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
@@ -1045,6 +1120,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// List the meter's offline records (GET_DATA 0x200 only) for the
     /// Records view (FR 1HHT00); the stream goes on afterwards.
     pub fn list_records(&mut self) -> Result<RecordListView, UiError> {
+        self.needs_queue_source()?;
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
@@ -1062,6 +1138,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// Download offline record `index` (1-based): a fresh record list, then
     /// one memory read of exactly that record's window (FR 1HHT00).
     pub fn download_record(&mut self, index: usize) -> Result<OfflineRecordView, UiError> {
+        self.needs_queue_source()?;
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
@@ -1103,7 +1180,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Step::Ended;
         };
-        let polled = blocked(self.meter.as_ref(), || session.poll_stream());
+        let polled = blocked(self.meter.as_ref(), || match self.source {
+            MeasurementSource::Queue => session.poll_stream(),
+            MeasurementSource::Cdc => session.poll_adcnew(),
+        });
         match polled {
             Ok(poll) => {
                 let times: Vec<u32> = self
@@ -1152,7 +1232,11 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
-        session.start_stream(rate).map_err(|e| session_error(&e))?;
+        match self.source {
+            MeasurementSource::Queue => session.start_stream(rate),
+            MeasurementSource::Cdc => session.start_adcnew(Content::Adc, rate),
+        }
+        .map_err(|e| session_error(&e))?;
         // The interval across the restart was not measured.
         let store = &self.store;
         blocked(self.meter.as_ref(), || store.start_run());
@@ -1170,7 +1254,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let _ = self.stop_pd();
         if let Some(mut session) = self.session.take() {
             // Best effort: the pipe closes either way.
-            let _ = session.stop_stream();
+            let _ = match self.source {
+                MeasurementSource::Queue => session.stop_stream(),
+                MeasurementSource::Cdc => session.stop_adcnew(),
+            };
             drop(session);
             self.end_recording(false);
             self.flush_batch();

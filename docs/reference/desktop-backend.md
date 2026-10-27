@@ -7,8 +7,8 @@ module, `apps/desktop/src/lib/backend.ts`. Every function there calls a Tauri
 command, or the in-browser `MockBackend` when the UI is built with
 `VITE_BACKEND=mock`. Scripts and other front ends can use the same seam. This
 page lists the parts added for session gaps, replug, the PD analyzer, the
-trigger panel, the firmware update and the meter settings; the source has the
-rest.
+trigger panel, the firmware update, the meter settings and the measurement
+source; the source code has the rest.
 
 ## Session history
 
@@ -221,6 +221,31 @@ live chart's series and colours; the live session's history is not touched.
 On disconnect the list and downloads are forgotten; an opened record stays
 open. `MockBackend` serves three demo records (the simulator's profiles) and
 counts the downloads (`recordDownloads()`).
+
+## Measurement source
+
+| item | meaning |
+|---|---|
+| `connect(deviceId, rateSps, onEvent, source?)` | `source` (`MeasurementSource`, default `"queue"`) picks where the live values come from; it goes to the Tauri command `connect` as `source`. |
+| `MeasurementSource` | `"queue"`: the ADC queue polled over the vendor bulk pipe (CONNECT, sign-in, device info, temperature). `"cdc"`: the ADCNEW stream the meter pushes on its CDC serial port; no CONNECT and no sign-in are sent, the stream is kept alive past the meter's one-hour limit and stopped on disconnect. |
+| `MEASUREMENT_SOURCES` | The choices the UI offers, `{ value, label }`, the queue first. |
+
+The CDC stream feeds the same `batch` and `gap` events, history, statistics
+and recorder as the queue (a dropped frame is a `stream` gap). It carries no
+device info and no temperature: the `connected` status takes model and
+serial from the device listing and has an empty firmware version, and
+`temp_c` stays `null`. The rate picker restarts the stream at the new rate.
+For a real meter the backend opens its CDC port by USB serial number; the
+demo devices play the simulator's CDC meter. In the Rust backend this is
+`worker::MeasurementSource`, `WorkerConfig.source` and
+`DeviceManager::connect_source`; an `Opener` picks the pipe in
+`open_source`.
+
+On the UI side, the "Measurement source" picker sits next to the device
+picker (in the "⋯" menu when the top bar is short of room). It is locked
+while a session runs and keeps its choice after a disconnect.
+`MockBackend.connectedSource()` answers the running session's source, `null`
+when none runs.
 
 ## Mock backend
 

@@ -695,11 +695,11 @@ fn watch_on_a_tty_redraws_in_place_with_ansi() {
 #[test]
 fn watch_interval_defaults_to_200_and_has_minimum_50() {
     match parse(&["powerz", "watch"]).command {
-        Command::Watch { interval } => assert_eq!(interval, 200),
+        Command::Watch { interval, .. } => assert_eq!(interval, 200),
         other => panic!("{other:?}"),
     }
     match parse(&["powerz", "watch", "--interval", "50"]).command {
-        Command::Watch { interval } => assert_eq!(interval, 50),
+        Command::Watch { interval, .. } => assert_eq!(interval, 50),
         other => panic!("{other:?}"),
     }
     let e = Cli::try_parse_from(["powerz", "watch", "--interval", "49"]).unwrap_err();

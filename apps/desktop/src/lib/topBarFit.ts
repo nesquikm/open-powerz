@@ -13,7 +13,8 @@ export const FIT_LEVELS = [
   null,
   /** 1: the wordmark goes (the window title names the app). */
   "hide-brand",
-  /** 2: theme, About and the rate-locked note move into the "⋯" menu. */
+  /** 2: theme, About, the measurement-source picker and the rate-locked note move into
+   * the "⋯" menu. */
   "settings-in-menu",
   /** 3: tighter spacing; the recording indicator shows just its time. */
   "compact",
@@ -27,6 +28,8 @@ export const FIT_LEVELS = [
 export type FitLevel = number;
 
 export const SETTINGS_IN_MENU_LEVEL = 2;
+/** The measurement-source picker moves into the menu with theme and About (FR 1HHT02). */
+export const SOURCE_IN_MENU_LEVEL = SETTINGS_IN_MENU_LEVEL;
 export const COMPACT_LEVEL = 3;
 export const RATE_IN_MENU_LEVEL = 4;
 export const EXPORT_IN_MENU_LEVEL = 5;

@@ -14,6 +14,7 @@
 //!   [`stop_stream`](Session::stop_stream),
 //!   [`poll_stream`](Session::poll_stream).
 
+mod adcnew;
 mod auth;
 mod memory;
 mod pd;
@@ -167,6 +168,10 @@ pub struct Session<T: Transport, C: Clock = SystemClock> {
     /// Read windows of the records in the last decoded RecordList: the only
     /// record-area reads [`Session::download_record`] may send.
     record_windows: Vec<(u32, u32)>,
+    /// The running ADCNEW stream on CDC, if any.
+    adcnew: Option<adcnew::AdcnewStream>,
+    /// PD / UFCS (and other non-record) ADCNEW frames not yet taken.
+    adcnew_raw: Vec<crate::adcnew::Frame>,
 }
 
 impl<T: Transport> Session<T, SystemClock> {
@@ -189,6 +194,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
             meter_rate: None,
             last_record_ms: None,
             record_windows: Vec::new(),
+            adcnew: None,
+            adcnew_raw: Vec::new(),
         }
     }
 

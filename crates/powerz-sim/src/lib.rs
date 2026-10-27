@@ -9,6 +9,7 @@
 //! Every identifier it reports is synthetic: serial [`SIM_SERIAL`] and a
 //! made-up UID; never a real meter's.
 
+mod adcnew;
 mod device;
 mod flash;
 mod memory;
@@ -201,6 +202,8 @@ pub struct FaultPlan {
     wrong_id_at: Vec<usize>,
     /// Every request fails with a permission error.
     permission_denied: bool,
+    /// ADCNEW frame numbers (from 1) sent with a broken CRC.
+    corrupt_adcnew_at: Vec<usize>,
 }
 
 impl FaultPlan {
@@ -241,9 +244,16 @@ impl FaultPlan {
         self
     }
 
+    /// ADCNEW frame number `frame` (counting every frame the CDC persona
+    /// pushes, from 1) is sent with a broken CRC.
+    pub fn corrupt_adcnew_at(mut self, frame: usize) -> FaultPlan {
+        self.corrupt_adcnew_at.push(frame);
+        self
+    }
+
     /// Parse the `POWERZ_SIM_FAULT` syntax: comma-separated `timeout`,
     /// `timeout@N`, `disconnect@N` (after N queue polls), `wrong-id@N`,
-    /// `permission`.
+    /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N).
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -262,10 +272,11 @@ impl FaultPlan {
                 ("disconnect", Some(n)) => plan.disconnect_after_polls(n),
                 ("wrong-id", Some(n)) => plan.wrong_id_at(n),
                 ("permission", None) => plan.permission_denied(),
+                ("corrupt-adcnew", Some(n)) => plan.corrupt_adcnew_at(n),
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
-                         disconnect@N, wrong-id@N or permission)"
+                         disconnect@N, wrong-id@N, permission or corrupt-adcnew@N)"
                     ));
                 }
             };
@@ -326,6 +337,10 @@ pub struct SimDevice {
     jump_at_power_up: bool,
     /// The mode the next power-up starts in, set by such a jump.
     power_up_mode: Option<DeviceMode>,
+    /// The ADCNEW push stream (CDC persona only), if started.
+    adcnew: Option<adcnew::AdcnewStream>,
+    /// ADCNEW frames pushed so far.
+    adcnew_sent: usize,
 }
 
 impl SimDevice {
@@ -370,6 +385,8 @@ impl SimDevice {
             flash_fault: None,
             jump_at_power_up: false,
             power_up_mode: None,
+            adcnew: None,
+            adcnew_sent: 0,
         }
     }
 
@@ -464,6 +481,63 @@ impl SimDevice {
         self
     }
 
+    /// Whether the ADCNEW stream is running (started, not stopped, and not
+    /// expired an hour after the last start or keep-alive).
+    pub fn adcnew_active(&self) -> bool {
+        let now = self.uptime_ms();
+        self.adcnew.as_ref().is_some_and(|s| s.active(now))
+    }
+
+    /// Act on an ADCNEW request (`02 [att]`, `01`, `03`) on the CDC
+    /// persona. The meter sends no reply.
+    fn adcnew_request(&mut self, request: &[u8]) {
+        let now = self.uptime_ms();
+        // Frames due before this request go out first.
+        self.adcnew_push(now);
+        match request.first().map(|b| b & 0x7F) {
+            Some(0x02) => {
+                self.adcnew = Some(match request.get(1) {
+                    Some(att) => adcnew::AdcnewStream::start(att & 0x0F, now, None),
+                    None => {
+                        let body =
+                            adcnew::first_frame_body(&self.scenario.sample(now), self.rate_code);
+                        adcnew::AdcnewStream::start(self.rate_code, now, Some(body))
+                    }
+                });
+            }
+            Some(0x01) => match self.adcnew.as_mut() {
+                Some(s) if s.active(now) => s.refresh(now),
+                _ => self.adcnew = None,
+            },
+            Some(0x03) => self.adcnew = None,
+            _ => {}
+        }
+    }
+
+    /// Queue every ADCNEW frame due up to uptime `now` on the IN pipe.
+    fn adcnew_push(&mut self, now: u64) {
+        let Some(stream) = self.adcnew.as_mut() else {
+            return;
+        };
+        for (att, body) in stream.due(self.scenario, now) {
+            self.adcnew_sent += 1;
+            let corrupt = self.faults.corrupt_adcnew_at.contains(&self.adcnew_sent);
+            self.pending.push_back(adcnew::encode(att, &body, corrupt));
+        }
+        if !stream.active(now) {
+            self.adcnew = None;
+        }
+    }
+
+    /// ADCNEW runs only on the CDC persona, and fails like any transfer
+    /// when the device is blocked.
+    fn adcnew_ready(&self) -> Result<(), Error> {
+        if self.persona != Persona::Cdc {
+            return Err(Error::AdcnewNeedsCdc);
+        }
+        self.blocked().map_or(Ok(()), Err)
+    }
+
     /// The error every transfer fails with, if any (permission, unplugged).
     fn blocked(&self) -> Option<Error> {
         if self.faults.permission_denied {
@@ -486,6 +560,13 @@ impl Transport for SimDevice {
         self.requests += 1;
         let n = self.requests;
         if self.faults.timeout_always || self.faults.timeout_at.contains(&n) {
+            return Err(Error::Timeout);
+        }
+        if self.persona == Persona::Cdc
+            && self.mode == DeviceMode::Application
+            && matches!(request.first().map(|b| b & 0x7F), Some(0x01..=0x03))
+        {
+            self.adcnew_request(request);
             return Err(Error::Timeout);
         }
         let is_poll = device::is_queue_poll(request);
@@ -529,11 +610,40 @@ impl Transport for SimDevice {
         if let Some(e) = self.blocked() {
             return Err(e);
         }
+        if self.pending.is_empty() {
+            let now = self.uptime_ms();
+            self.adcnew_push(now);
+        }
         match self.pending.pop_front() {
             Some(reply) => Ok(reply),
             None if self.mode == DeviceMode::Bootloader => self.bootloader_read(timeout),
             None => Err(Error::Timeout),
         }
+    }
+
+    fn adcnew_send(&mut self, request: powerz_protocol::adcnew::Request) -> Result<(), Error> {
+        self.adcnew_ready()?;
+        self.adcnew_request(&request.encode());
+        Ok(())
+    }
+
+    /// Frames pushed since the last call; frames with a bad CRC or length
+    /// are dropped, as the host's reader would.
+    fn adcnew_frames(&mut self) -> Result<Vec<powerz_protocol::adcnew::Frame>, Error> {
+        self.adcnew_ready()?;
+        let now = self.uptime_ms();
+        self.adcnew_push(now);
+        let mut frames = Vec::new();
+        self.pending.retain(|item| {
+            if item.first() != Some(&0x02) {
+                return true;
+            }
+            if let Ok(frame) = powerz_protocol::adcnew::decode_frame(item) {
+                frames.push(frame);
+            }
+            false
+        });
+        Ok(frames)
     }
 }
 

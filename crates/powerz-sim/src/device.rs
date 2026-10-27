@@ -50,7 +50,7 @@ pub(crate) fn put_data_obj(total_len: usize) -> u16 {
 }
 
 /// Encode one ADC section payload from `s`.
-fn adc_payload(s: &Sample, rate_code: u8) -> Vec<u8> {
+pub(crate) fn adc_payload(s: &Sample, rate_code: u8) -> Vec<u8> {
     let micro = |v: f64| ((v * 1e6).round() as i32).to_le_bytes();
     let tenth_mv = |v: f64| ((v * 10_000.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes();
     let mut p = vec![0u8; ADC_LEN];

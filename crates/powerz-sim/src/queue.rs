@@ -11,7 +11,7 @@ pub(crate) const MAX_RECORDS: usize = 63;
 pub(crate) const RECORD_LEN: usize = 20;
 
 /// Sample interval in ms for a queue rate code (4 behaves like 0).
-fn interval_ms(code: u8) -> u64 {
+pub(crate) fn interval_ms(code: u8) -> u64 {
     match code {
         1 => 100,
         2 => 20,
@@ -85,7 +85,7 @@ impl AdcQueue {
 }
 
 /// Encode one 20-byte record of `s` at uptime `t_ms`.
-fn record(s: &Sample, t_ms: u64, code: u8) -> [u8; RECORD_LEN] {
+pub(crate) fn record(s: &Sample, t_ms: u64, code: u8) -> [u8; RECORD_LEN] {
     let micro = |v: f64| ((v * 1e6).round() as i32).to_le_bytes();
     let scale = if matches!(code, 0 | 4) {
         10_000.0

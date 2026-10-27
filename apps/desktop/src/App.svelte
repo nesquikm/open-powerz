@@ -38,6 +38,7 @@
     triggerRisk,
     type BackendEvent,
     type ExportResult,
+    type MeasurementSource,
     type PdDetails,
     type PdOpened,
     type UiError,
@@ -434,6 +435,8 @@
 
   /** Rate requested on connect (and changed by the 1–4 shortcuts). */
   let requestedRateSps = $state(50);
+  /** Where the next session's measurements come from (FR 1HHT02). */
+  let requestedSource = $state<MeasurementSource>("queue");
 
   /** A disconnect is on its way; a second press must not send another. */
   let disconnecting = false;
@@ -484,7 +487,7 @@
     session.beginConnect();
     chart?.reset();
     try {
-      await connect(id, requestedRateSps, onBackendEvent);
+      await connect(id, requestedRateSps, onBackendEvent, requestedSource);
     } catch (err) {
       session.failConnect(toUiError(err));
     }
@@ -642,6 +645,8 @@
     {canExport}
     onExport={exportHistory}
     rateSps={session.rateSps ?? requestedRateSps}
+    source={requestedSource}
+    onSelectSource={(source) => (requestedSource = source)}
   >
     {#snippet views()}
       <div class="view-tabs" role="tablist" aria-label="Views">

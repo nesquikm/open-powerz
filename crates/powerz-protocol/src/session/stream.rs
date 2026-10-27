@@ -166,22 +166,32 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// Gaps between the last record seen and `records`, which must be in
     /// device-time order; advances the last-record time.
     fn track_gaps(&mut self, records: &[QueueRecord], interval: u32) -> Vec<Gap> {
-        let mut gaps = Vec::new();
-        for r in records {
-            let to_ms = r.time_ms();
-            if let Some(from_ms) = self.last_record_ms {
-                let delta = to_ms.saturating_sub(from_ms);
-                if delta > interval {
-                    gaps.push(Gap {
-                        from_ms,
-                        to_ms,
-                        expected: delta / interval,
-                        received: 1,
-                    });
-                }
-            }
-            self.last_record_ms = Some(to_ms);
-        }
-        gaps
+        gaps_after(&mut self.last_record_ms, records, interval)
     }
+}
+
+/// Gaps between `last_ms` (the device time of the last record seen) and
+/// `records`, which must be in device-time order; advances `last_ms`.
+pub(super) fn gaps_after(
+    last_ms: &mut Option<u32>,
+    records: &[QueueRecord],
+    interval: u32,
+) -> Vec<Gap> {
+    let mut gaps = Vec::new();
+    for r in records {
+        let to_ms = r.time_ms();
+        if let Some(from_ms) = *last_ms {
+            let delta = to_ms.saturating_sub(from_ms);
+            if delta > interval {
+                gaps.push(Gap {
+                    from_ms,
+                    to_ms,
+                    expected: delta / interval,
+                    received: 1,
+                });
+            }
+        }
+        *last_ms = Some(to_ms);
+    }
+    gaps
 }

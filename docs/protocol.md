@@ -581,7 +581,8 @@ use 2 000 000 baud 8N1, but CDC ignores the baud. [static] [doc]
   SETTINGS (188 bytes), queue poll. [device] (firmware 2.0.6)
 - [device] On firmware 2.0.6, types 0x01 / 0x02 / 0x03 on CDC are ADCNEW, not
   SYNC / CONNECT / DISCONNECT: a CONNECT sent on CDC started a 1000/s stream.
-  Never send those control types on CDC except as ADCNEW.
+  Never send those control types on CDC except as ADCNEW. Our library writes
+  them only through its ADCNEW requests (see Never-send commands).
 
 ADCNEW is a separate push stream described in a vendor note; the V2.5.2 PC
 software does not use it. [doc] [static]
@@ -609,7 +610,11 @@ Frame header (4 bytes):
 - A `0F` sent during the stream got a 4-byte reply of unknown meaning and
   stopped the stream. [device]
 - The note says auto-upload stops after one hour or on unplug unless
-  refreshed. [doc]
+  refreshed. [doc] Our library sends the keep-alive every 30 minutes while
+  a stream runs and `03` when it stops one.
+- On the shared byte stream our reader tells ADCNEW frames, binary replies
+  and PDM text lines apart, drops a frame whose length or CRC is wrong and
+  resyncs one byte later. [inferred]
 
 ## PDM text session (protocol triggering)
 
@@ -915,8 +920,11 @@ PDM text commands go through the same guard, and a request that could raise
 VBUS above 5 V needs a per-command confirmation (see PDM text session).
 
 Separate from the guard, one rule applies on CDC: there SYNC / CONNECT /
-DISCONNECT (0x01..0x03) start or stop the ADCNEW stream, so the CDC transport
-refuses to send them (ADCNEW is not supported yet). [device] (firmware 2.0.6)
+DISCONNECT (0x01..0x03) start, keep alive or stop the ADCNEW stream. [device]
+(firmware 2.0.6) So the CDC transport refuses these types as binary requests
+and as PDM text; only the dedicated ADCNEW requests (start, keep-alive, stop)
+write them, and only on CDC. On bulk and HID those requests are refused
+without writing.
 
 Outside the guard, one USB-level operation is safe and allowed: clearing an
 endpoint halt. It is the standard USB control request CLEAR_FEATURE with

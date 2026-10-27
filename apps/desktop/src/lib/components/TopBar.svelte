@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, type Snippet } from "svelte";
+  import { MEASUREMENT_SOURCES, type MeasurementSource } from "../backend";
   import { badgeLabel } from "../format";
   import { menuIndexAfter } from "../menuNav";
   import {
@@ -20,6 +21,7 @@
     moreMenuLabel,
     RATE_IN_MENU_LEVEL,
     SETTINGS_IN_MENU_LEVEL,
+    SOURCE_IN_MENU_LEVEL,
     startLevel,
     type Fit,
   } from "../topBarFit";
@@ -34,6 +36,8 @@
     onAbout,
     onSelectRate,
     rateSps,
+    source,
+    onSelectSource,
     recording,
     canRecord,
     onToggleRecording,
@@ -51,6 +55,9 @@
     onSelectRate: (sps: number) => void;
     /** The rate the next connect asks for, or the session's current rate. */
     rateSps: number;
+    /** Where the next (or running) session's measurements come from (FR 1HHT02). */
+    source: MeasurementSource;
+    onSelectSource: (source: MeasurementSource) => void;
     recording: Recording;
     /** A stream is running that can be recorded. */
     canRecord: boolean;
@@ -218,6 +225,21 @@
   </select>
 {/snippet}
 
+<!-- Picked before connecting; it cannot change under a running session. -->
+{#snippet sourceSelect()}
+  <select
+    aria-label="Measurement source"
+    title="Where the live values come from"
+    disabled={session.active || session.flashing}
+    value={source}
+    onchange={(e) => onSelectSource(e.currentTarget.value as MeasurementSource)}
+  >
+    {#each MEASUREMENT_SOURCES as option (option.value)}
+      <option value={option.value}>{option.label}</option>
+    {/each}
+  </select>
+{/snippet}
+
 {#snippet exportButton(inMenu: boolean)}
   <button
     type="button"
@@ -236,6 +258,7 @@
   <div class="group start">
     <span class="brand">open-powerz</span>
     <DevicePicker {session} />
+    <span class="source-inline">{@render sourceSelect()}</span>
     <button
       type="button"
       class:primary={!session.active}
@@ -317,8 +340,11 @@
       {#if menuOpen}
         <div class="menu panel" bind:this={menuPanel}>
           <!-- The rate picker and its note are not menu items, so they sit beside the menu. -->
-          {#if level >= RATE_IN_MENU_LEVEL || rateNote !== null}
+          {#if level >= SOURCE_IN_MENU_LEVEL || rateNote !== null}
             <div class="menu-extra">
+              {#if level >= SOURCE_IN_MENU_LEVEL}
+                {@render sourceSelect()}
+              {/if}
               {#if level >= RATE_IN_MENU_LEVEL}
                 {@render rateSelect()}
               {/if}
@@ -430,7 +456,8 @@
     gap: 0.5rem;
     min-width: 0;
   }
-  .rate-inline {
+  .rate-inline,
+  .source-inline {
     display: contents;
   }
   .rate-note {
@@ -565,6 +592,7 @@
   }
   /* Level 2: theme, About and the rate-locked note move into the menu. */
   .top-bar:global(.settings-in-menu) .settings-inline,
+  .top-bar:global(.settings-in-menu) .source-inline,
   .top-bar:global(.settings-in-menu) .inline-note {
     display: none;
   }

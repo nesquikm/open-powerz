@@ -72,6 +72,26 @@ impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
     fn recover(&mut self) -> Result<(), Error> {
         self.inner.recover()
     }
+
+    /// ADCNEW requests (`02 <att>`, `01`, `03`) are traced like frames:
+    /// `>` once written, `x` when refused before sending.
+    fn adcnew_send(&mut self, request: powerz_protocol::adcnew::Request) -> Result<(), Error> {
+        let bytes = request.encode();
+        match self.inner.adcnew_send(request) {
+            Err(e @ (Error::AdcnewNeedsCdc | Error::Forbidden { .. })) => {
+                self.log('x', &bytes);
+                Err(e)
+            }
+            result => {
+                self.log('>', &bytes);
+                result
+            }
+        }
+    }
+
+    fn adcnew_frames(&mut self) -> Result<Vec<powerz_protocol::adcnew::Frame>, Error> {
+        self.inner.adcnew_frames()
+    }
 }
 
 /// The flash path's raw writes (jumps, the descriptor, payload blocks):

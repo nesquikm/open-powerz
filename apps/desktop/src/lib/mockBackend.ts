@@ -49,6 +49,7 @@ import type {
   TriggerReply,
   TriggerRequest,
   UiError,
+  MeasurementSource,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
 import { DISCOVER_IDENTITY_CABLE, lineRefusal, messageRefusal } from "./console.svelte";
@@ -399,6 +400,8 @@ interface MockPdFile {
 interface Running {
   /** The picker id the session was connected with. */
   deviceId: string;
+  /** Where the measurements come from (FR 1HHT02). */
+  source: MeasurementSource;
   scenario: Scenario;
   rateSps: number;
   /** The meter refused the asked rate and runs at its own. */
@@ -878,10 +881,16 @@ export class MockBackend {
     for (const w of this.#watchers) w(list);
   }
 
+  /** The source the running session streams from, `null` when none runs (FR 1HHT02). */
+  connectedSource(): MeasurementSource | null {
+    return this.#session?.source ?? null;
+  }
+
   async connect(
     deviceId: string,
     rateSps: number,
     onEvent: (event: BackendEvent) => void,
+    source: MeasurementSource = "queue",
   ): Promise<void> {
     if (this.#flashing) throw usage(FLASH_REFUSAL);
     if (this.#session) throw usage("A meter is already connected. Disconnect it first.");
@@ -902,6 +911,7 @@ export class MockBackend {
     }
     const session: Running = {
       deviceId,
+      source,
       scenario,
       rateSps: locked ? LOCKED_RATE_SPS : rateSps,
       rateLocked: locked,
@@ -1016,7 +1026,8 @@ export class MockBackend {
       s.onEvent({ type: "gap", data: s.pendingGap });
       s.pendingGap = null;
     }
-    const tempC = 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
+    // Like the backend: the CDC stream carries no temperature.
+    const tempC = s.source === "cdc" ? null : 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
     s.onEvent({ type: "batch", data: { samples, temp_c: tempC, stats: s.stats.snapshot() } });
     s.streamed += n;
     const rec = s.recording;

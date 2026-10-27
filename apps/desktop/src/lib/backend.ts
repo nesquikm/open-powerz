@@ -298,16 +298,31 @@ export async function watchDevices(
   };
 }
 
-/** Opens a session on `deviceId`; every session event goes to `onEvent`. */
+/** Where the live measurements come from (mirrors `worker::MeasurementSource`, FR
+ * 1HHT02): the ADC queue over the vendor bulk pipe, or the ADCNEW stream the meter
+ * pushes on its CDC serial port (no sign-in, no temperature). */
+export type MeasurementSource = "queue" | "cdc";
+
+/** The sources the connect controls offer, the default first. */
+export const MEASUREMENT_SOURCES: readonly { value: MeasurementSource; label: string }[] = [
+  { value: "queue", label: "USB queue" },
+  { value: "cdc", label: "Serial stream" },
+];
+
+/** Opens a session on `deviceId` streaming from `source` (the queue by default);
+ * every session event goes to `onEvent`. */
 export async function connect(
   deviceId: string,
   rateSps: number,
   onEvent: (event: BackendEvent) => void,
+  source: MeasurementSource = "queue",
 ): Promise<void> {
-  if (mock) return mock.connect(deviceId, rateSps, onEvent);
+  if (mock) return mock.connect(deviceId, rateSps, onEvent, source);
   const channel = new Channel<BackendEvent>();
   channel.onmessage = onEvent;
-  await invoke("connect", { deviceId, rateSps, onEvent: channel });
+  // The queue is the backend's default, so it is left out of the arguments.
+  const picked = source === "queue" ? {} : { source };
+  await invoke("connect", { deviceId, rateSps, ...picked, onEvent: channel });
 }
 
 /** An open recording as a re-attached page picks it up (mirrors `devices.rs`). */

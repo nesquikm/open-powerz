@@ -6,7 +6,7 @@ use powerz_protocol::session::{Clock, Session};
 use powerz_protocol::transport::Transport;
 
 use crate::error::CliError;
-use crate::output::{adc_json, write_adc_lines, write_json};
+use crate::output::{Reading, adc_json, write_adc_lines, write_json};
 
 /// `powerz read`: one ADC snapshot. Human output has one labelled value per
 /// line (VBUS, IBUS, power, temperature, D+, D−, CC1, CC2) with at least 3
@@ -21,6 +21,6 @@ pub fn read<T: Transport, C: Clock>(
     if json {
         write_json(out, &adc_json(&a))
     } else {
-        write_adc_lines(out, &a)
+        write_adc_lines(out, &Reading::from(&a))
     }
 }

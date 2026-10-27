@@ -80,6 +80,7 @@ impl AppState {
     /// Connect to `device_id` at `rate_sps`; events go to `sink`. The UI
     /// drops a capture opened from a file when a session connects, so its
     /// memory is released here too.
+    #[cfg(test)]
     fn connect_session(
         &self,
         device_id: &str,
@@ -87,8 +88,26 @@ impl AppState {
         sink: impl worker::EventSink,
         stop: Arc<AtomicBool>,
     ) -> Result<(), UiError> {
+        self.connect_source_session(
+            device_id,
+            rate_sps,
+            worker::MeasurementSource::Queue,
+            sink,
+            stop,
+        )
+    }
+
+    /// [`AppState::connect_session`] streaming from `source` (FR 1HHT02).
+    fn connect_source_session(
+        &self,
+        device_id: &str,
+        rate_sps: u32,
+        source: worker::MeasurementSource,
+        sink: impl worker::EventSink,
+        stop: Arc<AtomicBool>,
+    ) -> Result<(), UiError> {
         self.manager()
-            .connect_with_stop(device_id, rate_sps, sink, stop)?;
+            .connect_source_with_stop(device_id, rate_sps, source, sink, stop)?;
         *self.opened_pd() = None;
         Ok(())
     }
@@ -201,20 +220,23 @@ async fn watch_devices(
 }
 
 /// Connect to the picked device; every session event goes over `on_event`.
-/// The session ends by itself once that channel is gone (window closed);
-/// a reloaded page takes the session over with `attach` instead.
+/// `source` (`queue`, the default, or `cdc`) picks where the measurements
+/// come from (FR 1HHT02). The session ends by itself once that channel is
+/// gone (window closed); a reloaded page takes the session over with
+/// `attach` instead.
 #[tauri::command]
 async fn connect(
     state: Shared<'_>,
     device_id: String,
     rate_sps: u32,
+    source: Option<worker::MeasurementSource>,
     on_event: Channel<BackendEvent>,
 ) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let stop = Arc::new(AtomicBool::new(false));
         let sink = channel_sink(on_event, Arc::clone(&stop));
-        state.connect_session(&device_id, rate_sps, sink, stop)
+        state.connect_source_session(&device_id, rate_sps, source.unwrap_or_default(), sink, stop)
     })
     .await
 }

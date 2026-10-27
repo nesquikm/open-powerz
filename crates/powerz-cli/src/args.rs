@@ -25,6 +25,17 @@ pub enum TransportKind {
     Sim,
 }
 
+/// Where `powerz watch` gets its values from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum WatchSource {
+    /// Ask the meter for one ADC snapshot per refresh (over --transport).
+    #[default]
+    Poll,
+    /// The ADCNEW push stream on the meter's CDC serial port: no sign-in,
+    /// the latest pushed record per refresh (no temperature).
+    Cdc,
+}
+
 /// Help heading of the flags accepted by every subcommand.
 const GLOBAL: &str = "Global options";
 
@@ -124,6 +135,11 @@ pub enum Command {
             value_parser = clap::value_parser!(u64).range(50..)
         )]
         interval: u64,
+        /// Where the values come from: `poll` asks for a snapshot each
+        /// refresh, `cdc` reads the ADCNEW stream on the CDC serial port
+        /// (whatever --transport says, except hid).
+        #[arg(long, value_enum, value_name = "SOURCE", default_value = "poll")]
+        source: WatchSource,
     },
     /// Record the ADC sample stream to a CSV file until Ctrl-C or --duration.
     Stream {
@@ -538,6 +554,14 @@ pub enum PdAction {
 }
 
 impl Command {
+    /// The `watch` source, for `watch` only.
+    pub fn watch_source(&self) -> Option<WatchSource> {
+        match self {
+            Command::Watch { source, .. } => Some(*source),
+            _ => None,
+        }
+    }
+
     /// Subcommand name as typed on the command line.
     pub fn name(&self) -> &'static str {
         match self {
@@ -761,6 +785,17 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
         return Err(CliError::Usage(format!(
             "`firmware {name}` runs on the vendor bulk pipe only; use --transport bulk (or sim)"
         )));
+    }
+    if cli.command.watch_source() == Some(WatchSource::Cdc) {
+        // The ADCNEW stream exists only on the CDC port; HID has none.
+        return if cli.transport == TransportKind::Hid {
+            Err(CliError::Usage(
+                "`watch --source cdc` reads the CDC serial port; it cannot run over --transport hid"
+                    .into(),
+            ))
+        } else {
+            Ok(())
+        };
     }
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
     // `pd send` talks to the meter's serial port like `trigger`.

@@ -59,6 +59,9 @@ pub enum Error {
         /// Frame type (bits 0..6 of the main header).
         ty: u8,
     },
+    /// ADCNEW stream requests exist only on the CDC port; nothing was sent.
+    #[error("the ADCNEW stream is only available over the CDC serial port")]
+    AdcnewNeedsCdc,
     /// No matching device or port was found.
     #[error("no matching device found")]
     NotFound,
@@ -84,6 +87,20 @@ pub trait Transport {
     /// gets no matching ACCEPT. Sends no device command. Default: nothing.
     fn recover(&mut self) -> Result<(), Error> {
         Ok(())
+    }
+
+    /// Write an ADCNEW stream request (start, keep-alive, stop). Only the
+    /// CDC transport sends these; the default refuses without writing.
+    fn adcnew_send(&mut self, request: crate::adcnew::Request) -> Result<(), Error> {
+        let _ = request;
+        Err(Error::AdcnewNeedsCdc)
+    }
+
+    /// Read what the port has buffered and return the ADCNEW frames
+    /// received since the last call, in stream order. Only the CDC
+    /// transport streams; the default refuses.
+    fn adcnew_frames(&mut self) -> Result<Vec<crate::adcnew::Frame>, Error> {
+        Err(Error::AdcnewNeedsCdc)
     }
 }
 
