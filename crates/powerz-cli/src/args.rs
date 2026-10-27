@@ -25,14 +25,15 @@ pub enum TransportKind {
     Sim,
 }
 
-/// Where `powerz watch` gets its values from.
+/// Where `powerz watch` and `powerz stream` get their values from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum WatchSource {
-    /// Ask the meter for one ADC snapshot per refresh (over --transport).
+    /// Poll the meter over --transport: one ADC snapshot per refresh
+    /// (`watch`), the ADC queue (`stream`).
     #[default]
     Poll,
     /// The ADCNEW push stream on the meter's CDC serial port: no sign-in,
-    /// the latest pushed record per refresh (no temperature).
+    /// no temperature.
     Cdc,
 }
 
@@ -152,6 +153,12 @@ pub enum Command {
         /// Stop after this many seconds of device time (fractions allowed).
         #[arg(long, value_name = "SECONDS")]
         duration: Option<f64>,
+        /// Where the samples come from: `poll` reads the ADC queue over
+        /// --transport, `cdc` records the ADCNEW stream on the CDC serial
+        /// port at 50 or 1000 records/s (whatever --transport says, except
+        /// hid) and reports gaps, dropped frames and CRC errors.
+        #[arg(long, value_enum, value_name = "SOURCE", default_value = "poll")]
+        source: WatchSource,
     },
     /// Capture USB PD traffic (messages and events) until Ctrl-C; bulk pipe only.
     #[command(
@@ -554,10 +561,10 @@ pub enum PdAction {
 }
 
 impl Command {
-    /// The `watch` source, for `watch` only.
-    pub fn watch_source(&self) -> Option<WatchSource> {
+    /// The source of `watch` and `stream`; `None` for other commands.
+    pub fn source(&self) -> Option<WatchSource> {
         match self {
-            Command::Watch { source, .. } => Some(*source),
+            Command::Watch { source, .. } | Command::Stream { source, .. } => Some(*source),
             _ => None,
         }
     }
@@ -786,16 +793,22 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
             "`firmware {name}` runs on the vendor bulk pipe only; use --transport bulk (or sim)"
         )));
     }
-    if cli.command.watch_source() == Some(WatchSource::Cdc) {
+    if cli.command.source() == Some(WatchSource::Cdc) {
         // The ADCNEW stream exists only on the CDC port; HID has none.
-        return if cli.transport == TransportKind::Hid {
-            Err(CliError::Usage(
-                "`watch --source cdc` reads the CDC serial port; it cannot run over --transport hid"
-                    .into(),
-            ))
-        } else {
-            Ok(())
-        };
+        let name = cli.command.name();
+        if cli.transport == TransportKind::Hid {
+            return Err(CliError::Usage(format!(
+                "`{name} --source cdc` reads the CDC serial port; it cannot run over --transport hid"
+            )));
+        }
+        if let Command::Stream { rate, .. } = cli.command
+            && !matches!(rate, 50 | 1000)
+        {
+            return Err(CliError::Usage(format!(
+                "`stream --source cdc` records 50 or 1000 records/s, not {rate}"
+            )));
+        }
+        return Ok(());
     }
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
     // `pd send` talks to the meter's serial port like `trigger`.

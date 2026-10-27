@@ -102,6 +102,12 @@ pub trait Transport {
     fn adcnew_frames(&mut self) -> Result<Vec<crate::adcnew::Frame>, Error> {
         Err(Error::AdcnewNeedsCdc)
     }
+
+    /// Frames of the ADCNEW stream lost on the host side so far. Only the
+    /// CDC transport streams; the default counts nothing.
+    fn adcnew_counters(&self) -> crate::adcnew::AdcnewCounters {
+        crate::adcnew::AdcnewCounters::default()
+    }
 }
 
 /// Default reply timeout for `request`: [`CONNECT_TIMEOUT`] for CONNECT,

@@ -40,7 +40,7 @@ pub use pd_send::{PdSendOptions, pd_send};
 pub use read::read;
 pub use records::{RecordSelection, records_get, records_list};
 pub use settings::{SettingsOutput, settings};
-pub use stream::{StreamOptions, StreamSummary, stream};
+pub use stream::{CdcStreamSummary, StreamOptions, StreamSummary, stream, stream_cdc};
 pub use trigger::{
     LegacyRequestOptions, PdRequestOptions, PdSettingsChange, trigger_legacy_list,
     trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,

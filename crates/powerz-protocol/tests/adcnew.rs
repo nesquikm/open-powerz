@@ -481,6 +481,37 @@ fn demux_splits_a_device_read_of_frames_around_a_pdm_line() {
 }
 
 #[test]
+fn demux_splits_a_pdm_parm_reply_a_put_data_and_frames_from_one_device_read() {
+    // One tty read from a PDM session with a stream running (session 2):
+    // the `pdm parm` reply, two frames, a PUT_DATA reply, then frames
+    // (one holding two records). [device]
+    let bytes = hex("
+        747970653d302c656d3d322c73696e6b3d300a
+        02120565ab55f8021d0e4f00a9fffffff30504000e002300
+        02120599bf55f802a60e4f00a5fffffff70504000e002200
+        413602031000000de255f80228140000f6050400cbcf55f80200909c0280030087d0
+        55f80200610d8bd155f80200b09702800400c7d255f80200810602120a5dd355f802
+        2f0f4f00a1ffffffed04050005000700e755f802310e4f0095fffffff40504000e00
+        2000
+        02120535fb55f8021f0d4f0099fffffff70504000b002000
+        021205500f56f802a80d4f0099fffffff60504000b001f00");
+    let (items, d) = demux_all(&bytes);
+    assert_eq!(
+        items[0],
+        CdcItem::Line("type=0,em=2,sink=0".into()),
+        "{items:?}"
+    );
+    let replies = items
+        .iter()
+        .filter(|i| matches!(i, CdcItem::Reply(_)))
+        .count();
+    assert_eq!(replies, 1, "{items:?}");
+    assert_eq!(record_times(&items).len(), 6, "{items:?}");
+    assert_eq!(d.dropped_frames(), 0);
+    assert_eq!(d.buffered(), 0);
+}
+
+#[test]
 fn demux_hands_out_a_binary_reply_between_1000_sps_frames() {
     // The 1000/s frames around a binary reply: the reply comes out whole,
     // framed by its section chain, and both frames survive.

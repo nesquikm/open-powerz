@@ -5,7 +5,7 @@
 
 use super::stream::{StreamPoll, gaps_after};
 use super::{Clock, Error, Session};
-use crate::adcnew::{Content, Frame, KEEP_ALIVE_PERIOD, MAX_RAW_FRAMES, Request};
+use crate::adcnew::{AdcnewCounters, Content, Frame, KEEP_ALIVE_PERIOD, MAX_RAW_FRAMES, Request};
 use crate::decode::Rate;
 use crate::transport::Transport;
 
@@ -84,6 +84,12 @@ impl<T: Transport, C: Clock> Session<T, C> {
         self.adcnew = Some(stream);
         result?;
         Ok(poll)
+    }
+
+    /// Frames of the stream lost on the host side since the transport was
+    /// opened: dropped for a bad CRC or length, or at the hold cap.
+    pub fn adcnew_counters(&self) -> AdcnewCounters {
+        self.transport.adcnew_counters()
     }
 
     /// Take the non-record ADCNEW frames (PD / UFCS content, kept raw)

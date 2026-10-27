@@ -36,9 +36,9 @@ use crate::commands::{
     PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions, console,
     detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
     firmware_probe_unavailable, info_in_mode, inspect_flash_file, list, pd, pd_decode, pd_save,
-    pd_send, read, records_get, records_list, select_device, settings, stream, trigger_legacy_list,
-    trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
-    trigger_pd_settings, watch, watch_cdc,
+    pd_send, read, records_get, records_list, select_device, settings, stream, stream_cdc,
+    trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
+    trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport, TracedOpener};
@@ -138,7 +138,7 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     let devices = transport::discovery::list_devices()?;
     let device = select_device(&devices, cli.device.as_deref())?;
     let mode = device.mode();
-    if cli.command.watch_source() == Some(WatchSource::Cdc) {
+    if cli.command.source() == Some(WatchSource::Cdc) {
         // The ADCNEW stream lives on the CDC port, whatever --transport says.
         return with_transport(cli, mode, open_cdc(device)?);
     }
@@ -958,13 +958,13 @@ fn ctrl_c_hold() -> impl FnMut(Duration) {
 }
 
 /// `--transport sim`: open the demo device (bulk persona, `--scenario`; its
-/// CDC persona for `watch --source cdc`) without touching USB; `--device`
+/// CDC persona for `watch` / `stream --source cdc`) without touching USB; `--device`
 /// must name its synthetic serial.
 fn run_sim(cli: &Cli) -> Result<(), CliError> {
     select_demo(cli)?;
     let mode = demo_entry().mode();
     let faults = sim_faults()?;
-    let persona = if cli.command.watch_source() == Some(WatchSource::Cdc) {
+    let persona = if cli.command.source() == Some(WatchSource::Cdc) {
         Persona::Cdc
     } else {
         Persona::Bulk
@@ -1084,7 +1084,7 @@ fn with_ctrl_c_after<C: Clock>(
 }
 
 /// Transport wrapper that sets the Ctrl-C flag once `remaining` GET_DATA
-/// requests have been answered, or (`watch --source cdc`, which sends
+/// requests have been answered, or (`--source cdc`, which sends
 /// none) once the ADCNEW stream has been read `remaining` times.
 struct CtrlCAfter<T> {
     inner: T,
@@ -1123,6 +1123,10 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
         }
         Ok(frames)
     }
+
+    fn adcnew_counters(&self) -> powerz_protocol::adcnew::AdcnewCounters {
+        self.inner.adcnew_counters()
+    }
 }
 
 /// [`with_clock`] on the system clock.
@@ -1156,7 +1160,7 @@ fn start<T: Transport, C: Clock>(
     mut session: Session<T, C>,
 ) -> Result<(), CliError> {
     // The ADCNEW stream needs no CONNECT, whose byte would start it on CDC.
-    if needs_connect(cli.transport) && cli.command.watch_source() != Some(WatchSource::Cdc) {
+    if needs_connect(cli.transport) && cli.command.source() != Some(WatchSource::Cdc) {
         session.connect()?;
     }
     dispatch(cli, mode, session)
@@ -1220,6 +1224,7 @@ fn dispatch<T: Transport, C: Clock>(
             rate,
             csv,
             duration,
+            source,
         } => {
             let rate = rate_from_sps(*rate)
                 .ok_or_else(|| CliError::Usage(format!("invalid rate {rate}")))?;
@@ -1237,14 +1242,16 @@ fn dispatch<T: Transport, C: Clock>(
                 duration,
                 start_unix_ms,
             };
-            stream(
-                &mut session,
-                &opts,
-                &stop,
-                &mut std::io::BufWriter::new(file),
-                &mut std::io::stderr().lock(),
-            )
-            .map(|_| ())
+            let mut csv = std::io::BufWriter::new(file);
+            let mut err = std::io::stderr().lock();
+            match source {
+                WatchSource::Poll => {
+                    stream(&mut session, &opts, &stop, &mut csv, &mut err).map(|_| ())
+                }
+                WatchSource::Cdc => {
+                    stream_cdc(&mut session, &opts, &stop, &mut csv, &mut err).map(|_| ())
+                }
+            }
         }
         Command::Pd { json } => {
             let stop = ctrl_c_flag()?;

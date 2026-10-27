@@ -4,6 +4,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use powerz_protocol::adcnew::Content;
 use powerz_protocol::decode::Rate;
 use powerz_protocol::session::{Clock, Gap, Session, SnapshotCadence, Streamer};
 use powerz_protocol::transport::Transport;
@@ -33,6 +34,19 @@ pub struct StreamSummary {
     pub samples: u64,
     /// Gaps reported by the session.
     pub gaps: Vec<Gap>,
+}
+
+/// What a finished `stream --source cdc` recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdcStreamSummary {
+    /// Rows written to the CSV.
+    pub records: u64,
+    /// Gaps in the records' device time.
+    pub gaps: Vec<Gap>,
+    /// Good frames the host dropped because they were not read in time.
+    pub dropped_frames: u64,
+    /// Frames dropped for a bad CRC or length.
+    pub crc_errors: u64,
 }
 
 /// How long `stream` keeps polling without receiving a single record.
@@ -167,18 +181,133 @@ pub fn stream<T: Transport, C: Clock>(
     Ok(summary)
 }
 
+/// `powerz stream --source cdc`: start the ADCNEW stream (ADC records at
+/// `opts.rate`, no sign-in, no queue), write one CSV row per pushed record
+/// (`TEMP` empty: records carry none) until the duration is reached or
+/// `stop` is set, stop the stream (`03`) and print one summary line to
+/// `err` (records, gaps, dropped frames, CRC errors), then one line per
+/// gap. Fails at once, writing no CSV, where the pipe has no ADCNEW stream.
+pub fn stream_cdc<T: Transport, C: Clock>(
+    session: &mut Session<T, C>,
+    opts: &StreamOptions,
+    stop: &AtomicBool,
+    csv: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<CdcStreamSummary, CliError> {
+    session.start_adcnew(Content::Adc, opts.rate)?;
+    let mut summary = CdcStreamSummary {
+        records: 0,
+        gaps: Vec::new(),
+        dropped_frames: 0,
+        crc_errors: 0,
+    };
+    let recorded = CsvRecorder::new(csv)
+        .map_err(CliError::from)
+        .and_then(|mut recorder| {
+            if let Err(e) = record_cdc(session, opts, stop, &mut recorder, &mut summary) {
+                // Keep the rows received before the failure.
+                let _ = recorder.flush();
+                return Err(e);
+            }
+            recorder.finish()?;
+            Ok(())
+        });
+    // Always try to stop the stream, even after a failed poll or write.
+    let stopped = session.stop_adcnew();
+    recorded?;
+    stopped?;
+    let counters = session.adcnew_counters();
+    summary.dropped_frames = counters.dropped_frames;
+    summary.crc_errors = counters.crc_errors;
+    writeln!(
+        err,
+        "{} records, {} gaps, {} dropped frames, {} CRC errors",
+        summary.records,
+        summary.gaps.len(),
+        summary.dropped_frames,
+        summary.crc_errors
+    )?;
+    write_gaps(err, &summary.gaps)?;
+    Ok(summary)
+}
+
+/// The polling loop of [`stream_cdc`] on a started stream.
+fn record_cdc<T: Transport, C: Clock, W: Write>(
+    session: &mut Session<T, C>,
+    opts: &StreamOptions,
+    stop: &AtomicBool,
+    recorder: &mut CsvRecorder<W>,
+    summary: &mut CdcStreamSummary,
+) -> Result<(), CliError> {
+    let period = Streamer::poll_period(opts.rate);
+    let limit_ms = opts.duration.map(|d| d.as_millis());
+    let within_limit = |elapsed_ms: u64| limit_ms.is_none_or(|l| u128::from(elapsed_ms) < l);
+    let mut first_ms: Option<u32> = None;
+    let mut waited_ms: u64 = 0;
+    while !stop.load(Ordering::SeqCst) {
+        let poll = session.poll_adcnew()?;
+        let Some(first) = poll.records.first() else {
+            waited_ms += period.as_millis() as u64;
+            if waited_ms > NO_DATA.as_millis() as u64 {
+                return Err(CliError::Device(format!(
+                    "no ADCNEW record from the meter for {} s",
+                    NO_DATA.as_secs()
+                )));
+            }
+            session.sleep(period);
+            continue;
+        };
+        waited_ms = 0;
+        let start = *first_ms.get_or_insert(first.time_ms());
+        if poll.records.iter().any(|r| r.time_ms() < start) {
+            return Err(CliError::Device(
+                "the meter's clock went backwards (did it reboot?); stream stopped".into(),
+            ));
+        }
+        let elapsed = |t: u32| u64::from(t - start);
+        summary.gaps.extend(
+            poll.gaps
+                .iter()
+                .filter(|g| within_limit(elapsed(g.to_ms)))
+                .copied(),
+        );
+        for r in &poll.records {
+            if !within_limit(elapsed(r.time_ms())) {
+                return Ok(());
+            }
+            // Only the first record's wall clock is used (the Unix origin).
+            let now_ms = match opts.start_unix_ms {
+                0 if recorder.rows() == 0 => std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64),
+                fixed => fixed,
+            };
+            recorder.push(r, now_ms)?;
+            summary.records += 1;
+        }
+        session.sleep(period);
+    }
+    Ok(())
+}
+
 /// The sample count, then one line per gap.
 fn write_summary(err: &mut dyn Write, summary: &StreamSummary) -> Result<(), CliError> {
     writeln!(err, "{} samples recorded", summary.samples)?;
     if !summary.gaps.is_empty() {
         writeln!(err, "{} gaps in the stream:", summary.gaps.len())?;
-        for g in &summary.gaps {
-            writeln!(
-                err,
-                "  gap {} ms -> {} ms: expected {} samples, received {}",
-                g.from_ms, g.to_ms, g.expected, g.received
-            )?;
-        }
+        write_gaps(err, &summary.gaps)?;
+    }
+    Ok(())
+}
+
+/// One indented line per gap.
+fn write_gaps(err: &mut dyn Write, gaps: &[Gap]) -> Result<(), CliError> {
+    for g in gaps {
+        writeln!(
+            err,
+            "  gap {} ms -> {} ms: expected {} samples, received {}",
+            g.from_ms, g.to_ms, g.expected, g.received
+        )?;
     }
     Ok(())
 }

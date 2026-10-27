@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
 use super::{Error, GuardedTransport, Transport, map_io_error};
-use crate::adcnew::{CdcDemux, CdcItem, Frame, Request};
+use crate::adcnew::{AdcnewCounters, CdcDemux, CdcItem, Frame, Request};
 use crate::frame::{DeclaredEnd, HEADER_LEN, MainHeader, declared_end, frame_type, msg};
 
 /// Wait after opening the port before the first frame.
@@ -81,6 +81,8 @@ pub struct CdcTransport<P> {
     streaming: bool,
     /// Stream frames read but not yet handed out.
     frames: Vec<Frame>,
+    /// Stream frames dropped at the hold cap.
+    overflowed: u64,
 }
 
 /// Stream frames kept between polls before the oldest are dropped.
@@ -95,6 +97,7 @@ impl<P: Read + Write> CdcTransport<P> {
             demux: None,
             streaming: false,
             frames: Vec::new(),
+            overflowed: 0,
         })
     }
 
@@ -133,6 +136,7 @@ impl<P: Read + Write> CdcTransport<P> {
                     // Callers that never poll must not grow this forever.
                     if self.frames.len() >= MAX_HELD_FRAMES {
                         self.frames.remove(0);
+                        self.overflowed += 1;
                     }
                     self.frames.push(frame);
                 }
@@ -344,6 +348,13 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
         }
         self.drain_demux(false);
         Ok(std::mem::take(&mut self.frames))
+    }
+
+    fn adcnew_counters(&self) -> AdcnewCounters {
+        AdcnewCounters {
+            crc_errors: self.demux.as_ref().map_or(0, |d| d.dropped_frames() as u64),
+            dropped_frames: self.overflowed,
+        }
     }
 }
 
@@ -602,6 +613,37 @@ mod tests {
             Frame::Records { records, .. } => assert_eq!(records[0].time_ms(), 3),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A one-record ADCNEW frame (att 0x12) with device time `n` ms.
+    fn record_frame(n: u32) -> Vec<u8> {
+        let mut body = n.to_le_bytes().to_vec();
+        body.extend([0u8; 16]);
+        let mut f = vec![0x02, 0x12, 0x05, crate::adcnew::crc8(&body)];
+        f.extend(body);
+        f
+    }
+
+    #[test]
+    fn frames_dropped_for_the_cap_and_for_a_bad_crc_are_counted() {
+        let mut bad = record_frame(1);
+        bad[3] ^= 0xFF;
+        let mut bytes = record_frame(0);
+        bytes.extend(bad);
+        bytes.extend((2..MAX_HELD_FRAMES as u32 + 4).flat_map(record_frame));
+        let port = FakePort::with_chunks(vec![Ok(bytes)]);
+        let mut t = CdcTransport::with_port(port);
+        assert_eq!(t.adcnew_counters(), AdcnewCounters::default());
+        t.adcnew_send(Request::StartDefault).unwrap();
+        let frames = t.adcnew_frames().unwrap();
+        assert_eq!(frames.len(), MAX_HELD_FRAMES);
+        assert_eq!(
+            t.adcnew_counters(),
+            AdcnewCounters {
+                crc_errors: 1,
+                dropped_frames: 3,
+            }
+        );
     }
 
     #[test]

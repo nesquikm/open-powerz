@@ -607,3 +607,82 @@ fn polled_watch_never_sends_adcnew_or_disconnect_types() {
         }
     }
 }
+
+// ---- 1HHT02 / 1HHT04: `powerz stream --source cdc` against the simulator ----
+
+#[test]
+fn stream_source_cdc_records_the_adcnew_stream_and_prints_the_summary() {
+    let csv = temp_csv("stream-cdc-50.csv");
+    let a = sim_fake("load-5v-1a")
+        .args([
+            "--trace",
+            "stream",
+            "--source",
+            "cdc",
+            "--rate",
+            "50",
+            "--duration",
+            "2",
+            "--csv",
+        ])
+        .arg(&csv)
+        .assert()
+        .success();
+    let err = stderr_of(&a);
+    let summary = err
+        .lines()
+        .find(|l| l.ends_with("CRC errors"))
+        .unwrap_or_else(|| panic!("no summary line:\n{err}"));
+    assert_eq!(
+        summary,
+        "100 records, 0 gaps, 0 dropped frames, 0 CRC errors"
+    );
+    // Only ADCNEW requests go out: start first, stop last; no CONNECT,
+    // queue or auth.
+    let sent: Vec<Vec<u8>> = err
+        .lines()
+        .filter(|l| l.starts_with('>'))
+        .map(traced_bytes)
+        .collect();
+    let start = powerz_protocol::adcnew::Request::Start {
+        content: powerz_protocol::adcnew::Content::Adc,
+        rate: powerz_protocol::decode::Rate::Sps50,
+    }
+    .encode();
+    assert_eq!(sent.first(), Some(&start), "{err}");
+    assert_eq!(sent.last(), Some(&vec![0x03]), "{err}");
+    assert!(sent.iter().all(|f| f.len() <= 2), "{err}");
+
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some(powerz_cli::record::CSV_HEADER));
+    assert_eq!(lines.count(), 100);
+    let _ = std::fs::remove_file(&csv);
+}
+
+#[test]
+fn stream_source_cdc_counts_a_corrupt_frame() {
+    let csv = temp_csv("stream-cdc-crc.csv");
+    let a = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_FAULT", "corrupt-adcnew@5")
+        .args([
+            "stream",
+            "--source",
+            "cdc",
+            "--rate",
+            "50",
+            "--duration",
+            "2",
+            "--csv",
+        ])
+        .arg(&csv)
+        .assert()
+        .success();
+    let err = stderr_of(&a);
+    assert!(
+        err.lines()
+            .any(|l| l.ends_with(", 1 gaps, 0 dropped frames, 1 CRC errors")),
+        "{err}"
+    );
+    let _ = std::fs::remove_file(&csv);
+}

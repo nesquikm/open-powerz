@@ -96,6 +96,10 @@ impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
     fn adcnew_frames(&mut self) -> Result<Vec<powerz_protocol::adcnew::Frame>, Error> {
         self.inner.adcnew_frames()
     }
+
+    fn adcnew_counters(&self) -> powerz_protocol::adcnew::AdcnewCounters {
+        self.inner.adcnew_counters()
+    }
 }
 
 /// The flash path's raw writes (jumps, the descriptor, payload blocks):

@@ -991,8 +991,14 @@ fn stream_rate_accepts_only_2_10_50_1000() {
             rate,
             csv,
             duration,
+            source,
         } => {
             assert_eq!(rate, 50);
+            assert_eq!(
+                source,
+                powerz_cli::WatchSource::Poll,
+                "the queue by default"
+            );
             assert_eq!(csv, std::path::PathBuf::from("o.csv"));
             assert_eq!(duration, Some(1.5));
         }

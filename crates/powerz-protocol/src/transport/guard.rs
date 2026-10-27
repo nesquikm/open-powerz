@@ -55,6 +55,10 @@ impl<T: Transport> Transport for GuardedTransport<T> {
     fn adcnew_frames(&mut self) -> Result<Vec<crate::adcnew::Frame>, Error> {
         self.inner.adcnew_frames()
     }
+
+    fn adcnew_counters(&self) -> crate::adcnew::AdcnewCounters {
+        self.inner.adcnew_counters()
+    }
 }
 
 #[cfg(test)]

@@ -341,6 +341,8 @@ pub struct SimDevice {
     adcnew: Option<adcnew::AdcnewStream>,
     /// ADCNEW frames pushed so far.
     adcnew_sent: usize,
+    /// ADCNEW frames the host side dropped for a bad CRC or length.
+    adcnew_crc_errors: u64,
 }
 
 impl SimDevice {
@@ -387,6 +389,7 @@ impl SimDevice {
             power_up_mode: None,
             adcnew: None,
             adcnew_sent: 0,
+            adcnew_crc_errors: 0,
         }
     }
 
@@ -634,16 +637,28 @@ impl Transport for SimDevice {
         let now = self.uptime_ms();
         self.adcnew_push(now);
         let mut frames = Vec::new();
+        let mut crc_errors = 0;
         self.pending.retain(|item| {
             if item.first() != Some(&0x02) {
                 return true;
             }
-            if let Ok(frame) = powerz_protocol::adcnew::decode_frame(item) {
-                frames.push(frame);
+            match powerz_protocol::adcnew::decode_frame(item) {
+                Ok(frame) => frames.push(frame),
+                Err(_) => crc_errors += 1,
             }
             false
         });
+        self.adcnew_crc_errors += crc_errors;
         Ok(frames)
+    }
+
+    /// Frames dropped for a bad CRC or length; the simulator holds every
+    /// good frame, so none is dropped at a cap.
+    fn adcnew_counters(&self) -> powerz_protocol::adcnew::AdcnewCounters {
+        powerz_protocol::adcnew::AdcnewCounters {
+            crc_errors: self.adcnew_crc_errors,
+            dropped_frames: 0,
+        }
     }
 }
 

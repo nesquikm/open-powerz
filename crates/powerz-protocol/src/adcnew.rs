@@ -42,6 +42,16 @@ pub fn crc8(body: &[u8]) -> u8 {
     })
 }
 
+/// Frames lost on the host side of an ADCNEW stream, counted by the CDC
+/// transport since it was opened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdcnewCounters {
+    /// Frames dropped for a bad CRC or length.
+    pub crc_errors: u64,
+    /// Good frames dropped because nobody polled them before the hold cap.
+    pub dropped_frames: u64,
+}
+
 /// Errors from decoding an ADCNEW frame.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AdcnewError {
