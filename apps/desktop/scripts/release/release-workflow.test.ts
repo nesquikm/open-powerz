@@ -65,6 +65,19 @@ const desktopJob = () => findJob((t) => /tauri-apps\/tauri-action@/.test(t));
 const cliJob = () => findJob((t) => /cargo build --release -p powerz-cli/.test(t));
 const publishJob = () => findJob((t) => /contents:\s*write/.test(t));
 
+/** The text of the publish job's run step that calls publish.ts, or "". */
+function publishRun(): string {
+  const j = publishJob();
+  if (!j) return "";
+  const src = j.lines;
+  for (let i = 0; i < src.length; i++) {
+    if (!/^\s*(?:-\s+)?run:/.test(src[i] ?? "")) continue;
+    const script = [src[i] ?? "", ...blockAfter(src, i)].filter((l) => !isComment(l)).join("\n");
+    if (/publish\.ts/.test(script)) return script;
+  }
+  return "";
+}
+
 /** The `needs:` of a job, inline (`needs: a` / `needs: [a, b]`) or as a list. */
 function needsOf(j: { lines: string[] }): string[] {
   const at = j.lines.findIndex((l) => /^\s*needs:/.test(l));
@@ -229,15 +242,13 @@ describe("publishing (AC-E1ZJ2N.5–7)", () => {
 
   it("titles the release from the check outputs and uses the notes file (AC-E1ZJ2N.5)", () => {
     const t = jobText(publishJob() ?? { lines: [] });
-    expect(t).toMatch(/gh release create/);
-    expect(t).toMatch(/needs\.[\w-]+\.outputs\.title/);
-    expect(t).toMatch(/--notes-file/);
+    expect(t).toMatch(/TITLE:\s*\$\{\{\s*needs\.check\.outputs\.title\s*\}\}/);
+    expect(publishRun()).toMatch(/release-notes\.md/);
   });
 
   it("marks a pre-release tag as a pre-release (AC-E1ZJ2N.5)", () => {
     const t = jobText(publishJob() ?? { lines: [] });
-    expect(t).toMatch(/--prerelease/);
-    expect(t).toMatch(/needs\.[\w-]+\.outputs\.prerelease/);
+    expect(t).toMatch(/PRERELEASE:\s*\$\{\{\s*needs\.check\.outputs\.prerelease\s*\}\}/);
   });
 
   it("attaches a SHA256SUMS.txt made with sha256sum (AC-E1ZJ2N.6)", () => {
@@ -264,21 +275,6 @@ describe("publishing (AC-E1ZJ2N.5–7)", () => {
     expect(t).toMatch(/\[ "\$total" -ne "\$\{#expected\[@\]\}" \]/);
   });
 
-  it("checks every file reached the release before deleting leftovers", () => {
-    const t = jobText(publishJob() ?? { lines: [] });
-    const verify = t.search(/grep -Fxq -- "\$\(basename "\$f"\)"/);
-    const del = t.search(/gh release delete-asset/);
-    expect(verify, "no post-upload check").toBeGreaterThanOrEqual(0);
-    expect(verify).toBeLessThan(del);
-  });
-
-  it("reuses an existing release (drafts included) on a re-run instead of creating another", () => {
-    const t = jobText(publishJob() ?? { lines: [] });
-    expect(t).toMatch(/gh api "repos\/\$GH_REPO\/releases" --paginate/);
-    expect(t).toMatch(/if \[ -n "\$ids" \]; then\s+gh release edit/);
-    expect(t).toMatch(/else\s+gh release create "\$TAG" --draft --verify-tag/);
-  });
-
   it("builds only the NSIS installer for a pre-release on Windows (WiX needs a numeric version)", () => {
     const t = jobText(desktopJob() ?? { lines: [] });
     expect(t).toMatch(/prerelease_args:\s*--bundles nsis/);
@@ -286,17 +282,69 @@ describe("publishing (AC-E1ZJ2N.5–7)", () => {
       /needs\.check\.outputs\.prerelease == 'true' && matrix\.prerelease_args \|\| matrix\.args/,
     );
   });
+});
 
-  it("creates a draft, uploads with --clobber, then publishes (AC-E1ZJ2N.7)", () => {
+// FR 4V3DHP: the draft/upload/check/publish logic moved into publish.ts (tested in
+// publish.test.ts against a fake GitHub API); the job only runs it.
+describe("publish job runs the tested publish script (AC-4V3DHP.1–4)", () => {
+  it("runs publish.ts with bun on the notes file and every dist file", () => {
+    const run = publishRun();
+    expect(run, "no run step calls publish.ts").toMatch(
+      /bun\s+apps\/desktop\/scripts\/release\/publish\.ts\b/,
+    );
+    expect(run).toMatch(/\$\{?RUNNER_TEMP\}?"?\/notes\/release-notes\.md/);
+    expect(run).toMatch(/\$\{?RUNNER_TEMP\}?"?\/dist\/\*/);
+  });
+
+  it("passes the tag, title and pre-release flag from the check job", () => {
     const t = jobText(publishJob() ?? { lines: [] });
-    const draft = t.search(/--draft(?!=)/);
-    const upload = t.search(/gh release upload[^\n]*--clobber|--clobber[^\n]*gh release upload/);
-    const publish = t.search(/--draft=false/);
-    expect(draft, "release is not created as a draft").toBeGreaterThanOrEqual(0);
-    expect(upload, "assets are not uploaded with --clobber").toBeGreaterThanOrEqual(0);
-    expect(publish, "the draft is never published").toBeGreaterThanOrEqual(0);
-    expect(draft).toBeLessThan(upload);
-    expect(upload).toBeLessThan(publish);
+    expect(t).toMatch(/TAG:\s*\$\{\{\s*needs\.check\.outputs\.tag\s*\}\}/);
+    expect(t).toMatch(/TITLE:\s*\$\{\{\s*needs\.check\.outputs\.title\s*\}\}/);
+    expect(t).toMatch(/PRERELEASE:\s*\$\{\{\s*needs\.check\.outputs\.prerelease\s*\}\}/);
+    expect(t).toMatch(/GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/);
+  });
+
+  it("gives the write token to the publish step only, and caps the job's run time", () => {
+    const j = publishJob() ?? { lines: [] };
+    const tokenLines = j.lines.filter((l) => /GH_TOKEN:/.test(l));
+    expect(tokenLines, "GH_TOKEN appears once").toHaveLength(1);
+    const step = j.lines.findIndex((l) => /name:\s*Publish the release/.test(l));
+    expect(step, "no `Publish the release` step").toBeGreaterThanOrEqual(0);
+    expect(blockAfter(j.lines, step).join("\n")).toMatch(/GH_TOKEN:/);
+    expect(jobText(j)).toMatch(/^\s+timeout-minutes:\s*\d+/m);
+  });
+
+  it("checks out only the release scripts from the workflow's own commit", () => {
+    const j = publishJob() ?? { lines: [] };
+    const at = j.lines.findIndex((l) => /uses:\s*actions\/checkout@[0-9a-f]{40}\s+#/.test(l));
+    expect(at, "the publish job has no pinned actions/checkout").toBeGreaterThanOrEqual(0);
+    const block = blockAfter(j.lines, at).join("\n");
+    expect(block).toMatch(/persist-credentials:\s*false/);
+    expect(block).toMatch(/sparse-checkout:\s*\|?\s*\n?\s*apps\/desktop\/scripts\/release\b/);
+    // The workflow's commit, never the tag: an older tag may not carry publish.ts.
+    expect(block).not.toMatch(/^\s*ref:/m);
+    expect(block).not.toMatch(/^\s*path:/m);
+  });
+
+  it("sets up bun pinned like the check job", () => {
+    const t = jobText(publishJob() ?? { lines: [] });
+    expect(t).toMatch(/uses:\s*oven-sh\/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\s+#/);
+    expect(t).toMatch(/bun-version:\s*1\.3\.14/);
+  });
+
+  it("verifies the checksums and sets up bun before publishing", () => {
+    const t = jobText(publishJob() ?? { lines: [] });
+    const publish = t.search(/publish\.ts/);
+    expect(publish).toBeGreaterThanOrEqual(0);
+    expect(t.search(/sha256sum --check --strict SHA256SUMS\.txt/)).toBeLessThan(publish);
+    expect(t.search(/oven-sh\/setup-bun@/)).toBeLessThan(publish);
+    expect(t.search(/actions\/checkout@/)).toBeLessThan(publish);
+  });
+
+  it("no longer looks the release up with gh after creating it (AC-4V3DHP.6)", () => {
+    const t = jobText(publishJob() ?? { lines: [] });
+    expect(t).not.toMatch(/gh release (create|edit|upload|delete-asset)/);
+    expect(t).not.toMatch(/gh api [^\n]*releases/);
   });
 });
 
@@ -342,7 +390,7 @@ describe("permissions, pins and tokens (AC-E1ZJ2N.9)", () => {
   it("grants contents: write to exactly one job, the publish job", () => {
     const writers = jobs().filter((j) => /contents:\s*write/.test(jobText(j)));
     expect(writers.map((j) => j.id)).toHaveLength(1);
-    expect(jobText(writers[0] ?? { lines: [] })).toMatch(/gh release create/);
+    expect(jobText(writers[0] ?? { lines: [] })).toMatch(/publish\.ts/);
   });
 
   it("pins every action to a full commit SHA with a version comment", () => {

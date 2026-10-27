@@ -4,6 +4,13 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] — 2026-10-27 — "Return to Sender"
+
+### Fixed
+- Release publishing finishes in one run: the publish job keeps the id of the draft it creates instead of looking it up again in a release list that can lag behind, checks every release id before using it, and finishes a release whose earlier run stopped at the draft, such as v0.6.0 (4V3DHP)
+
+Total test count at release: 2957 tests, 0 failures, 0 errors.
+
 ## [0.6.0] — 2026-10-27 — "Special Delivery"
 
 ### Added
