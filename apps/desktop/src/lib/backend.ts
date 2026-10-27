@@ -446,6 +446,30 @@ export async function pdDetails(index: number, opened = false): Promise<PdDetail
   return invoke<PdDetails>("pd_details", opened ? { index, opened } : { index });
 }
 
+/** Confidence of a meter setting: checked on the meter's screen, or from static
+ * analysis only (FR 1HHT01). */
+export type SettingTag = "confirmed" | "inferred";
+
+/** One read-only row of the Meter settings panel. */
+export interface MeterSettingField {
+  key: string;
+  label: string;
+  value: string;
+  tag: SettingTag;
+}
+
+/** The connected meter's settings, in display order (FR 1HHT01). */
+export interface MeterSettings {
+  fields: MeterSettingField[];
+}
+
+/** Reads the connected meter's settings (GET_DATA 0x008 only); rejects with the
+ * backend's error, e.g. without a meter or on a CRC mismatch. */
+export async function meterSettings(): Promise<MeterSettings> {
+  if (mock) return mock.meterSettings();
+  return invoke<MeterSettings>("meter_settings");
+}
+
 /** A PD capture opened from a pdcap file (FR TGE83E): its rows and status samples,
  * numbered from 0. */
 export interface PdOpened {

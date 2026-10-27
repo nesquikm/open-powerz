@@ -501,6 +501,14 @@ async fn pd_details(
     .await
 }
 
+/// Read the connected meter's settings (GET_DATA 0x008 only) for the
+/// read-only Meter settings panel (FR 1HHT01).
+#[tauri::command]
+async fn meter_settings(state: Shared<'_>) -> Result<worker::MeterSettingsView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || state.manager().control()?.read_settings()).await
+}
+
 /// Drop every captured PD record; the answer is the index of the next one.
 /// A capture opened from a file is dropped too; with only that one and no
 /// meter, the answer is 0.
@@ -995,6 +1003,7 @@ pub fn run() {
             pd_stop,
             pd_details,
             pd_clear,
+            meter_settings,
             pd_save,
             pd_open,
             pd_import,

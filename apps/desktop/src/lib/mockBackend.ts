@@ -20,6 +20,8 @@ import type {
   Gap,
   HistoryGap,
   HistorySeries,
+  MeterSettingField,
+  MeterSettings,
   MinMaxAvg,
   PdDetails,
   PdOpened,
@@ -725,6 +727,32 @@ const MOCK_CABLE: CableView = {
   epr_capable: true,
 };
 
+/** The demo meter's settings rows, as the backend decodes the captured FW 2.0.6
+ * block (FR 1HHT01). */
+const DEMO_METER_SETTINGS: readonly MeterSettingField[] = [
+  { key: "language", label: "Language", value: "English", tag: "inferred" },
+  { key: "brightness", label: "Brightness", value: "50%", tag: "inferred" },
+  { key: "dim_timeout", label: "Dim screen after", value: "off", tag: "inferred" },
+  { key: "startup_logo", label: "Startup logo", value: "off", tag: "inferred" },
+  { key: "theme", label: "Theme", value: "blue", tag: "inferred" },
+  { key: "auto_rotate", label: "Auto-rotate", value: "on", tag: "inferred" },
+  { key: "rotation", label: "Rotation", value: "90°", tag: "inferred" },
+  { key: "sample_rate", label: "Sample rate", value: "50 SPS", tag: "inferred" },
+  {
+    key: "voltage_cal",
+    label: "Voltage calibration (raw)",
+    value: "606, 606, 606, 606, 606",
+    tag: "inferred",
+  },
+  {
+    key: "current_cal",
+    label: "Current calibration (raw)",
+    value: "996668, 996668, 996668, 996668, 996668",
+    tag: "inferred",
+  },
+  { key: "offset_cal", label: "Offset calibration (raw)", value: "80", tag: "inferred" },
+];
+
 export class MockBackend {
   #session: Running | null = null;
   /** The PD capture saved last in the page, and the one opened (FR TGE83E). */
@@ -745,6 +773,8 @@ export class MockBackend {
   #unplugDone = false;
   #replugTimer: ReturnType<typeof setTimeout> | null = null;
   #watchers = new Set<(devices: DeviceListing[]) => void>();
+  /** Settings reads so far (FR 1HHT01). */
+  #meterSettingsReads = 0;
   /** The open trigger session (FR DGSQ6S), null when none. */
   #trigger: MockTrigger | null = null;
   /** Every command the scripted charger received. */
@@ -1190,6 +1220,19 @@ export class MockBackend {
     const k = s.pd.records[index - s.pd.base];
     if (k === undefined) throw usage("That PD record is not in the capture.");
     return pdDetailsOf(k, index);
+  }
+
+  /** The demo meter's settings: the fields of the captured FW 2.0.6 block, all
+   * tagged inferred (FR 1HHT01). */
+  async meterSettings(): Promise<MeterSettings> {
+    this.#open();
+    this.#meterSettingsReads += 1;
+    return { fields: DEMO_METER_SETTINGS.map((f) => ({ ...f })) };
+  }
+
+  /** How many times the settings were read (for the UI tests). */
+  meterSettingsReads(): number {
+    return this.#meterSettingsReads;
   }
 
   /** Drops every captured PD record; a running capture goes on. Like the backend,

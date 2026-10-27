@@ -33,11 +33,11 @@ use crate::args::{
 };
 use crate::commands::{
     DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
-    PdSettingsChange, StreamOptions, WatchOptions, console, detect, firmware_flash, firmware_info,
-    firmware_jump, firmware_probe, firmware_probe_unavailable, info_in_mode, inspect_flash_file,
-    list, pd, pd_decode, pd_save, pd_send, read, select_device, stream, trigger_legacy_list,
-    trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
-    trigger_pd_settings, watch,
+    PdSettingsChange, SettingsOutput, StreamOptions, WatchOptions, console, detect, firmware_flash,
+    firmware_info, firmware_jump, firmware_probe, firmware_probe_unavailable, info_in_mode,
+    inspect_flash_file, list, pd, pd_decode, pd_save, pd_send, read, select_device, settings,
+    stream, trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
+    trigger_pd_reset, trigger_pd_settings, watch,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport, TracedOpener};
@@ -1153,6 +1153,16 @@ fn dispatch<T: Transport, C: Clock>(
         Command::Firmware { .. } => unreachable!("firmware is handled before opening a device"),
         Command::Info { json } => info_in_mode(&mut session, mode, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
+        Command::Settings { json, raw } => {
+            let how = if *raw {
+                SettingsOutput::Raw
+            } else if *json {
+                SettingsOutput::Json
+            } else {
+                SettingsOutput::Text
+            };
+            settings(&mut session, how, &mut out)
+        }
         Command::Watch { interval } => {
             let stop = ctrl_c_flag()?;
             let opts = WatchOptions {

@@ -9,6 +9,7 @@
     firmwareChoose,
     firmwareFlash,
     firmwareInspect,
+    meterSettings,
     pdClear,
     pdDetails,
     pdImport,
@@ -62,6 +63,8 @@
   import Readout from "./lib/components/Readout.svelte";
   import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
   import StatsPanel from "./lib/components/StatsPanel.svelte";
+  import MeterSettingsView from "./lib/components/MeterSettingsView.svelte";
+  import { MeterSettingsPanel } from "./lib/meterSettings.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
   import TriggerView from "./lib/components/TriggerView.svelte";
   import { TriggerPanel } from "./lib/trigger.svelte";
@@ -99,6 +102,17 @@
   /** A stream is running that can be recorded. */
   const canRecord = $derived(session.state === "streaming" || session.state === "rate_locked");
   const exportJob = new ExportJob();
+  /** The read-only Meter settings panel (FR 1HHT01): read on connect, cleared on
+   * disconnect. */
+  const settingsPanel = new MeterSettingsPanel(meterSettings);
+  const meterConnected = $derived(session.details !== null);
+  $effect(() => {
+    const on = meterConnected;
+    untrack(() => {
+      if (on) void settingsPanel.connected();
+      else settingsPanel.disconnected();
+    });
+  });
   /** The PD analyzer's capture (FR TGE83C). */
   const pd = new PdCapture();
   /** The PD record selected in the chart or the packet table (FR TGE83D). */
@@ -713,7 +727,9 @@
           controls={statsControls}
           deps={statsDeps}
           canReset={canRecord}
-        />
+        >
+          <MeterSettingsView panel={settingsPanel} connected={meterConnected} />
+        </StatsPanel>
       </div>
     </div>
     {#if view === "trigger"}
@@ -897,9 +913,18 @@
     gap: 1rem;
     min-width: 0;
   }
+  /* Wide, the side card never sets the row height: it gets the main area's height and
+     scrolls inside it when the Meter settings make it taller. */
   .side-panel {
     grid-area: side;
     min-width: 0;
+    contain: size;
+    display: flex;
+    flex-direction: column;
+  }
+  .side-panel > :global(.stats) {
+    min-height: 0;
+    overflow-y: auto;
   }
   .chart {
     min-width: 0;
@@ -922,6 +947,7 @@
     }
     .side-panel {
       flex: 1 0 auto;
+      contain: none;
     }
     .notice-stack:not(.pd-notices) {
       position: static;

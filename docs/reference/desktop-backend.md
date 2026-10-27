@@ -7,7 +7,8 @@ module, `apps/desktop/src/lib/backend.ts`. Every function there calls a Tauri
 command, or the in-browser `MockBackend` when the UI is built with
 `VITE_BACKEND=mock`. Scripts and other front ends can use the same seam. This
 page lists the parts added for session gaps, replug, the PD analyzer, the
-trigger panel and the firmware update; the source has the rest.
+trigger panel, the firmware update and the meter settings; the source has the
+rest.
 
 ## Session history
 
@@ -172,6 +173,27 @@ Behaviour:
 - **The Firmware tab is opt-in.** It appears only when **Advanced firmware**
   is switched on in About. The switch is stored in the browser, off by
   default, and cannot be turned off while an update runs.
+
+## Meter settings
+
+| function | what it does |
+|---|---|
+| `meterSettings(): Promise<MeterSettings>` | Reads the connected meter's settings block (Tauri command `meter_settings`). Only one GET_DATA for the settings attribute (0x008) goes out; the stream keeps running. Rejects with `usage` when no meter is connected, and with the backend's error when the block fails its CRC check. |
+
+Types:
+
+| type | fields |
+|---|---|
+| `MeterSettings` | `fields`: every decoded field, in display order |
+| `MeterSettingField` | `key` (stable, e.g. `language`), `label`, `value` (formatted, e.g. `"50%"`; calibration values raw), `tag` |
+| `SettingTag` | `"confirmed"` (checked on the meter's screen) or `"inferred"` (static analysis only) |
+
+On the UI side, `MeterSettingsPanel` (in `meterSettings.svelte.ts`) reads the
+settings when a meter connects and on Refresh, and forgets them on
+disconnect; a failed read shows the error and no stale values. The read-only
+panel sits in the Meter tab's side card, under the stats. `MockBackend`
+answers the demo meter's fields and counts the reads
+(`meterSettingsReads()`).
 
 ## Mock backend
 

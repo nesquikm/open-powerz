@@ -146,7 +146,7 @@ Control types (main header type below 0x40):
 | 0x07 | FINISHED | reply only | acknowledges flash-write chunks | [doc] [static] |
 | 0x08 | JUMP_APROM | 0 | none; leaves DFU mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
 | 0x09 | JUMP_DFU | 0 | none; enters firmware-update mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
-| 0x0A | GET_STATUS | | no handler in the vendor app | [doc] |
+| 0x0A | settings write (named GET_STATUS in the API doc) | one 4-byte section per changed setting: attribute = setting key, u32 value | unknown; the vendor PDM settings dialog sends this type to change display settings, the key numbers are not recovered; the vendor meter app has no handler for it, and nothing in our app sends it | [doc] [static] |
 | 0x0B | ERROR | | no handler in the vendor app | [doc] |
 | 0x0C | GET_DATA | attribute bit mask | PUT_DATA (0x41) | [doc] [static] [device] |
 | 0x0D | GET_FILE | | unused by the vendor app | [doc] [static] |
@@ -310,9 +310,45 @@ first 96 bytes; device overrides its "96 bytes" reading.
 | 0x70 | ASCII | `POWER-Z`, probably the name shown on screen | [device] [inferred] |
 | 0xB0 | u32 | CRC-32 of bytes 0x60..0xAF | [device] (firmware 2.0.6) [inferred] (prior art) |
 
-- Writing settings (SET_DATA 0x48) is out of scope and never sent. [static]
-- Meter UI settings (brightness, rotation, language) are set some other way
-  that is still unknown. [inferred]
+### Meter settings fields
+
+The vendor trigger tool's settings dialog reads the meter's own UI settings
+from two words of this section: the u32 at 0x00 and the u32 at 0x60. Which
+bits feed which control was worked out by static analysis of that dialog
+[static]; what each value means on the meter has not yet been compared with
+the meter's screen, so every meaning below stays [inferred] until it is. Bits
+1..2, 12..13, 19..26 and 28..31 of the u32 at 0x00 are not read by the dialog
+[static].
+
+| field | position | values | tag |
+|---|---|---|---|
+| language | u32 at 0x00, bit 0 | 0 = Chinese, 1 = English | [static] map; meaning [inferred] |
+| brightness | u32 at 0x00, bits 3..9 | percent, 1..100 | [static] map; meaning [inferred] |
+| dim (screen dimming timeout) | u32 at 0x00, bits 10..11 | 0 = off, 1 = 15 s, 2 = 30 s, 3 = 60 s | [static] map; meaning [inferred] |
+| startup logo | u32 at 0x00, bits 14..15 | 0 = off, 1 = 1 s, 2 = 3 s, 3 = 5 s (how long the logo shows) | [static] map; meaning [inferred] |
+| theme | u32 at 0x00, bits 16..18 (the low 3 bits of the u16 at 0x02) | 0 blue, 1 green, 2 pink, 3 orange, 4 yellow, 5 dark green, 6 cyan; 7 unknown | [static] map; meaning [inferred] |
+| auto-rotate | u32 at 0x00, bit 27 | 1 = on | [static] map; meaning [inferred] |
+| rotation (default screen angle) | u32 at 0x60, bits 0..1 | 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270° | [static] map; meaning [inferred] |
+| rate (sampling rate) | u32 at 0x60, bits 2..3 | 0 = 2 SPS, 1 = 10 SPS, 2 = 50 SPS, 3 = 1000 SPS | [static] [device] (queue rate code); screen label [inferred] |
+| voltage calibration | 5 x i32 at 0x1C, 0x20, 0x24, 0x28, 0x2C | signed, shown as plain integers | [static] map; meaning [inferred] |
+| current calibration | 10 x i32 from 0x30; the dialog shows the 5 at 0x30, 0x34, 0x38, 0x3C, 0x40 | signed, shown as plain integers | [static] map; meaning [inferred] |
+| offset calibration | i32 at 0x58 | signed | [static] map; meaning [inferred] |
+
+- [device] Our firmware 2.0.6 dump has 0xF8500191 in the u32 at 0x00 and
+  0x849 in the u32 at 0x60. With the map above they read as English,
+  brightness 50, dim off, startup logo off, theme blue, auto-rotate on,
+  rotation 90° and rate 50 SPS; those readings are [inferred] until compared
+  with the meter's screen.
+- The decoder checks both CRC-32 blocks first. On a CRC mismatch in either
+  block it reports the mismatch as an error and decodes no field (our
+  decoder's behaviour, pinned by its unit tests).
+- Nothing is ever written: the app never sends a settings write (message
+  type 0x0A, see the Message catalogue) or SET_DATA (0x48); reading the
+  section is the only settings traffic (pinned by a test on the commands the
+  app sends).
+- A field moves from [inferred] to [device] only after it has been compared
+  with a photo or reading of the meter's screen; a field that does not match
+  is fixed or stays [inferred].
 
 ## Memory read and device info
 

@@ -376,6 +376,12 @@ impl<T: Transport, C: Clock> Session<T, C> {
         }
         Ok(settings)
     }
+
+    /// Read the SETTINGS block and decode its typed fields; a CRC mismatch
+    /// is reported as [`DecodeError::Crc`].
+    pub fn read_meter_settings(&mut self) -> Result<crate::decode::settings::MeterSettings, Error> {
+        Ok(self.read_settings()?.meter_settings()?)
+    }
 }
 
 /// The rate the meter actually runs at for a reported code: code 4 is

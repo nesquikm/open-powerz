@@ -97,6 +97,16 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show the meter's settings block (read-only): display, sample rate and
+    /// raw calibration values, each tagged confirmed or inferred.
+    Settings {
+        /// Print one JSON object instead of tagged lines.
+        #[arg(long, conflicts_with = "raw")]
+        json: bool,
+        /// Hex-dump the 180-byte block instead of decoding it.
+        #[arg(long)]
+        raw: bool,
+    },
     /// Show the `read` values live, refreshing until Ctrl-C.
     Watch {
         /// Refresh interval in milliseconds (minimum 50).
@@ -498,6 +508,7 @@ impl Command {
             Command::List { .. } => "list",
             Command::Info { .. } => "info",
             Command::Read { .. } => "read",
+            Command::Settings { .. } => "settings",
             Command::Watch { .. } => "watch",
             Command::Stream { .. } => "stream",
             Command::Pd { .. } => "pd",

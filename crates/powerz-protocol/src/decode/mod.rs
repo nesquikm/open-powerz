@@ -40,6 +40,12 @@ pub enum DecodeError {
         /// Frame type actually supplied (extend bit masked off).
         got: u8,
     },
+    /// A stored CRC-32 does not match its data block; nothing was decoded.
+    #[error("{what}: CRC mismatch")]
+    Crc {
+        /// Block whose CRC failed (e.g. `"SETTINGS block A"`).
+        what: &'static str,
+    },
 }
 
 /// Fail with [`DecodeError::Length`] unless `buf` holds at least `min` bytes.

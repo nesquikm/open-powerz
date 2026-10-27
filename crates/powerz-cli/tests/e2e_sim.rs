@@ -312,3 +312,53 @@ fn disconnect_mid_stream_is_device_error_exit_5() {
         .stderr(predicate::str::contains("disconnected"));
     let _ = std::fs::remove_file(&csv);
 }
+
+// ---- AC-1HHT01.3: `powerz settings` against the simulator ----
+
+#[test]
+fn settings_against_the_simulator() {
+    let a = sim("idle").arg("settings").assert().success();
+    let out = stdout_of(&a);
+    assert_eq!(stderr_of(&a), "", "no stderr on success");
+    // The demo meter mirrors the captured FW 2.0.6 settings word.
+    assert!(out.contains("English"), "{out}");
+    assert!(out.contains("50%"), "{out}");
+    assert!(out.contains("[inferred]"), "{out}");
+    insta::assert_snapshot!("settings_sim", out);
+}
+
+#[test]
+fn settings_json_and_raw_against_the_simulator() {
+    let a = sim("idle").args(["settings", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(&stdout_of(&a)).unwrap();
+    let fields = v["fields"].as_array().expect("fields array");
+    assert_eq!(fields.len(), 11);
+    assert!(fields.iter().all(|f| f["tag"] == "inferred"), "{v}");
+
+    let a = sim("idle").args(["settings", "--raw"]).assert().success();
+    let out = stdout_of(&a);
+    let n: usize = out
+        .lines()
+        .map(|l| l.split_whitespace().skip(1).count())
+        .sum();
+    assert_eq!(n, 180, "{out}");
+}
+
+#[test]
+fn settings_sends_no_write_against_the_simulator() {
+    let a = sim("idle").args(["--trace", "settings"]).assert().success();
+    let trace = stderr_of(&a);
+    let sent: Vec<&str> = trace.lines().filter(|l| l.starts_with('>')).collect();
+    assert!(!sent.is_empty(), "no frames traced:\n{trace}");
+    for line in sent {
+        let first = line
+            .trim_start_matches('>')
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        let ty = u8::from_str_radix(first, 16).unwrap_or(0xFF) & 0x7F;
+        assert_ne!(ty, 0x0A, "settings write sent: {line}");
+        assert_ne!(ty, 0x48, "SET_DATA sent: {line}");
+    }
+    assert!(!trace.lines().any(|l| l.starts_with('x')), "{trace}");
+}

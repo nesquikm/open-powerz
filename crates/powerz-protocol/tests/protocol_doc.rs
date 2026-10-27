@@ -605,3 +605,66 @@ fn x2spdw_12_clearing_an_endpoint_halt_is_listed_as_safe_with_a_tag() {
          operations with a confidence tag"
     );
 }
+
+// ---- AC-1HHT01.5: every decoded settings field is documented with a tag ----
+
+/// Spellings of a bit range `a..b` the doc may use.
+fn bit_range(a: u8, b: u8) -> Vec<String> {
+    vec![
+        format!("{a}..{b}"),
+        format!("{a}-{b}"),
+        format!("{a}–{b}"),
+        format!("{a} to {b}"),
+    ]
+}
+
+/// The SETTINGS section has a table row naming `keyword` with one of the
+/// `position` spellings and a confidence tag.
+fn assert_settings_field_row(rows: &[String], keyword: &str, position: &[String]) {
+    let ok = rows.iter().any(|r| {
+        let l = r.to_lowercase();
+        l.contains(keyword)
+            && position.iter().any(|p| l.contains(&p.to_lowercase()))
+            && (l.contains("[device]") || l.contains("[inferred]"))
+    });
+    assert!(
+        ok,
+        "SETTINGS: no table row documents {keyword:?} at one of {position:?} with a \
+         [device] or [inferred] tag"
+    );
+}
+
+#[test]
+fn settings_doc_documents_every_decoded_field_with_a_tag() {
+    let text = doc();
+    let rows: Vec<String> = units(&section(&text, "settings"))
+        .into_iter()
+        .filter(|u| u.starts_with('|'))
+        .collect();
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert_settings_field_row(&rows, "language", &s(&["bit 0"]));
+    assert_settings_field_row(&rows, "brightness", &bit_range(3, 9));
+    assert_settings_field_row(&rows, "dim", &bit_range(10, 11));
+    assert_settings_field_row(&rows, "startup logo", &bit_range(14, 15));
+    assert_settings_field_row(&rows, "theme", &bit_range(16, 18));
+    assert_settings_field_row(&rows, "auto-rotate", &s(&["bit 27"]));
+    assert_settings_field_row(&rows, "rotation", &bit_range(0, 1));
+    assert_settings_field_row(&rows, "rate", &bit_range(2, 3));
+    assert_settings_field_row(&rows, "voltage", &s(&["0x1c"]));
+    assert_settings_field_row(&rows, "current", &s(&["0x30"]));
+    assert_settings_field_row(&rows, "offset", &s(&["0x58"]));
+}
+
+#[test]
+fn settings_doc_says_crc_mismatch_is_refused_and_nothing_is_written() {
+    let text = doc();
+    let body = section(&text, "settings").join("\n").to_lowercase();
+    assert!(
+        body.contains("mismatch") && body.contains("crc"),
+        "SETTINGS must say a CRC mismatch is reported instead of decoding"
+    );
+    assert!(
+        contains_token(&body, "0x0a") && contains_token(&body, "0x48"),
+        "SETTINGS must say settings writes (0x0A) and SET_DATA (0x48) are never sent"
+    );
+}

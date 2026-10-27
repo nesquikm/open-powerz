@@ -148,6 +148,22 @@ pub struct PdStatusBatch {
     pub samples: Vec<PdStatusSample>,
 }
 
+/// The meter's settings as the panel shows them, in display order (FR
+/// 1HHT01); each row serializes as `{key, label, value, tag}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MeterSettingsView {
+    /// Every decoded field.
+    pub fields: Vec<powerz_protocol::decode::settings::Row>,
+}
+
+impl From<&powerz_protocol::decode::settings::MeterSettings> for MeterSettingsView {
+    fn from(settings: &powerz_protocol::decode::settings::MeterSettings) -> Self {
+        Self {
+            fields: settings.rows(),
+        }
+    }
+}
+
 /// Every event the backend sends to the UI.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -928,6 +944,17 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Ok(self.pd.clear())
     }
 
+    /// Read the meter's SETTINGS block (GET_DATA 0x008 only) for the
+    /// read-only settings panel (FR 1HHT01); the stream goes on afterwards.
+    pub fn read_settings(&mut self) -> Result<MeterSettingsView, UiError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        let settings = blocked(self.meter.as_ref(), || session.read_meter_settings())
+            .map_err(|e| session_error(&e))?;
+        Ok(MeterSettingsView::from(&settings))
+    }
+
     /// The PD capture so far, to be saved as a pdcap file (FR TGE83E) off
     /// this thread.
     pub fn pd_save(&self) -> PdSave {
@@ -1049,6 +1076,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::PdSave(reply) => {
                 let _ = reply.send(self.pd_save());
             }
+            Command::ReadSettings(reply) => {
+                let _ = reply.send(self.read_settings());
+            }
             Command::HoldPolling(hold, reply) => {
                 self.hold_polling(hold);
                 let _ = reply.send(());
@@ -1083,6 +1113,7 @@ enum Command {
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
     ClearPd(mpsc::Sender<Result<u64, UiError>>),
     PdSave(mpsc::Sender<PdSave>),
+    ReadSettings(mpsc::Sender<Result<MeterSettingsView, UiError>>),
     /// Hold or release the queue polling; answered between steps, so no
     /// poll is in flight once a hold is answered.
     HoldPolling(bool, mpsc::Sender<()>),
@@ -1104,6 +1135,7 @@ impl std::fmt::Debug for Command {
             Command::PdDetails(index, _) => f.debug_tuple("PdDetails").field(index).finish(),
             Command::ClearPd(_) => f.write_str("ClearPd"),
             Command::PdSave(_) => f.write_str("PdSave"),
+            Command::ReadSettings(_) => f.write_str("ReadSettings"),
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::Handover(..) => f.write_str("Handover"),
         }
@@ -1418,6 +1450,12 @@ impl WorkerControl {
     pub fn clear_pd(&self) -> Result<u64, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::ClearPd(reply), &answer)?
+    }
+
+    /// Read the meter's settings for the read-only panel.
+    pub fn read_settings(&self) -> Result<MeterSettingsView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::ReadSettings(reply), &answer)?
     }
 
     /// Save the PD capture to `path` as a pdcap file; returns the number of

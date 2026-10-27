@@ -21,6 +21,7 @@ mod list;
 mod pd;
 mod pd_send;
 mod read;
+mod settings;
 mod stream;
 mod trigger;
 mod watch;
@@ -36,6 +37,7 @@ pub use list::{list, select_device};
 pub use pd::{pd, pd_decode, pd_save};
 pub use pd_send::{PdSendOptions, pd_send};
 pub use read::read;
+pub use settings::{SettingsOutput, settings};
 pub use stream::{StreamOptions, StreamSummary, stream};
 pub use trigger::{
     LegacyRequestOptions, PdRequestOptions, PdSettingsChange, trigger_legacy_list,

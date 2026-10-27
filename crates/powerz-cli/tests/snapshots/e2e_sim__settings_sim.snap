@@ -1,0 +1,15 @@
+---
+source: crates/powerz-cli/tests/e2e_sim.rs
+expression: out
+---
+Language:                  English [inferred]
+Brightness:                50% [inferred]
+Dim screen after:          off [inferred]
+Startup logo:              off [inferred]
+Theme:                     blue [inferred]
+Auto-rotate:               on [inferred]
+Rotation:                  90° [inferred]
+Sample rate:               50 SPS [inferred]
+Voltage calibration (raw): 606, 606, 606, 606, 606 [inferred]
+Current calibration (raw): 996668, 996668, 996668, 996668, 996668 [inferred]
+Offset calibration (raw):  80 [inferred]
