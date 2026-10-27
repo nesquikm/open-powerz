@@ -1,8 +1,8 @@
 ---
 milestone: M_FW682R
 id: fr_01M5X67KQQR9RNV1E04KFW682R
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-27T00:56:11Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -26,10 +26,10 @@ codename: Return to Sender
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [4V3DHP](../frs/4V3DHP.md) | Release publish finds its own draft | n/a |
+| [4V3DHP](../frs/archive/4V3DHP.md) | Release publish finds its own draft | n/a |
 
 **Tasks:**
-- [ ] Release publish finds its own draft — 4V3DHP
+- [x] Release publish finds its own draft — 4V3DHP
 
 **M7 follow-ups:**
 - (none yet)

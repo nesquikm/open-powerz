@@ -1,8 +1,8 @@
 ---
 title: Release publish finds its own draft
 milestone: M_FW682R
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-27T00:56:11Z
 id: fr_01M5X67KQRK0874KKS9X4V3DHP
 created_at: 2026-10-26T22:45:23.832Z
 changelog_category: Fixed
@@ -55,3 +55,10 @@ Unit tests with a fake API cover the cases in AC 4. The dry run on the PR still 
 ## Notes
 
 Failed run: 40413437391 (tag v0.6.0, 2026-10-27). All nine files are on the v0.6.0 draft; it was left unpublished on purpose so the fixed workflow can finish it.
+
+## Implementation notes
+
+- publish.ts sends make_latest "true" for every final release, so a manual re-run of an older tag takes the Latest badge — same as the replaced step's gh release edit --latest; AC.5 runs v0.6.0 before the next tag
+- on an already published release a replaced asset is deleted before its re-upload — same as gh release upload --clobber; documented in publish.ts
+- the Link rel=next URL is followed without checking its host — the header comes from api.github.com responses
+- main() (CLI argument and env parsing) has no unit test — exercised by the workflow run; the publish logic and client are tested
