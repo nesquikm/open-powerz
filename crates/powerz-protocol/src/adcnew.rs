@@ -50,7 +50,15 @@ pub struct AdcnewCounters {
     pub crc_errors: u64,
     /// Good frames dropped because nobody polled them before the hold cap.
     pub dropped_frames: u64,
+    /// Start requests the meter echoed back instead of starting the stream.
+    pub start_echoes: u64,
 }
+
+/// Host silence before a start is sent again after the meter echoed one.
+/// Right after a bulk session the meter echoes a start and streams nothing,
+/// and any request within about 6–10 s keeps it so; a start after a quiet
+/// spell streams. [device] (firmware 2.0.6, 2026-10-28)
+pub const START_ECHO_QUIET: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// Errors from decoding an ADCNEW frame.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

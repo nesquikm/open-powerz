@@ -652,6 +652,12 @@ Frame header (4 bytes):
   ADC + queue data. [device]
 - A `0F` sent during the stream got a 4-byte reply of unknown meaning and
   stopped the stream. [device]
+- Right after a bulk session (CONNECT and GET_DATA on the vendor pipe) the
+  meter echoes a `02 <att>` start back unchanged and streams nothing. Every
+  request in that time keeps it so; a start sent after 6–10 s of host
+  silence streams normally. [device] (firmware 2.0.6, 2026-10-28) Our
+  library drops the echo, keeps quiet for 12 s and sends the start once
+  more; the CLI gives up after 3 echoes.
 - The note says auto-upload stops after one hour or on unplug unless
   refreshed. [doc] Our library sends the keep-alive every 30 minutes while
   a stream runs and `03` when it stops one.

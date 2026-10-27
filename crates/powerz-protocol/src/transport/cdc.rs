@@ -83,6 +83,13 @@ pub struct CdcTransport<P> {
     frames: Vec<Frame>,
     /// Stream frames dropped at the hold cap.
     overflowed: u64,
+    /// The last start request, until the first bytes after it show whether
+    /// the meter echoed it.
+    start_sent: Option<Vec<u8>>,
+    /// Bytes read since that start, while they may still be its echo.
+    after_start: Vec<u8>,
+    /// Start requests the meter echoed.
+    start_echoes: u64,
 }
 
 /// Stream frames kept between polls before the oldest are dropped.
@@ -98,6 +105,9 @@ impl<P: Read + Write> CdcTransport<P> {
             streaming: false,
             frames: Vec::new(),
             overflowed: 0,
+            start_sent: None,
+            after_start: Vec::new(),
+            start_echoes: 0,
         })
     }
 
@@ -122,6 +132,53 @@ impl<P: Read + Write> CdcTransport<P> {
                 | io::ErrorKind::Interrupted => Ok(None),
                 _ => Err(map_io_error(&e, std::env::consts::OS)),
             },
+        }
+    }
+
+    /// Hand stream bytes to the demux. Right after a start request they are
+    /// held until [`settle_start`](Self::settle_start) decides whether they
+    /// begin with an echo of it: right after a bulk session the meter sends
+    /// the start back instead of streaming `[device]`.
+    fn push_stream(&mut self, bytes: &[u8]) {
+        if self.start_sent.is_some() {
+            self.after_start.extend_from_slice(bytes);
+        } else if let Some(demux) = self.demux.as_mut() {
+            demux.push(bytes);
+        }
+    }
+
+    /// Decide on the bytes held since the last start, once a read found no
+    /// more: an echo is the start request alone, or the start followed by
+    /// bytes that are not a valid frame (a 50/s ADC+PD start, `02 12`,
+    /// begins like every 50/s record frame). Too few bytes to tell wait for
+    /// the next poll.
+    fn settle_start(&mut self) {
+        let Some(start) = self.start_sent.as_ref() else {
+            return;
+        };
+        let held = &self.after_start;
+        let echoed = if held.len() <= start.len() {
+            if start.starts_with(held) && held.len() < start.len() {
+                return;
+            }
+            held == start
+        } else if held.starts_with(start) {
+            match frame_at_start(held) {
+                // Not enough bytes yet to check the frame.
+                None => return,
+                Some(is_frame) => !is_frame,
+            }
+        } else {
+            false
+        };
+        let mut held = std::mem::take(&mut self.after_start);
+        if echoed {
+            self.start_echoes += 1;
+            held.drain(..start.len());
+        }
+        self.start_sent = None;
+        if let Some(demux) = self.demux.as_mut() {
+            demux.push(&held);
         }
     }
 
@@ -318,13 +375,22 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
             demux.push(&std::mem::take(&mut self.pending));
             self.demux = Some(demux);
         }
-        self.write_request(&request.encode())?;
+        let bytes = request.encode();
+        self.write_request(&bytes)?;
+        self.after_start.clear();
+        self.start_sent = None;
         match request {
             Request::Stop => {
                 self.streaming = false;
                 self.frames.clear();
             }
-            Request::Start { .. } | Request::StartDefault | Request::KeepAlive => {
+            // Only `02 <att>` is checked for an echo: a bare `02` could not be
+            // told from the first byte of a frame.
+            Request::Start { .. } => {
+                self.streaming = true;
+                self.start_sent = Some(bytes);
+            }
+            Request::StartDefault | Request::KeepAlive => {
                 self.streaming = true;
             }
         }
@@ -342,10 +408,9 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
             let Some(n) = self.read_chunk(&mut chunk)? else {
                 break;
             };
-            if let Some(demux) = self.demux.as_mut() {
-                demux.push(&chunk[..n]);
-            }
+            self.push_stream(&chunk[..n]);
         }
+        self.settle_start();
         self.drain_demux(false);
         Ok(std::mem::take(&mut self.frames))
     }
@@ -354,8 +419,20 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
         AdcnewCounters {
             crc_errors: self.demux.as_ref().map_or(0, |d| d.dropped_frames() as u64),
             dropped_frames: self.overflowed,
+            start_echoes: self.start_echoes,
         }
     }
+}
+
+/// Whether `bytes` begin with a whole, valid ADCNEW frame (length and
+/// CRC); `None` while too few bytes are there to tell.
+fn frame_at_start(bytes: &[u8]) -> Option<bool> {
+    let obj = usize::from(*bytes.get(2)?);
+    let len = 4 + obj * 4;
+    if bytes.len() < len.max(4) {
+        return None;
+    }
+    Some(obj > 0 && crate::adcnew::decode_frame(&bytes[..len]).is_ok())
 }
 
 /// Port reads per [`Transport::adcnew_frames`] call at most.
@@ -642,8 +719,94 @@ mod tests {
             AdcnewCounters {
                 crc_errors: 1,
                 dropped_frames: 3,
+                start_echoes: 0,
             }
         );
+    }
+
+    /// The start request for ADC at 50/s, as the meter echoes it right after
+    /// a bulk session (2026-10-28 probe on the meter: `02 02` in, `02 02`
+    /// back, no stream). [device]
+    const ECHOED_START: [u8; 2] = [0x02, 0x02];
+
+    #[test]
+    fn an_echoed_start_is_dropped_and_counted_not_read_as_a_frame() {
+        let mut bytes = ECHOED_START.to_vec();
+        bytes.extend(record_frame(20));
+        let port = FakePort::with_chunks(vec![Ok(bytes)]);
+        let mut t = CdcTransport::with_port(port.clone());
+        t.adcnew_send(Request::Start {
+            content: crate::adcnew::Content::Adc,
+            rate: crate::decode::Rate::Sps50,
+        })
+        .unwrap();
+        assert_eq!(
+            port.written(),
+            ECHOED_START.to_vec(),
+            "the real request bytes"
+        );
+        let frames = t.adcnew_frames().unwrap();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        let c = t.adcnew_counters();
+        assert_eq!((c.start_echoes, c.crc_errors), (1, 0));
+    }
+
+    #[test]
+    fn an_echo_split_across_reads_is_still_recognised() {
+        let mut rest = vec![ECHOED_START[1]];
+        rest.extend(record_frame(20));
+        let port = FakePort::with_chunks(vec![Ok(vec![ECHOED_START[0]]), Ok(rest)]);
+        let mut t = CdcTransport::with_port(port);
+        t.adcnew_send(Request::Start {
+            content: crate::adcnew::Content::Adc,
+            rate: crate::decode::Rate::Sps50,
+        })
+        .unwrap();
+        assert_eq!(t.adcnew_frames().unwrap().len(), 1);
+        assert_eq!(t.adcnew_counters().start_echoes, 1);
+    }
+
+    #[test]
+    fn a_frame_that_begins_like_the_start_is_not_an_echo() {
+        // ADC + PD at 50/s is `02 12`, the first two bytes of every 50/s
+        // record frame (`02 12 05 crc`).
+        let port = FakePort::with_chunks(vec![Ok(record_frame(20))]);
+        let mut t = CdcTransport::with_port(port.clone());
+        t.adcnew_send(Request::Start {
+            content: crate::adcnew::Content::AdcPd,
+            rate: crate::decode::Rate::Sps50,
+        })
+        .unwrap();
+        assert_eq!(port.written(), vec![0x02, 0x12]);
+        assert_eq!(t.adcnew_frames().unwrap().len(), 1);
+        assert_eq!(t.adcnew_counters(), AdcnewCounters::default());
+    }
+
+    #[test]
+    fn an_echo_with_nothing_after_it_is_counted() {
+        let port = FakePort::with_chunks(vec![Ok(ECHOED_START.to_vec())]);
+        let mut t = CdcTransport::with_port(port);
+        t.adcnew_send(Request::Start {
+            content: crate::adcnew::Content::Adc,
+            rate: crate::decode::Rate::Sps50,
+        })
+        .unwrap();
+        assert!(t.adcnew_frames().unwrap().is_empty());
+        let c = t.adcnew_counters();
+        assert_eq!((c.start_echoes, c.crc_errors), (1, 0));
+    }
+
+    #[test]
+    fn frames_right_after_a_start_are_not_taken_for_an_echo() {
+        let port = FakePort::with_chunks(vec![Ok(record_frame(20))]);
+        let mut t = CdcTransport::with_port(port);
+        t.adcnew_send(Request::Start {
+            content: crate::adcnew::Content::Adc,
+            rate: crate::decode::Rate::Sps50,
+        })
+        .unwrap();
+        assert_eq!(t.adcnew_frames().unwrap().len(), 1);
+        assert_eq!(t.adcnew_counters(), AdcnewCounters::default());
     }
 
     #[test]

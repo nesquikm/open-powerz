@@ -49,6 +49,19 @@ pub struct CdcStreamSummary {
     pub crc_errors: u64,
 }
 
+/// Echoed starts after which `stream --source cdc` and `watch --source cdc`
+/// give up: the meter echoes a start right after a bulk session `[device]`,
+/// and the session sends it again after a quiet spell.
+pub const MAX_START_ECHOES: u64 = 3;
+
+/// The error once the meter echoed more than [`MAX_START_ECHOES`] starts.
+pub(crate) fn too_many_echoes() -> CliError {
+    CliError::Device(
+        "the meter keeps echoing the ADCNEW start instead of streaming; unplug and replug it"
+            .into(),
+    )
+}
+
 /// How long `stream` keeps polling without receiving a single record.
 const NO_DATA: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -204,7 +217,7 @@ pub fn stream_cdc<T: Transport, C: Clock>(
     let recorded = CsvRecorder::new(csv)
         .map_err(CliError::from)
         .and_then(|mut recorder| {
-            if let Err(e) = record_cdc(session, opts, stop, &mut recorder, &mut summary) {
+            if let Err(e) = record_cdc(session, opts, stop, &mut recorder, &mut summary, err) {
                 // Keep the rows received before the failure.
                 let _ = recorder.flush();
                 return Err(e);
@@ -238,14 +251,34 @@ fn record_cdc<T: Transport, C: Clock, W: Write>(
     stop: &AtomicBool,
     recorder: &mut CsvRecorder<W>,
     summary: &mut CdcStreamSummary,
+    err: &mut dyn Write,
 ) -> Result<(), CliError> {
     let period = Streamer::poll_period(opts.rate);
     let limit_ms = opts.duration.map(|d| d.as_millis());
     let within_limit = |elapsed_ms: u64| limit_ms.is_none_or(|l| u128::from(elapsed_ms) < l);
     let mut first_ms: Option<u32> = None;
     let mut waited_ms: u64 = 0;
+    let mut told_echo = false;
     while !stop.load(Ordering::SeqCst) {
         let poll = session.poll_adcnew()?;
+        if session.adcnew_counters().start_echoes > MAX_START_ECHOES {
+            return Err(too_many_echoes());
+        }
+        if session.adcnew_restart_pending() {
+            // The meter echoed the start; the session sends it again after
+            // a quiet spell, which does not count as missing data.
+            if !told_echo {
+                writeln!(
+                    err,
+                    "the meter echoed the stream start (a bulk session ended moments ago); starting again in {} s",
+                    powerz_protocol::adcnew::START_ECHO_QUIET.as_secs()
+                )?;
+                told_echo = true;
+            }
+            waited_ms = 0;
+            session.sleep(period);
+            continue;
+        }
         let Some(first) = poll.records.first() else {
             waited_ms += period.as_millis() as u64;
             if waited_ms > NO_DATA.as_millis() as u64 {

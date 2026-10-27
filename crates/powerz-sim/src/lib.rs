@@ -188,6 +188,11 @@ impl Clock for SimClock {
     }
 }
 
+/// Host silence after which an echoing meter (the `echo-start` fault) takes
+/// an ADCNEW start again; the real meter needed between 6 and 10 s
+/// `[device]`.
+pub const ECHO_QUIET_MS: u64 = 8_000;
+
 /// Faults the simulator injects. Request numbers count `transact` calls
 /// from 1 (follow-up `read`s are not counted).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -204,6 +209,9 @@ pub struct FaultPlan {
     permission_denied: bool,
     /// ADCNEW frame numbers (from 1) sent with a broken CRC.
     corrupt_adcnew_at: Vec<usize>,
+    /// The CDC persona starts as right after a bulk session: it echoes
+    /// ADCNEW starts until the host has been quiet for [`ECHO_QUIET_MS`].
+    echo_start: bool,
 }
 
 impl FaultPlan {
@@ -253,7 +261,15 @@ impl FaultPlan {
 
     /// Parse the `POWERZ_SIM_FAULT` syntax: comma-separated `timeout`,
     /// `timeout@N`, `disconnect@N` (after N queue polls), `wrong-id@N`,
-    /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N).
+    /// The meter as right after a bulk session `[device]`: an ADCNEW start
+    /// is echoed and starts nothing until a request comes after
+    /// [`ECHO_QUIET_MS`] of host silence.
+    pub fn echo_start(mut self) -> FaultPlan {
+        self.echo_start = true;
+        self
+    }
+
+    /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -273,10 +289,11 @@ impl FaultPlan {
                 ("wrong-id", Some(n)) => plan.wrong_id_at(n),
                 ("permission", None) => plan.permission_denied(),
                 ("corrupt-adcnew", Some(n)) => plan.corrupt_adcnew_at(n),
+                ("echo-start", None) => plan.echo_start(),
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
-                         disconnect@N, wrong-id@N, permission or corrupt-adcnew@N)"
+                         disconnect@N, wrong-id@N, permission, corrupt-adcnew@N or echo-start)"
                     ));
                 }
             };
@@ -343,6 +360,13 @@ pub struct SimDevice {
     adcnew_sent: usize,
     /// ADCNEW frames the host side dropped for a bad CRC or length.
     adcnew_crc_errors: u64,
+    /// Echoing ADCNEW starts (the `echo-start` fault) since this uptime of
+    /// the last host request; `None` once a quiet start got through.
+    echo_since_ms: Option<u64>,
+    /// The last ADCNEW start request, to recognise its echo.
+    adcnew_last_start: Vec<u8>,
+    /// ADCNEW starts the host side saw echoed back.
+    adcnew_start_echoes: u64,
 }
 
 impl SimDevice {
@@ -390,6 +414,9 @@ impl SimDevice {
             adcnew: None,
             adcnew_sent: 0,
             adcnew_crc_errors: 0,
+            echo_since_ms: None,
+            adcnew_last_start: Vec::new(),
+            adcnew_start_echoes: 0,
         }
     }
 
@@ -480,6 +507,7 @@ impl SimDevice {
 
     /// Inject `faults`.
     pub fn with_faults(mut self, faults: FaultPlan) -> SimDevice {
+        self.echo_since_ms = faults.echo_start.then(|| self.uptime_ms());
         self.faults = faults;
         self
     }
@@ -497,6 +525,18 @@ impl SimDevice {
         let now = self.uptime_ms();
         // Frames due before this request go out first.
         self.adcnew_push(now);
+        if let Some(since) = self.echo_since_ms {
+            // Right after a bulk session: every request restarts the quiet
+            // time, and a start inside it comes back as an echo.
+            if now.saturating_sub(since) < ECHO_QUIET_MS {
+                self.echo_since_ms = Some(now);
+                if request.first().map(|b| b & 0x7F) == Some(0x02) {
+                    self.pending.push_back(request.to_vec());
+                }
+                return;
+            }
+            self.echo_since_ms = None;
+        }
         match request.first().map(|b| b & 0x7F) {
             Some(0x02) => {
                 self.adcnew = Some(match request.get(1) {
@@ -626,7 +666,11 @@ impl Transport for SimDevice {
 
     fn adcnew_send(&mut self, request: powerz_protocol::adcnew::Request) -> Result<(), Error> {
         self.adcnew_ready()?;
-        self.adcnew_request(&request.encode());
+        let bytes = request.encode();
+        if bytes.first() == Some(&0x02) {
+            self.adcnew_last_start = bytes.clone();
+        }
+        self.adcnew_request(&bytes);
         Ok(())
     }
 
@@ -638,9 +682,14 @@ impl Transport for SimDevice {
         self.adcnew_push(now);
         let mut frames = Vec::new();
         let mut crc_errors = 0;
+        let mut start_echoes = 0;
         self.pending.retain(|item| {
             if item.first() != Some(&0x02) {
                 return true;
+            }
+            if *item == self.adcnew_last_start {
+                start_echoes += 1;
+                return false;
             }
             match powerz_protocol::adcnew::decode_frame(item) {
                 Ok(frame) => frames.push(frame),
@@ -649,6 +698,7 @@ impl Transport for SimDevice {
             false
         });
         self.adcnew_crc_errors += crc_errors;
+        self.adcnew_start_echoes += start_echoes;
         Ok(frames)
     }
 
@@ -658,6 +708,7 @@ impl Transport for SimDevice {
         powerz_protocol::adcnew::AdcnewCounters {
             crc_errors: self.adcnew_crc_errors,
             dropped_frames: 0,
+            start_echoes: self.adcnew_start_echoes,
         }
     }
 }

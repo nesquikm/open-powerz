@@ -342,3 +342,71 @@ fn a_pdm_session_hands_out_the_stream_frames_it_read() {
     assert!(s.take_stream_frames().is_empty(), "taken once");
     s.close().expect("close");
 }
+
+// ---- The meter right after a bulk session (2026-10-28 probe) [device] ----
+//
+// A start sent less than about 10 s after a bulk session comes back as an
+// echo and starts nothing; every request in that time keeps it so. A start
+// after a quiet spell streams normally. The `echo-start` fault puts the
+// simulated meter in that state at power-up.
+
+fn echoing(clock: &SimClock) -> SimDevice {
+    cdc(Scenario::Load5v1a, clock).with_faults(FaultPlan::parse("echo-start").unwrap())
+}
+
+#[test]
+fn a_start_right_after_a_bulk_session_is_echoed_and_streams_nothing() {
+    let clock = SimClock::new(T0);
+    let mut dev = echoing(&clock);
+    send(&mut dev, &[0x02, 0x02]);
+    clock.advance(Duration::from_secs(1));
+    assert_eq!(drain_bytes(&mut dev), vec![0x02, 0x02]);
+    assert!(!dev.adcnew_active());
+}
+
+#[test]
+fn requests_inside_the_quiet_time_keep_the_meter_echoing() {
+    let clock = SimClock::new(T0);
+    let mut dev = echoing(&clock);
+    for _ in 0..20 {
+        send(&mut dev, &[0x02, 0x02]);
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(drain_bytes(&mut dev), vec![0x02, 0x02]);
+    }
+    assert!(!dev.adcnew_active());
+}
+
+#[test]
+fn a_start_after_ten_quiet_seconds_streams() {
+    let clock = SimClock::new(T0);
+    let mut dev = echoing(&clock);
+    send(&mut dev, &[0x02, 0x02]);
+    clock.advance(Duration::from_secs(10));
+    assert_eq!(drain_bytes(&mut dev), vec![0x02, 0x02]);
+    send(&mut dev, &[0x02, 0x02]);
+    clock.advance(Duration::from_secs(1));
+    let (frames, _, dropped) = demux(&drain_bytes(&mut dev));
+    assert_eq!(dropped, 0);
+    let n = records(&frames).len();
+    assert!((50..=51).contains(&n), "{n} records in one second at 50/s");
+}
+
+#[test]
+fn the_session_starts_again_after_an_echo_and_streams() {
+    let clock = SimClock::new(T0);
+    let mut s = powerz_protocol::session::Session::with_clock(echoing(&clock), clock.clone());
+    s.start_adcnew(Content::Adc, Rate::Sps50).unwrap();
+    let mut first_record_ms = None;
+    for k in 0..300u64 {
+        let poll = s.poll_adcnew().unwrap();
+        if !poll.records.is_empty() {
+            first_record_ms = Some(k * 100);
+            break;
+        }
+        clock.advance(Duration::from_millis(100));
+    }
+    let at = first_record_ms.expect("the stream never started");
+    assert!((10_000..=15_000).contains(&at), "first record at {at} ms");
+    let c = s.adcnew_counters();
+    assert_eq!((c.start_echoes, c.crc_errors), (1, 0));
+}

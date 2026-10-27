@@ -5,7 +5,9 @@
 
 use super::stream::{StreamPoll, gaps_after};
 use super::{Clock, Error, Session};
-use crate::adcnew::{AdcnewCounters, Content, Frame, KEEP_ALIVE_PERIOD, MAX_RAW_FRAMES, Request};
+use crate::adcnew::{
+    AdcnewCounters, Content, Frame, KEEP_ALIVE_PERIOD, MAX_RAW_FRAMES, Request, START_ECHO_QUIET,
+};
 use crate::decode::Rate;
 use crate::transport::Transport;
 
@@ -16,6 +18,14 @@ pub(super) struct AdcnewStream {
     last_refresh_ms: u64,
     /// Device time of the last record returned.
     last_record_ms: Option<u32>,
+    /// What was started, to start it again after an echo.
+    content: Content,
+    rate: Rate,
+    /// Echoed starts already acted on.
+    echoes_seen: u64,
+    /// Session-clock time to send the start again: set when the meter
+    /// echoed it before any record arrived.
+    restart_at_ms: Option<u64>,
 }
 
 impl<T: Transport, C: Clock> Session<T, C> {
@@ -28,6 +38,10 @@ impl<T: Transport, C: Clock> Session<T, C> {
         self.adcnew = Some(AdcnewStream {
             last_refresh_ms: self.clock.now_ms(),
             last_record_ms: None,
+            content,
+            rate,
+            echoes_seen: self.transport.adcnew_counters().start_echoes,
+            restart_at_ms: None,
         });
         Ok(())
     }
@@ -39,9 +53,18 @@ impl<T: Transport, C: Clock> Session<T, C> {
         Ok(())
     }
 
+    /// Whether the meter echoed the start and the session waits out
+    /// [`START_ECHO_QUIET`] before sending it again.
+    pub fn adcnew_restart_pending(&self) -> bool {
+        self.adcnew.is_some_and(|s| s.restart_at_ms.is_some())
+    }
+
     /// Read the records pushed since the last poll, with the gaps before or
     /// between them. Sends the keep-alive (`01`) once
     /// [`KEEP_ALIVE_PERIOD`] has passed since the start or the last one.
+    /// When the meter echoed the start before any record (it does right
+    /// after a bulk session `[device]`), nothing is sent for
+    /// [`START_ECHO_QUIET`], then the start is sent once more.
     /// Frames other than records (PD, UFCS content) are kept for
     /// [`take_adcnew_raw`](Self::take_adcnew_raw).
     pub fn poll_adcnew(&mut self) -> Result<StreamPoll, Error> {
@@ -49,8 +72,18 @@ impl<T: Transport, C: Clock> Session<T, C> {
             return Err(Error::Protocol("the ADCNEW stream is not running".into()));
         };
         let now = self.clock.now_ms();
+        if let Some(at) = stream.restart_at_ms
+            && now >= at
+        {
+            self.transport.adcnew_send(Request::Start {
+                content: stream.content,
+                rate: stream.rate,
+            })?;
+            stream.restart_at_ms = None;
+            stream.last_refresh_ms = now;
+        }
         let period = u64::try_from(KEEP_ALIVE_PERIOD.as_millis()).unwrap_or(u64::MAX);
-        if now.saturating_sub(stream.last_refresh_ms) >= period {
+        if stream.restart_at_ms.is_none() && now.saturating_sub(stream.last_refresh_ms) >= period {
             self.transport.adcnew_send(Request::KeepAlive)?;
             stream.last_refresh_ms = now;
         }
@@ -81,6 +114,14 @@ impl<T: Transport, C: Clock> Session<T, C> {
                 }
             }
         });
+        let echoes = self.transport.adcnew_counters().start_echoes;
+        if echoes > stream.echoes_seen {
+            stream.echoes_seen = echoes;
+            if stream.last_record_ms.is_none() && poll.records.is_empty() {
+                let quiet = u64::try_from(START_ECHO_QUIET.as_millis()).unwrap_or(u64::MAX);
+                stream.restart_at_ms = Some(now.saturating_add(quiet));
+            }
+        }
         self.adcnew = Some(stream);
         result?;
         Ok(poll)

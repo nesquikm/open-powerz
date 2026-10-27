@@ -198,3 +198,30 @@ fn cdc_watch_needs_the_cdc_pipe() {
     assert!(r.is_err(), "ADCNEW watch ran on the bulk pipe:\n{out}");
     assert!(!s.transport().adcnew_active());
 }
+
+#[test]
+fn cdc_watch_waits_out_an_echoed_start() {
+    // [device] 2026-10-28: a start right after a bulk session is echoed;
+    // watch sends it again after a quiet spell instead of failing.
+    let clock = SimClock::new(T0);
+    let dev = SimDevice::with_clock(Persona::Cdc, Scenario::Load5v1a, clock.clone())
+        .with_faults(powerz_sim::FaultPlan::parse("echo-start").unwrap());
+    let mut s = Session::with_clock(dev, clock.clone());
+    let stop = AtomicBool::new(false);
+    let mut refreshes = 0;
+    let mut out = Vec::new();
+    let opts = WatchOptions {
+        interval: Duration::from_millis(200),
+        tty: false,
+    };
+    let mut sleep = |d: Duration| {
+        clock.advance(d);
+        refreshes += 1;
+        if refreshes == 3 {
+            stop.store(true, Ordering::SeqCst);
+        }
+    };
+    let r = watch_cdc(&mut s, &opts, &stop, &mut sleep, &mut out);
+    assert_eq!(r, Ok(()));
+    assert_eq!(text(&out).lines().count(), 3, "{}", text(&out));
+}

@@ -224,3 +224,25 @@ fn cdc_stream_stops_on_ctrl_c() {
     stream_cdc(&mut s, &opts, &stop, &mut csv, &mut err).unwrap();
     assert!(!s.transport().adcnew_active());
 }
+
+#[test]
+fn a_start_echoed_after_a_bulk_session_is_sent_again_and_the_stream_records() {
+    // [device] 2026-10-28: right after a bulk session the meter echoes the
+    // start (`02 02`) and streams nothing until the host keeps quiet ~10 s.
+    let faults = FaultPlan::parse("echo-start").unwrap();
+    let mut s = session(Persona::Cdc, faults);
+    let stop = AtomicBool::new(false);
+    let (mut csv, mut err) = (Vec::new(), Vec::new());
+    let summary = stream_cdc(&mut s, &opts(Rate::Sps50, 2), &stop, &mut csv, &mut err).unwrap();
+    assert_eq!(summary.records, 100);
+    assert_eq!((summary.crc_errors, summary.dropped_frames), (0, 0));
+    assert!(summary.gaps.is_empty(), "{:?}", summary.gaps);
+    let err = text(&err);
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 2, "{err}");
+    assert!(lines[0].contains("echoed"), "{err}");
+    assert_eq!(
+        lines[1],
+        "100 records, 0 gaps, 0 dropped frames, 0 CRC errors"
+    );
+}

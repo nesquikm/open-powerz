@@ -9,6 +9,7 @@ use powerz_protocol::decode::Rate;
 use powerz_protocol::session::{Clock, Session};
 use powerz_protocol::transport::Transport;
 
+use super::stream::{MAX_START_ECHOES, too_many_echoes};
 use crate::error::CliError;
 use crate::output::{Reading, write_adc_line, write_adc_lines};
 
@@ -84,6 +85,16 @@ fn watch_stream<T: Transport, C: Clock>(
     while !stop.load(Ordering::SeqCst) {
         if let Some(r) = session.poll_adcnew()?.records.last() {
             latest = Some(Reading::from(r));
+        }
+        if session.adcnew_counters().start_echoes > MAX_START_ECHOES {
+            return Err(too_many_echoes());
+        }
+        if latest.is_none() && session.adcnew_restart_pending() {
+            // The meter echoed the start (right after a bulk session); the
+            // session sends it again after a quiet spell. Not a timeout.
+            waited_since = None;
+            session.sleep(FIRST_RECORD_POLL);
+            continue;
         }
         let Some(reading) = latest else {
             // Nothing pushed yet: look again shortly, within a limit.
