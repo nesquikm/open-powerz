@@ -124,3 +124,20 @@ test("a recording running at the unplug ends with a disconnect notice (AC-TGE839
   await expect(badge(page)).toHaveText("Streaming", { timeout: MOCK_REPLUG.awayMs + 3_000 });
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0);
 });
+
+test("the unplug banner sits below the view tabs, and leaves once the meter streams again (HIL 1HHT04.multi)", async ({
+  page,
+}) => {
+  await open(page, "?mock=replug");
+  await streamMeter(page);
+  await waitForUnplug(page);
+  const banner = page.locator(".notice.error").first();
+  await expect(banner).toContainText("The meter was unplugged.");
+  const tabs = (await page.getByRole("tab", { name: "Meter" }).boundingBox())!;
+  const box = (await banner.boundingBox())!;
+  expect(box.y, "the banner's top under the tab strip").toBeGreaterThanOrEqual(
+    tabs.y + tabs.height,
+  );
+  await expect(badge(page)).toHaveText("Streaming", { timeout: MOCK_REPLUG.awayMs + 3_000 });
+  await expect(banner).toHaveCount(0);
+});

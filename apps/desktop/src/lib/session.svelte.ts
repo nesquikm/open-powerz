@@ -42,6 +42,12 @@ export class Session {
     this.stats = null;
   }
 
+  /** A meter streams, so its settings and records can be read: also a session this page
+   * adopted after a reload, which has no connect details. */
+  get meterConnected(): boolean {
+    return this.state === "streaming" || this.state === "rate_locked";
+  }
+
   /** A session is open or opening (the picker is locked, the button reads Disconnect). */
   get active(): boolean {
     return this.state !== "disconnected" && this.state !== "error" && this.state !== "waiting";
@@ -147,8 +153,9 @@ export class Session {
           this.waitingSerial = event.data.serial;
           this.state = "waiting";
         } else {
-          // A meter that came back takes its unplug message with it.
-          if (this.waitingSerial !== null && this.error?.kind === "disconnected") this.error = null;
+          // A meter that came back takes its unplug message with it, whatever the unplug
+          // looked like: on macOS a pulled cable can end the session with an I/O error.
+          if (this.waitingSerial !== null) this.error = null;
           this.waitingSerial = null;
           if (event.data.state === "connected") this.details = event.data;
           this.rateSps = event.data.rate_sps;

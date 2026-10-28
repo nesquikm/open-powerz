@@ -261,7 +261,7 @@
     () => act().recordsList(),
     (index) => act().recordDownload(index),
   );
-  const meterConnected = $derived(session.details !== null);
+  const meterConnected = $derived(session.meterConnected);
   /** The meter the panels read from: they read again when another one takes the view. */
   const panelMeter = $derived(meterConnected ? primaryId : null);
   $effect(() => {
@@ -913,8 +913,9 @@
       {/if}
     {/snippet}
   </TopBar>
-  <ErrorBanner {session} />
   <main class="views">
+    <!-- Inside the views, under the room kept for the tabs that hang below the top bar. -->
+    <ErrorBanner {session} />
     <div
       class="content"
       role="tabpanel"
