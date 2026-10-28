@@ -80,6 +80,7 @@ impl AppState {
     /// Connect to `device_id` at `rate_sps`; events go to `sink`. The UI
     /// drops a capture opened from a file when a session connects, so its
     /// memory is released here too.
+    #[cfg(test)]
     fn connect_session(
         &self,
         device_id: &str,
@@ -87,8 +88,26 @@ impl AppState {
         sink: impl worker::EventSink,
         stop: Arc<AtomicBool>,
     ) -> Result<(), UiError> {
+        self.connect_source_session(
+            device_id,
+            rate_sps,
+            worker::MeasurementSource::Queue,
+            sink,
+            stop,
+        )
+    }
+
+    /// [`AppState::connect_session`] streaming from `source` (FR 1HHT02).
+    fn connect_source_session(
+        &self,
+        device_id: &str,
+        rate_sps: u32,
+        source: worker::MeasurementSource,
+        sink: impl worker::EventSink,
+        stop: Arc<AtomicBool>,
+    ) -> Result<(), UiError> {
         self.manager()
-            .connect_with_stop(device_id, rate_sps, sink, stop)?;
+            .connect_source_with_stop(device_id, rate_sps, source, sink, stop)?;
         *self.opened_pd() = None;
         Ok(())
     }
@@ -201,42 +220,49 @@ async fn watch_devices(
 }
 
 /// Connect to the picked device; every session event goes over `on_event`.
-/// The session ends by itself once that channel is gone (window closed);
-/// a reloaded page takes the session over with `attach` instead.
+/// `source` (`queue`, the default, or `cdc`) picks where the measurements
+/// come from (FR 1HHT02). The session ends by itself once that channel is
+/// gone (window closed); a reloaded page takes the session over with
+/// `attach` instead.
 #[tauri::command]
 async fn connect(
     state: Shared<'_>,
     device_id: String,
     rate_sps: u32,
+    source: Option<worker::MeasurementSource>,
     on_event: Channel<BackendEvent>,
 ) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let stop = Arc::new(AtomicBool::new(false));
         let sink = channel_sink(on_event, Arc::clone(&stop));
-        state.connect_session(&device_id, rate_sps, sink, stop)
+        state.connect_source_session(&device_id, rate_sps, source.unwrap_or_default(), sink, stop)
     })
     .await
 }
 
 /// Pick up the running session from a new page (after a reload): its later
-/// events go over `on_event`. `null` when no session is running.
+/// events go over `on_event`. `null` when no session is running. Without
+/// `device_id` it is the current meter's session; with one, that meter's
+/// (FR 1HHT03: the page picks up every running meter, see `running_meters`).
 #[tauri::command]
 async fn attach(
     state: Shared<'_>,
+    device_id: Option<String>,
     on_event: Channel<BackendEvent>,
 ) -> Result<Option<AttachedSession>, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
+        let id = state.manager().target(device_id.as_deref());
         // A reloaded page (e.g. after the web content process ended) starts
         // without a trigger session, so one the old page left open returns
         // to 5 V and closes now, outside the manager lock (FR DGSQ6S).
-        let leftover = state.manager().take_trigger();
+        let leftover = state.manager().take_trigger_for(&id);
         if let Some(trigger) = leftover {
             let _ = trigger.close();
         }
         // Taken under the lock; the handover waits for the worker without it.
-        let Some(attacher) = state.manager().attacher() else {
+        let Some(attacher) = state.manager().attacher_for(&id) else {
             return Ok(None);
         };
         // The new page's channel ends the session once it is gone, as the
@@ -247,15 +273,25 @@ async fn attach(
     .await
 }
 
+/// The device ids of the meters whose session runs, as their attach
+/// snapshots name them, in the order they were connected (FR 1HHT03): what a
+/// reloaded page picks up with `attach`.
+#[tauri::command]
+async fn running_meters(state: Shared<'_>) -> Result<Vec<String>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(state.manager().running_ids())).await
+}
+
 /// Stop the queue and close the open session.
 #[tauri::command]
-async fn disconnect(state: Shared<'_>) -> Result<(), UiError> {
+async fn disconnect(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         // Take the sessions under the lock; wait for them without it.
         let (trigger, session) = {
             let mut manager = state.manager();
-            (manager.take_trigger(), manager.take_session())
+            let id = manager.target(device_id.as_deref());
+            (manager.take_trigger_for(&id), manager.take_session_for(&id))
         };
         // Back to 5 V and `pdm close` before the queue stops (FR DGSQ6S).
         if let Some(trigger) = trigger {
@@ -269,10 +305,13 @@ async fn disconnect(state: Shared<'_>) -> Result<(), UiError> {
 
 /// Stop waiting for an unplugged meter; the user picked another device.
 #[tauri::command]
-async fn cancel_wait(state: Shared<'_>) -> Result<(), UiError> {
+async fn cancel_wait(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        state.manager().cancel_wait();
+        match device_id {
+            Some(id) => state.manager().cancel_wait_for(&id),
+            None => state.manager().cancel_wait(),
+        }
         Ok(())
     })
     .await
@@ -280,11 +319,18 @@ async fn cancel_wait(state: Shared<'_>) -> Result<(), UiError> {
 
 /// Restart the open session's queue at `rate_sps`.
 #[tauri::command]
-async fn set_rate(state: Shared<'_>, rate_sps: u32) -> Result<(), UiError> {
+async fn set_rate(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    rate_sps: u32,
+) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         // Take the control under the lock; wait for the answer without it.
-        let (control, rate) = state.manager().rate_control(rate_sps)?;
+        let (control, rate) = {
+            let manager = state.manager();
+            manager.rate_control_for(&manager.target(device_id.as_deref()), rate_sps)?
+        };
         control.set_rate(rate)
     })
     .await
@@ -293,18 +339,19 @@ async fn set_rate(state: Shared<'_>, rate_sps: u32) -> Result<(), UiError> {
 /// Start the PD capture on the open session (FR TGE83C); rows and the
 /// capture state arrive on the session channel.
 #[tauri::command]
-async fn pd_start(state: Shared<'_>) -> Result<(), UiError> {
+async fn pd_start(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let control = {
             let manager = state.manager();
+            let id = manager.target(device_id.as_deref());
             // The PD capture waits while triggering (FR DGSQ6S). [inferred]
-            if manager.trigger_open() {
+            if manager.trigger_open_for(&id) {
                 return Err(UiError::usage(
                     "Close the trigger session to capture PD traffic.",
                 ));
             }
-            manager.control()?
+            manager.control_for(&id)?
         };
         control.start_pd()
     })
@@ -313,26 +360,34 @@ async fn pd_start(state: Shared<'_>) -> Result<(), UiError> {
 
 /// Open the trigger session on the connected meter (FR DGSQ6S).
 #[tauri::command]
-async fn trigger_open(state: Shared<'_>) -> Result<(), UiError> {
+async fn trigger_open(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         // The port opens and the PDM handshake runs without the manager
         // lock, so a slow meter never blocks disconnect or attach.
-        let opener = state.manager().trigger_opener()?;
+        let (id, opener) = {
+            let manager = state.manager();
+            let id = manager.target(device_id.as_deref());
+            let opener = manager.trigger_opener_for(&id)?;
+            (id, opener)
+        };
         let worker = opener.open()?;
-        state.manager().install_trigger(worker)
+        state.manager().install_trigger_for(&id, worker)
     })
     .await
 }
 
 /// BC 1.2, Apple and the automatic list; nothing above 5 V is asked.
 #[tauri::command]
-async fn trigger_detect(state: Shared<'_>) -> Result<trigger::Detection, UiError> {
+async fn trigger_detect(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<trigger::Detection, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         // The handle is taken off the manager, so its lock is not held while
         // the session thread answers.
-        let control = state.manager().trigger_control()?;
+        let control = trigger_control(&state, device_id.as_deref())?;
         control.detect()
     })
     .await
@@ -342,11 +397,12 @@ async fn trigger_detect(state: Shared<'_>) -> Result<trigger::Detection, UiError
 #[tauri::command]
 async fn trigger_list(
     state: Shared<'_>,
+    device_id: Option<String>,
     protocol: trigger::TriggerProtocol,
 ) -> Result<trigger::ProtocolSection, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().trigger_control()?;
+        let control = trigger_control(&state, device_id.as_deref())?;
         control.list(protocol)
     })
     .await
@@ -357,11 +413,12 @@ async fn trigger_list(
 #[tauri::command]
 async fn trigger_risk(
     state: Shared<'_>,
+    device_id: Option<String>,
     request: trigger::TriggerRequest,
 ) -> Result<trigger::RiskClass, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().trigger_control()?;
+        let control = trigger_control(&state, device_id.as_deref())?;
         control.risk(request)
     })
     .await
@@ -372,12 +429,13 @@ async fn trigger_risk(
 #[tauri::command]
 async fn trigger_request(
     state: Shared<'_>,
+    device_id: Option<String>,
     request: trigger::TriggerRequest,
     confirmed: bool,
 ) -> Result<trigger::TriggerReply, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().trigger_control()?;
+        let control = trigger_control(&state, device_id.as_deref())?;
         control.request(request, confirmed)
     })
     .await
@@ -388,11 +446,12 @@ async fn trigger_request(
 #[tauri::command]
 async fn trigger_message_risk(
     state: Shared<'_>,
+    device_id: Option<String>,
     message: trigger::PdMessageRequest,
 ) -> Result<trigger::RiskClass, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().trigger_control()?;
+        let control = trigger_control(&state, device_id.as_deref())?;
         control.message_risk(message)
     })
     .await
@@ -402,12 +461,13 @@ async fn trigger_message_risk(
 #[tauri::command]
 async fn trigger_message_send(
     state: Shared<'_>,
+    device_id: Option<String>,
     message: trigger::PdMessageRequest,
     confirmed: bool,
 ) -> Result<trigger::PdSendReply, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().trigger_control()?;
+        let control = trigger_control(&state, device_id.as_deref())?;
         control.send_message(message, confirmed)
     })
     .await
@@ -417,11 +477,12 @@ async fn trigger_message_send(
 #[tauri::command]
 async fn trigger_console_risk(
     state: Shared<'_>,
+    device_id: Option<String>,
     line: String,
 ) -> Result<trigger::RiskClass, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().trigger_control()?;
+        let control = trigger_control(&state, device_id.as_deref())?;
         control.console_risk(line)
     })
     .await
@@ -432,12 +493,13 @@ async fn trigger_console_risk(
 #[tauri::command]
 async fn trigger_console_send(
     state: Shared<'_>,
+    device_id: Option<String>,
     line: String,
     confirmed: bool,
 ) -> Result<Vec<trigger::ConsoleLine>, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().trigger_control()?;
+        let control = trigger_control(&state, device_id.as_deref())?;
         control.console_send(line, confirmed)
     })
     .await
@@ -446,10 +508,10 @@ async fn trigger_console_send(
 /// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
 /// protocols `reset`. The session stays open.
 #[tauri::command]
-async fn trigger_back_to_5v(state: Shared<'_>) -> Result<(), UiError> {
+async fn trigger_back_to_5v(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().trigger_control()?;
+        let control = trigger_control(&state, device_id.as_deref())?;
         control.back_to_5v()
     })
     .await
@@ -457,11 +519,15 @@ async fn trigger_back_to_5v(state: Shared<'_>) -> Result<(), UiError> {
 
 /// Back to 5 V and close the trigger session, if one is open.
 #[tauri::command]
-async fn trigger_close(state: Shared<'_>) -> Result<(), UiError> {
+async fn trigger_close(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         // Take the session under the lock; close it without it.
-        let trigger = state.manager().take_trigger();
+        let trigger = {
+            let mut manager = state.manager();
+            let id = manager.target(device_id.as_deref());
+            manager.take_trigger_for(&id)
+        };
         trigger.map_or(Ok(()), trigger::TriggerWorker::close)
     })
     .await
@@ -469,10 +535,10 @@ async fn trigger_close(state: Shared<'_>) -> Result<(), UiError> {
 
 /// Stop the PD capture; the captured records stay.
 #[tauri::command]
-async fn pd_stop(state: Shared<'_>) -> Result<(), UiError> {
+async fn pd_stop(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().control()?;
+        let control = control(&state, device_id.as_deref())?;
         control.stop_pd()
     })
     .await
@@ -483,6 +549,7 @@ async fn pd_stop(state: Shared<'_>) -> Result<(), UiError> {
 #[tauri::command]
 async fn pd_details(
     state: Shared<'_>,
+    device_id: Option<String>,
     index: u64,
     opened: Option<bool>,
 ) -> Result<pd_capture::PdDetails, UiError> {
@@ -495,21 +562,55 @@ async fn pd_details(
                 .and_then(|pd| pd.details(index))
                 .ok_or_else(|| UiError::usage("That PD record is not in the opened capture."));
         }
-        let control = state.manager().control()?;
+        let control = control(&state, device_id.as_deref())?;
         control.pd_details(index)
     })
     .await
+}
+
+/// Read the connected meter's settings (GET_DATA 0x008 only) for the
+/// read-only Meter settings panel (FR 1HHT01).
+#[tauri::command]
+async fn meter_settings(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<worker::MeterSettingsView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || control(&state, device_id.as_deref())?.read_settings()).await
+}
+
+/// List the connected meter's offline records (GET_DATA 0x200 only) for
+/// the Records view (FR 1HHT00).
+#[tauri::command]
+async fn records_list(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<worker::RecordListView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || control(&state, device_id.as_deref())?.list_records()).await
+}
+
+/// Download offline record `index` (1-based) for the Records view: one
+/// memory read of that record's own window (FR 1HHT00).
+#[tauri::command]
+async fn record_download(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    index: usize,
+) -> Result<worker::OfflineRecordView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || control(&state, device_id.as_deref())?.download_record(index)).await
 }
 
 /// Drop every captured PD record; the answer is the index of the next one.
 /// A capture opened from a file is dropped too; with only that one and no
 /// meter, the answer is 0.
 #[tauri::command]
-async fn pd_clear(state: Shared<'_>) -> Result<u64, UiError> {
+async fn pd_clear(state: Shared<'_>, device_id: Option<String>) -> Result<u64, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let had_opened = state.opened_pd().take().is_some();
-        let control = match state.manager().control() {
+        let control = match control(&state, device_id.as_deref()) {
             Ok(control) => control,
             Err(_) if had_opened => return Ok(0),
             Err(e) => return Err(e),
@@ -761,20 +862,45 @@ fn choose_save_path(
 
 /// Refuse before the dialog when `prepare` does, ask where to save, then
 /// run `then` with what `prepare` gives and the chosen path; `None` when the
-/// dialog was cancelled (nothing runs). `prepare` runs again after the
-/// dialog, since the session may have ended meanwhile.
+/// dialog was cancelled (nothing runs). The meter is resolved once, before
+/// the dialog (the one `device_id` names, else the current one), so a meter
+/// connected meanwhile never takes the save; `prepare` runs again for it
+/// after the dialog, since its session may have ended meanwhile.
 fn with_save_path<P, R>(
     state: &AppState,
     app: &tauri::AppHandle,
+    device_id: Option<&str>,
     suggested_name: &str,
-    prepare: impl Fn(&AppManager) -> Result<P, UiError>,
+    prepare: impl Fn(&AppManager, &str) -> Result<P, UiError>,
     then: impl FnOnce(P, &Path) -> Result<R, UiError>,
 ) -> Result<Option<R>, UiError> {
-    prepare(&state.manager())?;
-    let Some(path) = choose_save_path(app, suggested_name)? else {
+    save_with(
+        state,
+        device_id,
+        || choose_save_path(app, suggested_name),
+        prepare,
+        then,
+    )
+}
+
+/// [`with_save_path`] with the dialog as `choose`.
+fn save_with<P, R>(
+    state: &AppState,
+    device_id: Option<&str>,
+    choose: impl FnOnce() -> Result<Option<PathBuf>, UiError>,
+    prepare: impl Fn(&AppManager, &str) -> Result<P, UiError>,
+    then: impl FnOnce(P, &Path) -> Result<R, UiError>,
+) -> Result<Option<R>, UiError> {
+    let id = {
+        let m = state.manager();
+        let id = m.target(device_id);
+        prepare(&m, &id)?;
+        id
+    };
+    let Some(path) = choose()? else {
         return Ok(None);
     };
-    let prepared = prepare(&state.manager())?;
+    let prepared = prepare(&state.manager(), &id)?;
     then(prepared, &path).map(Some)
 }
 
@@ -785,6 +911,7 @@ fn with_save_path<P, R>(
 async fn start_recording(
     app: tauri::AppHandle,
     state: Shared<'_>,
+    device_id: Option<String>,
     suggested_name: String,
 ) -> Result<Option<String>, UiError> {
     let state = Arc::clone(&state);
@@ -792,8 +919,9 @@ async fn start_recording(
         with_save_path(
             &state,
             &app,
+            device_id.as_deref(),
             &suggested_name,
-            AppManager::control,
+            |m: &AppManager, id| m.control_for(id),
             |control, path| {
                 control.record_to(path)?;
                 Ok(path.to_string_lossy().into_owned())
@@ -805,34 +933,62 @@ async fn start_recording(
 
 /// Stop the recording and return its row count and gaps.
 #[tauri::command]
-async fn stop_recording(state: Shared<'_>) -> Result<RecordingSummary, UiError> {
+async fn stop_recording(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<RecordingSummary, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = state.manager().control()?;
+        let control = control(&state, device_id.as_deref())?;
         control.stop_recording()
     })
     .await
 }
 
-/// The session's store, taken under the lock; queries run without it.
-fn session_store(state: &AppState) -> Result<store::SessionStore, UiError> {
-    state.manager().session_store()
+/// The store of meter `device_id` (the current session's without one),
+/// taken under the lock; queries run without it.
+fn session_store(
+    state: &AppState,
+    device_id: Option<&str>,
+) -> Result<store::SessionStore, UiError> {
+    let manager = state.manager();
+    manager.session_store_for(&manager.target(device_id))
+}
+
+/// The worker control of meter `device_id` (the current session's without
+/// one), taken under the lock; the caller waits for answers without it.
+fn control(state: &AppState, device_id: Option<&str>) -> Result<worker::WorkerControl, UiError> {
+    let manager = state.manager();
+    manager.control_for(&manager.target(device_id))
+}
+
+/// The trigger handle of meter `device_id` (the current session's without
+/// one), taken under the lock.
+fn trigger_control(
+    state: &AppState,
+    device_id: Option<&str>,
+) -> Result<trigger::TriggerControl, UiError> {
+    let manager = state.manager();
+    manager.trigger_control_for(&manager.target(device_id))
 }
 
 /// Statistics of the session (open or last) since its start or the last
 /// reset.
 #[tauri::command]
-async fn stats(state: Shared<'_>) -> Result<stats::StatsSnapshot, UiError> {
+async fn stats(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<stats::StatsSnapshot, UiError> {
     let state = Arc::clone(&state);
-    blocking(move || Ok(session_store(&state)?.stats())).await
+    blocking(move || Ok(session_store(&state, device_id.as_deref())?.stats())).await
 }
 
 /// Zero the session's statistics; they count again from the next sample.
 #[tauri::command]
-async fn reset_stats(state: Shared<'_>) -> Result<(), UiError> {
+async fn reset_stats(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        session_store(&state)?.reset_stats();
+        session_store(&state, device_id.as_deref())?.reset_stats();
         Ok(())
     })
     .await
@@ -840,10 +996,10 @@ async fn reset_stats(state: Shared<'_>) -> Result<(), UiError> {
 
 /// Discard the session's history (the stream and any recording go on).
 #[tauri::command]
-async fn clear_history(state: Shared<'_>) -> Result<(), UiError> {
+async fn clear_history(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        session_store(&state)?.clear_history();
+        session_store(&state, device_id.as_deref())?.clear_history();
         Ok(())
     })
     .await
@@ -855,6 +1011,7 @@ async fn clear_history(state: Shared<'_>) -> Result<(), UiError> {
 #[tauri::command]
 async fn history_range(
     state: Shared<'_>,
+    device_id: Option<String>,
     series: Vec<history::Series>,
     t0_ms: u64,
     t1_ms: u64,
@@ -862,7 +1019,8 @@ async fn history_range(
 ) -> Result<Vec<history::SeriesBuckets>, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        Ok(session_store(&state)?.history_range_to_edges(&series, t0_ms, t1_ms, buckets))
+        Ok(session_store(&state, device_id.as_deref())?
+            .history_range_to_edges(&series, t0_ms, t1_ms, buckets))
     })
     .await
 }
@@ -872,11 +1030,13 @@ async fn history_range(
 #[tauri::command]
 async fn history_gaps(
     state: Shared<'_>,
+    device_id: Option<String>,
     t0_ms: u64,
     t1_ms: u64,
 ) -> Result<Vec<history::HistoryGap>, UiError> {
     let state = Arc::clone(&state);
-    blocking(move || Ok(session_store(&state)?.history_gaps(t0_ms, t1_ms))).await
+    blocking(move || Ok(session_store(&state, device_id.as_deref())?.history_gaps(t0_ms, t1_ms)))
+        .await
 }
 
 /// Where an export went and how many rows it wrote.
@@ -893,6 +1053,7 @@ pub struct ExportResult {
 async fn export_session(
     app: tauri::AppHandle,
     state: Shared<'_>,
+    device_id: Option<String>,
     suggested_name: String,
     on_progress: Channel<ExportProgress>,
 ) -> Result<Option<ExportResult>, UiError> {
@@ -901,8 +1062,9 @@ async fn export_session(
         with_save_path(
             &state,
             &app,
+            device_id.as_deref(),
             &suggested_name,
-            AppManager::exporter,
+            |m: &AppManager, id| m.exporter_for(id),
             |exporter, path| {
                 let job = exporter.export_to(path, move |p| {
                     let _ = on_progress.send(p);
@@ -932,6 +1094,7 @@ async fn export_session(
 async fn pd_save(
     app: tauri::AppHandle,
     state: Shared<'_>,
+    device_id: Option<String>,
     suggested_name: String,
 ) -> Result<Option<ExportResult>, UiError> {
     let state = Arc::clone(&state);
@@ -939,8 +1102,9 @@ async fn pd_save(
         with_save_path(
             &state,
             &app,
+            device_id.as_deref(),
             &suggested_name,
-            AppManager::control,
+            |m: &AppManager, id| m.control_for(id),
             |control, path| {
                 let rows = control.save_pd(path)?;
                 Ok(ExportResult {
@@ -980,6 +1144,7 @@ pub fn run() {
             watch_devices,
             connect,
             attach,
+            running_meters,
             disconnect,
             cancel_wait,
             set_rate,
@@ -995,6 +1160,9 @@ pub fn run() {
             pd_stop,
             pd_details,
             pd_clear,
+            meter_settings,
+            records_list,
+            record_download,
             pd_save,
             pd_open,
             pd_import,
@@ -1117,6 +1285,44 @@ mod tests {
         let state = AppState::new();
         let list = state.manager().list_devices();
         assert!(list.iter().any(|d| d.id == "demo:idle"), "{list:?}");
+    }
+
+    /// The meter a save goes to is the one named (or current) when the save
+    /// was asked for, even when another meter connects while the dialog is
+    /// open (FR 1HHT03).
+    #[test]
+    fn a_save_goes_to_the_meter_current_before_the_dialog() {
+        let state = AppState::with_manager(DeviceManager::new(
+            || Ok(Vec::new()),
+            AppOpener,
+            SystemClock,
+        ));
+        let stop = || Arc::new(AtomicBool::new(false));
+        state
+            .connect_session("demo:load-5v-1a", 50, |_: BackendEvent| {}, stop())
+            .expect("the first demo connects");
+        let target = save_with(
+            &state,
+            None,
+            || {
+                // Another meter connects while the dialog is open: it
+                // becomes the current one.
+                state
+                    .connect_session("demo:pd-9v-2a", 50, |_: BackendEvent| {}, stop())
+                    .expect("the second demo connects");
+                Ok(Some(PathBuf::from("unused.csv")))
+            },
+            |_m: &AppManager, id| Ok(id.to_owned()),
+            |id, _path| Ok(id),
+        );
+        for id in ["demo:load-5v-1a", "demo:pd-9v-2a"] {
+            let _ = state.manager().disconnect_for(id);
+        }
+        assert_eq!(
+            target.expect("the save ran"),
+            Some("demo:load-5v-1a".to_owned()),
+            "the save went to the meter connected during the dialog"
+        );
     }
 
     #[test]

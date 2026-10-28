@@ -5,6 +5,7 @@ use crate::crypto;
 use std::time::Duration;
 
 use crate::decode::head::{self, HeadReply};
+use crate::decode::records::MEMORY_READ_MAX_LEN;
 use crate::decode::{DeviceInfoBlock, OtpBlock, Uid};
 use crate::firmware::version::{self, FirmwareWarning};
 use crate::transport::{self, Transport};
@@ -145,6 +146,17 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// anything is sent.
     pub fn memory_read(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, Error> {
         if !MEMORY_READ_ALLOWED.contains(&(addr, len)) {
+            return Err(Error::Forbidden { addr, len });
+        }
+        self.memory_read_unchecked(addr, len)
+    }
+
+    /// Memory read without the safe-block check; callers must have checked
+    /// `(addr, len)` against their own allow list. A read longer than
+    /// [`MEMORY_READ_MAX_LEN`] bytes is refused before anything is sent: the
+    /// meter would return only its first 256 bytes `[device]`.
+    pub(super) fn memory_read_unchecked(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, Error> {
+        if len > MEMORY_READ_MAX_LEN {
             return Err(Error::Forbidden { addr, len });
         }
         let request = memory_read_request(self.counter.next(), addr, len);

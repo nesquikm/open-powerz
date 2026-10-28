@@ -298,16 +298,31 @@ export async function watchDevices(
   };
 }
 
-/** Opens a session on `deviceId`; every session event goes to `onEvent`. */
+/** Where the live measurements come from (mirrors `worker::MeasurementSource`, FR
+ * 1HHT02): the ADC queue over the vendor bulk pipe, or the ADCNEW stream the meter
+ * pushes on its CDC serial port (no sign-in, no temperature). */
+export type MeasurementSource = "queue" | "cdc";
+
+/** The sources the connect controls offer, the default first. */
+export const MEASUREMENT_SOURCES: readonly { value: MeasurementSource; label: string }[] = [
+  { value: "queue", label: "USB queue" },
+  { value: "cdc", label: "Serial stream" },
+];
+
+/** Opens a session on `deviceId` streaming from `source` (the queue by default);
+ * every session event goes to `onEvent`. */
 export async function connect(
   deviceId: string,
   rateSps: number,
   onEvent: (event: BackendEvent) => void,
+  source: MeasurementSource = "queue",
 ): Promise<void> {
-  if (mock) return mock.connect(deviceId, rateSps, onEvent);
+  if (mock) return mock.connect(deviceId, rateSps, onEvent, source);
   const channel = new Channel<BackendEvent>();
   channel.onmessage = onEvent;
-  await invoke("connect", { deviceId, rateSps, onEvent: channel });
+  // The queue is the backend's default, so it is left out of the arguments.
+  const picked = source === "queue" ? {} : { source };
+  await invoke("connect", { deviceId, rateSps, ...picked, onEvent: channel });
 }
 
 /** An open recording as a re-attached page picks it up (mirrors `devices.rs`). */
@@ -329,14 +344,25 @@ export interface AttachedSession {
 }
 
 /** Asks the backend for the running session (after a reload); its later events go to
- * `onEvent`. Resolves to `null` when no session is running. */
+ * `onEvent`. Resolves to `null` when no session is running. Without `deviceId` it is the
+ * current meter's session; with one, that meter's (FR 1HHT03). */
 export async function attach(
   onEvent: (event: BackendEvent) => void,
+  deviceId?: string,
 ): Promise<AttachedSession | null> {
-  if (mock) return mock.attach(onEvent);
+  if (mock) return mock.attach(onEvent, deviceId);
   const channel = new Channel<BackendEvent>();
   channel.onmessage = onEvent;
-  return invoke<AttachedSession | null>("attach", { onEvent: channel });
+  const named = deviceId === undefined ? {} : { deviceId };
+  return invoke<AttachedSession | null>("attach", { ...named, onEvent: channel });
+}
+
+/** The device ids of the meters whose session runs, as their attach snapshots name them,
+ * in the order they were connected (FR 1HHT03): what a reloaded page picks up with
+ * {@link attach}. */
+export async function connectedMeters(): Promise<string[]> {
+  if (mock) return mock.connectedIds();
+  return invoke<string[]>("running_meters");
 }
 
 /** Ends the current session. */
@@ -444,6 +470,84 @@ export async function pdStop(): Promise<void> {
 export async function pdDetails(index: number, opened = false): Promise<PdDetails> {
   if (mock) return mock.pdDetails(index, opened);
   return invoke<PdDetails>("pd_details", opened ? { index, opened } : { index });
+}
+
+/** Confidence of a meter setting: checked on the meter's screen, or from static
+ * analysis only (FR 1HHT01). */
+export type SettingTag = "confirmed" | "inferred";
+
+/** One read-only row of the Meter settings panel. */
+export interface MeterSettingField {
+  key: string;
+  label: string;
+  value: string;
+  tag: SettingTag;
+}
+
+/** The connected meter's settings, in display order (FR 1HHT01). */
+export interface MeterSettings {
+  fields: MeterSettingField[];
+}
+
+/** Reads the connected meter's settings (GET_DATA 0x008 only); rejects with the
+ * backend's error, e.g. without a meter or on a CRC mismatch. */
+export async function meterSettings(): Promise<MeterSettings> {
+  if (mock) return mock.meterSettings();
+  return invoke<MeterSettings>("meter_settings");
+}
+
+/** One offline record on the meter, with its decoded list columns (FR 1HHT00). */
+export interface OfflineRecordEntry {
+  /** 1-based position in the meter's list. */
+  index: number;
+  name: string;
+  /** Seconds between samples. */
+  interval_s: number;
+  points: number;
+  duration_s: number;
+  /** Charge in Ah as stored: signed, negative for one current direction. */
+  charge_ah: number;
+  /** Energy in Wh as stored: signed like the charge. */
+  energy_wh: number;
+  /** Offset of the samples in the record area. */
+  offset: number;
+}
+
+/** The meter's offline-record list (FR 1HHT00). */
+export interface RecordList {
+  records: OfflineRecordEntry[];
+}
+
+/** One sample of a downloaded offline record. */
+export interface OfflineRecordSample {
+  /** Seconds from the record start. */
+  t_s: number;
+  vbus_v: number;
+  ibus_a: number;
+  charge_ah: number;
+  energy_wh: number;
+}
+
+/** A downloaded offline record (FR 1HHT00). */
+export interface OfflineRecord {
+  index: number;
+  name: string;
+  interval_s: number;
+  samples: OfflineRecordSample[];
+}
+
+/** Lists the connected meter's offline records (GET_DATA 0x200 only); rejects with
+ * the backend's error, e.g. without a meter. */
+export async function recordsList(): Promise<RecordList> {
+  if (mock) return mock.recordsList();
+  return invoke<RecordList>("records_list");
+}
+
+/** Downloads offline record `index` (1-based): its own window, read in chunks of at most
+ * 256 bytes. */
+export async function recordDownload(index: number): Promise<OfflineRecord> {
+  if (mock) return mock.recordDownload(index);
+  return invoke<OfflineRecord>("record_download", { index });
 }
 
 /** A PD capture opened from a pdcap file (FR TGE83E): its rows and status samples,
@@ -793,4 +897,157 @@ export async function triggerConsoleRisk(line: string): Promise<RiskClass> {
 export async function triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]> {
   if (mock) return mock.triggerConsoleSend(line, confirmed);
   return invoke<ConsoleLine[]>("trigger_console_send", { line, confirmed });
+}
+
+// ---- One meter's commands (FR 1HHT03) ----
+
+/** The commands of one meter's tile: every one names that meter, so an action never
+ * reaches another meter. */
+export interface MeterBackend {
+  readonly deviceId: string;
+  disconnect(): Promise<void>;
+  cancelWait(): Promise<void>;
+  setRate(rateSps: number): Promise<void>;
+  startRecording(suggestedName: string): Promise<string | null>;
+  stopRecording(): Promise<RecordingSummary>;
+  exportSession(
+    suggestedName: string,
+    onProgress: (progress: ExportProgress) => void,
+  ): Promise<ExportResult | null>;
+  stats(): Promise<StatsSnapshot>;
+  historyRange<const S extends readonly HistorySeries[]>(
+    series: S,
+    t0Ms: number,
+    t1Ms: number,
+    buckets: number,
+  ): Promise<BucketsFor<S>>;
+  historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]>;
+  resetStats(): Promise<void>;
+  clearHistory(): Promise<void>;
+  pdStart(): Promise<void>;
+  pdStop(): Promise<void>;
+  pdDetails(index: number, opened?: boolean): Promise<PdDetails>;
+  pdClear(): Promise<number>;
+  pdSave(suggestedName: string): Promise<ExportResult | null>;
+  meterSettings(): Promise<MeterSettings>;
+  recordsList(): Promise<RecordList>;
+  recordDownload(index: number): Promise<OfflineRecord>;
+  triggerOpen(): Promise<void>;
+  triggerDetect(): Promise<Detection>;
+  triggerList(protocol: TriggerProtocol): Promise<ProtocolSection>;
+  triggerRisk(request: TriggerRequest): Promise<RiskClass>;
+  triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply>;
+  triggerBackTo5v(): Promise<void>;
+  triggerClose(): Promise<void>;
+  triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>;
+  triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>;
+  triggerConsoleRisk(line: string): Promise<RiskClass>;
+  triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]>;
+}
+
+/** One meter's commands without its device id: {@link meterBackend}'s, or
+ * {@link currentMeterCommands}. */
+export type MeterCommands = Omit<MeterBackend, "deviceId">;
+
+/** The commands without a device id, which act on the backend's current session: the meter
+ * connected last (FR 1HHT03). */
+export const currentMeterCommands: MeterCommands = {
+  disconnect,
+  cancelWait,
+  setRate,
+  startRecording,
+  stopRecording,
+  exportSession,
+  stats,
+  historyRange,
+  historyGaps,
+  resetStats,
+  clearHistory,
+  pdStart,
+  pdStop,
+  pdDetails,
+  pdClear,
+  pdSave,
+  meterSettings,
+  recordsList,
+  recordDownload,
+  triggerOpen,
+  triggerDetect,
+  triggerList,
+  triggerRisk,
+  triggerRequest,
+  triggerBackTo5v,
+  triggerClose,
+  triggerMessageRisk,
+  triggerMessageSend,
+  triggerConsoleRisk,
+  triggerConsoleSend,
+};
+
+/** The commands of meter `deviceId` (FR 1HHT03): each invokes its Tauri command with
+ * `deviceId`, or the mock's {@link MockBackend.meter}. */
+export function meterBackend(deviceId: string): MeterBackend {
+  if (mock) return { deviceId, ...mock.meter(deviceId) };
+  const call = <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> =>
+    invoke<T>(cmd, { deviceId, ...args });
+  return {
+    deviceId,
+    disconnect: async () => {
+      await call("disconnect");
+    },
+    cancelWait: async () => {
+      await call("cancel_wait");
+    },
+    setRate: async (rateSps) => {
+      await call("set_rate", { rateSps });
+    },
+    startRecording: (suggestedName) => call("start_recording", { suggestedName }),
+    stopRecording: () => call("stop_recording"),
+    exportSession: (suggestedName, onProgress) => {
+      const channel = new Channel<ExportProgress>();
+      channel.onmessage = onProgress;
+      return call("export_session", { suggestedName, onProgress: channel });
+    },
+    stats: () => call("stats"),
+    historyRange: (series, t0Ms, t1Ms, buckets) =>
+      call("history_range", { series, ...wholeMs(t0Ms, t1Ms), buckets }),
+    historyGaps: (t0Ms, t1Ms) => call("history_gaps", wholeMs(t0Ms, t1Ms)),
+    resetStats: async () => {
+      await call("reset_stats");
+    },
+    clearHistory: async () => {
+      await call("clear_history");
+    },
+    pdStart: async () => {
+      await call("pd_start");
+    },
+    pdStop: async () => {
+      await call("pd_stop");
+    },
+    pdDetails: (index, opened = false) =>
+      call("pd_details", opened ? { index, opened } : { index }),
+    pdClear: () => call("pd_clear"),
+    pdSave: (suggestedName) => call("pd_save", { suggestedName }),
+    meterSettings: () => call("meter_settings"),
+    recordsList: () => call("records_list"),
+    recordDownload: (index) => call("record_download", { index }),
+    triggerOpen: async () => {
+      await call("trigger_open");
+    },
+    triggerDetect: () => call("trigger_detect"),
+    triggerList: (protocol) => call("trigger_list", { protocol }),
+    triggerRisk: (request) => call("trigger_risk", { request }),
+    triggerRequest: (request, confirmed) => call("trigger_request", { request, confirmed }),
+    triggerBackTo5v: async () => {
+      await call("trigger_back_to_5v");
+    },
+    triggerClose: async () => {
+      await call("trigger_close");
+    },
+    triggerMessageRisk: (message) => call("trigger_message_risk", { message }),
+    triggerMessageSend: (message, confirmed) =>
+      call("trigger_message_send", { message, confirmed }),
+    triggerConsoleRisk: (line) => call("trigger_console_risk", { line }),
+    triggerConsoleSend: (line, confirmed) => call("trigger_console_send", { line, confirmed }),
+  };
 }

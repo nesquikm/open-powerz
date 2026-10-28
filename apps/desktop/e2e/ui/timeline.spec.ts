@@ -158,9 +158,11 @@ test.describe("overview strip (AC-FENCD9.1 / AC-FENCD9.2)", () => {
     const win = page.locator(".chart-wrap .overview-window");
     await expect(win).toBeVisible();
     // Live on the newest 10 s of a 200 s session: a narrow window at the strip's right end.
-    await expect.poll(async () => (await overviewWindow(page)) !== null).toBe(true);
+    // The window spans the whole strip until the seeded history reaches it; wait for that.
+    await expect
+      .poll(async () => (await overviewWindow(page))?.widthPx ?? Infinity, { timeout: 5_000 })
+      .toBeLessThan(s.width / 4);
     const first = await overviewWindow(page);
-    expect(first!.widthPx).toBeLessThan(s.width / 4);
     expect(first!.leftPx + first!.widthPx).toBeGreaterThan(s.width - 4);
     const firstText = await win.getAttribute("aria-valuetext");
     // New data keeps arriving: the window keeps marking the newest data.

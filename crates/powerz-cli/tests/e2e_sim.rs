@@ -312,3 +312,377 @@ fn disconnect_mid_stream_is_device_error_exit_5() {
         .stderr(predicate::str::contains("disconnected"));
     let _ = std::fs::remove_file(&csv);
 }
+
+// ---- AC-1HHT01.3: `powerz settings` against the simulator ----
+
+#[test]
+fn settings_against_the_simulator() {
+    let a = sim("idle").arg("settings").assert().success();
+    let out = stdout_of(&a);
+    assert_eq!(stderr_of(&a), "", "no stderr on success");
+    // The demo meter mirrors the captured FW 2.0.6 settings word.
+    assert!(out.contains("English"), "{out}");
+    assert!(out.contains("50%"), "{out}");
+    assert!(out.contains("[confirmed]"), "screen-checked fields: {out}");
+    assert!(
+        out.contains("[inferred]"),
+        "rotation and calibration: {out}"
+    );
+    insta::assert_snapshot!("settings_sim", out);
+}
+
+#[test]
+fn settings_json_and_raw_against_the_simulator() {
+    let a = sim("idle").args(["settings", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(&stdout_of(&a)).unwrap();
+    let fields = v["fields"].as_array().expect("fields array");
+    assert_eq!(fields.len(), 11);
+    // Seven fields were confirmed on the meter's screen (1HHT04); rotation
+    // and the three calibration fields stay inferred.
+    let confirmed = fields.iter().filter(|f| f["tag"] == "confirmed").count();
+    let inferred = fields.iter().filter(|f| f["tag"] == "inferred").count();
+    assert_eq!((confirmed, inferred), (7, 4), "{v}");
+
+    let a = sim("idle").args(["settings", "--raw"]).assert().success();
+    let out = stdout_of(&a);
+    let n: usize = out
+        .lines()
+        .map(|l| l.split_whitespace().skip(1).count())
+        .sum();
+    assert_eq!(n, 180, "{out}");
+}
+
+#[test]
+fn settings_sends_no_write_against_the_simulator() {
+    let a = sim("idle").args(["--trace", "settings"]).assert().success();
+    let trace = stderr_of(&a);
+    let sent: Vec<&str> = trace.lines().filter(|l| l.starts_with('>')).collect();
+    assert!(!sent.is_empty(), "no frames traced:\n{trace}");
+    for line in sent {
+        let ty = traced_bytes(line).first().copied().unwrap_or(0xFF) & 0x7F;
+        assert_ne!(ty, 0x0A, "settings write sent: {line}");
+        assert_ne!(ty, 0x48, "SET_DATA sent: {line}");
+    }
+    assert!(!trace.lines().any(|l| l.starts_with('x')), "{trace}");
+}
+
+// ---- AC-1HHT00.4 / .6 / .7: `powerz records` against the simulator ----
+
+#[test]
+fn records_list_against_the_simulator() {
+    let a = sim("idle").args(["records", "list"]).assert().success();
+    let out = stdout_of(&a);
+    assert_eq!(stderr_of(&a), "", "no stderr on success");
+    let rows = out.lines().filter(|l| !l.trim().is_empty()).count();
+    assert!(rows >= 4, "header + at least three demo records:\n{out}");
+    insta::assert_snapshot!("records_list_sim", out);
+}
+
+#[test]
+fn records_list_json_against_the_simulator() {
+    let a = sim("idle")
+        .args(["records", "list", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_str(&stdout_of(&a)).unwrap();
+    let recs = v["records"].as_array().expect("records array");
+    assert!(recs.len() >= 3, "{v}");
+    for (i, r) in recs.iter().enumerate() {
+        assert_eq!(r["index"], i + 1, "{r}");
+        assert!(r["name"].as_str().is_some_and(|n| !n.is_empty()), "{r}");
+        assert!(r["points"].as_u64().is_some(), "{r}");
+    }
+}
+
+#[test]
+fn records_get_all_against_the_simulator_writes_csv_files() {
+    let dir = std::env::temp_dir().join(format!("powerz-e2e-records-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = sim("idle")
+        .args(["records", "get", "--all", "--json", "--out"])
+        .arg(&dir)
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_str(&stdout_of(&a)).unwrap();
+    let written = v["written"].as_array().expect("written array");
+    assert!(written.len() >= 3, "{v}");
+    for w in written {
+        let path = PathBuf::from(w["path"].as_str().unwrap());
+        assert_eq!(path.parent(), Some(dir.as_path()), "{w}");
+        let csv = std::fs::read_to_string(&path).unwrap();
+        let mut lines = csv.lines();
+        assert_eq!(
+            lines.next(),
+            Some("ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR")
+        );
+        assert_eq!(lines.count() as u64, w["rows"].as_u64().unwrap(), "{w}");
+    }
+    // `get <n>` writes the same file for one record.
+    let first = PathBuf::from(written[0]["path"].as_str().unwrap());
+    let all_csv = std::fs::read_to_string(&first).unwrap();
+    std::fs::remove_file(&first).unwrap();
+    sim("idle")
+        .args(["records", "get", "1", "--out"])
+        .arg(&dir)
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), all_csv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn records_get_out_of_range_against_the_simulator_is_exit_2() {
+    let dir = std::env::temp_dir().join(format!("powerz-e2e-records-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = sim("idle")
+        .args(["records", "get", "99", "--out"])
+        .arg(&dir)
+        .assert()
+        .code(2);
+    let err = stderr_of(&a);
+    assert!(
+        err.contains("99"),
+        "the error names the missing record: {err}"
+    );
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn records_get_sends_no_write_against_the_simulator() {
+    let dir = std::env::temp_dir().join(format!("powerz-e2e-records-tr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = sim("idle")
+        .args(["--trace", "records", "get", "--all", "--out"])
+        .arg(&dir)
+        .assert()
+        .success();
+    let trace = stderr_of(&a);
+    let sent: Vec<&str> = trace.lines().filter(|l| l.starts_with('>')).collect();
+    assert!(!sent.is_empty(), "no frames traced:\n{trace}");
+    let mut get_data_record_list = 0;
+    for line in sent {
+        let bytes = traced_bytes(line);
+        let ty = bytes.first().copied().unwrap_or(0xFF) & 0x7F;
+        assert!(
+            [0x02, 0x03, 0x0C, 0x40, 0x44, 0x4C].contains(&ty),
+            "outside the read-only set: {line}"
+        );
+        if ty == 0x0C && bytes.get(2..4) == Some(&[0x00, 0x04]) {
+            get_data_record_list += 1;
+        }
+    }
+    assert_eq!(get_data_record_list, 1, "one RecordList read:\n{trace}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- AC-1HHT02.4 / .5: `powerz watch --source cdc` against the simulator ----
+//
+// With `--source cdc`, `POWERZ_SIM_CTRL_C_AFTER=N` stands in for Ctrl-C after
+// N refreshes (the stream has no GET_DATA to count).
+
+/// A watch line with its numbers (and a missing value's `-`) as `#`.
+fn watch_shape(line: &str) -> String {
+    line.split_whitespace()
+        .map(|t| {
+            if t == "-" || t.parse::<f64>().is_ok() {
+                "#"
+            } else {
+                t
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The bytes of a `--trace` frame line `<marker> [<len>] <hex bytes>`;
+/// the `[len]` prefix must match.
+fn traced_bytes(line: &str) -> Vec<u8> {
+    let mut tokens = line.split_whitespace().skip(1);
+    let len: usize = tokens
+        .next()
+        .and_then(|t| t.strip_prefix('[')?.strip_suffix(']')?.parse().ok())
+        .unwrap_or_else(|| panic!("no [len] after the marker: {line}"));
+    let bytes: Vec<u8> = tokens
+        .map(|t| u8::from_str_radix(t, 16).unwrap_or_else(|_| panic!("not hex: {line}")))
+        .collect();
+    assert_eq!(bytes.len(), len, "[len] counts the bytes: {line}");
+    bytes
+}
+
+#[test]
+fn watch_source_cdc_prints_the_polled_line_format() {
+    let a = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_CTRL_C_AFTER", "3")
+        .args(["watch", "--source", "cdc", "--interval", "50"])
+        .assert()
+        .success();
+    assert_eq!(stderr_of(&a), "");
+    let out = stdout_of(&a);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "one line per refresh:\n{out}");
+
+    let polled = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_CTRL_C_AFTER", "1")
+        .args(["watch", "--interval", "50"])
+        .assert()
+        .success();
+    let polled_out = stdout_of(&polled);
+    let polled_line = polled_out.lines().next().expect("a polled line");
+    for l in &lines {
+        assert_eq!(
+            watch_shape(l),
+            watch_shape(polled_line),
+            "\ncdc:    {l}\npolled: {polled_line}"
+        );
+        let vbus: f64 = l
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("{l}"));
+        near("VBUS", vbus, 5.0, 0.1);
+    }
+}
+
+#[test]
+fn watch_source_cdc_starts_and_stops_the_stream_with_adcnew_requests_only() {
+    let a = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_CTRL_C_AFTER", "3")
+        .args(["--trace", "watch", "--source", "cdc", "--interval", "50"])
+        .assert()
+        .success();
+    let trace = stderr_of(&a);
+    let sent: Vec<Vec<u8>> = trace
+        .lines()
+        .filter(|l| l.starts_with('>'))
+        .map(traced_bytes)
+        .collect();
+    assert!(!trace.lines().any(|l| l.starts_with('x')), "{trace}");
+    assert_eq!(
+        sent.first().and_then(|f| f.first()),
+        Some(&0x02),
+        "starts with ADCNEW start:\n{trace}"
+    );
+    assert_eq!(
+        sent.last(),
+        Some(&vec![0x03]),
+        "ends with ADCNEW stop:\n{trace}"
+    );
+    for f in &sent {
+        let ty = f.first().copied().unwrap_or(0xFF) & 0x7F;
+        // AC-1HHT02.5: on CDC, 0x01..0x03 only as 1–2 byte ADCNEW requests;
+        // no CONNECT, no queue start, no auth.
+        if (0x01..=0x03).contains(&ty) {
+            assert!(f.len() <= 2, "not an ADCNEW request: {f:02x?}\n{trace}");
+        }
+        assert!(
+            ![0x0E, 0x0F, 0x4C].contains(&ty),
+            "queue/auth request on the stream path: {f:02x?}\n{trace}"
+        );
+    }
+}
+
+#[test]
+fn polled_watch_never_sends_adcnew_or_disconnect_types() {
+    // AC-1HHT02.5: on bulk, 0x02 is CONNECT only; 0x01 and 0x03 are never sent.
+    let a = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_CTRL_C_AFTER", "3")
+        .args(["--trace", "watch", "--interval", "50"])
+        .assert()
+        .success();
+    let trace = stderr_of(&a);
+    for f in trace
+        .lines()
+        .filter(|l| l.starts_with('>'))
+        .map(traced_bytes)
+    {
+        let ty = f.first().copied().unwrap_or(0xFF) & 0x7F;
+        assert!(ty != 0x01 && ty != 0x03, "{f:02x?}\n{trace}");
+        if ty == 0x02 {
+            assert_eq!(f.len(), 4, "0x02 only as CONNECT: {f:02x?}");
+            assert_eq!(&f[2..], &[0x00, 0x00], "CONNECT: {f:02x?}");
+        }
+    }
+}
+
+// ---- 1HHT02 / 1HHT04: `powerz stream --source cdc` against the simulator ----
+
+#[test]
+fn stream_source_cdc_records_the_adcnew_stream_and_prints_the_summary() {
+    let csv = temp_csv("stream-cdc-50.csv");
+    let a = sim_fake("load-5v-1a")
+        .args([
+            "--trace",
+            "stream",
+            "--source",
+            "cdc",
+            "--rate",
+            "50",
+            "--duration",
+            "2",
+            "--csv",
+        ])
+        .arg(&csv)
+        .assert()
+        .success();
+    let err = stderr_of(&a);
+    let summary = err
+        .lines()
+        .find(|l| l.ends_with("CRC errors"))
+        .unwrap_or_else(|| panic!("no summary line:\n{err}"));
+    assert_eq!(
+        summary,
+        "100 records, 0 gaps, 0 dropped frames, 0 CRC errors"
+    );
+    // Only ADCNEW requests go out: start first, stop last; no CONNECT,
+    // queue or auth.
+    let sent: Vec<Vec<u8>> = err
+        .lines()
+        .filter(|l| l.starts_with('>'))
+        .map(traced_bytes)
+        .collect();
+    let start = powerz_protocol::adcnew::Request::Start {
+        content: powerz_protocol::adcnew::Content::Adc,
+        rate: powerz_protocol::decode::Rate::Sps50,
+    }
+    .encode();
+    assert_eq!(sent.first(), Some(&start), "{err}");
+    assert_eq!(sent.last(), Some(&vec![0x03]), "{err}");
+    assert!(sent.iter().all(|f| f.len() <= 2), "{err}");
+
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some(powerz_cli::record::CSV_HEADER));
+    assert_eq!(lines.count(), 100);
+    let _ = std::fs::remove_file(&csv);
+}
+
+#[test]
+fn stream_source_cdc_counts_a_corrupt_frame() {
+    let csv = temp_csv("stream-cdc-crc.csv");
+    let a = sim_fake("load-5v-1a")
+        .env("POWERZ_SIM_FAULT", "corrupt-adcnew@5")
+        .args([
+            "stream",
+            "--source",
+            "cdc",
+            "--rate",
+            "50",
+            "--duration",
+            "2",
+            "--csv",
+        ])
+        .arg(&csv)
+        .assert()
+        .success();
+    let err = stderr_of(&a);
+    assert!(
+        err.lines()
+            .any(|l| l.ends_with(", 1 gaps, 0 dropped frames, 1 CRC errors")),
+        "{err}"
+    );
+    let _ = std::fs::remove_file(&csv);
+}

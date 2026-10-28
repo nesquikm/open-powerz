@@ -339,6 +339,13 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
         &self.caps
     }
 
+    /// ADCNEW stream frames read between the text replies so far, oldest
+    /// first; each is handed out once. The stream can run during a PDM
+    /// text session on the same port. \[device\]
+    pub fn take_stream_frames(&mut self) -> Vec<crate::adcnew::Frame> {
+        self.reader.take_frames()
+    }
+
     /// Swap in a freshly reopened port and re-open the PDM session on it
     /// before anything else (the device drops the text session on reopen).
     pub fn reopen(&mut self, port: P) -> Result<(), Error> {

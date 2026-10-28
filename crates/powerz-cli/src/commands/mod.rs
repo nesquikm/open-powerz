@@ -21,6 +21,8 @@ mod list;
 mod pd;
 mod pd_send;
 mod read;
+mod records;
+mod settings;
 mod stream;
 mod trigger;
 mod watch;
@@ -36,13 +38,15 @@ pub use list::{list, select_device};
 pub use pd::{pd, pd_decode, pd_save};
 pub use pd_send::{PdSendOptions, pd_send};
 pub use read::read;
-pub use stream::{StreamOptions, StreamSummary, stream};
+pub use records::{RecordSelection, records_get, records_list};
+pub use settings::{SettingsOutput, settings};
+pub use stream::{CdcStreamSummary, StreamOptions, StreamSummary, stream, stream_cdc};
 pub use trigger::{
     LegacyRequestOptions, PdRequestOptions, PdSettingsChange, trigger_legacy_list,
     trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
     trigger_pd_settings,
 };
-pub use watch::{WatchOptions, watch};
+pub use watch::{WatchOptions, watch, watch_cdc};
 
 /// Close the PDM `session` whatever `result` is; the first error wins.
 fn close_after<T, P: Read + Write, C: Clock>(

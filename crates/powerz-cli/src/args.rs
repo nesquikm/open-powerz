@@ -25,6 +25,18 @@ pub enum TransportKind {
     Sim,
 }
 
+/// Where `powerz watch` and `powerz stream` get their values from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum WatchSource {
+    /// Poll the meter over --transport: one ADC snapshot per refresh
+    /// (`watch`), the ADC queue (`stream`).
+    #[default]
+    Poll,
+    /// The ADCNEW push stream on the meter's CDC serial port: no sign-in,
+    /// no temperature.
+    Cdc,
+}
+
 /// Help heading of the flags accepted by every subcommand.
 const GLOBAL: &str = "Global options";
 
@@ -97,6 +109,23 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show the meter's settings block (read-only): display, sample rate and
+    /// raw calibration values, each tagged confirmed or inferred.
+    Settings {
+        /// Print one JSON object instead of tagged lines.
+        #[arg(long, conflicts_with = "raw")]
+        json: bool,
+        /// Hex-dump the 180-byte block instead of decoding it.
+        #[arg(long)]
+        raw: bool,
+    },
+    /// List the meter's offline records or download them as CSV files
+    /// (read-only; bulk pipe only).
+    Records {
+        /// What to do.
+        #[command(subcommand)]
+        action: RecordsAction,
+    },
     /// Show the `read` values live, refreshing until Ctrl-C.
     Watch {
         /// Refresh interval in milliseconds (minimum 50).
@@ -107,6 +136,11 @@ pub enum Command {
             value_parser = clap::value_parser!(u64).range(50..)
         )]
         interval: u64,
+        /// Where the values come from: `poll` asks for a snapshot each
+        /// refresh, `cdc` reads the ADCNEW stream on the CDC serial port
+        /// (whatever --transport says, except hid).
+        #[arg(long, value_enum, value_name = "SOURCE", default_value = "poll")]
+        source: WatchSource,
     },
     /// Record the ADC sample stream to a CSV file until Ctrl-C or --duration.
     Stream {
@@ -119,6 +153,12 @@ pub enum Command {
         /// Stop after this many seconds of device time (fractions allowed).
         #[arg(long, value_name = "SECONDS")]
         duration: Option<f64>,
+        /// Where the samples come from: `poll` reads the ADC queue over
+        /// --transport, `cdc` records the ADCNEW stream on the CDC serial
+        /// port at 50 or 1000 records/s (whatever --transport says, except
+        /// hid) and reports gaps, dropped frames and CRC errors.
+        #[arg(long, value_enum, value_name = "SOURCE", default_value = "poll")]
+        source: WatchSource,
     },
     /// Capture USB PD traffic (messages and events) until Ctrl-C; bulk pipe only.
     #[command(
@@ -170,6 +210,35 @@ pub enum Command {
         /// What to do.
         #[command(subcommand)]
         action: FirmwareAction,
+    },
+}
+
+/// `records` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum RecordsAction {
+    /// Show the offline records stored on the meter: name, interval,
+    /// points, duration, charge, energy and offset.
+    List {
+        /// Print one JSON object instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download record N (as `list` numbers it) or every record as CSV files
+    /// named `NN_<name>.csv`, in the `stream` CSV layout.
+    #[command(group = clap::ArgGroup::new("which").required(true).args(["index", "all"]))]
+    Get {
+        /// Record number (1-based, as `list` shows it).
+        #[arg(value_name = "N")]
+        index: Option<usize>,
+        /// Download every record that has samples.
+        #[arg(long)]
+        all: bool,
+        /// Directory to write the CSV files into (must exist).
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        out: PathBuf,
+        /// Print one JSON object listing the written files instead of text lines.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -492,12 +561,22 @@ pub enum PdAction {
 }
 
 impl Command {
+    /// The source of `watch` and `stream`; `None` for other commands.
+    pub fn source(&self) -> Option<WatchSource> {
+        match self {
+            Command::Watch { source, .. } | Command::Stream { source, .. } => Some(*source),
+            _ => None,
+        }
+    }
+
     /// Subcommand name as typed on the command line.
     pub fn name(&self) -> &'static str {
         match self {
             Command::List { .. } => "list",
             Command::Info { .. } => "info",
             Command::Read { .. } => "read",
+            Command::Settings { .. } => "settings",
+            Command::Records { .. } => "records",
             Command::Watch { .. } => "watch",
             Command::Stream { .. } => "stream",
             Command::Pd { .. } => "pd",
@@ -713,6 +792,23 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
         return Err(CliError::Usage(format!(
             "`firmware {name}` runs on the vendor bulk pipe only; use --transport bulk (or sim)"
         )));
+    }
+    if cli.command.source() == Some(WatchSource::Cdc) {
+        // The ADCNEW stream exists only on the CDC port; HID has none.
+        let name = cli.command.name();
+        if cli.transport == TransportKind::Hid {
+            return Err(CliError::Usage(format!(
+                "`{name} --source cdc` reads the CDC serial port; it cannot run over --transport hid"
+            )));
+        }
+        if let Command::Stream { rate, .. } = cli.command
+            && !matches!(rate, 50 | 1000)
+        {
+            return Err(CliError::Usage(format!(
+                "`stream --source cdc` records 50 or 1000 records/s, not {rate}"
+            )));
+        }
+        return Ok(());
     }
     let hid_ok = matches!(cli.command, Command::Read { .. } | Command::Watch { .. });
     // `pd send` talks to the meter's serial port like `trigger`.

@@ -178,7 +178,7 @@ fn listing_never_opens_a_device() {
 // ---- AC-VHY378.2: connect / disconnect through the manager ----
 
 #[test]
-fn connect_runs_on_a_worker_thread_and_a_second_connect_is_refused() {
+fn connect_runs_on_a_worker_thread_and_connecting_the_same_meter_again_is_refused() {
     let (mut m, opens, thread) = manager(vec![]);
     let (rx, sink) = channel_sink();
     m.connect("demo:load-5v-1a", 50, sink)
@@ -194,9 +194,10 @@ fn connect_runs_on_a_worker_thread_and_a_second_connect_is_refused() {
     );
 
     let (_rx2, sink2) = channel_sink();
+    // AC-1HHT03.1: another meter may join, but not the same one twice.
     let err = m
-        .connect("demo:idle", 50, sink2)
-        .expect_err("second connect accepted");
+        .connect("demo:load-5v-1a", 50, sink2)
+        .expect_err("the same meter connected twice");
     assert_eq!(err.kind, ErrorKind::Usage);
     assert_eq!(
         opens.load(Ordering::SeqCst),

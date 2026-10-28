@@ -154,6 +154,11 @@ final gate for the confirmation.
   the sample rate, any open recording with its elapsed time, and the chart and
   statistics, which refill from the session history. Closing the window still
   ends the session.
+- **Several meters, one window.** Each connected meter has its own worker,
+  session and history in the backend, and its own store in the UI. Commands
+  name the meter they act on by device id, so an action never reaches the
+  wrong meter; without one they go to the most recently connected meter, which
+  keeps the single-meter app unchanged. A reload attaches every running meter.
 - **Replug waits for the same meter.** When a streaming meter is unplugged,
   the backend remembers its serial number and the app shows **Waiting for
   meter**. The hotplug watcher matches new listings by serial. When the meter

@@ -82,7 +82,9 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
 - Tauri commands: `app_info`, `list_devices`, `watch_devices`, `connect`, `attach` (a reloaded page
   takes over the running session), `disconnect`, `set_rate`,
   `history_range`, `history_gaps`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
-  `stop_recording`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter), and
+  `stop_recording`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter),
+  `running_meters` (the running sessions' device ids, for a reload), `meter_settings`,
+  `records_list` and `record_download` (read-only meter data), and
   for the PD analyzer `pd_start`, `pd_stop`, `pd_details` (a record's raw bytes and field tree,
   on demand, from the live capture or, with `opened`, from an opened file), `pd_save` / `pd_open`
   (`.pdcap` files) and `pd_import` (read-only vendor PD log) and `pd_clear` (answers the next record index; indices never restart, so rows sent
@@ -91,7 +93,9 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
   `PdState`, `PdRows` (batched, at most 60 a second, decoded in the backend; each row carries
   `session_ms` on the measurement samples' time base) and `PdStatus` (the PD status blocks'
   VBUS / IBUS / CC1 / CC2, batched the same way) over one session channel, with export progress on its own channel. The UI reaches them only through `apps/desktop/src/lib/backend.ts`, the
-  seam the Playwright mock replaces.
+  seam the Playwright mock replaces. Every command that acts on a meter takes an optional
+  `device_id` (several meters at once; without it, the most recently connected running meter),
+  and `connect` takes a `source`: `queue` (ADC queue over bulk) or `cdc` (the ADCNEW stream).
 - CLI: `powerz <subcommand>` with `clap` once the first command lands.
 
 ## 4. Key Patterns

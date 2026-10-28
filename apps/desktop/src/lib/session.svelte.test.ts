@@ -343,6 +343,15 @@ describe("Session adopts a running session on load (AC-VEDDFD.2, AC-VEDDFD.5)", 
     expect(s.canToggleConnect).toBe(true);
   });
 
+  it("counts the adopted meter as connected, so the panels read it (HIL 1HHT04.multi)", () => {
+    const s = new Session();
+    expect(s.meterConnected).toBe(false);
+    s.adopt(snapshot());
+    expect(s.meterConnected).toBe(true);
+    s.handleEvent({ type: "status", data: { state: "disconnected", error: null } });
+    expect(s.meterConnected).toBe(false);
+  });
+
   it("keeps the adopted device picked when the device list arrives afterwards", () => {
     const s = new Session();
     s.adopt(snapshot());
@@ -534,6 +543,27 @@ describe("Session waits for an unplugged meter (AC-TGE839.1–AC-TGE839.5)", () 
     s.setDevices([meter("usb:1:9", SERIAL_A), ...DEMOS]);
     s.handleEvent(connectedTo(SERIAL_A));
     expect(s.error).toBeNull();
+  });
+
+  it("clears a read error that came with the unplug once the meter streams again (HIL 1HHT04.multi)", () => {
+    // On macOS the pulled cable can end the session with an I/O error, not an unplug one.
+    const s = streamingMeter();
+    s.handleEvent({
+      type: "status",
+      data: {
+        state: "disconnected",
+        error: {
+          kind: "internal",
+          message: "Talking to the meter failed.",
+          hint: "Replug the meter and try again.",
+        },
+      },
+    });
+    s.handleEvent(waitingForA);
+    s.setDevices([meter("usb:1:9", SERIAL_A), ...DEMOS]);
+    s.handleEvent(connectedTo(SERIAL_A));
+    expect(s.error).toBeNull();
+    expect(s.state).toBe("streaming");
   });
 
   /** Streaming from meter A at usb:1:7, before the cable is pulled. */

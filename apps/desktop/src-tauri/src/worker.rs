@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use powerz_protocol::adcnew::Content;
 use powerz_protocol::decode::pd_packet::CaptureClock;
 use powerz_protocol::decode::{QueueRecord, Rate};
 use powerz_protocol::firmware::DeviceMode;
@@ -18,7 +19,7 @@ use powerz_protocol::session::{
     self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer,
 };
 use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Series, SeriesBuckets};
@@ -27,6 +28,19 @@ use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, Recording
 use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, temp_at};
 use crate::ui_error::{self, ErrorKind, UiError};
+
+/// Where the live measurements come from (FR 1HHT02), named on the wire
+/// `queue` / `cdc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeasurementSource {
+    /// The ADC queue polled over the vendor bulk pipe (CONNECT, auth).
+    #[default]
+    Queue,
+    /// The ADCNEW push stream on the CDC serial port: no CONNECT and no
+    /// sign-in; it carries no device info and no temperature.
+    Cdc,
+}
 
 /// Worker start-up settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,15 +51,18 @@ pub struct WorkerConfig {
     pub session_id: u64,
     /// Device mode the `connected` status reports, from the listing.
     pub mode: DeviceMode,
+    /// Where the measurements come from; the queue by default.
+    pub source: MeasurementSource,
 }
 
 impl WorkerConfig {
-    /// Settings for a meter in application mode.
+    /// Settings for a meter in application mode, polling the queue.
     pub fn new(rate: Rate, session_id: u64) -> Self {
         Self {
             rate,
             session_id,
             mode: DeviceMode::Application,
+            source: MeasurementSource::Queue,
         }
     }
 }
@@ -146,6 +163,110 @@ pub struct PdRows {
 pub struct PdStatusBatch {
     /// Status blocks in time order.
     pub samples: Vec<PdStatusSample>,
+}
+
+/// The meter's settings as the panel shows them, in display order (FR
+/// 1HHT01); each row serializes as `{key, label, value, tag}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MeterSettingsView {
+    /// Every decoded field.
+    pub fields: Vec<powerz_protocol::decode::settings::Row>,
+}
+
+impl From<&powerz_protocol::decode::settings::MeterSettings> for MeterSettingsView {
+    fn from(settings: &powerz_protocol::decode::settings::MeterSettings) -> Self {
+        Self {
+            fields: settings.rows(),
+        }
+    }
+}
+
+/// One offline record as the Records view lists it (FR 1HHT00).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecordEntryView {
+    /// 1-based position in the meter's list.
+    pub index: usize,
+    /// The record's name.
+    pub name: String,
+    /// Seconds between samples.
+    pub interval_s: u8,
+    /// Number of samples.
+    pub points: u16,
+    /// Recorded time in seconds.
+    pub duration_s: u32,
+    /// Charge in Ah as stored: signed, negative for one current direction
+    /// (the Records view shows the magnitude, as the meter does).
+    pub charge_ah: f64,
+    /// Energy in Wh as stored: signed like the charge.
+    pub energy_wh: f64,
+    /// Offset of the samples in the record area.
+    pub offset: u32,
+}
+
+impl RecordEntryView {
+    fn new(index: usize, e: &powerz_protocol::decode::records::RecordEntry) -> Self {
+        Self {
+            index,
+            name: e.name.clone(),
+            interval_s: e.interval_s,
+            points: e.points,
+            duration_s: e.duration_s,
+            charge_ah: e.charge_ah(),
+            energy_wh: e.energy_wh(),
+            offset: e.offset,
+        }
+    }
+}
+
+/// The meter's offline-record list (FR 1HHT00).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecordListView {
+    /// Records in the meter's order.
+    pub records: Vec<RecordEntryView>,
+}
+
+/// One sample of a downloaded offline record.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecordSampleView {
+    /// Seconds from the record start.
+    pub t_s: f64,
+    /// VBUS in V.
+    pub vbus_v: f64,
+    /// IBUS in A.
+    pub ibus_a: f64,
+    /// Charge so far in Ah.
+    pub charge_ah: f64,
+    /// Energy so far in Wh.
+    pub energy_wh: f64,
+}
+
+impl RecordSampleView {
+    fn new(
+        entry: &powerz_protocol::decode::records::RecordEntry,
+        index: usize,
+        s: &powerz_protocol::decode::records::RecordSample,
+    ) -> Self {
+        Self {
+            t_s: entry.sample_time_s(index) as f64,
+            vbus_v: s.vbus_v(),
+            ibus_a: s.ibus_a(),
+            charge_ah: s.charge_ah(),
+            energy_wh: s.energy_wh(),
+        }
+    }
+}
+
+/// A downloaded offline record with its samples (FR 1HHT00).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OfflineRecordView {
+    /// 1-based position in the meter's list.
+    pub index: usize,
+    /// The record's name.
+    pub name: String,
+    /// Seconds between samples.
+    pub interval_s: u8,
+    /// Samples in time order.
+    pub samples: Vec<RecordSampleView>,
 }
 
 /// Every event the backend sends to the UI.
@@ -256,6 +377,7 @@ fn connected_info(
         rate,
         session_id,
         mode,
+        ..
     } = *config;
     ConnectedInfo {
         model: info.model.clone(),
@@ -306,10 +428,50 @@ fn sample(r: &QueueRecord) -> Sample {
     }
 }
 
+/// The `connected` status of a CDC stream session: the stream carries no
+/// device info, so model, firmware and serial are left blank for the
+/// caller (which knows the listing) to fill in.
+fn cdc_connected_info(config: &WorkerConfig) -> ConnectedInfo {
+    ConnectedInfo {
+        model: String::new(),
+        firmware_version: String::new(),
+        mode: config.mode.name(),
+        bootloader_version: String::new(),
+        warnings: Vec::new(),
+        update_required: None,
+        firmware_problems: Vec::new(),
+        serial: String::new(),
+        rate_sps: Some(config.rate.sps()),
+        rate_locked: false,
+        session_id: config.session_id,
+    }
+}
+
+/// Open the session `config.source` asks for: the queue (see
+/// [`open_queue_session`]) or the CDC ADCNEW stream, started at
+/// `config.rate` with ADC content only and nothing sent before it (no
+/// CONNECT, whose byte means something else there, and no sign-in).
+fn open_session<T: Transport, C: Clock>(
+    transport: T,
+    clock: C,
+    config: WorkerConfig,
+) -> Result<(Session<GuardedTransport<T>, C>, ConnectedInfo), UiError> {
+    match config.source {
+        MeasurementSource::Queue => open_queue_session(transport, clock, config),
+        MeasurementSource::Cdc => {
+            let mut session = Session::with_clock(GuardedTransport::new(transport), clock);
+            session
+                .start_adcnew(Content::Adc, config.rate)
+                .map_err(|e| session_error(&e))?;
+            Ok((session, cdc_connected_info(&config)))
+        }
+    }
+}
+
 /// CONNECT, read the device info, authenticate at level 1 and start the
 /// queue at `config.rate`. When the meter refuses the auth or the queue
 /// start, the session goes on with the rate locked to the meter's own.
-fn open_session<T: Transport, C: Clock>(
+fn open_queue_session<T: Transport, C: Clock>(
     transport: T,
     clock: C,
     config: WorkerConfig,
@@ -350,6 +512,8 @@ fn open_session<T: Transport, C: Clock>(
 pub struct Worker<T: Transport, C: Clock> {
     session: Option<Session<GuardedTransport<T>, C>>,
     clock: C,
+    /// Where the measurements come from.
+    source: MeasurementSource,
     rate: Rate,
     /// The rate cannot be changed (auth or queue start refused).
     rate_locked: bool,
@@ -458,6 +622,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let mut worker = Worker {
             session: Some(session),
             clock,
+            source: config.source,
             rate: config.rate,
             rate_locked: info.rate_locked,
             measured_sps: None,
@@ -501,7 +666,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Ok(());
         };
-        if !self.snapshots.take(self.clock.now_ms()) {
+        // The CDC stream is read without requests in between; it has no
+        // temperature to add.
+        if self.source == MeasurementSource::Cdc || !self.snapshots.take(self.clock.now_ms()) {
             return Ok(());
         }
         let adc = blocked(self.meter.as_ref(), || session.read_adc())?;
@@ -881,8 +1048,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         self.emit(BackendEvent::PdState(PdState { capturing: false }));
     }
 
+    /// Records and the PD sniffer use requests that were never checked on
+    /// the CDC pipe (memory reads, auth, 0x10), so a CDC session refuses them.
+    fn needs_queue_source(&self) -> Result<(), UiError> {
+        match self.source {
+            MeasurementSource::Queue => Ok(()),
+            MeasurementSource::Cdc => Err(UiError::usage(
+                "Not available with the serial stream; reconnect with the USB queue source.",
+            )),
+        }
+    }
+
     /// Start the PD sniffer (0x10, mode 1) and poll PD_PACKET from now on.
     pub fn start_pd(&mut self) -> Result<(), UiError> {
+        self.needs_queue_source()?;
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
@@ -928,6 +1107,66 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Ok(self.pd.clear())
     }
 
+    /// Read the meter's SETTINGS block (GET_DATA 0x008 only) for the
+    /// read-only settings panel (FR 1HHT01); the stream goes on afterwards.
+    pub fn read_settings(&mut self) -> Result<MeterSettingsView, UiError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        let settings = blocked(self.meter.as_ref(), || session.read_meter_settings())
+            .map_err(|e| session_error(&e))?;
+        Ok(MeterSettingsView::from(&settings))
+    }
+
+    /// List the meter's offline records (GET_DATA 0x200 only) for the
+    /// Records view (FR 1HHT00); the stream goes on afterwards.
+    pub fn list_records(&mut self) -> Result<RecordListView, UiError> {
+        self.needs_queue_source()?;
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        let entries = blocked(self.meter.as_ref(), || session.list_records())
+            .map_err(|e| session_error(&e))?;
+        Ok(RecordListView {
+            records: entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| RecordEntryView::new(i + 1, e))
+                .collect(),
+        })
+    }
+
+    /// Download offline record `index` (1-based): a fresh record list, then
+    /// that record's window as consecutive memory reads of at most 256 bytes
+    /// (FR 1HHT00).
+    pub fn download_record(&mut self, index: usize) -> Result<OfflineRecordView, UiError> {
+        self.needs_queue_source()?;
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        let meter = self.meter.as_ref();
+        let entries = blocked(meter, || session.list_records()).map_err(|e| session_error(&e))?;
+        let entry = index
+            .checked_sub(1)
+            .and_then(|i| entries.get(i))
+            .ok_or_else(|| UiError::usage("That record is not on the meter."))?;
+        if entry.points == 0 {
+            return Err(UiError::usage("That record has no samples."));
+        }
+        let samples =
+            blocked(meter, || session.download_record(entry)).map_err(|e| session_error(&e))?;
+        Ok(OfflineRecordView {
+            index,
+            name: entry.name.clone(),
+            interval_s: entry.interval_s,
+            samples: samples
+                .iter()
+                .enumerate()
+                .map(|(k, s)| RecordSampleView::new(entry, k, s))
+                .collect(),
+        })
+    }
+
     /// The PD capture so far, to be saved as a pdcap file (FR TGE83E) off
     /// this thread.
     pub fn pd_save(&self) -> PdSave {
@@ -943,7 +1182,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Step::Ended;
         };
-        let polled = blocked(self.meter.as_ref(), || session.poll_stream());
+        let polled = blocked(self.meter.as_ref(), || match self.source {
+            MeasurementSource::Queue => session.poll_stream(),
+            MeasurementSource::Cdc => session.poll_adcnew(),
+        });
         match polled {
             Ok(poll) => {
                 let times: Vec<u32> = self
@@ -992,7 +1234,11 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
-        session.start_stream(rate).map_err(|e| session_error(&e))?;
+        match self.source {
+            MeasurementSource::Queue => session.start_stream(rate),
+            MeasurementSource::Cdc => session.start_adcnew(Content::Adc, rate),
+        }
+        .map_err(|e| session_error(&e))?;
         // The interval across the restart was not measured.
         let store = &self.store;
         blocked(self.meter.as_ref(), || store.start_run());
@@ -1010,7 +1256,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let _ = self.stop_pd();
         if let Some(mut session) = self.session.take() {
             // Best effort: the pipe closes either way.
-            let _ = session.stop_stream();
+            let _ = match self.source {
+                MeasurementSource::Queue => session.stop_stream(),
+                MeasurementSource::Cdc => session.stop_adcnew(),
+            };
             drop(session);
             self.end_recording(false);
             self.flush_batch();
@@ -1049,6 +1298,15 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::PdSave(reply) => {
                 let _ = reply.send(self.pd_save());
             }
+            Command::ReadSettings(reply) => {
+                let _ = reply.send(self.read_settings());
+            }
+            Command::ListRecords(reply) => {
+                let _ = reply.send(self.list_records());
+            }
+            Command::DownloadRecord(index, reply) => {
+                let _ = reply.send(self.download_record(index));
+            }
             Command::HoldPolling(hold, reply) => {
                 self.hold_polling(hold);
                 let _ = reply.send(());
@@ -1083,6 +1341,9 @@ enum Command {
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
     ClearPd(mpsc::Sender<Result<u64, UiError>>),
     PdSave(mpsc::Sender<PdSave>),
+    ReadSettings(mpsc::Sender<Result<MeterSettingsView, UiError>>),
+    ListRecords(mpsc::Sender<Result<RecordListView, UiError>>),
+    DownloadRecord(usize, mpsc::Sender<Result<OfflineRecordView, UiError>>),
     /// Hold or release the queue polling; answered between steps, so no
     /// poll is in flight once a hold is answered.
     HoldPolling(bool, mpsc::Sender<()>),
@@ -1104,6 +1365,11 @@ impl std::fmt::Debug for Command {
             Command::PdDetails(index, _) => f.debug_tuple("PdDetails").field(index).finish(),
             Command::ClearPd(_) => f.write_str("ClearPd"),
             Command::PdSave(_) => f.write_str("PdSave"),
+            Command::ReadSettings(_) => f.write_str("ReadSettings"),
+            Command::ListRecords(_) => f.write_str("ListRecords"),
+            Command::DownloadRecord(index, _) => {
+                f.debug_tuple("DownloadRecord").field(index).finish()
+            }
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::Handover(..) => f.write_str("Handover"),
         }
@@ -1284,6 +1550,9 @@ pub type ExportJob = JoinHandle<Result<u64, UiError>>;
 /// How long a request to the worker may take before the UI gives up.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long the UI waits for one offline-record download.
+const RECORD_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Sends rate, recording and export requests to a running worker and
 /// answers history and statistics queries from its session store. It works
 /// without the [`WorkerHandle`], so a caller can wait for the answer without
@@ -1418,6 +1687,29 @@ impl WorkerControl {
     pub fn clear_pd(&self) -> Result<u64, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::ClearPd(reply), &answer)?
+    }
+
+    /// Read the meter's settings for the read-only panel.
+    pub fn read_settings(&self) -> Result<MeterSettingsView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::ReadSettings(reply), &answer)?
+    }
+
+    /// List the meter's offline records.
+    pub fn list_records(&self) -> Result<RecordListView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::ListRecords(reply), &answer)?
+    }
+
+    /// Download offline record `index` (1-based). A full record area is
+    /// about 2 MB, so the wait is longer than for other commands.
+    pub fn download_record(&self, index: usize) -> Result<OfflineRecordView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask_within(
+            Command::DownloadRecord(index, reply),
+            &answer,
+            RECORD_DOWNLOAD_TIMEOUT,
+        )?
     }
 
     /// Save the PD capture to `path` as a pdcap file; returns the number of

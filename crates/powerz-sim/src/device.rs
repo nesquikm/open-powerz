@@ -2,10 +2,12 @@
 //! transfers queued.
 
 use powerz_protocol::crypto::{self, KEYS};
+use powerz_protocol::decode::records::MEMORY_READ_MAX_LEN;
 use powerz_protocol::frame::{self, Attribute, DataHeader, SectionHeader};
 
 use crate::memory;
 use crate::queue::RECORD_LEN;
+use crate::records;
 use crate::{Persona, Sample, SimDevice};
 
 /// Message type codes the simulator understands.
@@ -49,7 +51,7 @@ pub(crate) fn put_data_obj(total_len: usize) -> u16 {
 }
 
 /// Encode one ADC section payload from `s`.
-fn adc_payload(s: &Sample, rate_code: u8) -> Vec<u8> {
+pub(crate) fn adc_payload(s: &Sample, rate_code: u8) -> Vec<u8> {
     let micro = |v: f64| ((v * 1e6).round() as i32).to_le_bytes();
     let tenth_mv = |v: f64| ((v * 10_000.0).round().clamp(0.0, 65535.0) as u16).to_le_bytes();
     let mut p = vec![0u8; ADC_LEN];
@@ -80,14 +82,33 @@ fn adc_payload(s: &Sample, rate_code: u8) -> Vec<u8> {
 /// Length of a SETTINGS section payload.
 const SETTINGS_LEN: usize = 180;
 
-/// Encode the 180-byte SETTINGS payload: block A (0x00..0x5C) with its
-/// CRC-32 at 0x5C, block B (0x60..0xB0: flags with the rate code in bits
-/// 2..3, name `POWER-Z` at 0x70) with its CRC-32 at 0xB0.
+/// The captured FW 2.0.6 SETTINGS block [device] (no serial or UID in it):
+/// English, brightness 50 %, rotation 90°, voltage/current/offset
+/// calibration words as read. The sim only rewrites the rate bits and CRCs.
+const SETTINGS_206: [u8; SETTINGS_LEN] = [
+    0x91, 0x01, 0x50, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x41, 0xFF, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x5E, 0x02, 0x00, 0x00,
+    0x5E, 0x02, 0x00, 0x00, 0x5E, 0x02, 0x00, 0x00, 0x5E, 0x02, 0x00, 0x00, 0x5E, 0x02, 0x00, 0x00,
+    0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00,
+    0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00,
+    0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x50, 0x00, 0x00, 0x00, 0xAE, 0x58, 0x10, 0xB9,
+    0x49, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x50, 0x4F, 0x57, 0x45, 0x52, 0x2D, 0x5A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xE9, 0x3D, 0x2E, 0x39,
+];
+
+/// Encode the 180-byte SETTINGS payload from [`SETTINGS_206`] with
+/// `rate_code` in bits 2..3 of the block B flags word (0x60), then refresh
+/// the CRC-32s of block A (0x00..0x5C, at 0x5C) and block B (0x60..0xB0,
+/// at 0xB0).
 fn settings_payload(rate_code: u8) -> Vec<u8> {
-    let mut p = vec![0u8; SETTINGS_LEN];
-    let flags = u32::from(rate_code & 0b11) << 2;
+    let mut p = SETTINGS_206.to_vec();
+    let mut flags = u32::from_le_bytes([p[0x60], p[0x61], p[0x62], p[0x63]]);
+    flags = (flags & !(0b11 << 2)) | (u32::from(rate_code & 0b11) << 2);
     p[0x60..0x64].copy_from_slice(&flags.to_le_bytes());
-    p[0x70..0x70 + 7].copy_from_slice(b"POWER-Z");
     let crc_a = crypto::crc32(&p[0x00..0x5C]);
     p[0x5C..0x60].copy_from_slice(&crc_a.to_le_bytes());
     let crc_b = crypto::crc32(&p[0x60..0xB0]);
@@ -194,6 +215,10 @@ impl SimDevice {
         if mask & Attribute::SETTINGS.bits() != 0 {
             sections.push((Attribute::SETTINGS, 0, settings_payload(self.rate_code)));
         }
+        // RecordList: served from level 1; at level 0 the reply is empty.
+        if mask & Attribute::RECORD_LIST.bits() != 0 && self.auth_level >= 1 {
+            sections.push((Attribute::RECORD_LIST, 0, records::list_payload()));
+        }
         let mut body = Vec::new();
         let n = sections.len();
         for (i, (att, chunk, payload)) in sections.into_iter().enumerate() {
@@ -246,9 +271,26 @@ impl SimDevice {
         self.control(msg::ACCEPT, id)
     }
 
-    /// 0x44: confirmation, then the block encrypted with key 0.
+    /// 0x44: confirmation, then the block encrypted with key 0 in one
+    /// transfer. Like the meter `[device]`, a read longer than
+    /// [`MEMORY_READ_MAX_LEN`] bytes gets its confirmation and only the
+    /// first 256 bytes, then nothing. Its replies carry level 0 in the
+    /// header whatever the session level (`C4 id 01 01`, `06 id 00 00`).
     fn memory_read(&mut self, req: &[u8], id: u8) -> Vec<Vec<u8>> {
-        let reject = || vec![self.control(msg::REJECT, id)];
+        let level0 = |ty: u8, encode: bool, obj: u16| {
+            DataHeader {
+                ty: ty & 0x7F,
+                extend: ty & 0x80 != 0,
+                id,
+                encode,
+                permi: 0,
+                obj,
+            }
+            .to_header()
+            .encode()
+            .to_vec()
+        };
+        let reject = || vec![level0(msg::REJECT, false, 0)];
         if !self.link_open() || req.len() < 4 + CRYPT_LEN || self.info_read_fails() {
             return reject();
         }
@@ -258,12 +300,19 @@ impl SimDevice {
         if word(12) != crypto::crc32(&plain[..12]) {
             return reject();
         }
-        let Some(block) = memory::block(addr, len, &self.app_version) else {
+        // Record samples: only inside a listed window, from level 1.
+        let record = (self.auth_level >= 1)
+            .then(|| records::samples(addr, len))
+            .flatten();
+        let Some(block) = memory::block(addr, len, &self.app_version, &self.serial).or(record)
+        else {
             return reject();
         };
-        let mut confirm = self.header(msg::MEM_READ | 0x80, id, true, 4).to_vec();
+        let mut confirm = level0(msg::MEM_READ | 0x80, true, 4);
         confirm.extend_from_slice(&plain[..16]);
-        vec![confirm, crypto::encrypt(&KEYS[0], &block)]
+        let mut data = crypto::encrypt(&KEYS[0], &block);
+        data.truncate(MEMORY_READ_MAX_LEN as usize);
+        vec![confirm, data]
     }
 
     /// 0x4C: grant level 1 for the UID, 2 for the OTP credential, else 0.
@@ -273,7 +322,7 @@ impl SimDevice {
             return self.control(msg::REJECT, id);
         }
         let plain = crypto::decrypt(&KEYS[3], &req[4..4 + CRYPT_LEN]);
-        let otp = memory::otp_credential();
+        let otp = memory::otp_credential(&self.serial);
         let granted = if plain[8..8 + memory::SIM_UID.len()] == memory::SIM_UID {
             1
         } else if plain[8..8 + otp.len()] == otp[..] {

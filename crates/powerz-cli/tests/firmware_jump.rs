@@ -392,7 +392,7 @@ fn trace_from_application_mode_shows_connect_uid_read_auth_then_jump_dfu() {
     let sent = traced_jump("application", "bootloader");
     let types: Vec<String> = sent
         .iter()
-        .map(|l| l.split_whitespace().nth(1).unwrap_or("").to_owned())
+        .map(|l| l.split_whitespace().nth(2).unwrap_or("").to_owned())
         .collect();
     assert_eq!(
         types,
@@ -400,25 +400,26 @@ fn trace_from_application_mode_shows_connect_uid_read_auth_then_jump_dfu() {
         "CONNECT, the UID read, 0x4C, then JUMP_DFU:\n{sent:#?}"
     );
     assert_eq!(
-        sent[0].split_whitespace().skip(3).collect::<Vec<_>>(),
+        sent[0].split_whitespace().skip(4).collect::<Vec<_>>(),
         ["00", "00"],
         "a bare CONNECT: {sent:#?}"
     );
     assert_eq!(
         sent[2].split_whitespace().count(),
-        1 + 36,
+        2 + 36,
         "a 36-byte 0x4C request: {sent:#?}"
     );
     assert_eq!(
-        sent[3].split_whitespace().skip(3).collect::<Vec<_>>(),
+        sent[3].split_whitespace().skip(4).collect::<Vec<_>>(),
         ["00", "00"],
         "a 4-byte JUMP_DFU: {sent:#?}"
     );
-    assert_eq!(sent[3].split_whitespace().count(), 1 + 4, "{sent:#?}");
+    assert_eq!(sent[3].split_whitespace().count(), 2 + 4, "{sent:#?}");
+    assert_eq!(sent[2].split_whitespace().nth(1), Some("[36]"), "{sent:#?}");
 }
 
 #[test]
 fn trace_from_bootloader_mode_shows_only_jump_aprom() {
     let sent = traced_jump("bootloader", "application");
-    assert_eq!(sent, ["> 08 01 00 00"], "only JUMP_APROM: {sent:#?}");
+    assert_eq!(sent, ["> [4] 08 01 00 00"], "only JUMP_APROM: {sent:#?}");
 }

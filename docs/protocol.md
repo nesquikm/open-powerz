@@ -146,7 +146,7 @@ Control types (main header type below 0x40):
 | 0x07 | FINISHED | reply only | acknowledges flash-write chunks | [doc] [static] |
 | 0x08 | JUMP_APROM | 0 | none; leaves DFU mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
 | 0x09 | JUMP_DFU | 0 | none; enters firmware-update mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
-| 0x0A | GET_STATUS | | no handler in the vendor app | [doc] |
+| 0x0A | settings write (named GET_STATUS in the API doc) | one 4-byte section per changed setting: attribute = setting key, u32 value | unknown; the vendor PDM settings dialog sends this type to change display settings, the key numbers are not recovered; the vendor meter app has no handler for it, and nothing in our app sends it | [doc] [static] |
 | 0x0B | ERROR | | no handler in the vendor app | [doc] |
 | 0x0C | GET_DATA | attribute bit mask | PUT_DATA (0x41) | [doc] [static] [device] |
 | 0x0D | GET_FILE | | unused by the vendor app | [doc] [static] |
@@ -187,7 +187,7 @@ attribute, chained by `next`. [doc] [static] [device]
 | 0x040 | QC_PACKET | `0C id 80 00` | UFCS sniffer stream; idle: 12-byte status + 8 unknown constant bytes | 0 for polling | [doc] [static] [device] (firmware 2.0.6) |
 | 0x080 | TICK | `0C id 00 01` | 8 bytes: u32 device uptime in ms, u32 0 | 1 (empty at 0) | [doc] [device] (firmware 2.0.6) |
 | 0x100 | TICK2 | `0C id 00 02` | always empty | n/a | [doc] [device] |
-| 0x200 | RecordList | `0C id 00 04` | N x 48-byte offline-record entries | 1 (empty at 0) | [static] [device] (firmware 2.0.6) |
+| 0x200 | RecordList | `0C id 00 04` | N x 48-byte offline-record entries (see Offline records) | 1 (empty at 0) | [static] [device] (firmware 2.0.6) |
 | 0x400 | PDList | `0C id 00 08` | always empty | n/a | [static] [device] |
 
 - [device] On firmware 2.0.6, PD_STATUS declares size 0 in its section
@@ -310,9 +310,53 @@ first 96 bytes; device overrides its "96 bytes" reading.
 | 0x70 | ASCII | `POWER-Z`, probably the name shown on screen | [device] [inferred] |
 | 0xB0 | u32 | CRC-32 of bytes 0x60..0xAF | [device] (firmware 2.0.6) [inferred] (prior art) |
 
-- Writing settings (SET_DATA 0x48) is out of scope and never sent. [static]
-- Meter UI settings (brightness, rotation, language) are set some other way
-  that is still unknown. [inferred]
+### Meter settings fields
+
+The vendor trigger tool's settings dialog reads the meter's own UI settings
+from two words of this section: the u32 at 0x00 and the u32 at 0x60. Which
+bits feed which control was worked out by static analysis of that dialog
+[static]. On 2026-10-27 the decoded values were compared with the meter's own
+settings screen: language, brightness, dim timeout, startup logo, theme,
+auto-rotate and sample rate matched and are [device]; rotation did not match
+and stays [inferred]; the calibration values are not shown on the meter and
+stay [inferred]. Bits 1..2, 12..13, 19..26 and 28..31 of the u32 at 0x00 are
+not read by the dialog [static].
+
+| field | position | values | tag |
+|---|---|---|---|
+| language | u32 at 0x00, bit 0 | 0 = Chinese, 1 = English | [static] map; [device] (screen check) |
+| brightness | u32 at 0x00, bits 3..9 | percent, 1..100 | [static] map; [device] (screen check) |
+| dim (screen dimming timeout) | u32 at 0x00, bits 10..11 | 0 = off, 1 = 15 s, 2 = 30 s, 3 = 60 s | [static] map; [device] (screen check of 0 = off); labels for 1..3 [static] |
+| startup logo | u32 at 0x00, bits 14..15 | 0 = off, 1 = 1 s, 2 = 3 s, 3 = 5 s (how long the logo shows) | [static] map; [device] (screen check of 0 = off); labels for 1..3 [static] |
+| theme | u32 at 0x00, bits 16..18 (the low 3 bits of the u16 at 0x02) | 0 blue, 1 green, 2 pink, 3 orange, 4 yellow, 5 dark green, 6 cyan; 7 unknown | [static] map; [device] (screen check of 0 = blue); other colours [static] |
+| auto-rotate | u32 at 0x00, bit 27 | 1 = on | [static] map; [device] (screen check) |
+| rotation (default screen angle) | u32 at 0x60, bits 0..1 | 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270° | [static] map; meaning [inferred]: the screen showed 0° with auto-rotate on while these bits read 90° |
+| rate (sampling rate) | u32 at 0x60, bits 2..3 | 0 = 2 SPS, 1 = 10 SPS, 2 = 50 SPS, 3 = 1000 SPS | [static] [device] (queue rate code; screen check) |
+| voltage calibration | 5 x i32 at 0x1C, 0x20, 0x24, 0x28, 0x2C | signed, shown as plain integers | [static] map; meaning [inferred] |
+| current calibration | 10 x i32 from 0x30; the dialog shows the 5 at 0x30, 0x34, 0x38, 0x3C, 0x40 | signed, shown as plain integers | [static] map; meaning [inferred] |
+| offset calibration | i32 at 0x58 | signed | [static] map; meaning [inferred] |
+
+- [device] Our firmware 2.0.6 dump has 0xF8500191 in the u32 at 0x00 and
+  0x849 in the u32 at 0x60. With the map above they read as English,
+  brightness 50, dim off, startup logo off, theme blue, auto-rotate on,
+  rotation 90° and rate 50 SPS.
+- [device] Screen check (2026-10-27, firmware 2.0.6): the meter's settings
+  screen showed the same language, brightness, dim timeout, startup logo,
+  theme, auto-rotate and sample rate as the decoded block. Rotation did not
+  match: the screen showed 0° with auto-rotate on while bits 0..1 of the u32
+  at 0x60 read 90°. Perhaps the bits hold the angle used when auto-rotate is
+  off, or the screen shows the current angle; until that is settled rotation
+  stays [inferred].
+- The decoder checks both CRC-32 blocks first. On a CRC mismatch in either
+  block it reports the mismatch as an error and decodes no field (our
+  decoder's behaviour, pinned by its unit tests).
+- Nothing is ever written: the app never sends a settings write (message
+  type 0x0A, see the Message catalogue) or SET_DATA (0x48); reading the
+  section is the only settings traffic (pinned by a test on the commands the
+  app sends).
+- A field moves from [inferred] to [device] only after it has been compared
+  with a photo or reading of the meter's screen; a field that does not match
+  is fixed or stays [inferred].
 
 ## Memory read and device info
 
@@ -343,6 +387,13 @@ Reply, as seen on firmware 2.0.6: [device]
 | 1 | 20 | confirmation: header `C4 id 01 01` (type 0x44 with extend and encode set) + the plaintext first 16 request bytes | [device] (firmware 2.0.6) |
 | 2 | roundup16(length) | the data, AES-128-ECB with key slot 0, in a separate transfer with no header | [static] [device] (firmware 2.0.6) |
 
+[device] One memory read returns at most 256 bytes. For a 2768-byte request
+the meter sent the 20-byte confirmation (`C4 id 01 01`: the third byte 0x01
+is the encrypted flag, the header carries auth level 0), then one 256-byte
+transfer, then nothing. Longer data is read as consecutive reads of at most
+256 bytes each (address += 256); the library refuses a longer read before
+sending it.
+
 Known addresses (the only ones we ever read):
 
 | address | length | content | tag |
@@ -354,8 +405,9 @@ Known addresses (the only ones we ever read):
 
 - Keep reads at least 50 ms apart (100 ms in session 1). Third parties report
   that other peripheral addresses crash the meter. [inferred] (prior art)
-- The SPI-flash read window at `0x98000000 + offset` holds offline
-  recordings; it is not on our allowed list yet. [static]
+- The SPI-flash read window at `0x98000000 + flash address` holds the
+  offline recordings. Only the window of a listed record is allowed, read in
+  chunks of at most 256 bytes (see Offline records). [static] [device]
 
 Firmware status (FR V9SK52). All requests below are read-only:
 
@@ -366,6 +418,101 @@ Firmware status (FR V9SK52). All requests below are read-only:
 | warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated | [static] [inferred] |
 | HEAD in application mode | the meter answers with reply id 0 (not the request's id): `40 00 00 01 00 10 00 00`, i.e. type 0x40, id 0, and a u32 at offset 4 of 0x00001000 on firmware 2.0.6, followed by 12 stale bytes from its own transmit buffer (20 bytes in all). We accept a type-0x40, id-0 reply only as the first transfer after our HEAD. A field of 0 means current; any other value is reported as an unrecognised reply, never as "update required", because the vendor's reading (non-zero = update required) does not fit a meter on normal firmware | [device] (firmware 2.0.6) [static] |
 | HEAD in boot-loader mode | the flash path accepts only a reply that echoes its own request id, with field 0; anything else stops before the descriptor | [static]; boot loader 2.5 answers `c0 <id> 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00`, field 0, with or without a valid application [device] |
+
+## Offline records
+
+The meter can record on its own and keeps the recordings in its SPI flash.
+We only list and download them; nothing on the meter is deleted, renamed or
+written. Module `decode::records` decodes them, `Session::list_records` and
+`Session::download_record` read them. [static]
+
+**List.** GET_DATA mask 0x200 (RecordList, request `0C id 00 04`) at auth
+level 1 returns a section of N back-to-back 48-byte entries; at level 0 the
+reply is empty. A size-0 section is an empty list, a length that is not a
+multiple of 48 is a decode error. The 10-bit `size` field of the section
+header is too small for a long list, so the payload length is taken from the
+frame. [static] [device] (firmware 2.0.6: empty at level 0)
+
+Entry layout (48 bytes). The vendor list view reads the fields below
+[static]; a real entry read from the meter on 2026-10-27 (record `A01.d`,
+173 points at 1 s) confirmed them against the meter's record screen
+[device]. The unknown bytes are kept raw in `RecordEntry::raw`.
+
+| off | type | field | tag |
+|---|---|---|---|
+| 0x00 | 16 bytes | name, ASCII, ends at the first NUL (never read past 16 bytes) | [static] [device] |
+| 0x10 | u8 | unknown, kept raw; 0x45 in the real entry | [device] (value); meaning unknown |
+| 0x11 | u8 | sample interval in seconds | [static] [device] |
+| 0x12 | u16 | point count (number of 16-byte samples) | [static] [device] |
+| 0x14 | u32 | capacity in points: the meter shows `points/capacity` (173/10000) | [device] |
+| 0x18 | u32 | duration in seconds | [static] [device] |
+| 0x1C | i32 | charge in µAh (÷1e6 = Ah), signed: negative for one current direction; the screen shows the magnitude of the sample totals, and this stored total is slightly larger | [static] [device] |
+| 0x20 | i32 | energy in µWh (÷1e6 = Wh), signed like the charge; shown as a magnitude like the charge | [static] [device] |
+| 0x24 | u32 | flash offset of the samples inside the record area | [static] [device] |
+| 0x28 | 4 bytes | unknown, kept raw; 0 in the real entry | [device] (value); meaning unknown |
+| 0x2C | 4 bytes | unknown, kept raw; not a Unix time (perhaps a checksum or an id) | [device] (value); meaning unknown |
+
+- [device] There is no start timestamp in the entry: no u32 of the real
+  entry is near the Unix time of the recording.
+- [device] The stored charge and energy are a little larger than the last
+  sample's totals (by 178 µAh and 896 µWh in the check, under a second
+  of the measured load). The
+  meter's record screen shows the last sample's totals.
+- [device] Charge and energy are stored negative for the load direction used
+  in the check (−37 251 µAh, −188 148 µWh); the meter's screen shows the
+  magnitude. `powerz records list` and the desktop Records view show
+  magnitudes too; `records list --json` gives the magnitudes as `charge_ah` /
+  `energy_wh` and the stored signed values as `charge_raw_uah` /
+  `energy_raw_uwh`.
+
+**Download window.** The samples of one entry are the `points x 16` bytes at
+`0x98100000 + offset`. The vendor app reads flash address
+`offset + 0x100000` through a window that maps flash address 0 to
+0x98000000, in a single memory read. [static] On the meter a memory read
+returns at most 256 bytes: a longer one gets its confirmation and the first
+256 bytes, then nothing. [device] So we read the window as consecutive
+chunks of at most 256 bytes (type 0x44, same request as in Memory read and
+device info), address += 256 each time; the last chunk is the rest (a
+173-point record is 10 reads of 256 bytes and one of 208). Every chunk lies
+inside the listed window. Reading the real record this way returned all 173
+samples correctly. [device] Our bounds: [inferred]
+
+- the window is computed only from an entry of the last record list; any
+  other address, even inside the record area, is refused before sending, and
+  no chunk reaches outside the window;
+- a record with 0 points is refused (nothing to read);
+- `offset + points x 16` must not pass 0x200000, the size of the record
+  area: flash 0x100000..0x2FFFFF, below the logo area that starts at flash
+  0x300000. The vendor app itself checks no bound. [static] [inferred]
+
+Sample layout (16 bytes, `points` of them back to back, all values signed
+little-endian i32, one sample per interval). Evidence: the vendor chart
+loader converts each of the four words as a signed integer and divides it by
+1e6, and fills only the VBUS, IBUS, charge and energy series; D+, D-, CC1,
+CC2 and temperature stay 0, so the format carries none of them. [static] A
+recording made on our meter (2026-10-27, steady ~5.06 V / 0.76 A with the
+load unplugged once) confirmed every field: the last sample's totals equal
+the meter's record screen exactly (shown as 37.073 mAh and 187.252 mWh,
+stored as −37 073 µAh and −187 252 µWh). [device] The raw 16 bytes are kept
+in `RecordSample::raw`.
+
+| off | type | field | unit | tag |
+|---|---|---|---|---|
+| 0x00 | i32 | VBUS | µV (÷1e6 = V) | [static] [device] |
+| 0x04 | i32 | IBUS, signed; negative for the load direction used in the check | µA (÷1e6 = A) | [static] [device] |
+| 0x08 | i32 | charge, running total since the record start, signed like IBUS | µAh (÷1e6 = Ah) | [static] [device] |
+| 0x0C | i32 | energy, running total since the record start, signed like IBUS | µWh (÷1e6 = Wh) | [static] [device] |
+
+- Samples carry no timestamp: sample i is at `interval x i` seconds from the
+  record start (`RecordEntry::sample_time_s`). The record has no absolute
+  start time. [static] [device]
+- The vendor app can show IBUS, charge and energy as absolute values (an
+  option on by default). [static] We keep the samples signed: they are raw
+  measurements, written to the CSV and drawn in the chart with their sign,
+  like the live recorder's. Only the list's charge and energy are shown as
+  magnitudes, as on the meter's screen.
+- Delete exists in the vendor app (it rewrites the list with SET_DATA) and is
+  never sent by this library. [static]
 
 ## Authentication
 
@@ -477,7 +624,8 @@ use 2 000 000 baud 8N1, but CDC ignores the baud. [static] [doc]
   SETTINGS (188 bytes), queue poll. [device] (firmware 2.0.6)
 - [device] On firmware 2.0.6, types 0x01 / 0x02 / 0x03 on CDC are ADCNEW, not
   SYNC / CONNECT / DISCONNECT: a CONNECT sent on CDC started a 1000/s stream.
-  Never send those control types on CDC except as ADCNEW.
+  Never send those control types on CDC except as ADCNEW. Our library writes
+  them only through its ADCNEW requests (see Never-send commands).
 
 ADCNEW is a separate push stream described in a vendor note; the V2.5.2 PC
 software does not use it. [doc] [static]
@@ -504,8 +652,18 @@ Frame header (4 bytes):
   ADC + queue data. [device]
 - A `0F` sent during the stream got a 4-byte reply of unknown meaning and
   stopped the stream. [device]
+- Right after a bulk session (CONNECT and GET_DATA on the vendor pipe) the
+  meter echoes a `02 <att>` start back unchanged and streams nothing. Every
+  request in that time keeps it so; a start sent after 6–10 s of host
+  silence streams normally. [device] (firmware 2.0.6, 2026-10-28) Our
+  library drops the echo, keeps quiet for 12 s and sends the start once
+  more; the CLI gives up after 3 echoes.
 - The note says auto-upload stops after one hour or on unplug unless
-  refreshed. [doc]
+  refreshed. [doc] Our library sends the keep-alive every 30 minutes while
+  a stream runs and `03` when it stops one.
+- On the shared byte stream our reader tells ADCNEW frames, binary replies
+  and PDM text lines apart, drops a frame whose length or CRC is wrong and
+  resyncs one byte later. [inferred]
 
 ## PDM text session (protocol triggering)
 
@@ -784,10 +942,14 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
 Our library refuses to send these requests, so a bug or a CLI typo cannot
 brick, decalibrate or reboot a device. Three checks run before any byte
 reaches the meter: the transport-layer guard refuses the six frame types, the
-session refuses memory reads outside the four known blocks, and the HID
-transport sends only the ADC snapshot. [device] [static] The one exception
+session refuses memory reads outside the four known blocks and the offline
+record window, and the HID transport sends only the ADC snapshot. [device] [static] The one exception
 is the firmware flash path, which may send JUMP_DFU, JUMP_APROM and the 0x42
-descriptor under its own stricter guard (see Firmware download). RESET,
+descriptor under its own stricter guard (see Firmware download). The one
+memory-read exception is an offline record: the window `0x98100000 + offset`,
+`points x 16` bytes, computed from an entry of the last record list,
+bounded by the record area and read in chunks of at most 256 bytes that all
+lie inside it (see Offline records). [inferred] RESET,
 SET_DATA and memory writes are never sent on any path. [static]
 
 | request | why | tag |
@@ -798,7 +960,7 @@ SET_DATA and memory writes are never sent on any path. [static]
 | type 0x42 | firmware download descriptor (starts an erase) | [static] |
 | type 0x48 SET_DATA | writes settings and calibration | [static] |
 | type 0x4A | memory / SPI-flash write | [static] |
-| memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
+| memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` or the offline record window of a listed entry | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
 | any HID request other than the ADC snapshot (GET_DATA mask 0x001) | replies over 64 bytes hang and reboot the meter; control commands are ignored | [device] (firmware 2.0.6) |
 
 HEAD (0x40) is not on this list: it only reads a status word, so the
@@ -808,8 +970,11 @@ PDM text commands go through the same guard, and a request that could raise
 VBUS above 5 V needs a per-command confirmation (see PDM text session).
 
 Separate from the guard, one rule applies on CDC: there SYNC / CONNECT /
-DISCONNECT (0x01..0x03) start or stop the ADCNEW stream, so the CDC transport
-refuses to send them (ADCNEW is not supported yet). [device] (firmware 2.0.6)
+DISCONNECT (0x01..0x03) start, keep alive or stop the ADCNEW stream. [device]
+(firmware 2.0.6) So the CDC transport refuses these types as binary requests
+and as PDM text; only the dedicated ADCNEW requests (start, keep-alive, stop)
+write them, and only on CDC. On bulk and HID those requests are refused
+without writing.
 
 Outside the guard, one USB-level operation is safe and allowed: clearing an
 endpoint halt. It is the standard USB control request CLEAR_FEATURE with

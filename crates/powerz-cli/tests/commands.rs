@@ -695,11 +695,11 @@ fn watch_on_a_tty_redraws_in_place_with_ansi() {
 #[test]
 fn watch_interval_defaults_to_200_and_has_minimum_50() {
     match parse(&["powerz", "watch"]).command {
-        Command::Watch { interval } => assert_eq!(interval, 200),
+        Command::Watch { interval, .. } => assert_eq!(interval, 200),
         other => panic!("{other:?}"),
     }
     match parse(&["powerz", "watch", "--interval", "50"]).command {
-        Command::Watch { interval } => assert_eq!(interval, 50),
+        Command::Watch { interval, .. } => assert_eq!(interval, 50),
         other => panic!("{other:?}"),
     }
     let e = Cli::try_parse_from(["powerz", "watch", "--interval", "49"]).unwrap_err();
@@ -991,8 +991,14 @@ fn stream_rate_accepts_only_2_10_50_1000() {
             rate,
             csv,
             duration,
+            source,
         } => {
             assert_eq!(rate, 50);
+            assert_eq!(
+                source,
+                powerz_cli::WatchSource::Poll,
+                "the queue by default"
+            );
             assert_eq!(csv, std::path::PathBuf::from("o.csv"));
             assert_eq!(duration, Some(1.5));
         }
@@ -1101,17 +1107,40 @@ fn hid_is_accepted_only_for_read_and_watch() {
 
 // ---- AC-STQEA1.7: --trace ----
 
-/// `(marker, lowercase hex)` of every non-empty trace line.
+/// `(marker, lowercase hex)` of every non-empty trace line
+/// (`<marker> [<len>] <hex bytes>`); the `[len]` prefix must equal the
+/// number of bytes on the line.
 fn trace_lines(s: &str) -> Vec<(char, String)> {
     s.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
-            let mut chars = l.trim_start().chars();
-            let marker = chars.next().unwrap();
-            let hex: String = chars.filter(|c| !c.is_whitespace()).collect();
-            (marker, hex.to_lowercase())
+            let mut tokens = l.split_whitespace();
+            let marker = tokens.next().unwrap().chars().next().unwrap();
+            let len: usize = tokens
+                .next()
+                .and_then(|t| t.strip_prefix('[')?.strip_suffix(']')?.parse().ok())
+                .unwrap_or_else(|| panic!("no [len] after the marker: {l}"));
+            let bytes: Vec<&str> = tokens.collect();
+            assert_eq!(bytes.len(), len, "[len] counts the bytes: {l}");
+            (marker, bytes.concat().to_lowercase())
         })
         .collect()
+}
+
+#[test]
+fn trace_lines_carry_the_byte_length_right_after_the_marker() {
+    // The length survives cutting the hex after the first 4 bytes.
+    let sink = SharedBuf::default();
+    let mut t = TraceTransport::new(
+        MockTransport::new(vec![Step::read(vec![0x63; 256])]),
+        sink.clone(),
+    );
+    t.read(Duration::from_millis(1000)).unwrap();
+    assert!(
+        sink.text().starts_with("< [256] 63 63 63 63 "),
+        "{}",
+        sink.text()
+    );
 }
 
 #[test]
@@ -1371,8 +1400,8 @@ fn trace_marks_a_refused_frame_as_not_sent() {
         );
     }
     let log = text(&log);
-    assert!(!log.contains("> 08"), "{log}");
-    assert!(log.starts_with("x 08 01 00 00"), "{log}");
+    assert!(!log.contains("> [4] 08"), "{log}");
+    assert!(log.starts_with("x [4] 08 01 00 00"), "{log}");
 }
 
 /// `start_unix_ms: 0` asks for the wall clock at the first received record,

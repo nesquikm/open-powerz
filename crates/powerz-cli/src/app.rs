@@ -22,22 +22,23 @@ use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{
-    FaultPlan, FlashFault, PdScenario, Persona, SIM_SERIAL, SimCable, SimCharger, SimClock,
-    SimDevice, SimMeter, SimPdm,
+    FaultPlan, FlashFault, PdScenario, Persona, SIM_SERIAL, Scenario, SimCable, SimCharger,
+    SimClock, SimDevice, SimMeter, SimPdm,
 };
 
 use crate::args::{
     Cli, Command, FirmwareAction, FixedAction, JumpTo, LimitsAction, PdAction, PdDecode, Qc3Action,
-    QcAction, RequestFlags, TransportKind, TriggerProtocol, UfcsAction, needs_connect,
-    rate_from_sps, validate,
+    QcAction, RecordsAction, RequestFlags, TransportKind, TriggerProtocol, UfcsAction, WatchSource,
+    needs_connect, rate_from_sps, validate,
 };
 use crate::commands::{
     DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
-    PdSettingsChange, StreamOptions, WatchOptions, console, detect, firmware_flash, firmware_info,
-    firmware_jump, firmware_probe, firmware_probe_unavailable, info_in_mode, inspect_flash_file,
-    list, pd, pd_decode, pd_save, pd_send, read, select_device, stream, trigger_legacy_list,
-    trigger_legacy_request, trigger_pd_list, trigger_pd_request, trigger_pd_reset,
-    trigger_pd_settings, watch,
+    PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions, console,
+    detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
+    firmware_probe_unavailable, info_in_mode, inspect_flash_file, list, pd, pd_decode, pd_save,
+    pd_send, read, records_get, records_list, select_device, settings, stream, stream_cdc,
+    trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
+    trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport, TracedOpener};
@@ -62,7 +63,7 @@ fn demo_entry() -> DeviceEntry {
     DeviceEntry {
         model: Model::Km003c,
         pid: PID_KM003C,
-        serial: Some(SIM_SERIAL.to_string()),
+        serial: Some(sim_serial()),
         product: Some("POWER-Z KM003C".to_owned()),
         interface_string: Some("APP".to_owned()),
         bus: "demo".to_string(),
@@ -137,6 +138,10 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     let devices = transport::discovery::list_devices()?;
     let device = select_device(&devices, cli.device.as_deref())?;
     let mode = device.mode();
+    if cli.command.source() == Some(WatchSource::Cdc) {
+        // The ADCNEW stream lives on the CDC port, whatever --transport says.
+        return with_transport(cli, mode, open_cdc(device)?);
+    }
     match cli.transport {
         TransportKind::Sim => unreachable!("the simulator is handled above"),
         TransportKind::Bulk => with_transport(cli, mode, BulkTransport::open(device)?),
@@ -177,14 +182,10 @@ fn probe_sim(cli: &Cli, json: bool) -> Result<(), CliError> {
     };
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-        let sim = configure(SimDevice::with_clock(
-            Persona::Bulk,
-            cli.scenario,
-            clock.clone(),
-        ))?;
+        let sim = configure(sim_device_clock(Persona::Bulk, cli.scenario, clock.clone()))?;
         run_probe(cli, &sim.usb_identity(), sim, clock, json)
     } else {
-        let sim = configure(SimDevice::new(Persona::Bulk, cli.scenario))?;
+        let sim = configure(sim_device(Persona::Bulk, cli.scenario))?;
         run_probe(cli, &sim.usb_identity(), sim, SystemClock, json)
     }
 }
@@ -299,15 +300,11 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
         let after = sim_ctrl_c_after_writes()?;
         return if fake_sim_clock() {
             let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-            let meter = sim_meter(SimDevice::with_clock(
-                Persona::Bulk,
-                cli.scenario,
-                clock.clone(),
-            ))?;
+            let meter = sim_meter(sim_device_clock(Persona::Bulk, cli.scenario, clock.clone()))?;
             let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
             flash_on(cli, &container, meter, clock, &stop, &mut out)
         } else {
-            let meter = sim_meter(SimDevice::new(Persona::Bulk, cli.scenario))?;
+            let meter = sim_meter(sim_device(Persona::Bulk, cli.scenario))?;
             let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
             flash_on(cli, &container, meter, SystemClock, &stop, &mut out)
         };
@@ -412,10 +409,10 @@ fn jump_mode(cli: &Cli, to: JumpTo, i_understand: bool) -> Result<(), CliError> 
         }
         return if fake_sim_clock() {
             let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-            let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+            let sim = sim_device_clock(Persona::Bulk, cli.scenario, clock.clone());
             jump_on(cli, target, sim_meter(sim)?, clock, &stop, &mut out)
         } else {
-            let sim = SimDevice::new(Persona::Bulk, cli.scenario);
+            let sim = sim_device(Persona::Bulk, cli.scenario);
             jump_on(cli, target, sim_meter(sim)?, SystemClock, &stop, &mut out)
         };
     }
@@ -548,14 +545,10 @@ fn detect_hint(cli: &Cli) -> Result<Option<Hint>, CliError> {
         TransportKind::Sim => {
             if fake_sim_clock() {
                 let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-                let sim = SimDevice::with_clock(Persona::Bulk, cli.scenario, clock.clone());
+                let sim = sim_device_clock(Persona::Bulk, cli.scenario, clock.clone());
                 adc_snapshot(cli, sim, clock)?
             } else {
-                adc_snapshot(
-                    cli,
-                    SimDevice::new(Persona::Bulk, cli.scenario),
-                    SystemClock,
-                )?
+                adc_snapshot(cli, sim_device(Persona::Bulk, cli.scenario), SystemClock)?
             }
         }
         kind => {
@@ -614,6 +607,22 @@ fn select_demo(cli: &Cli) -> Result<(), CliError> {
     let demo = [demo_entry()];
     select_device(&demo, cli.device.as_deref())?;
     Ok(())
+}
+
+/// Honour `POWERZ_SIM_SERIAL=<serial>` (test-only): the demo device reports
+/// that serial instead of [`SIM_SERIAL`], standing in for a second meter.
+fn sim_serial() -> String {
+    std::env::var("POWERZ_SIM_SERIAL").unwrap_or_else(|_| SIM_SERIAL.to_string())
+}
+
+/// The demo device, with the `POWERZ_SIM_SERIAL` override applied.
+fn sim_device(persona: Persona, scenario: Scenario) -> SimDevice {
+    SimDevice::new(persona, scenario).with_serial(&sim_serial())
+}
+
+/// [`sim_device`] on the given simulated clock.
+fn sim_device_clock(persona: Persona, scenario: Scenario, clock: SimClock) -> SimDevice {
+    SimDevice::with_clock(persona, scenario, clock).with_serial(&sim_serial())
 }
 
 /// `POWERZ_SIM_CLOCK=fake` (test-only): run the simulator on a fake clock.
@@ -952,12 +961,18 @@ fn ctrl_c_hold() -> impl FnMut(Duration) {
     move |d: Duration| sleep_unless_stopped(d, &stop)
 }
 
-/// `--transport sim`: open the demo device (bulk persona, `--scenario`)
-/// without touching USB; `--device` must name its synthetic serial.
+/// `--transport sim`: open the demo device (bulk persona, `--scenario`; its
+/// CDC persona for `watch` / `stream --source cdc`) without touching USB; `--device`
+/// must name its synthetic serial.
 fn run_sim(cli: &Cli) -> Result<(), CliError> {
     select_demo(cli)?;
     let mode = demo_entry().mode();
     let faults = sim_faults()?;
+    let persona = if cli.command.source() == Some(WatchSource::Cdc) {
+        Persona::Cdc
+    } else {
+        Persona::Bulk
+    };
     // `pd` on the demo device plays the PD capture scenario.
     let with_pd = |sim: SimDevice| match cli.command {
         Command::Pd { .. } => sim.with_pd_scenario(PdScenario::Negotiation),
@@ -965,15 +980,11 @@ fn run_sim(cli: &Cli) -> Result<(), CliError> {
     };
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
-        let sim = with_pd(SimDevice::with_clock(
-            Persona::Bulk,
-            cli.scenario,
-            clock.clone(),
-        ));
+        let sim = with_pd(sim_device_clock(persona, cli.scenario, clock.clone()));
         let sim = sim_firmware_knobs(sim)?;
         with_ctrl_c_after(cli, mode, sim.with_faults(faults), clock)
     } else {
-        let sim = sim_firmware_knobs(with_pd(SimDevice::new(Persona::Bulk, cli.scenario)))?;
+        let sim = sim_firmware_knobs(with_pd(sim_device(persona, cli.scenario)))?;
         with_ctrl_c_after(cli, mode, sim.with_faults(faults), SystemClock)
     }
 }
@@ -1077,7 +1088,8 @@ fn with_ctrl_c_after<C: Clock>(
 }
 
 /// Transport wrapper that sets the Ctrl-C flag once `remaining` GET_DATA
-/// requests have been answered.
+/// requests have been answered, or (`--source cdc`, which sends
+/// none) once the ADCNEW stream has been read `remaining` times.
 struct CtrlCAfter<T> {
     inner: T,
     remaining: usize,
@@ -1098,6 +1110,26 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         self.inner.read(timeout)
+    }
+
+    fn adcnew_send(
+        &mut self,
+        request: powerz_protocol::adcnew::Request,
+    ) -> Result<(), transport::Error> {
+        self.inner.adcnew_send(request)
+    }
+
+    fn adcnew_frames(&mut self) -> Result<Vec<powerz_protocol::adcnew::Frame>, transport::Error> {
+        let frames = self.inner.adcnew_frames()?;
+        self.remaining = self.remaining.saturating_sub(1);
+        if self.remaining == 0 {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+        Ok(frames)
+    }
+
+    fn adcnew_counters(&self) -> powerz_protocol::adcnew::AdcnewCounters {
+        self.inner.adcnew_counters()
     }
 }
 
@@ -1131,7 +1163,8 @@ fn start<T: Transport, C: Clock>(
     mode: DeviceMode,
     mut session: Session<T, C>,
 ) -> Result<(), CliError> {
-    if needs_connect(cli.transport) {
+    // The ADCNEW stream needs no CONNECT, whose byte would start it on CDC.
+    if needs_connect(cli.transport) && cli.command.source() != Some(WatchSource::Cdc) {
         session.connect()?;
     }
     dispatch(cli, mode, session)
@@ -1153,25 +1186,49 @@ fn dispatch<T: Transport, C: Clock>(
         Command::Firmware { .. } => unreachable!("firmware is handled before opening a device"),
         Command::Info { json } => info_in_mode(&mut session, mode, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
-        Command::Watch { interval } => {
+        Command::Settings { json, raw } => {
+            let how = if *raw {
+                SettingsOutput::Raw
+            } else if *json {
+                SettingsOutput::Json
+            } else {
+                SettingsOutput::Text
+            };
+            settings(&mut session, how, &mut out)
+        }
+        Command::Records { action } => match action {
+            RecordsAction::List { json } => records_list(&mut session, *json, &mut out),
+            RecordsAction::Get {
+                index,
+                all,
+                out: dir,
+                json,
+            } => {
+                let which = match index {
+                    Some(n) if !*all => RecordSelection::One(*n),
+                    _ => RecordSelection::All,
+                };
+                records_get(&mut session, which, dir, *json, &mut out)
+            }
+        },
+        Command::Watch { interval, source } => {
             let stop = ctrl_c_flag()?;
             let opts = WatchOptions {
                 interval: Duration::from_millis(*interval),
                 tty: out.is_terminal(),
             };
             let stop_for_sleep = Arc::clone(&stop);
-            watch(
-                &mut session,
-                &opts,
-                &stop,
-                &mut |d| sleep_unless_stopped(d, &stop_for_sleep),
-                &mut out,
-            )
+            let mut sleep = |d| sleep_unless_stopped(d, &stop_for_sleep);
+            match source {
+                WatchSource::Poll => watch(&mut session, &opts, &stop, &mut sleep, &mut out),
+                WatchSource::Cdc => watch_cdc(&mut session, &opts, &stop, &mut sleep, &mut out),
+            }
         }
         Command::Stream {
             rate,
             csv,
             duration,
+            source,
         } => {
             let rate = rate_from_sps(*rate)
                 .ok_or_else(|| CliError::Usage(format!("invalid rate {rate}")))?;
@@ -1189,14 +1246,16 @@ fn dispatch<T: Transport, C: Clock>(
                 duration,
                 start_unix_ms,
             };
-            stream(
-                &mut session,
-                &opts,
-                &stop,
-                &mut std::io::BufWriter::new(file),
-                &mut std::io::stderr().lock(),
-            )
-            .map(|_| ())
+            let mut csv = std::io::BufWriter::new(file);
+            let mut err = std::io::stderr().lock();
+            match source {
+                WatchSource::Poll => {
+                    stream(&mut session, &opts, &stop, &mut csv, &mut err).map(|_| ())
+                }
+                WatchSource::Cdc => {
+                    stream_cdc(&mut session, &opts, &stop, &mut csv, &mut err).map(|_| ())
+                }
+            }
         }
         Command::Pd { json } => {
             let stop = ctrl_c_flag()?;

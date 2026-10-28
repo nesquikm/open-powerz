@@ -1,7 +1,9 @@
 //! SETTINGS block (`ATT_SETTINGS`, 180 bytes, two CRC-32 blocks).
 //! See `docs/protocol.md`.
 
-use super::{DecodeError, c_str, need, u32_at};
+use serde::Serialize;
+
+use super::{DecodeError, Rate, c_str, need, u32_at};
 
 /// Length of the SETTINGS section payload.
 const LEN: usize = 180;
@@ -62,6 +64,374 @@ impl Settings {
     /// The raw 180 payload bytes.
     pub fn raw(&self) -> &[u8] {
         &self.raw
+    }
+
+    /// Typed fields, or [`DecodeError::Crc`] if either CRC-32 block fails.
+    pub fn meter_settings(&self) -> Result<MeterSettings, DecodeError> {
+        if !self.block_a_crc_ok {
+            return Err(DecodeError::Crc {
+                what: "SETTINGS block A",
+            });
+        }
+        if !self.block_b_crc_ok {
+            return Err(DecodeError::Crc {
+                what: "SETTINGS block B",
+            });
+        }
+        let w0 = u32_at(&self.raw, 0x00);
+        let w60 = u32_at(&self.raw, 0x60);
+        let i32_at = |off: usize| u32_at(&self.raw, off) as i32;
+        let cal5 = |base: usize| core::array::from_fn(|i| i32_at(base + 4 * i));
+        // Field map: research control notes §3.4 (PDM settings dialog,
+        // static analysis). The 2026-10-27 screen check confirmed language,
+        // brightness, dim timeout, startup logo, theme, auto-rotate and sample
+        // rate [device]. Rotation stays [inferred]: the screen showed 0° with
+        // auto-rotate on while bits 0..1 of 0x60 read 90°. The calibration
+        // values are not shown on the meter and stay [inferred].
+        Ok(MeterSettings {
+            language: Tagged {
+                value: if w0 & 1 == 0 {
+                    Language::Chinese
+                } else {
+                    Language::English
+                },
+                tag: Tag::Confirmed,
+            },
+            brightness: Tagged {
+                value: ((w0 >> 3) & 0x7F) as u8,
+                tag: Tag::Confirmed,
+            },
+            dim_timeout: Tagged {
+                value: match (w0 >> 10) & 0b11 {
+                    0 => DimTimeout::Off,
+                    1 => DimTimeout::Secs15,
+                    2 => DimTimeout::Secs30,
+                    _ => DimTimeout::Secs60,
+                },
+                tag: Tag::Confirmed,
+            },
+            startup_logo: Tagged {
+                value: match (w0 >> 14) & 0b11 {
+                    0 => StartupLogo::Off,
+                    1 => StartupLogo::Secs1,
+                    2 => StartupLogo::Secs3,
+                    _ => StartupLogo::Secs5,
+                },
+                tag: Tag::Confirmed,
+            },
+            theme: Tagged {
+                value: match ((w0 >> 16) & 0b111) as u8 {
+                    0 => Theme::Blue,
+                    1 => Theme::Green,
+                    2 => Theme::Pink,
+                    3 => Theme::Orange,
+                    4 => Theme::Yellow,
+                    5 => Theme::DarkGreen,
+                    6 => Theme::Cyan,
+                    other => Theme::Unknown(other),
+                },
+                tag: Tag::Confirmed,
+            },
+            auto_rotate: Tagged {
+                value: (w0 >> 27) & 1 == 1,
+                tag: Tag::Confirmed,
+            },
+            rotation: Tagged {
+                value: match w60 & 0b11 {
+                    0 => Rotation::Deg0,
+                    1 => Rotation::Deg90,
+                    2 => Rotation::Deg180,
+                    _ => Rotation::Deg270,
+                },
+                tag: Tag::Inferred,
+            },
+            sample_rate: Tagged {
+                value: match (w60 >> 2) & 0b11 {
+                    0 => Rate::Sps2,
+                    1 => Rate::Sps10,
+                    2 => Rate::Sps50,
+                    _ => Rate::Sps1000,
+                },
+                tag: Tag::Confirmed,
+            },
+            voltage_cal: Tagged {
+                value: cal5(0x1C),
+                tag: Tag::Inferred,
+            },
+            current_cal: Tagged {
+                value: cal5(0x30),
+                tag: Tag::Inferred,
+            },
+            offset_cal: Tagged {
+                value: i32_at(0x58),
+                tag: Tag::Inferred,
+            },
+        })
+    }
+}
+
+/// Confidence of a decoded settings field; serializes as [`Tag::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tag {
+    /// Checked against the meter's screen.
+    Confirmed,
+    /// From static analysis only.
+    Inferred,
+}
+
+impl Tag {
+    /// Lower-case name (`"confirmed"` / `"inferred"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tag::Confirmed => "confirmed",
+            Tag::Inferred => "inferred",
+        }
+    }
+}
+
+/// A decoded value with its confidence tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tagged<T> {
+    /// The decoded value.
+    pub value: T,
+    /// Its confidence.
+    pub tag: Tag,
+}
+
+/// Display language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    /// Code 0.
+    Chinese,
+    /// Code 1.
+    English,
+}
+
+/// Screen dim timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DimTimeout {
+    /// Never dims.
+    Off,
+    /// 15 s.
+    Secs15,
+    /// 30 s.
+    Secs30,
+    /// 60 s.
+    Secs60,
+}
+
+/// Startup logo duration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupLogo {
+    /// No logo.
+    Off,
+    /// 1 s.
+    Secs1,
+    /// 3 s.
+    Secs3,
+    /// 5 s.
+    Secs5,
+}
+
+/// UI colour theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    /// Code 0.
+    Blue,
+    /// Code 1.
+    Green,
+    /// Code 2.
+    Pink,
+    /// Code 3.
+    Orange,
+    /// Code 4.
+    Yellow,
+    /// Code 5.
+    DarkGreen,
+    /// Code 6.
+    Cyan,
+    /// Any other code, kept raw.
+    Unknown(u8),
+}
+
+/// Screen rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rotation {
+    /// 0°.
+    Deg0,
+    /// 90°.
+    Deg90,
+    /// 180°.
+    Deg180,
+    /// 270°.
+    Deg270,
+}
+
+/// One displayable settings row: the single formatting source for the CLI
+/// and the desktop panel (serializes as `{key, label, value, tag}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Row {
+    /// Stable key.
+    pub key: &'static str,
+    /// Human label.
+    pub label: &'static str,
+    /// Formatted value.
+    pub value: String,
+    /// Confidence.
+    pub tag: Tag,
+}
+
+/// Typed fields of a CRC-checked SETTINGS block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeterSettings {
+    /// Display language.
+    pub language: Tagged<Language>,
+    /// Brightness, percent (raw 7-bit value).
+    pub brightness: Tagged<u8>,
+    /// Dim timeout.
+    pub dim_timeout: Tagged<DimTimeout>,
+    /// Startup logo duration.
+    pub startup_logo: Tagged<StartupLogo>,
+    /// Colour theme.
+    pub theme: Tagged<Theme>,
+    /// Auto-rotate.
+    pub auto_rotate: Tagged<bool>,
+    /// Screen rotation.
+    pub rotation: Tagged<Rotation>,
+    /// Queue sample rate.
+    pub sample_rate: Tagged<Rate>,
+    /// Voltage calibration gains (raw).
+    pub voltage_cal: Tagged<[i32; 5]>,
+    /// Current calibration gains (raw).
+    pub current_cal: Tagged<[i32; 5]>,
+    /// Offset calibration (raw).
+    pub offset_cal: Tagged<i32>,
+}
+
+impl MeterSettings {
+    /// Decode a 180-byte SETTINGS payload; fails on length or CRC mismatch.
+    pub fn decode(payload: &[u8]) -> Result<MeterSettings, DecodeError> {
+        Settings::decode(payload)?.meter_settings()
+    }
+
+    /// Displayable rows: every field with its label, formatted value and tag.
+    /// Calibration values are shown raw and read-only.
+    pub fn rows(&self) -> Vec<Row> {
+        fn row<T>(key: &'static str, label: &'static str, f: &Tagged<T>, value: String) -> Row {
+            Row {
+                key,
+                label,
+                value,
+                tag: f.tag,
+            }
+        }
+        fn join(v: &[i32]) -> String {
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
+        vec![
+            row(
+                "language",
+                "Language",
+                &self.language,
+                match self.language.value {
+                    Language::Chinese => "Chinese",
+                    Language::English => "English",
+                }
+                .to_string(),
+            ),
+            row(
+                "brightness",
+                "Brightness",
+                &self.brightness,
+                format!("{}%", self.brightness.value),
+            ),
+            row(
+                "dim_timeout",
+                "Dim screen after",
+                &self.dim_timeout,
+                match self.dim_timeout.value {
+                    DimTimeout::Off => "off",
+                    DimTimeout::Secs15 => "15 s",
+                    DimTimeout::Secs30 => "30 s",
+                    DimTimeout::Secs60 => "60 s",
+                }
+                .to_string(),
+            ),
+            row(
+                "startup_logo",
+                "Startup logo",
+                &self.startup_logo,
+                match self.startup_logo.value {
+                    StartupLogo::Off => "off",
+                    StartupLogo::Secs1 => "1 s",
+                    StartupLogo::Secs3 => "3 s",
+                    StartupLogo::Secs5 => "5 s",
+                }
+                .to_string(),
+            ),
+            row(
+                "theme",
+                "Theme",
+                &self.theme,
+                match self.theme.value {
+                    Theme::Blue => "blue".to_string(),
+                    Theme::Green => "green".to_string(),
+                    Theme::Pink => "pink".to_string(),
+                    Theme::Orange => "orange".to_string(),
+                    Theme::Yellow => "yellow".to_string(),
+                    Theme::DarkGreen => "dark green".to_string(),
+                    Theme::Cyan => "cyan".to_string(),
+                    Theme::Unknown(c) => format!("unknown ({c})"),
+                },
+            ),
+            row(
+                "auto_rotate",
+                "Auto-rotate",
+                &self.auto_rotate,
+                on_off(self.auto_rotate.value),
+            ),
+            row(
+                "rotation",
+                "Rotation",
+                &self.rotation,
+                match self.rotation.value {
+                    Rotation::Deg0 => "0°",
+                    Rotation::Deg90 => "90°",
+                    Rotation::Deg180 => "180°",
+                    Rotation::Deg270 => "270°",
+                }
+                .to_string(),
+            ),
+            row(
+                "sample_rate",
+                "Sample rate",
+                &self.sample_rate,
+                format!("{} SPS", self.sample_rate.value.sps()),
+            ),
+            row(
+                "voltage_cal",
+                "Voltage calibration (raw)",
+                &self.voltage_cal,
+                join(&self.voltage_cal.value),
+            ),
+            row(
+                "current_cal",
+                "Current calibration (raw)",
+                &self.current_cal,
+                join(&self.current_cal.value),
+            ),
+            row(
+                "offset_cal",
+                "Offset calibration (raw)",
+                &self.offset_cal,
+                self.offset_cal.value.to_string(),
+            ),
+        ]
     }
 }
 

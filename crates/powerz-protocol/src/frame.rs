@@ -126,6 +126,10 @@ impl Attribute {
     pub const PD_PACKET: Attribute = Attribute(0x010);
     /// PD status.
     pub const PD_STATUS: Attribute = Attribute(0x020);
+    /// Offline record list (`RecordList`): 48-byte entries. Its 10-bit
+    /// `size` cannot hold a long list, so the section takes the rest of the
+    /// frame. \[static\]
+    pub const RECORD_LIST: Attribute = Attribute(0x200);
 
     /// The raw mask bits.
     pub fn bits(self) -> u16 {
@@ -349,8 +353,9 @@ pub fn classify_reply(frame: &[u8]) -> Result<Reply, FrameError> {
 
 /// Walk the section chain of a whole PUT_DATA frame (main header included).
 ///
-/// A `PD_STATUS` section has no usable size and takes the rest of the frame.
-/// ADC queue sections hold `chunk * size` bytes; every other section `size`.
+/// A `PD_STATUS` or `RECORD_LIST` section has no usable size and takes the
+/// rest of the frame. ADC queue sections hold `chunk * size` bytes; every
+/// other section `size`.
 pub fn parse_put_data(frame: &[u8]) -> Result<Vec<Section<'_>>, FrameError> {
     walk_sections(frame, false)
 }
@@ -375,7 +380,7 @@ fn walk_sections(frame: &[u8], cut_queue_ok: bool) -> Result<Vec<Section<'_>>, F
         let header = SectionHeader::from_word(read_word(frame, offset)?);
         let start = offset + HEADER_LEN;
         let att = Attribute(header.att);
-        if att == Attribute::PD_STATUS {
+        if att == Attribute::PD_STATUS || att == Attribute::RECORD_LIST {
             sections.push(Section {
                 att,
                 payload: &frame[start..],

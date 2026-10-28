@@ -7,9 +7,11 @@ use std::time::Duration;
 use powerz_protocol::firmware::flash::{FlashTransport, Meter, MeterOpener};
 use powerz_protocol::transport::{Error, Transport};
 
-/// Wraps a transport and writes each frame sent as `> <hex>`, each frame
-/// received as `< <hex>` and each frame the guard refused before sending as
-/// `x <hex>` (one line per frame) to `sink`.
+/// Wraps a transport and writes each frame sent as `> [<len>] <hex>`, each
+/// frame received as `< [<len>] <hex>` and each frame the guard refused
+/// before sending as `x [<len>] <hex>` (one line per frame) to `sink`. The
+/// byte length comes right after the marker, so it survives cutting a line
+/// after its first bytes.
 #[derive(Debug)]
 pub struct TraceTransport<T, W> {
     inner: T,
@@ -29,10 +31,12 @@ impl<T: Transport, W: Write> TraceTransport<T, W> {
 }
 
 impl<T: Transport, W: Write> TraceTransport<T, W> {
-    /// Write one `marker hex` line; trace I/O errors never fail the transport.
+    /// Write one `marker [len] hex` line; trace I/O errors never fail the
+    /// transport.
     fn log(&mut self, marker: char, frame: &[u8]) {
-        let mut line = String::with_capacity(2 + frame.len() * 3);
+        let mut line = String::with_capacity(10 + frame.len() * 3);
         line.push(marker);
+        line.push_str(&format!(" [{}]", frame.len()));
         for b in frame {
             line.push_str(&format!(" {b:02x}"));
         }
@@ -71,6 +75,30 @@ impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
 
     fn recover(&mut self) -> Result<(), Error> {
         self.inner.recover()
+    }
+
+    /// ADCNEW requests (`02 <att>`, `01`, `03`) are traced like frames:
+    /// `>` once written, `x` when refused before sending.
+    fn adcnew_send(&mut self, request: powerz_protocol::adcnew::Request) -> Result<(), Error> {
+        let bytes = request.encode();
+        match self.inner.adcnew_send(request) {
+            Err(e @ (Error::AdcnewNeedsCdc | Error::Forbidden { .. })) => {
+                self.log('x', &bytes);
+                Err(e)
+            }
+            result => {
+                self.log('>', &bytes);
+                result
+            }
+        }
+    }
+
+    fn adcnew_frames(&mut self) -> Result<Vec<powerz_protocol::adcnew::Frame>, Error> {
+        self.inner.adcnew_frames()
+    }
+
+    fn adcnew_counters(&self) -> powerz_protocol::adcnew::AdcnewCounters {
+        self.inner.adcnew_counters()
     }
 }
 
@@ -256,7 +284,7 @@ mod tests {
             assert!(t.write_raw(&[0x42, 0x02], T).is_err());
         }
         let text = String::from_utf8(sink).unwrap();
-        assert_eq!(text, "> 09 01 00 00\nx 42 02\n");
+        assert_eq!(text, "> [4] 09 01 00 00\nx [2] 42 02\n");
     }
 
     #[test]

@@ -605,3 +605,276 @@ fn x2spdw_12_clearing_an_endpoint_halt_is_listed_as_safe_with_a_tag() {
          operations with a confidence tag"
     );
 }
+
+// ---- AC-1HHT01.5: every decoded settings field is documented with a tag ----
+
+/// Spellings of a bit range `a..b` the doc may use.
+fn bit_range(a: u8, b: u8) -> Vec<String> {
+    vec![
+        format!("{a}..{b}"),
+        format!("{a}-{b}"),
+        format!("{a}–{b}"),
+        format!("{a} to {b}"),
+    ]
+}
+
+/// The SETTINGS section has a table row naming `keyword` with one of the
+/// `position` spellings and a confidence tag.
+fn assert_settings_field_row(rows: &[String], keyword: &str, position: &[String]) {
+    let ok = rows.iter().any(|r| {
+        let l = r.to_lowercase();
+        l.contains(keyword)
+            && position.iter().any(|p| l.contains(&p.to_lowercase()))
+            && (l.contains("[device]") || l.contains("[inferred]"))
+    });
+    assert!(
+        ok,
+        "SETTINGS: no table row documents {keyword:?} at one of {position:?} with a \
+         [device] or [inferred] tag"
+    );
+}
+
+#[test]
+fn settings_doc_documents_every_decoded_field_with_a_tag() {
+    let text = doc();
+    let rows: Vec<String> = units(&section(&text, "settings"))
+        .into_iter()
+        .filter(|u| u.starts_with('|'))
+        .collect();
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert_settings_field_row(&rows, "language", &s(&["bit 0"]));
+    assert_settings_field_row(&rows, "brightness", &bit_range(3, 9));
+    assert_settings_field_row(&rows, "dim", &bit_range(10, 11));
+    assert_settings_field_row(&rows, "startup logo", &bit_range(14, 15));
+    assert_settings_field_row(&rows, "theme", &bit_range(16, 18));
+    assert_settings_field_row(&rows, "auto-rotate", &s(&["bit 27"]));
+    assert_settings_field_row(&rows, "rotation", &bit_range(0, 1));
+    assert_settings_field_row(&rows, "rate", &bit_range(2, 3));
+    assert_settings_field_row(&rows, "voltage", &s(&["0x1c"]));
+    assert_settings_field_row(&rows, "current", &s(&["0x30"]));
+    assert_settings_field_row(&rows, "offset", &s(&["0x58"]));
+}
+
+#[test]
+fn settings_doc_says_crc_mismatch_is_refused_and_nothing_is_written() {
+    let text = doc();
+    let body = section(&text, "settings").join("\n").to_lowercase();
+    assert!(
+        body.contains("mismatch") && body.contains("crc"),
+        "SETTINGS must say a CRC mismatch is reported instead of decoding"
+    );
+    assert!(
+        contains_token(&body, "0x0a") && contains_token(&body, "0x48"),
+        "SETTINGS must say settings writes (0x0A) and SET_DATA (0x48) are never sent"
+    );
+}
+
+// ---- AC-1HHT00.3: offline records are documented with tags and evidence ----
+
+/// Body of the single `##` section about offline records.
+fn offline_records_section(text: &str) -> Vec<String> {
+    let found: Vec<_> = sections(text)
+        .into_iter()
+        .filter(|(h, _)| heading_matches(h, &["offline record"]))
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "expected exactly one `##` heading naming offline records, found {:?}",
+        found.iter().map(|(h, _)| h.clone()).collect::<Vec<_>>()
+    );
+    found.into_iter().next().map(|(_, b)| b).unwrap_or_default()
+}
+
+/// A table row of `rows` names `keyword` at `offset` and carries a tag.
+fn assert_layout_row(rows: &[String], what: &str, offset: &str, keyword: &str) {
+    let ok = rows.iter().any(|r| {
+        let l = r.to_lowercase();
+        contains_token(&l, offset) && l.contains(keyword) && TAGS.iter().any(|t| l.contains(t))
+    });
+    assert!(
+        ok,
+        "{what}: no table row documents {keyword:?} at {offset} with a confidence tag"
+    );
+}
+
+#[test]
+fn offline_records_doc_documents_the_48_byte_entry_with_tags() {
+    let text = doc();
+    let rows: Vec<String> = units(&offline_records_section(&text))
+        .into_iter()
+        .filter(|u| u.starts_with('|'))
+        .collect();
+    assert_layout_row(&rows, "entry", "0x00", "name");
+    assert_layout_row(&rows, "entry", "0x11", "interval");
+    assert_layout_row(&rows, "entry", "0x12", "point");
+    assert_layout_row(&rows, "entry", "0x18", "duration");
+    assert_layout_row(&rows, "entry", "0x1c", "charge");
+    assert_layout_row(&rows, "entry", "0x20", "energy");
+    assert_layout_row(&rows, "entry", "0x24", "offset");
+    let body = offline_records_section(&text).join("\n").to_lowercase();
+    assert!(body.contains("48"), "the entry size (48 bytes) is stated");
+    assert!(
+        body.contains("unknown"),
+        "the unknown entry bytes are named"
+    );
+}
+
+#[test]
+fn offline_records_doc_documents_the_16_byte_sample_as_inferred_with_static_evidence() {
+    let text = doc();
+    let section = offline_records_section(&text);
+    let rows: Vec<String> = units(&section)
+        .into_iter()
+        .filter(|u| u.starts_with('|'))
+        .collect();
+    for (off, kw) in [
+        ("0x00", "vbus"),
+        ("0x04", "ibus"),
+        ("0x08", "charge"),
+        ("0x0c", "energy"),
+    ] {
+        let ok = rows.iter().any(|r| {
+            let l = r.to_lowercase();
+            contains_token(&l, off)
+                && l.contains(kw)
+                && (l.contains("[inferred]") || l.contains("[device]"))
+                && l.contains("[static]")
+        });
+        assert!(
+            ok,
+            "sample: no row documents {kw} at {off} with its [static] evidence and an \
+             [inferred] (or, once confirmed, [device]) tag"
+        );
+    }
+    let body = section.join("\n").to_lowercase();
+    assert!(body.contains("16"), "the sample size (16 bytes) is stated");
+    assert!(body.contains("interval"), "sample time = interval × index");
+}
+
+#[test]
+fn offline_records_doc_states_the_download_window_and_its_bounds() {
+    let text = doc();
+    let body = offline_records_section(&text).join("\n").to_lowercase();
+    assert!(
+        contains_token(&body, "0x98100000"),
+        "the download address base 0x98100000 is stated"
+    );
+    assert!(
+        contains_token(&body, "0x200000") || contains_token(&body, "0x300000"),
+        "the record-area bound is stated"
+    );
+    assert!(
+        contains_token(&body, "0x200"),
+        "the RecordList GET_DATA mask 0x200 is named"
+    );
+    assert!(
+        body.contains("delete") || body.contains("never"),
+        "the section says nothing is deleted or written"
+    );
+}
+
+#[test]
+fn offline_records_doc_states_the_device_facts_of_the_real_meter_run() {
+    let text = doc();
+    let section = offline_records_section(&text);
+    let body = section.join("\n").to_lowercase();
+    assert!(
+        contains_token(&body, "256"),
+        "the 256-byte memory-read reply limit is stated"
+    );
+    assert!(
+        body.contains("chunk") || body.contains("consecutive"),
+        "the download is a run of consecutive reads"
+    );
+    assert!(body.contains("capacity"), "the 0x14 capacity is named");
+    assert!(body.contains("timestamp"), "no start timestamp is said");
+    assert!(
+        body.contains("magnitude") && body.contains("negative"),
+        "the sign of charge and energy and the magnitude display are stated"
+    );
+    let rows: Vec<String> = units(&section)
+        .into_iter()
+        .filter(|u| u.starts_with('|'))
+        .collect();
+    assert_layout_row(&rows, "entry", "0x14", "capacity");
+    for (off, kw) in [
+        ("0x00", "vbus"),
+        ("0x04", "ibus"),
+        ("0x08", "charge"),
+        ("0x0c", "energy"),
+    ] {
+        let ok = rows.iter().any(|r| {
+            let l = r.to_lowercase();
+            contains_token(&l, off)
+                && l.contains(kw)
+                && l.contains("[device]")
+                && !l.contains("[inferred]")
+        });
+        assert!(ok, "sample: {kw} at {off} is now [device]");
+    }
+}
+
+#[test]
+fn memory_read_doc_states_the_256_byte_reply_limit() {
+    let text = doc();
+    let body = section(&text, "memory read").join("\n").to_lowercase();
+    assert!(
+        contains_token(&body, "256") && body.contains("[device]"),
+        "Memory read must state the 256-byte reply limit with a [device] tag"
+    );
+}
+
+/// The settings-field table row naming `keyword`, lowercase.
+fn settings_field_row(rows: &[String], keyword: &str) -> String {
+    rows.iter()
+        .map(|r| r.to_lowercase())
+        .find(|l| l.starts_with(&format!("| {keyword}")))
+        .unwrap_or_else(|| panic!("no settings-field row for {keyword:?}"))
+}
+
+#[test]
+fn settings_doc_marks_the_screen_checked_fields_device_and_rotation_inferred() {
+    let text = doc();
+    let rows: Vec<String> = units(&section(&text, "settings"))
+        .into_iter()
+        .filter(|u| u.starts_with('|'))
+        .collect();
+    for kw in [
+        "language",
+        "brightness",
+        "dim",
+        "startup logo",
+        "theme",
+        "auto-rotate",
+        "rate",
+    ] {
+        let row = settings_field_row(&rows, kw);
+        assert!(row.contains("[device]"), "{kw} is screen-checked: {row}");
+        assert!(
+            row.contains("[static]"),
+            "{kw} keeps its [static] map tag: {row}"
+        );
+        assert!(!row.contains("meaning [inferred]"), "{kw}: {row}");
+    }
+    for kw in ["rotation", "voltage", "current", "offset"] {
+        let row = settings_field_row(&rows, kw);
+        assert!(row.contains("[inferred]"), "{kw} stays inferred: {row}");
+    }
+    let body = section(&text, "settings").join("\n").to_lowercase();
+    assert!(
+        body.contains("0°") && body.contains("90°") && body.contains("auto-rotate on"),
+        "the rotation mismatch (screen 0°, bits read 90°, auto-rotate on) is noted"
+    );
+}
+
+#[test]
+fn never_send_allows_only_the_record_window_besides_the_four_blocks() {
+    let text = doc();
+    let body = section(&text, "never send").join("\n").to_lowercase();
+    assert!(
+        body.contains("offline record") || contains_token(&body, "0x98100000"),
+        "Never-send must name the record-download window as the one memory-read \
+         exception to the four known blocks"
+    );
+}

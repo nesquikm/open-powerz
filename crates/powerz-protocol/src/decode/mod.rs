@@ -9,6 +9,7 @@ pub mod info;
 pub mod pd_packet;
 pub mod queue;
 pub mod rate;
+pub mod records;
 pub mod settings;
 
 pub use adc::AdcSnapshot;
@@ -39,6 +40,12 @@ pub enum DecodeError {
         expected: u8,
         /// Frame type actually supplied (extend bit masked off).
         got: u8,
+    },
+    /// A stored CRC-32 does not match its data block; nothing was decoded.
+    #[error("{what}: CRC mismatch")]
+    Crc {
+        /// Block whose CRC failed (e.g. `"SETTINGS block A"`).
+        what: &'static str,
     },
 }
 

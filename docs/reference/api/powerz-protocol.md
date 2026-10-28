@@ -14,7 +14,8 @@ This page is a map of the public modules.
 |---|---|
 | crate root | `VID` (`0x5FC9`, the ChargerLAB USB vendor ID); `VERSION` (the library's version); `pd`, a re-export of the [`powerz-pd`](powerz-pd.md) decoder crate (`pub use powerz_pd as pd`) |
 | `frame` | Pure framing over byte slices: `MainHeader`, `ControlHeader`, `DataHeader`, `SectionHeader`, `Attribute`, `Section`, `Reply`; `classify_reply`, `parse_put_data`; request builders `get_data`, `connect`, `start_queue`, `stop_queue`, `start_pd_sniffer`, `stop_analyzer`; `Attribute::PD_PACKET`; `SequenceCounter`; `FrameError` |
-| `decode` | Payload decoders: `AdcSnapshot`, `QueueRecord` (also built from raw units with `QueueRecord::from_raw`), `Rate`, `Settings`, `DeviceInfoBlock`, `OtpBlock`, `Uid`; `DecodeError`; the `pd_packet` module (see below); the `head` module (`HeadReply`, the old-firmware check) |
+| `decode` | Payload decoders: `AdcSnapshot`, `QueueRecord` (also built from raw units with `QueueRecord::from_raw`), `Rate`, `Settings`, `DeviceInfoBlock`, `OtpBlock`, `Uid`; `DecodeError`; the `pd_packet` module (see below); the `head` module (`HeadReply`, the old-firmware check); the `records` and `settings` modules (offline records and the settings block, see below) |
+| `adcnew` | The ADCNEW stream the meter pushes on its CDC serial port: `Request` (start / stop / keep-alive bytes), `Content`, `Frame` and `decode_frame`, `crc8`, `CdcDemux` (splits ADCNEW frames from PDM text on one port, `CdcItem`), `AdcnewCounters`, `AdcnewError`; `KEEP_ALIVE_PERIOD`, `START_ECHO_QUIET` (12 s), `MAX_RAW_FRAMES` (see below) |
 | `transport` | The `Transport` trait and its pipes: `bulk` (`nusb`), `cdc` (`serialport`; `cdc::without_tty_twins` drops the macOS `/dev/tty.*` twin of each `/dev/cu.*` port), `hid` (`hidapi`, ADC snapshot only); `discovery` and `select` for finding meters; `GuardedTransport` (refuses commands outside the safe set before they are sent); `MockTransport` for tests; `FIRST_CONNECT_TIMEOUT` (wait for the first ACCEPT before `Transport::recover` and a retry); `Error` |
 | `session` | `Session` over a transport: CONNECT, memory read (`DeviceInfo`), authentication, and ADC-queue streaming (`Streamer`, `StreamPoll`, `Gap`, and `SnapshotCadence` for the side snapshot that refreshes temperature at 1000 SPS); PD capture (`PdSniffer`, `PdOptions`, `PdPoll`, `CapturedRecord`, and the `Session` methods `start_pd_sniffer`, `stop_pd_sniffer`, `poll_pd_sniffer`; see below); `Clock` / `SystemClock`; `OwnedSection`; `Error` |
 | `pdcap` | The [pdcap](../pdcap.md) capture file format: `Header`, `Entry`, `Writer`, `Reader`, `load` / `Loaded`, `Error` / `ErrorKind`, `FORMAT_VERSION`, `MAX_LINE_BYTES` (see below) |
@@ -25,6 +26,41 @@ This page is a map of the public modules.
 Decoders and framing are pure functions (`&[u8] → Result<T, _>`), so they can
 be used without a device. The wire format is described in
 [docs/protocol.md](../../protocol.md).
+
+## Offline records, settings and the ADCNEW stream
+
+### `decode::records`
+
+| item | signature or contents |
+|---|---|
+| `RecordEntry` | One 48-byte record-list entry: `name: String`, `interval_s: u8`, `points: u16`, `capacity_points: u32`, `duration_s: u32`, `charge_uah: i32` and `energy_uwh: i32` (signed, as stored), `offset: u32`, `raw: [u8; 48]`; `RecordEntry::decode(buf: &[u8]) -> Result<RecordEntry, DecodeError>`; `charge_ah`, `energy_wh` (signed) and `charge_magnitude_ah`, `energy_magnitude_wh` (as the screen shows them); `read_window(&self) -> Option<(u32, u32)>` (the record's memory window, bounded by the record area); `read_chunks(&self) -> Vec<(u32, u32)>` (that window as reads of at most `MEMORY_READ_MAX_LEN`); `sample_time_s(&self, index: usize) -> u64` |
+| `decode_record_list` | `decode_record_list(payload: &[u8]) -> Result<Vec<RecordEntry>, DecodeError>`; an empty list is `Ok(vec![])` |
+| `RecordSample` | One 16-byte sample: `vbus_uv`, `ibus_ua`, `charge_uah`, `energy_uwh` (all `i32`), `raw: [u8; 16]`; `RecordSample::decode`; `vbus_v`, `ibus_a`, `charge_ah`, `energy_wh` |
+| `SAMPLE_FIELDS` | Each sample field's key, offset and confidence `Tag` |
+| constants | `ENTRY_LEN` (48), `SAMPLE_LEN` (16), `FLASH_WINDOW_BASE` (`0x9810_0000`), `MEMORY_READ_MAX_LEN` (256), `RECORD_AREA_LEN` (`0x20_0000`) |
+
+### `decode::settings`
+
+| item | signature or contents |
+|---|---|
+| `Settings` | The raw settings block: `Settings::decode(payload: &[u8]) -> Result<Settings, DecodeError>`; `block_a_crc_ok`, `block_b_crc_ok`, `rate_code`, `name`, `raw`; `meter_settings(&self) -> Result<MeterSettings, DecodeError>` (refuses a block whose CRC fails) |
+| `MeterSettings` | Each field as `Tagged<T>` (`value`, `tag`): `language`, `brightness`, `dim_timeout`, `startup_logo`, `theme`, `auto_rotate`, `rotation`, `sample_rate`, `voltage_cal`, `current_cal`, `offset_cal`; `rows(&self) -> Vec<Row>` (`key`, `label`, `value`, `tag`) for display |
+| `Tag` | `Confirmed` or `Inferred`; `as_str` |
+| field enums | `Language`, `DimTimeout`, `StartupLogo`, `Theme`, `Rotation` |
+
+### `session` records and ADCNEW
+
+`Session` methods, read-only toward the meter:
+
+| method | contents |
+|---|---|
+| `list_records(&mut self) -> Result<Vec<RecordEntry>, Error>` | Authenticates to level 1 when needed, then one GET_DATA of the record list |
+| `download_record(&mut self, entry: &RecordEntry) -> Result<Vec<RecordSample>, Error>` | Reads the entry's window in chunks of at most 256 bytes; any address outside it is refused |
+| `start_adcnew(&mut self, content: Content, rate: Rate)`, `stop_adcnew(&mut self)` | Start and stop the ADCNEW stream on a CDC session (50 or 1000 SPS) |
+| `poll_adcnew(&mut self) -> Result<StreamPoll, Error>` | The records received since the last poll, with gaps; sends the keep-alive when due and restarts the stream after a start echo |
+| `adcnew_restart_pending(&self) -> bool` | A start echo was seen and the start is waiting for `START_ECHO_QUIET` of quiet |
+| `adcnew_counters(&self) -> AdcnewCounters` | `crc_errors`, `dropped_frames`, `start_echoes` |
+| `take_adcnew_raw(&mut self) -> Vec<Frame>` | The raw frames kept for a trace (at most `MAX_RAW_FRAMES`) |
 
 ## PD capture
 

@@ -1,9 +1,9 @@
 //! Output formatting shared by the subcommands: pretty JSON and the ADC
-//! snapshot views used by `read` and `watch`.
+//! reading views used by `read` and `watch`.
 
 use std::io::{self, Write};
 
-use powerz_protocol::decode::AdcSnapshot;
+use powerz_protocol::decode::{AdcSnapshot, QueueRecord};
 use serde::Serialize;
 use serde_json::ser::{Formatter, PrettyFormatter};
 
@@ -72,9 +72,53 @@ impl Formatter for PlainFloats {
     }
 }
 
-/// Temperature with 1 decimal, or `-` when the meter reports it invalid.
-fn temp_text(a: &AdcSnapshot) -> String {
-    a.temp_c()
+/// The values `read` and `watch` show, from an ADC snapshot or a pushed
+/// ADCNEW record (which carries no temperature).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Reading {
+    vbus_v: f64,
+    ibus_a: f64,
+    power_w: f64,
+    temp_c: Option<f64>,
+    dp_v: f64,
+    dm_v: f64,
+    cc1_v: f64,
+    cc2_v: f64,
+}
+
+impl From<&AdcSnapshot> for Reading {
+    fn from(a: &AdcSnapshot) -> Reading {
+        Reading {
+            vbus_v: a.vbus_v(),
+            ibus_a: a.ibus_a(),
+            power_w: a.power_w(),
+            temp_c: a.temp_c(),
+            dp_v: a.dp_v(),
+            dm_v: a.dm_v(),
+            cc1_v: a.cc1_v(),
+            cc2_v: a.cc2_v(),
+        }
+    }
+}
+
+impl From<&QueueRecord> for Reading {
+    fn from(r: &QueueRecord) -> Reading {
+        Reading {
+            vbus_v: r.vbus_v(),
+            ibus_a: r.ibus_a(),
+            power_w: r.vbus_v() * r.ibus_a(),
+            temp_c: None,
+            dp_v: r.dp_v(),
+            dm_v: r.dm_v(),
+            cc1_v: r.cc1_v(),
+            cc2_v: r.cc2_v(),
+        }
+    }
+}
+
+/// Temperature with 1 decimal, or `-` when invalid or not reported.
+fn temp_text(a: &Reading) -> String {
+    a.temp_c
         .map_or_else(|| "-".to_string(), |t| format!("{t:.1}"))
 }
 
@@ -95,33 +139,33 @@ pub(crate) fn adc_json(a: &AdcSnapshot) -> serde_json::Value {
 
 /// The snapshot as labelled lines, one value per line, 3 decimals
 /// (temperature 1).
-pub(crate) fn write_adc_lines(out: &mut dyn Write, a: &AdcSnapshot) -> Result<(), CliError> {
+pub(crate) fn write_adc_lines(out: &mut dyn Write, a: &Reading) -> Result<(), CliError> {
     let temp = temp_text(a);
-    writeln!(out, "VBUS:   {} V", fixed3(a.vbus_v()))?;
-    writeln!(out, "IBUS:   {} A", fixed3(a.ibus_a()))?;
-    writeln!(out, "Power:  {} W", fixed3(a.power_w()))?;
+    writeln!(out, "VBUS:   {} V", fixed3(a.vbus_v))?;
+    writeln!(out, "IBUS:   {} A", fixed3(a.ibus_a))?;
+    writeln!(out, "Power:  {} W", fixed3(a.power_w))?;
     writeln!(out, "Temp:   {temp} °C")?;
-    writeln!(out, "D+:     {} V", fixed3(a.dp_v()))?;
-    writeln!(out, "D−:     {} V", fixed3(a.dm_v()))?;
-    writeln!(out, "CC1:    {} V", fixed3(a.cc1_v()))?;
-    writeln!(out, "CC2:    {} V", fixed3(a.cc2_v()))?;
+    writeln!(out, "D+:     {} V", fixed3(a.dp_v))?;
+    writeln!(out, "D−:     {} V", fixed3(a.dm_v))?;
+    writeln!(out, "CC1:    {} V", fixed3(a.cc1_v))?;
+    writeln!(out, "CC2:    {} V", fixed3(a.cc2_v))?;
     Ok(())
 }
 
 /// The snapshot as one line, for `watch` when stdout is not a terminal.
-pub(crate) fn write_adc_line(out: &mut dyn Write, a: &AdcSnapshot) -> Result<(), CliError> {
+pub(crate) fn write_adc_line(out: &mut dyn Write, a: &Reading) -> Result<(), CliError> {
     let temp = temp_text(a);
     writeln!(
         out,
         "VBUS {} V  IBUS {} A  Power {} W  Temp {temp} °C  \
          D+ {} V  D− {} V  CC1 {} V  CC2 {} V",
-        fixed3(a.vbus_v()),
-        fixed3(a.ibus_a()),
-        fixed3(a.power_w()),
-        fixed3(a.dp_v()),
-        fixed3(a.dm_v()),
-        fixed3(a.cc1_v()),
-        fixed3(a.cc2_v())
+        fixed3(a.vbus_v),
+        fixed3(a.ibus_a),
+        fixed3(a.power_w),
+        fixed3(a.dp_v),
+        fixed3(a.dm_v),
+        fixed3(a.cc1_v),
+        fixed3(a.cc2_v)
     )?;
     Ok(())
 }

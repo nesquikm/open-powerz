@@ -1,19 +1,32 @@
-//! Pure stream reader for the PDM reply byte stream.
+//! Pure stream reader for the CDC byte stream: the PDM reply stream and
+//! the ADCNEW push stream share one port, so one reader separates them.
 //!
 //! The CDC stream carries, in any order \[device\] (firmware 2.0.6):
 //! - text reply lines ending in `\n` (no `\r`);
 //! - binary capability blocks starting with a tag (see [`super::caps`]),
 //!   usually followed by `\n`;
-//! - binary protocol frames to skip: PUT_DATA (`byte0 & 0x7F == 0x41`,
-//!   framed like the CDC transport frames them) and ADCNEW frames
-//!   (`02 att obj crc` + `obj × 4` body bytes).
+//! - binary protocol replies: PUT_DATA (`byte0 & 0x7F == 0x41`, framed like
+//!   the CDC transport frames them), 0x44 / 0x4C replies and 4-byte control
+//!   replies;
+//! - ADCNEW frames (`02 att obj crc` + `obj × 4` body bytes, CRC-checked).
+//!
+//! [`ReplyReader`] hands out lines and blocks, keeps ADCNEW frames for
+//! [`ReplyReader::take_frames`] and skips binary replies;
+//! [`crate::adcnew::CdcDemux`] uses the same reader without block detection
+//! and hands out frames, replies and lines.
 //!
 //! A `\n` right after a block is swallowed, even when it arrives in a later
-//! chunk. After a malformed block the reader skips to the next `\n`.
+//! chunk. After a malformed block the reader skips to the next `\n`. A bad
+//! ADCNEW frame is dropped whole when a valid item follows it; otherwise the
+//! reader drops bytes up to the next valid frame or line start, so a corrupt
+//! length never swallows what comes after it.
+
+use std::collections::VecDeque;
 
 use super::Error;
 use super::caps::{self, CapBlock};
-use crate::frame::msg::PUT_DATA;
+use crate::adcnew::{Frame, decode_frame};
+use crate::frame::msg;
 use crate::transport::cdc::frame_complete;
 
 /// One item read from the reply stream.
@@ -25,6 +38,19 @@ pub enum ReplyItem {
     Block(CapBlock),
 }
 
+/// One item of the shared CDC stream reader.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Token {
+    /// A text line, without its `\n`.
+    Line(String),
+    /// A capability block (only with block detection on).
+    Block(CapBlock),
+    /// A decoded ADCNEW frame.
+    Frame(Frame),
+    /// A whole binary protocol reply.
+    Reply(Vec<u8>),
+}
+
 /// Incremental reader: push bytes as they arrive, pull items.
 #[derive(Debug, Clone, Default)]
 pub struct ReplyReader {
@@ -32,10 +58,41 @@ pub struct ReplyReader {
     after_block: bool,
     /// After a malformed block: drop bytes up to and including the next `\n`.
     skip_line: bool,
+    /// Capability blocks are not recognised (the plain CDC demux).
+    no_blocks: bool,
+    /// After a bad ADCNEW frame: drop bytes up to the next valid frame or
+    /// the start of a line.
+    resync: bool,
+    /// Bad ADCNEW frames dropped so far.
+    dropped: usize,
+    /// ADCNEW frames read between lines, oldest first.
+    frames: VecDeque<Frame>,
 }
 
 /// ADCNEW record frame type (first byte). \[device\]
 const ADCNEW: u8 = 0x02;
+/// ADCNEW frame header length.
+const ADCNEW_HEADER: usize = 4;
+
+/// Binary reply types (byte 0, extend bit masked off) the reader frames as
+/// replies; other non-text bytes are dropped one by one. \[static\]
+const REPLY_TYPES: [u8; 11] = [
+    msg::ACCEPT,
+    msg::REJECT,
+    msg::FINISHED,
+    msg::GET_DATA,
+    msg::START_QUEUE,
+    msg::STOP_QUEUE,
+    msg::START_ANALYZER,
+    msg::STOP_ANALYZER,
+    msg::PUT_DATA,
+    msg::MEM_READ_CONFIRM,
+    msg::AUTH_REPLY,
+];
+
+/// Reply types whose first byte is a printable letter (`A`, `D`, `L`): a
+/// text line may start with them too. \[inferred\]
+const LETTER_TYPES: [u8; 3] = [msg::PUT_DATA, msg::MEM_READ_CONFIRM, msg::AUTH_REPLY];
 
 /// Shortest text line that may start with 0x41 (`A`); shorter ones are taken
 /// as a PUT_DATA frame. \[inferred\]
@@ -43,6 +100,10 @@ const PUT_DATA_TEXT_MIN: usize = 4;
 /// A tag (`ufcs:` etc.) starts a text line only with text after it: the tag
 /// itself plus at least one character. \[inferred\]
 const TAG_TEXT_MIN: usize = 6;
+
+/// Most ADCNEW frames kept for [`ReplyReader::take_frames`]; older ones are
+/// dropped so a session nobody drains stays bounded. \[inferred\]
+const MAX_KEPT_FRAMES: usize = 4096;
 
 /// See [`ReplyReader::shape`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,15 +113,32 @@ enum Shape {
     Undecided,
 }
 
+/// An ADCNEW frame at some offset: decoded, bad (with its declared length),
+/// or not complete yet (`None`).
+type FrameAt = Option<Result<(Frame, usize), usize>>;
+
 /// Most bytes kept while waiting for a line end, block end or frame end.
 /// Longer input is dropped up to the next `\n` with [`Error::LineTooLong`],
 /// so a device that never ends a line cannot grow the buffer forever.
 pub const MAX_LINE: usize = 4096;
 
+/// Bytes a text line may hold: printable ASCII, tab and `\r`.
+fn is_text(b: u8) -> bool {
+    matches!(b, 0x20..=0x7e | b'\t' | b'\r')
+}
+
 impl ReplyReader {
     /// An empty reader.
     pub fn new() -> ReplyReader {
         ReplyReader::default()
+    }
+
+    /// An empty reader that does not look for capability blocks.
+    pub(crate) fn without_blocks() -> ReplyReader {
+        ReplyReader {
+            no_blocks: true,
+            ..ReplyReader::default()
+        }
     }
 
     /// Append bytes read from the port.
@@ -69,8 +147,37 @@ impl ReplyReader {
     }
 
     /// The next complete item, `None` while more bytes are needed.
-    /// Binary frames are skipped silently. Never panics.
+    /// Binary replies are skipped; ADCNEW frames are kept for
+    /// [`take_frames`](Self::take_frames). Never panics.
     pub fn next_item(&mut self) -> Option<Result<ReplyItem, Error>> {
+        loop {
+            match self.next_token()? {
+                Ok(Token::Line(line)) => return Some(Ok(ReplyItem::Line(line))),
+                Ok(Token::Block(block)) => return Some(Ok(ReplyItem::Block(block))),
+                Ok(Token::Frame(frame)) => {
+                    if self.frames.len() >= MAX_KEPT_FRAMES {
+                        self.frames.pop_front();
+                    }
+                    self.frames.push_back(frame);
+                }
+                Ok(Token::Reply(_)) => {}
+                Err(err) => return Some(Err(err)),
+            }
+        }
+    }
+
+    /// The ADCNEW frames read so far, oldest first; each is handed out once.
+    pub fn take_frames(&mut self) -> Vec<Frame> {
+        self.frames.drain(..).collect()
+    }
+
+    /// Bad ADCNEW frames dropped so far.
+    pub(crate) fn dropped_frames(&self) -> usize {
+        self.dropped
+    }
+
+    /// The next complete token, `None` while more bytes are needed.
+    pub(crate) fn next_token(&mut self) -> Option<Result<Token, Error>> {
         loop {
             if self.skip_line {
                 match self.newline() {
@@ -84,6 +191,9 @@ impl ReplyReader {
                     }
                 }
             }
+            if self.resync && !self.resync_step() {
+                return self.need_more();
+            }
             let &first = self.buf.first()?;
             if self.after_block {
                 self.after_block = false;
@@ -92,41 +202,65 @@ impl ReplyReader {
                     continue;
                 }
             }
-            // Binary protocol frames interleaved with the text: skip them.
+            if first == ADCNEW {
+                match self.frame_at(0) {
+                    None => return self.need_more(),
+                    Some(Ok((frame, len))) => {
+                        self.consume(len);
+                        return Some(Ok(Token::Frame(frame)));
+                    }
+                    Some(Err(len)) => {
+                        // Drop the bad frame whole when a valid item (or
+                        // nothing yet) follows its declared end; otherwise
+                        // its length is suspect: drop one byte and resync.
+                        match self.item_at(len) {
+                            None if len < self.buf.len() => return self.need_more(),
+                            None | Some(true) => self.consume(len),
+                            Some(false) => {
+                                self.consume(1);
+                                self.resync = true;
+                            }
+                        }
+                        self.dropped += 1;
+                        continue;
+                    }
+                }
+            }
             // A printable line that merely starts with 0x41 (`Apple 2.4A`
             // in `entry list` [device]) is text, not a frame.
-            let put_data = first & 0x7F == PUT_DATA;
-            let shape = if put_data {
-                self.shape(PUT_DATA_TEXT_MIN)
+            let letter = first < 0x80 && LETTER_TYPES.contains(&first);
+            let reply = if letter {
+                match self.shape(PUT_DATA_TEXT_MIN) {
+                    Shape::Undecided => return self.need_more(),
+                    Shape::Binary => true,
+                    Shape::Text => false,
+                }
             } else {
-                Shape::Binary
+                !is_text(first) && first != b'\n'
             };
-            if put_data && shape == Shape::Undecided {
-                return self.need_more();
-            }
-            if put_data && shape == Shape::Binary {
+            if reply {
+                if !REPLY_TYPES.contains(&(first & 0x7F)) {
+                    // Neither text nor a known frame: noise, drop it.
+                    self.consume(1);
+                    continue;
+                }
                 let Some(len) = frame_complete(&self.buf) else {
                     return self.need_more();
                 };
-                self.consume(len.max(1));
-                continue;
-            }
-            if first == ADCNEW {
-                let Some(&words) = self.buf.get(2) else {
-                    return self.need_more();
-                };
-                let len = 4 + usize::from(words) * 4;
-                if self.buf.len() < len {
-                    return self.need_more();
-                }
+                let len = len.max(1);
+                let bytes = self.buf.get(..len).unwrap_or_default().to_vec();
                 self.consume(len);
-                continue;
+                return Some(Ok(Token::Reply(bytes)));
             }
             // `pdo:` is always a block. The other tags also start text lines
             // of `entry list` (`ufcs:63.0W,` [device]): followed by printable
             // text up to the line end they are text, while their binary
             // blocks carry a non-printable byte (the count) right after the tag.
-            let tag = caps::block_tag(&self.buf);
+            let tag = if self.no_blocks {
+                None
+            } else {
+                caps::block_tag(&self.buf)
+            };
             let block = match tag {
                 None => false,
                 Some(super::BlockTag::Pdo) => true,
@@ -142,7 +276,7 @@ impl ReplyReader {
                     Ok(Some((block, len))) => {
                         self.consume(len.max(1));
                         self.after_block = true;
-                        Some(Ok(ReplyItem::Block(block)))
+                        Some(Ok(Token::Block(block)))
                     }
                     Err(err) => {
                         self.skip_line = true;
@@ -150,26 +284,112 @@ impl ReplyReader {
                     }
                 };
             }
+            match self.line_at(0) {
+                Shape::Undecided => return self.need_more(),
+                // A non-text byte before the line end: not a line, drop one
+                // byte and look again.
+                Shape::Binary => {
+                    self.consume(1);
+                    continue;
+                }
+                Shape::Text => {}
+            }
             let Some(pos) = self.newline() else {
                 return self.need_more();
             };
             let line =
                 String::from_utf8_lossy(self.buf.get(..pos).unwrap_or_default()).into_owned();
             self.consume(pos + 1);
-            return Some(Ok(ReplyItem::Line(line)));
+            return Some(Ok(Token::Line(line)));
         }
+    }
+
+    /// The ADCNEW frame starting at `at`.
+    fn frame_at(&self, at: usize) -> FrameAt {
+        let &words = self.buf.get(at + 2)?;
+        let len = ADCNEW_HEADER + usize::from(words) * 4;
+        let bytes = self.buf.get(at..at + len)?;
+        Some(match decode_frame(bytes) {
+            Ok(frame) => Ok((frame, len)),
+            Err(_) => Err(len),
+        })
+    }
+
+    /// Whether a valid item (good frame, text line, binary reply) starts at
+    /// `at`; `None` while more bytes are needed.
+    fn item_at(&self, at: usize) -> Option<bool> {
+        let &b = self.buf.get(at)?;
+        if b == ADCNEW {
+            return self.frame_at(at).map(|f| f.is_ok());
+        }
+        match self.line_at(at) {
+            Shape::Text => return Some(true),
+            Shape::Undecided if is_text(b) => return None,
+            _ => {}
+        }
+        if !REPLY_TYPES.contains(&(b & 0x7F)) {
+            return Some(false);
+        }
+        frame_complete(self.buf.get(at..).unwrap_or_default()).map(|_| true)
+    }
+
+    /// One resync step after a bad frame: drop bytes up to the next valid
+    /// frame or line start. `false` while more bytes are needed.
+    fn resync_step(&mut self) -> bool {
+        for p in 0..self.buf.len() {
+            if p > 0 && self.buf.get(p - 1) == Some(&b'\n') {
+                self.consume(p);
+                self.resync = false;
+                return true;
+            }
+            if self.buf.get(p) == Some(&ADCNEW) {
+                match self.frame_at(p) {
+                    None => {
+                        self.consume(p);
+                        return false;
+                    }
+                    Some(Ok(_)) => {
+                        self.consume(p);
+                        self.resync = false;
+                        return true;
+                    }
+                    Some(Err(_)) => {}
+                }
+            }
+        }
+        if self.buf.last() == Some(&b'\n') {
+            self.resync = false;
+        }
+        self.buf.clear();
+        false
     }
 
     /// More bytes are needed: `None`, unless the buffer is already past
     /// [`MAX_LINE`], in which case it is dropped up to the next `\n`.
-    fn need_more(&mut self) -> Option<Result<ReplyItem, Error>> {
+    fn need_more(&mut self) -> Option<Result<Token, Error>> {
         if self.buf.len() <= MAX_LINE {
             return None;
         }
         let len = self.buf.len();
         self.buf.clear();
         self.skip_line = true;
+        self.resync = false;
         Some(Err(Error::LineTooLong { len }))
+    }
+
+    /// Whether a text line starts at `at`: text bytes up to a `\n` (text),
+    /// a non-text byte first (binary), or no line end yet (undecided).
+    /// Scans at most [`MAX_LINE`] bytes.
+    fn line_at(&self, at: usize) -> Shape {
+        let rest = self.buf.get(at..).unwrap_or_default();
+        for &b in rest.iter().take(MAX_LINE + 1) {
+            match b {
+                b'\n' => return Shape::Text,
+                b if is_text(b) => {}
+                _ => return Shape::Binary,
+            }
+        }
+        Shape::Undecided
     }
 
     /// What the buffer starts with: a text line (printable ASCII up to a

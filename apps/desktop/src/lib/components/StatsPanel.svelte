@@ -2,6 +2,7 @@
   import { isMissing, statsView } from "../stats";
   import type { StatsControls, StatsDeps } from "../stats.svelte";
   import type { StatsSnapshot } from "../backend";
+  import type { Snippet } from "svelte";
   import Notice from "./Notice.svelte";
 
   let {
@@ -9,6 +10,7 @@
     controls,
     deps,
     canReset,
+    children,
   }: {
     /** Latest snapshot, null before the first batch. */
     stats: StatsSnapshot | null;
@@ -16,6 +18,8 @@
     deps: StatsDeps;
     /** A stream is running, so there is something to reset or clear. */
     canReset: boolean;
+    /** More of the side card under the stats (the Meter settings, FR 1HHT01). */
+    children?: Snippet;
   } = $props();
 
   let cancelButton = $state<HTMLButtonElement | null>(null);
@@ -163,6 +167,7 @@
       >
     {/if}
   </div>
+  {@render children?.()}
 </aside>
 
 <style>

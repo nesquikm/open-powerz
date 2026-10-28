@@ -7,7 +7,8 @@ module, `apps/desktop/src/lib/backend.ts`. Every function there calls a Tauri
 command, or the in-browser `MockBackend` when the UI is built with
 `VITE_BACKEND=mock`. Scripts and other front ends can use the same seam. This
 page lists the parts added for session gaps, replug, the PD analyzer, the
-trigger panel and the firmware update; the source has the rest.
+trigger panel, the firmware update, the meter settings and the measurement
+source; the source code has the rest.
 
 ## Session history
 
@@ -172,6 +173,102 @@ Behaviour:
 - **The Firmware tab is opt-in.** It appears only when **Advanced firmware**
   is switched on in About. The switch is stored in the browser, off by
   default, and cannot be turned off while an update runs.
+
+## Meter settings
+
+| function | what it does |
+|---|---|
+| `meterSettings(): Promise<MeterSettings>` | Reads the connected meter's settings block (Tauri command `meter_settings`). Only one GET_DATA for the settings attribute (0x008) goes out; the stream keeps running. Rejects with `usage` when no meter is connected, and with the backend's error when the block fails its CRC check. |
+
+Types:
+
+| type | fields |
+|---|---|
+| `MeterSettings` | `fields`: every decoded field, in display order |
+| `MeterSettingField` | `key` (stable, e.g. `language`), `label`, `value` (formatted, e.g. `"50%"`; calibration values raw), `tag` |
+| `SettingTag` | `"confirmed"` (checked on the meter's screen) or `"inferred"` (static analysis only) |
+
+On the UI side, `MeterSettingsPanel` (in `meterSettings.svelte.ts`) reads the
+settings when a meter connects and on Refresh, and forgets them on
+disconnect; a failed read shows the error and no stale values. The read-only
+panel sits in the Meter tab's side card, under the stats. `MockBackend`
+answers the demo meter's fields and counts the reads
+(`meterSettingsReads()`).
+
+## Offline records
+
+| function | what it does |
+|---|---|
+| `recordsList(): Promise<RecordList>` | Lists the connected meter's offline records (Tauri command `records_list`). Only one GET_DATA for the record-list attribute (0x200) goes out, after level-1 authentication when the session is below it; the stream keeps running. Rejects with `usage` when no meter is connected. |
+| `recordDownload(index): Promise<OfflineRecord>` | Downloads record `index` (1-based) (Tauri command `record_download`): the list is read again, then that record's window as consecutive memory reads of at most 256 bytes, all inside the window. Rejects with `usage` for an index that is not listed or a record with no samples, without reading anything. The UI waits up to 30 s for it. |
+
+Types:
+
+| type | fields |
+|---|---|
+| `RecordList` | `records`: every record, in the meter's order |
+| `OfflineRecordEntry` | `index` (1-based), `name`, `interval_s`, `points`, `duration_s`, `charge_ah`, `energy_wh` (as stored: signed, negative for one current direction; the Records view shows their magnitude, as the meter does), `offset` (in the record area) |
+| `OfflineRecord` | `index`, `name`, `interval_s`, `samples` |
+| `OfflineRecordSample` | `t_s` (seconds from the record start), `vbus_v`, `ibus_a`, `charge_ah`, `energy_wh` (charge and energy summed so far); signed raw measurements, drawn in the chart with their sign |
+
+On the UI side, `RecordsPanel` (in `records.svelte.ts`) lists the records when
+a meter connects and on Refresh, downloads one or all of them (download-all
+skips empty records, shows "n of total" progress and stops at the first
+failure), and opens a downloaded record (downloading it first when needed).
+The Records tab shows the list and, for an opened record, its totals,
+min/max/avg of VBUS, IBUS and power, and a chart of its own drawn with the
+live chart's series and colours; the live session's history is not touched.
+On disconnect the list and downloads are forgotten; an opened record stays
+open. `MockBackend` serves three demo records (the simulator's profiles) and
+counts the downloads (`recordDownloads()`).
+
+## Measurement source
+
+| item | meaning |
+|---|---|
+| `connect(deviceId, rateSps, onEvent, source?)` | `source` (`MeasurementSource`, default `"queue"`) picks where the live values come from; it goes to the Tauri command `connect` as `source`. |
+| `MeasurementSource` | `"queue"`: the ADC queue polled over the vendor bulk pipe (CONNECT, sign-in, device info, temperature). `"cdc"`: the ADCNEW stream the meter pushes on its CDC serial port; no CONNECT and no sign-in are sent, the stream is kept alive past the meter's one-hour limit and stopped on disconnect. |
+| `MEASUREMENT_SOURCES` | The choices the UI offers, `{ value, label }`, the queue first. |
+
+The CDC stream feeds the same `batch` and `gap` events, history, statistics
+and recorder as the queue (a dropped frame is a `stream` gap). It carries no
+device info and no temperature: the `connected` status takes model and
+serial from the device listing and has an empty firmware version, and
+`temp_c` stays `null`. The rate picker restarts the stream at the new rate.
+For a real meter the backend opens its CDC port by USB serial number; the
+demo devices play the simulator's CDC meter. In the Rust backend this is
+`worker::MeasurementSource`, `WorkerConfig.source` and
+`DeviceManager::connect_source`; an `Opener` picks the pipe in
+`open_source`.
+
+On the UI side, the "Measurement source" picker sits next to the device
+picker (in the "⋯" menu when the top bar is short of room). It is locked
+while a session runs and keeps its choice after a disconnect.
+`MockBackend.connectedSource()` answers the running session's source, `null`
+when none runs.
+
+## Several meters
+
+| item | meaning |
+|---|---|
+| `meterBackend(deviceId): MeterBackend` | The commands of one meter: each invokes its Tauri command with `deviceId`, so an action never reaches another meter. `MeterBackend` holds `deviceId` and the per-meter commands (disconnect, rate, recording, export, stats, history, PD, meter settings, records, trigger). |
+| `currentMeterCommands: MeterCommands` | The same commands without a device id; they act on the backend's current meter, as with one meter. |
+| `connectedMeters(): Promise<string[]>` | The device ids of the running sessions, in connect order (Tauri command `running_meters`). |
+| `attach(onEvent, deviceId?)` | With `deviceId`, picks up that meter's running session after a reload; without it, the current meter's. |
+
+Every Tauri command that acts on a meter takes an optional `deviceId`.
+Without it the backend uses its current meter: the most recently connected
+meter that is still running. Connecting another meter keeps the sessions that
+are already running, including one that waits for an unplugged meter. While a
+firmware update runs, connecting any meter is refused.
+
+On the UI side, `Meters` (in `meters.svelte.ts`) holds one entry per
+connected meter with its own `Session` store; `fullViewId` names the meter
+the full single-meter view shows, and each meter's events go either to that
+view or to its tile. With one meter the app looks as before; with two or
+more, `MeterGrid` shows the tiles and **Add meter** opens `AddMeterDialog`,
+which leaves out the meters already connected. A reload attaches every
+running meter. The mock backend runs each demo device as its own meter.
 
 ## Mock backend
 
