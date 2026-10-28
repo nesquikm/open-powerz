@@ -199,6 +199,14 @@ the same file; a test in the gate fails when a workflow names its own Rust
 version. A new Rust release on the runners therefore can't turn a green branch
 red with new lints: moving the version is a reviewed change to that one file.
 
+The README lists every shipped feature, one line each. A test in the gate reads
+every "Added" entry in `CHANGELOG.md` and fails when the README's Features
+section has no line for it; `apps/desktop/scripts/readme/readme-features.json`
+maps each entry to its area and a phrase from its line, or marks it as not a
+user feature. The same test fails when a relative link in the README points at
+a file that does not exist. A release that adds a feature therefore also adds
+its README line.
+
 Releases come from `.github/workflows/release.yml`. A pushed `vX.Y.Z` tag, or a
 manual run that names an existing tag, runs five jobs:
 

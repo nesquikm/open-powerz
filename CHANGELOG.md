@@ -4,6 +4,13 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] — 2026-10-28 — "Read Me Maybe"
+
+### Changed
+- The README tells the real story: the current status, every shipped feature on one line with a link to its guide, what comes next, and a screenshot of the desktop app on the demo device; a gate test fails when a release adds a feature the README does not list or when a README link points nowhere (7V4B90)
+
+Total test count at release: 3334 tests, 0 failures, 0 errors.
+
 ## [0.7.0] — 2026-10-28 — "Memory Lane"
 
 ### Added
