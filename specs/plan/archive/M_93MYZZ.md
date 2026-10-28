@@ -7,6 +7,7 @@ kickoff_branch: null
 frozen_at: null
 migration: none
 codename: Read Me Maybe
+shipped_in: v0.7.1
 ---
 
 # Implementation Plan
