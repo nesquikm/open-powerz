@@ -10,24 +10,24 @@ use crate::pdm::reply::{ReplyReader, Token};
 /// taken; older ones are dropped first.
 pub const MAX_RAW_FRAMES: usize = 1024;
 
-/// Frame type of every ADCNEW stream frame and of the start request. [device]
+/// Frame type of every ADCNEW stream frame and of the start request. \[device\]
 const TYPE_START: u8 = 0x02;
-/// Keep-alive request type. [doc] [device]
+/// Keep-alive request type. \[doc\] \[device\]
 const TYPE_KEEP_ALIVE: u8 = 0x01;
-/// Stop request type. [doc] [device]
+/// Stop request type. \[doc\] \[device\]
 const TYPE_STOP: u8 = 0x03;
 /// How often a running stream is refreshed with the keep-alive: the meter
-/// stops pushing an hour after the last `02` or `01`. [doc]
+/// stops pushing an hour after the last `02` or `01`. \[doc\]
 pub const KEEP_ALIVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// Length of the frame header.
 const HEADER_LEN: usize = 4;
-/// Length of one record in a record frame (same as the ADC queue). [device]
+/// Length of one record in a record frame (same as the ADC queue). \[device\]
 const RECORD_LEN: usize = 20;
-/// Record frames carry att `0x10 | rate code`. [device] (firmware 2.0.6)
+/// Record frames carry att `0x10 | rate code`. \[device\] (firmware 2.0.6)
 const RECORD_ATT_BASE: u8 = 0x10;
 
 /// CRC-8 used by ADCNEW frames: poly 0x29, init 0, no reflection, xorout 0,
-/// computed over the body only. [device] (firmware 2.0.6)
+/// computed over the body only. \[device\] (firmware 2.0.6)
 pub fn crc8(body: &[u8]) -> u8 {
     body.iter().fold(0u8, |mut c, &b| {
         c ^= b;
@@ -57,7 +57,7 @@ pub struct AdcnewCounters {
 /// Host silence before a start is sent again after the meter echoed one.
 /// Right after a bulk session the meter echoes a start and streams nothing,
 /// and any request within about 6–10 s keeps it so; a start after a quiet
-/// spell streams. [device] (firmware 2.0.6, 2026-10-28)
+/// spell streams. \[device\] (firmware 2.0.6, 2026-10-28)
 pub const START_ECHO_QUIET: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// Errors from decoding an ADCNEW frame.
@@ -168,7 +168,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, AdcnewError> {
     Ok(Frame::Records { rate, records })
 }
 
-/// What the stream carries besides ADC records (request att high nibble). [doc]
+/// What the stream carries besides ADC records (request att high nibble). \[doc\]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Content {
     /// ADC records only.
@@ -196,18 +196,18 @@ impl Content {
 /// An ADCNEW request sent on the CDC port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
-    /// Bare `02`: stream at the meter's own rate. [device]
+    /// Bare `02`: stream at the meter's own rate. \[device\]
     StartDefault,
-    /// `02 <att>`: stream `content` at `rate`. [doc] [device]
+    /// `02 <att>`: stream `content` at `rate`. \[doc\] \[device\]
     Start {
         /// What to stream.
         content: Content,
         /// Record rate.
         rate: Rate,
     },
-    /// `03`: stop the stream. [doc] [device]
+    /// `03`: stop the stream. \[doc\] \[device\]
     Stop,
-    /// `01`: keep-alive. [doc] [device]
+    /// `01`: keep-alive. \[doc\] \[device\]
     KeepAlive,
 }
 

@@ -398,7 +398,7 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
     }
 
     /// Reads until the port has nothing more buffered (at most
-    /// [`MAX_STREAM_READS`] reads, so a fast stream cannot hold it forever).
+    /// `MAX_STREAM_READS` reads, so a fast stream cannot hold it forever).
     fn adcnew_frames(&mut self) -> Result<Vec<Frame>, Error> {
         if self.demux.is_none() {
             return Ok(Vec::new());

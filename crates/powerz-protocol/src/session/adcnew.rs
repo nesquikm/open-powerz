@@ -134,7 +134,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
     }
 
     /// Take the non-record ADCNEW frames (PD / UFCS content, kept raw)
-    /// received so far, at most [`MAX_RAW_FRAMES`](crate::adcnew::MAX_RAW_FRAMES) of the newest.
+    /// received so far, at most [`MAX_RAW_FRAMES`] of the newest.
     pub fn take_adcnew_raw(&mut self) -> Vec<Frame> {
         std::mem::take(&mut self.adcnew_raw)
     }
