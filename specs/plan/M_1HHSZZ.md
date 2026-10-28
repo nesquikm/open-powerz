@@ -49,6 +49,14 @@ Build order: 1HHT01, 1HHT00, 1HHT02, 1HHT03, then 1HHT04 (its stages can run as 
 - Release publish sends no tag_name in its updates; the v0.6.0 draft was published as "untagged-…" and repaired by hand. Send tag_name and check it after publishing (found after M_FW682R).
 - A manual release re-run of an older tag takes the Latest badge (make_latest true).
 - Settings rotation: bits 0–1 of u32@0x60 read 90° while the screen shows 0° with auto-rotate on. Re-check with auto-rotate off before trusting the mapping (found in 1HHT04 settings stage).
+- From the 1HHT04 multi-device stage:
+  - The header picker shows the full serial; offer a "hide serial" option for screenshots.
+  - Header Record, Export, rate and Disconnect act on the picker's meter, which changes as meters are added or expanded. Make them per tile, or label the target meter.
+  - Record opens the Save sheet before recording starts.
+  - Tile order swaps across a reload.
+  - app.log stays empty during a run, so it is no use as evidence.
+  - PD capture stops when its meter leaves the full view.
+  - While one meter flashes firmware, connecting any meter is refused.
 
 **Device safety:** read-only. Forbidden: SET_DATA 0x48 (any att), 0x4A, settings writes 0x0A, RESET 04, JUMP 08/09, 0x42, memory reads outside the safe list plus the per-record window, triggering above 5 V.
 
