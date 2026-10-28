@@ -1,8 +1,8 @@
 ---
 milestone: M_1HHSZZ
 id: fr_01M5XK5N83KRGEZMRZRV1HHSZZ
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-28T08:12:03Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -30,20 +30,20 @@ codename: Memory Lane
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [1HHT00](../frs/1HHT00.md) | Offline records: list and download | n/a |
-| [1HHT01](../frs/1HHT01.md) | Meter settings, read-only | n/a |
-| [1HHT02](../frs/1HHT02.md) | ADCNEW stream over the virtual serial port | n/a |
-| [1HHT03](../frs/1HHT03.md) | Several meters at once | n/a |
-| [1HHT04](../frs/1HHT04.md) | Real-meter checks for meter data | n/a |
+| [1HHT00](../frs/archive/1HHT00.md) | Offline records: list and download | n/a |
+| [1HHT01](../frs/archive/1HHT01.md) | Meter settings, read-only | n/a |
+| [1HHT02](../frs/archive/1HHT02.md) | ADCNEW stream over the virtual serial port | n/a |
+| [1HHT03](../frs/archive/1HHT03.md) | Several meters at once | n/a |
+| [1HHT04](../frs/archive/1HHT04.md) | Real-meter checks for meter data | n/a |
 
 Build order: 1HHT01, 1HHT00, 1HHT02, 1HHT03, then 1HHT04 (its stages can run as soon as their feature is done).
 
 **Tasks:**
-- [ ] Offline records: list and download — 1HHT00
-- [ ] Meter settings, read-only — 1HHT01
-- [ ] ADCNEW stream over the virtual serial port — 1HHT02
-- [ ] Several meters at once — 1HHT03
-- [ ] Real-meter checks for meter data — 1HHT04
+- [x] Offline records: list and download — 1HHT00
+- [x] Meter settings, read-only — 1HHT01
+- [x] ADCNEW stream over the virtual serial port — 1HHT02
+- [x] Several meters at once — 1HHT03
+- [x] Real-meter checks for meter data — 1HHT04
 
 **M7 follow-ups:**
 - Release publish sends no tag_name in its updates; the v0.6.0 draft was published as "untagged-…" and repaired by hand. Send tag_name and check it after publishing (found after M_FW682R).
