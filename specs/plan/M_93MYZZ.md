@@ -30,7 +30,7 @@ codename: Read Me Maybe
 | [7V4B90](../frs/7V4B90.md) | README lists what open-powerz does | n/a |
 
 **Tasks:**
-- [ ] README lists what open-powerz does — 7V4B90
+- [x] README lists what open-powerz does — 7V4B90
 
 **M7 follow-ups:**
 - (none yet)
