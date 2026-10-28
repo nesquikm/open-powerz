@@ -98,6 +98,8 @@
     menuOpen = true;
     await tick();
     setActiveItem(0, fromKeyboard);
+    // With only the source picker in the menu there is no item: focus the picker.
+    if (fromKeyboard && menuItems().length === 0) menuPanel?.querySelector("select")?.focus();
   }
 
   /** Close the menu; `refocus` puts focus back on ⋯ (after a pick or Escape). */
@@ -156,7 +158,7 @@
     });
     applyFit(el, chosen);
     level = chosen.level;
-    if (level < SETTINGS_IN_MENU_LEVEL) menuOpen = false;
+    if (level < SOURCE_IN_MENU_LEVEL) menuOpen = false;
   }
 
   // Refit when the window or anything in the bar changes size (a label, the recording
@@ -164,23 +166,24 @@
   $effect(() => {
     const el = bar;
     if (!el || typeof ResizeObserver === "undefined") return;
-    // Refit on the next frame, not inside the observation: fit() resizes the bar, and a
-    // resize inside the callback makes WebKit log a ResizeObserver loop error. One
-    // pending frame at a time.
+    // Refit right after the observation, not inside it: fit() resizes the bar, and a
+    // resize inside the callback makes WebKit log a ResizeObserver loop error. A timeout,
+    // not an animation frame: a headless page's first frame can come a second late, and
+    // the bar would overflow until then. One pending refit at a time.
     let frame = 0;
     const observer = new ResizeObserver(() => {
       if (frame) return;
-      frame = requestAnimationFrame(() => {
+      frame = window.setTimeout(() => {
         frame = 0;
         fit();
-      });
+      }, 0);
     });
     observer.observe(el);
     for (const group of el.querySelectorAll(".group")) observer.observe(group);
     fit();
     return () => {
       observer.disconnect();
-      if (frame) cancelAnimationFrame(frame);
+      if (frame) window.clearTimeout(frame);
     };
   });
 
@@ -330,7 +333,7 @@
         aria-label={moreMenuLabel(level)}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        aria-controls="top-bar-menu"
+        aria-controls={level >= SETTINGS_IN_MENU_LEVEL ? "top-bar-menu" : undefined}
         onclick={(e) => {
           // A click with no pointer (detail 0) came from Enter or Space.
           if (menuOpen) closeMenu(false);
@@ -338,9 +341,21 @@
         }}>⋯</button
       >
       {#if menuOpen}
-        <div class="menu panel" bind:this={menuPanel}>
+        <!-- Only the source picker in the menu: Escape still closes it. -->
+        <div
+          class="menu panel"
+          bind:this={menuPanel}
+          role="presentation"
+          onkeydown={(e) => {
+            if (e.key === "Escape" && level < SETTINGS_IN_MENU_LEVEL) {
+              e.preventDefault();
+              e.stopPropagation();
+              closeMenu(true);
+            }
+          }}
+        >
           <!-- The rate picker and its note are not menu items, so they sit beside the menu. -->
-          {#if level >= SOURCE_IN_MENU_LEVEL || rateNote !== null}
+          {#if level >= SOURCE_IN_MENU_LEVEL}
             <div class="menu-extra">
               {#if level >= SOURCE_IN_MENU_LEVEL}
                 {@render sourceSelect()}
@@ -348,41 +363,43 @@
               {#if level >= RATE_IN_MENU_LEVEL}
                 {@render rateSelect()}
               {/if}
-              {#if rateNote !== null}
+              {#if rateNote !== null && level >= SETTINGS_IN_MENU_LEVEL}
                 <p class="rate-note menu-note">{rateNote}</p>
               {/if}
             </div>
           {/if}
-          <div
-            id="top-bar-menu"
-            class="menu-list"
-            role="menu"
-            tabindex="-1"
-            aria-labelledby="top-bar-more"
-            bind:this={menuList}
-            onkeydown={onMenuKeydown}
-            onfocusout={(e) => {
-              // Tab out of the menu closes it (menu pattern); a move between items doesn't.
-              const to = e.relatedTarget instanceof Node ? e.relatedTarget : null;
-              if (to && (menuPanel?.contains(to) || moreButton?.contains(to))) return;
-              if (to) closeMenu(false);
-            }}
-          >
-            {#if level >= EXPORT_IN_MENU_LEVEL}
-              {@render exportButton(true)}
-            {/if}
-            <ThemeControl
-              choice={themeChoice}
-              onChoose={(choice) => pick(() => onSetTheme(choice))}
-              inMenu
-            />
-            <button
-              type="button"
-              role="menuitem"
+          {#if level >= SETTINGS_IN_MENU_LEVEL}
+            <div
+              id="top-bar-menu"
+              class="menu-list"
+              role="menu"
               tabindex="-1"
-              onclick={() => pick(() => onAbout(moreButton ?? null))}>About</button
+              aria-labelledby="top-bar-more"
+              bind:this={menuList}
+              onkeydown={onMenuKeydown}
+              onfocusout={(e) => {
+                // Tab out of the menu closes it (menu pattern); a move between items doesn't.
+                const to = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+                if (to && (menuPanel?.contains(to) || moreButton?.contains(to))) return;
+                if (to) closeMenu(false);
+              }}
             >
-          </div>
+              {#if level >= EXPORT_IN_MENU_LEVEL}
+                {@render exportButton(true)}
+              {/if}
+              <ThemeControl
+                choice={themeChoice}
+                onChoose={(choice) => pick(() => onSetTheme(choice))}
+                inMenu
+              />
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                onclick={() => pick(() => onAbout(moreButton ?? null))}>About</button
+              >
+            </div>
+          {/if}
         </div>
       {/if}
     </span>
@@ -590,16 +607,19 @@
   .top-bar:global(.hide-brand) .brand {
     display: none;
   }
-  /* Level 2: theme, About and the rate-locked note move into the menu. */
+  /* Level 2: the measurement-source picker moves into the menu, which appears. */
+  .top-bar:global(.source-in-menu) .source-inline {
+    display: none;
+  }
+  .top-bar:global(.source-in-menu) .settings-menu {
+    display: inline-flex;
+  }
+  /* Level 3: theme, About and the rate-locked note move into the menu. */
   .top-bar:global(.settings-in-menu) .settings-inline,
-  .top-bar:global(.settings-in-menu) .source-inline,
   .top-bar:global(.settings-in-menu) .inline-note {
     display: none;
   }
-  .top-bar:global(.settings-in-menu) .settings-menu {
-    display: inline-flex;
-  }
-  /* Level 3 (always below 1000 px): tighter spacing; the recording indicator shows just
+  /* Level 4 (always below 1000 px): tighter spacing; the recording indicator shows just
      its time; the hidden row count stays for screen readers. */
   .top-bar:global(.compact) {
     column-gap: 0.5rem;
@@ -619,7 +639,7 @@
     clip-path: inset(50%);
     white-space: nowrap;
   }
-  /* Levels 4 and 5: the sample rate, then Export, move into the menu. */
+  /* Levels 5 and 6: the sample rate, then Export, move into the menu. */
   .top-bar:global(.rate-in-menu) .rate-inline,
   .top-bar:global(.export-in-menu) .export {
     display: none;

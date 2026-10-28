@@ -4,8 +4,12 @@ import {
   chooseFit,
   COMPACT_LEVEL,
   fitClasses,
+  EXPORT_IN_MENU_LEVEL,
   MAX_FIT_LEVEL,
   moreMenuLabel,
+  RATE_IN_MENU_LEVEL,
+  SETTINGS_IN_MENU_LEVEL,
+  SOURCE_IN_MENU_LEVEL,
   startLevel,
   type Fit,
 } from "./topBarFit";
@@ -45,7 +49,11 @@ describe("top bar fit", () => {
 
   it("names one class per level reached, plus the mode", () => {
     expect(fitClasses({ level: 0, mode: "natural" })).toEqual([]);
-    expect(fitClasses({ level: 2, mode: "natural" })).toEqual(["hide-brand", "settings-in-menu"]);
+    expect(fitClasses({ level: SETTINGS_IN_MENU_LEVEL, mode: "natural" })).toEqual([
+      "hide-brand",
+      "source-in-menu",
+      "settings-in-menu",
+    ]);
     const all = fitClasses({ level: MAX_FIT_LEVEL, mode: "wrap" });
     expect(all).toContain("export-in-menu");
     expect(all).toContain("fit-wrap");
@@ -56,7 +64,18 @@ describe("top bar fit", () => {
 
   it("names what the menu holds", () => {
     expect(moreMenuLabel(COMPACT_LEVEL)).toBe("More: theme and About");
-    expect(moreMenuLabel(4)).toBe("More: sample rate, theme and About");
-    expect(moreMenuLabel(5)).toBe("More: sample rate, Export, theme and About");
+    expect(moreMenuLabel(RATE_IN_MENU_LEVEL)).toBe("More: sample rate, theme and About");
+    expect(moreMenuLabel(EXPORT_IN_MENU_LEVEL)).toBe("More: sample rate, Export, theme and About");
+  });
+
+  // CI Linux fonts (HIL-free regression, PR #8): the source picker leaves the row before
+  // theme, About and the rate-locked note, so the note keeps its place on a 1280 px bar.
+  it("moves the measurement source into the menu on its own, before the settings", () => {
+    expect(SOURCE_IN_MENU_LEVEL).toBeLessThan(SETTINGS_IN_MENU_LEVEL);
+    expect(fitClasses({ level: SOURCE_IN_MENU_LEVEL, mode: "natural" })).toEqual([
+      "hide-brand",
+      "source-in-menu",
+    ]);
+    expect(moreMenuLabel(SOURCE_IN_MENU_LEVEL)).toBe("More: measurement source");
   });
 });

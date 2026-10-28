@@ -279,3 +279,23 @@ test("with very large control text the bar keeps one row and every control stays
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
 });
+
+// CI WebKit (PR #8): the first animation frame of a headless page can come about a second
+// late, and the bar's refit after the device list widens the picker must not wait for it.
+test("the top bar refits without waiting for an animation frame (1280×800, wide text)", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.requestAnimationFrame = (cb) => window.setTimeout(() => cb(performance.now()), 3000);
+    document.addEventListener("DOMContentLoaded", () => {
+      const style = document.createElement("style");
+      style.textContent = "html, body, button, select { letter-spacing: 0.05em !important; }";
+      document.head.append(style);
+    });
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await open(page);
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.scrollWidth), { timeout: 1500 })
+    .toBeLessThanOrEqual(1280);
+});

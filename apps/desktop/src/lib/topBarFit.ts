@@ -13,26 +13,28 @@ export const FIT_LEVELS = [
   null,
   /** 1: the wordmark goes (the window title names the app). */
   "hide-brand",
-  /** 2: theme, About, the measurement-source picker and the rate-locked note move into
-   * the "⋯" menu. */
+  /** 2: the measurement-source picker moves into the "⋯" menu (FR 1HHT02), before the
+   * settings, so the rate-locked note keeps its place in the row longer. */
+  "source-in-menu",
+  /** 3: theme, About and the rate-locked note move into the menu. */
   "settings-in-menu",
-  /** 3: tighter spacing; the recording indicator shows just its time. */
+  /** 4: tighter spacing; the recording indicator shows just its time. */
   "compact",
-  /** 4: the sample-rate picker moves into the menu. */
+  /** 5: the sample-rate picker moves into the menu. */
   "rate-in-menu",
-  /** 5: the Export button moves into the menu; a running export shows as a thin line
+  /** 6: the Export button moves into the menu; a running export shows as a thin line
    * along the bar's bottom edge. */
   "export-in-menu",
 ] as const;
 
 export type FitLevel = number;
 
-export const SETTINGS_IN_MENU_LEVEL = 2;
-/** The measurement-source picker moves into the menu with theme and About (FR 1HHT02). */
-export const SOURCE_IN_MENU_LEVEL = SETTINGS_IN_MENU_LEVEL;
-export const COMPACT_LEVEL = 3;
-export const RATE_IN_MENU_LEVEL = 4;
-export const EXPORT_IN_MENU_LEVEL = 5;
+/** The first level with the "⋯" menu: the measurement-source picker alone (FR 1HHT02). */
+export const SOURCE_IN_MENU_LEVEL = 2;
+export const SETTINGS_IN_MENU_LEVEL = 3;
+export const COMPACT_LEVEL = 4;
+export const RATE_IN_MENU_LEVEL = 5;
+export const EXPORT_IN_MENU_LEVEL = 6;
 export const MAX_FIT_LEVEL = FIT_LEVELS.length - 1;
 
 /** Below this window width (CSS px) the bar starts compact, whatever fits. */
@@ -82,6 +84,7 @@ export const ALL_FIT_CLASSES: readonly string[] = [
 
 /** The accessible name of the "⋯" button: what the menu holds at `level`. */
 export function moreMenuLabel(level: FitLevel): string {
+  if (level < SETTINGS_IN_MENU_LEVEL) return "More: measurement source";
   const extra = [
     level >= RATE_IN_MENU_LEVEL ? "sample rate" : null,
     level >= EXPORT_IN_MENU_LEVEL ? "Export" : null,
