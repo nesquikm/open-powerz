@@ -1,8 +1,8 @@
 ---
 milestone: M_93MYZZ
 id: fr_01M61AYGNGDP8GCX9XDB93MYZZ
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-28T15:15:17Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -27,7 +27,7 @@ codename: Read Me Maybe
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [7V4B90](../frs/7V4B90.md) | README lists what open-powerz does | n/a |
+| [7V4B90](../frs/archive/7V4B90.md) | README lists what open-powerz does | n/a |
 
 **Tasks:**
 - [x] README lists what open-powerz does — 7V4B90
