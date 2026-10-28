@@ -247,6 +247,29 @@ while a session runs and keeps its choice after a disconnect.
 `MockBackend.connectedSource()` answers the running session's source, `null`
 when none runs.
 
+## Several meters
+
+| item | meaning |
+|---|---|
+| `meterBackend(deviceId): MeterBackend` | The commands of one meter: each invokes its Tauri command with `deviceId`, so an action never reaches another meter. `MeterBackend` holds `deviceId` and the per-meter commands (disconnect, rate, recording, export, stats, history, PD, meter settings, records, trigger). |
+| `currentMeterCommands: MeterCommands` | The same commands without a device id; they act on the backend's current meter, as with one meter. |
+| `connectedMeters(): Promise<string[]>` | The device ids of the running sessions, in connect order (Tauri command `running_meters`). |
+| `attach(onEvent, deviceId?)` | With `deviceId`, picks up that meter's running session after a reload; without it, the current meter's. |
+
+Every Tauri command that acts on a meter takes an optional `deviceId`.
+Without it the backend uses its current meter: the most recently connected
+meter that is still running. Connecting another meter keeps the sessions that
+are already running, including one that waits for an unplugged meter. While a
+firmware update runs, connecting any meter is refused.
+
+On the UI side, `Meters` (in `meters.svelte.ts`) holds one entry per
+connected meter with its own `Session` store; `fullViewId` names the meter
+the full single-meter view shows, and each meter's events go either to that
+view or to its tile. With one meter the app looks as before; with two or
+more, `MeterGrid` shows the tiles and **Add meter** opens `AddMeterDialog`,
+which leaves out the meters already connected. A reload attaches every
+running meter. The mock backend runs each demo device as its own meter.
+
 ## Mock backend
 
 `MockBackend` (in `mockBackend.ts`) plays a demo session in the browser, with

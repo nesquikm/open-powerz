@@ -20,9 +20,25 @@ counted from the first sample. Numbers are plain decimals with at most 8
 significant digits; CHARGE (Ah) and ENERGY (Wh) are integrated from the signed
 current, so charging in the reverse direction counts down.
 
-Streaming needs the vendor bulk interface (the default `--transport bulk`);
-`cdc` and `hid` carry only `read` and `watch`. To try it without a meter, add
+Streaming the ADC queue needs the vendor bulk interface (the default
+`--transport bulk`). To try it without a meter, add
 `--transport sim --scenario pd-9v-2a`.
+
+## Record the serial-port stream instead
+
+The meter can also push its samples on its virtual serial port (the ADCNEW
+stream). It needs no sign-in, at 50 or 1000 samples per second:
+
+```bash
+powerz stream --source cdc --rate 1000 --csv run.csv --duration 60
+```
+
+The CSV has the same columns, with `TEMP` empty (this stream carries no
+temperature). The summary line reads
+`<n> records, <g> gaps, <d> dropped frames, <c> CRC errors`. Right after a bulk
+session the meter may echo the start for a few seconds; the CLI says so and
+starts again after 12 s. In the desktop app, pick **Serial stream** in the
+Measurement source picker before connecting.
 
 ## Record or export from the desktop app
 

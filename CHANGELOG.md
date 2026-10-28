@@ -4,6 +4,17 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-10-28 — "Memory Lane"
+
+### Added
+- Offline records: `powerz records list` and `powerz records get N|--all` download the recordings the meter makes on its own as CSV files in the `stream` layout, and the desktop app's Records tab lists them, downloads one or all with progress and opens a downloaded record in the history chart with its statistics; each download reads only that record's memory window, 256 bytes at a time (1HHT00)
+- Meter settings, read-only: `powerz settings` (`--json`, `--raw`) and a Meter settings panel show language, brightness, dim timeout, startup logo, theme, auto-rotate, rotation, sample rate and the calibration values, each tagged confirmed or inferred; nothing is ever written (1HHT01)
+- ADCNEW stream over the virtual serial port: `powerz stream --source cdc` and `powerz watch --source cdc` use the stream the meter pushes on its CDC port at 50 or 1000 SPS with no sign-in, report records, gaps, dropped frames and CRC errors, and start again when the meter echoes the start after a bulk session; the desktop app offers it as the Serial stream source (1HHT02)
+- Several meters at once: the desktop app connects more than one meter, shows them in a grid of tiles with Add meter, Expand, All meters and per-tile Disconnect, and keeps recording, replug and every action on its own meter; a reload picks up every running meter (1HHT03)
+- Real-meter checks: settings, offline records, the ADCNEW stream and two meters side by side were checked on a KM003C with read-only runbooks (1HHT04)
+
+Total test count at release: 3294 tests, 0 failures, 0 errors.
+
 ## [0.6.1] — 2026-10-27 — "Return to Sender"
 
 ### Fixed
