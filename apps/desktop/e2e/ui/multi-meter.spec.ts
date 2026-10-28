@@ -120,6 +120,29 @@ test("on a narrow window the tiles stack (AC-1HHT03.2)", async ({ page }) => {
   expect(b!.y).toBeGreaterThan(a!.y + a!.height / 2);
 });
 
+test("the tiles stack as soon as the window narrows, not after its resize event (AC-1HHT03.2)", async ({
+  page,
+}) => {
+  // A busy runner delivers the resize event late; the layout must not wait for it.
+  await page.addInitScript(() => {
+    const add = window.addEventListener.bind(window);
+    window.addEventListener = ((type: string, listener: EventListener, options?: unknown) => {
+      if (type !== "resize") return add(type, listener, options as AddEventListenerOptions);
+      return add(
+        type,
+        (e: Event) => setTimeout(() => listener.call(window, e), 3000),
+        options as AddEventListenerOptions,
+      );
+    }) as typeof window.addEventListener;
+  });
+  await twoMeters(page);
+  await page.setViewportSize({ width: 900, height: 1200 });
+  const a = await tileOf(page, "load-5v-1a").boundingBox();
+  const b = await tileOf(page, "pd-9v-2a").boundingBox();
+  expect(a && b, "both tiles are laid out").toBeTruthy();
+  expect(Math.abs(a!.x - b!.x)).toBeLessThan(4);
+});
+
 test("one tile expands to the full single-meter view and back (AC-1HHT03.2)", async ({ page }) => {
   await twoMeters(page);
   await tileOf(page, "pd-9v-2a").getByRole("button", { name: "Expand" }).click();

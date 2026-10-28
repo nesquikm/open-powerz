@@ -1,15 +1,8 @@
-/** The grid of meter tiles (FR 1HHT03): its columns and each tile's title. */
+/** The grid of meter tiles (FR 1HHT03): each tile's title. The columns are CSS, in
+ * MeterGrid.svelte. */
 
 import type { DeviceListing } from "./backend";
 import { deviceOptionLabel } from "./format";
-import { LAYOUT_BREAKPOINT_PX } from "./layout";
-
-/** Columns of the tile grid for a window `width` CSS px wide holding `count` meters: two
- * side by side on a wide window, one (stacked) on a narrow one or for a single meter. */
-export function gridColumns(width: number, count: number): number {
-  if (count < 2 || width < LAYOUT_BREAKPOINT_PX) return 1;
-  return 2;
-}
 
 /** The last four characters of `serial` after an ellipsis; a short serial whole, none empty. */
 export function serialSuffix(serial: string | null): string {

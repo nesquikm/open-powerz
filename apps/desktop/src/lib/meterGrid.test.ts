@@ -1,9 +1,10 @@
 /** FR 1HHT03, AC .2: the grid of meter tiles. */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { DeviceListing } from "./backend";
 import { LAYOUT_BREAKPOINT_PX } from "./layout";
-import { gridColumns, serialSuffix, tileTitle } from "./meterGrid";
+import { serialSuffix, tileTitle } from "./meterGrid";
 
 function listing(over: Partial<DeviceListing>): DeviceListing {
   return {
@@ -18,28 +19,6 @@ function listing(over: Partial<DeviceListing>): DeviceListing {
     ...over,
   };
 }
-
-describe("gridColumns (AC-1HHT03.2)", () => {
-  it("puts two meters side by side on a wide window", () => {
-    expect(gridColumns(LAYOUT_BREAKPOINT_PX, 2)).toBe(2);
-    expect(gridColumns(1920, 2)).toBe(2);
-  });
-
-  it("never uses more than two columns, however many meters", () => {
-    expect(gridColumns(2560, 3)).toBe(2);
-    expect(gridColumns(2560, 4)).toBe(2);
-  });
-
-  it("stacks the tiles on a narrow window", () => {
-    expect(gridColumns(LAYOUT_BREAKPOINT_PX - 1, 2)).toBe(1);
-    expect(gridColumns(800, 3)).toBe(1);
-  });
-
-  it("uses one column for a single meter", () => {
-    expect(gridColumns(1920, 1)).toBe(1);
-    expect(gridColumns(1920, 0)).toBe(1);
-  });
-});
 
 describe("serialSuffix (AC-1HHT03.2)", () => {
   it("shows the last four characters of the serial", () => {
@@ -79,5 +58,12 @@ describe("tileTitle (AC-1HHT03.2)", () => {
     // A second simulated meter reports a serial of its own (the serial override).
     const demo = listing({ serial: "123456", demo_scenario: "idle", label: "Demo device — idle" });
     expect(tileTitle(demo, "SIM-B-0002").suffix).toBe("…0002");
+  });
+});
+
+describe("the tile grid's columns (AC-1HHT03.2)", () => {
+  it("go side by side at the app's layout breakpoint, in CSS", () => {
+    const css = readFileSync(new URL("./components/MeterGrid.svelte", import.meta.url), "utf8");
+    expect(css).toContain(`@media (min-width: ${LAYOUT_BREAKPOINT_PX}px)`);
   });
 });

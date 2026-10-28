@@ -2,7 +2,7 @@
   /** One tile per connected meter (FR 1HHT03): its name, serial suffix and live readout,
    * two side by side on a wide window and stacked on a narrow one. */
   import { badgeLabel } from "../format";
-  import { gridColumns, tileTitle } from "../meterGrid";
+  import { tileTitle } from "../meterGrid";
   import type { Meters } from "../meters.svelte";
   import Readout from "./Readout.svelte";
 
@@ -17,18 +17,11 @@
     /** "Disconnect": ends meter `id`'s session only (AC-1HHT03.3). */
     onDisconnect: (id: string) => void;
   } = $props();
-
-  let width = $state(window.innerWidth);
-  const columns = $derived(gridColumns(width, meters.entries.length));
 </script>
 
-<svelte:window bind:innerWidth={width} />
-
-<section
-  class="meter-grid"
-  aria-label="Meters"
-  style:grid-template-columns="repeat({columns}, minmax(0, 1fr))"
->
+<!-- Side by side only on a wide window: a media query, so the tiles stack in the same frame
+     the window narrows, never after a late resize event. -->
+<section class="meter-grid" class:paired={meters.entries.length >= 2} aria-label="Meters">
   {#each meters.entries as entry (entry.listing.id)}
     {@const title = tileTitle(entry.listing, entry.session.details?.serial ?? null)}
     <article class="tile" aria-label={title.name}>
@@ -52,10 +45,17 @@
 <style>
   .meter-grid {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 1rem;
     padding: 1rem;
     align-content: start;
     min-width: 0;
+  }
+  /* LAYOUT_BREAKPOINT_PX (lib/layout.ts): at most two columns, however many meters. */
+  @media (min-width: 1200px) {
+    .meter-grid.paired {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
   .tile {
     display: flex;
