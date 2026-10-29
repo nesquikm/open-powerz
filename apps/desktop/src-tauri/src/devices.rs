@@ -219,6 +219,18 @@ impl Transport for AppTransport {
         }
     }
 
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        match self {
+            AppTransport::Demo(t) => t.transact_record_table(request, timeout),
+            AppTransport::Usb(t) => t.transact_record_table(request, timeout),
+            AppTransport::Cdc(t) => t.transact_record_table(request, timeout),
+        }
+    }
+
     fn recover(&mut self) -> Result<(), transport::Error> {
         match self {
             AppTransport::Demo(t) => t.recover(),

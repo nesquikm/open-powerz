@@ -212,6 +212,10 @@ pub struct FaultPlan {
     /// The CDC persona starts as right after a bulk session: it echoes
     /// ADCNEW starts until the host has been quiet for [`ECHO_QUIET_MS`].
     echo_start: bool,
+    /// Memory reads inside the record area are REJECTed (other reads work).
+    reject_record_reads: bool,
+    /// A record-table write is ACCEPTed but the old table is kept.
+    ignore_table_write: bool,
 }
 
 impl FaultPlan {
@@ -269,7 +273,22 @@ impl FaultPlan {
         self
     }
 
-    /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`.
+    /// Every memory read inside the record area is REJECTed (a record
+    /// download fails); auth and info-block reads keep working.
+    pub fn reject_record_reads(mut self) -> FaultPlan {
+        self.reject_record_reads = true;
+        self
+    }
+
+    /// A record-table write (SET_DATA 0x28) is ACCEPTed but the meter keeps
+    /// its old table, so the re-read after a delete does not match.
+    pub fn ignore_table_write(mut self) -> FaultPlan {
+        self.ignore_table_write = true;
+        self
+    }
+
+    /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`,
+    /// `reject-record-reads`, `ignore-table-write`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -290,10 +309,13 @@ impl FaultPlan {
                 ("permission", None) => plan.permission_denied(),
                 ("corrupt-adcnew", Some(n)) => plan.corrupt_adcnew_at(n),
                 ("echo-start", None) => plan.echo_start(),
+                ("reject-record-reads", None) => plan.reject_record_reads(),
+                ("ignore-table-write", None) => plan.ignore_table_write(),
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
-                         disconnect@N, wrong-id@N, permission, corrupt-adcnew@N or echo-start)"
+                         disconnect@N, wrong-id@N, permission, corrupt-adcnew@N, echo-start, \
+                         reject-record-reads or ignore-table-write)"
                     ));
                 }
             };
@@ -369,6 +391,9 @@ pub struct SimDevice {
     adcnew_last_start: Vec<u8>,
     /// ADCNEW starts the host side saw echoed back.
     adcnew_start_echoes: u64,
+    /// The offline-record table (RecordList entries); a SET_DATA 0x28
+    /// write replaces it.
+    record_table: Vec<[u8; powerz_protocol::decode::records::ENTRY_LEN]>,
 }
 
 impl SimDevice {
@@ -420,6 +445,7 @@ impl SimDevice {
             echo_since_ms: None,
             adcnew_last_start: Vec::new(),
             adcnew_start_echoes: 0,
+            record_table: records::initial_table(),
         }
     }
 

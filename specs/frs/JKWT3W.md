@@ -24,7 +24,7 @@ The library, CLI and desktop app change the meter's display and rate settings wi
 ## Acceptance Criteria
 
 - AC-JKWT3W.1: The key numbers for the settings write (type 0x0A) are recovered from the vendor PDM settings dialog with REA and written to the protocol docs with evidence; any key not recovered is left out of the feature.
-- AC-JKWT3W.2: The write sends one type-0x0A message with one 4-byte section per changed setting, matching the documented layout, built by a function with byte-vector tests.
+- AC-JKWT3W.2: The write sends one type-0x0A message in the documented layout: one 8-byte entry (key word, value) for every writable key, changed ones at their new values and the rest at the values just read, then the 0x7FFF save marker. A function with byte-vector tests builds it.
 - AC-JKWT3W.3: Only the recovered display and rate keys are accepted, each with its valid range; calibration, OTP and any unknown key are refused by the guard before anything is sent, with tests.
 - AC-JKWT3W.4: After the write the settings block is read again; the changed fields must hold the new values and every other field must be unchanged, else an error names the difference. Nothing is retried on its own.
 - AC-JKWT3W.5: `powerz settings set <field>=<value> … --i-understand` writes, and the desktop Meter settings panel gets Edit controls with an Apply button and a summary of the change before it is sent.

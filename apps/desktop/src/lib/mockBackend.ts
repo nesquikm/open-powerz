@@ -25,6 +25,7 @@ import type {
   OfflineRecord,
   OfflineRecordEntry,
   OfflineRecordSample,
+  RecordDeleteResult,
   RecordList,
   MinMaxAvg,
   PdDetails,
@@ -359,10 +360,23 @@ export function pdSyntheticFromUrl(search: string | undefined): number | null {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
+/** A scripted record-delete failure (FR JKWT3V): `backup` fails the backup (nothing is
+ * deleted), `mismatch` keeps the old table so the re-read does not match. */
+export type RecordsFault = "backup" | "mismatch";
+
+/** `?recordsfault=backup|mismatch` in the page URL scripts a record-delete failure
+ * (FR JKWT3V); anything else is ignored. */
+export function recordsFaultFromUrl(search: string | undefined): RecordsFault | null {
+  const raw = urlParam(search, "recordsfault");
+  return raw === "backup" || raw === "mismatch" ? raw : null;
+}
+
 /** Options of a {@link MockBackend}. */
 export interface MockOptions {
   /** PD records to seed when the capture first starts. */
   pdSynthetic?: number | null;
+  /** A scripted record-delete failure (FR JKWT3V). */
+  recordsFault?: RecordsFault | null;
 }
 
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
@@ -797,25 +811,30 @@ function demoRecordSamples(spec: (typeof DEMO_RECORD_SPECS)[number]): OfflineRec
   });
 }
 
+/** One demo record: its list entry and its samples, which agree. */
+interface DemoRecord {
+  entry: OfflineRecordEntry;
+  samples: OfflineRecordSample[];
+}
+
 /** The demo records, downloaded form: entries and samples agree. */
-const DEMO_RECORDS: readonly { entry: OfflineRecordEntry; samples: OfflineRecordSample[] }[] =
-  DEMO_RECORD_SPECS.map((spec, i) => {
-    const samples = demoRecordSamples(spec);
-    const last = samples[samples.length - 1];
-    return {
-      entry: {
-        index: i + 1,
-        name: spec.name,
-        interval_s: spec.interval_s,
-        points: spec.points,
-        duration_s: spec.interval_s * Math.max(spec.points - 1, 0),
-        charge_ah: last?.charge_ah ?? 0,
-        energy_wh: last?.energy_wh ?? 0,
-        offset: spec.offset,
-      },
-      samples,
-    };
-  });
+const DEMO_RECORDS: readonly DemoRecord[] = DEMO_RECORD_SPECS.map((spec, i) => {
+  const samples = demoRecordSamples(spec);
+  const last = samples[samples.length - 1];
+  return {
+    entry: {
+      index: i + 1,
+      name: spec.name,
+      interval_s: spec.interval_s,
+      points: spec.points,
+      duration_s: spec.interval_s * Math.max(spec.points - 1, 0),
+      charge_ah: last?.charge_ah ?? 0,
+      energy_wh: last?.energy_wh ?? 0,
+      offset: spec.offset,
+    },
+    samples,
+  };
+});
 
 /** The commands of one meter's tile (FR 1HHT03), as {@link MockBackend.meter} hands them out. */
 export type MockMeter = MeterCommands;
@@ -853,6 +872,10 @@ export class MockBackend {
   #meterSettingsReads = 0;
   /** Offline-record downloads so far (FR 1HHT00). */
   #recordDownloads = 0;
+  /** The demo meter's record table, which a delete changes (FR JKWT3V). */
+  #records: DemoRecord[] = [...DEMO_RECORDS];
+  /** Record backups written so far, for their folder names (FR JKWT3V). */
+  #recordBackups = 0;
   /** The trigger session (FR DGSQ6S) of the meter the commands act on, null when none;
    * each meter has its own (FR 1HHT03). */
   get #trigger(): MockTrigger | null {
@@ -865,7 +888,10 @@ export class MockBackend {
    * `?pdsynthetic=`. */
   constructor(
     mode: MockMode | null = mockModeFromUrl(pageSearch()),
-    options: MockOptions = { pdSynthetic: pdSyntheticFromUrl(pageSearch()) },
+    options: MockOptions = {
+      pdSynthetic: pdSyntheticFromUrl(pageSearch()),
+      recordsFault: recordsFaultFromUrl(pageSearch()),
+    },
   ) {
     this.#mode = mode;
     this.#options = options;
@@ -963,6 +989,7 @@ export class MockBackend {
       meterSettings: on(this.meterSettings),
       recordsList: on(this.recordsList),
       recordDownload: on(this.recordDownload),
+      recordsDelete: on(this.recordsDelete),
       triggerOpen: on(this.triggerOpen),
       triggerDetect: on(this.triggerDetect),
       triggerList: on(this.triggerList),
@@ -1426,13 +1453,13 @@ export class MockBackend {
   /** The demo meter's offline records (FR 1HHT00). */
   async recordsList(): Promise<RecordList> {
     this.#open();
-    return { records: DEMO_RECORDS.map((r) => ({ ...r.entry })) };
+    return { records: this.#records.map((r) => ({ ...r.entry })) };
   }
 
   /** Downloads demo record `index` (1-based). */
   async recordDownload(index: number): Promise<OfflineRecord> {
     this.#open();
-    const r = DEMO_RECORDS[index - 1];
+    const r = this.#records[index - 1];
     if (!r || r.entry.points === 0) throw usage("That record is not on the meter.");
     this.#recordDownloads += 1;
     return {
@@ -1440,6 +1467,48 @@ export class MockBackend {
       name: r.entry.name,
       interval_s: r.entry.interval_s,
       samples: r.samples.map((x) => ({ ...x })),
+    };
+  }
+
+  /** Deletes demo record `target` (1-based), or all with `"all"`, like the backend
+   * (FR JKWT3V): the typed `confirm` must be the record's exact name (or `all`); the
+   * records are backed up first; the list is read again and must match. */
+  async recordsDelete(target: number | "all", confirm: string): Promise<RecordDeleteResult> {
+    this.#open();
+    const one = target === "all" ? null : this.#records.find((r) => r.entry.index === target);
+    if (one === undefined) throw usage("That record is not on the meter.");
+    const doomed = one ? [one] : this.#records;
+    const want = one ? one.entry.name : "all";
+    if (confirm !== want) {
+      throw usage(`Type ${target === "all" ? "all" : `the record name "${want}"`} to delete.`);
+    }
+    if (this.#options.recordsFault === "backup") {
+      throw {
+        kind: "usage",
+        message: "The record backup could not be written, so nothing was deleted.",
+        hint: null,
+      } satisfies UiError;
+    }
+    this.#recordBackups += 1;
+    const backupDir = `/demo/open-powerz-backups/records-${this.#recordBackups}`;
+    const backups = doomed.map(
+      (r) =>
+        `${backupDir}/${String(r.entry.index).padStart(2, "0")}_${r.entry.name.replace(/[^A-Za-z0-9]+/g, "_")}.csv`,
+    );
+    if (this.#options.recordsFault === "mismatch") {
+      throw {
+        kind: "protocol",
+        message: `The meter's record list does not match after the delete. Backup: ${backupDir}`,
+        hint: null,
+      } satisfies UiError;
+    }
+    this.#records = this.#records
+      .filter((r) => !doomed.includes(r))
+      .map((r, i) => ({ entry: { ...r.entry, index: i + 1 }, samples: r.samples }));
+    return {
+      records: this.#records.map((r) => ({ ...r.entry })),
+      backup_dir: backupDir,
+      backups,
     };
   }
 

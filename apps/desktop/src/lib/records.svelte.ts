@@ -10,6 +10,7 @@ import {
   toUiError,
   type OfflineRecord,
   type OfflineRecordEntry,
+  type RecordDeleteResult,
   type RecordList,
   type UiError,
 } from "./backend";
@@ -132,19 +133,27 @@ export class RecordsPanel {
   lastAll = $state<number | null>(null);
   opened = $state<OfflineRecord | null>(null);
   openedStats = $derived(this.opened ? recordStats(this.opened) : null);
+  /** The delete in flight: a record index, `"all"`, or null (FR JKWT3V). */
+  deleting = $state<number | "all" | null>(null);
+  /** The last finished delete: the new list and the backup folder, or null. */
+  lastDelete = $state<RecordDeleteResult | null>(null);
   /** Downloaded records by index. */
   readonly #downloaded = new SvelteMap<number, OfflineRecord>();
   readonly #list: () => Promise<RecordList>;
   readonly #download: (index: number) => Promise<OfflineRecord>;
+  readonly #delete: (target: number | "all", confirm: string) => Promise<RecordDeleteResult>;
   /** Bumped on disconnect and on each list, so a stale answer is dropped. */
   #generation = 0;
 
   constructor(
     list: () => Promise<RecordList>,
     download: (index: number) => Promise<OfflineRecord>,
+    remove: (target: number | "all", confirm: string) => Promise<RecordDeleteResult> = () =>
+      Promise.reject(new Error("Deleting records is not available.")),
   ) {
     this.#list = list;
     this.#download = download;
+    this.#delete = remove;
   }
 
   /** A meter connected: list its records. */
@@ -159,18 +168,42 @@ export class RecordsPanel {
     try {
       const { records } = await this.#list();
       if (generation !== this.#generation) return;
-      this.records = records;
-      this.error = null;
-      // A record downloaded before stays only while the meter still lists it.
-      for (const [i, r] of [...this.#downloaded]) {
-        if (records[i - 1]?.name !== r.name) this.#downloaded.delete(i);
-      }
+      this.#showList(records);
     } catch (e) {
       if (generation !== this.#generation) return;
       this.records = null;
       this.error = toUiError(e);
     } finally {
       if (generation === this.#generation) this.loading = false;
+    }
+  }
+
+  /** Show `records` as the list. A record downloaded before stays only while the
+   * meter still lists it at the same place. */
+  #showList(records: OfflineRecordEntry[]): void {
+    this.records = records;
+    this.error = null;
+    for (const [i, r] of [...this.#downloaded]) {
+      if (records[i - 1]?.name !== r.name) this.#downloaded.delete(i);
+    }
+  }
+
+  /** Delete record `target` (1-based), or every record with `"all"`, sending the typed
+   * `confirm` (FR JKWT3V). On success the new list and the backup show; a failure
+   * shows the error (with its backup path) and is not retried. */
+  async delete(target: number | "all", confirm: string): Promise<void> {
+    const generation = this.#generation;
+    this.deleting = target;
+    this.lastDelete = null;
+    try {
+      const result = await this.#delete(target, confirm);
+      if (generation !== this.#generation) return;
+      this.#showList(result.records);
+      this.lastDelete = result;
+    } catch (e) {
+      if (generation === this.#generation) this.error = toUiError(e);
+    } finally {
+      if (generation === this.#generation) this.deleting = null;
     }
   }
 
@@ -238,6 +271,8 @@ export class RecordsPanel {
     this.downloading = null;
     this.progress = null;
     this.lastAll = null;
+    this.deleting = null;
+    this.lastDelete = null;
     this.#downloaded.clear();
   }
 }

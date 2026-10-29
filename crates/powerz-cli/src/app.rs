@@ -32,12 +32,12 @@ use crate::args::{
     needs_connect, rate_from_sps, validate,
 };
 use crate::commands::{
-    DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
-    PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions, console,
-    detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
+    DeleteOptions, DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions,
+    PdSendOptions, PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions,
+    console, detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
     firmware_probe_unavailable, info_in_mode, inspect_flash_file, list, pd, pd_decode, pd_save,
-    pd_send, read, records_get, records_list, select_device, settings, stream, stream_cdc,
-    trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
+    pd_send, read, records_delete, records_get, records_list, select_device, settings, stream,
+    stream_cdc, trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
     trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
 };
 use crate::error::CliError;
@@ -231,6 +231,14 @@ impl Transport for LazyBulk {
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         self.pipe()?.read(timeout)
+    }
+
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact_record_table(request, timeout)
     }
 
     fn recover(&mut self) -> Result<(), transport::Error> {
@@ -490,6 +498,14 @@ impl<P: Transport> Transport for CountingPipe<P> {
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         self.inner.read(timeout)
+    }
+
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_record_table(request, timeout)
     }
 }
 
@@ -1112,6 +1128,14 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
         self.inner.read(timeout)
     }
 
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_record_table(request, timeout)
+    }
+
     fn adcnew_send(
         &mut self,
         request: powerz_protocol::adcnew::Request,
@@ -1209,6 +1233,25 @@ fn dispatch<T: Transport, C: Clock>(
                     _ => RecordSelection::All,
                 };
                 records_get(&mut session, which, dir, *json, &mut out)
+            }
+            RecordsAction::Delete {
+                index,
+                all,
+                i_understand,
+                yes,
+                out: dir,
+            } => {
+                let which = match index {
+                    Some(n) if !*all => RecordSelection::One(*n),
+                    _ => RecordSelection::All,
+                };
+                let opts = DeleteOptions {
+                    i_understand: *i_understand,
+                    yes: *yes,
+                    out: dir.clone(),
+                };
+                let mut input = std::io::stdin().lock();
+                records_delete(&mut session, which, &opts, &mut input, &mut out)
             }
         },
         Command::Watch { interval, source } => {

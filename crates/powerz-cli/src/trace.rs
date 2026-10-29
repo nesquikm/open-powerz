@@ -73,6 +73,26 @@ impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
         Ok(frame)
     }
 
+    /// The record-table write (the delete path), traced like [`transact`](Self::transact).
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, Error> {
+        match self.inner.transact_record_table(request, timeout) {
+            Err(e @ Error::Forbidden { .. }) => {
+                self.log('x', request);
+                Err(e)
+            }
+            result => {
+                self.log('>', request);
+                let reply = result?;
+                self.log('<', &reply);
+                Ok(reply)
+            }
+        }
+    }
+
     fn recover(&mut self) -> Result<(), Error> {
         self.inner.recover()
     }

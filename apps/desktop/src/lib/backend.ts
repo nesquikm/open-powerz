@@ -550,6 +550,30 @@ export async function recordDownload(index: number): Promise<OfflineRecord> {
   return invoke<OfflineRecord>("record_download", { index });
 }
 
+/** The result of an offline-record delete (FR JKWT3V): the list as read again and
+ * where the backup went. */
+export interface RecordDeleteResult {
+  /** The meter's records after the delete. */
+  records: OfflineRecordEntry[];
+  /** Folder holding the CSV backup. */
+  backup_dir: string;
+  /** The backup CSV files, one per deleted record. */
+  backups: string[];
+}
+
+/** Deletes offline record `target` (1-based), or every record with `"all"`, after a
+ * backup; `confirm` is the typed record name (or `all`), which the backend checks too. */
+export async function recordsDelete(
+  target: number | "all",
+  confirm: string,
+): Promise<RecordDeleteResult> {
+  if (mock) return mock.recordsDelete(target, confirm);
+  return invoke<RecordDeleteResult>("records_delete", {
+    index: target === "all" ? null : target,
+    confirm,
+  });
+}
+
 /** A PD capture opened from a pdcap file (FR TGE83E): its rows and status samples,
  * numbered from 0. */
 export interface PdOpened {
@@ -932,6 +956,7 @@ export interface MeterBackend {
   meterSettings(): Promise<MeterSettings>;
   recordsList(): Promise<RecordList>;
   recordDownload(index: number): Promise<OfflineRecord>;
+  recordsDelete(target: number | "all", confirm: string): Promise<RecordDeleteResult>;
   triggerOpen(): Promise<void>;
   triggerDetect(): Promise<Detection>;
   triggerList(protocol: TriggerProtocol): Promise<ProtocolSection>;
@@ -971,6 +996,7 @@ export const currentMeterCommands: MeterCommands = {
   meterSettings,
   recordsList,
   recordDownload,
+  recordsDelete,
   triggerOpen,
   triggerDetect,
   triggerList,
@@ -1031,6 +1057,8 @@ export function meterBackend(deviceId: string): MeterBackend {
     meterSettings: () => call("meter_settings"),
     recordsList: () => call("records_list"),
     recordDownload: (index) => call("record_download", { index }),
+    recordsDelete: (target, confirm) =>
+      call("records_delete", { index: target === "all" ? null : target, confirm }),
     triggerOpen: async () => {
       await call("trigger_open");
     },

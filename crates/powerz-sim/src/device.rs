@@ -24,6 +24,7 @@ pub(crate) mod msg {
     pub const HEAD: u8 = 0x40;
     pub const PUT_DATA: u8 = 0x41;
     pub const MEM_READ: u8 = 0x44;
+    pub const SET_DATA: u8 = 0x48;
     pub const AUTH: u8 = 0x4C;
 }
 
@@ -174,6 +175,7 @@ impl SimDevice {
             msg::HEAD => vec![self.head(id)],
             msg::MEM_READ => self.memory_read(req, id),
             msg::AUTH => vec![self.auth(req, id)],
+            msg::SET_DATA => vec![self.set_data(req, id)],
             _ => vec![self.control(msg::REJECT, id)],
         }
     }
@@ -217,7 +219,11 @@ impl SimDevice {
         }
         // RecordList: served from level 1; at level 0 the reply is empty.
         if mask & Attribute::RECORD_LIST.bits() != 0 && self.auth_level >= 1 {
-            sections.push((Attribute::RECORD_LIST, 0, records::list_payload()));
+            sections.push((
+                Attribute::RECORD_LIST,
+                0,
+                records::list_payload(&self.record_table),
+            ));
         }
         let mut body = Vec::new();
         let n = sections.len();
@@ -301,8 +307,11 @@ impl SimDevice {
             return reject();
         }
         // Record samples: only inside a listed window, from level 1.
+        if self.faults.reject_record_reads && records::in_record_area(addr) {
+            return reject();
+        }
         let record = (self.auth_level >= 1)
-            .then(|| records::samples(addr, len))
+            .then(|| records::samples(&self.record_table, addr, len))
             .flatten();
         let Some(block) = memory::block(addr, len, &self.app_version, &self.serial).or(record)
         else {
@@ -313,6 +322,23 @@ impl SimDevice {
         let mut data = crypto::encrypt(&KEYS[0], &block);
         data.truncate(MEMORY_READ_MAX_LEN as usize);
         vec![confirm, data]
+    }
+
+    /// 0x48: only the record-table write (attribute 0x28) is taken; it
+    /// replaces the table (kept as is under the `ignore-table-write`
+    /// fault) and is ACCEPTed. Every other SET_DATA is REJECTed and changes
+    /// nothing.
+    fn set_data(&mut self, req: &[u8], id: u8) -> Vec<u8> {
+        if !self.link_open() {
+            return self.control(msg::REJECT, id);
+        }
+        let Some(table) = records::table_write(req) else {
+            return self.control(msg::REJECT, id);
+        };
+        if !self.faults.ignore_table_write {
+            self.record_table = table;
+        }
+        self.control(msg::ACCEPT, id)
     }
 
     /// 0x4C: grant level 1 for the UID, 2 for the OTP credential, else 0.

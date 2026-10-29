@@ -8,7 +8,8 @@
 //! Every record is made up and deterministic. Layouts follow
 //! `docs/protocol.md` (Offline records).
 
-use powerz_protocol::decode::records::{ENTRY_LEN, FLASH_WINDOW_BASE, SAMPLE_LEN};
+use powerz_protocol::decode::records::{ENTRY_LEN, FLASH_WINDOW_BASE, RECORD_AREA_LEN, SAMPLE_LEN};
+use powerz_protocol::transport::guard::check_record_table_write;
 
 /// Capacity in points written at 0x14 of every entry, as on the real meter
 /// [device].
@@ -95,19 +96,31 @@ fn entry(spec: &Spec) -> [u8; ENTRY_LEN] {
     e
 }
 
-/// The RecordList payload: every entry back to back.
-pub(crate) fn list_payload() -> Vec<u8> {
-    SPECS.iter().flat_map(entry).collect()
+/// The demo meter's initial record table: one entry per record, in order.
+pub(crate) fn initial_table() -> Vec<[u8; ENTRY_LEN]> {
+    SPECS.iter().map(entry).collect()
+}
+
+/// The RecordList payload of `table`: every entry back to back.
+pub(crate) fn list_payload(table: &[[u8; ENTRY_LEN]]) -> Vec<u8> {
+    table.concat()
+}
+
+/// Whether `addr` lies inside the record area's memory-read window.
+pub(crate) fn in_record_area(addr: u32) -> bool {
+    (FLASH_WINDOW_BASE..FLASH_WINDOW_BASE.saturating_add(RECORD_AREA_LEN)).contains(&addr)
 }
 
 /// Plain sample bytes `addr..addr + len` when that range lies wholly
-/// inside one record's window, or `None` for any other range.
-pub(crate) fn samples(addr: u32, len: u32) -> Option<Vec<u8>> {
+/// inside the window of one record still listed in `table`, or `None` for
+/// any other range.
+pub(crate) fn samples(table: &[[u8; ENTRY_LEN]], addr: u32, len: u32) -> Option<Vec<u8>> {
     let end = u64::from(addr) + u64::from(len);
     let spec = SPECS.iter().find(|s| {
+        let listed = table.iter().any(|e| *e == entry(s));
         let start = FLASH_WINDOW_BASE + s.offset;
         let window = u64::from(s.points) * SAMPLE_LEN as u64;
-        len > 0 && addr >= start && end <= u64::from(start) + window
+        listed && len > 0 && addr >= start && end <= u64::from(start) + window
     })?;
     let from = (addr - (FLASH_WINDOW_BASE + spec.offset)) as usize;
     let all: Vec<u8> = sample_values(spec)
@@ -115,4 +128,12 @@ pub(crate) fn samples(addr: u32, len: u32) -> Option<Vec<u8>> {
         .flat_map(|w| w.into_iter().flat_map(i32::to_le_bytes))
         .collect();
     all.get(from..from + len as usize).map(<[u8]>::to_vec)
+}
+
+/// The entries a record-table write (SET_DATA attribute 0x28) carries, or
+/// `None` when `req` is not a well-formed table write.
+pub(crate) fn table_write(req: &[u8]) -> Option<Vec<[u8; ENTRY_LEN]>> {
+    check_record_table_write(req).ok()?;
+    let data = &req[8..req.len() - 4];
+    Some(data.as_chunks::<ENTRY_LEN>().0.to_vec())
 }

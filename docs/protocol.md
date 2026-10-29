@@ -146,7 +146,7 @@ Control types (main header type below 0x40):
 | 0x07 | FINISHED | reply only | acknowledges flash-write chunks | [doc] [static] |
 | 0x08 | JUMP_APROM | 0 | none; leaves DFU mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
 | 0x09 | JUMP_DFU | 0 | none; enters firmware-update mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
-| 0x0A | settings write (named GET_STATUS in the API doc) | one 4-byte section per changed setting: attribute = setting key, u32 value | unknown; the vendor PDM settings dialog sends this type to change display settings, the key numbers are not recovered; the vendor meter app has no handler for it, and nothing in our app sends it | [doc] [static] |
+| 0x0A | settings write (named GET_STATUS in the API doc) | key / value entries, see Settings write | unknown; the vendor settings dialog sends it over CDC and does not wait for a reply; our app sends it only from the settings write path and checks the result by reading SETTINGS again | [doc] [static] |
 | 0x0B | ERROR | | no handler in the vendor app | [doc] |
 | 0x0C | GET_DATA | attribute bit mask | PUT_DATA (0x41) | [doc] [static] [device] |
 | 0x0D | GET_FILE | | unused by the vendor app | [doc] [static] |
@@ -163,7 +163,7 @@ Data types (main header type 0x40 and up):
 | 0x41 PUT_DATA | reply only | section chain | GET_DATA reply | [doc] [static] [device] |
 | 0x42 | `42 id 00 04` | 64-byte firmware descriptor | firmware download; sent only by the firmware flash path (see Firmware download) | [static] |
 | 0x44 | `44 id 01 01` | 32 encrypted bytes | memory read (see Memory read and device info) | [static] [device] |
-| 0x48 SET_DATA | varies | section header + plain data | writes a setting or calibration value; never sent by us | [static] |
+| 0x48 SET_DATA | varies | section header + plain data | writes a setting, a calibration value or the record table; we send it only with attribute 0x28 to rewrite the record table (see Deleting records) | [static] |
 | 0x4A | varies | encrypted block header + data | memory / SPI-flash write; never sent by us | [static] |
 | 0x4C | `4C id 00 02` | 32 encrypted bytes | session authentication (see Authentication) | [static] [device] |
 
@@ -350,13 +350,55 @@ not read by the dialog [static].
 - The decoder checks both CRC-32 blocks first. On a CRC mismatch in either
   block it reports the mismatch as an error and decodes no field (our
   decoder's behaviour, pinned by its unit tests).
-- Nothing is ever written: the app never sends a settings write (message
-  type 0x0A, see the Message catalogue) or SET_DATA (0x48); reading the
-  section is the only settings traffic (pinned by a test on the commands the
-  app sends).
+- Fields change only through the settings write below; calibration is never
+  written, and SET_DATA (0x48) is never used for settings.
 - A field moves from [inferred] to [device] only after it has been compared
   with a photo or reading of the meter's screen; a field that does not match
   is fixed or stays [inferred].
+
+### Settings write
+
+The vendor trigger tool's settings dialog changes these fields with one
+message of type 0x0A. Everything in this section comes from static analysis
+of that dialog and its writer [static]; until a stage of the hardware check
+has run, nothing here is [device].
+
+Message layout (all words little-endian):
+
+- Main header: `0x0A | id << 8 | n << 23`, where `n` is the number of
+  entries (so `obj` = 2 words per entry). [static]
+- Then one 8-byte entry per key, in ascending key order: a key word
+  `0x01008000 | key` (key in bits 0..14, `next` in bit 15, size 4 in bits
+  22..31) followed by the i32 value. `next` is clear on the last entry only.
+  [static]
+- The vendor dialog always sends every key below, not only the changed
+  ones, and ends with key 0x7FFF = 0x1234. That last entry is read as a
+  "save" marker [inferred]. Our writer sends the same full set: changed keys
+  at their new values, the others at the values just read. [static]
+- The vendor app does not wait for or check a reply. We read SETTINGS again
+  afterwards and compare every field. [static]
+
+| key | field | values | tag |
+|---|---|---|---|
+| 0x01 | language | 0 = Chinese, 1 = English | [static] |
+| 0x03 | brightness | 1..100 | [static] |
+| 0x04 | dim | 0..3 (off, 15 s, 30 s, 60 s) | [static] |
+| 0x06 | startup logo time | 0..3 (off, 1 s, 3 s, 5 s); sent at its read value, not editable here | [static] |
+| 0x07 | theme | 0..6 | [static] |
+| 0x14 | rate | 0..3 (2, 10, 50, 1000 SPS) | [static] |
+| 0x15 | rotation | 0..3 (0°, 90°, 180°, 270°) | [static] |
+| 0x7FFF | save marker | always 0x1234 | [static]; meaning [inferred] |
+
+- Example, id 1, Chinese, brightness 50, everything else 0:
+  `0a 01 00 04`, `01 80 00 01 00 00 00 00`, `03 80 00 01 32 00 00 00`, ...,
+  `ff 7f 00 01 34 12 00 00`. [static]
+- The dialog has an auto-rotate checkbox but never writes it, so there is no
+  known key for auto-rotate and we do not change it. Keys 0x02 and 0x05 are
+  not used. [static]
+- Key 0x08 = 1 is the dialog's factory reset (it erases settings and
+  records). The guard refuses it, and so any key not in the table. [static]
+- Whether the firmware accepts a subset of keys, or needs the marker, is
+  unknown. [inferred]
 
 ## Memory read and device info
 
@@ -511,8 +553,26 @@ in `RecordSample::raw`.
   measurements, written to the CSV and drawn in the chart with their sign,
   like the live recorder's. Only the list's charge and energy are shown as
   magnitudes, as on the meter's screen.
-- Delete exists in the vendor app (it rewrites the list with SET_DATA) and is
-  never sent by this library. [static]
+
+### Deleting records
+
+The vendor app deletes recordings by rewriting the record table. [static]
+
+- It sends one SET_DATA (0x48) with attribute 0x28. The data is the
+  remaining 48-byte entries, unchanged and in list order, followed by four
+  zero bytes. [static]
+- Main header: `0x48 | id << 8 | ((len / 4) + 2) << 22`, where `len` is the
+  data length in bytes. Then one extended section header (`att` 0x28,
+  `next` 0, `chunk` 0, `size` = `len`) and the data. [static]
+- The extended `size` field is 10 bits, so it can hold at most 1023 bytes:
+  21 remaining entries (21 x 48 + 4 = 1012). With 22 or more, the vendor
+  app sends the size wrapped. How the firmware handles that is unknown (the
+  firmware image is encrypted, so static analysis cannot say). Our library
+  refuses such a delete before sending anything. [static] [inferred]
+- The vendor app checks only that the transfer went through, then reads the
+  list again. [static] Our design (not a vendor fact): back up the affected
+  recordings to CSV first, refuse the delete if the backup fails, read the
+  list again afterwards and compare it with the expected table.
 
 ## Authentication
 
@@ -949,8 +1009,12 @@ descriptor under its own stricter guard (see Firmware download). The one
 memory-read exception is an offline record: the window `0x98100000 + offset`,
 `points x 16` bytes, computed from an entry of the last record list,
 bounded by the record area and read in chunks of at most 256 bytes that all
-lie inside it (see Offline records). [inferred] RESET,
-SET_DATA and memory writes are never sent on any path. [static]
+lie inside it (see Offline records). [inferred] Two narrow write paths
+exist: SET_DATA (0x48) with attribute 0x28 only, sent by the record delete
+(see Deleting records), and the settings write (type 0x0A) with the keys of
+Settings write only (see Settings write). Every other SET_DATA attribute
+and every other 0x0A key, factory reset (key 0x08) included, is refused.
+RESET and memory writes are never sent on any path. [static]
 
 | request | why | tag |
 |---|---|---|
@@ -958,7 +1022,8 @@ SET_DATA and memory writes are never sent on any path. [static]
 | type 0x08 JUMP_APROM | leaves firmware-update mode | [doc] [static] |
 | type 0x09 JUMP_DFU | enters firmware-update mode | [doc] [static] |
 | type 0x42 | firmware download descriptor (starts an erase) | [static] |
-| type 0x48 SET_DATA | writes settings and calibration | [static] |
+| type 0x48 SET_DATA, any attribute other than 0x28 from the delete path | writes settings and calibration | [static] |
+| type 0x0A with a key outside Settings write, or from any path but the settings write | factory reset and unknown settings | [static] |
 | type 0x4A | memory / SPI-flash write | [static] |
 | memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` or the offline record window of a listed entry | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
 | any HID request other than the ADC snapshot (GET_DATA mask 0x001) | replies over 64 bytes hang and reboot the meter; control commands are ignored | [device] (firmware 2.0.6) |

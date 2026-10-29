@@ -119,8 +119,8 @@ pub enum Command {
         #[arg(long)]
         raw: bool,
     },
-    /// List the meter's offline records or download them as CSV files
-    /// (read-only; bulk pipe only).
+    /// List the meter's offline records, download them as CSV files or
+    /// delete them after a CSV backup (bulk pipe only).
     Records {
         /// What to do.
         #[command(subcommand)]
@@ -239,6 +239,27 @@ pub enum RecordsAction {
         /// Print one JSON object listing the written files instead of text lines.
         #[arg(long)]
         json: bool,
+    },
+    /// Delete record N (as `list` numbers it) or every record, after
+    /// backing the affected records up as `NN_<name>.csv` files. Needs
+    /// --i-understand and the record name (or "all") typed at the prompt.
+    #[command(group = clap::ArgGroup::new("which").required(true).args(["index", "all"]))]
+    Delete {
+        /// Record number (1-based, as `list` shows it).
+        #[arg(value_name = "N")]
+        index: Option<usize>,
+        /// Delete every record.
+        #[arg(long)]
+        all: bool,
+        /// Acknowledge that a delete cannot be undone.
+        #[arg(long)]
+        i_understand: bool,
+        /// Skip the typed confirmation (still needs --i-understand).
+        #[arg(long)]
+        yes: bool,
+        /// Directory to write the CSV backup into (must exist).
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        out: PathBuf,
     },
 }
 

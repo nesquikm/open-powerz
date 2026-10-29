@@ -36,6 +36,7 @@ pub use memory::{
 };
 pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer};
 pub use probe::{ConnectOutcome, HeadOutcome, ProbeReport};
+pub use records::{RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_table_request};
 pub use stream::{Gap, SnapshotCadence, StreamPoll, Streamer};
 
 /// Errors from a [`Session`].
@@ -72,6 +73,27 @@ pub enum Error {
          else; unplug the meter, then hold Back while plugging it back in"
     )]
     BootloaderMidDownload,
+    /// A record delete would leave a table longer than the 10-bit extended
+    /// `size` field can describe; nothing was sent. \[static\]
+    #[error(
+        "deleting would leave {remaining} records ({len} bytes), more than the \
+         1023-byte record table limit"
+    )]
+    RecordTableTooLong {
+        /// Entries that would remain.
+        remaining: usize,
+        /// Length of the table that would be written.
+        len: usize,
+    },
+    /// After a record delete the meter lists something other than the
+    /// table that was written.
+    #[error("after the delete the meter lists {actual} records, expected {expected}")]
+    RecordTableMismatch {
+        /// Entries in the table that was written.
+        expected: usize,
+        /// Entries the meter lists now.
+        actual: usize,
+    },
     /// A reply could not be decoded.
     #[error(transparent)]
     Decode(#[from] DecodeError),
@@ -246,10 +268,21 @@ impl<T: Transport, C: Clock> Session<T, C> {
         take_first: impl Fn(&[u8]) -> bool,
     ) -> Result<Vec<u8>, Error> {
         let expected_id = if request[0] == 0x4C { 0 } else { request[1] };
-        let mut reply = self.transport.transact(request, timeout)?;
+        let reply = self.transport.transact(request, timeout)?;
         if take_first(&reply) {
             return Ok(reply);
         }
+        self.reread_until_id(reply, expected_id, timeout)
+    }
+
+    /// Return `reply` if its id is `expected_id`, else read again (up to
+    /// [`MAX_STALE_REPLIES`] times) until one is.
+    fn reread_until_id(
+        &mut self,
+        mut reply: Vec<u8>,
+        expected_id: u8,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, Error> {
         let mut rereads = 0;
         while reply.get(1) != Some(&expected_id) {
             if rereads == MAX_STALE_REPLIES {

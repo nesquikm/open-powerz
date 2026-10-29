@@ -151,6 +151,18 @@ pub fn decode_record_list(payload: &[u8]) -> Result<Vec<RecordEntry>, DecodeErro
         .collect()
 }
 
+/// Build the record table a delete writes back (SET_DATA attribute 0x28):
+/// the raw bytes of `entries`, unchanged and in order, then four zero
+/// bytes. \[static\]
+pub fn encode_record_table(entries: &[RecordEntry]) -> Vec<u8> {
+    let mut table = Vec::with_capacity(entries.len() * ENTRY_LEN + 4);
+    for e in entries {
+        table.extend_from_slice(&e.raw);
+    }
+    table.extend_from_slice(&[0u8; 4]);
+    table
+}
+
 /// One 16-byte record sample.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordSample {

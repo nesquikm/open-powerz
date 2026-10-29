@@ -225,6 +225,18 @@ pub struct RecordListView {
     pub records: Vec<RecordEntryView>,
 }
 
+/// The result of an offline-record delete (FR JKWT3V): the list as read
+/// again and where the backup went.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecordDeleteView {
+    /// The meter's records after the delete.
+    pub records: Vec<RecordEntryView>,
+    /// Folder holding the CSV backup.
+    pub backup_dir: String,
+    /// The backup CSV files, one per deleted record.
+    pub backups: Vec<String>,
+}
+
 /// One sample of a downloaded offline record.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RecordSampleView {
@@ -1167,6 +1179,87 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         })
     }
 
+    /// Delete offline record `target` (1-based) or, for `None`, every
+    /// record (FR JKWT3V). `confirm` must be the record's name (or "all").
+    /// The affected records are first downloaded to `NN_<name>.csv` files
+    /// in `backup_dir` (created if missing); a failed backup deletes
+    /// nothing. Then the record table is rewritten once and read again; a
+    /// failure after the write names the backup folder and is not retried.
+    pub fn delete_records(
+        &mut self,
+        target: Option<usize>,
+        confirm: &str,
+        backup_dir: &Path,
+    ) -> Result<RecordDeleteView, UiError> {
+        self.needs_queue_source()?;
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        let meter = self.meter.as_ref();
+        let entries = blocked(meter, || session.list_records()).map_err(|e| session_error(&e))?;
+        let (positions, expected) = match target {
+            Some(index) => {
+                let entry = index
+                    .checked_sub(1)
+                    .and_then(|i| entries.get(i))
+                    .ok_or_else(|| UiError::usage("That record is not on the meter."))?;
+                (vec![index - 1], entry.name.as_str())
+            }
+            None => ((0..entries.len()).collect(), "all"),
+        };
+        if confirm != expected {
+            return Err(UiError::usage(
+                "The typed confirmation does not match; nothing was deleted.",
+            ));
+        }
+        let backup_failed = |detail: String| UiError {
+            kind: ErrorKind::Internal,
+            message: format!("The backup failed, so nothing was deleted: {detail}"),
+            hint: None,
+        };
+        std::fs::create_dir_all(backup_dir)
+            .map_err(|e| backup_failed(format!("cannot create {}: {e}", backup_dir.display())))?;
+        let mut backups = Vec::with_capacity(positions.len());
+        for &p in &positions {
+            let entry = &entries[p];
+            let samples = if entry.points == 0 {
+                Vec::new()
+            } else {
+                blocked(meter, || session.download_record(entry)).map_err(|e| {
+                    let ui = session_error(&e);
+                    UiError {
+                        message: format!(
+                            "The backup download failed, so nothing was deleted. {}",
+                            ui.message
+                        ),
+                        ..ui
+                    }
+                })?
+            };
+            let path = backup_dir.join(powerz_record::offline_record_file_name(p + 1, &entry.name));
+            std::fs::write(&path, powerz_record::offline_record_csv(entry, &samples))
+                .map_err(|e| backup_failed(format!("cannot write {}: {e}", path.display())))?;
+            backups.push(path.display().to_string());
+        }
+        let after =
+            blocked(meter, || session.delete_records(&entries, &positions)).map_err(|e| {
+                let ui = session_error(&e);
+                UiError {
+                    message: format!("{} Backup: {}", ui.message, backup_dir.display()),
+                    ..ui
+                }
+            })?;
+        Ok(RecordDeleteView {
+            records: after
+                .iter()
+                .enumerate()
+                .map(|(i, e)| RecordEntryView::new(i + 1, e))
+                .collect(),
+            backup_dir: backup_dir.display().to_string(),
+            backups,
+        })
+    }
+
     /// The PD capture so far, to be saved as a pdcap file (FR TGE83E) off
     /// this thread.
     pub fn pd_save(&self) -> PdSave {
@@ -1307,6 +1400,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::DownloadRecord(index, reply) => {
                 let _ = reply.send(self.download_record(index));
             }
+            Command::DeleteRecords(target, confirm, dir, reply) => {
+                let _ = reply.send(self.delete_records(target, &confirm, &dir));
+            }
             Command::HoldPolling(hold, reply) => {
                 self.hold_polling(hold);
                 let _ = reply.send(());
@@ -1344,6 +1440,12 @@ enum Command {
     ReadSettings(mpsc::Sender<Result<MeterSettingsView, UiError>>),
     ListRecords(mpsc::Sender<Result<RecordListView, UiError>>),
     DownloadRecord(usize, mpsc::Sender<Result<OfflineRecordView, UiError>>),
+    DeleteRecords(
+        Option<usize>,
+        String,
+        PathBuf,
+        mpsc::Sender<Result<RecordDeleteView, UiError>>,
+    ),
     /// Hold or release the queue polling; answered between steps, so no
     /// poll is in flight once a hold is answered.
     HoldPolling(bool, mpsc::Sender<()>),
@@ -1370,6 +1472,11 @@ impl std::fmt::Debug for Command {
             Command::DownloadRecord(index, _) => {
                 f.debug_tuple("DownloadRecord").field(index).finish()
             }
+            Command::DeleteRecords(target, _, dir, _) => f
+                .debug_tuple("DeleteRecords")
+                .field(target)
+                .field(dir)
+                .finish(),
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::Handover(..) => f.write_str("Handover"),
         }
@@ -1553,6 +1660,10 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long the UI waits for one offline-record download.
 const RECORD_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a delete may take: the backup downloads every affected record
+/// (up to the whole record area) before the table write.
+const RECORD_DELETE_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Sends rate, recording and export requests to a running worker and
 /// answers history and statistics queries from its session store. It works
 /// without the [`WorkerHandle`], so a caller can wait for the answer without
@@ -1709,6 +1820,24 @@ impl WorkerControl {
             Command::DownloadRecord(index, reply),
             &answer,
             RECORD_DOWNLOAD_TIMEOUT,
+        )?
+    }
+
+    /// Delete offline record `target` (1-based) or every record (`None`)
+    /// after a CSV backup into `backup_dir`; `confirm` is the typed record
+    /// name (or "all"). Backing up every record can take a while, so the
+    /// wait is longer than for a single download.
+    pub fn delete_records(
+        &self,
+        target: Option<usize>,
+        confirm: &str,
+        backup_dir: &Path,
+    ) -> Result<RecordDeleteView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask_within(
+            Command::DeleteRecords(target, confirm.to_owned(), backup_dir.to_owned(), reply),
+            &answer,
+            RECORD_DELETE_TIMEOUT,
         )?
     }
 

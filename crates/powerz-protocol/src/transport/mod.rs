@@ -81,6 +81,21 @@ pub trait Transport {
     /// Read one follow-up transfer without writing.
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error>;
 
+    /// Write the record-table SET_DATA (attribute 0x28, the delete path) and
+    /// return the reply. The only route by which a 0x48 frame may pass a
+    /// [`GuardedTransport`], which checks it with
+    /// [`check_record_table_write`](guard::check_record_table_write).
+    /// Default: run that check, then [`transact`](Transport::transact).
+    /// Wrappers that sit outside a guard must forward this method.
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, Error> {
+        guard::check_record_table_write(request)?;
+        self.transact(request, timeout)
+    }
+
     /// Bring a pipe left mid-transfer back to a clean state (e.g. clear a
     /// halted endpoint, drain stale data). Called once by
     /// [`Session::connect`](crate::session::Session::connect) when CONNECT

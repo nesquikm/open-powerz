@@ -180,6 +180,17 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
             message: "The meter did not accept the app's sign-in.".to_owned(),
             hint: Some("Replug the meter and try again.".to_owned()),
         },
+        S::RecordTableTooLong { .. } => UiError {
+            kind: ErrorKind::Usage,
+            message: "Deleting that would leave more records than one table write can hold."
+                .to_owned(),
+            hint: Some("Delete more records at once, or all of them.".to_owned()),
+        },
+        S::RecordTableMismatch { .. } => UiError {
+            kind: ErrorKind::Protocol,
+            message: "The record list does not match after the delete.".to_owned(),
+            hint: Some("Read the list again; nothing was retried.".to_owned()),
+        },
         S::BootloaderMidDownload => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter's bootloader was left mid-download.".to_owned(),

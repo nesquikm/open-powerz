@@ -602,6 +602,43 @@ async fn record_download(
     blocking(move || control(&state, device_id.as_deref())?.download_record(index)).await
 }
 
+/// Delete offline record `index` (1-based) or, for `null`, every record
+/// (FR JKWT3V). `confirm` is the typed record name (or "all"). The affected
+/// records are backed up first as CSV files into a new folder under the
+/// Downloads folder (`open-powerz-backups/records-<time>`); the answer names it.
+#[tauri::command]
+async fn records_delete(
+    app: tauri::AppHandle,
+    state: Shared<'_>,
+    device_id: Option<String>,
+    index: Option<usize>,
+    confirm: String,
+) -> Result<worker::RecordDeleteView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let dir = backup_dir(&app)?;
+        control(&state, device_id.as_deref())?.delete_records(index, &confirm, &dir)
+    })
+    .await
+}
+
+/// A new folder name for a record backup: `open-powerz-backups/records-<unix ms>`
+/// under the Downloads folder (the app data folder when there is none).
+fn backup_dir(app: &tauri::AppHandle) -> Result<PathBuf, UiError> {
+    use tauri::Manager;
+    let base = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().app_data_dir())
+        .map_err(|_| UiError::usage("No folder found to write the record backup to."))?;
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    Ok(base
+        .join("open-powerz-backups")
+        .join(format!("records-{ms}")))
+}
+
 /// Drop every captured PD record; the answer is the index of the next one.
 /// A capture opened from a file is dropped too; with only that one and no
 /// meter, the answer is 0.
@@ -1163,6 +1200,7 @@ pub fn run() {
             meter_settings,
             records_list,
             record_download,
+            records_delete,
             pd_save,
             pd_open,
             pd_import,

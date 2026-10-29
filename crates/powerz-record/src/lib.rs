@@ -6,6 +6,7 @@
 use std::io::{self, Write};
 
 use powerz_protocol::decode::QueueRecord;
+use powerz_protocol::decode::records::{RecordEntry, RecordSample};
 
 /// Header of the recorder CSV, matching the vendor recorder.
 pub const CSV_HEADER: &str = "ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR";
@@ -76,6 +77,48 @@ fn trim_zeros(s: &str) -> &str {
     } else {
         s
     }
+}
+
+/// `NN_<name>.csv`, the file name of offline record `index` (1-based) as
+/// `powerz records get` writes it, with every character outside
+/// `[A-Za-z0-9_-]` replaced by `_` so the file always lands inside the
+/// output directory.
+pub fn offline_record_file_name(index: usize, name: &str) -> String {
+    let mut safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        safe.push_str("record");
+    }
+    format!("{index:02}_{safe}.csv")
+}
+
+/// An offline record as recorder CSV: elapsed time from the entry's
+/// interval, no `Unix` time (the meter stores no start time),
+/// VBUS/IBUS/charge/energy from the samples with their sign kept (raw
+/// measurements, like the live recorder), power = VBUS x IBUS; D+/D-/CC/TEMP
+/// are not recorded.
+pub fn offline_record_csv(entry: &RecordEntry, samples: &[RecordSample]) -> String {
+    let mut csv = format!("{CSV_HEADER}\n");
+    for (k, s) in samples.iter().enumerate() {
+        csv.push_str(&format!(
+            "{},,{},{},,,,,,{},{},{}\n",
+            format_elapsed(entry.sample_time_s(k).saturating_mul(1000)),
+            sig8(s.vbus_v()),
+            sig8(s.ibus_a()),
+            sig8(s.charge_ah()),
+            sig8(s.energy_wh()),
+            sig8(s.vbus_v() * s.ibus_a()),
+        ));
+    }
+    csv
 }
 
 /// Writes [`QueueRecord`]s as rows under [`CSV_HEADER`] to `W`.

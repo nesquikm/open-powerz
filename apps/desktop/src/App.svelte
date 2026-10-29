@@ -260,6 +260,7 @@
   const recordsPanel = new RecordsPanel(
     () => act().recordsList(),
     (index) => act().recordDownload(index),
+    (target, confirm) => act().recordsDelete(target, confirm),
   );
   const meterConnected = $derived(session.meterConnected);
   /** The meter the panels read from: they read again when another one takes the view. */
