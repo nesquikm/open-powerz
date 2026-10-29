@@ -40,3 +40,8 @@ Hardware only; results are recorded rather than automated.
 ## Notes
 
 The recordings made for the test are throwaway; the user's existing recordings are backed up first. Amended 2026-10-28 before the spec commit (spec author's OK): the meter holds the user's real recordings, so hardware delete-all is optional and needs the user's explicit agreement at the time.
+
+Delete stage, 2026-10-29 (`qa-runs/JKWT3X.delete-*`, outside the repo):
+- Round 1 (`ffda724`): deleted the last row correctly, but the CLI took the meter's FINISHED reply as an error and exited 5. Fixed in `cd63907`.
+- Round 2 (`cd63907`): stopped before any write, because the runbook compared the list's charge and energy with the meter's screen within 1 %, and the screen does not always show the stored total (docs/protocol.md, Offline records, open question). Later rounds check the screen for names, points and durations only.
+- Round 3 (`cd63907`): AC-JKWT3X.1, .3, .4 and .5 PASS. A middle row, then the last throwaway, deleted one at a time, each answered FINISHED and exit 0; each write and each list after it held exactly the expected entries byte for byte; every surviving CSV was byte-equal to the backup; the user's recording is intact. Each delete was approved by the user before it was sent. Delete-all was not run on the meter.

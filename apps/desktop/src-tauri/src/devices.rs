@@ -196,8 +196,9 @@ type Discover = Arc<dyn Fn() -> Result<Vec<DeviceEntry>, transport::Error> + Sen
 pub enum AppTransport {
     /// The simulated KM003C.
     Demo(Box<SimDevice>),
-    /// A real meter on its vendor bulk interface.
-    Usb(GuardedTransport<BulkTransport>),
+    /// A real meter on its vendor bulk interface, with its USB serial
+    /// number (to find its CDC port for the settings write).
+    Usb(GuardedTransport<BulkTransport>, Option<String>),
     /// A real meter on its CDC serial port.
     Cdc(GuardedTransport<SerialCdcTransport>),
 }
@@ -206,7 +207,7 @@ impl Transport for AppTransport {
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         match self {
             AppTransport::Demo(t) => t.transact(request, timeout),
-            AppTransport::Usb(t) => t.transact(request, timeout),
+            AppTransport::Usb(t, _) => t.transact(request, timeout),
             AppTransport::Cdc(t) => t.transact(request, timeout),
         }
     }
@@ -214,7 +215,7 @@ impl Transport for AppTransport {
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         match self {
             AppTransport::Demo(t) => t.read(timeout),
-            AppTransport::Usb(t) => t.read(timeout),
+            AppTransport::Usb(t, _) => t.read(timeout),
             AppTransport::Cdc(t) => t.read(timeout),
         }
     }
@@ -226,7 +227,7 @@ impl Transport for AppTransport {
     ) -> Result<Vec<u8>, transport::Error> {
         match self {
             AppTransport::Demo(t) => t.transact_record_table(request, timeout),
-            AppTransport::Usb(t) => t.transact_record_table(request, timeout),
+            AppTransport::Usb(t, _) => t.transact_record_table(request, timeout),
             AppTransport::Cdc(t) => t.transact_record_table(request, timeout),
         }
     }
@@ -238,15 +239,32 @@ impl Transport for AppTransport {
     ) -> Result<Vec<u8>, transport::Error> {
         match self {
             AppTransport::Demo(t) => t.transact_settings(request, timeout),
-            AppTransport::Usb(t) => t.transact_settings(request, timeout),
+            AppTransport::Usb(t, _) => t.transact_settings(request, timeout),
             AppTransport::Cdc(t) => t.transact_settings(request, timeout),
+        }
+    }
+
+    /// The settings write goes over the meter's CDC port \[device\]: the
+    /// demo device's CDC persona (sharing its settings), the real meter's
+    /// serial port found by its USB serial number. A CDC pipe is that port
+    /// itself.
+    fn settings_pipe(&mut self) -> Option<Result<Box<dyn Transport>, transport::Error>> {
+        match self {
+            AppTransport::Demo(t) => Some(Ok(Box::new(t.cdc_twin()))),
+            AppTransport::Usb(_, serial) => Some(match serial.as_deref() {
+                Some(serial) => {
+                    CdcTransport::open(serial).map(|t| Box::new(t) as Box<dyn Transport>)
+                }
+                None => Err(transport::Error::NotFound),
+            }),
+            AppTransport::Cdc(_) => None,
         }
     }
 
     fn recover(&mut self) -> Result<(), transport::Error> {
         match self {
             AppTransport::Demo(t) => t.recover(),
-            AppTransport::Usb(t) => t.recover(),
+            AppTransport::Usb(t, _) => t.recover(),
             AppTransport::Cdc(t) => t.recover(),
         }
     }
@@ -254,7 +272,7 @@ impl Transport for AppTransport {
     fn adcnew_send(&mut self, request: AdcnewRequest) -> Result<(), transport::Error> {
         match self {
             AppTransport::Demo(t) => t.adcnew_send(request),
-            AppTransport::Usb(t) => t.adcnew_send(request),
+            AppTransport::Usb(t, _) => t.adcnew_send(request),
             AppTransport::Cdc(t) => t.adcnew_send(request),
         }
     }
@@ -262,7 +280,7 @@ impl Transport for AppTransport {
     fn adcnew_frames(&mut self) -> Result<Vec<AdcnewFrame>, transport::Error> {
         match self {
             AppTransport::Demo(t) => t.adcnew_frames(),
-            AppTransport::Usb(t) => t.adcnew_frames(),
+            AppTransport::Usb(t, _) => t.adcnew_frames(),
             AppTransport::Cdc(t) => t.adcnew_frames(),
         }
     }
@@ -314,7 +332,8 @@ impl Opener for AppOpener {
             .into_iter()
             .find(|e| &e.bus == bus && e.address == address)
             .ok_or(transport::Error::NotFound)?;
-        Ok(AppTransport::Usb(BulkTransport::open(&entry)?))
+        let serial = entry.serial.clone();
+        Ok(AppTransport::Usb(BulkTransport::open(&entry)?, serial))
     }
 }
 

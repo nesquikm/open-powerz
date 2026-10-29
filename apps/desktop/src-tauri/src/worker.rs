@@ -1138,6 +1138,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// that send nothing. Otherwise one settings write goes out between two
     /// SETTINGS reads; the answer is the settings as read back, and a
     /// mismatching re-read is an error naming the field, never retried.
+    /// The meter takes the write only on its CDC port \[device\]: a session
+    /// on bulk sends the write and both reads over the meter's CDC pipe,
+    /// opened for them alone (no CONNECT there) while the stream waits.
     pub fn write_settings(
         &mut self,
         changes: &BTreeMap<String, i32>,
@@ -1163,8 +1166,19 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
-        let settings = blocked(self.meter.as_ref(), || session.write_settings(&parsed))
-            .map_err(|e| session_error(&e))?;
+        let settings = if self.source == MeasurementSource::Cdc {
+            blocked(self.meter.as_ref(), || session.write_settings(&parsed))
+        } else {
+            let clock = self.clock.clone();
+            blocked(self.meter.as_ref(), || {
+                let pipe = session
+                    .transport_mut()
+                    .settings_pipe()
+                    .unwrap_or(Err(transport::Error::SettingsNeedCdc))?;
+                Session::with_clock(GuardedTransport::new(pipe), clock).write_settings(&parsed)
+            })
+        }
+        .map_err(|e| session_error(&e))?;
         Ok(MeterSettingsView::from(&settings))
     }
 

@@ -1,9 +1,11 @@
-//! AC-JKWT3W.6: the demo meter takes a settings write (type 0x0A) and
-//! serves the new values in its SETTINGS block afterwards, with valid CRCs
-//! and everything else unchanged. A write that carries a key outside the
-//! documented table (such as the factory reset 0x08) is REJECTed and
-//! changes nothing. The `ignore-settings-write` fault ACCEPTs the write but
-//! keeps the old block, so the re-read does not match.
+//! AC-JKWT3W.6: on its CDC persona the demo meter takes a settings write
+//! (type 0x0A) and serves the new values in its SETTINGS block afterwards,
+//! with valid CRCs and everything else unchanged. A write that carries a key
+//! outside the documented table (such as the factory reset 0x08) is
+//! REJECTed and changes nothing. The `ignore-settings-write` fault ACCEPTs
+//! the write but keeps the old block, so the re-read does not match. On the
+//! bulk persona a settings write gets no reply and changes nothing, as on
+//! the KM003C (2026-10-29) `[device]`.
 
 mod common;
 
@@ -16,12 +18,12 @@ use powerz_protocol::decode::settings::{
 use powerz_protocol::frame::Attribute;
 use powerz_protocol::transport::Transport;
 
-fn connected_with(faults: FaultPlan) -> SimSession {
+/// Session on the CDC persona, where the settings write is taken (no
+/// CONNECT: 0x02 is ADCNEW on CDC).
+fn cdc_with(faults: FaultPlan) -> SimSession {
     let clock = clock();
-    let dev = device(Persona::Bulk, Scenario::Idle, &clock).with_faults(faults);
-    let mut s = session(dev, &clock);
-    s.connect().expect("CONNECT");
-    s
+    let dev = device(Persona::Cdc, Scenario::Idle, &clock).with_faults(faults);
+    session(dev, &clock)
 }
 
 /// A raw type-0x0A frame with `entries`, `next` set on all but the last.
@@ -51,7 +53,7 @@ fn raw_settings(d: &mut SimDevice, id: u8) -> Vec<u8> {
 
 #[test]
 fn a_write_changes_the_fields_the_meter_serves_afterwards() {
-    let mut s = connected_with(FaultPlan::new());
+    let mut s = cdc_with(FaultPlan::new());
     let before = s.read_meter_settings().expect("read");
     assert_eq!(before.brightness.value, 50);
     let after = s
@@ -81,7 +83,7 @@ fn a_write_changes_the_fields_the_meter_serves_afterwards() {
 
 #[test]
 fn a_rate_write_changes_the_rate_bits() {
-    let mut s = connected_with(FaultPlan::new());
+    let mut s = cdc_with(FaultPlan::new());
     let after = s
         .write_settings(&[(WritableField::SampleRate, 1)])
         .expect("write");
@@ -93,7 +95,7 @@ fn a_rate_write_changes_the_rate_bits() {
 #[test]
 fn the_written_block_keeps_valid_crcs_and_its_name() {
     let clock = clock();
-    let mut d = raw_connected(Scenario::Idle, &clock);
+    let mut d = device(Persona::Cdc, Scenario::Idle, &clock);
     let entries = [
         (0x01u16, 1u32),
         (0x03, 33),
@@ -122,7 +124,7 @@ fn the_written_block_keeps_valid_crcs_and_its_name() {
 #[test]
 fn a_write_with_the_factory_reset_key_is_rejected_and_changes_nothing() {
     let clock = clock();
-    let mut d = raw_connected(Scenario::Idle, &clock);
+    let mut d = device(Persona::Cdc, Scenario::Idle, &clock);
     let before = raw_settings(&mut d, 2);
     let frame = settings_frame(
         3,
@@ -145,8 +147,30 @@ fn a_write_with_the_factory_reset_key_is_rejected_and_changes_nothing() {
 }
 
 #[test]
+fn on_bulk_a_settings_write_gets_no_reply_and_changes_nothing() {
+    let clock = clock();
+    let mut d = raw_connected(Scenario::Idle, &clock);
+    let before = raw_settings(&mut d, 2);
+    let entries = [
+        (0x01u16, 1u32),
+        (0x03, 20),
+        (0x04, 0),
+        (0x06, 0),
+        (0x07, 1),
+        (0x14, 2),
+        (0x15, 1),
+        (0x7FFF, 0x1234),
+    ];
+    assert_eq!(
+        d.transact_settings(&settings_frame(3, &entries), T),
+        Err(powerz_protocol::transport::Error::Timeout)
+    );
+    assert_eq!(raw_settings(&mut d, 4), before);
+}
+
+#[test]
 fn ignore_settings_write_accepts_but_keeps_the_old_block() {
-    let mut s = connected_with(FaultPlan::new().ignore_settings_write());
+    let mut s = cdc_with(FaultPlan::new().ignore_settings_write());
     let before = s.read_meter_settings().unwrap();
     let err = s
         .write_settings(&[(WritableField::Brightness, 80)])

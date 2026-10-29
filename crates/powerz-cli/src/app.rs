@@ -138,8 +138,9 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     let devices = transport::discovery::list_devices()?;
     let device = select_device(&devices, cli.device.as_deref())?;
     let mode = device.mode();
-    if cli.command.source() == Some(WatchSource::Cdc) {
-        // The ADCNEW stream lives on the CDC port, whatever --transport says.
+    if cli.command.needs_cdc() {
+        // The ADCNEW stream and the settings write live on the CDC port,
+        // whatever --transport says.
         return with_transport(cli, mode, open_cdc(device)?);
     }
     match cli.transport {
@@ -994,13 +995,14 @@ fn ctrl_c_hold() -> impl FnMut(Duration) {
 }
 
 /// `--transport sim`: open the demo device (bulk persona, `--scenario`; its
-/// CDC persona for `watch` / `stream --source cdc`) without touching USB; `--device`
+/// CDC persona for `watch` / `stream --source cdc` and `settings set`)
+/// without touching USB; `--device`
 /// must name its synthetic serial.
 fn run_sim(cli: &Cli) -> Result<(), CliError> {
     select_demo(cli)?;
     let mode = demo_entry().mode();
     let faults = sim_faults()?;
-    let persona = if cli.command.source() == Some(WatchSource::Cdc) {
+    let persona = if cli.command.needs_cdc() {
         Persona::Cdc
     } else {
         Persona::Bulk
@@ -1211,8 +1213,8 @@ fn start<T: Transport, C: Clock>(
     mode: DeviceMode,
     mut session: Session<T, C>,
 ) -> Result<(), CliError> {
-    // The ADCNEW stream needs no CONNECT, whose byte would start it on CDC.
-    if needs_connect(cli.transport) && cli.command.source() != Some(WatchSource::Cdc) {
+    // Nothing on CDC gets a CONNECT, whose byte would start ADCNEW there.
+    if needs_connect(cli.transport) && !cli.command.needs_cdc() {
         session.connect()?;
     }
     dispatch(cli, mode, session)

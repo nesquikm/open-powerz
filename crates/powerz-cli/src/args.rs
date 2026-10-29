@@ -611,6 +611,21 @@ impl Command {
         }
     }
 
+    /// The command runs on the meter's CDC port whatever `--transport`
+    /// says, with no CONNECT (0x02 starts ADCNEW there): the ADCNEW stream
+    /// (`--source cdc`) and the settings write, which the KM003C ignored over
+    /// bulk (2026-10-29) `[device]`.
+    pub fn needs_cdc(&self) -> bool {
+        self.source() == Some(WatchSource::Cdc)
+            || matches!(
+                self,
+                Command::Settings {
+                    action: Some(SettingsAction::Set { .. }),
+                    ..
+                }
+            )
+    }
+
     /// Subcommand name as typed on the command line.
     pub fn name(&self) -> &'static str {
         match self {

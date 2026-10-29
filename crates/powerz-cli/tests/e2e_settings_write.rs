@@ -107,6 +107,32 @@ fn set_writes_one_frame_and_prints_the_settings_read_back() {
     assert!(reads >= 2, "settings read before and after: {reads}");
 }
 
+/// The meter takes the settings write only on its CDC port: over bulk it
+/// was silently ignored (2026-10-29) `[device]`. On CDC there is no CONNECT
+/// (0x02 starts the ADCNEW stream there), so the trace shows only the two
+/// SETTINGS reads and the write.
+#[test]
+fn set_goes_over_the_cdc_port_without_connect() {
+    let a = sim()
+        .args([
+            "--trace",
+            "settings",
+            "set",
+            "brightness=20",
+            "--i-understand",
+        ])
+        .assert()
+        .success();
+    let trace = stderr_of(&a);
+    let types: Vec<u8> = trace
+        .lines()
+        .filter(|l| l.starts_with('>'))
+        .map(|l| traced_bytes(l)[0] & 0x7F)
+        .collect();
+    assert_eq!(types, vec![0x0C, 0x0A, 0x0C], "{trace}");
+    assert!(stdout_of(&a).contains("20%"));
+}
+
 #[test]
 fn set_takes_every_writable_field() {
     let a = sim()

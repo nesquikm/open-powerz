@@ -191,6 +191,9 @@ impl SimDevice {
             msg::MEM_READ => self.memory_read(req, id),
             msg::AUTH => vec![self.auth(req, id)],
             msg::SET_DATA => vec![self.set_data(req, id)],
+            // Over bulk the KM003C neither answers nor applies a settings
+            // write (2026-10-29) `[device]`.
+            msg::SETTINGS_WRITE if self.persona != Persona::Cdc => Vec::new(),
             msg::SETTINGS_WRITE => vec![self.settings_write(req, id)],
             _ => vec![self.control(msg::REJECT, id)],
         }
@@ -231,11 +234,10 @@ impl SimDevice {
             sections.push((Attribute::PD_PACKET, 0, self.pd.chunk(now, fallback)));
         }
         if mask & Attribute::SETTINGS.bits() != 0 {
-            sections.push((
-                Attribute::SETTINGS,
-                0,
-                settings_payload(&self.settings, self.rate_code),
-            ));
+            sections.push((Attribute::SETTINGS, 0, {
+                let stored = self.stored();
+                settings_payload(&stored.settings, stored.rate_code)
+            }));
         }
         // RecordList: served from level 1; at level 0 the reply is empty.
         if mask & Attribute::RECORD_LIST.bits() != 0 && self.auth_level >= 1 {
@@ -286,7 +288,8 @@ impl SimDevice {
             }
             msg::STOP_QUEUE => {
                 self.streaming = false;
-                self.queue.set_rate(self.rate_code, now);
+                let code = self.rate_code();
+                self.queue.set_rate(code, now);
             }
             // Analyzer start: mode 1 is the PD sniffer.
             msg::START_ANALYZER if code == PD_MODE => self.pd.start(now),
@@ -362,7 +365,7 @@ impl SimDevice {
         self.control(msg::FINISHED, id)
     }
 
-    /// 0x0A: a settings write laid out as `check_settings_write` demands
+    /// 0x0A on CDC: a settings write laid out as `check_settings_write` demands
     /// (only the documented keys, in order, values in range) is ACCEPTed
     /// and applied to the SETTINGS block (kept as is under the
     /// `ignore-settings-write` fault); key 0x14 sets the rate code. Every
@@ -375,10 +378,12 @@ impl SimDevice {
         if self.faults.ignore_settings_write {
             return self.control(msg::ACCEPT, id);
         }
+        let mut rate = None;
+        let mut stored = self.stored();
         for (i, &key) in SETTINGS_WRITE_KEYS.iter().enumerate() {
             let at = 8 + 8 * i;
             let v = u32::from_le_bytes([req[at], req[at + 1], req[at + 2], req[at + 3]]);
-            let b = &mut self.settings;
+            let b = &mut stored.settings;
             match key {
                 0x01 => set_bits(b, 0x00, 0, 1, v),
                 0x03 => set_bits(b, 0x00, 3, 7, v),
@@ -386,15 +391,19 @@ impl SimDevice {
                 0x06 => set_bits(b, 0x00, 14, 2, v),
                 0x07 => set_bits(b, 0x00, 16, 3, v),
                 0x14 => {
-                    self.rate_code = (v & 0b11) as u8;
-                    if !self.streaming {
-                        let now = self.uptime_ms();
-                        self.queue.set_rate(self.rate_code, now);
-                    }
+                    stored.rate_code = (v & 0b11) as u8;
+                    rate = Some(stored.rate_code);
                 }
                 0x15 => set_bits(b, 0x60, 0, 2, v),
                 _ => {}
             }
+        }
+        drop(stored);
+        if let Some(code) = rate
+            && !self.streaming
+        {
+            let now = self.uptime_ms();
+            self.queue.set_rate(code, now);
         }
         self.control(msg::ACCEPT, id)
     }

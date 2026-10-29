@@ -19,8 +19,8 @@ mod queue;
 mod records;
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use flash::{FlashFault, SimMeter, SimMeterPipe};
@@ -336,7 +336,7 @@ impl FaultPlan {
 }
 
 /// Where the simulator's uptime comes from.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum TimeSource {
     /// Real time since this instant.
     Real(Instant),
@@ -358,8 +358,6 @@ pub struct SimDevice {
     connected: bool,
     /// The ADC queue was started with 0x0E.
     streaming: bool,
-    /// Meter rate code (SETTINGS); the queue falls back to it after 0x0F.
-    rate_code: u8,
     /// The always-running ADC queue.
     queue: queue::AdcQueue,
     /// Injected faults.
@@ -405,9 +403,19 @@ pub struct SimDevice {
     /// The offline-record table (RecordList entries); a SET_DATA 0x28
     /// write replaces it.
     record_table: Vec<[u8; powerz_protocol::decode::records::ENTRY_LEN]>,
+    /// What the meter keeps across its pipes: the SETTINGS block and rate
+    /// code, shared with a [`cdc_twin`](SimDevice::cdc_twin).
+    stored: Arc<Mutex<Stored>>,
+}
+
+/// The settings a meter keeps, whichever pipe changes them.
+#[derive(Debug)]
+struct Stored {
     /// The SETTINGS block (rate bits and CRCs refreshed when served); a
     /// settings write (type 0x0A) changes it.
     settings: [u8; device::SETTINGS_LEN],
+    /// Meter rate code (SETTINGS); the queue falls back to it after 0x0F.
+    rate_code: u8,
 }
 
 impl SimDevice {
@@ -421,6 +429,20 @@ impl SimDevice {
     pub fn with_clock(persona: Persona, scenario: Scenario, clock: SimClock) -> SimDevice {
         let start = clock.now_ms();
         SimDevice::open(persona, scenario, TimeSource::Sim { clock, start })
+    }
+
+    /// This meter's CDC persona, opened beside this one on the same time
+    /// source: it shares the stored settings, so a settings write sent there
+    /// is what this one serves afterwards, and it has the same faults,
+    /// mode and serial. A rate written there reaches this one's queue at its
+    /// next 0x0F.
+    pub fn cdc_twin(&self) -> SimDevice {
+        let mut twin = SimDevice::open(Persona::Cdc, self.scenario, self.time.clone());
+        twin.stored = Arc::clone(&self.stored);
+        twin.faults = self.faults.clone();
+        twin.mode = self.mode;
+        twin.serial = self.serial.clone();
+        twin
     }
 
     /// A freshly opened meter: on bulk one stale DISCONNECT waits on the IN
@@ -438,7 +460,6 @@ impl SimDevice {
             auth_level: 0,
             connected: false,
             streaming: false,
-            rate_code: 2,
             queue: queue::AdcQueue::new(2),
             faults: FaultPlan::new(),
             requests: 0,
@@ -460,8 +481,21 @@ impl SimDevice {
             adcnew_last_start: Vec::new(),
             adcnew_start_echoes: 0,
             record_table: records::initial_table(),
-            settings: device::SETTINGS_206,
+            stored: Arc::new(Mutex::new(Stored {
+                settings: device::SETTINGS_206,
+                rate_code: 2,
+            })),
         }
+    }
+
+    /// The settings this meter keeps (a poisoned lock still holds them).
+    fn stored(&self) -> std::sync::MutexGuard<'_, Stored> {
+        self.stored.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Meter rate code (SETTINGS); the queue falls back to it after 0x0F.
+    fn rate_code(&self) -> u8 {
+        self.stored().rate_code
     }
 
     /// Simulated device uptime in ms.
@@ -595,8 +629,8 @@ impl SimDevice {
                     Some(att) => adcnew::AdcnewStream::start(att & 0x0F, now, None),
                     None => {
                         let body =
-                            adcnew::first_frame_body(&self.scenario.sample(now), self.rate_code);
-                        adcnew::AdcnewStream::start(self.rate_code, now, Some(body))
+                            adcnew::first_frame_body(&self.scenario.sample(now), self.rate_code());
+                        adcnew::AdcnewStream::start(self.rate_code(), now, Some(body))
                     }
                 });
             }

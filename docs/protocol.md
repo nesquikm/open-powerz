@@ -146,7 +146,7 @@ Control types (main header type below 0x40):
 | 0x07 | FINISHED | reply only | acknowledges flash-write chunks; also the KM003C's answer to the record-table write (SET_DATA 0x28) | [doc] [static]; record table [device] (2026-10-29) |
 | 0x08 | JUMP_APROM | 0 | none; leaves DFU mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
 | 0x09 | JUMP_DFU | 0 | none; enters firmware-update mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
-| 0x0A | settings write (named GET_STATUS in the API doc) | key / value entries, see Settings write | unknown; the vendor settings dialog sends it over CDC and does not wait for a reply; our app sends it only from the settings write path and checks the result by reading SETTINGS again | [doc] [static] |
+| 0x0A | settings write (named GET_STATUS in the API doc) | key / value entries, see Settings write | unknown; the vendor settings dialog sends it over CDC and does not wait for a reply; over bulk the meter ignores it (no reply, no change) [device]; our app sends it only on CDC, from the settings write path, and checks the result by reading SETTINGS again | [doc] [static] [device] |
 | 0x0B | ERROR | | no handler in the vendor app | [doc] |
 | 0x0C | GET_DATA | attribute bit mask | PUT_DATA (0x41) | [doc] [static] [device] |
 | 0x0D | GET_FILE | | unused by the vendor app | [doc] [static] |
@@ -360,8 +360,28 @@ not read by the dialog [static].
 
 The vendor trigger tool's settings dialog changes these fields with one
 message of type 0x0A. Everything in this section comes from static analysis
-of that dialog and its writer [static]; until a stage of the hardware check
-has run, nothing here is [device].
+of that dialog and its writer [static], except where marked [device].
+
+Which pipe:
+
+- [device] Over the vendor bulk interface the KM003C ignores the write: on
+  2026-10-29 our first write (`0a 03 00 04 …`, the full key set below) got
+  no reply, and the settings read back and the meter's screen were
+  unchanged.
+- [static] The vendor tool sends the write only on the CDC serial port,
+  with nothing before it: no CONNECT, no authentication, no text command.
+  When its dialog opens it reads SETTINGS once (`0c ff 10 00`, id forced
+  to 0xFF, to fill the dialog); on OK it writes the 0x0A frame and reads no
+  reply. The vendor bulk app has no settings write.
+- So we send the write, and the SETTINGS reads around it, only on the
+  meter's CDC port, without CONNECT (type 0x02 starts ADCNEW there).
+  Whether the meter applies it there is not yet checked on the device.
+  [static] [inferred] Over bulk our library refuses the write before
+  sending it.
+- On CDC the reply to the write, if any, and every reply after it are read
+  through the ADCNEW / text demux: stream frames and text lines are skipped
+  and a reply counts only when it carries the request's id (the read-back's
+  id, not the write's). [inferred]
 
 Message layout (all words little-endian):
 
@@ -493,7 +513,7 @@ Entry layout (48 bytes). The vendor list view reads the fields below
 | 0x12 | u16 | point count (number of 16-byte samples) | [static] [device] |
 | 0x14 | u32 | capacity in points: the meter shows `points/capacity` (173/10000) | [device] |
 | 0x18 | u32 | duration in seconds | [static] [device] |
-| 0x1C | i32 | charge in µAh (÷1e6 = Ah), signed: negative for one current direction; the screen shows the magnitude of the sample totals, and this stored total is slightly larger | [static] [device] |
+| 0x1C | i32 | charge in µAh (÷1e6 = Ah), signed: negative for one current direction; the screen shows a magnitude (which total, see below) | [static] [device] |
 | 0x20 | i32 | energy in µWh (÷1e6 = Wh), signed like the charge; shown as a magnitude like the charge | [static] [device] |
 | 0x24 | u32 | flash offset of the samples inside the record area | [static] [device] |
 | 0x28 | 4 bytes | unknown, kept raw; 0 in the real entry | [device] (value); meaning unknown |
@@ -503,8 +523,24 @@ Entry layout (48 bytes). The vendor list view reads the fields below
   entry is near the Unix time of the recording.
 - [device] The stored charge and energy are a little larger than the last
   sample's totals (by 178 µAh and 896 µWh in the check, under a second
-  of the measured load). The
-  meter's record screen shows the last sample's totals.
+  of the measured load).
+- Open question: which total the meter's record screen shows. [device]
+  observations, all magnitudes:
+
+  | Recording | Seen | Screen | List entry | Last sample | tag |
+  |---|---|---|---|---|---|
+  | A01.d (173 pts) | 2026-10-27 | 37.073 mAh, 187.252 mWh | 37.251 mAh, 188.148 mWh | 37.073 mAh, 187.252 mWh | [device] |
+  | A02.d (32 pts) | 2026-10-29, twice | 3.149 mAh, 16.142 mWh | 3.149 mAh, 16.142 mWh | 3.074 mAh, 15.759 mWh | [device] |
+  | A03.d (35 pts) | 2026-10-29 14:20 | 3.387 mAh, 17.358 mWh | 3.437 mAh, 17.616 mWh | 3.387 mAh, 17.358 mWh | [device] |
+  | A03.d (35 pts) | 2026-10-29 15:33 | 3.437 mAh, 17.616 mWh | 3.437 mAh, 17.616 mWh | 3.387 mAh, 17.358 mWh | [device] |
+
+  So the screen shows one of the two totals, and the same recording
+  (A03.d) showed the last sample first and the list entry an hour later.
+  Perhaps the screen shows the running totals of a recording made in the
+  current session and the stored entry otherwise; what switches it is
+  unknown. [inferred] Names, point counts and durations always matched.
+  Until this is understood, compare a recording with the screen by name,
+  points and duration only. [inferred]
 - [device] Charge and energy are stored negative for the load direction used
   in the check (−37 251 µAh, −188 148 µWh); the meter's screen shows the
   magnitude. `powerz records list` and the desktop Records view show
@@ -540,7 +576,8 @@ CC2 and temperature stay 0, so the format carries none of them. [static] A
 recording made on our meter (2026-10-27, steady ~5.06 V / 0.76 A with the
 load unplugged once) confirmed every field: the last sample's totals equal
 the meter's record screen exactly (shown as 37.073 mAh and 187.252 mWh,
-stored as −37 073 µAh and −187 252 µWh). [device] The raw 16 bytes are kept
+stored as −37 073 µAh and −187 252 µWh). [device] Later recordings did not
+all follow this; see the open question under Offline records. The raw 16 bytes are kept
 in `RecordSample::raw`.
 
 | off | type | field | unit | tag |

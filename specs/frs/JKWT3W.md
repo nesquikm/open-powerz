@@ -41,3 +41,5 @@ Unit tests for the builder and the guard, simulator and CLI tests, a Playwright 
 ## Notes
 
 User decision 2026-10-28: build settings writes in M6b, never calibration; first real write only with the user's OK.
+
+Real meter, 2026-10-29: the first write went over the vendor bulk interface and the KM003C ignored it (no reply, settings and screen unchanged). The vendor tool sends this message only on the CDC serial port, with no CONNECT or sign-in before it [static]. So the write (and the SETTINGS reads around it) now goes over the meter's CDC port in the CLI and the desktop app, the library refuses it over bulk before sending, and the simulator's bulk persona ignores it as the meter did. Replies on CDC are matched by request id through the ADCNEW/text demux.

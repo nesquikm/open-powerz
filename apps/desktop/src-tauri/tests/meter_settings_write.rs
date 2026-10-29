@@ -3,7 +3,10 @@
 //! settings write through the guard, reads the block again and hands the UI
 //! the rows as read back. Unknown or read-only keys and values out of range
 //! are usage errors that send no write; a re-read that does not match is an
-//! error naming the field and is not retried.
+//! error naming the field and is not retried. The meter takes the write only
+//! on its CDC port (bulk ignored it, 2026-10-29 `[device]`), so a session on
+//! bulk sends the write and its two reads over the CDC pipe of the same
+//! meter, with no CONNECT there.
 
 mod common;
 
@@ -17,10 +20,19 @@ use serde_json::Value;
 
 type Log = std::sync::Arc<std::sync::Mutex<common::Log>>;
 
-fn start_with(faults: FaultPlan) -> (Worker<Pipe, SimClock>, SimClock, Log) {
+/// What the bulk pipe and the meter's CDC pipe saw.
+struct Logs {
+    bulk: Log,
+    cdc: Log,
+}
+
+fn start_with(faults: FaultPlan) -> (Worker<Pipe, SimClock>, SimClock, Logs) {
     let clock = clock();
     let pipe = Pipe::sim(Scenario::Load5v1a, faults, &clock, PipeOpts::default());
-    let log = std::sync::Arc::clone(&pipe.log);
+    let log = Logs {
+        bulk: std::sync::Arc::clone(&pipe.log),
+        cdc: std::sync::Arc::clone(&pipe.cdc_log),
+    };
     let (_events, sink) = capture(&clock);
     let worker = Worker::start(pipe, clock.clone(), WorkerConfig::new(Rate::Sps50, 1), sink)
         .unwrap_or_else(|e| panic!("worker did not start: {e:?}"));
@@ -31,11 +43,11 @@ fn changes(pairs: &[(&str, i32)]) -> BTreeMap<String, i32> {
     pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
 }
 
-fn settings_writes(log: &Log) -> Vec<Vec<u8>> {
-    log.lock()
-        .unwrap()
-        .of_type(0x0A)
-        .into_iter()
+/// Settings writes sent on either pipe.
+fn settings_writes(log: &Logs) -> Vec<Vec<u8>> {
+    [&log.bulk, &log.cdc]
+        .iter()
+        .flat_map(|l| l.lock().unwrap().of_type(0x0A))
         .map(|(_, f)| f)
         .collect()
 }
@@ -81,6 +93,18 @@ fn write_settings_sends_one_write_and_returns_the_rows_read_back() {
         vec![0x01, 0x03, 0x04, 0x06, 0x07, 0x14, 0x15, 0x7FFF]
     );
     assert!(e.contains(&(0x03, 80)) && e.contains(&(0x07, 2)), "{e:?}");
+    // The write went over CDC: nothing of it on bulk, and on CDC only the
+    // two SETTINGS reads around it (no CONNECT, which is ADCNEW there).
+    assert!(log.bulk.lock().unwrap().of_type(0x0A).is_empty());
+    let cdc_types: Vec<u8> = log
+        .cdc
+        .lock()
+        .unwrap()
+        .frames
+        .iter()
+        .map(|(_, f)| f[0] & 0x7F)
+        .collect();
+    assert_eq!(cdc_types, vec![0x0C, 0x0A, 0x0C]);
     // A later plain read shows the change too, and the stream goes on.
     let again = serde_json::to_value(worker.read_settings().unwrap()).unwrap();
     assert_eq!(value_of(&again, "brightness"), "80%");
@@ -205,13 +229,14 @@ fn write_settings_without_a_session_is_an_error_and_sends_nothing() {
     let (mut worker, clock, log) = start_with(FaultPlan::new());
     run_for(&mut worker, &clock, 200);
     worker.stop();
-    let before = log.lock().unwrap().frames.len();
+    let before = log.bulk.lock().unwrap().frames.len();
     assert!(
         worker
             .write_settings(&changes(&[("brightness", 80)]))
             .is_err()
     );
-    assert_eq!(log.lock().unwrap().frames.len(), before);
+    assert_eq!(log.bulk.lock().unwrap().frames.len(), before);
+    assert!(log.cdc.lock().unwrap().frames.is_empty());
 }
 
 #[test]

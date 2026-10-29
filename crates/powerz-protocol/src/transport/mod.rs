@@ -59,6 +59,10 @@ pub enum Error {
         /// Frame type (bits 0..6 of the main header).
         ty: u8,
     },
+    /// The settings write (type 0x0A) goes only over the CDC port: over
+    /// bulk the KM003C ignored it (2026-10-29) \[device\]; nothing was sent.
+    #[error("the settings write is only taken over the meter's CDC serial port")]
+    SettingsNeedCdc,
     /// ADCNEW stream requests exist only on the CDC port; nothing was sent.
     #[error("the ADCNEW stream is only available over the CDC serial port")]
     AdcnewNeedsCdc,
@@ -104,6 +108,15 @@ pub trait Transport {
     fn transact_settings(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         guard::check_settings_write(request)?;
         self.transact(request, timeout)
+    }
+
+    /// Open the pipe on which this meter takes the settings write (type
+    /// 0x0A): its CDC port, since over bulk the KM003C ignored the write
+    /// (2026-10-29) \[device\]. `None` when this pipe has no such twin, or
+    /// is that pipe itself. Wrappers that sit outside a guard must forward
+    /// this method. Default: `None`.
+    fn settings_pipe(&mut self) -> Option<Result<Box<dyn Transport>, Error>> {
+        None
     }
 
     /// Bring a pipe left mid-transfer back to a clean state (e.g. clear a
@@ -170,6 +183,48 @@ pub fn map_io_error(err: &std::io::Error, target_os: &str) -> Error {
         | ErrorKind::NotFound => Error::Disconnected,
         ErrorKind::PermissionDenied => permission_error(target_os, &err.to_string()),
         _ => Error::Io(err.to_string()),
+    }
+}
+
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        (**self).transact(request, timeout)
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
+        (**self).read(timeout)
+    }
+
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, Error> {
+        (**self).transact_record_table(request, timeout)
+    }
+
+    fn transact_settings(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        (**self).transact_settings(request, timeout)
+    }
+
+    fn settings_pipe(&mut self) -> Option<Result<Box<dyn Transport>, Error>> {
+        (**self).settings_pipe()
+    }
+
+    fn recover(&mut self) -> Result<(), Error> {
+        (**self).recover()
+    }
+
+    fn adcnew_send(&mut self, request: crate::adcnew::Request) -> Result<(), Error> {
+        (**self).adcnew_send(request)
+    }
+
+    fn adcnew_frames(&mut self) -> Result<Vec<crate::adcnew::Frame>, Error> {
+        (**self).adcnew_frames()
+    }
+
+    fn adcnew_counters(&self) -> crate::adcnew::AdcnewCounters {
+        (**self).adcnew_counters()
     }
 }
 

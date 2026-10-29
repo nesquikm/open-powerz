@@ -153,6 +153,11 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
         | T::AdcnewNeedsCdc => {
             UiError::usage("This action is not available over the current connection.")
         }
+        T::SettingsNeedCdc => UiError {
+            kind: ErrorKind::Usage,
+            message: "The meter takes settings changes only over its serial (CDC) port, which could not be used.".to_owned(),
+            hint: Some("Close any other program using the meter's serial port and try again.".to_owned()),
+        },
         T::HidReplyTooLong { .. } => protocol(),
         T::Io(_) => UiError {
             kind: ErrorKind::Internal,

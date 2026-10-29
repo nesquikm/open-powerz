@@ -143,6 +143,12 @@ impl<T: Transport> Transport for GuardedTransport<T> {
         self.inner.transact_settings(request, timeout)
     }
 
+    /// The inner pipe's settings twin, unguarded: whoever opens a session on
+    /// it puts its own guard in front.
+    fn settings_pipe(&mut self) -> Option<Result<Box<dyn Transport>, Error>> {
+        self.inner.settings_pipe()
+    }
+
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
         self.inner.read(timeout)
     }
