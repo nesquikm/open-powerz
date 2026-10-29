@@ -4,6 +4,15 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-10-30 — "Write Stuff"
+
+### Added
+- Delete offline records: `powerz records delete N|--all --i-understand` and the desktop Records tab's Delete and Delete all back the records up as CSV first, ask you to type the record name (or `all`), then rewrite the meter's record list and read it again; a failed backup deletes nothing, and a re-read that does not match names the backup folder and is not retried (JKWT3V)
+- Change meter settings: `powerz settings set field=value… --i-understand` and the desktop Meter settings panel's Edit and Apply change the language, brightness, dim timeout, theme, rotation and sample rate (never calibration, auto-rotate or the startup logo) with one write over the meter's serial port, read the settings back and say that the meter's screen shows the change once that setting is opened in its menu (JKWT3W)
+- Real-meter checks: deleting records and changing settings were checked on a KM003C, each write approved before it was sent; the checks found that the meter answers a record delete with FINISHED, takes the settings write only on its serial port, and pairs rotation and sample rate the other way round from the vendor tool (JKWT3X)
+
+Total test count at release: 3519 tests, 0 failures, 0 errors.
+
 ## [0.7.1] — 2026-10-28 — "Read Me Maybe"
 
 ### Changed

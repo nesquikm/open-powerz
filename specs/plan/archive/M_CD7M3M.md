@@ -7,6 +7,7 @@ kickoff_branch: null
 frozen_at: null
 migration: none
 codename: Write Stuff
+shipped_in: v0.8.0
 ---
 
 # Implementation Plan
