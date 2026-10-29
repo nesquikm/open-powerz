@@ -222,8 +222,10 @@ export class MeterSettingsPanel {
     return this.refresh();
   }
 
-  /** Read the settings again; a failed read shows the error and no stale values. */
+  /** Read the settings again; a failed read shows the error and no stale values.
+   * Ignored while a write is in flight, whose answer is the fresher read. */
   async refresh(): Promise<void> {
+    if (this.applying) return;
     const generation = ++this.#generation;
     this.loading = true;
     try {

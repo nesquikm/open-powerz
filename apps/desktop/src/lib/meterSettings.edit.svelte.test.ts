@@ -230,6 +230,18 @@ describe("MeterSettingsPanel edit (AC-JKWT3W.4, .5)", () => {
     expect(panel.notice).toBeNull();
   });
 
+  it("a refresh while Apply is in flight is ignored, so the write's answer still lands", async () => {
+    const { panel, read } = await editing();
+    panel.setDraft("brightness", 80);
+    const done = panel.apply();
+    await panel.refresh();
+    await done;
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(panel.settings).toEqual(AFTER);
+    expect(panel.applying).toBe(false);
+    expect(panel.editing).toBe(false);
+  });
+
   it("Apply with nothing changed sends nothing", async () => {
     const { panel, write } = await editing();
     await panel.apply();

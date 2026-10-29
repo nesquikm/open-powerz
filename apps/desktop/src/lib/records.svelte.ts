@@ -190,7 +190,7 @@ export class RecordsPanel {
 
   /** Delete record `target` (1-based), or every record with `"all"`, sending the typed
    * `confirm` (FR JKWT3V). On success the new list and the backup show; a failure
-   * shows the error (with its backup path) and is not retried. */
+   * shows the error (with its backup path) over a fresh list and is not retried. */
   async delete(target: number | "all", confirm: string): Promise<void> {
     const generation = this.#generation;
     this.deleting = target;
@@ -201,7 +201,19 @@ export class RecordsPanel {
       this.#showList(result.records);
       this.lastDelete = result;
     } catch (e) {
-      if (generation === this.#generation) this.error = toUiError(e);
+      if (generation !== this.#generation) return;
+      const error = toUiError(e);
+      // The table may have been written: list again so the rows match the
+      // meter, and keep the delete's error on show.
+      try {
+        const { records } = await this.#list();
+        if (generation !== this.#generation) return;
+        this.#showList(records);
+      } catch {
+        if (generation !== this.#generation) return;
+        this.records = null;
+      }
+      this.error = error;
     } finally {
       if (generation === this.#generation) this.deleting = null;
     }

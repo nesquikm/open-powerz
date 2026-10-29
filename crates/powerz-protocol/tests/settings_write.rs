@@ -18,8 +18,8 @@ use common::*;
 use powerz_protocol::crypto;
 use powerz_protocol::decode::Rate;
 use powerz_protocol::decode::settings::{
-    MeterSettings, Rotation, SAVE_MARKER, SETTINGS_KEY_FIELDS, SETTINGS_WRITE_KEYS, Theme,
-    WritableField, apply_settings_write, settings_write_request,
+    MeterSettings, Rotation, SAVE_MARKER, SETTINGS_KEY_FIELDS, SETTINGS_WRITE_KEYS,
+    SettingsWriteError, Theme, WritableField, apply_settings_write, settings_write_request,
 };
 use powerz_protocol::session::Session;
 use powerz_protocol::transport::mock::{MockTransport, Step};
@@ -434,6 +434,13 @@ fn ac2_decoding_then_writing_back_every_key_is_byte_identical() {
     }
     for p in blocks {
         let current = decode(&p);
+        if WritableField::ALL
+            .iter()
+            .any(|f| !f.range().contains(&f.code(&current)))
+        {
+            // Refused before anything is built (see the test below).
+            continue;
+        }
         let f = settings_write_request(1, &current, &[]).unwrap();
         for field in SETTINGS_KEY_FIELDS {
             let at = 4 + 8 * SETTINGS_WRITE_KEYS
@@ -490,6 +497,48 @@ fn ac3_builder_refuses_values_out_of_range() {
             );
         }
     }
+}
+
+#[test]
+fn ac3_a_value_the_meter_holds_out_of_range_is_named_unless_it_is_changed() {
+    // The guard would refuse such a frame as dangerous; say instead which
+    // field the meter holds out of range, so the user can set it too.
+    for (name, code, field) in [
+        ("theme", 7, WritableField::Theme),
+        ("brightness", 0, WritableField::Brightness),
+        ("brightness", 101, WritableField::Brightness),
+    ] {
+        let current = decode(&block(&[(name, code)]));
+        let err = settings_write_request(1, &current, &[(WritableField::Language, 1)])
+            .expect_err("a held out-of-range value is refused");
+        assert_eq!(
+            err,
+            SettingsWriteError::MeterValueOutOfRange {
+                field: field.name(),
+                value: code as i32,
+                min: *field.range().start(),
+                max: *field.range().end(),
+            }
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("meter") && msg.contains(name), "{msg}");
+        let fixed = settings_write_request(1, &current, &[(field, 1)]);
+        assert!(
+            fixed.is_ok(),
+            "changing {name} too lets the write go: {fixed:?}"
+        );
+    }
+}
+
+#[test]
+fn ac3_a_held_out_of_range_value_sends_nothing() {
+    let p = block(&[("theme", 7)]);
+    let mut s = session(&p, vec![]);
+    let err = s
+        .write_settings(&[(WritableField::Brightness, 20)])
+        .expect_err("refused");
+    assert!(err.to_string().contains("theme"), "{err}");
+    assert!(settings_writes(&s).is_empty(), "no settings write was sent");
 }
 
 // ---- AC-JKWT3W.2 / .4: the session write and the re-read ----

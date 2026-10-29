@@ -112,6 +112,25 @@ describe("RecordsPanel delete (AC-JKWT3V.3, .4)", () => {
     expect(panel.deleting).toBeNull();
   });
 
+  it("after a failed delete it lists again, so the rows match the meter, and keeps the error", async () => {
+    const { panel, list } = harness(undefined, mismatch);
+    await panel.connected();
+    list.mockResolvedValueOnce({ records: [A, C] });
+    await panel.delete(2, "charger test");
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(panel.records).toEqual([A, C]);
+    expect(panel.error).toEqual(mismatch);
+  });
+
+  it("when that list fails too, no stale rows stay and the delete error still shows", async () => {
+    const { panel, list } = harness(undefined, mismatch);
+    await panel.connected();
+    list.mockRejectedValueOnce({ kind: "device", message: "gone", hint: null });
+    await panel.delete(2, "charger test");
+    expect(panel.records).toBeNull();
+    expect(panel.error).toEqual(mismatch);
+  });
+
   it("forgets a download whose record moved or went away", async () => {
     const result: RecordDeleteResult = {
       records: [A, { ...C, index: 2 }],

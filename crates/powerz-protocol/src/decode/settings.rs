@@ -721,6 +721,23 @@ pub enum SettingsWriteError {
         /// Highest allowed value.
         max: i32,
     },
+    /// A field left unchanged holds a value outside its range on the
+    /// meter; it would go out as read, which the guard refuses. Changing
+    /// that field too lets the write go.
+    #[error(
+        "the meter holds {field} = {value}, outside {min}..={max}; \
+         set {field} too so it can be written"
+    )]
+    MeterValueOutOfRange {
+        /// Field name.
+        field: &'static str,
+        /// Value read from the meter.
+        value: i32,
+        /// Lowest allowed value.
+        min: i32,
+        /// Highest allowed value.
+        max: i32,
+    },
 }
 
 /// The type-0x0A frame that writes `changes` over `current` (the settings
@@ -730,7 +747,8 @@ pub enum SettingsWriteError {
 /// every other key at its read value, the startup logo always at its read
 /// value, and the save marker last. \[static\]
 ///
-/// A value outside its field's [`range`](WritableField::range) is refused.
+/// A value outside its field's [`range`](WritableField::range) is refused,
+/// and so is a write over a field the meter holds out of range.
 pub fn settings_write_request(
     id: u8,
     current: &MeterSettings,
@@ -740,6 +758,17 @@ pub fn settings_write_request(
         let range = f.range();
         if !range.contains(&value) {
             return Err(SettingsWriteError::OutOfRange {
+                field: f.name(),
+                value,
+                min: *range.start(),
+                max: *range.end(),
+            });
+        }
+    }
+    for f in WritableField::ALL {
+        let (range, value) = (f.range(), f.code_after(current, changes));
+        if !range.contains(&value) {
+            return Err(SettingsWriteError::MeterValueOutOfRange {
                 field: f.name(),
                 value,
                 min: *range.start(),

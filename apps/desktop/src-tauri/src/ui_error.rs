@@ -1,6 +1,7 @@
 //! Maps session and transport errors to plain-language `{ kind, message,
 //! hint }` for the UI (FR VHY378).
 
+use powerz_protocol::decode::settings::SettingsWriteError;
 use powerz_protocol::session;
 use powerz_protocol::transport;
 use serde::Serialize;
@@ -196,7 +197,18 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
             message: "The record list does not match after the delete.".to_owned(),
             hint: Some("Read the list again; nothing was retried.".to_owned()),
         },
-        S::SettingsWrite(e) => UiError::usage(format!("That setting value is out of range: {e}.")),
+        S::SettingsWrite(e @ SettingsWriteError::OutOfRange { .. }) => {
+            UiError::usage(format!("That setting value is out of range: {e}."))
+        }
+        S::SettingsWrite(SettingsWriteError::MeterValueOutOfRange { field, value, .. }) => {
+            UiError {
+                kind: ErrorKind::Protocol,
+                message: format!(
+                    "The meter holds {field} = {value}, which this app cannot write back."
+                ),
+                hint: Some(format!("Change {field} too, then apply again.")),
+            }
+        }
         S::SettingsMismatch {
             field,
             expected,
@@ -311,6 +323,22 @@ mod tests {
             "linux",
         );
         assert_eq!(e.kind, ErrorKind::Timeout);
+        assert_plain(&e);
+    }
+
+    #[test]
+    fn a_value_the_meter_holds_out_of_range_says_to_change_that_field_too() {
+        let err = session::Error::SettingsWrite(SettingsWriteError::MeterValueOutOfRange {
+            field: "theme",
+            value: 7,
+            min: 0,
+            max: 6,
+        });
+        let e = from_session(&err, "macos");
+        assert_eq!(e.kind, ErrorKind::Protocol);
+        assert!(e.message.contains("theme = 7"), "{}", e.message);
+        assert!(!e.message.contains("damage"), "{}", e.message);
+        assert!(e.hint.as_deref().unwrap_or("").contains("theme"), "{e:?}");
         assert_plain(&e);
     }
 
