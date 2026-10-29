@@ -392,8 +392,9 @@ describe("repository gate", () => {
 
   it("AC-7V4B90.3: Coming next names the planned work without dates", () => {
     const next = section("Coming next");
-    expect(next).toMatch(/delet\w* offline records|record delete/i);
-    expect(next).toMatch(/settings/i);
+    // Record delete and settings writes shipped in 0.8.0 (JKWT3V, JKWT3W): no longer next.
+    expect(next).not.toMatch(/delet\w* offline records|record delete/i);
+    expect(next).not.toMatch(/settings/i);
     expect(next).toMatch(/polish/i);
     expect(next).toMatch(/browser edition/i);
     expect(next).not.toMatch(/\b20\d\d\b|\bQ[1-4]\b/);

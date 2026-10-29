@@ -8,8 +8,9 @@
 // area containing <phrase> (case-insensitive); a bare "<area-slug>" needs any
 // bullet in the area. null marks an entry that is not a user-facing feature:
 // AH2AEN (the desktop test suite), V9SK56 (staged firmware checks on a real
-// meter) and 1HHT04 (read-only real-meter checks) are development
-// verification, not something a user does.
+// meter), 1HHT04 (read-only real-meter checks) and JKWT3X (approved
+// real-meter write checks) are development verification, not something a
+// user does.
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
