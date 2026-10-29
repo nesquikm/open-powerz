@@ -16,8 +16,10 @@ mod common;
 
 use common::*;
 use powerz_protocol::crypto;
+use powerz_protocol::decode::Rate;
 use powerz_protocol::decode::settings::{
-    MeterSettings, SAVE_MARKER, SETTINGS_WRITE_KEYS, WritableField, settings_write_request,
+    MeterSettings, Rotation, SAVE_MARKER, SETTINGS_KEY_FIELDS, SETTINGS_WRITE_KEYS, Theme,
+    WritableField, apply_settings_write, settings_write_request,
 };
 use powerz_protocol::session::Session;
 use powerz_protocol::transport::mock::{MockTransport, Step};
@@ -110,8 +112,8 @@ fn captured_entries(changes: &[(u16, i32)]) -> Vec<(u16, i32)> {
         (0x04, 0),
         (0x06, 0),
         (0x07, 0),
-        (0x14, 2),
-        (0x15, 1),
+        (0x14, 1),
+        (0x15, 2),
         (0x7FFF, 0x1234),
     ];
     for &(k, v) in changes {
@@ -146,8 +148,8 @@ fn ac1_writable_fields_carry_the_recovered_keys() {
             ("brightness", 0x03),
             ("dim_timeout", 0x04),
             ("theme", 0x07),
-            ("sample_rate", 0x14),
-            ("rotation", 0x15),
+            ("sample_rate", 0x15),
+            ("rotation", 0x14),
         ]
     );
     for f in WritableField::ALL {
@@ -276,8 +278,8 @@ fn ac2_every_field_can_be_changed_at_once() {
                 (0x04, 3),
                 (0x06, 0),
                 (0x07, 6),
-                (0x14, 0),
-                (0x15, 3),
+                (0x14, 3),
+                (0x15, 0),
                 (0x7FFF, 0x1234),
             ]
         )
@@ -318,12 +320,134 @@ fn ac2_every_read_code_is_sent_back_unchanged() {
                 (0x04, 2),
                 (0x06, 0),
                 (0x07, 5),
-                (0x14, 3),
+                (0x14, 2),
+                (0x15, 3),
+                (0x7FFF, 0x1234),
+            ]
+        )
+    );
+}
+
+// ---- AC-JKWT3W.2: the real meter's key map (round 3, 2026-10-29) ----
+
+/// The SETTINGS block read from the KM003C right before the round-3 write.
+const ROUND3_BEFORE: &str = include_str!("vectors/settings_round3_before.hex");
+
+/// The write round 3 sent (code 4e726fb, keys 0x14 / 0x15 paired the way the
+/// vendor dialog pairs them): brightness 20, theme green, every other key at
+/// the value read, 0x14 = 2 and 0x15 = 1. The meter answered FINISHED.
+const ROUND3_FRAME: [u8; 68] = [
+    0x0a, 0x02, 0x00, 0x04, 0x01, 0x80, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x03, 0x80, 0x00, 0x01,
+    0x14, 0x00, 0x00, 0x00, 0x04, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x06, 0x80, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x07, 0x80, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x14, 0x80, 0x00, 0x01,
+    0x02, 0x00, 0x00, 0x00, 0x15, 0x80, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0xff, 0x7f, 0x00, 0x01,
+    0x34, 0x12, 0x00, 0x00,
+];
+
+fn round3_before() -> Vec<u8> {
+    let p = vector(ROUND3_BEFORE);
+    assert_eq!(p.len(), 180);
+    p
+}
+
+/// Fields other than the four the round-3 write moved, which must be equal.
+fn assert_same_except_display_and_flags(a: &MeterSettings, b: &MeterSettings) {
+    assert_eq!(a.language, b.language);
+    assert_eq!(a.dim_timeout, b.dim_timeout);
+    assert_eq!(a.startup_logo, b.startup_logo);
+    assert_eq!(a.auto_rotate, b.auto_rotate);
+    assert_eq!(a.voltage_cal, b.voltage_cal);
+    assert_eq!(a.current_cal, b.current_cal);
+    assert_eq!(a.offset_cal, b.offset_cal);
+}
+
+#[test]
+fn ac2_the_round_3_frame_applied_as_the_meter_did_gives_its_read_back() {
+    // Read back on the meter after that frame: brightness 20, green, and
+    // also sample rate 10 SPS and rotation 180°, which were not asked for.
+    // So key 0x14 lands in bits 0..1 of 0x60 and key 0x15 in bits 2..3.
+    let before = round3_before();
+    let mut after = before.clone();
+    assert!(apply_settings_write(&mut after, &ROUND3_FRAME));
+    fix_crcs(&mut after);
+    let (b, a) = (decode(&before), decode(&after));
+    assert_eq!(a.brightness.value, 20);
+    assert_eq!(a.theme.value, Theme::Green);
+    assert_eq!(a.sample_rate.value, Rate::Sps10);
+    assert_eq!(a.rotation.value, Rotation::Deg180);
+    assert_same_except_display_and_flags(&b, &a);
+}
+
+#[test]
+fn ac2_a_brightness_and_theme_write_over_the_real_block_changes_nothing_else() {
+    let before = round3_before();
+    let current = decode(&before);
+    let f = settings_write_request(
+        2,
+        &current,
+        &[(WritableField::Brightness, 20), (WritableField::Theme, 1)],
+    )
+    .unwrap();
+    // Rotation (0x14) at bits 0..1 = 1, rate (0x15) at bits 2..3 = 2.
+    assert_eq!(
+        f,
+        expected_write(
+            2,
+            &[
+                (0x01, 1),
+                (0x03, 20),
+                (0x04, 0),
+                (0x06, 0),
+                (0x07, 1),
+                (0x14, 1),
                 (0x15, 2),
                 (0x7FFF, 0x1234),
             ]
         )
     );
+    let mut after = before.clone();
+    assert!(apply_settings_write(&mut after, &f));
+    // Byte for byte, only brightness (bits 3..9) and theme (16..18) moved.
+    let mut expected = before.clone();
+    set_bits(&mut expected, 0x00, 3, 7, 20);
+    set_bits(&mut expected, 0x00, 16, 3, 1);
+    assert_eq!(after, expected);
+}
+
+#[test]
+fn ac2_decoding_then_writing_back_every_key_is_byte_identical() {
+    // For every key, the value the builder sends unchanged is exactly the
+    // raw bits, so a write that changes nothing leaves the block as read.
+    let mut blocks = vec![round3_before(), captured()];
+    for (name, max) in [
+        ("language", 1u32),
+        ("brightness", 127),
+        ("dim_timeout", 3),
+        ("startup_logo", 3),
+        ("theme", 7),
+        ("rotation", 3),
+        ("sample_rate", 3),
+    ] {
+        for code in 0..=max {
+            blocks.push(block(&[(name, code)]));
+        }
+    }
+    for p in blocks {
+        let current = decode(&p);
+        let f = settings_write_request(1, &current, &[]).unwrap();
+        for field in SETTINGS_KEY_FIELDS {
+            let at = 4 + 8 * SETTINGS_WRITE_KEYS
+                .iter()
+                .position(|&k| k == field.key)
+                .unwrap();
+            let sent = i32::from_le_bytes(f[at + 4..at + 8].try_into().unwrap());
+            let raw = (word(&p, field.offset) >> field.shift) & ((1 << field.width) - 1);
+            assert_eq!(sent, raw as i32, "key {:#x} in {p:02x?}", field.key);
+        }
+        let mut after = p.clone();
+        assert!(apply_settings_write(&mut after, &f));
+        assert_eq!(after, p, "a write of the values read changes nothing");
+    }
 }
 
 // ---- AC-JKWT3W.3: ranges ----
@@ -420,7 +544,7 @@ fn ac2_write_reads_then_sends_one_frame_then_reads_again() {
 #[test]
 fn ac2_a_rate_change_is_written_and_read_back() {
     let after = block(&[("sample_rate", 1), ("theme", 3)]);
-    let frame = expected_write(2, &captured_entries(&[(0x07, 3), (0x14, 1)]));
+    let frame = expected_write(2, &captured_entries(&[(0x07, 3), (0x15, 1)]));
     let mut s = session(
         &captured(),
         vec![

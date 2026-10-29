@@ -102,8 +102,8 @@ fn the_written_block_keeps_valid_crcs_and_its_name() {
         (0x04, 1),
         (0x06, 0),
         (0x07, 6),
-        (0x14, 2),
-        (0x15, 3),
+        (0x14, 3),
+        (0x15, 2),
         (0x7FFF, 0x1234),
     ];
     let reply = d
@@ -144,6 +144,31 @@ fn a_write_with_the_factory_reset_key_is_rejected_and_changes_nothing() {
     let reply = d.transact(&frame, T).expect("reply");
     assert_eq!(ty(&reply), 0x06, "REJECT: {reply:02x?}");
     assert_eq!(raw_settings(&mut d, 4), before);
+}
+
+#[test]
+fn keys_0x14_and_0x15_land_where_the_meter_put_them() {
+    // On the KM003C (2026-10-29) 0x14 = 2 and 0x15 = 1 read back as
+    // rotation 180° (bits 0..1 of 0x60) and 10 SPS (bits 2..3) `[device]`.
+    let clock = clock();
+    let mut d = device(Persona::Cdc, Scenario::Idle, &clock);
+    let entries = [
+        (0x01u16, 1u32),
+        (0x03, 50),
+        (0x04, 0),
+        (0x06, 0),
+        (0x07, 0),
+        (0x14, 2),
+        (0x15, 1),
+        (0x7FFF, 0x1234),
+    ];
+    let reply = d
+        .transact_settings(&settings_frame(3, &entries), T)
+        .expect("reply");
+    assert_eq!(&reply[..2], &[0x05, 0x03], "ACCEPT: {reply:02x?}");
+    let m = MeterSettings::decode(&raw_settings(&mut d, 4)).unwrap();
+    assert_eq!(m.rotation.value, Rotation::Deg180);
+    assert_eq!(m.sample_rate.value, Rate::Sps10);
 }
 
 #[test]

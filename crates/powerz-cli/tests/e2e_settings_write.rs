@@ -95,7 +95,7 @@ fn set_writes_one_frame_and_prints_the_settings_read_back() {
     let value = |k: u16| e.iter().find(|(key, _)| *key == k).unwrap().1;
     assert_eq!(value(0x03), 80);
     assert_eq!(value(0x07), 2);
-    assert_eq!(value(0x15), 2);
+    assert_eq!(value(0x14), 2, "rotation is key 0x14 [device]");
     // Unchanged ones at the demo meter's values: English, dim off, logo off.
     assert_eq!((value(0x01), value(0x04), value(0x06)), (1, 0, 0));
     assert_eq!(value(0x7FFF), 0x1234);
@@ -155,7 +155,7 @@ fn set_takes_every_writable_field() {
     assert_eq!(writes.len(), 1);
     let e = entries(&writes[0]);
     let value = |k: u16| e.iter().find(|(key, _)| *key == k).unwrap().1;
-    assert_eq!((value(0x01), value(0x04), value(0x14)), (0, 2, 1));
+    assert_eq!((value(0x01), value(0x04), value(0x15)), (0, 2, 1));
 }
 
 #[test]

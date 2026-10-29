@@ -3,7 +3,7 @@
 
 use powerz_protocol::crypto::{self, KEYS};
 use powerz_protocol::decode::records::MEMORY_READ_MAX_LEN;
-use powerz_protocol::decode::settings::SETTINGS_WRITE_KEYS;
+use powerz_protocol::decode::settings::apply_settings_write;
 use powerz_protocol::frame::{self, Attribute, DataHeader, SectionHeader};
 
 use powerz_protocol::transport::guard::check_settings_write;
@@ -106,15 +106,6 @@ pub(crate) const SETTINGS_206: [u8; SETTINGS_LEN] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0xE9, 0x3D, 0x2E, 0x39,
 ];
-
-/// Replace `width` bits at `shift` of the u32 at `off` in `block` with
-/// `value`.
-fn set_bits(block: &mut [u8; SETTINGS_LEN], off: usize, shift: u32, width: u32, value: u32) {
-    let mask = ((1u32 << width) - 1) << shift;
-    let mut w = u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]]);
-    w = (w & !mask) | ((value << shift) & mask);
-    block[off..off + 4].copy_from_slice(&w.to_le_bytes());
-}
 
 /// Encode the 180-byte SETTINGS payload from `block` with
 /// `rate_code` in bits 2..3 of the block B flags word (0x60), then refresh
@@ -368,7 +359,9 @@ impl SimDevice {
     /// 0x0A on CDC: a settings write laid out as `check_settings_write` demands
     /// (only the documented keys, in order, values in range) is ACCEPTed
     /// and applied to the SETTINGS block (kept as is under the
-    /// `ignore-settings-write` fault); key 0x14 sets the rate code. Every
+    /// `ignore-settings-write` fault) the way the meter stores it
+    /// (`apply_settings_write`: key 0x15 sets the rate code, 0x14 the bits 0..1
+    /// of 0x60 `[device]`). Every
     /// other 0x0A frame, such as one carrying the factory-reset key, is
     /// REJECTed and changes nothing.
     fn settings_write(&mut self, req: &[u8], id: u8) -> Vec<u8> {
@@ -378,26 +371,17 @@ impl SimDevice {
         if self.faults.ignore_settings_write {
             return self.control(msg::ACCEPT, id);
         }
-        let mut rate = None;
         let mut stored = self.stored();
-        for (i, &key) in SETTINGS_WRITE_KEYS.iter().enumerate() {
-            let at = 8 + 8 * i;
-            let v = u32::from_le_bytes([req[at], req[at + 1], req[at + 2], req[at + 3]]);
-            let b = &mut stored.settings;
-            match key {
-                0x01 => set_bits(b, 0x00, 0, 1, v),
-                0x03 => set_bits(b, 0x00, 3, 7, v),
-                0x04 => set_bits(b, 0x00, 10, 2, v),
-                0x06 => set_bits(b, 0x00, 14, 2, v),
-                0x07 => set_bits(b, 0x00, 16, 3, v),
-                0x14 => {
-                    stored.rate_code = (v & 0b11) as u8;
-                    rate = Some(stored.rate_code);
-                }
-                0x15 => set_bits(b, 0x60, 0, 2, v),
-                _ => {}
-            }
-        }
+        let old_rate = stored.rate_code;
+        apply_settings_write(&mut stored.settings, req);
+        let w60 = u32::from_le_bytes([
+            stored.settings[0x60],
+            stored.settings[0x61],
+            stored.settings[0x62],
+            stored.settings[0x63],
+        ]);
+        stored.rate_code = ((w60 >> 2) & 0b11) as u8;
+        let rate = (stored.rate_code != old_rate).then_some(stored.rate_code);
         drop(stored);
         if let Some(code) = rate
             && !self.streaming

@@ -48,6 +48,8 @@ Build order: JKWT3V, JKWT3W, then JKWT3X (each stage can run once its feature is
 - Settings write on the desktop with a CDC-only meter session: the write uses that session's port; with a bulk session it opens the CDC port beside it. If another program holds the serial port, the error should say so in plain words.
 - Records: work out which charge/energy total the meter's record screen shows. It shows either the last sample or the stored list entry, and on 2026-10-29 the same recording (A03.d) showed the last sample first and the list entry an hour later (docs/protocol.md, Offline records, open question). Until then, real-meter checks compare the screen by name, points and duration only.
 - Settings write: the read-back compares the 11 decoded fields only; consider also comparing the undecoded bytes of the 180-byte block.
+- Settings: what bits 0..1 of 0x60 (key 0x14) really mean. They read 90° while the screen was upright with auto-rotate on; find the meaning on the meter before offering rotation as an editable field in the UI.
+- Settings: the meter's screen redraws a new brightness or theme only after that menu item is opened and left; say so in the CLI and desktop success messages.
 
 **Device safety:** writes only through the two new guarded paths. Forbidden: any other SET_DATA attribute, 0x4A, calibration, OTP, RESET 04, JUMP 08/09, 0x42, memory writes, triggering above 5 V. No write on the real meter before the user approves that stage.
 

@@ -409,8 +409,8 @@ Message layout (all words little-endian):
 | 0x04 | dim | 0..3 (off, 15 s, 30 s, 60 s) | [static] |
 | 0x06 | startup logo time | 0..3 (off, 1 s, 3 s, 5 s); sent at its read value, not editable here | [static] |
 | 0x07 | theme | 0..6 | [static] |
-| 0x14 | rate | 0..3 (2, 10, 50, 1000 SPS) | [static] |
-| 0x15 | rotation | 0..3 (0°, 90°, 180°, 270°) | [static] |
+| 0x14 | bits 0..1 of 0x60 (read as rotation) | 0..3 (0°, 90°, 180°, 270°) | [static] key; [device] bits; meaning of the codes [inferred] |
+| 0x15 | rate, bits 2..3 of 0x60 | 0..3 (2, 10, 50, 1000 SPS) | [static] key; [device] bits |
 | 0x7FFF | save marker | always 0x1234 | [static]; meaning [inferred] |
 
 - Example, id 1, Chinese, brightness 50, everything else 0:
@@ -423,6 +423,18 @@ Message layout (all words little-endian):
   records). The guard refuses it, and so any key not in the table. [static]
 - Whether the firmware accepts a subset of keys, or needs the marker, is
   unknown. [inferred]
+- [device] Keys 0x14 and 0x15 go the other way round from the vendor
+  dialog. The dialog loads one combo from bits 0..1 of 0x60 and writes it
+  as key 0x15, and loads another from bits 2..3 and writes it as 0x14
+  [static]. But on the KM003C (FW 2.0.6, 2026-10-29) a write of 0x14 = 2,
+  0x15 = 1 over a block with bits 0..1 = 1 and bits 2..3 = 2 read back as
+  bits 0..1 = 2 and bits 2..3 = 1: rate 10 SPS and "rotation" 180°. So the
+  meter stores key 0x14 in bits 0..1 and key 0x15 in bits 2..3 (the rate),
+  and we write them that way. Keys 0x01, 0x03, 0x04, 0x06 and 0x07 stored
+  what we sent in the bits the dialog reads them from. [device]
+- [device] The meter stores the write at once (the next SETTINGS read shows
+  it), but the screen shows a new brightness or theme only after that item
+  of the meter's own menu is opened and left again.
 
 ## Memory read and device info
 

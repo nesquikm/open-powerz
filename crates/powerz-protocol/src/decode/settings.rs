@@ -455,6 +455,101 @@ pub const SETTINGS_WRITE_KEYS: [u16; 8] = [0x01, 0x03, 0x04, 0x06, 0x07, 0x14, 0
 /// Message type of the settings write. \[static\]
 pub const SETTINGS_WRITE_TYPE: u8 = 0x0A;
 
+/// Where the value of one settings-write key lives in the SETTINGS block:
+/// `width` bits at `shift` of the little-endian u32 at `offset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyField {
+    /// Settings-write key.
+    pub key: u16,
+    /// Byte offset of the u32 in the 180-byte block.
+    pub offset: usize,
+    /// Lowest bit of the field.
+    pub shift: u32,
+    /// Width in bits.
+    pub width: u32,
+}
+
+/// Every settings-write key but the save marker, with the block bits the
+/// meter stores its value in. Keys 0x01..0x07 round-trip as the vendor
+/// dialog reads and writes them \[static\] \[device\]. Keys 0x14 and 0x15 are
+/// the other way round from the vendor dialog, which pairs 0x14 with bits
+/// 2..3 of 0x60 and 0x15 with bits 0..1 \[static\]: on the KM003C (FW 2.0.6,
+/// 2026-10-29) a write of 0x14 = 2, 0x15 = 1 read back as bits 0..1 = 2 and
+/// rate bits 2..3 = 1 \[device\].
+pub const SETTINGS_KEY_FIELDS: [KeyField; 7] = [
+    KeyField {
+        key: 0x01,
+        offset: 0x00,
+        shift: 0,
+        width: 1,
+    },
+    KeyField {
+        key: 0x03,
+        offset: 0x00,
+        shift: 3,
+        width: 7,
+    },
+    KeyField {
+        key: 0x04,
+        offset: 0x00,
+        shift: 10,
+        width: 2,
+    },
+    KeyField {
+        key: 0x06,
+        offset: 0x00,
+        shift: 14,
+        width: 2,
+    },
+    KeyField {
+        key: 0x07,
+        offset: 0x00,
+        shift: 16,
+        width: 3,
+    },
+    KeyField {
+        key: 0x14,
+        offset: 0x60,
+        shift: 0,
+        width: 2,
+    },
+    KeyField {
+        key: 0x15,
+        offset: 0x60,
+        shift: 2,
+        width: 2,
+    },
+];
+
+/// Store the values of a settings write in `block` (a 180-byte SETTINGS
+/// payload) the way the meter does, per [`SETTINGS_KEY_FIELDS`]; the CRCs are
+/// left as they were. A frame that is not a full write in the documented
+/// layout (every key of [`SETTINGS_WRITE_KEYS`] in order), or a block too
+/// short for a field, changes nothing and gives `false`.
+pub fn apply_settings_write(block: &mut [u8], frame: &[u8]) -> bool {
+    let n = SETTINGS_WRITE_KEYS.len();
+    if frame.len() != 4 + 8 * n || frame[0] & 0x7F != SETTINGS_WRITE_TYPE || block.len() < LEN {
+        return false;
+    }
+    let entry = |i: usize| {
+        let at = 4 + 8 * i;
+        let word = u32_at(frame, at);
+        (word, u32_at(frame, at + 4))
+    };
+    if (0..n).any(|i| Some(entry(i).0) != settings_entry_word(i)) {
+        return false;
+    }
+    for (i, &key) in SETTINGS_WRITE_KEYS.iter().enumerate() {
+        let Some(f) = SETTINGS_KEY_FIELDS.iter().find(|f| f.key == key) else {
+            continue;
+        };
+        let mask = ((1u32 << f.width) - 1) << f.shift;
+        let w = (u32_at(block, f.offset) & !mask) | ((entry(i).1 << f.shift) & mask);
+        block[f.offset..f.offset + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    true
+}
+
 /// A settings field the app may change. Auto-rotate has no recovered key,
 /// the startup logo is sent only at its read value, and calibration is
 /// never written. \[static\]
@@ -468,9 +563,10 @@ pub enum WritableField {
     DimTimeout,
     /// Key 0x07: 0..6.
     Theme,
-    /// Key 0x14: rate code 0..3.
+    /// Key 0x15: rate code 0..3 \[device\].
     SampleRate,
-    /// Key 0x15: 0..3 (0°, 90°, 180°, 270°).
+    /// Key 0x14: 0..3 (0°, 90°, 180°, 270°) \[device\] (key); the meaning
+    /// of the codes stays \[inferred\].
     Rotation,
 }
 
@@ -515,8 +611,8 @@ impl WritableField {
             WritableField::Brightness => 0x03,
             WritableField::DimTimeout => 0x04,
             WritableField::Theme => 0x07,
-            WritableField::SampleRate => 0x14,
-            WritableField::Rotation => 0x15,
+            WritableField::SampleRate => 0x15,
+            WritableField::Rotation => 0x14,
         }
     }
 
