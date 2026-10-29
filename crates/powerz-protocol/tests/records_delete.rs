@@ -382,3 +382,70 @@ fn a_delete_leaving_21_entries_is_sent() {
     assert_eq!(after.len(), 21);
     assert_eq!(set_data_frames(&s), vec![expected_frame(4, &rest)]);
 }
+
+// ---- AC-JKWT3V.1: the reply the real meter sends ----
+
+/// The KM003C answered the record-table write of request id 7 with
+/// `07 07 00 00` (FINISHED, same id) and had deleted the record
+/// `[device]` (JKWT3X run 2026-10-29).
+const REAL_FINISHED_REPLY: [u8; 4] = [0x07, 0x07, 0x00, 0x00];
+
+#[test]
+fn a_finished_reply_with_the_request_id_is_success_as_on_the_real_meter() {
+    let listed = [a(), b(), c()];
+    // Lists at ids 3..=6, so the write goes out with id 7 like on the meter.
+    let lists: Vec<Step> = (4..=6)
+        .map(|id| Step::transact(get_data(id, 0x200), list_reply(id, &listed)))
+        .collect();
+    let mut s = session(
+        &listed,
+        [
+            lists,
+            vec![
+                Step::transact(expected_frame(7, &[a(), b()]), REAL_FINISHED_REPLY),
+                Step::transact(get_data(8, 0x200), list_reply(8, &[a(), b()])),
+            ],
+        ]
+        .concat(),
+    );
+    let mut list = s.list_records().unwrap();
+    for _ in 4..=6 {
+        list = s.list_records().unwrap();
+    }
+    let after = s.delete_records(&list, &[2]).expect("FINISHED is success");
+    assert_eq!(after, vec![list[0].clone(), list[1].clone()]);
+    assert_eq!(set_data_frames(&s), vec![expected_frame(7, &[a(), b()])]);
+    assert_eq!(s.transport().inner().inner.remaining(), 0);
+}
+
+#[test]
+fn a_rejected_delete_is_an_error_and_is_not_retried() {
+    let mut s = session(
+        &[a(), b(), c()],
+        vec![Step::transact(expected_frame(4, &[a(), c()]), reject(4))],
+    );
+    let list = s.list_records().unwrap();
+    let err = s.delete_records(&list, &[1]).expect_err("REJECT");
+    assert!(matches!(err, Error::Rejected { .. }), "got {err:?}");
+    assert_eq!(set_data_frames(&s).len(), 1, "the write is not retried");
+    assert_eq!(written(&s).len(), 3, "no re-read after a REJECT");
+}
+
+#[test]
+fn any_other_reply_to_the_delete_is_an_error() {
+    // DISCONNECT and a PUT_DATA with the request id are neither ACCEPT nor
+    // FINISHED.
+    for reply in [vec![0x03, 4, 0, 0], vec![0x41, 4, 0, 0]] {
+        let mut s = session(
+            &[a(), b(), c()],
+            vec![Step::transact(
+                expected_frame(4, &[a(), c()]),
+                reply.clone(),
+            )],
+        );
+        let list = s.list_records().unwrap();
+        let err = s.delete_records(&list, &[1]).expect_err("not a success");
+        assert!(matches!(err, Error::Protocol(_)), "{reply:02x?}: {err:?}");
+        assert_eq!(written(&s).len(), 3, "{reply:02x?}: no re-read");
+    }
+}

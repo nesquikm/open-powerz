@@ -282,8 +282,9 @@ impl FaultPlan {
         self
     }
 
-    /// A record-table write (SET_DATA 0x28) is ACCEPTed but the meter keeps
-    /// its old table, so the re-read after a delete does not match.
+    /// A record-table write (SET_DATA 0x28) is answered with FINISHED but the
+    /// meter keeps its old table, so the re-read after a delete does not
+    /// match.
     pub fn ignore_table_write(mut self) -> FaultPlan {
         self.ignore_table_write = true;
         self

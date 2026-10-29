@@ -1,11 +1,12 @@
 //! AC-JKWT3V.6: the demo meter keeps a record table that a delete changes.
 //! A SET_DATA (0x48) with attribute 0x28 replaces the table with the
-//! entries it carries (the data minus the four zero bytes); every other
-//! SET_DATA attribute is REJECTed and changes nothing. Two faults stand in
-//! for the failure paths: `reject-record-reads` REJECTs every memory read
-//! inside the record area (the backup download fails; the UID and info
-//! reads still work), and `ignore-table-write` ACCEPTs the write but keeps
-//! the old table (the re-read does not match).
+//! entries it carries (the data minus the four zero bytes) and answers
+//! FINISHED, as the real meter does; every other SET_DATA attribute is
+//! REJECTed and changes nothing. Two faults stand in for the failure paths:
+//! `reject-record-reads` REJECTs every memory read inside the record area
+//! (the backup download fails; the UID and info reads still work), and
+//! `ignore-table-write` answers the write with FINISHED but keeps the old
+//! table (the re-read does not match).
 
 mod common;
 
@@ -108,14 +109,15 @@ fn the_delete_works_through_the_shared_guard() {
 }
 
 #[test]
-fn a_raw_table_write_replaces_the_table_and_is_accepted() {
+fn a_raw_table_write_replaces_the_table_and_is_finished() {
     let (mut s, list) = listed_with(FaultPlan::new());
     let keep = [list[2].clone(), list[0].clone()];
     let dev = s.transport_mut();
     let reply = dev
         .transact(&set_data(0x30, 0x28, &table_of(&keep)), T)
         .unwrap();
-    assert_eq!(&reply[..2], &[0x05, 0x30], "ACCEPT: {reply:02x?}");
+    // FINISHED with the request id, as the KM003C answers [device].
+    assert_eq!(&reply[..2], &[0x07, 0x30], "FINISHED: {reply:02x?}");
     let reply = dev.transact(&get_data(0x31, RECORD_LIST), T).unwrap();
     let secs = sections(&reply);
     assert_eq!(secs.len(), 1);
@@ -152,7 +154,7 @@ fn reject_record_reads_fails_the_download_but_not_the_list_or_auth() {
 }
 
 #[test]
-fn ignore_table_write_accepts_the_write_but_keeps_the_table() {
+fn ignore_table_write_finishes_the_write_but_keeps_the_table() {
     let (mut s, list) = listed_with(FaultPlan::new().ignore_table_write());
     let err = s.delete_records(&list, &[0]).expect_err("mismatch");
     assert!(

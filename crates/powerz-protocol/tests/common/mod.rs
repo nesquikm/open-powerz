@@ -183,6 +183,10 @@ pub fn reject(id: u8) -> Vec<u8> {
     vec![0x06, id, 0, 0]
 }
 
+pub fn finished(id: u8) -> Vec<u8> {
+    vec![0x07, id, 0, 0]
+}
+
 /// Deterministic [`Clock`]: time moves only when the session sleeps; random
 /// values come from a counter. Clones share state.
 #[derive(Debug, Clone)]

@@ -549,3 +549,104 @@ fn ac4_a_rejected_write_is_an_error_and_is_not_retried() {
     assert_eq!(settings_writes(&s).len(), 1);
     assert_eq!(written(&s).len(), 2, "no re-read and no retry");
 }
+
+// ---- AC-JKWT3W.2 / .4: replies the meter may send to 0x0A ----
+//
+// The vendor app never reads a reply to the settings write `[static]`, and
+// the meter answered the record-table write with FINISHED `[device]`. So
+// ACCEPT and FINISHED both count, and no reply at all is followed by one
+// read-back, which alone decides.
+
+#[test]
+fn ac2_a_finished_reply_is_success() {
+    let after = block(&[("brightness", 80)]);
+    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let mut s = session(
+        &captured(),
+        vec![
+            Step::transact(frame.clone(), finished(2)),
+            Step::transact(get_data(3, 0x008), settings_reply(3, &after)),
+        ],
+    );
+    let m = s
+        .write_settings(&[(WritableField::Brightness, 80)])
+        .expect("FINISHED is success");
+    assert_eq!(m, decode(&after));
+    assert_eq!(s.transport().inner().remaining(), 0);
+}
+
+#[test]
+fn ac2_no_reply_is_followed_by_one_read_back_that_decides() {
+    let after = block(&[("brightness", 80)]);
+    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let mut s = session(
+        &captured(),
+        vec![
+            Step::transact_err(frame.clone(), powerz_protocol::transport::Error::Timeout),
+            Step::transact(get_data(3, 0x008), settings_reply(3, &after)),
+        ],
+    );
+    let m = s
+        .write_settings(&[(WritableField::Brightness, 80)])
+        .expect("a matching read-back after silence is success");
+    assert_eq!(m, decode(&after));
+    assert_eq!(
+        written(&s),
+        &[get_data(1, 0x008), frame, get_data(3, 0x008)],
+        "one write, one read-back, nothing retried"
+    );
+    assert_eq!(s.transport().inner().remaining(), 0);
+}
+
+#[test]
+fn ac4_no_reply_and_a_read_back_without_the_change_is_a_mismatch() {
+    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let mut s = session(
+        &captured(),
+        vec![
+            Step::transact_err(frame, powerz_protocol::transport::Error::Timeout),
+            Step::transact(get_data(3, 0x008), settings_reply(3, &captured())),
+        ],
+    );
+    let err = s
+        .write_settings(&[(WritableField::Brightness, 80)])
+        .expect_err("not applied");
+    assert!(err.to_string().contains("brightness"), "{err}");
+    assert_eq!(settings_writes(&s).len(), 1, "the write is not retried");
+    assert_eq!(written(&s).len(), 3);
+}
+
+#[test]
+fn ac2_a_late_reply_to_the_write_is_skipped_by_the_read_back() {
+    // Silence within the timeout, then the FINISHED arrives in place of the
+    // read-back's reply.
+    let after = block(&[("brightness", 80)]);
+    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let mut s = session(
+        &captured(),
+        vec![
+            Step::transact_err(frame, powerz_protocol::transport::Error::Timeout),
+            Step::transact(get_data(3, 0x008), finished(2)),
+            Step::read(settings_reply(3, &after)),
+        ],
+    );
+    let m = s
+        .write_settings(&[(WritableField::Brightness, 80)])
+        .expect("stale reply skipped");
+    assert_eq!(m, decode(&after));
+    assert_eq!(s.transport().inner().remaining(), 0);
+}
+
+#[test]
+fn ac4_any_other_reply_to_the_write_is_an_error_without_a_read_back() {
+    for reply in [vec![0x03, 2, 0, 0], vec![0x41, 2, 0, 0]] {
+        let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+        let mut s = session(&captured(), vec![Step::transact(frame, reply.clone())]);
+        assert!(
+            s.write_settings(&[(WritableField::Brightness, 80)])
+                .is_err(),
+            "{reply:02x?}"
+        );
+        assert_eq!(written(&s).len(), 2, "{reply:02x?}: no re-read");
+    }
+}

@@ -19,6 +19,7 @@ pub(crate) mod msg {
     pub const DISCONNECT: u8 = 0x03;
     pub const ACCEPT: u8 = 0x05;
     pub const REJECT: u8 = 0x06;
+    pub const FINISHED: u8 = 0x07;
     pub const GET_DATA: u8 = 0x0C;
     pub const START_QUEUE: u8 = 0x0E;
     pub const STOP_QUEUE: u8 = 0x0F;
@@ -345,7 +346,8 @@ impl SimDevice {
 
     /// 0x48: only the record-table write (attribute 0x28) is taken; it
     /// replaces the table (kept as is under the `ignore-table-write`
-    /// fault) and is ACCEPTed. Every other SET_DATA is REJECTed and changes
+    /// fault) and is answered with FINISHED, as the KM003C does `[device]`.
+    /// Every other SET_DATA is REJECTed and changes
     /// nothing.
     fn set_data(&mut self, req: &[u8], id: u8) -> Vec<u8> {
         if !self.link_open() {
@@ -357,7 +359,7 @@ impl SimDevice {
         if !self.faults.ignore_table_write {
             self.record_table = table;
         }
-        self.control(msg::ACCEPT, id)
+        self.control(msg::FINISHED, id)
     }
 
     /// 0x0A: a settings write laid out as `check_settings_write` demands

@@ -20,7 +20,10 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// values just read, then read SETTINGS again. \[static\]
     ///
     /// An out-of-range value is [`Error::SettingsWrite`], sent after the
-    /// first read only. A REJECT is an error and nothing is retried. A
+    /// first read only. An ACCEPT or a FINISHED counts as sent; so does no
+    /// reply at all, since the vendor app never reads one \[static\]: then
+    /// the read-back alone decides. A REJECT or any other reply is an error,
+    /// and nothing is retried. A
     /// re-read where a changed field lacks its new value, or any other field
     /// moved, is [`Error::SettingsMismatch`] naming that field. Returns the
     /// settings as read again.
@@ -31,11 +34,19 @@ impl<T: Transport, C: Clock> Session<T, C> {
         let before = self.read_meter_settings()?;
         let request = settings_write_request(self.counter.next(), &before, changes)?;
         let timeout = transport::default_timeout(&request);
-        let first = self.transport.transact_settings(&request, timeout)?;
-        let reply = self.reread_until_id(first, request[1], timeout)?;
-        match frame::classify_reply(&reply)? {
-            Reply::Accept(_) => {}
-            other => return Err(unexpected_reply(&request, "settings write", other)),
+        let reply = self
+            .transport
+            .transact_settings(&request, timeout)
+            .map_err(Error::from)
+            .and_then(|first| self.reread_until_id(first, request[1], timeout));
+        match reply {
+            Ok(reply) => match frame::classify_reply(&reply)? {
+                Reply::Accept(_) | Reply::Finished(_) => {}
+                other => return Err(unexpected_reply(&request, "settings write", other)),
+            },
+            // No reply: the read-back below decides.
+            Err(Error::Transport(transport::Error::Timeout)) => {}
+            Err(e) => return Err(e),
         }
         let after = self.read_meter_settings()?;
         verify(&before, &after, changes)?;

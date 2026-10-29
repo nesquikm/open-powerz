@@ -66,6 +66,10 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// one SET_DATA (attribute 0x28) carrying the other entries, unchanged
     /// and in order, then the list is read again. \[static\]
     ///
+    /// The write succeeds on an ACCEPT or a FINISHED with the request id
+    /// (the KM003C sends FINISHED \[device\]); a REJECT is
+    /// [`Error::Rejected`] and any other reply [`Error::Protocol`].
+    ///
     /// A position outside `list` fails with [`Error::Protocol`] and a table
     /// longer than [`RECORD_TABLE_MAX_LEN`] with [`Error::RecordTableTooLong`],
     /// both before anything is sent. A re-read that differs from the
@@ -98,7 +102,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
         let first = self.transport.transact_record_table(&request, timeout)?;
         let reply = self.reread_until_id(first, request[1], timeout)?;
         match frame::classify_reply(&reply)? {
-            Reply::Accept(_) => {}
+            // The KM003C answers FINISHED with the request id \[device\].
+            Reply::Accept(_) | Reply::Finished(_) => {}
             other => return Err(unexpected_reply(&request, "SET_DATA", other)),
         }
         let after = self.list_records()?;

@@ -143,7 +143,7 @@ Control types (main header type below 0x40):
 | 0x04 | RESET | none | not used by the vendor app; never sent by us | [doc] [inferred] |
 | 0x05 | ACCEPT | reply only | | [doc] [static] [device] |
 | 0x06 | REJECT | reply only | | [doc] [static] [device] |
-| 0x07 | FINISHED | reply only | acknowledges flash-write chunks | [doc] [static] |
+| 0x07 | FINISHED | reply only | acknowledges flash-write chunks; also the KM003C's answer to the record-table write (SET_DATA 0x28) | [doc] [static]; record table [device] (2026-10-29) |
 | 0x08 | JUMP_APROM | 0 | none; leaves DFU mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
 | 0x09 | JUMP_DFU | 0 | none; enters firmware-update mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
 | 0x0A | settings write (named GET_STATUS in the API doc) | key / value entries, see Settings write | unknown; the vendor settings dialog sends it over CDC and does not wait for a reply; our app sends it only from the settings write path and checks the result by reading SETTINGS again | [doc] [static] |
@@ -375,8 +375,12 @@ Message layout (all words little-endian):
   ones, and ends with key 0x7FFF = 0x1234. That last entry is read as a
   "save" marker [inferred]. Our writer sends the same full set: changed keys
   at their new values, the others at the values just read. [static]
-- The vendor app does not wait for or check a reply. We read SETTINGS again
-  afterwards and compare every field. [static]
+- The vendor app does not wait for or check a reply. [static] What the
+  meter answers is unknown. We take ACCEPT or FINISHED (FINISHED is what it
+  sends for the record-table write [device]), and also no reply at all.
+  REJECT or any other reply is an error, with no read-back. After the
+  other three we read SETTINGS again and compare every field; that read
+  alone decides when no reply came. [inferred]
 
 | key | field | values | tag |
 |---|---|---|---|
@@ -571,7 +575,11 @@ The vendor app deletes recordings by rewriting the record table. [static]
   firmware image is encrypted, so static analysis cannot say). Our library
   refuses such a delete before sending anything. [static] [inferred]
 - The vendor app checks only that the transfer went through, then reads the
-  list again. [static] Our design (not a vendor fact): back up the affected
+  list again. [static] The KM003C answers with FINISHED and the request id
+  (`07 id 00 00`), not ACCEPT, and the record is gone from the list and the
+  screen (checked 2026-10-29). [device] We take ACCEPT or FINISHED as
+  success; REJECT or any other reply is an error.
+- Our design (not a vendor fact): back up the affected
   recordings to CSV first, refuse the delete if the backup fails, read the
   list again afterwards and compare it with the expected table.
 

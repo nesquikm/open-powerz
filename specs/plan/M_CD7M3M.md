@@ -44,7 +44,7 @@ Build order: JKWT3V, JKWT3W, then JKWT3X (each stage can run once its feature is
 - Delete: refuse the 22+ remaining-entries case before the CSV backup is written, not after (CLI and desktop), with a test at each level.
 - Delete: make the re-read mismatch message say when the count matches but the entries differ.
 - Desktop: a delete-all on an empty list sends an empty-table write (the UI hides the button); return early like the CLI.
-- Settings write: the vendor app does not wait for a reply to 0x0A and the reply is undocumented; we require ACCEPT. If the real meter stays silent, accept a timeout followed by a matching re-read (decide from the JKWT3X run).
+- Settings write: we now take ACCEPT, FINISHED or no reply to 0x0A, then let the read-back decide (the meter answered the record-table write with FINISHED on 2026-10-29). Once the JKWT3X settings run shows which reply the meter sends, make the simulator answer the same way and tag it `[device]` in docs/protocol.md.
 - Settings write: the read-back compares the 11 decoded fields only; consider also comparing the undecoded bytes of the 180-byte block.
 
 **Device safety:** writes only through the two new guarded paths. Forbidden: any other SET_DATA attribute, 0x4A, calibration, OTP, RESET 04, JUMP 08/09, 0x42, memory writes, triggering above 5 V. No write on the real meter before the user approves that stage.
