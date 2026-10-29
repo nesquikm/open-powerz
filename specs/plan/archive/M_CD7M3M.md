@@ -29,9 +29,9 @@ shipped_in: v0.8.0
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [JKWT3V](../frs/JKWT3V.md) | Delete offline recordings | n/a |
-| [JKWT3W](../frs/JKWT3W.md) | Change meter settings | n/a |
-| [JKWT3X](../frs/JKWT3X.md) | Real-meter checks for meter writes | n/a |
+| [JKWT3V](../frs/archive/JKWT3V.md) | Delete offline recordings | n/a |
+| [JKWT3W](../frs/archive/JKWT3W.md) | Change meter settings | n/a |
+| [JKWT3X](../frs/archive/JKWT3X.md) | Real-meter checks for meter writes | n/a |
 
 Build order: JKWT3V, JKWT3W, then JKWT3X (each stage can run once its feature is done).
 

@@ -84,7 +84,8 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
   `history_range`, `history_gaps`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
   `stop_recording`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter),
   `running_meters` (the running sessions' device ids, for a reload), `meter_settings`,
-  `records_list` and `record_download` (read-only meter data), and
+  `records_list` and `record_download` (read-only meter data), `records_delete` and
+  `meter_settings_write` (the two meter writes, each confirmed in the UI first), and
   for the PD analyzer `pd_start`, `pd_stop`, `pd_details` (a record's raw bytes and field tree,
   on demand, from the live capture or, with `opened`, from an opened file), `pd_save` / `pd_open`
   (`.pdcap` files) and `pd_import` (read-only vendor PD log) and `pd_clear` (answers the next record index; indices never restart, so rows sent
@@ -146,7 +147,9 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
   fact stays `[inferred]` until a device test confirms it; KM002C is untested.
 - **Device safety:** a wrong command can hang, reboot or brick the meter. A single guard in the
   transport layer refuses the never-send set before any byte is written, and HID only carries
-  the ADC snapshot (GET_DATA mask 0x001).
+  the ADC snapshot (GET_DATA mask 0x001). The only writes past it are two narrow paths, each
+  checked frame by frame: the record table (SET_DATA 0x48, attribute 0x28) and the settings
+  write (type 0x0A, over CDC only).
 - **WebKitGTK** on Linux is slower; chart decimation must happen in Rust.
 - **Tauri build order:** `apps/desktop/dist` must exist before the Tauri crate compiles.
 

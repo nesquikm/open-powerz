@@ -1070,7 +1070,7 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
 
 Our library refuses to send these requests, so a bug or a CLI typo cannot
 brick, decalibrate or reboot a device. Three checks run before any byte
-reaches the meter: the transport-layer guard refuses the six frame types, the
+reaches the meter: the transport-layer guard refuses the seven frame types, the
 session refuses memory reads outside the four known blocks and the offline
 record window, and the HID transport sends only the ADC snapshot. [device] [static] The one exception
 is the firmware flash path, which may send JUMP_DFU, JUMP_APROM and the 0x42
