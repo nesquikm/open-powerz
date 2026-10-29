@@ -26,6 +26,7 @@ import type {
   OfflineRecordEntry,
   OfflineRecordSample,
   RecordDeleteResult,
+  SettingChanges,
   RecordList,
   MinMaxAvg,
   PdDetails,
@@ -371,12 +372,24 @@ export function recordsFaultFromUrl(search: string | undefined): RecordsFault | 
   return raw === "backup" || raw === "mismatch" ? raw : null;
 }
 
+/** A scripted settings-write failure (FR JKWT3W): `mismatch` keeps the old values so
+ * the re-read does not match. */
+export type SettingsFault = "mismatch";
+
+/** `?settingsfault=mismatch` in the page URL scripts a settings-write failure
+ * (FR JKWT3W); anything else is ignored. */
+export function settingsFaultFromUrl(search: string | undefined): SettingsFault | null {
+  return urlParam(search, "settingsfault") === "mismatch" ? "mismatch" : null;
+}
+
 /** Options of a {@link MockBackend}. */
 export interface MockOptions {
   /** PD records to seed when the capture first starts. */
   pdSynthetic?: number | null;
   /** A scripted record-delete failure (FR JKWT3V). */
   recordsFault?: RecordsFault | null;
+  /** A scripted settings-write failure (FR JKWT3W). */
+  settingsFault?: SettingsFault | null;
 }
 
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
@@ -785,6 +798,26 @@ const DEMO_METER_SETTINGS: readonly MeterSettingField[] = [
   { key: "offset_cal", label: "Offset calibration (raw)", value: "80", tag: "inferred" },
 ];
 
+/** How the demo meter shows each writable setting's codes (FR JKWT3W): a list
+ * indexed by code, or `null` for brightness (1..100, shown as a percentage). Kept
+ * here rather than imported from the panel so the mock stays free of UI modules. */
+const DEMO_WRITABLE_SETTINGS: Readonly<Record<string, readonly string[] | null>> = {
+  language: ["Chinese", "English"],
+  brightness: null,
+  dim_timeout: ["off", "15 s", "30 s", "60 s"],
+  theme: ["blue", "green", "pink", "orange", "yellow", "dark green", "cyan"],
+  rotation: ["0°", "90°", "180°", "270°"],
+  sample_rate: ["2 SPS", "10 SPS", "50 SPS", "1000 SPS"],
+};
+
+/** How the demo meter shows `code` for writable `key`, or null when it is out of range. */
+function demoSettingText(key: string, code: number): string | null {
+  if (!Object.hasOwn(DEMO_WRITABLE_SETTINGS, key) || !Number.isInteger(code)) return null;
+  const labels = DEMO_WRITABLE_SETTINGS[key];
+  if (labels) return labels[code] ?? null;
+  return code >= 1 && code <= 100 ? `${code}%` : null;
+}
+
 /** The demo meter's offline records (FR 1HHT00, AC .6): the simulator's three load
  * profiles, each sample's charge and energy summed like the meter does; PHONE_5V
  * stores negative totals like the real meter in one current direction. */
@@ -870,6 +903,10 @@ export class MockBackend {
   #watchers = new Set<(devices: DeviceListing[]) => void>();
   /** Settings reads so far (FR 1HHT01). */
   #meterSettingsReads = 0;
+  /** Settings writes sent so far (FR JKWT3W). */
+  #meterSettingsWrites = 0;
+  /** The demo meter's settings rows, which a write changes (FR JKWT3W). */
+  #meterSettings: MeterSettingField[] = DEMO_METER_SETTINGS.map((f) => ({ ...f }));
   /** Offline-record downloads so far (FR 1HHT00). */
   #recordDownloads = 0;
   /** The demo meter's record table, which a delete changes (FR JKWT3V). */
@@ -891,6 +928,7 @@ export class MockBackend {
     options: MockOptions = {
       pdSynthetic: pdSyntheticFromUrl(pageSearch()),
       recordsFault: recordsFaultFromUrl(pageSearch()),
+      settingsFault: settingsFaultFromUrl(pageSearch()),
     },
   ) {
     this.#mode = mode;
@@ -987,6 +1025,7 @@ export class MockBackend {
       pdClear: on(this.pdClear),
       pdSave: on(this.pdSave),
       meterSettings: on(this.meterSettings),
+      meterSettingsWrite: on(this.meterSettingsWrite),
       recordsList: on(this.recordsList),
       recordDownload: on(this.recordDownload),
       recordsDelete: on(this.recordsDelete),
@@ -1442,7 +1481,46 @@ export class MockBackend {
   async meterSettings(): Promise<MeterSettings> {
     this.#open();
     this.#meterSettingsReads += 1;
-    return { fields: DEMO_METER_SETTINGS.map((f) => ({ ...f })) };
+    return { fields: this.#meterSettings.map((f) => ({ ...f })) };
+  }
+
+  /** Writes `changes` to the demo meter like the backend (FR JKWT3W): unknown or
+   * read-only keys, values out of range and an empty change are refused before the
+   * write; with the `mismatch` fault the meter keeps its old values and the re-read
+   * names the first field that did not change. */
+  async meterSettingsWrite(changes: SettingChanges): Promise<MeterSettings> {
+    this.#open();
+    const entries = Object.entries(changes) as [string, number][];
+    if (entries.length === 0) throw usage("No setting was changed.");
+    const shown = new Map<string, string>();
+    for (const [key, code] of entries) {
+      if (!Object.hasOwn(DEMO_WRITABLE_SETTINGS, key)) {
+        throw usage(`The setting ${key} cannot be changed.`);
+      }
+      const text = demoSettingText(key, code);
+      if (text === null) throw usage(`${key} = ${code} is out of range.`);
+      shown.set(key, text);
+    }
+    this.#meterSettingsWrites += 1;
+    const next = this.#meterSettings.map((f) => ({ ...f, value: shown.get(f.key) ?? f.value }));
+    if (this.#options.settingsFault === "mismatch") {
+      const moved = next.find((f, i) => f.value !== this.#meterSettings[i]?.value);
+      if (moved) {
+        const old = this.#meterSettings.find((f) => f.key === moved.key)?.value ?? "?";
+        throw {
+          kind: "protocol",
+          message: `After the write the meter shows ${moved.key} ${old}, expected ${moved.value}.`,
+          hint: null,
+        } satisfies UiError;
+      }
+    }
+    this.#meterSettings = next;
+    return { fields: this.#meterSettings.map((f) => ({ ...f })) };
+  }
+
+  /** How many settings writes were sent (for the UI tests). */
+  meterSettingsWrites(): number {
+    return this.#meterSettingsWrites;
   }
 
   /** How many times the settings were read (for the UI tests). */

@@ -4,10 +4,13 @@ use std::time::Duration;
 
 use super::{Error, Transport};
 use crate::decode::records::ENTRY_LEN;
+use crate::decode::settings::{
+    SETTINGS_WRITE_KEYS, SETTINGS_WRITE_TYPE, settings_entry_word, settings_key_range,
+};
 
-/// Frame types never sent: RESET, JUMP_APROM, JUMP_DFU, firmware download,
-/// SET_DATA and memory / flash write.
-pub const FORBIDDEN_TYPES: [u8; 6] = [0x04, 0x08, 0x09, 0x42, 0x48, 0x4A];
+/// Frame types never sent on the shared path: RESET, JUMP_APROM, JUMP_DFU,
+/// the settings write, firmware download, SET_DATA and memory / flash write.
+pub const FORBIDDEN_TYPES: [u8; 7] = [0x04, 0x08, 0x09, 0x0A, 0x42, 0x48, 0x4A];
 
 /// Refuse `request` if its frame type (bits 0..6 of byte 0) is forbidden.
 pub fn check(request: &[u8]) -> Result<(), Error> {
@@ -55,6 +58,47 @@ pub fn check_record_table_write(request: &[u8]) -> Result<(), Error> {
     }
 }
 
+/// Accept `request` only if it is the settings write laid out as in
+/// `docs/protocol.md` "Settings write" \[static\]: main header
+/// `0x0A | id << 8 | n << 23` (extend bit clear, `n` entries), then exactly
+/// the keys of [`SETTINGS_WRITE_KEYS`] in order, each as the key word
+/// `0x01008000 | key` (`next` clear on the last entry only) and an i32 value
+/// within that key's range, the last being the save marker.
+///
+/// Every other frame, including the factory-reset key 0x08 and any
+/// calibration key, is refused with [`Error::Forbidden`]. The shared
+/// [`check`] still refuses every 0x0A; this rule applies only on the
+/// settings path ([`Transport::transact_settings`]).
+pub fn check_settings_write(request: &[u8]) -> Result<(), Error> {
+    let refuse = Error::Forbidden {
+        ty: crate::frame::frame_type(request).unwrap_or(SETTINGS_WRITE_TYPE),
+    };
+    let word = |at: usize| -> Option<u32> {
+        let b = request.get(at..at + 4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let n = SETTINGS_WRITE_KEYS.len();
+    let Some(main) = word(0) else {
+        return Err(refuse);
+    };
+    if main & 0x007F_00FF != u32::from(SETTINGS_WRITE_TYPE)
+        || (main >> 23) as usize != n
+        || request.len() != 4 + 8 * n
+    {
+        return Err(refuse);
+    }
+    for (i, &key) in SETTINGS_WRITE_KEYS.iter().enumerate() {
+        let (Some(k), Some(v)) = (word(4 + 8 * i), word(8 + 8 * i)) else {
+            return Err(refuse);
+        };
+        let in_range = settings_key_range(key).is_some_and(|r| r.contains(&(v as i32)));
+        if Some(k) != settings_entry_word(i) || !in_range {
+            return Err(refuse);
+        }
+    }
+    Ok(())
+}
+
 /// Wraps a transport and runs [`check`] before every write
 /// ([`check_record_table_write`] on the record-table path).
 #[derive(Debug)]
@@ -90,6 +134,13 @@ impl<T: Transport> Transport for GuardedTransport<T> {
     ) -> Result<Vec<u8>, Error> {
         check_record_table_write(request)?;
         self.inner.transact_record_table(request, timeout)
+    }
+
+    /// Runs [`check_settings_write`] instead of [`check`], then hands the
+    /// frame to the inner transport's settings path.
+    fn transact_settings(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        check_settings_write(request)?;
+        self.inner.transact_settings(request, timeout)
     }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
@@ -360,6 +411,268 @@ mod tests {
             g.transact_record_table(&bad, T),
             Err(Error::Forbidden { ty: 0x48 })
         );
+        assert_eq!(g.inner().inner().written(), &[f]);
+    }
+
+    // ---- AC-JKWT3W.3: the settings write (type 0x0A) is the only one allowed ----
+    //
+    // Layout from docs/protocol.md "Settings write": main header
+    // `0x0A | id << 8 | n << 23`, then n 8-byte entries in ascending key
+    // order (key word `0x01008000 | key`, `next` cleared on the last), every
+    // writable key once, ending with 0x7FFF = 0x1234.
+
+    /// The documented key set with in-range values.
+    fn good_entries() -> Vec<(u16, u32)> {
+        vec![
+            (0x01, 1),
+            (0x03, 50),
+            (0x04, 0),
+            (0x06, 0),
+            (0x07, 0),
+            (0x14, 2),
+            (0x15, 1),
+            (0x7FFF, 0x1234),
+        ]
+    }
+
+    /// A type-0x0A frame with `entries`, `next` set on all but the last.
+    fn settings_frame(id: u8, entries: &[(u16, u32)]) -> Vec<u8> {
+        let n = entries.len() as u32;
+        let mut f = (0x0Au32 | (u32::from(id) << 8) | (n << 23))
+            .to_le_bytes()
+            .to_vec();
+        for (i, &(key, value)) in entries.iter().enumerate() {
+            let next = if i + 1 < entries.len() { 1u32 << 15 } else { 0 };
+            f.extend((0x0100_0000u32 | next | u32::from(key)).to_le_bytes());
+            f.extend(value.to_le_bytes());
+        }
+        f
+    }
+
+    fn with_value(key: u16, value: u32) -> Vec<(u16, u32)> {
+        let mut e = good_entries();
+        e.iter_mut().find(|(k, _)| *k == key).unwrap().1 = value;
+        e
+    }
+
+    fn refused(f: &[u8]) -> bool {
+        matches!(check_settings_write(f), Err(Error::Forbidden { .. }))
+    }
+
+    #[test]
+    fn shared_check_refuses_every_settings_write() {
+        assert!(FORBIDDEN_TYPES.contains(&0x0A), "0x0A is forbidden");
+        assert_eq!(
+            check(&settings_frame(1, &good_entries())),
+            Err(Error::Forbidden { ty: 0x0A })
+        );
+        assert_eq!(
+            check(&[0x0A, 0x01, 0x00, 0x00]),
+            Err(Error::Forbidden { ty: 0x0A })
+        );
+    }
+
+    #[test]
+    fn settings_check_accepts_the_documented_layout() {
+        assert_eq!(
+            check_settings_write(&settings_frame(1, &good_entries())),
+            Ok(())
+        );
+        assert_eq!(settings_frame(1, &good_entries()).len(), 4 + 8 * 8);
+        // Every edge of every range.
+        for (key, lo, hi) in [
+            (0x01u16, 0u32, 1u32),
+            (0x03, 1, 100),
+            (0x04, 0, 3),
+            (0x06, 0, 3),
+            (0x07, 0, 6),
+            (0x14, 0, 3),
+            (0x15, 0, 3),
+        ] {
+            for v in [lo, hi] {
+                assert_eq!(
+                    check_settings_write(&settings_frame(9, &with_value(key, v))),
+                    Ok(()),
+                    "key {key:#x} = {v}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settings_check_refuses_values_out_of_range() {
+        for (key, bad) in [
+            (0x01u16, 2u32),
+            (0x03, 0),
+            (0x03, 101),
+            (0x03, 127),
+            (0x04, 4),
+            (0x06, 4),
+            (0x07, 7),
+            (0x14, 4),
+            (0x15, 4),
+            (0x15, u32::MAX),
+            (0x7FFF, 0),
+            (0x7FFF, 0x1235),
+        ] {
+            assert!(
+                refused(&settings_frame(1, &with_value(key, bad))),
+                "key {key:#x} = {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_check_refuses_the_factory_reset_key() {
+        // Key 0x08 = 1 erases settings and records.
+        let mut e = good_entries();
+        e.insert(5, (0x08, 1));
+        assert!(refused(&settings_frame(1, &e)));
+        let mut e = good_entries();
+        e[4] = (0x08, 1);
+        assert!(refused(&settings_frame(1, &e)));
+        assert!(refused(&settings_frame(1, &[(0x08, 1), (0x7FFF, 0x1234)])));
+    }
+
+    #[test]
+    fn settings_check_refuses_every_unknown_key() {
+        // Calibration, OTP or anything else: no key outside the table passes,
+        // neither in place of a known key nor added to the set.
+        let known = [0x01u16, 0x03, 0x04, 0x06, 0x07, 0x14, 0x15, 0x7FFF];
+        for key in (0u16..0x8000).filter(|k| !known.contains(k)) {
+            let mut replaced = good_entries();
+            replaced[6] = (key, 0);
+            assert!(
+                refused(&settings_frame(1, &replaced)),
+                "key {key:#x} replaced"
+            );
+            let mut added = good_entries();
+            added.insert(7, (key, 0));
+            assert!(refused(&settings_frame(1, &added)), "key {key:#x} added");
+        }
+    }
+
+    #[test]
+    fn settings_check_refuses_malformed_frames() {
+        let good = settings_frame(1, &good_entries());
+        let mut bad: Vec<(&str, Vec<u8>)> = Vec::new();
+        let mut missing = good_entries();
+        missing.remove(2);
+        bad.push(("a key missing", settings_frame(1, &missing)));
+        let mut dup = good_entries();
+        dup.insert(2, (0x03, 50));
+        bad.push(("a key twice", settings_frame(1, &dup)));
+        let mut swapped = good_entries();
+        swapped.swap(1, 2);
+        bad.push(("keys out of order", settings_frame(1, &swapped)));
+        let mut no_marker = good_entries();
+        no_marker.pop();
+        bad.push(("no save marker", settings_frame(1, &no_marker)));
+        // `next` set on the last entry.
+        let mut f = good.clone();
+        let last = f.len() - 8;
+        f[last + 1] |= 0x80;
+        bad.push(("next on the last entry", f));
+        // `next` cleared on a middle entry.
+        let mut f = good.clone();
+        f[4 + 8 + 1] &= 0x7F;
+        bad.push(("next cleared in the middle", f));
+        // Entry size field other than 4.
+        let mut f = good.clone();
+        f[4 + 3] = 0x02;
+        bad.push(("entry size 8", f));
+        // Main header entry count that does not match.
+        let mut f = good.clone();
+        let h = u32::from_le_bytes([f[0], f[1], f[2], f[3]]);
+        f[0..4].copy_from_slice(&((h & 0x007F_FFFF) | (7 << 23)).to_le_bytes());
+        bad.push(("count mismatch", f));
+        // Extend bit on the main header.
+        let mut f = good.clone();
+        f[0] |= 0x80;
+        bad.push(("extend bit", f));
+        bad.push(("truncated", good[..good.len() - 4].to_vec()));
+        let mut f = good.clone();
+        f.extend([0u8; 8]);
+        bad.push(("trailing bytes", f));
+        bad.push(("header only", good[..4].to_vec()));
+        bad.push(("empty", Vec::new()));
+        for (what, f) in bad {
+            assert!(refused(&f), "{what}: {f:02x?}");
+        }
+    }
+
+    #[test]
+    fn settings_check_refuses_other_frame_types() {
+        let mut set_data_cal = settings_frame(1, &good_entries());
+        set_data_cal[0] = 0x48;
+        for f in [
+            vec![0x0C, 0x01, 0x10, 0x00],
+            vec![0x02, 0x01, 0, 0],
+            set_data_cal,
+            set_data(1, 0x0A, &table(1)),
+        ] {
+            assert!(refused(&f), "{f:02x?}");
+        }
+    }
+
+    #[test]
+    fn guarded_transport_refuses_the_settings_write_on_the_shared_path() {
+        let mut g = GuardedTransport::new(MockTransport::new(vec![]));
+        let f = settings_frame(3, &good_entries());
+        assert_eq!(g.transact(&f, T), Err(Error::Forbidden { ty: 0x0A }));
+        assert!(g.inner().written().is_empty());
+    }
+
+    #[test]
+    fn guarded_transport_passes_the_settings_write_on_its_own_path() {
+        let f = settings_frame(3, &good_entries());
+        let accept = vec![0x05, 0x03, 0x00, 0x00];
+        let mut g = GuardedTransport::new(MockTransport::new(vec![Step::transact(
+            f.clone(),
+            accept.clone(),
+        )]));
+        assert_eq!(g.transact_settings(&f, T), Ok(accept));
+        assert_eq!(g.inner().written(), &[f]);
+    }
+
+    #[test]
+    fn guarded_transport_refuses_anything_else_on_the_settings_path() {
+        let mut g = GuardedTransport::new(MockTransport::new(vec![]));
+        let mut reset = good_entries();
+        reset.insert(5, (0x08, 1));
+        for f in [
+            settings_frame(3, &reset),
+            settings_frame(3, &with_value(0x03, 0)),
+            set_data(3, 0x28, &table(1)),
+            vec![0x0C, 0x01, 0x10, 0x00],
+        ] {
+            assert!(
+                matches!(g.transact_settings(&f, T), Err(Error::Forbidden { .. })),
+                "{f:02x?}"
+            );
+        }
+        assert!(g.inner().written().is_empty());
+        // The record-table path does not take a settings write either.
+        assert!(matches!(
+            g.transact_record_table(&settings_frame(3, &good_entries()), T),
+            Err(Error::Forbidden { .. })
+        ));
+        assert!(g.inner().written().is_empty());
+    }
+
+    #[test]
+    fn nested_guards_each_check_the_settings_path() {
+        let f = settings_frame(4, &good_entries());
+        let accept = vec![0x05, 0x04, 0x00, 0x00];
+        let mut g = GuardedTransport::new(GuardedTransport::new(MockTransport::new(vec![
+            Step::transact(f.clone(), accept.clone()),
+        ])));
+        assert_eq!(g.transact_settings(&f, T), Ok(accept));
+        let bad = settings_frame(5, &with_value(0x07, 9));
+        assert!(matches!(
+            g.transact_settings(&bad, T),
+            Err(Error::Forbidden { .. })
+        ));
         assert_eq!(g.inner().inner().written(), &[f]);
     }
 }

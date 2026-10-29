@@ -41,7 +41,7 @@ pub use read::read;
 pub use records::{
     DELETE_RISK, DeleteOptions, RecordSelection, records_delete, records_get, records_list,
 };
-pub use settings::{SettingsOutput, settings};
+pub use settings::{SETTINGS_RISK, SettingsOutput, settings, settings_set};
 pub use stream::{CdcStreamSummary, StreamOptions, StreamSummary, stream, stream_cdc};
 pub use trigger::{
     LegacyRequestOptions, PdRequestOptions, PdSettingsChange, trigger_legacy_list,

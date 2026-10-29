@@ -2119,7 +2119,7 @@ fn every_descriptor_the_engine_sends_starts_at_0x4000() {
 
 #[test]
 fn the_shared_guard_still_refuses_jumps_and_the_descriptor() {
-    assert_eq!(FORBIDDEN_TYPES, [0x04, 0x08, 0x09, 0x42, 0x48, 0x4A]);
+    assert_eq!(FORBIDDEN_TYPES, [0x04, 0x08, 0x09, 0x0A, 0x42, 0x48, 0x4A]);
     for ty in [0x08, 0x09, 0x42] {
         assert_eq!(
             guard::check(&[ty, 0x01, 0x00, 0x00]),

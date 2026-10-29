@@ -216,6 +216,8 @@ pub struct FaultPlan {
     reject_record_reads: bool,
     /// A record-table write is ACCEPTed but the old table is kept.
     ignore_table_write: bool,
+    /// A settings write is ACCEPTed but the old SETTINGS block is kept.
+    ignore_settings_write: bool,
 }
 
 impl FaultPlan {
@@ -287,8 +289,15 @@ impl FaultPlan {
         self
     }
 
+    /// A settings write (type 0x0A) is ACCEPTed but the meter keeps its old
+    /// SETTINGS block, so the re-read after the write does not match.
+    pub fn ignore_settings_write(mut self) -> FaultPlan {
+        self.ignore_settings_write = true;
+        self
+    }
+
     /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`,
-    /// `reject-record-reads`, `ignore-table-write`.
+    /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -311,11 +320,12 @@ impl FaultPlan {
                 ("echo-start", None) => plan.echo_start(),
                 ("reject-record-reads", None) => plan.reject_record_reads(),
                 ("ignore-table-write", None) => plan.ignore_table_write(),
+                ("ignore-settings-write", None) => plan.ignore_settings_write(),
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
                          disconnect@N, wrong-id@N, permission, corrupt-adcnew@N, echo-start, \
-                         reject-record-reads or ignore-table-write)"
+                         reject-record-reads, ignore-table-write or ignore-settings-write)"
                     ));
                 }
             };
@@ -394,6 +404,9 @@ pub struct SimDevice {
     /// The offline-record table (RecordList entries); a SET_DATA 0x28
     /// write replaces it.
     record_table: Vec<[u8; powerz_protocol::decode::records::ENTRY_LEN]>,
+    /// The SETTINGS block (rate bits and CRCs refreshed when served); a
+    /// settings write (type 0x0A) changes it.
+    settings: [u8; device::SETTINGS_LEN],
 }
 
 impl SimDevice {
@@ -446,6 +459,7 @@ impl SimDevice {
             adcnew_last_start: Vec::new(),
             adcnew_start_echoes: 0,
             record_table: records::initial_table(),
+            settings: device::SETTINGS_206,
         }
     }
 

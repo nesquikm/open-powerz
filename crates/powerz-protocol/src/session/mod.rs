@@ -20,6 +20,7 @@ mod memory;
 mod pd;
 mod probe;
 mod records;
+mod settings_write;
 mod stream;
 
 use std::time::Duration;
@@ -93,6 +94,20 @@ pub enum Error {
         expected: usize,
         /// Entries the meter lists now.
         actual: usize,
+    },
+    /// A settings change was refused before anything was sent.
+    #[error(transparent)]
+    SettingsWrite(#[from] crate::decode::settings::SettingsWriteError),
+    /// After a settings write the meter reads a field other than expected;
+    /// nothing was retried.
+    #[error("after the settings write the meter reads {field} = {actual}, expected {expected}")]
+    SettingsMismatch {
+        /// Field name.
+        field: &'static str,
+        /// Value the write should have left.
+        expected: String,
+        /// Value read back.
+        actual: String,
     },
     /// A reply could not be decoded.
     #[error(transparent)]

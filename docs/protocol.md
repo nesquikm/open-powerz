@@ -464,8 +464,9 @@ Firmware status (FR V9SK52). All requests below are read-only:
 ## Offline records
 
 The meter can record on its own and keeps the recordings in its SPI flash.
-We only list and download them; nothing on the meter is deleted, renamed or
-written. Module `decode::records` decodes them, `Session::list_records` and
+We list, download and delete them; nothing on the meter is renamed, and the
+only write is the record-table rewrite described in "Deleting records" below.
+Module `decode::records` decodes them, `Session::list_records` and
 `Session::download_record` read them. [static]
 
 **List.** GET_DATA mask 0x200 (RecordList, request `0C id 00 04`) at auth

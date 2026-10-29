@@ -1,6 +1,7 @@
 //! Session worker: one thread per connected meter, streaming backend events
 //! to the UI (FR VHY378).
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -1130,6 +1131,43 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Ok(MeterSettingsView::from(&settings))
     }
 
+    /// Change meter settings (FR JKWT3W): `changes` maps writable field
+    /// keys (`language`, `brightness`, `dim_timeout`, `theme`,
+    /// `sample_rate`, `rotation`) to wire codes. An empty change, an
+    /// unknown or read-only key and a value out of range are usage errors
+    /// that send nothing. Otherwise one settings write goes out between two
+    /// SETTINGS reads; the answer is the settings as read back, and a
+    /// mismatching re-read is an error naming the field, never retried.
+    pub fn write_settings(
+        &mut self,
+        changes: &BTreeMap<String, i32>,
+    ) -> Result<MeterSettingsView, UiError> {
+        use powerz_protocol::decode::settings::WritableField;
+        if changes.is_empty() {
+            return Err(UiError::usage("No setting was changed."));
+        }
+        let mut parsed = Vec::with_capacity(changes.len());
+        for (key, &value) in changes {
+            let field = WritableField::from_name(key)
+                .ok_or_else(|| UiError::usage(format!("The setting {key} cannot be changed.")))?;
+            let range = field.range();
+            if !range.contains(&value) {
+                return Err(UiError::usage(format!(
+                    "{key} = {value} is out of range ({}..={}).",
+                    range.start(),
+                    range.end()
+                )));
+            }
+            parsed.push((field, value));
+        }
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        let settings = blocked(self.meter.as_ref(), || session.write_settings(&parsed))
+            .map_err(|e| session_error(&e))?;
+        Ok(MeterSettingsView::from(&settings))
+    }
+
     /// List the meter's offline records (GET_DATA 0x200 only) for the
     /// Records view (FR 1HHT00); the stream goes on afterwards.
     pub fn list_records(&mut self) -> Result<RecordListView, UiError> {
@@ -1400,6 +1438,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::DownloadRecord(index, reply) => {
                 let _ = reply.send(self.download_record(index));
             }
+            Command::WriteSettings(changes, reply) => {
+                let _ = reply.send(self.write_settings(&changes));
+            }
             Command::DeleteRecords(target, confirm, dir, reply) => {
                 let _ = reply.send(self.delete_records(target, &confirm, &dir));
             }
@@ -1438,6 +1479,10 @@ enum Command {
     ClearPd(mpsc::Sender<Result<u64, UiError>>),
     PdSave(mpsc::Sender<PdSave>),
     ReadSettings(mpsc::Sender<Result<MeterSettingsView, UiError>>),
+    WriteSettings(
+        BTreeMap<String, i32>,
+        mpsc::Sender<Result<MeterSettingsView, UiError>>,
+    ),
     ListRecords(mpsc::Sender<Result<RecordListView, UiError>>),
     DownloadRecord(usize, mpsc::Sender<Result<OfflineRecordView, UiError>>),
     DeleteRecords(
@@ -1468,6 +1513,9 @@ impl std::fmt::Debug for Command {
             Command::ClearPd(_) => f.write_str("ClearPd"),
             Command::PdSave(_) => f.write_str("PdSave"),
             Command::ReadSettings(_) => f.write_str("ReadSettings"),
+            Command::WriteSettings(changes, _) => {
+                f.debug_tuple("WriteSettings").field(changes).finish()
+            }
             Command::ListRecords(_) => f.write_str("ListRecords"),
             Command::DownloadRecord(index, _) => {
                 f.debug_tuple("DownloadRecord").field(index).finish()
@@ -1804,6 +1852,16 @@ impl WorkerControl {
     pub fn read_settings(&self) -> Result<MeterSettingsView, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::ReadSettings(reply), &answer)?
+    }
+
+    /// Change meter settings (field key to wire code); the answer is the
+    /// settings as read back.
+    pub fn write_settings(
+        &self,
+        changes: &BTreeMap<String, i32>,
+    ) -> Result<MeterSettingsView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::WriteSettings(changes.clone(), reply), &answer)?
     }
 
     /// List the meter's offline records.

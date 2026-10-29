@@ -35,12 +35,17 @@ codename: Write Stuff
 Build order: JKWT3V, JKWT3W, then JKWT3X (each stage can run once its feature is done).
 
 **Tasks:**
-- [ ] Delete offline recordings — JKWT3V
-- [ ] Change meter settings — JKWT3W
+- [x] Delete offline recordings — JKWT3V
+- [x] Change meter settings — JKWT3W
 - [ ] Real-meter checks for meter writes — JKWT3X
 
 **M7 follow-ups:**
 - Delete with 22 or more remaining recordings (rewritten table over 1023 bytes): refused in M6b because the 10-bit `size` field cannot encode it; revisit if the meter's handling of larger tables is ever documented.
+- Delete: refuse the 22+ remaining-entries case before the CSV backup is written, not after (CLI and desktop), with a test at each level.
+- Delete: make the re-read mismatch message say when the count matches but the entries differ.
+- Desktop: a delete-all on an empty list sends an empty-table write (the UI hides the button); return early like the CLI.
+- Settings write: the vendor app does not wait for a reply to 0x0A and the reply is undocumented; we require ACCEPT. If the real meter stays silent, accept a timeout followed by a matching re-read (decide from the JKWT3X run).
+- Settings write: the read-back compares the 11 decoded fields only; consider also comparing the undecoded bytes of the 180-byte block.
 
 **Device safety:** writes only through the two new guarded paths. Forbidden: any other SET_DATA attribute, 0x4A, calibration, OTP, RESET 04, JUMP 08/09, 0x42, memory writes, triggering above 5 V. No write on the real meter before the user approves that stage.
 

@@ -56,14 +56,17 @@ test.describe("meter settings panel (FR 1HHT01)", () => {
     await expect.poll(() => reads(page)).toBe(1);
   });
 
-  test("is read-only: no input controls, only a Refresh button (AC-1HHT01.4)", async ({ page }) => {
+  test("is read-only until Edit: no input controls, only Refresh and Edit (AC-1HHT01.4, AC-JKWT3W.5)", async ({
+    page,
+  }) => {
     await open(page);
     await streamDemo(page);
     const p = panel(page);
     await expect(p).toContainText("English");
     await expect(p.locator("input, select, textarea, [contenteditable='true']")).toHaveCount(0);
-    await expect(p.getByRole("button")).toHaveCount(1);
+    await expect(p.getByRole("button")).toHaveCount(2);
     await expect(p.getByRole("button", { name: /refresh/i })).toBeVisible();
+    await expect(p.getByRole("button", { name: "Edit" })).toBeVisible();
   });
 
   test("Refresh reads the settings again (AC-1HHT01.4)", async ({ page }) => {

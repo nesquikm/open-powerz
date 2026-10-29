@@ -496,6 +496,22 @@ export async function meterSettings(): Promise<MeterSettings> {
   return invoke<MeterSettings>("meter_settings");
 }
 
+/** A settings field the panel may change (FR JKWT3W); calibration, auto-rotate and
+ * the startup logo never are. */
+export type EditableSettingKey =
+  "language" | "brightness" | "dim_timeout" | "theme" | "rotation" | "sample_rate";
+
+/** A settings change: the new wire code of each changed field (FR JKWT3W). */
+export type SettingChanges = Partial<Record<EditableSettingKey, number>>;
+
+/** Writes `changes` to the connected meter (one settings write between two reads) and
+ * resolves to the settings as read back; rejects with the backend's error, e.g. when
+ * the re-read does not match. Nothing is retried. */
+export async function meterSettingsWrite(changes: SettingChanges): Promise<MeterSettings> {
+  if (mock) return mock.meterSettingsWrite(changes);
+  return invoke<MeterSettings>("meter_settings_write", { changes });
+}
+
 /** One offline record on the meter, with its decoded list columns (FR 1HHT00). */
 export interface OfflineRecordEntry {
   /** 1-based position in the meter's list. */
@@ -954,6 +970,7 @@ export interface MeterBackend {
   pdClear(): Promise<number>;
   pdSave(suggestedName: string): Promise<ExportResult | null>;
   meterSettings(): Promise<MeterSettings>;
+  meterSettingsWrite(changes: SettingChanges): Promise<MeterSettings>;
   recordsList(): Promise<RecordList>;
   recordDownload(index: number): Promise<OfflineRecord>;
   recordsDelete(target: number | "all", confirm: string): Promise<RecordDeleteResult>;
@@ -994,6 +1011,7 @@ export const currentMeterCommands: MeterCommands = {
   pdClear,
   pdSave,
   meterSettings,
+  meterSettingsWrite,
   recordsList,
   recordDownload,
   recordsDelete,
@@ -1055,6 +1073,7 @@ export function meterBackend(deviceId: string): MeterBackend {
     pdClear: () => call("pd_clear"),
     pdSave: (suggestedName) => call("pd_save", { suggestedName }),
     meterSettings: () => call("meter_settings"),
+    meterSettingsWrite: (changes) => call("meter_settings_write", { changes }),
     recordsList: () => call("records_list"),
     recordDownload: (index) => call("record_download", { index }),
     recordsDelete: (target, confirm) =>

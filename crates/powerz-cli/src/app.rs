@@ -28,17 +28,17 @@ use powerz_sim::{
 
 use crate::args::{
     Cli, Command, FirmwareAction, FixedAction, JumpTo, LimitsAction, PdAction, PdDecode, Qc3Action,
-    QcAction, RecordsAction, RequestFlags, TransportKind, TriggerProtocol, UfcsAction, WatchSource,
-    needs_connect, rate_from_sps, validate,
+    QcAction, RecordsAction, RequestFlags, SettingsAction, TransportKind, TriggerProtocol,
+    UfcsAction, WatchSource, needs_connect, rate_from_sps, validate,
 };
 use crate::commands::{
     DeleteOptions, DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions,
     PdSendOptions, PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions,
     console, detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
     firmware_probe_unavailable, info_in_mode, inspect_flash_file, list, pd, pd_decode, pd_save,
-    pd_send, read, records_delete, records_get, records_list, select_device, settings, stream,
-    stream_cdc, trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
-    trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
+    pd_send, read, records_delete, records_get, records_list, select_device, settings,
+    settings_set, stream, stream_cdc, trigger_legacy_list, trigger_legacy_request, trigger_pd_list,
+    trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport, TracedOpener};
@@ -239,6 +239,14 @@ impl Transport for LazyBulk {
         timeout: Duration,
     ) -> Result<Vec<u8>, transport::Error> {
         self.pipe()?.transact_record_table(request, timeout)
+    }
+
+    fn transact_settings(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact_settings(request, timeout)
     }
 
     fn recover(&mut self) -> Result<(), transport::Error> {
@@ -506,6 +514,14 @@ impl<P: Transport> Transport for CountingPipe<P> {
         timeout: Duration,
     ) -> Result<Vec<u8>, transport::Error> {
         self.inner.transact_record_table(request, timeout)
+    }
+
+    fn transact_settings(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_settings(request, timeout)
     }
 }
 
@@ -1136,6 +1152,14 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
         self.inner.transact_record_table(request, timeout)
     }
 
+    fn transact_settings(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_settings(request, timeout)
+    }
+
     fn adcnew_send(
         &mut self,
         request: powerz_protocol::adcnew::Request,
@@ -1210,7 +1234,15 @@ fn dispatch<T: Transport, C: Clock>(
         Command::Firmware { .. } => unreachable!("firmware is handled before opening a device"),
         Command::Info { json } => info_in_mode(&mut session, mode, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
-        Command::Settings { json, raw } => {
+        Command::Settings {
+            action:
+                Some(SettingsAction::Set {
+                    changes,
+                    i_understand,
+                }),
+            ..
+        } => settings_set(&mut session, changes, *i_understand, &mut out),
+        Command::Settings { json, raw, .. } => {
             let how = if *raw {
                 SettingsOutput::Raw
             } else if *json {

@@ -109,8 +109,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show the meter's settings block (read-only): display, sample rate and
-    /// raw calibration values, each tagged confirmed or inferred.
+    /// Show the meter's settings block: display, sample rate and raw
+    /// calibration values, each tagged confirmed or inferred; `set` changes
+    /// the display and sample-rate fields.
     Settings {
         /// Print one JSON object instead of tagged lines.
         #[arg(long, conflicts_with = "raw")]
@@ -118,6 +119,9 @@ pub enum Command {
         /// Hex-dump the 180-byte block instead of decoding it.
         #[arg(long)]
         raw: bool,
+        /// Change settings instead of only reading them.
+        #[command(subcommand)]
+        action: Option<SettingsAction>,
     },
     /// List the meter's offline records, download them as CSV files or
     /// delete them after a CSV backup (bulk pipe only).
@@ -210,6 +214,23 @@ pub enum Command {
         /// What to do.
         #[command(subcommand)]
         action: FirmwareAction,
+    },
+}
+
+/// `settings` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum SettingsAction {
+    /// Write `<field>=<value>` changes (language=chinese|english,
+    /// brightness=1..100, dim_timeout=off|15|30|60, theme=<name>,
+    /// rotation=0|90|180|270, sample_rate=2|10|50|1000), then read the
+    /// settings back and print them. Needs --i-understand.
+    Set {
+        /// `<field>=<value>` pairs; fields left out keep their values.
+        #[arg(value_name = "FIELD=VALUE")]
+        changes: Vec<String>,
+        /// Acknowledge that the meter's settings will be changed.
+        #[arg(long)]
+        i_understand: bool,
     },
 }
 

@@ -96,6 +96,16 @@ pub trait Transport {
         self.transact(request, timeout)
     }
 
+    /// Write the settings write (type 0x0A) and return the reply. The only
+    /// route by which a 0x0A frame may pass a [`GuardedTransport`], which
+    /// checks it with [`check_settings_write`](guard::check_settings_write).
+    /// Default: run that check, then [`transact`](Transport::transact).
+    /// Wrappers that sit outside a guard must forward this method.
+    fn transact_settings(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        guard::check_settings_write(request)?;
+        self.transact(request, timeout)
+    }
+
     /// Bring a pipe left mid-transfer back to a clean state (e.g. clear a
     /// halted endpoint, drain stale data). Called once by
     /// [`Session::connect`](crate::session::Session::connect) when CONNECT

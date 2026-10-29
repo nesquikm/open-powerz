@@ -579,6 +579,19 @@ async fn meter_settings(
     blocking(move || control(&state, device_id.as_deref())?.read_settings()).await
 }
 
+/// Change the connected meter's settings (FR JKWT3W): `changes` maps
+/// writable field keys to wire codes. One settings write between two
+/// SETTINGS reads; the answer is the settings as read back.
+#[tauri::command]
+async fn meter_settings_write(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    changes: std::collections::BTreeMap<String, i32>,
+) -> Result<worker::MeterSettingsView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || control(&state, device_id.as_deref())?.write_settings(&changes)).await
+}
+
 /// List the connected meter's offline records (GET_DATA 0x200 only) for
 /// the Records view (FR 1HHT00).
 #[tauri::command]
@@ -1198,6 +1211,7 @@ pub fn run() {
             pd_details,
             pd_clear,
             meter_settings,
+            meter_settings_write,
             records_list,
             record_download,
             records_delete,

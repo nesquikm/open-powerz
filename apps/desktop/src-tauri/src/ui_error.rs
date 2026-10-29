@@ -191,6 +191,18 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
             message: "The record list does not match after the delete.".to_owned(),
             hint: Some("Read the list again; nothing was retried.".to_owned()),
         },
+        S::SettingsWrite(e) => UiError::usage(format!("That setting value is out of range: {e}.")),
+        S::SettingsMismatch {
+            field,
+            expected,
+            actual,
+        } => UiError {
+            kind: ErrorKind::Protocol,
+            message: format!(
+                "The meter's settings do not match after the change: {field} reads {actual}, expected {expected}."
+            ),
+            hint: Some("Read the settings again; nothing was retried.".to_owned()),
+        },
         S::BootloaderMidDownload => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter's bootloader was left mid-download.".to_owned(),
