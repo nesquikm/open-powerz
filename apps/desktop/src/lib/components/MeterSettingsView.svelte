@@ -128,6 +128,9 @@
   {:else if rows.length === 0}
     <p class="hint">{panel.loading ? "Reading…" : "No settings read yet."}</p>
   {:else}
+    {#if panel.notice}
+      <p class="notice" role="status">{panel.notice}</p>
+    {/if}
     <dl>
       {#each rows as row (row.key)}
         <div class="row">
@@ -201,6 +204,10 @@
   }
   .error {
     color: var(--danger);
+  }
+  .notice {
+    color: var(--muted);
+    font-size: 0.8rem;
   }
   dl {
     display: grid;

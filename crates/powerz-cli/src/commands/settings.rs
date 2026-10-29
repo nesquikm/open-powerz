@@ -143,20 +143,30 @@ pub fn parse_changes(args: &[String]) -> Result<Vec<(WritableField, i32)>, CliEr
         .collect()
 }
 
+/// Said after a write the meter read back as asked: the KM003C stores it
+/// at once but redraws a new brightness or theme only after that setting
+/// is opened in its own menu (2026-10-29) \[device\].
+pub const SETTINGS_SAVED_NOTE: &str = "The meter has saved the change; its screen shows it \
+     after you open that setting in the meter's menu.";
+
 /// `powerz settings set <field>=<value> … --i-understand`: check every
-/// change, send one settings write between two SETTINGS reads and print
-/// the settings read back. A mismatching re-read is a device error naming
-/// the field; nothing is retried.
+/// change, send one settings write between two SETTINGS reads, print the
+/// settings read back to `out` and [`SETTINGS_SAVED_NOTE`] to `note`. A
+/// mismatching re-read is a device error naming the field; nothing is
+/// retried.
 pub fn settings_set<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     args: &[String],
     i_understand: bool,
     out: &mut dyn Write,
+    note: &mut dyn Write,
 ) -> Result<(), CliError> {
     if !i_understand {
         return Err(CliError::Usage(SETTINGS_RISK.into()));
     }
     let changes = parse_changes(args)?;
     let after = session.write_settings(&changes)?;
-    write_rows(&after.rows(), out)
+    write_rows(&after.rows(), out)?;
+    writeln!(note, "{SETTINGS_SAVED_NOTE}")?;
+    Ok(())
 }

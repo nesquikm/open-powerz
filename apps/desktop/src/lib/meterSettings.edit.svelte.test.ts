@@ -9,6 +9,7 @@ import type { MeterSettings, SettingChanges, UiError } from "./backend";
 import {
   EDITABLE_SETTINGS,
   MeterSettingsPanel,
+  SAVED_NOTICE,
   changeSummary,
   settingCodes,
 } from "./meterSettings.svelte";
@@ -197,6 +198,36 @@ describe("MeterSettingsPanel edit (AC-JKWT3W.4, .5)", () => {
     expect(panel.editing).toBe(false);
     expect(panel.error).toBeNull();
     expect(panel.applying).toBe(false);
+  });
+
+  it("a successful Apply says the meter's screen shows it after its menu is opened", async () => {
+    const { panel } = await editing();
+    expect(panel.notice).toBeNull();
+    panel.setDraft("brightness", 80);
+    await panel.apply();
+    expect(SAVED_NOTICE).toBe(
+      "The meter has saved the change; its screen shows it after you open that setting in the meter's menu.",
+    );
+    expect(panel.notice).toBe(SAVED_NOTICE);
+  });
+
+  it("the saved notice goes away on the next edit and on disconnect", async () => {
+    const { panel } = await editing();
+    panel.setDraft("brightness", 80);
+    await panel.apply();
+    panel.startEdit();
+    expect(panel.notice).toBeNull();
+    panel.setDraft("brightness", 70);
+    await panel.apply();
+    panel.disconnected();
+    expect(panel.notice).toBeNull();
+  });
+
+  it("a failed write shows no saved notice", async () => {
+    const { panel } = await editing(mismatch);
+    panel.setDraft("brightness", 80);
+    await panel.apply();
+    expect(panel.notice).toBeNull();
   });
 
   it("Apply with nothing changed sends nothing", async () => {

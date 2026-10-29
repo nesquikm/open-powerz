@@ -306,7 +306,7 @@ first 96 bytes; device overrides its "96 bytes" reading.
 | 0x30 | 10 x i32 | an array of values near 1 000 000 (likely gains, 1e6 = 1.0) | [static] [device] [inferred] |
 | 0x5C | u32 | CRC-32 of bytes 0x00..0x5B | [static] [device] (firmware 2.0.6) |
 | 0x60..0xB3 | bytes | block B (84 bytes) | [static] [device] (firmware 2.0.6) |
-| 0x60 | u32 | flags; bits 2..3 = the meter's queue rate code | [static] [device] |
+| 0x60 | u32 | flags; bits 2..3 = the meter's queue rate code; bit 7 seen set after a brightness change in the meter's menu, meaning unknown | [static] [device] |
 | 0x70 | ASCII | `POWER-Z`, probably the name shown on screen | [device] [inferred] |
 | 0xB0 | u32 | CRC-32 of bytes 0x60..0xAF | [device] (firmware 2.0.6) [inferred] (prior art) |
 
@@ -433,8 +433,19 @@ Message layout (all words little-endian):
   and we write them that way. Keys 0x01, 0x03, 0x04, 0x06 and 0x07 stored
   what we sent in the bits the dialog reads them from. [device]
 - [device] The meter stores the write at once (the next SETTINGS read shows
-  it), but the screen shows a new brightness or theme only after that item
-  of the meter's own menu is opened and left again.
+  it, and so does its own Settings menu), but its live screen does not
+  redraw. On 2026-10-29 a new theme showed when the theme item of the
+  meter's menu was opened; a new brightness once showed only after the
+  value was changed in that menu, and after the restore write both showed
+  when their menu items were opened. So after a successful write the CLI
+  and the desktop app say the screen shows the change after that setting
+  is opened in the meter's menu.
+- [device] Bit 7 of the u32 at 0x60 went from 0 to 1 (0x49 to 0xC9) while
+  the user changed the brightness by hand in the meter's menu, between two
+  settings writes; neither write changed it, and the CRC-32 at 0xB0 changed
+  with it (it matched bytes 0x60..0xAF before and after). Open question:
+  what bit 7 means (perhaps a "changed on the meter" flag [inferred]).
+  Writes send no key for it and leave it as it is.
 
 ## Memory read and device info
 

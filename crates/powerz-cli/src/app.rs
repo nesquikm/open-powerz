@@ -1243,7 +1243,13 @@ fn dispatch<T: Transport, C: Clock>(
                     i_understand,
                 }),
             ..
-        } => settings_set(&mut session, changes, *i_understand, &mut out),
+        } => settings_set(
+            &mut session,
+            changes,
+            *i_understand,
+            &mut out,
+            &mut std::io::stderr(),
+        ),
         Command::Settings { json, raw, .. } => {
             let how = if *raw {
                 SettingsOutput::Raw

@@ -37,7 +37,7 @@ Build order: JKWT3V, JKWT3W, then JKWT3X (each stage can run once its feature is
 **Tasks:**
 - [x] Delete offline recordings — JKWT3V
 - [x] Change meter settings — JKWT3W
-- [ ] Real-meter checks for meter writes — JKWT3X
+- [x] Real-meter checks for meter writes — JKWT3X
 
 **M7 follow-ups:**
 - Delete with 22 or more remaining recordings (rewritten table over 1023 bytes): refused in M6b because the 10-bit `size` field cannot encode it; revisit if the meter's handling of larger tables is ever documented.
@@ -49,7 +49,7 @@ Build order: JKWT3V, JKWT3W, then JKWT3X (each stage can run once its feature is
 - Records: work out which charge/energy total the meter's record screen shows. It shows either the last sample or the stored list entry, and on 2026-10-29 the same recording (A03.d) showed the last sample first and the list entry an hour later (docs/protocol.md, Offline records, open question). Until then, real-meter checks compare the screen by name, points and duration only.
 - Settings write: the read-back compares the 11 decoded fields only; consider also comparing the undecoded bytes of the 180-byte block.
 - Settings: what bits 0..1 of 0x60 (key 0x14) really mean. They read 90° while the screen was upright with auto-rotate on; find the meaning on the meter before offering rotation as an editable field in the UI.
-- Settings: the meter's screen redraws a new brightness or theme only after that menu item is opened and left; say so in the CLI and desktop success messages.
+- Settings: what bit 7 of 0x60 means. It went from 0 to 1 while the user changed brightness in the meter's menu (2026-10-29); writes leave it as it is.
 
 **Device safety:** writes only through the two new guarded paths. Forbidden: any other SET_DATA attribute, 0x4A, calibration, OTP, RESET 04, JUMP 08/09, 0x42, memory writes, triggering above 5 V. No write on the real meter before the user approves that stage.
 

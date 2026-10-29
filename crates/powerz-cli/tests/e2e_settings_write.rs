@@ -246,6 +246,35 @@ fn a_mismatching_re_read_is_exit_5_and_names_the_field() {
     assert_eq!(sent_of_type(&err, 0x0A).len(), 1, "not retried: {err}");
 }
 
+/// The KM003C stores the write at once but redraws a new brightness or
+/// theme only after that setting is opened in its menu (2026-10-29)
+/// `[device]`, so a successful write says so on stderr; stdout stays the
+/// settings read back.
+#[test]
+fn a_successful_set_says_the_screen_shows_it_after_the_menu_is_opened() {
+    let a = sim()
+        .args(["settings", "set", "brightness=80", "--i-understand"])
+        .assert()
+        .success();
+    let note = "The meter has saved the change; its screen shows it after you open that setting in the meter's menu.";
+    assert!(stderr_of(&a).contains(note), "{}", stderr_of(&a));
+    assert!(!stdout_of(&a).contains("saved"), "{}", stdout_of(&a));
+}
+
+#[test]
+fn a_failed_set_does_not_claim_the_meter_saved_it() {
+    let a = sim()
+        .env("POWERZ_SIM_FAULT", "ignore-settings-write")
+        .args(["settings", "set", "brightness=80", "--i-understand"])
+        .assert()
+        .code(5);
+    assert!(
+        !stderr_of(&a).contains("saved the change"),
+        "{}",
+        stderr_of(&a)
+    );
+}
+
 #[test]
 fn plain_settings_still_reads_only() {
     let a = sim().args(["--trace", "settings"]).assert().success();

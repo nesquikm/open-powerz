@@ -118,6 +118,12 @@ export function changeSummary(settings: MeterSettings, changes: SettingChanges):
   return lines;
 }
 
+/** Shown after a write the meter read back as asked: the KM003C stores it at once but
+ * redraws a new brightness or theme only after that setting is opened in its own menu
+ * (2026-10-29) [device]. */
+export const SAVED_NOTICE =
+  "The meter has saved the change; its screen shows it after you open that setting in the meter's menu.";
+
 /** The panel's settings, read through `read` (the backend's `meterSettings`) and
  * changed through `write` (the backend's `meterSettingsWrite`). */
 export class MeterSettingsPanel {
@@ -130,6 +136,8 @@ export class MeterSettingsPanel {
   draft = $state<SettingChanges>({});
   /** A write is in flight. */
   applying = $state(false);
+  /** Set to SAVED_NOTICE after a successful write; cleared by the next edit. */
+  notice = $state<string | null>(null);
   readonly #read: () => Promise<MeterSettings>;
   readonly #write: (changes: SettingChanges) => Promise<MeterSettings>;
   /** Bumped on disconnect and on each read, so a stale answer is dropped. */
@@ -166,6 +174,7 @@ export class MeterSettingsPanel {
     if (!this.settings || this.applying) return;
     this.draft = settingCodes(this.settings);
     this.error = null;
+    this.notice = null;
     this.editing = true;
   }
 
@@ -197,6 +206,7 @@ export class MeterSettingsPanel {
       if (generation !== this.#generation) return;
       this.settings = after;
       this.error = null;
+      this.notice = SAVED_NOTICE;
       this.editing = false;
       this.draft = {};
     } catch (e) {
@@ -235,6 +245,7 @@ export class MeterSettingsPanel {
     this.#generation += 1;
     this.settings = null;
     this.error = null;
+    this.notice = null;
     this.loading = false;
     this.editing = false;
     this.draft = {};
