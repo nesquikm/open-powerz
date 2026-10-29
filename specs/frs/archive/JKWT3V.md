@@ -1,8 +1,8 @@
 ---
 title: Delete offline recordings
 milestone: M_CD7M3M
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-29T22:23:37Z
 id: fr_01M61PKCQNB3VEMC0G4YJKWT3V
 created_at: 2026-10-28T16:48:24.821Z
 changelog_category: Added
@@ -45,3 +45,9 @@ User decision 2026-10-28: build delete in M6b; the first real delete runs only w
 Size limit: the 10-bit `size` field cannot encode a table over 1023 bytes (22+ remaining entries). The vendor wraps it; the meter's handling is unknown (encrypted firmware, no probing writes), so we refuse such a delete with a clear message and a test.
 
 Real meter, 2026-10-29: the KM003C answers the record-table write with FINISHED (`07 <id> 00 00`), not ACCEPT; the first run exited 5 on a delete that had worked, fixed in `cd63907` (ACCEPT or FINISHED is success). Three deletes then checked out byte for byte: the last row, a middle row (the entry behind it kept byte-identical, offset unchanged) and the remaining throwaway. Delete-all is covered by simulator tests only.
+
+## Implementation notes
+
+- the meter answers the record-table write with FINISHED, not ACCEPT [device]; the session takes either, and the read-back decides (fixed in `cd63907`)
+- Phase 3 review: after a failed delete the desktop panel lists again so its rows match the meter, keeping the delete's error and backup path (`46a3c5a`); a delete refused before touching the meter (wrong typed name) costs one extra harmless read
+- the 1023-byte table limit stays an open question: no real meter with 22+ remaining records was available

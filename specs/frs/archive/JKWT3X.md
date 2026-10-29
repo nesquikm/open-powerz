@@ -1,8 +1,8 @@
 ---
 title: Real-meter checks for meter writes
 milestone: M_CD7M3M
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-29T22:23:37Z
 id: fr_01M61PKCQNB3VEMC0G4YJKWT3X
 created_at: 2026-10-28T16:48:24.821Z
 changelog_category: Added
@@ -50,3 +50,8 @@ Settings stage, 2026-10-29 (`qa-runs/JKWT3X.settings-*`, outside the repo):
 - Round 2 (`cd63907`): the write went over bulk and the meter ignored it (no reply, nothing changed); stopped at the read-back. Fixed in `4e726fb` (the write goes over the CDC port).
 - Round 3 (`4e726fb`): the meter answered FINISHED and stored brightness and theme, but also moved the sample rate and the bits read as rotation, because keys 0x14 and 0x15 were swapped. The user set them back by hand. Fixed in `a13ac4d`.
 - Round 4 (`a13ac4d`): AC-JKWT3X.2, .3, .4 and .5 PASS. Both writes were answered FINISHED; after write 1 only brightness (50 → 20) and theme (blue → green) changed, and after the restore the settings read back identical to the start, in text and JSON. Calibration was untouched. Each write was approved by the user before it was sent. The meter's Settings menu showed the new values; its live screen showed them only after the menu item was opened, or for brightness once, changed. AC-JKWT3X.2 was amended for this (spec author's decision, 2026-10-29). The user's words: "1. brighness was 20, but I saw chenges only after I changed it in menu (to 21). 2. theme was green, and I saw that it changed when I entered "theme" submenu. So, it's changes but not affecting until I enter corresponding menu or even change value (brignnes)"; after the restore: "yes, it back to 50 and blue, but effect was only I enter the corresponging menu"; and about round 3: "Previous time was exactly the same".
+
+## Implementation notes
+
+- delete stage passed in rounds 1–3, settings stage in round 4 (`a13ac4d`), each write approved by the user in the test agent's tab before it was sent
+- AC .2 was amended after round 4: the live screen redrawing only after the setting is opened in the meter's menu is meter behaviour [device], not a failure

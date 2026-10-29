@@ -1,8 +1,8 @@
 ---
 milestone: M_CD7M3M
 id: fr_01M61PKCQKB552ZH6D0BCD7M3M
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-29T22:23:37Z
 kickoff_branch: null
 frozen_at: null
 migration: none
