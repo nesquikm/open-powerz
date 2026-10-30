@@ -1,0 +1,45 @@
+---
+title: Firmware update fixes
+milestone: M_3KPN7D
+status: active
+archived_at: null
+id: fr_01M65KVDYC49QF1V7N1Y4PJRVJ
+created_at: 2026-10-30T05:17:20.204Z
+changelog_category: Fixed
+---
+
+# Firmware update fixes
+
+## Summary
+
+The firmware update works on the real meter, and its reviews left a list of rough edges.
+The update cannot be cancelled, it can end a running recording without asking, and a page reload loses its progress.
+This fixes those and a few smaller checks around firmware versions.
+No real-meter flashing is needed for these fixes.
+
+## Requirement
+
+The firmware update and firmware status code handle cancel, reloads, other devices and odd version strings correctly, and agree between backend and UI.
+
+## Acceptance Criteria
+
+- AC-4PJRVJ.1: The desktop update can be cancelled before the erase starts; once erasing has begun, Cancel is disabled with a reason.
+- AC-4PJRVJ.2: Starting an update disconnects only the target meter, and asks before ending a running recording.
+- AC-4PJRVJ.3: A page reload during an update shows the running update's stage (the backend reports it), not an idle screen.
+- AC-4PJRVJ.4: The firmware thresholds (1.7.0, 2.0.7) come from the backend, or one test pins both sides.
+- AC-4PJRVJ.5: Version strings with a leading v or a suffix (e.g. 2.0.7-beta) are parsed by a documented policy, with tests.
+- AC-4PJRVJ.6: The firmware notice is announced by screen readers (the live region is mounted before its text is set).
+- AC-4PJRVJ.7: A failing info block does not abort `powerz info` or the desktop connect; the info blocks are read once per connect.
+- AC-4PJRVJ.8: The probe stops on any SYNC reply, whatever its id; release notes that number every line show no extra bullets; `HeadReply::update_required()` and the desktop branches match AC-V9SK52.3.
+
+## Technical Design
+
+Engine stop flag wired to a Cancel command with a stage gate; device-scoped disconnect; backend-reported update state on attach; shared thresholds via the info command.
+
+## Testing
+
+Simulator tests for cancel at each stage, reload/attach state and the tolerant info read; unit tests for version parsing and the notice; Playwright for cancel and the recording prompt.
+
+## Notes
+
+Source: the M_MJ7KE9 M7 follow-ups. Flashing on the real meter is not repeated.
