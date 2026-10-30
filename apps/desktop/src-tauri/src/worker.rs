@@ -565,6 +565,8 @@ pub struct Worker<T: Transport, C: Clock> {
     /// Holds on the queue polling (FR DGSQ6S): while any is held, no
     /// GET_DATA goes out, but the session stays connected.
     poll_holds: u32,
+    /// Whether a PDM session is open on this meter, when the owner tells.
+    pdm_open: Option<PdmOpen>,
 }
 
 /// A running PD sniffer.
@@ -655,6 +657,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             pd: PdCapture::new(),
             pd_meter: (info.model.clone(), info.firmware_version.clone()),
             poll_holds: 0,
+            pdm_open: None,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -1033,8 +1036,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 self.pd.push(&poll.records, poll.status);
                 Step::Continue
             }
-            Err(e) => self.lose_session(&e),
+            Err(e) => self.poll_failed(&e),
         }
+    }
+
+    /// A poll failed. A bad reply from a meter still on the line leaves an
+    /// open PDM session alone: ending the stream would close it, and the
+    /// reconnect's bulk CONNECT would silence it [device]. The next polls
+    /// try again; once PDM is closed a fault that stays ends the session.
+    fn poll_failed(&mut self, e: &session::Error) -> Step {
+        let pdm_open = self.pdm_open.as_ref();
+        if !is_device_loss(e) && blocked(self.meter.as_ref(), || pdm_open.is_some_and(|f| f())) {
+            return Step::Continue;
+        }
+        self.lose_session(e)
     }
 
     /// The pipe failed: drop the session, end the recording and a running
@@ -1360,7 +1375,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 }
                 Step::Continue
             }
-            Err(e) => self.lose_session(&e),
+            Err(e) => self.poll_failed(&e),
         }
     }
 
@@ -1838,6 +1853,11 @@ impl WorkerControl {
         self.ask(Command::HoldPolling(hold, reply), &answer)
     }
 
+    /// The newest measurement of the session, if any.
+    pub(crate) fn latest_record(&self) -> Option<QueueRecord> {
+        self.store.latest_record()
+    }
+
     /// Start the PD capture.
     pub fn start_pd(&self) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
@@ -2038,6 +2058,19 @@ impl Drop for WorkerHandle {
     }
 }
 
+/// Whether a PDM session is open on the worker's meter.
+pub type PdmOpen = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Whether `e` can mean the meter is gone. Only a reply that arrived and
+/// made no sense proves it is still on the line. \[inferred\]
+fn is_device_loss(e: &session::Error) -> bool {
+    use session::Error as S;
+    !matches!(
+        e,
+        S::Protocol(_) | S::Rejected { .. } | S::Decode(_) | S::Frame(_)
+    )
+}
+
 /// Open the pipe with `open` on a dedicated thread and run a worker there.
 pub fn spawn<T, C, O>(open: O, clock: C, config: WorkerConfig, sink: impl EventSink) -> WorkerHandle
 where
@@ -2080,7 +2113,27 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, None)
+    spawn_inner(open, clock, config, store, sink, stop, None, None)
+}
+
+/// [`spawn_with_store`] for a meter that can hold a PDM session: while
+/// `pdm_open` says one is open, a stream error that is not a device loss
+/// does not end the session.
+pub fn spawn_watching_pdm<T, C, O>(
+    open: O,
+    clock: C,
+    config: WorkerConfig,
+    store: SessionStore,
+    sink: impl EventSink,
+    stop: Arc<AtomicBool>,
+    pdm_open: PdmOpen,
+) -> WorkerHandle
+where
+    T: Transport,
+    C: Clock + Clone + Send + 'static,
+    O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
+{
+    spawn_inner(open, clock, config, store, sink, stop, None, Some(pdm_open))
 }
 
 /// [`spawn_with_store`] adding the wall time the worker spends blocked in
@@ -2099,9 +2152,10 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, Some(meter))
+    spawn_inner(open, clock, config, store, sink, stop, Some(meter), None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_inner<T, C, O>(
     open: O,
     clock: C,
@@ -2110,6 +2164,7 @@ fn spawn_inner<T, C, O>(
     sink: impl EventSink,
     stop: Arc<AtomicBool>,
     meter: Option<BlockedMeter>,
+    pdm_open: Option<PdmOpen>,
 ) -> WorkerHandle
 where
     T: Transport,
@@ -2175,6 +2230,7 @@ where
                 worker_sink,
                 depth,
                 meter,
+                pdm_open,
             )
         }));
         if let Err(payload) = ran {
@@ -2212,6 +2268,7 @@ fn run_worker<T, C, O>(
     sink: mpsc::Sender<Forward>,
     depth: Arc<AtomicUsize>,
     meter: Option<BlockedMeter>,
+    pdm_open: Option<PdmOpen>,
 ) where
     T: Transport,
     C: Clock + Clone,
@@ -2256,6 +2313,7 @@ fn run_worker<T, C, O>(
             return;
         }
     };
+    worker.pdm_open = pdm_open;
     'run: while !stop.load(Ordering::SeqCst) {
         loop {
             match inbox.try_recv() {

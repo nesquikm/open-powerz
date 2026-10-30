@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -438,6 +438,10 @@ struct Meter {
     /// The queue rate to restore when the trigger session closes, if it was
     /// capped for it.
     rate_before_trigger: Option<Rate>,
+    /// Counts the PDM sessions opening, open or closing on this meter
+    /// ([`crate::trigger::PdmHold`]). Wider than [`Meter::trigger`], which is
+    /// empty during the handshake and while a taken session closes.
+    pdm_holds: Arc<AtomicUsize>,
     /// When the next automatic reconnect may start (FR 4PJRVK).
     back_off: ReconnectBackOff,
 }
@@ -702,11 +706,13 @@ fn history_sink(history: Arc<Mutex<History>>, mut sink: impl EventSink) -> impl 
 
 /// Opens a trigger session for the connected meter (see
 /// [`DeviceManager::trigger_opener`]); a simulated one for a demo device.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TriggerOpener {
     demo: bool,
     serial: Option<String>,
     now_ms: u64,
+    /// Covers the handshake, before the session reaches the manager.
+    _hold: crate::trigger::PdmHold,
 }
 
 impl TriggerOpener {
@@ -1201,6 +1207,7 @@ where
             device: device.clone(),
             trigger: Arc::default(),
             rate_before_trigger: None,
+            pdm_holds: Arc::default(),
             back_off: ReconnectBackOff::default(),
         });
         self.current = Some(device.id);
@@ -1317,13 +1324,15 @@ where
             )),
             None => Box::new(sink),
         };
-        m.worker = Some(worker::spawn_with_store(
+        let pdm_holds = Arc::clone(&m.pdm_holds);
+        m.worker = Some(worker::spawn_watching_pdm(
             move || opener.open_source(&device, source),
             clock,
             config,
             store,
             sink,
             Arc::clone(&m.stop),
+            Arc::new(move || pdm_holds.load(Ordering::SeqCst) > 0),
         ));
     }
 
@@ -1652,6 +1661,7 @@ where
         }
         // Polling pauses while the automatic list runs (AC-DGSQ6S.11).
         worker.pause_during_list(control);
+        worker.hold_until_closed(crate::trigger::PdmHold::new(&meter.pdm_holds));
         *lock(&meter.trigger) = Some(worker);
         Ok(())
     }
@@ -1690,6 +1700,7 @@ where
             demo: meter.device.demo_scenario.is_some(),
             serial: meter.device.serial.clone(),
             now_ms: self.clock.clone().now_ms(),
+            _hold: crate::trigger::PdmHold::new(&meter.pdm_holds),
         })
     }
 

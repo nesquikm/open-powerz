@@ -97,10 +97,11 @@ function hexBytes(text: string): number[] | null {
 /** Why the console refuses `line`, or null: GoodCRC as `pd cmd` or a `pd data`
  * control message in any spelling (lowercased, whitespace removed, the value read
  * leniently; a value that cannot be read is refused too), and `pdm open` / `pdm
- * close`. The backend applies the same rule. */
+ * close`. The backend applies the same rule; `goodcrc_parity.json` pins the two
+ * together (U+0085 is whitespace to Rust but not to `\s`). */
 export function lineRefusal(line: string): string | null {
   const text = line.trim();
-  const norm = text.replace(/\s+/g, "").toLowerCase();
+  const norm = text.replace(/[\s\u0085]+/g, "").toLowerCase();
   if (norm.startsWith("pdmopen") || norm.startsWith("pdmclose")) return SESSION_REASON;
   if (norm.startsWith("pdcmd")) {
     const n = norm.startsWith("pdcmd=") ? lenientNumber(norm.slice("pdcmd=".length)) : null;
@@ -180,17 +181,21 @@ export class PdConsole {
     }
   }
 
-  /** Sends a raw line: GoodCRC is refused, above 5 V waits for {@link confirm}. */
-  async sendLine(line: string): Promise<void> {
-    if (this.busy) return;
+  /**
+   * Sends a raw line: GoodCRC is refused, above 5 V waits for {@link confirm}.
+   * True when the line went out.
+   */
+  async sendLine(line: string): Promise<boolean> {
+    if (this.busy) return false;
     this.error = null;
     const text = line.trim();
-    if (text === "") return;
+    if (text === "") return false;
     const refusal = lineRefusal(text);
     if (refusal !== null) {
       this.error = { kind: "usage", message: refusal, hint: null };
-      return;
+      return false;
     }
+    let sent = false;
     await this.#exclusive(async () => {
       // The backend's classifier decides (unknown text is above 5 V).
       if ((await this.#api.consoleRisk(text)) === "above_5v") {
@@ -198,7 +203,9 @@ export class PdConsole {
         return;
       }
       this.#append(await this.#api.consoleSend(text, false));
+      sent = true;
     });
+    return sent;
   }
 
   /** Sends a built message: GoodCRC is refused, above 5 V waits for {@link confirm}. */
@@ -220,19 +227,22 @@ export class PdConsole {
     });
   }
 
-  /** Sends the pending line or message, confirmed. */
-  async confirm(): Promise<void> {
+  /** Sends the pending line or message, confirmed. True when a line went out. */
+  async confirm(): Promise<boolean> {
     const pending = this.pending;
-    if (!pending || this.busy) return;
+    if (!pending || this.busy) return false;
     this.pending = null;
     this.error = null;
+    let lineSent = false;
     await this.#exclusive(async () => {
       if (pending.message) {
         await this.#sendMessage(pending.message, true);
       } else if (pending.line !== null) {
         this.#append(await this.#api.consoleSend(pending.line, true));
+        lineSent = true;
       }
     });
+    return lineSent;
   }
 
   /** Drops the pending send; nothing is sent. */

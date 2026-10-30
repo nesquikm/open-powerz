@@ -145,9 +145,9 @@ port.
 | `Error` | `Timeout`, `Malformed`, `HighVoltageNotConfirmed`, `Refused` (GoodCRC), `Forbidden`, `UnsupportedOnCdc`, `LineTooLong`, `UnexpectedReply`, `OutOfSync` (the meter needs a power cycle), `NotFound`, `Ambiguous`, `Disconnected`, `Io` |
 | `pd` | USB PD: `enter`, `ensure_entered`, `offers` / `Offer` / `OfferKind`, `validate`, `request` / `Request` / `RequestOutcome`, `hard_reset`, `return_to_5v` / `BackTo5V`, `read_settings` / `write_settings` / `PdSettings` (`PdType`, `Emarker`, `SinkCaps`), `Error`; `FIRST_EPR_POSITION` (8) |
 | `legacy` | QC 2.0, QC 3.0, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS: `LegacyProtocol`, `enter`, `ensure_entered`, `limits` / `Limits`, `validate`, `request` / `Request` / `Outcome`, `return_to_5v`, `Error`; `QC3_MIN_MV`, `QC3_MAX_MV`, `QC3_STEP_MV` |
-| `detect` | `bc12`, `apple` (each answers a `Support`), `list` / `list_until` with `ListOptions` → `ListResult` of `ListEntry`; `disagreements` / `Disagreement`; `hint(dp_mv: u32, dm_mv: u32) -> Hint` and `ChargeMode`; `DEFAULT_STALL_LIMIT` (45 s) |
+| `detect` | `bc12`, `apple` (each answers a `Support`), `list` / `list_until` with `ListOptions` → `ListResult` of `ListEntry`; `disagreements` / `Disagreement`; `hint(dp_mv: u32, dm_mv: u32) -> Hint`, `hint_from_volts(dp_v: f64, dm_v: f64) -> Hint` and `ChargeMode`; `DEFAULT_STALL_LIMIT` (45 s) |
 | `message` | Custom PD messages: `PdMessage` (`control`, `data`, `from_hex`, `to_command`), `SopTarget`, `Preset` (the cable Discover Identity), `await_cable_identity` / `CableIdentity`, `cable_identity_from_message`, `refusal` (GoodCRC), `MessageError` |
-| `console` | The raw console: `send_line` (returns `SentLine`), `command_of`, `console_refusal`, `effect_of` / `Effect` (what has to be undone before `pdm close`), `ConsoleEntry` / `Direction`, `describe_block`; `LISTEN` (300 ms) |
+| `console` | The raw console: `send_line` (returns `SentLine`), `command_of`, `console_refusal`, `effect_of` / `Effect` (what has to be undone before `pdm close`), `ConsoleEntry` / `Direction`, `describe_block`; `LISTEN` (300 ms), `listen_for(command: &Command) -> Duration` (the entry bound for an `entry` line) |
 
 The text protocol itself is described in
 [docs/protocol.md](../../protocol.md#pdm-text-session-protocol-triggering).

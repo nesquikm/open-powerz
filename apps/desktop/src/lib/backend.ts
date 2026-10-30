@@ -777,6 +777,8 @@ export interface Detection {
   apple: SupportName;
   entries: DetectEntry[];
   complete: boolean;
+  /** The D+/D- charging-mode hint line, absent without a measurement. */
+  hint?: string | null;
 }
 
 export type OfferKind = "fixed" | "battery" | "variable" | "pps" | "spr-avs" | "epr-avs";

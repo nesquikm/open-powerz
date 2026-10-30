@@ -56,7 +56,7 @@ import type {
   MeterCommands,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
-import { DISCOVER_IDENTITY_CABLE, lineRefusal, messageRefusal } from "./console.svelte";
+import { lineRefusal, messageRefusal } from "./console.svelte";
 import { PD_CYCLE_MS, pdContractAt, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
@@ -598,9 +598,28 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
     "(see `docs/linux.md`).",
 };
 
+/** The role swaps (DR, PR, VCONN, FR): control messages the library classifier does
+ * not prove to stay at 5 V. */
+const SWAP_CONTROL_TYPES: readonly number[] = [9, 10, 11, 19];
+
+/** Vendor_Defined, the data message type of a VDM. */
+const VENDOR_DEFINED = 15;
+
+/** Like the library's check: a Vendor_Defined message to a cable plug whose first object
+ * is a structured VDM header for a Discover Identity REQ, whatever its SVID, version or
+ * other objects. */
+function isCableDiscoverIdentity(m: PdMessageRequest): boolean {
+  const vdm = m.data_objects[0];
+  if (m.sop === "sop" || m.msg_type !== VENDOR_DEFINED || vdm === undefined) return false;
+  const structured = (vdm >>> 15) & 1;
+  const commandType = (vdm >>> 6) & 3;
+  const command = vdm & 0x1f;
+  return structured === 1 && commandType === 0 && command === 1;
+}
+
 /** Like the library's builder: a control message on SOP is `pd cmd=<type>`, anything
- * else `pd data=<SOP byte><header LE><objects LE>` in uppercase hex; GoodCRC and
- * malformed messages are a usage error. */
+ * else `pd data=<SOP byte><header LE><objects LE>` in uppercase hex; GoodCRC, reserved
+ * control types and malformed messages are a usage error. */
 function renderMockMessage(m: PdMessageRequest): string {
   const { msg_type: ty, data_objects: objects } = m;
   if (!Number.isInteger(ty) || ty < 0 || ty > 31) {
@@ -609,7 +628,8 @@ function renderMockMessage(m: PdMessageRequest): string {
   const refusal = messageRefusal(m);
   if (refusal !== null) throw usage(refusal);
   if (objects.length === 0) {
-    if (ty < 3 || ty > 0x18) throw usage("A data message needs at least one data object.");
+    if (ty === 0 || ty > 0x18) throw usage(`Control message type ${ty} is reserved in USB PD.`);
+    if (ty === 2) throw usage("A data message needs at least one data object.");
   }
   if (objects.length > 7) {
     throw usage(`${objects.length} data objects: a PD message carries at most 7.`);
@@ -629,7 +649,10 @@ function mockLineRisk(text: string): RiskClass {
   if (["pdm parm", "pd pdo", "ufcs pdo"].includes(text)) return "read_only";
   if (/^(pdm open|pdm close|reset|pd hrst|entry \S+)$/.test(text)) return "at_most_5v";
   const cmd = /^pd cmd=(\d+)$/.exec(text);
-  if (cmd) return Number(cmd[1]) <= 24 ? "at_most_5v" : "above_5v";
+  if (cmd) {
+    const ty = Number(cmd[1]);
+    return ty >= 1 && ty <= 24 && !SWAP_CONTROL_TYPES.includes(ty) ? "at_most_5v" : "above_5v";
+  }
   const req = /^pd req=(\d+)$/.exec(text);
   if (req) {
     const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === Number(req[1]));
@@ -1831,6 +1854,8 @@ export class MockBackend {
         { name: "vfcp", support: "not-supported", vbus_mv: null, ibus_ma: null },
       ],
       complete: false,
+      // The demo stream's D+ / D- levels, as `detect::hint` labels them.
+      hint: "hint: DCP / QC2 12 V (D+ 0.600 V, D- 0.600 V)",
     };
   }
 
@@ -2033,11 +2058,14 @@ export class MockBackend {
 
   // ---- Custom PD messages and the raw console (FR DGSQ6T) ----
 
-  /** The library risk class of a built message; GoodCRC is refused with a reason. */
+  /** The library risk class of a built message; GoodCRC and reserved control types are
+   * refused with a reason. */
   async triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass> {
     this.#openTrigger();
     renderMockMessage(message);
-    if (message.data_objects.length === 0) return "at_most_5v";
+    if (message.data_objects.length === 0) {
+      return SWAP_CONTROL_TYPES.includes(message.msg_type) ? "above_5v" : "at_most_5v";
+    }
     // Request / EPR_Request go by the requested position; every other data message
     // is above 5 V, like the library classifier.
     if (message.sop !== "sop" || (message.msg_type !== 2 && message.msg_type !== 9)) {
@@ -2050,19 +2078,20 @@ export class MockBackend {
 
   /** Sends a built message to the scripted charger (or the demo e-marked cable). */
   async triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply> {
-    this.#openTrigger();
+    const t = this.#openTrigger();
     const command = renderMockMessage(message);
     if ((await this.triggerMessageRisk(message)) === "above_5v" && !confirmed) {
       throw usage("A message that can raise VBUS above 5 V needs your confirmation.");
     }
+    // Like the backend: PD first, unless PD is what was entered last.
+    if (t.entered !== "pd") {
+      this.#triggerLog.push("entry pd");
+      t.entered = "pd";
+    }
     this.#triggerLog.push(command);
     // The demo e-marked cable (the session-2 240 W passive cable) answers a
     // Discover Identity REQ to a cable plug.
-    const discover =
-      message.sop !== "sop" &&
-      message.msg_type === 15 &&
-      message.data_objects.length === 1 &&
-      message.data_objects[0] === DISCOVER_IDENTITY_CABLE.data_objects[0];
+    const discover = isCableDiscoverIdentity(message);
     return {
       command,
       lines: [{ at_ms: Date.now(), direction: "tx", text: command, block: null }],
@@ -2087,6 +2116,7 @@ export class MockBackend {
       throw usage("A line that can raise VBUS above 5 V needs your confirmation.");
     }
     this.#triggerLog.push(text);
+    if (this.#mode === "trigger-out-of-sync") throw outOfSyncError();
     const at = Date.now();
     const lines: ConsoleLine[] = [{ at_ms: at, direction: "tx", text, block: null }];
     const rx = (reply: string, block: string | null = null): void => {

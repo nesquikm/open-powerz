@@ -18,8 +18,17 @@ use super::session::{HighVoltageConfirmation, PdmSession};
 use super::{BlockTag, Error};
 use crate::session::Clock;
 
-/// How long the console listens for replies after each line.
+/// How long the console listens for replies after a line.
 pub const LISTEN: Duration = Duration::from_millis(300);
+
+/// How long to listen after `command`: an `entry` line gets the entry bound,
+/// since its `pdo:` block can follow well after the first reply. \[inferred\]
+pub fn listen_for(command: &Command) -> Duration {
+    match command {
+        Command::Entry(_) => super::pd::ENTRY_TIMEOUT,
+        _ => LISTEN,
+    }
+}
 
 /// Which way a console line went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

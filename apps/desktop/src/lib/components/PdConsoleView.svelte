@@ -54,7 +54,13 @@
 
   async function sendLine(e: SubmitEvent): Promise<void> {
     e.preventDefault();
-    await pdConsole.sendLine(command);
+    await clearAfter(() => pdConsole.sendLine(command));
+  }
+
+  /** Empties the field once its line went out, unless the user typed on meanwhile. */
+  async function clearAfter(send: () => Promise<boolean>): Promise<void> {
+    const line = command;
+    if ((await send()) && command === line) command = "";
   }
 </script>
 
@@ -155,7 +161,11 @@
       <button type="submit" disabled={controlsOff}>Send</button>
     </form>
     {#if pdConsole.error}
-      <p class="error" role="alert" {@attach reveal}>{pdConsole.error.message}</p>
+      <p class="error" role="alert" {@attach reveal}>
+        {pdConsole.error.hint
+          ? `${pdConsole.error.message} ${pdConsole.error.hint}`
+          : pdConsole.error.message}
+      </p>
     {/if}
     <div class="transcript" role="log" aria-label="Console transcript">
       {#each pdConsole.lines as line, i (i)}
@@ -170,7 +180,7 @@
     voltageMv={0}
     text={pdConsole.pending.text}
     onCancel={() => pdConsole.cancel()}
-    onConfirm={() => void pdConsole.confirm()}
+    onConfirm={() => void clearAfter(() => pdConsole.confirm())}
   />
 {/if}
 

@@ -223,6 +223,9 @@
       {#if !panel.detection.complete}
         <p class="muted">The automatic list ended early (stalled or cut off).</p>
       {/if}
+      {#if panel.detection.hint}
+        <p class="muted">{panel.detection.hint}</p>
+      {/if}
     {:else}
       <p class="muted">Not detected yet.</p>
     {/if}
@@ -404,8 +407,9 @@
       </dl>
     {:else if panel.requestFailure}
       <p class="error">
-        Request failed: {panel.requestFailure.message}{#if panel.requestFailure.hint}
-          {panel.requestFailure.hint}{/if}
+        Request failed: {panel.requestFailure.message}{panel.requestFailure.hint
+          ? ` ${panel.requestFailure.hint}`
+          : ""}
       </p>
     {:else}
       <p class="muted">No request yet.</p>

@@ -8,7 +8,8 @@
 //! allows it and sends `pdm close`.
 
 use std::io::{Read, Write};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -75,6 +76,9 @@ pub struct Detection {
     pub entries: Vec<DetectEntry>,
     /// Whether the list ended normally.
     pub complete: bool,
+    /// The D+ / D- charging-mode hint line from the latest measurement,
+    /// taken before the probes; `None` without one.
+    pub hint: Option<String>,
 }
 
 /// One PD offer, as a button (fixed) or a slider range (PPS / AVS).
@@ -305,7 +309,13 @@ impl TriggerControl {
     /// [device]) and resumes however the list ends.
     pub fn detect(&self) -> Result<Detection, UiError> {
         let _held = PollingHeld::hold(self.stream.as_ref());
-        self.call(|e| e.detect())
+        let hint = self
+            .stream
+            .as_ref()
+            .and_then(WorkerControl::latest_record)
+            .map(|r| detect::hint_from_volts(r.dp_v(), r.dm_v()).label());
+        let detection = self.call(|e| e.detect())?;
+        Ok(Detection { hint, ..detection })
     }
 
     /// Enter `protocol` and report its section; a protocol the charger
@@ -591,6 +601,7 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
                 })
                 .collect(),
             complete: list.complete,
+            hint: None,
         })
     }
 
@@ -750,7 +761,8 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
             ));
         }
         let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
-        let sent = console::send_line(&mut self.pdm, &line, confirmation, console::LISTEN)
+        let listen = console::listen_for(&command);
+        let sent = console::send_line(&mut self.pdm, &line, confirmation, listen)
             .map_err(|e| pdm_error(&e))?;
         // The line was written: its undo is recorded even if reading the
         // replies failed.
@@ -1009,6 +1021,26 @@ fn legacy_error(err: &legacy::Error) -> UiError {
     }
 }
 
+/// One count on a meter's open PDM sessions: taken before `pdm open` and let
+/// go once the session has closed, so the stream worker sees the session
+/// through the hand-overs on either side of the manager's slot.
+#[derive(Debug)]
+pub struct PdmHold(Arc<AtomicUsize>);
+
+impl PdmHold {
+    /// Take one count on `holds`.
+    pub fn new(holds: &Arc<AtomicUsize>) -> PdmHold {
+        holds.fetch_add(1, Ordering::SeqCst);
+        PdmHold(Arc::clone(holds))
+    }
+}
+
+impl Drop for PdmHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// The trigger session's thread. [`TriggerWorker::close`] or a drop
 /// returns the charger to 5 V and sends `pdm close`.
 #[derive(Debug)]
@@ -1017,6 +1049,8 @@ pub struct TriggerWorker {
     thread: Option<JoinHandle<()>>,
     /// The meter's measurement stream, for its controls' detection.
     stream: Option<WorkerControl>,
+    /// Let go after the thread has closed the session.
+    hold: Option<PdmHold>,
 }
 
 impl std::fmt::Debug for Msg {
@@ -1079,6 +1113,7 @@ impl TriggerWorker {
                 tx,
                 thread: Some(thread),
                 stream: None,
+                hold: None,
             }),
             Ok(Err(e)) => {
                 let _ = thread.join();
@@ -1136,6 +1171,11 @@ impl TriggerWorker {
                 ),
             }),
         }
+    }
+
+    /// Keep `hold` until this session has closed.
+    pub(crate) fn hold_until_closed(&mut self, hold: PdmHold) {
+        self.hold = Some(hold);
     }
 
     /// Ask the thread to close and wait for it; once only.

@@ -523,6 +523,18 @@ pub fn hint(dp_mv: u32, dm_mv: u32) -> Hint {
     }
 }
 
+/// [`hint`] for D+ / D- readings in volts (negative readings clamp to 0 mV).
+/// Pure.
+pub fn hint_from_volts(dp_v: f64, dm_v: f64) -> Hint {
+    hint(volts_to_mv(dp_v), volts_to_mv(dm_v))
+}
+
+/// Volts to whole millivolts (negative readings clamp to 0).
+fn volts_to_mv(v: f64) -> u32 {
+    // The cast saturates; ADC volts are far below u32::MAX mV.
+    (v * 1000.0).round().max(0.0) as u32
+}
+
 /// Half-width of a level window, mV (inclusive). \[inferred\]
 const HINT_WINDOW_MV: u32 = 200;
 

@@ -137,7 +137,8 @@ fn run_lines<P: Read + Write, C: Clock>(
             continue;
         }
         let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
-        match console::send_line(session, text, confirmation, console::LISTEN) {
+        let listen = console::listen_for(&command);
+        match console::send_line(session, text, confirmation, listen) {
             Ok(sent) => {
                 // Recorded first: the line was written, whatever comes next.
                 track(sent.effect, undo);

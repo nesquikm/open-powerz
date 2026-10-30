@@ -93,7 +93,7 @@ Types (they mirror `src-tauri/src/trigger.rs`):
 | type | fields |
 |---|---|
 | `TriggerProtocol` | `"pd"`, `"qc"`, `"fcp"`, `"afc"`, `"sfcp"`, `"scp"`, `"vfcp"`, `"tfcp"`, `"ufcs"`. `TRIGGER_PROTOCOLS` lists them, PD first. |
-| `Detection` | `bc12`, `apple` (each a `SupportName`: `"supported"`, `"not-supported"` or `"unknown"`), `entries` (`DetectEntry[]`: `name`, `support`, `vbus_mv`, `ibus_ma`), `complete` (false when the list stalled or was cut off) |
+| `Detection` | `bc12`, `apple` (each a `SupportName`: `"supported"`, `"not-supported"` or `"unknown"`), `entries` (`DetectEntry[]`: `name`, `support`, `vbus_mv`, `ibus_ma`), `complete` (false when the list stalled or was cut off), `hint` (the D+/D− charging-mode text from the newest measurement, null before the first one) |
 | `ProtocolSection` | `protocol`, `supported`, `offers` (`TriggerOffer[]`, PD only), `limits` (`TriggerLimits[]`), `settings` (`PdEmulation`: `pd_type`, `emarker`, `sink`; PD only, else `null`) |
 | `TriggerOffer` | `position`, `kind` (`"fixed"`, `"battery"`, `"variable"`, `"pps"`, `"spr-avs"`, `"epr-avs"`), `min_voltage_mv`, `max_voltage_mv`, `max_current_ma`, `max_power_mw`, `epr` |
 | `TriggerLimits` | `index` (the UFCS capability number, else `null`), `min_voltage_mv`, `max_voltage_mv`, `min_current_ma`, `max_current_ma`, `max_power_mw` |

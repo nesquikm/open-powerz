@@ -409,6 +409,18 @@ export class TriggerPanel {
     this.error = null;
     try {
       await this.#api.backTo5v();
+      if (this.#gone) return;
+      // The way back is the latest request: nothing of the one before stays on
+      // the card. The backend reports no reply for it, so nothing is delivered yet.
+      this.reply = {
+        command: "Back to 5 V",
+        requested_mv: 5000,
+        requested_ma: null,
+        delivered_mv: null,
+        delivered_ma: null,
+        reply: null,
+      };
+      this.requestFailure = null;
       this.requestedMv = 5000;
       this.#restartSettle();
     } catch (e) {

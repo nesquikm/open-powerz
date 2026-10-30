@@ -582,6 +582,37 @@ test("an out-of-sync meter shows the power-cycle error and disables requests (AC
   await expect(backButton(page)).toBeEnabled();
 });
 
+// ---- FR 4PJRVH: the result card and the Detection card ----
+
+test("Back to 5 V leaves nothing of the old request in the result (AC-4PJRVH.1)", async ({
+  page,
+}) => {
+  await detected(page);
+  await request9V(page);
+  await expect(result(page)).toContainText("pd req=2");
+  await backButton(page).click();
+  // The latest request is the way back, and the card names it.
+  await expect(result(page)).toContainText(/pd req=1|Back to 5 V/);
+  const facts = (await result(page).locator("dl dd").allInnerTexts()).join(" | ");
+  expect(facts).not.toContain("pd req=2");
+  expect(facts).not.toMatch(/8\.8\d V/);
+});
+
+test("a failure's message and hint do not run together (AC-4PJRVH.2)", async ({ page }) => {
+  await detected(page, "?mock=trigger-out-of-sync");
+  await request9V(page);
+  await expect(result(page)).toContainText(/are sent\.\s+Power-cycle/, { useInnerText: true });
+});
+
+// Page contract: the Detection region shows the CLI's hint line, as
+// `hint: <modes> (D+ x.xxx V, D- x.xxx V)`.
+test("the Detection card shows the D+/D- charging-mode hint (AC-4PJRVH.4)", async ({ page }) => {
+  await detected(page);
+  await expect(view(page).getByRole("region", { name: "Detection", exact: true })).toContainText(
+    /hint: .+\(D\+ \d+\.\d{3} V, D- \d+\.\d{3} V\)/,
+  );
+});
+
 // FR DGSQ6R AC .7 / .8 page contract: `?mock=trigger-list-lag` makes the meter answer
 // one command late after the automatic list is cut off, so detection's `pdm parm`
 // check fails and the backend reports `out_of_sync` (the mock records `entry bc`,

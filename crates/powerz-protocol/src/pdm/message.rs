@@ -473,13 +473,14 @@ fn pd_data_refusal(bytes: &[u8]) -> Option<String> {
 }
 
 /// A raw line the parser did not recognise: normalised (lowercase, no
-/// whitespace), a `pd cmd` / `pd data` line is judged by its value read
+/// whitespace, no U+FEFF, which JavaScript's `\s` counts as whitespace and
+/// Rust does not), a `pd cmd` / `pd data` line is judged by its value read
 /// leniently; one whose value cannot be read with confidence is refused,
 /// since the firmware's own parsing of it is unknown. \[inferred\]
 fn raw_refusal(text: &str) -> Option<String> {
     let norm: String = text
         .chars()
-        .filter(|c| !c.is_whitespace())
+        .filter(|c| !c.is_whitespace() && *c != '\u{FEFF}')
         .collect::<String>()
         .to_ascii_lowercase();
     if let Some(rest) = norm.strip_prefix("pdcmd") {
