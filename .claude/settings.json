@@ -33,7 +33,8 @@
       "Bash(bun test:*)",
       "Bash(bun run:*)",
       "Bash(bun --version)",
-      "Bash(bunx:*)"
+      "Bash(bunx:*)",
+      "Bash(claude:*)"
     ]
   }
 }

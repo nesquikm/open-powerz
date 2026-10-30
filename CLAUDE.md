@@ -6,7 +6,7 @@ Unofficial open-source, cross-platform (macOS, Linux, Windows) desktop app + CLI
 
 ## Tech Stack
 
-- **Language:** Rust (edition 2024, MSRV 1.96) for the protocol library, CLI and Tauri backend; TypeScript (~6.0) for the web UI
+- **Language:** Rust (edition 2024, MSRV 1.96; toolchain pinned to Rust 1.99.1 in `rust-toolchain.toml`) for the protocol library, CLI and Tauri backend; TypeScript (~6.0) for the web UI
 - **Framework:** Tauri 2 desktop shell; Svelte 5 (runes) web UI; uPlot for charts
 - **USB / IO (planned):** `nusb` (vendor bulk), `hidapi` (HID), `serialport` (CDC), RustCrypto `aes` + `crc32fast` (auth, memory read)
 - **Build:** cargo workspace; Vite 8 for the UI; Bun 1.3 as the JS package manager / script runner
@@ -16,10 +16,13 @@ Unofficial open-source, cross-platform (macOS, Linux, Windows) desktop app + CLI
 ## Architecture
 
 ```
-Cargo.toml                      # workspace (members below; default-members = protocol + cli)
+Cargo.toml                      # workspace (members below; default-members = every crate under crates/)
 package.json, bun.lock          # Bun workspace root, delegates scripts to apps/desktop
 crates/
+├── powerz-pd/                  # library: USB PD r3.2 message decoder (pure, no I/O, builds for wasm32)
 ├── powerz-protocol/            # library: transports (bulk/HID/CDC), framing, ADC/queue/PD/settings decode, auth
+├── powerz-sim/                 # simulated KM003C behind the Transport trait (demo device, e2e test double)
+├── powerz-record/              # library: vendor-compatible CSV recorder shared by CLI and desktop app
 └── powerz-cli/                 # `powerz` binary: live readout, CSV streaming, raw frame dumps
 apps/desktop/                   # Tauri 2 app
 ├── src/                        # Svelte 5 + TS web UI (App.svelte, lib/*.ts, co-located *.test.ts)
