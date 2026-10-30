@@ -8,10 +8,13 @@
 // never looks a new draft up again, because the release list can lag behind a create
 // (the v0.6.0 run failed that way). The release stays a draft until every file is
 // attached and checked; files left over from an earlier run are deleted only then.
+// Every update sends the tag name, and the published release's tag is checked
+// against the tag this run built (FR 4PJRVN).
 
 import { readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseTag } from "./versions";
 
 /** A release as the GitHub releases API returns it (only the fields used here). */
 export interface Release {
@@ -31,6 +34,8 @@ export interface Asset {
 
 /** The fields of a release that `updateRelease` changes. */
 export interface ReleasePatch {
+  /** Always sent: a PATCH without it can leave a published draft on an `untagged-…` tag. */
+  tag_name: string;
   name?: string;
   body?: string;
   draft?: boolean;
@@ -64,6 +69,35 @@ export interface PublishOptions {
 export const isReleaseId = (id: unknown): id is number =>
   typeof id === "number" && Number.isInteger(id) && id > 0;
 
+/** The numeric `[major, minor, patch]` of a release tag (see `parseTag`), or undefined. */
+function versionOf(tag: string): number[] | undefined {
+  try {
+    return parseTag(tag).version.split("-")[0]?.split(".").map(Number);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Numeric order of two versions (negative when a < b). */
+function compareVersions(a: number[], b: number[]): number {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return (a[i] ?? 0) - (b[i] ?? 0);
+  return 0;
+}
+
+/**
+ * True when another published, non-pre-release release has a higher version than
+ * `tag`: a manual run for an older tag must not take the Latest badge from it.
+ */
+export function newerFinalExists(releases: Release[], tag: string): boolean {
+  const own = versionOf(tag);
+  if (own === undefined) return false;
+  return releases.some((r) => {
+    if (r.draft || r.prerelease || r.tag_name === tag) return false;
+    const v = versionOf(r.tag_name);
+    return v !== undefined && compareVersions(v, own) > 0;
+  });
+}
+
 const log = (msg: string): void => {
   process.stderr.write(`${msg}\n`);
 };
@@ -79,7 +113,8 @@ export async function publishRelease(gh: GitHubClient, opts: PublishOptions): Pr
     throw new Error(`tag ${tag} does not exist; push it before publishing`);
   }
 
-  const existing = (await gh.listReleases()).filter((r) => r.tag_name === tag);
+  const releases = await gh.listReleases();
+  const existing = releases.filter((r) => r.tag_name === tag);
   if (existing.length > 1) {
     const ids = existing.map((r) => String(r.id)).join(", ");
     throw new Error(
@@ -95,7 +130,7 @@ export async function publishRelease(gh: GitHubClient, opts: PublishOptions): Pr
     }
     id = found.id;
     log(`release ${id} exists for ${tag}; updating its title and notes`);
-    await gh.updateRelease(id, { name: opts.title, body: opts.notes });
+    await gh.updateRelease(id, { tag_name: tag, name: opts.title, body: opts.notes });
   } else {
     const created = await gh.createDraftRelease({
       tag_name: tag,
@@ -140,12 +175,22 @@ export async function publishRelease(gh: GitHubClient, opts: PublishOptions): Pr
     }
   }
 
-  await gh.updateRelease(id, {
+  const published = await gh.updateRelease(id, {
+    tag_name: tag,
     draft: false,
     prerelease: opts.prerelease,
-    make_latest: opts.prerelease ? "false" : "true",
+    make_latest: opts.prerelease || newerFinalExists(releases, tag) ? "false" : "true",
   });
   log(`published release ${id} for ${tag}`);
+
+  // The published release must sit on the tag this run built (the v0.6.0 run ended
+  // on an `untagged-…` tag); the check reads the tag GitHub reports in the response.
+  if (published?.tag_name !== tag) {
+    throw new Error(
+      `release ${id} was published on tag ${String(published?.tag_name)}, not on ${tag}; ` +
+        `it is public now, so set its tag by hand (PATCH /releases/${id} with tag_name=${tag})`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

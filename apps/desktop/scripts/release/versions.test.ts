@@ -198,9 +198,35 @@ describe("versions.ts CLI (AC-E1ZJ2N.2, AC-E1ZJ2N.5)", () => {
     expect(lines).toContain("prerelease=false");
     expect(lines).toContain('title=v0.6.0 — "Special Delivery"');
     expect(existsSync(notes)).toBe(true);
-    expect(readFileSync(notes, "utf8").trim()).toBe(
-      "### Added\n- Release builds on a version tag (E1ZJ2N)",
+    // The CHANGELOG section comes first; FR 4PJRVN adds install notes after it.
+    expect(readFileSync(notes, "utf8").trimStart()).toMatch(
+      /^### Added\n- Release builds on a version tag \(E1ZJ2N\)\n/,
     );
+  });
+
+  // FR 4PJRVN (AC-4PJRVN.5): a release asset carries no file mode, so the AppImage is
+  // never executable after download; the release notes say how to make it so.
+  it("adds a Linux note on making the AppImage executable after the section (AC-4PJRVN.5)", () => {
+    const { root, notes } = fixture(matching("0.6.0"));
+    mkdirSync(dirname(notes), { recursive: true });
+    const r = run(["v0.6.0", "--root", root, "--notes", notes]);
+    expect(r.status).toBe(0);
+    const text = readFileSync(notes, "utf8");
+    const section = text.indexOf("- Release builds on a version tag (E1ZJ2N)");
+    const hint = text.search(/chmod \+x\s+\S*\.AppImage/);
+    expect(hint, "the notes never say chmod +x <file>.AppImage").toBeGreaterThanOrEqual(0);
+    expect(section).toBeGreaterThanOrEqual(0);
+    expect(hint, "the AppImage note comes before the CHANGELOG section").toBeGreaterThan(section);
+    // The note names the AppImage this version ships, so it can be pasted as is.
+    expect(text).toMatch(/chmod \+x\s+\S*0\.6\.0\S*\.AppImage/);
+  });
+
+  it("adds the AppImage note for a pre-release too (AC-4PJRVN.5)", () => {
+    const { root, notes } = fixture(matching("0.7.0-rc.1"));
+    mkdirSync(dirname(notes), { recursive: true });
+    const r = run(["v0.7.0-rc.1", "--root", root, "--notes", notes]);
+    expect(r.status).toBe(0);
+    expect(readFileSync(notes, "utf8")).toMatch(/chmod \+x\s+\S*0\.7\.0-rc\.1\S*\.AppImage/);
   });
 
   it("marks a pre-release tag", () => {

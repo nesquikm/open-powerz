@@ -45,7 +45,7 @@ Build order: 4PJRVP, 4PJRVN, 4PJRVK, 4PJRVH, 4PJRVJ, 4PJRVM.
 - [ ] Firmware update fixes — 4PJRVJ
 - [ ] PD analyzer, replug and CLI fixes — 4PJRVK
 - [ ] Several meters, records and settings fixes — 4PJRVM
-- [ ] Release pipeline fixes — 4PJRVN
+- [x] Release pipeline fixes — 4PJRVN
 - [x] Housekeeping — 4PJRVP
 
 **Follow-ups for later:**

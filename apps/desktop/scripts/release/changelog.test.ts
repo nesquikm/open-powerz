@@ -157,3 +157,51 @@ describe("releaseTitle (AC-E1ZJ2N.5)", () => {
     expect(releaseTitle("v1.0.0-rc.1", undefined)).toBe("v1.0.0-rc.1");
   });
 });
+
+// FR 4PJRVN (AC-4PJRVN.4): the unquoted-codename branch of the heading pattern must not
+// take a malformed date for a codename; such a heading is not a release heading.
+describe("malformed dates in a heading (AC-4PJRVN.4)", () => {
+  it.each([
+    ["a one-digit day", "## [0.6.0] — 2026-10-2"],
+    ["a one-digit month", "## [0.6.0] — 2026-1-28"],
+    ["a two-digit year", "## [0.6.0] — 26-10-28"],
+    ["slashes", "## [0.6.0] — 2026/10/28"],
+    ["trailing characters", "## [0.6.0] — 2026-10-28x"],
+    ["dots", "## [0.6.0] - 2026.10.28"],
+    ["a malformed date before a quoted codename", '## [0.6.0] — 2026-10-2 — "Special Delivery"'],
+    ["a malformed date before an unquoted codename", "## [0.6.0] — 2026-1-28 — Special Delivery"],
+  ])("rejects a heading with %s instead of reading it as a codename", (_, heading) => {
+    const section = extractRelease(`${heading}\n\n- new\n`, "0.6.0");
+    expect(section?.codename, `"${section?.codename}" taken as a codename`).toBeUndefined();
+    expect(section).toBeNull();
+  });
+
+  it.each(["1.5x Faster", "2-way Street"])(
+    "still reads an unquoted codename that starts with digits (%s)",
+    (codename) => {
+      expect(
+        extractRelease(`## [0.6.0] — 2026-10-28 — ${codename}\n\n- new\n`, "0.6.0")?.codename,
+      ).toBe(codename);
+    },
+  );
+
+  it("still reads a valid date with an unquoted or quoted codename", () => {
+    expect(
+      extractRelease("## [0.6.0] — 2026-10-28 — Special Delivery\n\n- new\n", "0.6.0"),
+    ).toEqual({
+      version: "0.6.0",
+      date: "2026-10-28",
+      codename: "Special Delivery",
+      notes: "- new",
+    });
+    expect(
+      extractRelease('## [0.6.0] – 2026-10-28 – "Special Delivery"\n\n- new\n', "0.6.0")?.codename,
+    ).toBe("Special Delivery");
+  });
+
+  it("skips a malformed heading and still finds the next section", () => {
+    const text = "## [0.6.0] — 2026-10-2\n\n- bad\n\n## [0.5.0] — 2026-10-26\n\n- old\n";
+    expect(extractRelease(text, "0.6.0")).toBeNull();
+    expect(extractRelease(text, "0.5.0")?.notes).toBe("- old");
+  });
+});
