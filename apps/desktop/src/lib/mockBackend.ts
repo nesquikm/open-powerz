@@ -30,6 +30,7 @@ import type {
   RecordList,
   MinMaxAvg,
   PdDetails,
+  PdCleared,
   PdOpened,
   PdRow,
   PdStatusSample,
@@ -56,7 +57,7 @@ import type {
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
 import { DISCOVER_IDENTITY_CABLE, lineRefusal, messageRefusal } from "./console.svelte";
-import { PD_CYCLE_MS, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
+import { PD_CYCLE_MS, pdContractAt, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
@@ -398,6 +399,17 @@ const PD_SEED_BATCH = 10_000;
 /** The meter's PD status block period while the sniffer runs, ms (FR TGE83D). */
 const PD_STATUS_MS = 5;
 
+/** What session `s`'s meter reads at session time `tMs`: its scenario, on the PD
+ * contract while a capture runs, so the two tell the same story. */
+function measuredAt(s: Running, tMs: number): Sample {
+  const sample = sampleAt(s.scenario, tMs);
+  if (s.pd.timer === null) return sample;
+  const contract = pdContractAt(tMs - s.pd.sessionOffsetMs);
+  sample.vbus_v = contract.vbus_v + 0.01 * Math.sin(tMs / 140);
+  sample.ibus_a = contract.ibus_a;
+  return sample;
+}
+
 /** The PD capture of a mock session (FR TGE83C). */
 interface MockPdCapture {
   /** The PD sniffer runs. */
@@ -416,6 +428,8 @@ interface MockPdCapture {
   sessionOffsetMs: number;
   /** The row of every captured record, by record index minus `base`. */
   rows: PdRow[];
+  /** Session time of the latest status sample sent, 0 if none. */
+  statusMs: number;
 }
 
 /** A PD capture saved, or opened, in the mock: script records and rows from index 0. */
@@ -1112,6 +1126,7 @@ export class MockBackend {
         seeded: false,
         sessionOffsetMs: 0,
         rows: [],
+        statusMs: 0,
       },
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
@@ -1195,7 +1210,7 @@ export class MockBackend {
     const step = 1000 / s.rateSps;
     const samples: Sample[] = [];
     for (let i = 0; i < n; i++) {
-      const sample = sampleAt(s.scenario, Math.round(s.nextMs));
+      const sample = measuredAt(s, Math.round(s.nextMs));
       if (s.triggerVbusV !== null) {
         sample.vbus_v = s.triggerVbusV + 0.01 * Math.sin(s.nextMs / 140);
       }
@@ -1438,7 +1453,7 @@ export class MockBackend {
     const samples: PdStatusSample[] = [];
     for (let t = pd.nowMs; t < pd.nowMs + BATCH_MS; t += PD_STATUS_MS) {
       const ms = t + pd.sessionOffsetMs;
-      const m = sampleAt(s.scenario, ms);
+      const m = measuredAt(s, ms);
       samples.push({
         session_ms: ms,
         vbus_v: m.vbus_v,
@@ -1448,6 +1463,7 @@ export class MockBackend {
       });
     }
     pd.nowMs += BATCH_MS;
+    pd.statusMs = Math.max(pd.statusMs, samples[samples.length - 1]?.session_ms ?? 0);
     if (rows.length > 0) s.onEvent({ type: "pd_rows", data: { rows } });
     s.onEvent({ type: "pd_status", data: { samples } });
   }
@@ -1596,16 +1612,17 @@ export class MockBackend {
   }
 
   /** Drops every captured PD record; a running capture goes on. Like the backend,
-   * indices keep counting: resolves to the index of the next record. */
-  async pdClear(): Promise<number> {
+   * indices keep counting: resolves to the index of the next record and the latest
+   * status session time. */
+  async pdClear(): Promise<PdCleared> {
     const hadOpened = this.#openedPd !== null;
     this.#openedPd = null;
-    if (hadOpened && this.#session === null) return 0;
+    if (hadOpened && this.#session === null) return { next_index: 0, status_floor_ms: 0 };
     const pd = this.#open().pd;
     pd.base += pd.records.length;
     pd.records = [];
     pd.rows = [];
-    return pd.base;
+    return { next_index: pd.base, status_floor_ms: pd.statusMs };
   }
 
   /** There is no save dialog: the proposed name is the path. Resolves to the number of
@@ -1630,8 +1647,10 @@ export class MockBackend {
       path: saved.path,
       rows: saved.rows.map((r) => ({ ...r })),
       status: [],
+      dropped: 0,
       damaged_line: null,
       oversized: 0,
+      skipped: 0,
       truncated: false,
     };
   }
@@ -1744,8 +1763,10 @@ export class MockBackend {
       path: "vendor-pd-log.sqlite",
       rows: rows.map((r) => ({ ...r })),
       status: [],
+      dropped: 0,
       damaged_line: null,
       oversized: 0,
+      skipped: 0,
       truncated: false,
     };
   }

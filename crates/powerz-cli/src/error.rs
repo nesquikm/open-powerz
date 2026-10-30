@@ -13,6 +13,10 @@ pub enum CliError {
     Permission(String),
     /// Device or protocol failure (exit code 5).
     Device(String),
+    /// The reader of a streaming command's output went away, as
+    /// `powerz watch | head` makes it do: the command ends, quietly and
+    /// with exit code 0.
+    OutputClosed,
 }
 
 impl std::fmt::Display for CliError {
@@ -22,6 +26,7 @@ impl std::fmt::Display for CliError {
             | CliError::NoDevice(m)
             | CliError::Permission(m)
             | CliError::Device(m) => f.write_str(m),
+            CliError::OutputClosed => f.write_str("the output pipe closed"),
         }
     }
 }
@@ -29,13 +34,15 @@ impl std::fmt::Display for CliError {
 impl std::error::Error for CliError {}
 
 impl CliError {
-    /// Process exit code: 2 usage, 3 no device, 4 permission, 5 device.
+    /// Process exit code: 2 usage, 3 no device, 4 permission, 5 device,
+    /// 0 for a closed output pipe.
     pub fn exit_code(&self) -> i32 {
         match self {
             CliError::Usage(_) => 2,
             CliError::NoDevice(_) => 3,
             CliError::Permission(_) => 4,
             CliError::Device(_) => 5,
+            CliError::OutputClosed => 0,
         }
     }
 }

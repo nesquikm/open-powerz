@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use common::*;
-use powerz_protocol::decode::pd_packet::{PdEvent, PdRecordKind};
+use powerz_protocol::decode::pd_packet::{CaptureClock, PdEvent, PdRecordKind};
 use powerz_protocol::frame::Attribute;
 use powerz_protocol::session::{CapturedRecord, Error, PdOptions, PdSniffer, Session};
 use powerz_protocol::transport::{Error as TransportError, Transport};
@@ -269,4 +269,83 @@ fn a_poll_timeout_still_stops_the_sniffer() {
         .find(|x| x.att == Attribute::PD_PACKET)
         .expect("PD section");
     assert_eq!(pd.payload.len(), 12);
+}
+
+// ---- AC-4PJRVK.5: the PD scenario and the measurement stream agree ----
+
+/// How far the measurement may sit from the negotiated VBUS, V.
+const AGREE_V: f64 = 0.3;
+
+/// One poll of a capture on `scenario`, every 100 ms of simulated time, for
+/// four seconds: the status block and the ADC snapshot of the same request,
+/// and the queue records that came since the last poll.
+fn contract_and_measurements(
+    scenario: Scenario,
+) -> (
+    Vec<(u32, u16, f64)>,
+    Vec<powerz_protocol::decode::QueueRecord>,
+) {
+    let clock = clock();
+    let dev = device(Persona::Bulk, scenario, &clock).with_pd_scenario(PdScenario::Negotiation);
+    let mut s = session(dev, &clock);
+    s.connect().unwrap();
+    s.start_pd_sniffer().unwrap();
+    let mut capture_clock = CaptureClock::default();
+    let mut polls = Vec::new();
+    let mut queue = Vec::new();
+    for _ in 0..40 {
+        clock.advance(Duration::from_millis(100));
+        let poll = s
+            .poll_pd_sniffer(PdOptions { with_adc: true }, &mut capture_clock)
+            .unwrap();
+        let status = poll.status.expect("a status block");
+        let adc = poll.adc.expect("an ADC snapshot");
+        polls.push((status.time_ms, status.vbus_mv, adc.vbus_v()));
+        queue.extend(s.poll_stream().unwrap().records);
+    }
+    s.stop_pd_sniffer().unwrap();
+    (polls, queue)
+}
+
+#[test]
+fn the_meter_reading_follows_the_negotiated_contract() {
+    for scenario in [Scenario::Load5v1a, Scenario::Idle] {
+        let (polls, _) = contract_and_measurements(scenario);
+        assert!(
+            polls.iter().any(|&(_, mv, _)| mv > 5_500),
+            "the contract goes above 5 V: {polls:?}"
+        );
+        for (t, mv, measured) in polls {
+            let negotiated = f64::from(mv) / 1000.0;
+            assert!(
+                (measured - negotiated).abs() <= AGREE_V,
+                "{scenario:?} at {t} ms: {negotiated} V negotiated, {measured} V measured"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_measurement_stream_follows_the_negotiated_contract() {
+    let (polls, queue) = contract_and_measurements(Scenario::Load5v1a);
+    // Between two polls that agree on the contract, it held all along.
+    let mut checked = 0;
+    for w in polls.windows(2) {
+        let (from, mv, _) = w[0];
+        let (to, next_mv, _) = w[1];
+        if mv != next_mv {
+            continue;
+        }
+        for r in queue.iter().filter(|r| (from..=to).contains(&r.time_ms())) {
+            checked += 1;
+            let negotiated = f64::from(mv) / 1000.0;
+            assert!(
+                (r.vbus_v() - negotiated).abs() <= AGREE_V,
+                "at {} ms: {negotiated} V negotiated, {} V in the stream",
+                r.time_ms(),
+                r.vbus_v()
+            );
+        }
+    }
+    assert!(checked > 0, "no stream record to compare");
 }

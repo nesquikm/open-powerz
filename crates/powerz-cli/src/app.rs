@@ -46,7 +46,7 @@ use crate::trace::{TracePort, TraceTransport, TracedOpener};
 /// Run the parsed command line against real devices; returns the exit code.
 pub fn run(cli: Cli) -> i32 {
     match try_run(&cli) {
-        Ok(()) => 0,
+        Ok(()) | Err(CliError::OutputClosed) => 0,
         Err(e) => {
             eprintln!("powerz: {e}");
             e.exit_code()

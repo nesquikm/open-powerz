@@ -98,7 +98,8 @@ fn pd_request(caps: &Capabilities, position: u8, voltage_mv: Option<u32>) -> Ris
         // SPR AVS covers 9-20 V by definition. \[doc\]
         SourcePdo::SprAvs(_) => in_range(9000),
         SourcePdo::EprAvs(a) => in_range(a.min_voltage_mv),
-        SourcePdo::Reserved(_) => Risk::Above5V,
+        // Reserved and any future kind: assume the worst.
+        _ => Risk::Above5V,
     }
 }
 

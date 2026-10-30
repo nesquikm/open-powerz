@@ -43,7 +43,7 @@ Build order: 4PJRVP, 4PJRVN, 4PJRVK, 4PJRVH, 4PJRVJ, 4PJRVM.
 **Tasks:**
 - [ ] Trigger panel and console fixes — 4PJRVH
 - [ ] Firmware update fixes — 4PJRVJ
-- [ ] PD analyzer, replug and CLI fixes — 4PJRVK
+- [x] PD analyzer, replug and CLI fixes — 4PJRVK
 - [ ] Several meters, records and settings fixes — 4PJRVM
 - [x] Release pipeline fixes — 4PJRVN
 - [x] Housekeeping — 4PJRVP

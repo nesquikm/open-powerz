@@ -142,7 +142,8 @@ impl Offer {
                 None,
                 Some(a.pdp_w.saturating_mul(1000)),
             ),
-            SourcePdo::Reserved(_) => return None,
+            // Reserved, and any future kind of the non_exhaustive SourcePdo.
+            _ => return None,
         };
         Some(Offer {
             position,

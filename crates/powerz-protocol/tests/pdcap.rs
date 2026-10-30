@@ -523,6 +523,26 @@ fn the_streaming_reader_reports_the_damaged_line_and_then_stops() {
     assert_eq!(err.line(), 1 + entries.len());
 }
 
+#[test]
+fn a_damage_message_names_only_the_line_of_the_file() {
+    let entries = small_capture();
+    let bytes = write_file(&header(), &entries);
+    let cut = &bytes[..bytes.len() - 5];
+    let err = Reader::new(Cursor::new(cut))
+        .expect("header reads")
+        .last()
+        .expect("items")
+        .expect_err("the cut line is an error");
+    let text = err.to_string();
+    let file_line = 1 + entries.len();
+    assert!(
+        text.starts_with(&format!("pdcap line {file_line}: ")),
+        "{text}"
+    );
+    assert!(text.contains(" at column "), "{text}");
+    assert!(!text.contains(" at line "), "{text}");
+}
+
 // ------------------------------------------ AC-TGE83E.5: the reference doc
 
 fn repo_file(rel: &str) -> PathBuf {

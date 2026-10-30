@@ -5,6 +5,7 @@ use crate::field::{Field, Flag, yes_no};
 
 /// SOP* kind of a message, from the meter's SOP code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Sop {
     /// SOP: port to port.
     Sop,
@@ -46,6 +47,7 @@ impl Sop {
 
 /// Port Power Role (bit 8 on SOP).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PowerRole {
     /// 0.
     Sink,
@@ -55,6 +57,7 @@ pub enum PowerRole {
 
 /// Port Data Role (bit 5 on SOP).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DataRole {
     /// 0.
     Ufp,
@@ -64,6 +67,7 @@ pub enum DataRole {
 
 /// Cable Plug (bit 8 on SOP'/SOP'').
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CablePlug {
     /// 0: sent by a DFP or UFP port.
     Port,
@@ -73,6 +77,7 @@ pub enum CablePlug {
 
 /// Specification Revision (bits 7..6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SpecRevision {
     /// 00b: revision 1.0.
     Rev1,
@@ -107,6 +112,7 @@ impl SpecRevision {
 /// Message family: a control message has no data objects, a data message
 /// has some, an extended message has the Extended bit set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MessageKind {
     /// Control message.
     Control,

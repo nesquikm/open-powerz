@@ -206,10 +206,11 @@ impl SimDevice {
     fn get_data(&mut self, req: &[u8], id: u8) -> Vec<u8> {
         let mask = frame::get_data_mask(req).map_or(0, Attribute::bits);
         let now = self.uptime_ms();
-        self.queue.fill(self.scenario, now);
+        let measured = self.measured();
+        self.queue.fill(measured, now);
         let mut sections: Vec<(Attribute, u8, Vec<u8>)> = Vec::new();
         if mask & Attribute::ADC.bits() != 0 {
-            let sample = self.scenario.sample(now);
+            let sample = measured.sample(now);
             sections.push((Attribute::ADC, 0, adc_payload(&sample, self.queue.code())));
         }
         if mask & Attribute::ADC_QUEUE.bits() != 0 {
@@ -218,7 +219,7 @@ impl SimDevice {
             sections.push((Attribute::ADC_QUEUE, n, records.concat()));
         }
         if mask & Attribute::PD_PACKET.bits() != 0 {
-            let s = self.scenario.sample(now);
+            let s = measured.sample(now);
             let mv = |v: f64| (v * 1000.0).round().clamp(0.0, 65535.0) as u16;
             let ma = (s.ibus_a * 1000.0).round().clamp(-32768.0, 32767.0) as i16;
             let fallback = (mv(s.vbus_v), ma, mv(s.cc1_v), mv(s.cc2_v));

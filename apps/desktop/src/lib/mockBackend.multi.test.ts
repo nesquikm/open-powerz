@@ -91,8 +91,11 @@ describe("MockBackend with two meters (FR 1HHT03)", () => {
     expect(a.some((e) => e.type === "pd_state")).toBe(true);
     expect(b.some((e) => e.type === "pd_state" || e.type === "pd_rows")).toBe(false);
 
-    // Each meter keeps its own statistics.
-    expect((await backend.meter(LOAD).stats()).vbus?.avg).toBeCloseTo(5, 0);
+    // Each meter keeps its own statistics. LOAD's capture plays its 9 V contract for
+    // part of each cycle (AC-4PJRVK.5), so its average sits between 5 V and PD's 9 V.
+    const loadAvg = (await backend.meter(LOAD).stats()).vbus?.avg;
+    expect(loadAvg).toBeGreaterThan(4.5);
+    expect(loadAvg).toBeLessThan(8);
     expect((await backend.meter(PD).stats()).vbus?.avg).toBeCloseTo(9, 0);
   });
 

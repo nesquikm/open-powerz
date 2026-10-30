@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -373,6 +373,44 @@ impl Drop for WatchHandle {
 /// the serial it waits to see again.
 type Waiting = Arc<Mutex<Vec<(String, String)>>>;
 
+/// First wait before the next automatic reconnect of a meter that failed to
+/// open (FR 4PJRVK); doubles with each failed try. Longer than a few hotplug
+/// polls, so a meter held by another app is not hammered.
+const FIRST_BACK_OFF_MS: u64 = 2_000;
+
+/// The longest a meter that keeps failing to open waits for its next try.
+const MOST_BACK_OFF_MS: u64 = 60_000;
+
+/// Paces a session's automatic reconnects (FR 4PJRVK): every try that does
+/// not end in samples pushes the next one further out, up to the cap.
+#[derive(Debug, Default)]
+struct ReconnectBackOff {
+    /// Tries since the meter last delivered samples. Shared with the
+    /// session's event sink, which clears it when samples arrive.
+    tries: Arc<AtomicU32>,
+    /// Earliest time of the next try, once there has been one.
+    next_try_ms: u64,
+}
+
+impl ReconnectBackOff {
+    /// Whether a reconnect may start at `now_ms`.
+    fn due(&self, now_ms: u64) -> bool {
+        self.tries.load(Ordering::SeqCst) == 0 || now_ms >= self.next_try_ms
+    }
+
+    /// A reconnect starts at `now_ms`.
+    fn tried(&mut self, now_ms: u64) {
+        let earlier = self.tries.fetch_add(1, Ordering::SeqCst);
+        let delay = FIRST_BACK_OFF_MS.saturating_mul(1 << earlier.min(16));
+        self.next_try_ms = now_ms.saturating_add(delay.min(MOST_BACK_OFF_MS));
+    }
+
+    /// Start over: the next try may run at once.
+    fn reset(&self) {
+        self.tries.store(0, Ordering::SeqCst);
+    }
+}
+
 /// One meter's session (FR 1HHT03): every connected meter has its own
 /// worker, data, page, trigger session and wait.
 struct Meter {
@@ -400,6 +438,8 @@ struct Meter {
     /// The queue rate to restore when the trigger session closes, if it was
     /// capped for it.
     rate_before_trigger: Option<Rate>,
+    /// When the next automatic reconnect may start (FR 4PJRVK).
+    back_off: ReconnectBackOff,
 }
 
 impl Meter {
@@ -454,6 +494,9 @@ pub struct DeviceManager<O, C> {
     /// The simulator serials given to second (third, ...) demo meters, by
     /// serial: the demo device id that got each (FR 1HHT03).
     demo_serials: HashMap<String, String>,
+    /// Called each time a session reports `connected`, just before the page
+    /// is told: the moment the page drops a capture opened from a file.
+    on_connected: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Why a request is refused while a firmware update runs.
@@ -695,6 +738,17 @@ fn take(
     lock(slot).take()
 }
 
+/// Wrap `sink` so `hook` runs when the session reports `connected`, before
+/// the event goes on.
+fn connected_sink(hook: Arc<dyn Fn() + Send + Sync>, mut sink: impl EventSink) -> impl EventSink {
+    move |event: BackendEvent| {
+        if matches!(event, BackendEvent::Status(Status::Connected(_))) {
+            hook();
+        }
+        sink(event);
+    }
+}
+
 /// Forget any wait for the meter whose session is `id`.
 fn forget_wait(waiting: &Waiting, id: &str) {
     waiting
@@ -724,15 +778,20 @@ fn trigger_sink(
 /// Wrap `sink` so a real meter's session that ends without being asked to,
 /// after it delivered samples, is followed by a waiting status for `serial`,
 /// and the manager remembers that session `id` waits for that serial
-/// (FR TGE839).
+/// (FR TGE839). Samples clear the count of failed reconnects in `tries`
+/// (FR 4PJRVK).
 fn waiting_sink(
     waiting: Waiting,
     id: String,
     serial: String,
     history: Arc<Mutex<History>>,
+    tries: Arc<AtomicU32>,
     mut sink: impl EventSink,
 ) -> impl EventSink {
     move |event: BackendEvent| {
+        if matches!(&event, BackendEvent::Batch(batch) if !batch.samples.is_empty()) {
+            tries.store(0, Ordering::SeqCst);
+        }
         let ended = matches!(event, BackendEvent::Status(Status::Disconnected { .. }));
         sink(event);
         if !ended {
@@ -781,7 +840,14 @@ where
             flashing: Arc::default(),
             flash_targets: Arc::default(),
             demo_serials: HashMap::new(),
+            on_connected: Arc::new(|| {}),
         }
+    }
+
+    /// Call `hook` whenever a session (a user connect or an automatic
+    /// reconnect) reports `connected`, before the page is told.
+    pub fn set_on_connected(&mut self, hook: impl Fn() + Send + Sync + 'static) {
+        self.on_connected = Arc::new(hook);
     }
 
     /// Refuse a request while a firmware update holds the meter.
@@ -920,6 +986,15 @@ where
             .collect()
     }
 
+    /// Arm a wait for `serial` on session `id`, as an unplug does.
+    #[cfg(test)]
+    pub(crate) fn arm_wait(&self, id: &str, serial: &str) {
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((id.to_owned(), serial.to_owned()));
+    }
+
     /// Stop waiting for unplugged meters: the user picked another device,
     /// so a meter that comes back later is listed but not reconnected.
     pub fn cancel_wait(&mut self) {
@@ -937,7 +1012,9 @@ where
     /// The hotplug watcher's changed device list; returns whether it
     /// started a connect. Only an awaited meter that is listed again is
     /// reconnected, into its own session; nothing else is ever connected on
-    /// its own.
+    /// its own. A meter whose reconnect failed is tried again only once its
+    /// back-off has passed, or at once when it left the list and came back
+    /// (FR 4PJRVK).
     pub fn devices_changed(&mut self, devices: &[DeviceListing]) -> bool {
         if self.flashing() {
             return false;
@@ -947,6 +1024,7 @@ where
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        let now_ms = self.clock.now_ms();
         let mut started = false;
         for (id, serial) in waits {
             let Some(index) = self.meters.iter().position(|m| m.id == id) else {
@@ -962,8 +1040,12 @@ where
                 .find(|d| d.demo_scenario.is_none() && d.serial.as_deref() == Some(serial.as_str()))
                 .cloned()
             else {
+                meter.back_off.reset();
                 continue;
             };
+            if !meter.back_off.due(now_ms) {
+                continue;
+            }
             // A meter back in bootloader mode is listed but not opened; keep
             // waiting for its application-mode return.
             if device.ensure_connectable().is_err() {
@@ -992,6 +1074,7 @@ where
                 old.retire();
             }
             meter.device = device;
+            meter.back_off.tried(now_ms);
             self.open_session(index, rate);
             started = true;
         }
@@ -1118,6 +1201,7 @@ where
             device: device.clone(),
             trigger: Arc::default(),
             rate_before_trigger: None,
+            back_off: ReconnectBackOff::default(),
         });
         self.current = Some(device.id);
         self.open_session(self.meters.len() - 1, rate);
@@ -1212,15 +1296,25 @@ where
             source,
             ..WorkerConfig::new(rate, session_id)
         };
-        let sink = trigger_sink(
-            Arc::clone(&m.trigger),
-            history_sink(
-                Arc::clone(&history),
-                listing_sink(device.clone(), live_sink(Arc::clone(&m.live))),
+        let sink = connected_sink(
+            Arc::clone(&self.on_connected),
+            trigger_sink(
+                Arc::clone(&m.trigger),
+                history_sink(
+                    Arc::clone(&history),
+                    listing_sink(device.clone(), live_sink(Arc::clone(&m.live))),
+                ),
             ),
         );
         let sink: Box<dyn FnMut(BackendEvent) + Send> = match waits_for {
-            Some(serial) => Box::new(waiting_sink(waiting, m.id.clone(), serial, history, sink)),
+            Some(serial) => Box::new(waiting_sink(
+                waiting,
+                m.id.clone(),
+                serial,
+                history,
+                Arc::clone(&m.back_off.tries),
+                sink,
+            )),
             None => Box::new(sink),
         };
         m.worker = Some(worker::spawn_with_store(
@@ -1441,7 +1535,8 @@ where
             while !flag.load(Ordering::SeqCst) {
                 // While the app waits for a meter, report every poll, changed or
                 // not: a replug seen before the wait was armed, or a reconnect
-                // that failed to open, gets another try (FR TGE839).
+                // that failed to open, gets another try (FR TGE839), paced by
+                // the session's back-off (FR 4PJRVK).
                 if !waiting
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use open_powerz_desktop_lib::devices::{DeviceListing, DeviceManager, Opener};
+use open_powerz_desktop_lib::devices::{DeviceListing, DeviceManager, HOTPLUG_PERIOD_MS, Opener};
 use open_powerz_desktop_lib::recording::RecordingEvent;
 use open_powerz_desktop_lib::worker::{BackendEvent, GapKind, Status};
 use powerz_protocol::transport::{self, Transport, discovery::DeviceEntry, discovery::Model};
@@ -601,6 +601,176 @@ fn picking_another_device_cancels_the_wait_before_any_connect() {
             .iter()
             .all(|e| !matches!(e, BackendEvent::Status(Status::Connected(_))))
     );
+}
+
+// ---- AC-4PJRVK.1: a reconnect whose open keeps failing backs off ----
+
+/// The longest a meter that keeps failing to open may wait for its next try.
+const MOST_BACK_OFF_MS: u64 = 60_000;
+
+/// Wait until the ended session's worker is gone, so the next list can start
+/// a reconnect.
+fn worker_gone(rig: &Rig) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !rig.m.connected_ids().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the failed reconnect never ended"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A meter listed again whose open keeps failing, polled every hotplug
+/// period for `polls` polls: the simulated times of the tries that started.
+fn tries_while_open_fails(
+    rig: &mut Rig,
+    rx: &mpsc::Receiver<BackendEvent>,
+    polls: u64,
+) -> Vec<u64> {
+    let mut tries = Vec::new();
+    for _ in 0..polls {
+        if rig.relist() {
+            tries.push(rig.clock.now_ms());
+            recv_until(rx, |e| {
+                matches!(e, BackendEvent::Status(Status::Waiting { .. }))
+            });
+            worker_gone(rig);
+        }
+        rig.clock.advance(Duration::from_millis(HOTPLUG_PERIOD_MS));
+    }
+    tries
+}
+
+/// Listed by the OS, but every open fails (held by another app, say).
+fn list_but_fail_every_open(rig: &mut Rig) {
+    *rig.attached.lock().unwrap() = vec![meter(SERIAL_A, "1", 9)];
+}
+
+fn gaps(tries: &[u64]) -> Vec<u64> {
+    tries.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+#[test]
+fn a_reconnect_that_fails_to_open_is_not_tried_on_the_next_poll() {
+    let mut rig = Rig::new();
+    let (rx, _) = stream_meter_a(&mut rig, 50);
+    unplug_and_wait(&mut rig, &rx);
+    list_but_fail_every_open(&mut rig);
+
+    let tries = tries_while_open_fails(&mut rig, &rx, 4);
+    assert_eq!(
+        tries.len(),
+        1,
+        "four polls in a row each tried the open: {tries:?}"
+    );
+}
+
+#[test]
+fn the_delay_between_failed_reconnects_grows_up_to_a_cap() {
+    let mut rig = Rig::new();
+    let (rx, _) = stream_meter_a(&mut rig, 50);
+    unplug_and_wait(&mut rig, &rx);
+    list_but_fail_every_open(&mut rig);
+
+    // Ten minutes of polls.
+    let polls = 600_000 / HOTPLUG_PERIOD_MS;
+    let gaps = gaps(&tries_while_open_fails(&mut rig, &rx, polls));
+    assert!(gaps.len() >= 4, "too few tries in ten minutes: {gaps:?}");
+    assert!(
+        gaps.windows(2).all(|w| w[1] >= w[0]),
+        "a later delay got shorter: {gaps:?}"
+    );
+    assert!(
+        gaps[gaps.len() - 1] > gaps[0],
+        "the delay does not grow: {gaps:?}"
+    );
+    assert!(
+        gaps.iter().all(|&g| g <= MOST_BACK_OFF_MS),
+        "a delay ran past the cap: {gaps:?}"
+    );
+    // Once capped it stays there (a poll may round it up by one period).
+    let last = &gaps[gaps.len() - 2..];
+    assert!(
+        last[1] - last[0] <= HOTPLUG_PERIOD_MS,
+        "the delay is still growing after ten minutes: {gaps:?}"
+    );
+}
+
+#[test]
+fn the_back_off_starts_at_2_s_and_doubles() {
+    let mut rig = Rig::new();
+    let (rx, _) = stream_meter_a(&mut rig, 50);
+    unplug_and_wait(&mut rig, &rx);
+    list_but_fail_every_open(&mut rig);
+
+    let gaps = gaps(&tries_while_open_fails(
+        &mut rig,
+        &rx,
+        60_000 / HOTPLUG_PERIOD_MS,
+    ));
+    assert!(gaps.len() >= 4, "too few tries in a minute: {gaps:?}");
+    // A poll may round a delay up by one period.
+    for (i, base) in [2_000_u64, 4_000, 8_000, 16_000].into_iter().enumerate() {
+        assert!(
+            (base..=base + HOTPLUG_PERIOD_MS).contains(&gaps[i]),
+            "delay {i} should be about {base} ms: {gaps:?}"
+        );
+    }
+}
+
+#[test]
+fn the_connected_hook_runs_for_a_reconnect_that_connects_only() {
+    let mut rig = Rig::new();
+    let (rx, _) = stream_meter_a(&mut rig, 50);
+    unplug_and_wait(&mut rig, &rx);
+    let connected = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&connected);
+    rig.m.set_on_connected(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
+    list_but_fail_every_open(&mut rig);
+    assert_eq!(tries_while_open_fails(&mut rig, &rx, 1).len(), 1);
+    assert_eq!(
+        connected.load(Ordering::SeqCst),
+        0,
+        "a failed open fired it"
+    );
+
+    rig.plugged.store(true, Ordering::SeqCst);
+    let mut started = false;
+    let back = rig.clock.now_ms();
+    while !started && rig.clock.now_ms() - back <= MOST_BACK_OFF_MS {
+        started = rig.relist();
+        rig.clock.advance(Duration::from_millis(HOTPLUG_PERIOD_MS));
+    }
+    assert!(started);
+    recv_until(&rx, is_samples);
+    assert_eq!(connected.load(Ordering::SeqCst), 1);
+    rig.m.disconnect().unwrap();
+}
+
+#[test]
+fn a_meter_that_opens_again_reconnects_within_the_cap_after_failed_tries() {
+    let mut rig = Rig::new();
+    let (rx, _) = stream_meter_a(&mut rig, 50);
+    unplug_and_wait(&mut rig, &rx);
+    list_but_fail_every_open(&mut rig);
+    let polls = 120_000 / HOTPLUG_PERIOD_MS;
+    tries_while_open_fails(&mut rig, &rx, polls);
+
+    // Whatever held the meter let go; the back-off still ends in a reconnect.
+    rig.plugged.store(true, Ordering::SeqCst);
+    let back = rig.clock.now_ms();
+    let mut started = false;
+    while !started && rig.clock.now_ms() - back <= MOST_BACK_OFF_MS {
+        started = rig.relist();
+        rig.clock.advance(Duration::from_millis(HOTPLUG_PERIOD_MS));
+    }
+    assert!(started, "no reconnect within the cap");
+    recv_until(&rx, is_samples);
+    assert_eq!(rig.m.waiting_for(), None);
+    rig.m.disconnect().unwrap();
 }
 
 // ---- AC-V9SK52.5: a meter that comes back in bootloader mode ----

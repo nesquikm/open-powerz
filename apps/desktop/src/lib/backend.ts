@@ -594,14 +594,19 @@ export async function recordsDelete(
  * numbered from 0. */
 export interface PdOpened {
   path: string;
+  /** The rows the capture keeps (at most its record limit). */
   rows: PdRow[];
   status: PdStatusSample[];
+  /** Records the capture dropped past its limit (the oldest ones): not in `rows`. */
+  dropped: number;
   /** The 1-based line where reading stopped when the file is truncated or corrupt
    * (AC-TGE83E.3); every valid line before it was loaded. `null` for a whole file. */
   damaged_line: number | null;
   /** Vendor log rows skipped because their record bytes are oversized (0 for a pdcap
    * file). */
   oversized: number;
+  /** Vendor log rows skipped because they hold no whole record (0 for a pdcap file). */
+  skipped: number;
   /** The vendor log has more rows than the import takes: only the first ones were
    * imported (false for a pdcap file). */
   truncated: boolean;
@@ -693,11 +698,20 @@ export async function firmwareFlash(
   });
 }
 
-/** Drops every captured PD record; resolves to the index of the next record. Rows
- * numbered below it were sent before the clear and are stale. */
-export async function pdClear(): Promise<number> {
+/** What a PD clear answers. */
+export interface PdCleared {
+  /** Index of the next record: rows numbered below it were sent before the clear and
+   * are stale. */
+  next_index: number;
+  /** Session time (ms) of the latest status sample the backend had at the clear, 0 if
+   * none: status samples carry no index, so those at or below it are stale. */
+  status_floor_ms: number;
+}
+
+/** Drops every captured PD record; resolves to {@link PdCleared}. */
+export async function pdClear(): Promise<PdCleared> {
   if (mock) return mock.pdClear();
-  return invoke<number>("pd_clear");
+  return invoke<PdCleared>("pd_clear");
 }
 
 /** Opens the save dialog proposing `suggestedName` and saves the PD capture so far as a
@@ -967,7 +981,7 @@ export interface MeterBackend {
   pdStart(): Promise<void>;
   pdStop(): Promise<void>;
   pdDetails(index: number, opened?: boolean): Promise<PdDetails>;
-  pdClear(): Promise<number>;
+  pdClear(): Promise<PdCleared>;
   pdSave(suggestedName: string): Promise<ExportResult | null>;
   meterSettings(): Promise<MeterSettings>;
   meterSettingsWrite(changes: SettingChanges): Promise<MeterSettings>;

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Series, SeriesBuckets};
-use crate::pd_capture::{PdCapture, PdDetails, PdRow, PdStatusSample};
+use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
 use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
 use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, temp_at};
@@ -1116,8 +1116,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
 
     /// Drop every captured PD record; a running capture goes on. Returns
     /// the index the next record gets.
-    pub fn clear_pd(&mut self) -> Result<u64, UiError> {
-        Ok(self.pd.clear())
+    pub fn clear_pd(&mut self) -> Result<PdCleared, UiError> {
+        Ok(self.pd.clear_with_floor())
     }
 
     /// Read the meter's SETTINGS block (GET_DATA 0x008 only) for the
@@ -1490,7 +1490,7 @@ enum Command {
     StartPd(mpsc::Sender<Result<(), UiError>>),
     StopPd(mpsc::Sender<Result<(), UiError>>),
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
-    ClearPd(mpsc::Sender<Result<u64, UiError>>),
+    ClearPd(mpsc::Sender<Result<PdCleared, UiError>>),
     PdSave(mpsc::Sender<PdSave>),
     ReadSettings(mpsc::Sender<Result<MeterSettingsView, UiError>>),
     WriteSettings(
@@ -1857,7 +1857,7 @@ impl WorkerControl {
     }
 
     /// Drop every captured PD record; returns the index the next one gets.
-    pub fn clear_pd(&self) -> Result<u64, UiError> {
+    pub fn clear_pd(&self) -> Result<PdCleared, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::ClearPd(reply), &answer)?
     }

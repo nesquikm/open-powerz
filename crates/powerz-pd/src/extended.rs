@@ -76,6 +76,7 @@ impl ExtendedHeader {
 
 /// Type of an Extended_Control message (ECDB byte 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EcdbType {
     /// 1: EPR_Get_Source_Cap.
     EprGetSourceCap,
@@ -100,6 +101,7 @@ pub struct ExtendedControl {
 
 /// Action of an EPR_Mode message (EPRMDO bits 31..24).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EprAction {
     /// 1: Enter.
     Enter,

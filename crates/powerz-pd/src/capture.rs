@@ -10,6 +10,7 @@ use crate::vdm::Vdm;
 
 /// One captured record, as the decoder sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Input<'a> {
     /// A PD message.
     Message {
@@ -32,6 +33,7 @@ pub enum Input<'a> {
 
 /// A decoded message body.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Message {
     /// A control message (no body).
     Control,
@@ -73,6 +75,7 @@ pub enum Message {
 
 /// Something wrong with a message or its context.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Issue {
     /// A Request with no Source_Capabilities remembered on SOP.
     NoSourceCapabilities,
@@ -98,6 +101,29 @@ pub enum Issue {
         /// Bytes that arrived.
         got: usize,
     },
+}
+
+impl std::fmt::Display for Issue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Issue::NoSourceCapabilities => {
+                write!(f, "Request with no Source_Capabilities remembered")
+            }
+            Issue::PositionOutOfRange {
+                position,
+                available,
+            } => write!(
+                f,
+                "Request points at object position {position}, but only {available} PDOs are remembered"
+            ),
+            Issue::MissingChunk { expected, got } => {
+                write!(f, "chunk {got} arrived, but chunk {expected} was due")
+            }
+            Issue::ShortBody { expected, got } => {
+                write!(f, "body is {got} bytes, the header announces {expected}")
+            }
+        }
+    }
 }
 
 /// One decoded PD message.

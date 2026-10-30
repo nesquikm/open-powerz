@@ -550,6 +550,26 @@ fn clear_drops_the_captured_records() {
     assert_eq!(rows(&events).len(), SCENARIO_RECORDS, "clear sends no rows");
 }
 
+#[test]
+fn clear_answers_the_latest_status_time_as_a_floor() {
+    let (mut worker, _clock, _log, events) = captured();
+    let last = json_events(&events)
+        .into_iter()
+        .filter(|(_, e)| e["type"] == "pd_status")
+        .flat_map(|(_, e)| e["data"]["samples"].as_array().cloned().unwrap_or_default())
+        .filter_map(|x| x["session_ms"].as_u64())
+        .max()
+        .expect("the scenario sent status samples");
+    let cleared = worker.clear_pd().expect("clear");
+    // Samples still waiting to go out count too: the clear drops them unsent.
+    assert!(cleared.status_floor_ms >= last, "{cleared:?} < {last}");
+    let again = worker.clear_pd().expect("clear again");
+    assert_eq!(
+        again.status_floor_ms, cleared.status_floor_ms,
+        "the floor never goes back"
+    );
+}
+
 // ---- The same through the worker's control (what the Tauri commands use) ----
 
 #[test]
@@ -607,7 +627,7 @@ fn the_worker_control_starts_answers_clears_and_stops_the_capture() {
 #[test]
 fn records_after_a_clear_keep_counting_so_late_rows_cannot_collide() {
     let (mut worker, clock, _log, events) = captured();
-    let next = worker.clear_pd().expect("clear");
+    let next = worker.clear_pd().expect("clear").next_index;
     assert_eq!(
         next, SCENARIO_RECORDS as u64,
         "clear returns the next index"

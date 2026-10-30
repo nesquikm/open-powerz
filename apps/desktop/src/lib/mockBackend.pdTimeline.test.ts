@@ -102,3 +102,34 @@ describe("MockBackend PD status blocks (AC-TGE83D.4)", () => {
     await backend.disconnect();
   });
 });
+
+describe("the demo's PD scenario and its measurement stream agree (AC-4PJRVK.5)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** Measurement samples between two neighbouring rows of one contract, with that contract. */
+  function samplesUnderContract(events: BackendEvent[]): { want: number; got: number }[] {
+    const rows = pdRows(events).sort((a, b) => a.session_ms! - b.session_ms!);
+    const samples = events.flatMap((e) => (e.type === "batch" ? e.data.samples : []));
+    const out: { want: number; got: number }[] = [];
+    for (let i = 1; i < rows.length; i++) {
+      const [a, b] = [rows[i - 1]!, rows[i]!];
+      if (Math.abs(a.vbus_v - b.vbus_v) > 0.1) continue;
+      for (const s of samples) {
+        if (s.t_ms > a.session_ms! && s.t_ms < b.session_ms!) {
+          out.push({ want: a.vbus_v, got: s.vbus_v });
+        }
+      }
+    }
+    return out;
+  }
+
+  it("measures 9 V while 9 V is negotiated, and 5 V around it", async () => {
+    const { backend, events } = await capturing(1_000, 12_000);
+    await backend.disconnect();
+    const compared = samplesUnderContract(events);
+    expect(compared.some((c) => c.want > 8.5)).toBe(true);
+    expect(compared.some((c) => c.want < 5.5)).toBe(true);
+    for (const { want, got } of compared) expect(Math.abs(got - want)).toBeLessThan(0.3);
+  });
+});

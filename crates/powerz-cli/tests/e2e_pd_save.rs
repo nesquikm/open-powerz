@@ -211,3 +211,44 @@ fn pd_decode_of_a_missing_file_fails_with_a_message() {
     let a = sim(0).args(["pd", "decode"]).arg(&path).assert().failure();
     assert!(stderr_of(&a).contains("missing.pdcap"), "{}", stderr_of(&a));
 }
+
+// -------------------------------- AC-4PJRVK.6: a file error is not a device error
+
+/// A file error fails with a code of its own kind: 5 means the meter failed,
+/// and `pd decode` opens no meter.
+fn assert_file_error(a: &assert_cmd::assert::Assert, name: &str, what: &str) {
+    let code = a.get_output().status.code();
+    assert_ne!(code, Some(0), "a file error fails");
+    assert_ne!(code, Some(5), "a file error is no device error");
+    let err = stderr_of(a);
+    assert!(err.contains(name), "the file is named:\n{err}");
+    assert!(err.contains(what), "the reason is given:\n{err}");
+    assert_eq!(err.lines().count(), 1, "one clear line:\n{err}");
+}
+
+#[test]
+fn pd_decode_of_a_file_that_is_no_capture_is_a_file_error() {
+    let path = scratch("not-a-capture.pdcap");
+    std::fs::write(&path, "not a pdcap file\n").expect("written");
+    let a = sim(0).args(["pd", "decode"]).arg(&path).assert();
+    assert_file_error(&a, "not-a-capture.pdcap", "line 1");
+}
+
+#[test]
+fn pd_decode_of_a_cut_file_is_a_file_error() {
+    let (path, _) = save_capture("cut-error.pdcap");
+    let text = std::fs::read_to_string(&path).expect("saved");
+    let first = text.lines().next().expect("a header");
+    let cut = scratch("cut-error-short.pdcap");
+    std::fs::write(&cut, format!("{first}\n{{\"kind\":")).expect("written");
+    let a = sim(0).args(["pd", "decode"]).arg(&cut).assert();
+    assert_file_error(&a, "cut-error-short.pdcap", "line 2");
+}
+
+#[test]
+fn pd_decode_of_a_folder_is_a_file_error() {
+    let dir = scratch("a-folder.pdcap");
+    std::fs::create_dir_all(&dir).expect("a folder");
+    let a = sim(0).args(["pd", "decode"]).arg(&dir).assert();
+    assert_file_error(&a, "a-folder.pdcap", "");
+}

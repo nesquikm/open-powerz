@@ -85,6 +85,8 @@ pub struct VendorImport {
     pub capture: PdCapture,
     /// `pd_table` rows skipped because their `Raw` is over the limit.
     pub oversized: u64,
+    /// `pd_table` rows skipped because their `Raw` is not one whole record.
+    pub skipped: u64,
     /// The log has more rows than [`ImportLimits::max_rows`]: only the first
     /// ones were imported.
     pub truncated: bool,
@@ -119,6 +121,7 @@ pub fn import_vendor_pd_log_with(
     )?;
     let mut pd = PdCapture::new();
     let mut taken = 0u64;
+    let mut skipped = 0u64;
     let mut truncated = false;
     let mut rows = db.prepare(
         "SELECT Time, Vbus, Ibus, Raw FROM pd_table \
@@ -133,6 +136,7 @@ pub fn import_vendor_pd_log_with(
         taken += 1;
         // A row without whole record bytes has nothing to decode.
         let Some(record) = blob(row, 3)?.and_then(record_from) else {
+            skipped += 1;
             continue;
         };
         pd.push_imported(
@@ -168,6 +172,7 @@ pub fn import_vendor_pd_log_with(
     Ok(VendorImport {
         capture: pd,
         oversized: u64::try_from(oversized).unwrap_or(0),
+        skipped,
         truncated,
     })
 }

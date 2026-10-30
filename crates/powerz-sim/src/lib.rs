@@ -141,6 +141,29 @@ impl Scenario {
     }
 }
 
+/// What the meter measures: the demo [`Scenario`], with VBUS on the PD
+/// contract while a capture plays, so both tell the same story.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Measured {
+    scenario: Scenario,
+    contract: Option<pd::Contract>,
+}
+
+impl Measured {
+    /// The reading at simulated device uptime `t_ms`.
+    pub(crate) fn sample(self, t_ms: u64) -> Sample {
+        let mut s = self.scenario.sample(t_ms);
+        if let Some(mv) = self.contract.and_then(|c| c.mv_at(t_ms)) {
+            s.vbus_v = f64::from(mv) / 1000.0;
+            let live = mv > 1000;
+            s.ibus_a = if live { s.ibus_a } else { 0.0 };
+            s.dp_v = if live { 0.6 } else { 0.0 };
+            s.dm_v = s.dp_v;
+        }
+        s
+    }
+}
+
 /// Injected simulated time. Clones share one time line; time moves only by
 /// [`advance`](SimClock::advance) or a session [`Clock::sleep`].
 #[derive(Debug, Clone)]
@@ -506,6 +529,14 @@ impl SimDevice {
         }
     }
 
+    /// What the meter measures right now.
+    pub(crate) fn measured(&self) -> Measured {
+        Measured {
+            scenario: self.scenario,
+            contract: self.pd.contract(),
+        }
+    }
+
     /// Play `scenario` on the PD sniffer: from each sniffer start (0x10,
     /// mode 1) PD_PACKET polls carry its records. Without a PD scenario the
     /// sniffer captures nothing (status block only).
@@ -628,8 +659,10 @@ impl SimDevice {
                 self.adcnew = Some(match request.get(1) {
                     Some(att) => adcnew::AdcnewStream::start(att & 0x0F, now, None),
                     None => {
-                        let body =
-                            adcnew::first_frame_body(&self.scenario.sample(now), self.rate_code());
+                        let body = adcnew::first_frame_body(
+                            &self.measured().sample(now),
+                            self.rate_code(),
+                        );
                         adcnew::AdcnewStream::start(self.rate_code(), now, Some(body))
                     }
                 });
@@ -645,10 +678,11 @@ impl SimDevice {
 
     /// Queue every ADCNEW frame due up to uptime `now` on the IN pipe.
     fn adcnew_push(&mut self, now: u64) {
+        let measured = self.measured();
         let Some(stream) = self.adcnew.as_mut() else {
             return;
         };
-        for (att, body) in stream.due(self.scenario, now) {
+        for (att, body) in stream.due(measured, now) {
             self.adcnew_sent += 1;
             let corrupt = self.faults.corrupt_adcnew_at.contains(&self.adcnew_sent);
             self.pending.push_back(adcnew::encode(att, &body, corrupt));

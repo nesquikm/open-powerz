@@ -27,6 +27,8 @@
   import {
     defaultPdCaptureName,
     pdImportNoticeText,
+    pdOpenedNotice,
+    type PdOpenedNotice,
     pdOpenDamageText,
     pdSaveNoticeText,
   } from "./lib/pdSave";
@@ -423,7 +425,7 @@
     return act()
       .pdClear()
       .then(
-        (from) => pd.endClear(from, ticket),
+        (cleared) => pd.endClear(cleared.next_index, ticket, cleared.status_floor_ms),
         (err: unknown) => {
           pd.endClear(0, ticket);
           throw err;
@@ -462,7 +464,7 @@
   /** Why the last opened PD capture file stopped loading early, while its notice shows. */
   let pdOpenDamage = $state<string | null>(null);
   /** The last vendor PD log import (FR TGE83E, AC .6), while its notice shows. */
-  let pdImported = $state<PdOpened | null>(null);
+  let pdImported = $state<PdOpenedNotice | null>(null);
 
   /** Open capture: open dialog, then the chosen pdcap file in place of the live capture
    * (FR TGE83E); needs no meter. */
@@ -490,9 +492,11 @@
     try {
       const opened = await load();
       if (opened !== null) {
-        pd.open(opened.rows, opened.status);
-        pdImported = imported ? opened : null;
-        pdOpenDamage = pdOpenDamageText(opened);
+        pd.open(opened.rows, opened.status, opened.dropped);
+        // Only the counts stay for the notice; the rows live in the store.
+        const notice = pdOpenedNotice(opened);
+        pdImported = imported ? notice : null;
+        pdOpenDamage = pdOpenDamageText(notice);
       }
     } catch (err) {
       pdSaveError = toUiError(err);

@@ -6,7 +6,7 @@
 use powerz_protocol::adcnew::crc8;
 
 use crate::queue::{RECORD_LEN, interval_ms, record};
-use crate::{Sample, Scenario};
+use crate::{Measured, Sample};
 
 /// The stream ends this long after the last `02` or `01`. [doc]
 const EXPIRY_MS: u64 = 60 * 60 * 1000;
@@ -74,7 +74,7 @@ impl AdcnewStream {
     }
 
     /// Every frame due up to uptime `now`, as `(att, body)` pairs.
-    pub(crate) fn due(&mut self, scenario: Scenario, now: u64) -> Vec<(u8, Vec<u8>)> {
+    pub(crate) fn due(&mut self, measured: Measured, now: u64) -> Vec<(u8, Vec<u8>)> {
         let mut out = Vec::new();
         if let Some(body) = self.first.take() {
             out.push((FIRST_FRAME_ATT, body));
@@ -85,7 +85,7 @@ impl AdcnewStream {
         let att = RECORD_ATT_BASE | self.code;
         while self.next_ms <= end {
             let t = self.next_ms;
-            self.partial.push(record(&scenario.sample(t), t, self.code));
+            self.partial.push(record(&measured.sample(t), t, self.code));
             self.next_ms += step;
             if self.partial.len() == per {
                 out.push((att, self.partial.drain(..).flatten().collect()));

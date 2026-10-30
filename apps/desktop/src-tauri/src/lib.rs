@@ -57,7 +57,7 @@ struct AppState {
     /// The PD capture opened from a file (FR TGE83E): outside the
     /// per-connection worker, so it opens without a meter and never mixes
     /// with a live capture.
-    opened_pd: Mutex<Option<pd_capture::PdCapture>>,
+    opened_pd: Arc<Mutex<Option<pd_capture::PdCapture>>>,
 }
 
 impl AppState {
@@ -69,17 +69,25 @@ impl AppState {
         ))
     }
 
-    fn with_manager(manager: AppManager) -> AppState {
+    fn with_manager(mut manager: AppManager) -> AppState {
+        // The page drops a capture opened from a file when a session
+        // reports `connected` (a user Connect or an automatic reconnect);
+        // the backend releases its copy at that same moment. A session that
+        // fails to open keeps the file on both sides.
+        let opened_pd: Arc<Mutex<Option<pd_capture::PdCapture>>> = Arc::default();
+        let slot = Arc::clone(&opened_pd);
+        manager.set_on_connected(move || {
+            *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        });
         AppState {
             manager: Mutex::new(manager),
             watch: Mutex::new(None),
-            opened_pd: Mutex::new(None),
+            opened_pd,
         }
     }
 
-    /// Connect to `device_id` at `rate_sps`; events go to `sink`. The UI
-    /// drops a capture opened from a file when a session connects, so its
-    /// memory is released here too.
+    /// Connect to `device_id` at `rate_sps`; events go to `sink`. The
+    /// opened capture is released once the session reports `connected`.
     #[cfg(test)]
     fn connect_session(
         &self,
@@ -107,9 +115,14 @@ impl AppState {
         stop: Arc<AtomicBool>,
     ) -> Result<(), UiError> {
         self.manager()
-            .connect_source_with_stop(device_id, rate_sps, source, sink, stop)?;
-        *self.opened_pd() = None;
-        Ok(())
+            .connect_source_with_stop(device_id, rate_sps, source, sink, stop)
+    }
+
+    /// The hotplug watcher's device list; returns whether it started a
+    /// reconnect. The opened capture is released once that session reports
+    /// `connected`, as with Connect.
+    fn devices_changed(&self, devices: &[DeviceListing]) -> bool {
+        self.manager().devices_changed(devices)
     }
 
     fn opened_pd(&self) -> MutexGuard<'_, Option<pd_capture::PdCapture>> {
@@ -127,16 +140,40 @@ impl AppState {
         damaged_line: Option<usize>,
         left_out: LeftOut,
     ) -> PdOpened {
+        // Rows the capture trimmed past its limit are not sent: the page
+        // gets what `pd_details` can answer, and the count of the rest.
+        let first = pd.first_index();
+        let mut rows = pd.take_all().unwrap_or_default();
+        rows.retain(|r| r.index >= first);
         let opened = PdOpened {
             path: path.to_string_lossy().into_owned(),
-            rows: pd.take_all().unwrap_or_default(),
+            rows,
+            dropped: pd.dropped(),
             status: pd.take_all_status().unwrap_or_default(),
             damaged_line,
             oversized: left_out.oversized,
+            skipped: left_out.skipped,
             truncated: left_out.truncated,
         };
         *self.opened_pd() = Some(pd);
         opened
+    }
+
+    /// Open the pdcap file at `path` as the opened capture. A file damaged
+    /// after its header opens with what it holds, even nothing, and names the
+    /// line; a file without a pdcap header is refused.
+    fn open_pdcap_file(&self, path: &Path) -> Result<PdOpened, UiError> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| UiError::usage(format!("Could not open the PD capture: {e}")))?;
+        let loaded = powerz_protocol::pdcap::load(std::io::BufReader::new(file));
+        if let (Some(e), None) = (&loaded.error, &loaded.header) {
+            return Err(UiError::usage(format!(
+                "Could not open the PD capture: {e}"
+            )));
+        }
+        let pd = pd_capture::PdCapture::from_pdcap(&loaded.entries);
+        let damaged_line = loaded.error.as_ref().map(|e| e.line());
+        Ok(self.show_opened(path, pd, damaged_line, LeftOut::default()))
     }
 
     fn manager(&self) -> MutexGuard<'_, AppManager> {
@@ -198,7 +235,7 @@ async fn watch_devices(
                 // A meter the app waits for that is listed again reconnects
                 // (FR TGE839).
                 if let Some(state) = weak.upgrade() {
-                    state.manager().devices_changed(&list);
+                    state.devices_changed(&list);
                 }
                 if on_change.send(list).is_err() {
                     gone.store(true, Ordering::SeqCst);
@@ -652,17 +689,21 @@ fn backup_dir(app: &tauri::AppHandle) -> Result<PathBuf, UiError> {
         .join(format!("records-{ms}")))
 }
 
-/// Drop every captured PD record; the answer is the index of the next one.
-/// A capture opened from a file is dropped too; with only that one and no
-/// meter, the answer is 0.
+/// Drop every captured PD record; the answer is the index of the next one and
+/// the latest status session time the backend had (the floor below which the
+/// page drops late status samples). A capture opened from a file is dropped
+/// too; with only that one and no meter, both are 0.
 #[tauri::command]
-async fn pd_clear(state: Shared<'_>, device_id: Option<String>) -> Result<u64, UiError> {
+async fn pd_clear(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<pd_capture::PdCleared, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let had_opened = state.opened_pd().take().is_some();
         let control = match control(&state, device_id.as_deref()) {
             Ok(control) => control,
-            Err(_) if had_opened => return Ok(0),
+            Err(_) if had_opened => return Ok(pd_capture::PdCleared::default()),
             Err(e) => return Err(e),
         };
         control.clear_pd()
@@ -676,8 +717,11 @@ async fn pd_clear(state: Shared<'_>, device_id: Option<String>) -> Result<u64, U
 pub struct PdOpened {
     /// The file opened.
     pub path: String,
-    /// Every row of the capture.
+    /// Every row the capture keeps (at most its record limit).
     pub rows: Vec<pd_capture::PdRow>,
+    /// Records the capture dropped past its limit (the oldest ones); not in
+    /// `rows`.
+    pub dropped: u64,
     /// Every status sample of the capture.
     pub status: Vec<pd_capture::PdStatusSample>,
     /// The 1-based line where reading stopped when the file is truncated or
@@ -685,6 +729,8 @@ pub struct PdOpened {
     pub damaged_line: Option<usize>,
     /// Vendor log rows skipped because their record bytes are oversized.
     pub oversized: u64,
+    /// Vendor log rows skipped because they hold no whole record.
+    pub skipped: u64,
     /// The vendor log has more rows than the import takes; only the first
     /// ones were imported.
     pub truncated: bool,
@@ -694,6 +740,7 @@ pub struct PdOpened {
 #[derive(Debug, Clone, Copy, Default)]
 struct LeftOut {
     oversized: u64,
+    skipped: u64,
     truncated: bool,
 }
 
@@ -729,22 +776,7 @@ async fn pd_open(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<PdOp
         let Some(path) = choose_open_path(&app, "PD capture", &["pdcap"])? else {
             return Ok(None);
         };
-        let file = std::fs::File::open(&path)
-            .map_err(|e| UiError::usage(format!("Could not open the PD capture: {e}")))?;
-        let loaded = powerz_protocol::pdcap::load(std::io::BufReader::new(file));
-        if let (Some(e), true) = (&loaded.error, loaded.entries.is_empty()) {
-            return Err(UiError::usage(format!(
-                "Could not open the PD capture: {e}"
-            )));
-        }
-        let pd = pd_capture::PdCapture::from_pdcap(&loaded.entries);
-        let damaged_line = loaded.error.as_ref().map(|e| e.line());
-        Ok(Some(state.show_opened(
-            &path,
-            pd,
-            damaged_line,
-            LeftOut::default(),
-        )))
+        state.open_pdcap_file(&path).map(Some)
     })
     .await
 }
@@ -764,6 +796,7 @@ async fn pd_import(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<Pd
                 .map_err(|e| UiError::usage(format!("Could not import the vendor PD log: {e}")))?;
         let left_out = LeftOut {
             oversized: imported.oversized,
+            skipped: imported.skipped,
             truncated: imported.truncated,
         };
         Ok(Some(state.show_opened(
@@ -1377,8 +1410,17 @@ mod tests {
         );
     }
 
+    /// Wait until `done` holds, up to 10 s.
+    fn wait_for(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     #[test]
-    fn connecting_a_meter_releases_the_opened_capture() {
+    fn connecting_a_meter_releases_the_opened_capture_once_it_reports_connected() {
         // No USB discovery: only the demo device is listed.
         let state = AppState::with_manager(DeviceManager::new(
             || Ok(Vec::new()),
@@ -1394,10 +1436,234 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
             )
             .expect("the demo device connects");
-        let still_opened = state.opened_pd().is_some();
+        wait_for("the opened capture was released", || {
+            state.opened_pd().is_none()
+        });
         if let Ok(session) = state.manager().take_session() {
             session.disconnect();
         }
-        assert!(!still_opened, "the opened capture outlived the new session");
+    }
+
+    #[test]
+    fn a_connect_the_manager_refuses_keeps_the_opened_capture() {
+        let state = AppState::with_manager(DeviceManager::new(
+            || Ok(Vec::new()),
+            AppOpener,
+            SystemClock,
+        ));
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        let refused = state.connect_session(
+            "usb:0:1",
+            50,
+            |_: BackendEvent| {},
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(refused.is_err(), "no such meter is attached");
+        assert!(state.opened_pd().is_some(), "a refused Connect dropped it");
+    }
+
+    // ---- AC-4PJRVK.7: an automatic reconnect releases the opened capture ----
+
+    const SERIAL: &str = "SERIAL-RECONNECT";
+
+    /// An app whose USB discovery lists one meter, at an address no real
+    /// meter has, so every open of it fails.
+    fn state_with_a_listed_meter() -> (AppState, Vec<devices::DeviceListing>, String) {
+        use powerz_protocol::transport::discovery::{DeviceEntry, Model};
+        let state = AppState::with_manager(DeviceManager::new(
+            || {
+                Ok(vec![DeviceEntry {
+                    model: Model::Km003c,
+                    pid: 0x0063,
+                    serial: Some(SERIAL.to_owned()),
+                    product: Some("POWER-Z KM003C".to_owned()),
+                    interface_string: Some("APP".to_owned()),
+                    bus: "254".to_owned(),
+                    address: 99,
+                }])
+            },
+            AppOpener,
+            SystemClock,
+        ));
+        let list = state.manager().list_devices();
+        let id = list
+            .iter()
+            .find(|d| d.demo_scenario.is_none())
+            .expect("the meter is listed")
+            .id
+            .clone();
+        (state, list, id)
+    }
+
+    /// Connect to the meter and wait until its session has ended.
+    fn session_ended(state: &AppState, id: &str) {
+        state
+            .connect_session(
+                id,
+                50,
+                |_: BackendEvent| {},
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the connect starts");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !state.manager().connected_ids().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the session never ended"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_failed_connect_keeps_the_opened_capture() {
+        let (state, _list, id) = state_with_a_listed_meter();
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        session_ended(&state, &id);
+        assert!(
+            state.opened_pd().is_some(),
+            "a Connect whose open failed dropped the opened capture"
+        );
+    }
+
+    #[test]
+    fn a_failed_automatic_reconnect_keeps_the_opened_capture() {
+        let (state, list, id) = state_with_a_listed_meter();
+        session_ended(&state, &id);
+        state.manager().arm_wait(&id, SERIAL);
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+
+        assert!(
+            state.devices_changed(&list),
+            "the listed meter did not reconnect"
+        );
+        wait_for("the reconnect session ended", || {
+            state.manager().connected_ids().is_empty()
+        });
+        let _ = state.manager().disconnect_for(&id);
+        assert!(
+            state.opened_pd().is_some(),
+            "a reconnect whose open failed dropped the opened capture"
+        );
+    }
+
+    #[test]
+    fn a_device_list_that_starts_no_reconnect_keeps_the_opened_capture() {
+        let (state, list, _) = state_with_a_listed_meter();
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        assert!(!state.devices_changed(&list), "nothing waits for a meter");
+        assert!(
+            state.opened_pd().is_some(),
+            "a plain list change dropped the opened capture"
+        );
+    }
+
+    // ---- AC-4PJRVK.6: a damaged pdcap file, and rows the import skipped ----
+
+    /// A file in a fresh scratch directory holding `text`.
+    fn pdcap_file(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("powerz-pdcap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join(name);
+        std::fs::write(&path, text).expect("file written");
+        path
+    }
+
+    /// The header line of a pdcap file, as the writer makes it.
+    fn pdcap_header_line() -> String {
+        use powerz_protocol::pdcap::{Header, Writer};
+        let header = Header::new("0.0.0-test", "KM003C".to_owned(), "2.0.7".to_owned());
+        let bytes = Writer::new(Vec::new(), &header)
+            .expect("header written")
+            .finish()
+            .expect("flushed");
+        String::from_utf8(bytes).expect("a text line")
+    }
+
+    #[test]
+    fn a_pdcap_damaged_on_its_first_entry_opens_empty_with_the_damaged_line() {
+        let path = pdcap_file(
+            "first-entry.pdcap",
+            &format!("{}{{\"kind\":\"rec", pdcap_header_line()),
+        );
+        let state = AppState::new();
+        let opened = state.open_pdcap_file(&path).expect("the file opens");
+        assert!(opened.rows.is_empty() && opened.status.is_empty());
+        assert_eq!(opened.damaged_line, Some(2));
+        assert!(
+            state.opened_pd().is_some(),
+            "the empty capture takes the opened-capture slot"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_no_pdcap_at_all_is_still_refused() {
+        let path = pdcap_file("not-a-capture.pdcap", "not a pdcap file\n");
+        let state = AppState::new();
+        let refused = state.open_pdcap_file(&path);
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(state.opened_pd().is_none());
+    }
+
+    #[test]
+    fn the_rows_an_import_skipped_reach_the_page() {
+        let state = AppState::new();
+        let opened = state.show_opened(
+            Path::new("log.sqlite"),
+            pd_capture::PdCapture::new(),
+            None,
+            LeftOut {
+                oversized: 0,
+                skipped: 3,
+                truncated: false,
+            },
+        );
+        assert_eq!(opened.skipped, 3);
+        let json = serde_json::to_value(&opened).expect("serializes");
+        assert_eq!(json["skipped"], 3);
+    }
+
+    // ---- AC-4PJRVK.5: the opened capture's rows are bounded at the IPC boundary ----
+
+    #[test]
+    fn an_opened_capture_sends_only_the_rows_it_keeps_and_counts_the_rest() {
+        use powerz_protocol::decode::pd_packet::{PdMessage, PdRecord, PdRecordKind};
+        use powerz_protocol::session::CapturedRecord;
+        let mut pd = pd_capture::PdCapture::with_limit(5);
+        for t in 0..20_u64 {
+            pd.push(
+                &[CapturedRecord {
+                    elapsed_ms: t,
+                    record: PdRecord {
+                        time_ms: 0,
+                        from_meter: false,
+                        raw: Vec::new(),
+                        kind: PdRecordKind::Message(PdMessage {
+                            sop: 0,
+                            header: 0x01A3,
+                            body: Vec::new(),
+                        }),
+                    },
+                }],
+                None,
+            );
+        }
+        let state = AppState::new();
+        let opened = state.show_opened(Path::new("log.sqlite"), pd, None, LeftOut::default());
+        let indices: Vec<u64> = opened.rows.iter().map(|r| r.index).collect();
+        assert_eq!(
+            indices,
+            vec![15, 16, 17, 18, 19],
+            "only the kept rows go out"
+        );
+        assert_eq!(opened.dropped, 15);
+        let json = serde_json::to_value(&opened).expect("serializes");
+        assert_eq!(json["dropped"], 15);
+        assert!(
+            state
+                .opened_pd()
+                .as_ref()
+                .is_some_and(|p| p.details(15).is_some())
+        );
     }
 }

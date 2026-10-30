@@ -190,6 +190,55 @@ test("a legend names the marker colours, and markers use them (AC-TGE83D.1)", as
   }
 });
 
+// ---- AC-4PJRVK.4: a count badge splits on zoom ----
+
+test("a count badge splits into its records when zoomed in around it (AC-4PJRVK.4)", async ({
+  page,
+}) => {
+  await capturedThenMeter(page);
+  await page.getByRole("button", { name: "Whole session" }).click();
+  await pause(page);
+  await expect
+    .poll(async () => (await chartPdMarkers(page)).some((m) => m.count > 1), {
+      message: "the demo's negotiation shares a badge at this zoom",
+    })
+    .toBe(true);
+  const badge = (await chartPdMarkers(page))
+    .filter((m) => m.count > 1)
+    .sort((a, b) => b.count - a.count)[0]!;
+  expect(badge.indices).toHaveLength(badge.count);
+
+  const layer = (await markerLayer(page).boundingBox())!;
+  const before = await lastDraw(page);
+  await page.mouse.move(layer.x + badge.leftPx, layer.y + layer.height / 2);
+  // The wheel zooms around the pointer, so the badge's records stay in view.
+  const splitInto = async (): Promise<number> => {
+    const records = new Set(badge.indices);
+    const markers = await chartPdMarkers(page);
+    return markers.filter((m) => m.indices.some((i) => records.has(i))).length;
+  };
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.wheel(0, -240);
+        return splitInto();
+      },
+      { message: "the badge's records take several markers", timeout: 10_000 },
+    )
+    .toBeGreaterThan(1);
+
+  const after = await lastDraw(page);
+  expect(span(after)).toBeLessThan(span(before));
+  // Nothing got lost: every record of the badge is still drawn, once.
+  const drawn = (await chartPdMarkers(page)).flatMap((m) => m.indices);
+  for (const i of badge.indices) {
+    expect(
+      drawn.filter((d) => d === i),
+      `record ${i}`,
+    ).toHaveLength(1);
+  }
+});
+
 // ---- AC-TGE83D.2 / .6: marker → row ----
 
 test("clicking a marker shows its row selected and scrolled into the table (AC-TGE83D.2, AC-TGE83D.6)", async ({

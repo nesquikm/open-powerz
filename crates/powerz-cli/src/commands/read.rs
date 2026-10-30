@@ -21,6 +21,6 @@ pub fn read<T: Transport, C: Clock>(
     if json {
         write_json(out, &adc_json(&a))
     } else {
-        write_adc_lines(out, &Reading::from(&a))
+        Ok(write_adc_lines(out, &Reading::from(&a))?)
     }
 }
