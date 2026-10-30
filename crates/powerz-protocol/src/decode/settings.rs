@@ -1,6 +1,8 @@
 //! SETTINGS block (`ATT_SETTINGS`, 180 bytes, two CRC-32 blocks).
 //! See `docs/protocol.md`.
 
+use std::ops::RangeInclusive;
+
 use serde::Serialize;
 
 use super::{DecodeError, Rate, c_str, need, u32_at};
@@ -433,6 +435,363 @@ impl MeterSettings {
             ),
         ]
     }
+}
+
+// ---- Settings write (type 0x0A), see docs/protocol.md "Settings write" ----
+
+/// Key of the startup logo time: sent at its read value, never editable.
+/// \[static\]
+pub const STARTUP_LOGO_KEY: u16 = 0x06;
+
+/// Key of the trailing "save" entry. \[static\] (meaning \[inferred\])
+pub const SAVE_MARKER_KEY: u16 = 0x7FFF;
+
+/// Value of the trailing "save" entry. \[static\]
+pub const SAVE_MARKER: i32 = 0x1234;
+
+/// Every key of a settings write, in the order sent. \[static\]
+pub const SETTINGS_WRITE_KEYS: [u16; 8] = [0x01, 0x03, 0x04, 0x06, 0x07, 0x14, 0x15, 0x7FFF];
+
+/// Message type of the settings write. \[static\]
+pub const SETTINGS_WRITE_TYPE: u8 = 0x0A;
+
+/// Where the value of one settings-write key lives in the SETTINGS block:
+/// `width` bits at `shift` of the little-endian u32 at `offset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyField {
+    /// Settings-write key.
+    pub key: u16,
+    /// Byte offset of the u32 in the 180-byte block.
+    pub offset: usize,
+    /// Lowest bit of the field.
+    pub shift: u32,
+    /// Width in bits.
+    pub width: u32,
+}
+
+/// Every settings-write key but the save marker, with the block bits the
+/// meter stores its value in. Keys 0x01..0x07 round-trip as the vendor
+/// dialog reads and writes them \[static\] \[device\]. Keys 0x14 and 0x15 are
+/// the other way round from the vendor dialog, which pairs 0x14 with bits
+/// 2..3 of 0x60 and 0x15 with bits 0..1 \[static\]: on the KM003C (FW 2.0.6,
+/// 2026-10-29) a write of 0x14 = 2, 0x15 = 1 read back as bits 0..1 = 2 and
+/// rate bits 2..3 = 1 \[device\].
+pub const SETTINGS_KEY_FIELDS: [KeyField; 7] = [
+    KeyField {
+        key: 0x01,
+        offset: 0x00,
+        shift: 0,
+        width: 1,
+    },
+    KeyField {
+        key: 0x03,
+        offset: 0x00,
+        shift: 3,
+        width: 7,
+    },
+    KeyField {
+        key: 0x04,
+        offset: 0x00,
+        shift: 10,
+        width: 2,
+    },
+    KeyField {
+        key: 0x06,
+        offset: 0x00,
+        shift: 14,
+        width: 2,
+    },
+    KeyField {
+        key: 0x07,
+        offset: 0x00,
+        shift: 16,
+        width: 3,
+    },
+    KeyField {
+        key: 0x14,
+        offset: 0x60,
+        shift: 0,
+        width: 2,
+    },
+    KeyField {
+        key: 0x15,
+        offset: 0x60,
+        shift: 2,
+        width: 2,
+    },
+];
+
+/// Store the values of a settings write in `block` (a 180-byte SETTINGS
+/// payload) the way the meter does, per [`SETTINGS_KEY_FIELDS`]; the CRCs are
+/// left as they were. A frame that is not a full write in the documented
+/// layout (every key of [`SETTINGS_WRITE_KEYS`] in order), or a block too
+/// short for a field, changes nothing and gives `false`.
+pub fn apply_settings_write(block: &mut [u8], frame: &[u8]) -> bool {
+    let n = SETTINGS_WRITE_KEYS.len();
+    if frame.len() != 4 + 8 * n || frame[0] & 0x7F != SETTINGS_WRITE_TYPE || block.len() < LEN {
+        return false;
+    }
+    let entry = |i: usize| {
+        let at = 4 + 8 * i;
+        let word = u32_at(frame, at);
+        (word, u32_at(frame, at + 4))
+    };
+    if (0..n).any(|i| Some(entry(i).0) != settings_entry_word(i)) {
+        return false;
+    }
+    for (i, &key) in SETTINGS_WRITE_KEYS.iter().enumerate() {
+        let Some(f) = SETTINGS_KEY_FIELDS.iter().find(|f| f.key == key) else {
+            continue;
+        };
+        let mask = ((1u32 << f.width) - 1) << f.shift;
+        let w = (u32_at(block, f.offset) & !mask) | ((entry(i).1 << f.shift) & mask);
+        block[f.offset..f.offset + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    true
+}
+
+/// A settings field the app may change. Auto-rotate has no recovered key,
+/// the startup logo is sent only at its read value, and calibration is
+/// never written. \[static\]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WritableField {
+    /// Key 0x01: 0 = Chinese, 1 = English.
+    Language,
+    /// Key 0x03: 1..100.
+    Brightness,
+    /// Key 0x04: 0..3 (off, 15 s, 30 s, 60 s).
+    DimTimeout,
+    /// Key 0x07: 0..6.
+    Theme,
+    /// Key 0x15: rate code 0..3 \[device\].
+    SampleRate,
+    /// Key 0x14: 0..3 (0°, 90°, 180°, 270°) \[device\] (key); the meaning
+    /// of the codes stays \[inferred\].
+    Rotation,
+}
+
+impl WritableField {
+    /// Every writable field, in key order.
+    pub const ALL: [WritableField; 6] = [
+        WritableField::Language,
+        WritableField::Brightness,
+        WritableField::DimTimeout,
+        WritableField::Theme,
+        WritableField::SampleRate,
+        WritableField::Rotation,
+    ];
+
+    /// Stable name (the [`Row::key`] of the field).
+    pub fn name(self) -> &'static str {
+        match self {
+            WritableField::Language => "language",
+            WritableField::Brightness => "brightness",
+            WritableField::DimTimeout => "dim_timeout",
+            WritableField::Theme => "theme",
+            WritableField::SampleRate => "sample_rate",
+            WritableField::Rotation => "rotation",
+        }
+    }
+
+    /// The field for an exact [`name`](Self::name); `None` for anything else.
+    pub fn from_name(name: &str) -> Option<WritableField> {
+        WritableField::ALL.into_iter().find(|f| f.name() == name)
+    }
+
+    /// The field written under `key`; `None` for the startup logo, the save
+    /// marker and every key outside [`SETTINGS_WRITE_KEYS`].
+    pub fn from_key(key: u16) -> Option<WritableField> {
+        WritableField::ALL.into_iter().find(|f| f.key() == key)
+    }
+
+    /// Key word of the field in a settings write. \[static\]
+    pub fn key(self) -> u16 {
+        match self {
+            WritableField::Language => 0x01,
+            WritableField::Brightness => 0x03,
+            WritableField::DimTimeout => 0x04,
+            WritableField::Theme => 0x07,
+            WritableField::SampleRate => 0x15,
+            WritableField::Rotation => 0x14,
+        }
+    }
+
+    /// Values the meter accepts. \[static\]
+    pub fn range(self) -> RangeInclusive<i32> {
+        match self {
+            WritableField::Language => 0..=1,
+            WritableField::Brightness => 1..=100,
+            WritableField::DimTimeout | WritableField::SampleRate | WritableField::Rotation => {
+                0..=3
+            }
+            WritableField::Theme => 0..=6,
+        }
+    }
+
+    /// The code a write of `changes` over `current` leaves in this field:
+    /// the last change to it, else its read code.
+    pub fn code_after(self, current: &MeterSettings, changes: &[(WritableField, i32)]) -> i32 {
+        changes
+            .iter()
+            .rev()
+            .find(|(c, _)| *c == self)
+            .map_or_else(|| self.code(current), |&(_, v)| v)
+    }
+
+    /// The field's current wire code in `settings`.
+    pub fn code(self, settings: &MeterSettings) -> i32 {
+        match self {
+            WritableField::Language => match settings.language.value {
+                Language::Chinese => 0,
+                Language::English => 1,
+            },
+            WritableField::Brightness => i32::from(settings.brightness.value),
+            WritableField::DimTimeout => match settings.dim_timeout.value {
+                DimTimeout::Off => 0,
+                DimTimeout::Secs15 => 1,
+                DimTimeout::Secs30 => 2,
+                DimTimeout::Secs60 => 3,
+            },
+            WritableField::Theme => i32::from(match settings.theme.value {
+                Theme::Blue => 0,
+                Theme::Green => 1,
+                Theme::Pink => 2,
+                Theme::Orange => 3,
+                Theme::Yellow => 4,
+                Theme::DarkGreen => 5,
+                Theme::Cyan => 6,
+                Theme::Unknown(c) => c,
+            }),
+            WritableField::SampleRate => i32::from(settings.sample_rate.value.code()),
+            WritableField::Rotation => match settings.rotation.value {
+                Rotation::Deg0 => 0,
+                Rotation::Deg90 => 1,
+                Rotation::Deg180 => 2,
+                Rotation::Deg270 => 3,
+            },
+        }
+    }
+}
+
+/// Startup logo wire code (0..3) in `settings`.
+fn startup_logo_code(settings: &MeterSettings) -> i32 {
+    match settings.startup_logo.value {
+        StartupLogo::Off => 0,
+        StartupLogo::Secs1 => 1,
+        StartupLogo::Secs3 => 2,
+        StartupLogo::Secs5 => 3,
+    }
+}
+
+/// Values a settings write may carry for `key`; `None` for a key outside
+/// [`SETTINGS_WRITE_KEYS`]. \[static\]
+pub fn settings_key_range(key: u16) -> Option<RangeInclusive<i32>> {
+    match key {
+        STARTUP_LOGO_KEY => Some(0..=3),
+        SAVE_MARKER_KEY => Some(SAVE_MARKER..=SAVE_MARKER),
+        _ => WritableField::from_key(key).map(WritableField::range),
+    }
+}
+
+/// Key word of entry `index` of a settings write: `0x01008000 | key`, with
+/// the `next` bit (15) clear on the last entry only; `None` past the last
+/// key of [`SETTINGS_WRITE_KEYS`]. \[static\]
+pub fn settings_entry_word(index: usize) -> Option<u32> {
+    let key = *SETTINGS_WRITE_KEYS.get(index)?;
+    let next = if index + 1 < SETTINGS_WRITE_KEYS.len() {
+        1u32 << 15
+    } else {
+        0
+    };
+    Some(0x0100_0000 | next | u32::from(key))
+}
+
+/// A settings change the builder refuses; nothing is sent.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SettingsWriteError {
+    /// The new value is outside the field's range.
+    #[error("{field} = {value} is out of range ({min}..={max})")]
+    OutOfRange {
+        /// Field name.
+        field: &'static str,
+        /// Refused value.
+        value: i32,
+        /// Lowest allowed value.
+        min: i32,
+        /// Highest allowed value.
+        max: i32,
+    },
+    /// A field left unchanged holds a value outside its range on the
+    /// meter; it would go out as read, which the guard refuses. Changing
+    /// that field too lets the write go.
+    #[error(
+        "the meter holds {field} = {value}, outside {min}..={max}; \
+         set {field} too so it can be written"
+    )]
+    MeterValueOutOfRange {
+        /// Field name.
+        field: &'static str,
+        /// Value read from the meter.
+        value: i32,
+        /// Lowest allowed value.
+        min: i32,
+        /// Highest allowed value.
+        max: i32,
+    },
+}
+
+/// The type-0x0A frame that writes `changes` over `current` (the settings
+/// just read): main header `0x0A | id << 8 | n << 23`, then one 8-byte entry
+/// per key of [`SETTINGS_WRITE_KEYS`] (key word `0x01008000 | key`, `next`
+/// clear on the last; i32 value). Changed fields go out at their new values,
+/// every other key at its read value, the startup logo always at its read
+/// value, and the save marker last. \[static\]
+///
+/// A value outside its field's [`range`](WritableField::range) is refused,
+/// and so is a write over a field the meter holds out of range.
+pub fn settings_write_request(
+    id: u8,
+    current: &MeterSettings,
+    changes: &[(WritableField, i32)],
+) -> Result<Vec<u8>, SettingsWriteError> {
+    for &(f, value) in changes {
+        let range = f.range();
+        if !range.contains(&value) {
+            return Err(SettingsWriteError::OutOfRange {
+                field: f.name(),
+                value,
+                min: *range.start(),
+                max: *range.end(),
+            });
+        }
+    }
+    for f in WritableField::ALL {
+        let (range, value) = (f.range(), f.code_after(current, changes));
+        if !range.contains(&value) {
+            return Err(SettingsWriteError::MeterValueOutOfRange {
+                field: f.name(),
+                value,
+                min: *range.start(),
+                max: *range.end(),
+            });
+        }
+    }
+    let value_of = |key: u16| -> i32 {
+        match key {
+            STARTUP_LOGO_KEY => startup_logo_code(current),
+            SAVE_MARKER_KEY => SAVE_MARKER,
+            _ => WritableField::from_key(key).map_or(0, |f| f.code_after(current, changes)),
+        }
+    };
+    let n = SETTINGS_WRITE_KEYS.len() as u32;
+    let mut frame = Vec::with_capacity(4 + 8 * SETTINGS_WRITE_KEYS.len());
+    frame.extend((u32::from(SETTINGS_WRITE_TYPE) | (u32::from(id) << 8) | (n << 23)).to_le_bytes());
+    for (i, &key) in SETTINGS_WRITE_KEYS.iter().enumerate() {
+        let word = settings_entry_word(i).unwrap_or_default();
+        frame.extend(word.to_le_bytes());
+        frame.extend(value_of(key).to_le_bytes());
+    }
+    Ok(frame)
 }
 
 #[cfg(test)]

@@ -19,8 +19,8 @@ mod queue;
 mod records;
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use flash::{FlashFault, SimMeter, SimMeterPipe};
@@ -212,6 +212,12 @@ pub struct FaultPlan {
     /// The CDC persona starts as right after a bulk session: it echoes
     /// ADCNEW starts until the host has been quiet for [`ECHO_QUIET_MS`].
     echo_start: bool,
+    /// Memory reads inside the record area are REJECTed (other reads work).
+    reject_record_reads: bool,
+    /// A record-table write is ACCEPTed but the old table is kept.
+    ignore_table_write: bool,
+    /// A settings write is ACCEPTed but the old SETTINGS block is kept.
+    ignore_settings_write: bool,
 }
 
 impl FaultPlan {
@@ -269,7 +275,30 @@ impl FaultPlan {
         self
     }
 
-    /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`.
+    /// Every memory read inside the record area is REJECTed (a record
+    /// download fails); auth and info-block reads keep working.
+    pub fn reject_record_reads(mut self) -> FaultPlan {
+        self.reject_record_reads = true;
+        self
+    }
+
+    /// A record-table write (SET_DATA 0x28) is answered with FINISHED but the
+    /// meter keeps its old table, so the re-read after a delete does not
+    /// match.
+    pub fn ignore_table_write(mut self) -> FaultPlan {
+        self.ignore_table_write = true;
+        self
+    }
+
+    /// A settings write (type 0x0A) is ACCEPTed but the meter keeps its old
+    /// SETTINGS block, so the re-read after the write does not match.
+    pub fn ignore_settings_write(mut self) -> FaultPlan {
+        self.ignore_settings_write = true;
+        self
+    }
+
+    /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`,
+    /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -290,10 +319,14 @@ impl FaultPlan {
                 ("permission", None) => plan.permission_denied(),
                 ("corrupt-adcnew", Some(n)) => plan.corrupt_adcnew_at(n),
                 ("echo-start", None) => plan.echo_start(),
+                ("reject-record-reads", None) => plan.reject_record_reads(),
+                ("ignore-table-write", None) => plan.ignore_table_write(),
+                ("ignore-settings-write", None) => plan.ignore_settings_write(),
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
-                         disconnect@N, wrong-id@N, permission, corrupt-adcnew@N or echo-start)"
+                         disconnect@N, wrong-id@N, permission, corrupt-adcnew@N, echo-start, \
+                         reject-record-reads, ignore-table-write or ignore-settings-write)"
                     ));
                 }
             };
@@ -303,7 +336,7 @@ impl FaultPlan {
 }
 
 /// Where the simulator's uptime comes from.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum TimeSource {
     /// Real time since this instant.
     Real(Instant),
@@ -325,8 +358,6 @@ pub struct SimDevice {
     connected: bool,
     /// The ADC queue was started with 0x0E.
     streaming: bool,
-    /// Meter rate code (SETTINGS); the queue falls back to it after 0x0F.
-    rate_code: u8,
     /// The always-running ADC queue.
     queue: queue::AdcQueue,
     /// Injected faults.
@@ -369,6 +400,22 @@ pub struct SimDevice {
     adcnew_last_start: Vec<u8>,
     /// ADCNEW starts the host side saw echoed back.
     adcnew_start_echoes: u64,
+    /// The offline-record table (RecordList entries); a SET_DATA 0x28
+    /// write replaces it.
+    record_table: Vec<[u8; powerz_protocol::decode::records::ENTRY_LEN]>,
+    /// What the meter keeps across its pipes: the SETTINGS block and rate
+    /// code, shared with a [`cdc_twin`](SimDevice::cdc_twin).
+    stored: Arc<Mutex<Stored>>,
+}
+
+/// The settings a meter keeps, whichever pipe changes them.
+#[derive(Debug)]
+struct Stored {
+    /// The SETTINGS block (rate bits and CRCs refreshed when served); a
+    /// settings write (type 0x0A) changes it.
+    settings: [u8; device::SETTINGS_LEN],
+    /// Meter rate code (SETTINGS); the queue falls back to it after 0x0F.
+    rate_code: u8,
 }
 
 impl SimDevice {
@@ -382,6 +429,20 @@ impl SimDevice {
     pub fn with_clock(persona: Persona, scenario: Scenario, clock: SimClock) -> SimDevice {
         let start = clock.now_ms();
         SimDevice::open(persona, scenario, TimeSource::Sim { clock, start })
+    }
+
+    /// This meter's CDC persona, opened beside this one on the same time
+    /// source: it shares the stored settings, so a settings write sent there
+    /// is what this one serves afterwards, and it has the same faults,
+    /// mode and serial. A rate written there reaches this one's queue at its
+    /// next 0x0F.
+    pub fn cdc_twin(&self) -> SimDevice {
+        let mut twin = SimDevice::open(Persona::Cdc, self.scenario, self.time.clone());
+        twin.stored = Arc::clone(&self.stored);
+        twin.faults = self.faults.clone();
+        twin.mode = self.mode;
+        twin.serial = self.serial.clone();
+        twin
     }
 
     /// A freshly opened meter: on bulk one stale DISCONNECT waits on the IN
@@ -399,7 +460,6 @@ impl SimDevice {
             auth_level: 0,
             connected: false,
             streaming: false,
-            rate_code: 2,
             queue: queue::AdcQueue::new(2),
             faults: FaultPlan::new(),
             requests: 0,
@@ -420,7 +480,22 @@ impl SimDevice {
             echo_since_ms: None,
             adcnew_last_start: Vec::new(),
             adcnew_start_echoes: 0,
+            record_table: records::initial_table(),
+            stored: Arc::new(Mutex::new(Stored {
+                settings: device::SETTINGS_206,
+                rate_code: 2,
+            })),
         }
+    }
+
+    /// The settings this meter keeps (a poisoned lock still holds them).
+    fn stored(&self) -> std::sync::MutexGuard<'_, Stored> {
+        self.stored.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Meter rate code (SETTINGS); the queue falls back to it after 0x0F.
+    fn rate_code(&self) -> u8 {
+        self.stored().rate_code
     }
 
     /// Simulated device uptime in ms.
@@ -554,8 +629,8 @@ impl SimDevice {
                     Some(att) => adcnew::AdcnewStream::start(att & 0x0F, now, None),
                     None => {
                         let body =
-                            adcnew::first_frame_body(&self.scenario.sample(now), self.rate_code);
-                        adcnew::AdcnewStream::start(self.rate_code, now, Some(body))
+                            adcnew::first_frame_body(&self.scenario.sample(now), self.rate_code());
+                        adcnew::AdcnewStream::start(self.rate_code(), now, Some(body))
                     }
                 });
             }

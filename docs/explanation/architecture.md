@@ -63,6 +63,16 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
   Nothing is retried automatically: after a failure the meter stays in its
   bootloader, which can always be flashed again. The engine was checked step
   by step on a real KM003C, each step only after the user approved it.
+- **Two meter writes, each on its own narrow path.** Deleting records and
+  changing settings are the only other writes. The shared guard still refuses
+  every SET_DATA (0x48) and settings write (0x0A); each passes only through
+  its own transport method (`transact_record_table`, `transact_settings`),
+  whose check accepts exactly one frame shape: the record table on attribute
+  0x28, or the settings keys in order with every value in range and the save
+  marker last, never calibration or the factory reset. Both write once, read
+  the meter back and stop on a mismatch without retrying; a delete backs the
+  records up as CSV first and deletes nothing when that fails. The settings
+  write goes over the CDC port, since the KM003C ignores it over bulk.
 - **Auth keys ship in the repository.** Authenticated features (queue
   streaming, device info) need the meter's AES keys; shipping them makes those
   features work out of the box.

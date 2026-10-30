@@ -109,8 +109,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show the meter's settings block (read-only): display, sample rate and
-    /// raw calibration values, each tagged confirmed or inferred.
+    /// Show the meter's settings block: display, sample rate and raw
+    /// calibration values, each tagged confirmed or inferred; `set` changes
+    /// the display and sample-rate fields.
     Settings {
         /// Print one JSON object instead of tagged lines.
         #[arg(long, conflicts_with = "raw")]
@@ -118,9 +119,12 @@ pub enum Command {
         /// Hex-dump the 180-byte block instead of decoding it.
         #[arg(long)]
         raw: bool,
+        /// Change settings instead of only reading them.
+        #[command(subcommand)]
+        action: Option<SettingsAction>,
     },
-    /// List the meter's offline records or download them as CSV files
-    /// (read-only; bulk pipe only).
+    /// List the meter's offline records, download them as CSV files or
+    /// delete them after a CSV backup (bulk pipe only).
     Records {
         /// What to do.
         #[command(subcommand)]
@@ -213,6 +217,23 @@ pub enum Command {
     },
 }
 
+/// `settings` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum SettingsAction {
+    /// Write `<field>=<value>` changes (language=chinese|english,
+    /// brightness=1..100, dim_timeout=off|15|30|60, theme=<name>,
+    /// rotation=0|90|180|270, sample_rate=2|10|50|1000), then read the
+    /// settings back and print them. Needs --i-understand.
+    Set {
+        /// `<field>=<value>` pairs; fields left out keep their values.
+        #[arg(value_name = "FIELD=VALUE")]
+        changes: Vec<String>,
+        /// Acknowledge that the meter's settings will be changed.
+        #[arg(long)]
+        i_understand: bool,
+    },
+}
+
 /// `records` actions.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum RecordsAction {
@@ -239,6 +260,27 @@ pub enum RecordsAction {
         /// Print one JSON object listing the written files instead of text lines.
         #[arg(long)]
         json: bool,
+    },
+    /// Delete record N (as `list` numbers it) or every record, after
+    /// backing the affected records up as `NN_<name>.csv` files. Needs
+    /// --i-understand and the record name (or "all") typed at the prompt.
+    #[command(group = clap::ArgGroup::new("which").required(true).args(["index", "all"]))]
+    Delete {
+        /// Record number (1-based, as `list` shows it).
+        #[arg(value_name = "N")]
+        index: Option<usize>,
+        /// Delete every record.
+        #[arg(long)]
+        all: bool,
+        /// Acknowledge that a delete cannot be undone.
+        #[arg(long)]
+        i_understand: bool,
+        /// Skip the typed confirmation (still needs --i-understand).
+        #[arg(long)]
+        yes: bool,
+        /// Directory to write the CSV backup into (must exist).
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        out: PathBuf,
     },
 }
 
@@ -567,6 +609,21 @@ impl Command {
             Command::Watch { source, .. } | Command::Stream { source, .. } => Some(*source),
             _ => None,
         }
+    }
+
+    /// The command runs on the meter's CDC port whatever `--transport`
+    /// says, with no CONNECT (0x02 starts ADCNEW there): the ADCNEW stream
+    /// (`--source cdc`) and the settings write, which the KM003C ignored over
+    /// bulk (2026-10-29) `[device]`.
+    pub fn needs_cdc(&self) -> bool {
+        self.source() == Some(WatchSource::Cdc)
+            || matches!(
+                self,
+                Command::Settings {
+                    action: Some(SettingsAction::Set { .. }),
+                    ..
+                }
+            )
     }
 
     /// Subcommand name as typed on the command line.

@@ -44,12 +44,16 @@ impl<T: Transport, W: Write> TraceTransport<T, W> {
         let _ = self.sink.write_all(line.as_bytes());
         let _ = self.sink.flush();
     }
-}
 
-impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
-    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        match self.inner.transact(request, timeout) {
-            // Refused before any byte was written: say so, never "sent".
+    /// Trace one request/reply exchange: `x` when the frame was refused
+    /// before any byte was written (never "sent"), else `>` and, on
+    /// success, `<` with the reply.
+    fn log_exchange(
+        &mut self,
+        request: &[u8],
+        result: Result<Vec<u8>, Error>,
+    ) -> Result<Vec<u8>, Error> {
+        match result {
             Err(
                 e @ (Error::Forbidden { .. }
                 | Error::UnsupportedOnHid
@@ -66,11 +70,34 @@ impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
             }
         }
     }
+}
+
+impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
+    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        let result = self.inner.transact(request, timeout);
+        self.log_exchange(request, result)
+    }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
         let frame = self.inner.read(timeout)?;
         self.log('<', &frame);
         Ok(frame)
+    }
+
+    /// The record-table write (the delete path), traced like [`transact`](Self::transact).
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, Error> {
+        let result = self.inner.transact_record_table(request, timeout);
+        self.log_exchange(request, result)
+    }
+
+    /// The settings write, traced like [`transact`](Self::transact).
+    fn transact_settings(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        let result = self.inner.transact_settings(request, timeout);
+        self.log_exchange(request, result)
     }
 
     fn recover(&mut self) -> Result<(), Error> {

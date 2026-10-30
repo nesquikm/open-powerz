@@ -253,13 +253,17 @@
   /** A stream is running that can be recorded. */
   const canRecord = $derived(session.state === "streaming" || session.state === "rate_locked");
   const exportJob = new ExportJob();
-  /** The read-only Meter settings panel (FR 1HHT01): read on connect, cleared on
-   * disconnect. */
-  const settingsPanel = new MeterSettingsPanel(() => act().meterSettings());
+  /** The Meter settings panel (FR 1HHT01): read on connect, cleared on disconnect;
+   * Edit changes the writable fields (FR JKWT3W). */
+  const settingsPanel = new MeterSettingsPanel(
+    () => act().meterSettings(),
+    (changes) => act().meterSettingsWrite(changes),
+  );
   /** The Records view (FR 1HHT00): the offline records, listed on connect. */
   const recordsPanel = new RecordsPanel(
     () => act().recordsList(),
     (index) => act().recordDownload(index),
+    (target, confirm) => act().recordsDelete(target, confirm),
   );
   const meterConnected = $derived(session.meterConnected);
   /** The meter the panels read from: they read again when another one takes the view. */

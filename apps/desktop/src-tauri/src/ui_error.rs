@@ -1,6 +1,7 @@
 //! Maps session and transport errors to plain-language `{ kind, message,
 //! hint }` for the UI (FR VHY378).
 
+use powerz_protocol::decode::settings::SettingsWriteError;
 use powerz_protocol::session;
 use powerz_protocol::transport;
 use serde::Serialize;
@@ -153,6 +154,11 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
         | T::AdcnewNeedsCdc => {
             UiError::usage("This action is not available over the current connection.")
         }
+        T::SettingsNeedCdc => UiError {
+            kind: ErrorKind::Usage,
+            message: "The meter takes settings changes only over its serial (CDC) port, which could not be used.".to_owned(),
+            hint: Some("Close any other program using the meter's serial port and try again.".to_owned()),
+        },
         T::HidReplyTooLong { .. } => protocol(),
         T::Io(_) => UiError {
             kind: ErrorKind::Internal,
@@ -179,6 +185,40 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
             kind: ErrorKind::Protocol,
             message: "The meter did not accept the app's sign-in.".to_owned(),
             hint: Some("Replug the meter and try again.".to_owned()),
+        },
+        S::RecordTableTooLong { .. } => UiError {
+            kind: ErrorKind::Usage,
+            message: "Deleting that would leave more records than one table write can hold."
+                .to_owned(),
+            hint: Some("Delete more records at once, or all of them.".to_owned()),
+        },
+        S::RecordTableMismatch { .. } => UiError {
+            kind: ErrorKind::Protocol,
+            message: "The record list does not match after the delete.".to_owned(),
+            hint: Some("Read the list again; nothing was retried.".to_owned()),
+        },
+        S::SettingsWrite(e @ SettingsWriteError::OutOfRange { .. }) => {
+            UiError::usage(format!("That setting value is out of range: {e}."))
+        }
+        S::SettingsWrite(SettingsWriteError::MeterValueOutOfRange { field, value, .. }) => {
+            UiError {
+                kind: ErrorKind::Protocol,
+                message: format!(
+                    "The meter holds {field} = {value}, which this app cannot write back."
+                ),
+                hint: Some(format!("Change {field} too, then apply again.")),
+            }
+        }
+        S::SettingsMismatch {
+            field,
+            expected,
+            actual,
+        } => UiError {
+            kind: ErrorKind::Protocol,
+            message: format!(
+                "The meter's settings do not match after the change: {field} reads {actual}, expected {expected}."
+            ),
+            hint: Some("Read the settings again; nothing was retried.".to_owned()),
         },
         S::BootloaderMidDownload => UiError {
             kind: ErrorKind::Protocol,
@@ -283,6 +323,22 @@ mod tests {
             "linux",
         );
         assert_eq!(e.kind, ErrorKind::Timeout);
+        assert_plain(&e);
+    }
+
+    #[test]
+    fn a_value_the_meter_holds_out_of_range_says_to_change_that_field_too() {
+        let err = session::Error::SettingsWrite(SettingsWriteError::MeterValueOutOfRange {
+            field: "theme",
+            value: 7,
+            min: 0,
+            max: 6,
+        });
+        let e = from_session(&err, "macos");
+        assert_eq!(e.kind, ErrorKind::Protocol);
+        assert!(e.message.contains("theme = 7"), "{}", e.message);
+        assert!(!e.message.contains("damage"), "{}", e.message);
+        assert!(e.hint.as_deref().unwrap_or("").contains("theme"), "{e:?}");
         assert_plain(&e);
     }
 

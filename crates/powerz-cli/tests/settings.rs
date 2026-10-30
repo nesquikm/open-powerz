@@ -48,7 +48,8 @@ fn settings_subcommand_parses_json_and_raw() {
         c.command,
         Command::Settings {
             json: false,
-            raw: false
+            raw: false,
+            action: None
         }
     );
     let c = Cli::try_parse_from(["powerz", "settings", "--json"]).unwrap();
@@ -56,7 +57,8 @@ fn settings_subcommand_parses_json_and_raw() {
         c.command,
         Command::Settings {
             json: true,
-            raw: false
+            raw: false,
+            action: None
         }
     );
     let c = Cli::try_parse_from(["powerz", "settings", "--raw"]).unwrap();
@@ -64,7 +66,8 @@ fn settings_subcommand_parses_json_and_raw() {
         c.command,
         Command::Settings {
             json: false,
-            raw: true
+            raw: true,
+            action: None
         }
     );
     assert!(Cli::try_parse_from(["powerz", "settings", "--json", "--raw"]).is_err());

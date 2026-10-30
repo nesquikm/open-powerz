@@ -28,17 +28,17 @@ use powerz_sim::{
 
 use crate::args::{
     Cli, Command, FirmwareAction, FixedAction, JumpTo, LimitsAction, PdAction, PdDecode, Qc3Action,
-    QcAction, RecordsAction, RequestFlags, TransportKind, TriggerProtocol, UfcsAction, WatchSource,
-    needs_connect, rate_from_sps, validate,
+    QcAction, RecordsAction, RequestFlags, SettingsAction, TransportKind, TriggerProtocol,
+    UfcsAction, WatchSource, needs_connect, rate_from_sps, validate,
 };
 use crate::commands::{
-    DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions, PdSendOptions,
-    PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions, console,
-    detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
+    DeleteOptions, DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions,
+    PdSendOptions, PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions,
+    console, detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
     firmware_probe_unavailable, info_in_mode, inspect_flash_file, list, pd, pd_decode, pd_save,
-    pd_send, read, records_get, records_list, select_device, settings, stream, stream_cdc,
-    trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
-    trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
+    pd_send, read, records_delete, records_get, records_list, select_device, settings,
+    settings_set, stream, stream_cdc, trigger_legacy_list, trigger_legacy_request, trigger_pd_list,
+    trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport, TracedOpener};
@@ -138,8 +138,9 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     let devices = transport::discovery::list_devices()?;
     let device = select_device(&devices, cli.device.as_deref())?;
     let mode = device.mode();
-    if cli.command.source() == Some(WatchSource::Cdc) {
-        // The ADCNEW stream lives on the CDC port, whatever --transport says.
+    if cli.command.needs_cdc() {
+        // The ADCNEW stream and the settings write live on the CDC port,
+        // whatever --transport says.
         return with_transport(cli, mode, open_cdc(device)?);
     }
     match cli.transport {
@@ -231,6 +232,22 @@ impl Transport for LazyBulk {
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         self.pipe()?.read(timeout)
+    }
+
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact_record_table(request, timeout)
+    }
+
+    fn transact_settings(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact_settings(request, timeout)
     }
 
     fn recover(&mut self) -> Result<(), transport::Error> {
@@ -490,6 +507,22 @@ impl<P: Transport> Transport for CountingPipe<P> {
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         self.inner.read(timeout)
+    }
+
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_record_table(request, timeout)
+    }
+
+    fn transact_settings(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_settings(request, timeout)
     }
 }
 
@@ -962,13 +995,14 @@ fn ctrl_c_hold() -> impl FnMut(Duration) {
 }
 
 /// `--transport sim`: open the demo device (bulk persona, `--scenario`; its
-/// CDC persona for `watch` / `stream --source cdc`) without touching USB; `--device`
+/// CDC persona for `watch` / `stream --source cdc` and `settings set`)
+/// without touching USB; `--device`
 /// must name its synthetic serial.
 fn run_sim(cli: &Cli) -> Result<(), CliError> {
     select_demo(cli)?;
     let mode = demo_entry().mode();
     let faults = sim_faults()?;
-    let persona = if cli.command.source() == Some(WatchSource::Cdc) {
+    let persona = if cli.command.needs_cdc() {
         Persona::Cdc
     } else {
         Persona::Bulk
@@ -1112,6 +1146,22 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
         self.inner.read(timeout)
     }
 
+    fn transact_record_table(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_record_table(request, timeout)
+    }
+
+    fn transact_settings(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_settings(request, timeout)
+    }
+
     fn adcnew_send(
         &mut self,
         request: powerz_protocol::adcnew::Request,
@@ -1163,8 +1213,8 @@ fn start<T: Transport, C: Clock>(
     mode: DeviceMode,
     mut session: Session<T, C>,
 ) -> Result<(), CliError> {
-    // The ADCNEW stream needs no CONNECT, whose byte would start it on CDC.
-    if needs_connect(cli.transport) && cli.command.source() != Some(WatchSource::Cdc) {
+    // Nothing on CDC gets a CONNECT, whose byte would start ADCNEW there.
+    if needs_connect(cli.transport) && !cli.command.needs_cdc() {
         session.connect()?;
     }
     dispatch(cli, mode, session)
@@ -1186,7 +1236,21 @@ fn dispatch<T: Transport, C: Clock>(
         Command::Firmware { .. } => unreachable!("firmware is handled before opening a device"),
         Command::Info { json } => info_in_mode(&mut session, mode, *json, &mut out),
         Command::Read { json } => read(&mut session, *json, &mut out),
-        Command::Settings { json, raw } => {
+        Command::Settings {
+            action:
+                Some(SettingsAction::Set {
+                    changes,
+                    i_understand,
+                }),
+            ..
+        } => settings_set(
+            &mut session,
+            changes,
+            *i_understand,
+            &mut out,
+            &mut std::io::stderr(),
+        ),
+        Command::Settings { json, raw, .. } => {
             let how = if *raw {
                 SettingsOutput::Raw
             } else if *json {
@@ -1209,6 +1273,25 @@ fn dispatch<T: Transport, C: Clock>(
                     _ => RecordSelection::All,
                 };
                 records_get(&mut session, which, dir, *json, &mut out)
+            }
+            RecordsAction::Delete {
+                index,
+                all,
+                i_understand,
+                yes,
+                out: dir,
+            } => {
+                let which = match index {
+                    Some(n) if !*all => RecordSelection::One(*n),
+                    _ => RecordSelection::All,
+                };
+                let opts = DeleteOptions {
+                    i_understand: *i_understand,
+                    yes: *yes,
+                    out: dir.clone(),
+                };
+                let mut input = std::io::stdin().lock();
+                records_delete(&mut session, which, &opts, &mut input, &mut out)
             }
         },
         Command::Watch { interval, source } => {

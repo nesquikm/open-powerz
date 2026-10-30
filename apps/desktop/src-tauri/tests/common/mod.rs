@@ -95,6 +95,8 @@ pub struct Pipe {
     /// The stale stream of [`PipeOpts::stale_stream`] has been stopped.
     stale_stopped: bool,
     pub log: Arc<Mutex<Log>>,
+    /// What the meter's CDC pipe saw (see [`Transport::settings_pipe`]).
+    pub cdc_log: Arc<Mutex<Log>>,
 }
 
 impl Pipe {
@@ -107,6 +109,7 @@ impl Pipe {
             snapshots: 0,
             stale_stopped: false,
             log: Arc::new(Mutex::new(Log::default())),
+            cdc_log: Arc::new(Mutex::new(Log::default())),
         }
     }
 
@@ -203,6 +206,14 @@ impl Transport for Pipe {
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         self.inner.read(timeout)
+    }
+
+    /// The same simulated meter's CDC persona, logging to `cdc_log`.
+    fn settings_pipe(&mut self) -> Option<Result<Box<dyn Transport>, transport::Error>> {
+        let mut twin = Pipe::new(self.inner.cdc_twin(), &self.clock, PipeOpts::default());
+        twin.log = Arc::clone(&self.cdc_log);
+        twin.cdc_log = Arc::clone(&self.cdc_log);
+        Some(Ok(Box::new(twin)))
     }
 }
 

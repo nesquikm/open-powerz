@@ -179,6 +179,12 @@ impl Transport for BulkTransport {
         Ok(data)
     }
 
+    /// Refused before sending: the KM003C ignores the settings write over
+    /// bulk (2026-10-29) \[device\]; it goes over the CDC port.
+    fn transact_settings(&mut self, _request: &[u8], _timeout: Duration) -> Result<Vec<u8>, Error> {
+        Err(Error::SettingsNeedCdc)
+    }
+
     /// Clear the halt on both bulk endpoints (a standard USB control request,
     /// not a meter command), then drain stale IN data.
     fn recover(&mut self) -> Result<(), Error> {

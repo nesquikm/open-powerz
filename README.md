@@ -60,10 +60,12 @@ check the download and open the app past the macOS and Windows warnings.
 ### Offline records
 
 - Download the recordings the meter made on its own as CSV, and open one in the chart with its statistics ([read the meter's memory](docs/how-to/read-the-meters-memory.md))
+- Delete a recording or all of them, after a CSV backup and a typed confirmation ([delete recordings](docs/how-to/read-the-meters-memory.md#delete-recordings))
 
 ### Meter settings
 
-- View the meter's settings and calibration values, read-only ([read the settings](docs/how-to/read-the-meters-memory.md#read-the-settings))
+- View the meter's settings and calibration values ([read the settings](docs/how-to/read-the-meters-memory.md#read-the-settings))
+- Change the language, brightness, dim timeout, theme, rotation and sample rate, checked by reading them back ([change the settings](docs/how-to/read-the-meters-memory.md#change-the-settings))
 
 ### Serial stream
 
@@ -88,7 +90,6 @@ check the download and open the app past the macOS and Windows warnings.
 
 ## Coming next
 
-- Deleting offline records and changing meter settings from the app
 - Polish across the app
 - A browser edition for Chrome and Edge, hosted on GitHub Pages
 

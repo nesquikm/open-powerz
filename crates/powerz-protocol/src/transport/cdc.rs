@@ -183,9 +183,9 @@ impl<P: Read + Write> CdcTransport<P> {
     }
 
     /// Take every complete item out of the demux: stream frames are kept
-    /// (while streaming), text lines dropped; the first binary reply is
-    /// returned when `want_reply`, other replies are dropped.
-    fn drain_demux(&mut self, want_reply: bool) -> Option<Vec<u8>> {
+    /// (while streaming), text lines dropped; the first binary reply that
+    /// `want` accepts is returned, other replies are dropped.
+    fn drain_demux(&mut self, want: Option<ReplyFor>) -> Option<Vec<u8>> {
         let demux = self.demux.as_mut()?;
         while let Some(item) = demux.next_item() {
             match item {
@@ -197,23 +197,27 @@ impl<P: Read + Write> CdcTransport<P> {
                     }
                     self.frames.push(frame);
                 }
-                Ok(CdcItem::Reply(bytes)) if want_reply => return Some(bytes),
+                Ok(CdcItem::Reply(bytes)) if want.is_some_and(|w| w.accepts(&bytes)) => {
+                    return Some(bytes);
+                }
                 _ => {}
             }
         }
         None
     }
 
-    /// Write `request` and read through the demux until a binary reply
-    /// arrives, keeping the stream frames read on the way.
+    /// Write `request` and read through the demux until its binary reply
+    /// arrives (see [`ReplyFor`]), keeping the stream frames read on the way
+    /// and dropping text lines and replies to other requests.
     fn transact_demuxed(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         // Replies still buffered answer an earlier request that timed out.
-        self.drain_demux(false);
+        self.drain_demux(None);
+        let want = ReplyFor::request(request);
         self.write_request(request)?;
         let deadline = Instant::now() + timeout;
         let mut chunk = [0u8; READ_CHUNK];
         loop {
-            if let Some(reply) = self.drain_demux(true) {
+            if let Some(reply) = self.drain_demux(Some(want)) {
                 return Ok(reply);
             }
             if Instant::now() >= deadline {
@@ -224,6 +228,16 @@ impl<P: Read + Write> CdcTransport<P> {
             {
                 demux.push(&chunk[..n]);
             }
+        }
+    }
+
+    /// Read the byte stream through the demux from now on (bytes already
+    /// buffered go in first).
+    fn start_demux(&mut self) {
+        if self.demux.is_none() {
+            let mut demux = CdcDemux::new();
+            demux.push(&std::mem::take(&mut self.pending));
+            self.demux = Some(demux);
         }
     }
 
@@ -242,6 +256,30 @@ impl<P: Read + Write> CdcTransport<P> {
             if let Some(n) = self.read_chunk(&mut chunk)? {
                 self.pending.extend_from_slice(&chunk[..n]);
             }
+        }
+    }
+}
+
+/// Which demuxed reply answers a request: the one with its id, except for
+/// authentication, whose reply carries id 0 \[device\] and is taken by type.
+#[derive(Debug, Clone, Copy)]
+enum ReplyFor {
+    Id(u8),
+    Auth,
+}
+
+impl ReplyFor {
+    fn request(request: &[u8]) -> ReplyFor {
+        match frame_type(request) {
+            Some(msg::AUTH_REPLY) => ReplyFor::Auth,
+            _ => ReplyFor::Id(request.get(1).copied().unwrap_or(0)),
+        }
+    }
+
+    fn accepts(self, reply: &[u8]) -> bool {
+        match self {
+            ReplyFor::Id(id) => reply.get(1) == Some(&id),
+            ReplyFor::Auth => frame_type(reply) == Some(msg::AUTH_REPLY),
         }
     }
 }
@@ -369,12 +407,19 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
         Err(Error::Timeout)
     }
 
+    /// The settings write and everything after it go through the demux: the
+    /// meter may answer it late or not at all \[static\], so its reply, a
+    /// stream frame or a text line must never pass for the reply to the
+    /// next request (the read-back), which is matched by id.
+    fn transact_settings(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        super::guard::check_settings_write(request)?;
+        check_cdc(request)?;
+        self.start_demux();
+        self.transact_demuxed(request, timeout)
+    }
+
     fn adcnew_send(&mut self, request: Request) -> Result<(), Error> {
-        if self.demux.is_none() {
-            let mut demux = CdcDemux::new();
-            demux.push(&std::mem::take(&mut self.pending));
-            self.demux = Some(demux);
-        }
+        self.start_demux();
         let bytes = request.encode();
         self.write_request(&bytes)?;
         self.after_start.clear();
@@ -411,7 +456,7 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
             self.push_stream(&chunk[..n]);
         }
         self.settle_start();
-        self.drain_demux(false);
+        self.drain_demux(None);
         Ok(std::mem::take(&mut self.frames))
     }
 
@@ -722,6 +767,65 @@ mod tests {
                 start_echoes: 0,
             }
         );
+    }
+
+    // ---- JKWT3W: the settings write goes over CDC ----
+
+    const SETTINGS_188: &str = include_str!("../../tests/vectors/settings_188.hex");
+
+    /// A type-0x0A frame with the documented keys, `next` on all but the last.
+    fn settings_write(id: u8) -> Vec<u8> {
+        let entries: [(u16, u32); 8] = [
+            (0x01, 1),
+            (0x03, 20),
+            (0x04, 0),
+            (0x06, 0),
+            (0x07, 1),
+            (0x14, 2),
+            (0x15, 1),
+            (0x7FFF, 0x1234),
+        ];
+        let mut f = (0x0Au32 | (u32::from(id) << 8) | (8 << 23))
+            .to_le_bytes()
+            .to_vec();
+        for (i, &(key, value)) in entries.iter().enumerate() {
+            let next = if i + 1 < entries.len() { 1u32 << 15 } else { 0 };
+            f.extend((0x0100_0000u32 | next | u32::from(key)).to_le_bytes());
+            f.extend(value.to_le_bytes());
+        }
+        f
+    }
+
+    #[test]
+    fn a_settings_write_skips_stream_frames_text_and_other_ids_for_its_reply() {
+        let mut bytes = record_frame(1);
+        bytes.extend(b"ok\r\n");
+        bytes.extend([0x05, 0x09, 0x00, 0x00]); // a reply to another request
+        bytes.extend([0x07, 0x03, 0x00, 0x00]);
+        let port = FakePort::with_chunks(vec![Ok(bytes)]);
+        let mut t = CdcTransport::with_port(port.clone());
+        let f = settings_write(3);
+        assert_eq!(t.transact_settings(&f, T), Ok(vec![0x07, 0x03, 0x00, 0x00]));
+        assert_eq!(port.written(), f, "only the write is sent");
+    }
+
+    #[test]
+    fn the_read_back_after_a_settings_write_is_matched_by_id() {
+        let port = FakePort::with_chunks(vec![]);
+        let mut t = CdcTransport::with_port(port.clone());
+        // No reply to the write in time.
+        assert_eq!(
+            t.transact_settings(&settings_write(3), Duration::from_millis(30)),
+            Err(Error::Timeout)
+        );
+        let mut settings = hex_vector(SETTINGS_188);
+        settings[1] = 0x04;
+        let mut late = vec![0x07, 0x03, 0x00, 0x00]; // the write's late reply
+        late.extend(record_frame(2));
+        late.extend(b"ok\r\n");
+        port.0.borrow_mut().chunks.push_back(Ok(late));
+        port.0.borrow_mut().chunks.push_back(Ok(settings.clone()));
+        assert_eq!(t.transact(&[0x0C, 0x04, 0x10, 0x00], T), Ok(settings));
     }
 
     /// The start request for ADC at 50/s, as the meter echoes it right after

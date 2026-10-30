@@ -7,6 +7,7 @@
   } from "../records.svelte";
   import type { ResolvedTheme } from "../theme";
   import RecordChart from "./RecordChart.svelte";
+  import RecordDeleteDialog from "./RecordDeleteDialog.svelte";
 
   let {
     panel,
@@ -20,7 +21,21 @@
   } = $props();
 
   const rows = $derived(panel.records ? recordRows({ records: panel.records }) : []);
-  const busy = $derived(panel.loading || panel.downloading !== null || panel.progress !== null);
+  const busy = $derived(
+    panel.loading ||
+      panel.downloading !== null ||
+      panel.progress !== null ||
+      panel.deleting !== null,
+  );
+  /** The delete being confirmed: a record, `"all"`, or null when no dialog is open. */
+  let confirming = $state<{ index: number; name: string } | "all" | null>(null);
+
+  function confirmDelete(typed: string): void {
+    const target = confirming;
+    confirming = null;
+    if (target === null) return;
+    void panel.delete(target === "all" ? "all" : target.index, typed);
+  }
   const anyDownloadable = $derived(rows.some((r) => r.downloadable));
   const stats = $derived(panel.openedStats);
 
@@ -99,10 +114,22 @@
             Download all
           </button>
         {/if}
+        {#if connected && rows.length > 0}
+          <button type="button" onclick={() => (confirming = "all")} disabled={busy}>
+            Delete all
+          </button>
+        {/if}
       </div>
     </div>
     {#if panel.error}
       <p class="error" role="alert">{panel.error.message}</p>
+    {/if}
+    {#if panel.deleting !== null}
+      <p class="progress" role="status">Backing up and deleting…</p>
+    {:else if panel.lastDelete}
+      <p class="progress" role="status">
+        Deleted. Backup: <span class="path">{panel.lastDelete.backup_dir}</span>
+      </p>
     {/if}
     {#if !connected}
       <p class="hint">Connect a meter to list its offline records.</p>
@@ -160,12 +187,24 @@
                       aria-label="Open {row.name}">Open</button
                     >
                   {/if}
+                  <button
+                    type="button"
+                    onclick={() => (confirming = { index: row.index, name: row.name })}
+                    disabled={busy}>Delete</button
+                  >
                 </td>
               </tr>
             {/each}
           </tbody>
         </table>
       </div>
+    {/if}
+    {#if confirming !== null}
+      <RecordDeleteDialog
+        name={confirming === "all" ? null : confirming.name}
+        onCancel={() => (confirming = null)}
+        onConfirm={confirmDelete}
+      />
     {/if}
   </section>
 {/if}
@@ -233,6 +272,10 @@
   }
   .name {
     font-weight: 600;
+  }
+  .path {
+    font-family: ui-monospace, monospace;
+    overflow-wrap: anywhere;
   }
   .offset {
     font-family: ui-monospace, monospace;

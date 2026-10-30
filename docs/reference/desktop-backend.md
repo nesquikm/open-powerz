@@ -179,6 +179,7 @@ Behaviour:
 | function | what it does |
 |---|---|
 | `meterSettings(): Promise<MeterSettings>` | Reads the connected meter's settings block (Tauri command `meter_settings`). Only one GET_DATA for the settings attribute (0x008) goes out; the stream keeps running. Rejects with `usage` when no meter is connected, and with the backend's error when the block fails its CRC check. |
+| `meterSettingsWrite(changes): Promise<MeterSettings>` | Writes `changes` (`SettingChanges`: the new wire code per changed field) to the connected meter (Tauri command `meter_settings_write`): one settings read, one settings write over the meter's CDC port, one read back, and resolves to the settings as read back. Rejects with `usage` for a value out of range or no meter, and with the backend's error when the read-back does not match (naming the field) or the meter holds a value out of range for a field not being changed. Nothing is retried. |
 
 Types:
 
@@ -187,19 +188,27 @@ Types:
 | `MeterSettings` | `fields`: every decoded field, in display order |
 | `MeterSettingField` | `key` (stable, e.g. `language`), `label`, `value` (formatted, e.g. `"50%"`; calibration values raw), `tag` |
 | `SettingTag` | `"confirmed"` (checked on the meter's screen) or `"inferred"` (static analysis only) |
+| `EditableSettingKey` | `language`, `brightness`, `dim_timeout`, `theme`, `rotation`, `sample_rate` |
+| `SettingChanges` | a partial map from `EditableSettingKey` to the new wire code |
 
 On the UI side, `MeterSettingsPanel` (in `meterSettings.svelte.ts`) reads the
 settings when a meter connects and on Refresh, and forgets them on
-disconnect; a failed read shows the error and no stale values. The read-only
-panel sits in the Meter tab's side card, under the stats. `MockBackend`
-answers the demo meter's fields and counts the reads
-(`meterSettingsReads()`).
+disconnect; a failed read shows the error and no stale values. The panel sits
+in the Meter tab's side card, under the stats. Edit mode gives the writable
+fields controls and lists the changes before Apply; Refresh is hidden, and a
+refresh while Apply is in flight is ignored. After a successful write the
+panel shows `SAVED_NOTICE` in one line (the meter's screen shows the change
+after that setting is opened in its menu) until the next edit or disconnect.
+`MockBackend` answers the demo meter's fields, counts the reads
+(`meterSettingsReads()`) and writes (`meterSettingsWrites()`), and
+`?settingsfault=mismatch` makes its read-back differ.
 
 ## Offline records
 
 | function | what it does |
 |---|---|
 | `recordsList(): Promise<RecordList>` | Lists the connected meter's offline records (Tauri command `records_list`). Only one GET_DATA for the record-list attribute (0x200) goes out, after level-1 authentication when the session is below it; the stream keeps running. Rejects with `usage` when no meter is connected. |
+| `recordsDelete(target, confirm): Promise<RecordDeleteResult>` | Deletes record `target` (1-based) or every record (`"all"`) (Tauri command `records_delete`). `confirm` is the typed record name (or `all`), checked again by the backend. Backs the records up as CSV into a new `open-powerz-backups/records-<ms>` folder under Downloads (the app data folder when there is none), then rewrites the record list and reads it again. Rejects with `usage` for a mismatching confirmation or an unknown index, and with the backend's error when the backup fails (nothing deleted) or the re-read does not match (the message names the backup). |
 | `recordDownload(index): Promise<OfflineRecord>` | Downloads record `index` (1-based) (Tauri command `record_download`): the list is read again, then that record's window as consecutive memory reads of at most 256 bytes, all inside the window. Rejects with `usage` for an index that is not listed or a record with no samples, without reading anything. The UI waits up to 30 s for it. |
 
 Types:
@@ -209,6 +218,7 @@ Types:
 | `RecordList` | `records`: every record, in the meter's order |
 | `OfflineRecordEntry` | `index` (1-based), `name`, `interval_s`, `points`, `duration_s`, `charge_ah`, `energy_wh` (as stored: signed, negative for one current direction; the Records view shows their magnitude, as the meter does), `offset` (in the record area) |
 | `OfflineRecord` | `index`, `name`, `interval_s`, `samples` |
+| `RecordDeleteResult` | `records` (the list read again), `backup_dir`, `backups` (one CSV path per deleted record) |
 | `OfflineRecordSample` | `t_s` (seconds from the record start), `vbus_v`, `ibus_a`, `charge_ah`, `energy_wh` (charge and energy summed so far); signed raw measurements, drawn in the chart with their sign |
 
 On the UI side, `RecordsPanel` (in `records.svelte.ts`) lists the records when
@@ -218,9 +228,12 @@ failure), and opens a downloaded record (downloading it first when needed).
 The Records tab shows the list and, for an opened record, its totals,
 min/max/avg of VBUS, IBUS and power, and a chart of its own drawn with the
 live chart's series and colours; the live session's history is not touched.
+Delete and Delete all open a dialog that needs the typed name (or `all`);
+after a failed delete the panel lists the records again and keeps the error.
 On disconnect the list and downloads are forgotten; an opened record stays
-open. `MockBackend` serves three demo records (the simulator's profiles) and
-counts the downloads (`recordDownloads()`).
+open. `MockBackend` serves three demo records (the simulator's profiles),
+counts the downloads (`recordDownloads()`), and `?recordsfault=backup|mismatch`
+scripts a failed backup or a mismatching re-read.
 
 ## Measurement source
 

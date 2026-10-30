@@ -3,7 +3,10 @@
 
 use powerz_protocol::crypto::{self, KEYS};
 use powerz_protocol::decode::records::MEMORY_READ_MAX_LEN;
+use powerz_protocol::decode::settings::apply_settings_write;
 use powerz_protocol::frame::{self, Attribute, DataHeader, SectionHeader};
+
+use powerz_protocol::transport::guard::check_settings_write;
 
 use crate::memory;
 use crate::queue::RECORD_LEN;
@@ -16,6 +19,7 @@ pub(crate) mod msg {
     pub const DISCONNECT: u8 = 0x03;
     pub const ACCEPT: u8 = 0x05;
     pub const REJECT: u8 = 0x06;
+    pub const FINISHED: u8 = 0x07;
     pub const GET_DATA: u8 = 0x0C;
     pub const START_QUEUE: u8 = 0x0E;
     pub const STOP_QUEUE: u8 = 0x0F;
@@ -24,6 +28,8 @@ pub(crate) mod msg {
     pub const HEAD: u8 = 0x40;
     pub const PUT_DATA: u8 = 0x41;
     pub const MEM_READ: u8 = 0x44;
+    pub const SETTINGS_WRITE: u8 = 0x0A;
+    pub const SET_DATA: u8 = 0x48;
     pub const AUTH: u8 = 0x4C;
 }
 
@@ -80,12 +86,13 @@ pub(crate) fn adc_payload(s: &Sample, rate_code: u8) -> Vec<u8> {
 }
 
 /// Length of a SETTINGS section payload.
-const SETTINGS_LEN: usize = 180;
+pub(crate) const SETTINGS_LEN: usize = 180;
 
 /// The captured FW 2.0.6 SETTINGS block [device] (no serial or UID in it):
 /// English, brightness 50 %, rotation 90°, voltage/current/offset
-/// calibration words as read. The sim only rewrites the rate bits and CRCs.
-const SETTINGS_206: [u8; SETTINGS_LEN] = [
+/// calibration words as read. The sim starts from it, applies settings
+/// writes and rewrites the rate bits and CRCs.
+pub(crate) const SETTINGS_206: [u8; SETTINGS_LEN] = [
     0x91, 0x01, 0x50, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x41, 0xFF, 0x00, 0x00, 0x00, 0x00,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x5E, 0x02, 0x00, 0x00,
     0x5E, 0x02, 0x00, 0x00, 0x5E, 0x02, 0x00, 0x00, 0x5E, 0x02, 0x00, 0x00, 0x5E, 0x02, 0x00, 0x00,
@@ -100,12 +107,12 @@ const SETTINGS_206: [u8; SETTINGS_LEN] = [
     0xE9, 0x3D, 0x2E, 0x39,
 ];
 
-/// Encode the 180-byte SETTINGS payload from [`SETTINGS_206`] with
+/// Encode the 180-byte SETTINGS payload from `block` with
 /// `rate_code` in bits 2..3 of the block B flags word (0x60), then refresh
 /// the CRC-32s of block A (0x00..0x5C, at 0x5C) and block B (0x60..0xB0,
 /// at 0xB0).
-fn settings_payload(rate_code: u8) -> Vec<u8> {
-    let mut p = SETTINGS_206.to_vec();
+fn settings_payload(block: &[u8; SETTINGS_LEN], rate_code: u8) -> Vec<u8> {
+    let mut p = block.to_vec();
     let mut flags = u32::from_le_bytes([p[0x60], p[0x61], p[0x62], p[0x63]]);
     flags = (flags & !(0b11 << 2)) | (u32::from(rate_code & 0b11) << 2);
     p[0x60..0x64].copy_from_slice(&flags.to_le_bytes());
@@ -174,6 +181,11 @@ impl SimDevice {
             msg::HEAD => vec![self.head(id)],
             msg::MEM_READ => self.memory_read(req, id),
             msg::AUTH => vec![self.auth(req, id)],
+            msg::SET_DATA => vec![self.set_data(req, id)],
+            // Over bulk the KM003C neither answers nor applies a settings
+            // write (2026-10-29) `[device]`.
+            msg::SETTINGS_WRITE if self.persona != Persona::Cdc => Vec::new(),
+            msg::SETTINGS_WRITE => vec![self.settings_write(req, id)],
             _ => vec![self.control(msg::REJECT, id)],
         }
     }
@@ -213,11 +225,18 @@ impl SimDevice {
             sections.push((Attribute::PD_PACKET, 0, self.pd.chunk(now, fallback)));
         }
         if mask & Attribute::SETTINGS.bits() != 0 {
-            sections.push((Attribute::SETTINGS, 0, settings_payload(self.rate_code)));
+            sections.push((Attribute::SETTINGS, 0, {
+                let stored = self.stored();
+                settings_payload(&stored.settings, stored.rate_code)
+            }));
         }
         // RecordList: served from level 1; at level 0 the reply is empty.
         if mask & Attribute::RECORD_LIST.bits() != 0 && self.auth_level >= 1 {
-            sections.push((Attribute::RECORD_LIST, 0, records::list_payload()));
+            sections.push((
+                Attribute::RECORD_LIST,
+                0,
+                records::list_payload(&self.record_table),
+            ));
         }
         let mut body = Vec::new();
         let n = sections.len();
@@ -260,7 +279,8 @@ impl SimDevice {
             }
             msg::STOP_QUEUE => {
                 self.streaming = false;
-                self.queue.set_rate(self.rate_code, now);
+                let code = self.rate_code();
+                self.queue.set_rate(code, now);
             }
             // Analyzer start: mode 1 is the PD sniffer.
             msg::START_ANALYZER if code == PD_MODE => self.pd.start(now),
@@ -301,8 +321,11 @@ impl SimDevice {
             return reject();
         }
         // Record samples: only inside a listed window, from level 1.
+        if self.faults.reject_record_reads && records::in_record_area(addr) {
+            return reject();
+        }
         let record = (self.auth_level >= 1)
-            .then(|| records::samples(addr, len))
+            .then(|| records::samples(&self.record_table, addr, len))
             .flatten();
         let Some(block) = memory::block(addr, len, &self.app_version, &self.serial).or(record)
         else {
@@ -313,6 +336,60 @@ impl SimDevice {
         let mut data = crypto::encrypt(&KEYS[0], &block);
         data.truncate(MEMORY_READ_MAX_LEN as usize);
         vec![confirm, data]
+    }
+
+    /// 0x48: only the record-table write (attribute 0x28) is taken; it
+    /// replaces the table (kept as is under the `ignore-table-write`
+    /// fault) and is answered with FINISHED, as the KM003C does `[device]`.
+    /// Every other SET_DATA is REJECTed and changes
+    /// nothing.
+    fn set_data(&mut self, req: &[u8], id: u8) -> Vec<u8> {
+        if !self.link_open() {
+            return self.control(msg::REJECT, id);
+        }
+        let Some(table) = records::table_write(req) else {
+            return self.control(msg::REJECT, id);
+        };
+        if !self.faults.ignore_table_write {
+            self.record_table = table;
+        }
+        self.control(msg::FINISHED, id)
+    }
+
+    /// 0x0A on CDC: a settings write laid out as `check_settings_write` demands
+    /// (only the documented keys, in order, values in range) is ACCEPTed
+    /// and applied to the SETTINGS block (kept as is under the
+    /// `ignore-settings-write` fault) the way the meter stores it
+    /// (`apply_settings_write`: key 0x15 sets the rate code, 0x14 the bits 0..1
+    /// of 0x60 `[device]`). Every
+    /// other 0x0A frame, such as one carrying the factory-reset key, is
+    /// REJECTed and changes nothing.
+    fn settings_write(&mut self, req: &[u8], id: u8) -> Vec<u8> {
+        if !self.link_open() || check_settings_write(req).is_err() {
+            return self.control(msg::REJECT, id);
+        }
+        if self.faults.ignore_settings_write {
+            return self.control(msg::ACCEPT, id);
+        }
+        let mut stored = self.stored();
+        let old_rate = stored.rate_code;
+        apply_settings_write(&mut stored.settings, req);
+        let w60 = u32::from_le_bytes([
+            stored.settings[0x60],
+            stored.settings[0x61],
+            stored.settings[0x62],
+            stored.settings[0x63],
+        ]);
+        stored.rate_code = ((w60 >> 2) & 0b11) as u8;
+        let rate = (stored.rate_code != old_rate).then_some(stored.rate_code);
+        drop(stored);
+        if let Some(code) = rate
+            && !self.streaming
+        {
+            let now = self.uptime_ms();
+            self.queue.set_rate(code, now);
+        }
+        self.control(msg::ACCEPT, id)
     }
 
     /// 0x4C: grant level 1 for the UID, 2 for the OTP credential, else 0.

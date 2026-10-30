@@ -38,8 +38,10 @@ pub use list::{list, select_device};
 pub use pd::{pd, pd_decode, pd_save};
 pub use pd_send::{PdSendOptions, pd_send};
 pub use read::read;
-pub use records::{RecordSelection, records_get, records_list};
-pub use settings::{SettingsOutput, settings};
+pub use records::{
+    DELETE_RISK, DeleteOptions, RecordSelection, records_delete, records_get, records_list,
+};
+pub use settings::{SETTINGS_RISK, SettingsOutput, settings, settings_set};
 pub use stream::{CdcStreamSummary, StreamOptions, StreamSummary, stream, stream_cdc};
 pub use trigger::{
     LegacyRequestOptions, PdRequestOptions, PdSettingsChange, trigger_legacy_list,
