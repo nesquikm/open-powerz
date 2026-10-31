@@ -28,6 +28,10 @@ On Windows, pick either the `.msi` or the setup `.exe`. Both install the
 same app. A pre-release (such as `v0.6.0-rc.1`) has only the setup `.exe`,
 because a Windows Installer package needs a plain numeric version.
 
+The **Latest** badge on the releases page always points to the newest final
+release, so <https://github.com/nesquikm/open-powerz/releases/latest> stays on
+the newest version even when an older tag is published again.
+
 ## Check the download
 
 Download `SHA256SUMS.txt` into the same folder as your files, then check
@@ -105,7 +109,9 @@ If SmartScreen stops it, use **More info → Run anyway** again.
 
 ## Linux
 
-Use the AppImage on any x86_64 distribution:
+Use the AppImage on any x86_64 distribution. A downloaded AppImage loses its
+executable bit, so the release notes also give these two commands, with the
+release's own version filled in:
 
 ```bash
 chmod +x open-powerz_<version>_amd64.AppImage

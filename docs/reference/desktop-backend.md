@@ -59,6 +59,9 @@ Types:
 | `PdStatusSample` | `session_ms`, `vbus_v`, `ibus_a` (signed), `cc1_v`, `cc2_v` |
 | `PdOpened` | `path`, `rows`, `status`, `damaged_line` (1-based line where reading stopped, `null` for a whole file), `oversized` (vendor log rows skipped for oversized record bytes, 0 for pdcap), `skipped` (vendor log rows skipped for holding no whole record, 0 for pdcap), `truncated` (the vendor log had more rows than the import takes), `dropped` (the oldest records past the capture's limit, not in `rows`) |
 
+A capture keeps its latest 100,000 records and drops the oldest, with a
+notice. Status samples are not part of this limit.
+
 On the UI side, `PdCapture` (in `pdCapture.svelte.ts`) holds the rows and the
 status samples for the table and the chart. `THEME_COLORS` and
 `themeVariables` (in `theme.ts`) carry the marker colours, one per
@@ -292,7 +295,8 @@ Every Tauri command that acts on a meter takes an optional `deviceId`.
 Without it the backend uses its current meter: the most recently connected
 meter that is still running. Connecting another meter keeps the sessions that
 are already running, including one that waits for an unplugged meter. While a
-firmware update runs, connecting any meter is refused.
+firmware update runs, the updating meter stays held and another meter can still
+connect (see [Firmware](#firmware)).
 
 On the UI side, `Meters` (in `meters.svelte.ts`) holds one entry per
 connected meter with its own `Session` store; `fullViewId` names the meter

@@ -4,6 +4,21 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] — 2026-10-31 — "Loose Ends"
+
+### Fixed
+- Trigger panel and console: the panel shows the D+/D- charging hint, a console `entry` line waits long enough to catch its `pdo:` block, a stream error that is not a device loss no longer ends the session while a trigger session opens or closes, and `powerz stream` exits 0 with a note when the meter rejects the stop after gaps (4PJRVH)
+- Firmware update: an update can be cancelled until the erase begins, a reloaded page follows the running update instead of offering a second one, a recording on the updating meter asks before it ends, another meter's recording keeps going, and `powerz info` keeps what it read when one block fails (4PJRVJ)
+- PD analyzer: a capture keeps its latest 100,000 records and says when it drops the oldest, `pdClear` drops late status samples, a file damaged on its first entry opens empty and names the line, an opened file is released on the next connect, and `pd decode` exits 2 on bad input (4PJRVK)
+- Several meters and records: each grid tile has its own connect, rate, Record and Export controls, Record starts at once and asks where to keep the file at Stop, a parked meter keeps its PD capture, a record delete that cannot go ahead is refused before any backup is written, and the app writes `app.log` with no serial or UID (4PJRVM)
+- Real-meter fixes: the settings panel reads a block the meter saved before its last reboot, and an unplug is logged as unplugged instead of an error (4PJRVM)
+- Release pipeline: the release keeps its tag name and id, the Latest badge stays on the newest final release, release notes carry the AppImage commands, and CI checks the minimum supported Rust (4PJRVN)
+
+### Changed
+- Project guide and specs match the code again: the architecture tree lists every crate and the Rust 1.99.1 pin is named (4PJRVP)
+
+Total test count at release: 3848 tests, 0 failures, 0 errors.
+
 ## [0.8.0] — 2026-10-30 — "Write Stuff"
 
 ### Added

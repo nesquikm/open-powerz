@@ -44,7 +44,7 @@ be used without a device. The wire format is described in
 
 | item | signature or contents |
 |---|---|
-| `Settings` | The raw settings block: `Settings::decode(payload: &[u8]) -> Result<Settings, DecodeError>`; `block_a_crc_ok`, `block_b_crc_ok`, `rate_code`, `name`, `raw`; `meter_settings(&self) -> Result<MeterSettings, DecodeError>` (refuses a block whose CRC fails) |
+| `Settings` | The raw settings block: `Settings::decode(payload: &[u8]) -> Result<Settings, DecodeError>`; `block_a_crc_ok`, `block_b_crc_ok`, `rate_code`, `name`, `raw`; `undecoded_diff(&self, other: &Settings) -> Vec<usize>` (the offsets of bytes outside the decoded fields that differ); `meter_settings(&self) -> Result<MeterSettings, DecodeError>` (refuses a block whose CRC fails) |
 | `MeterSettings` | Each field as `Tagged<T>` (`value`, `tag`): `language`, `brightness`, `dim_timeout`, `startup_logo`, `theme`, `auto_rotate`, `rotation`, `sample_rate`, `voltage_cal`, `current_cal`, `offset_cal`; `rows(&self) -> Vec<Row>` (`key`, `label`, `value`, `tag`) for display |
 | `Tag` | `Confirmed` or `Inferred`; `as_str` |
 | field enums | `Language`, `DimTimeout`, `StartupLogo`, `Theme`, `Rotation` |
