@@ -1,8 +1,8 @@
 ---
 title: PD analyzer, replug and CLI fixes
 milestone: M_3KPN7D
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-31T13:10:58Z
 id: fr_01M65KVDYC49QF1V7N1Y4PJRVK
 created_at: 2026-10-30T05:17:20.204Z
 changelog_category: Fixed
@@ -42,3 +42,16 @@ Unit tests for back-off, the bounded stores and the file errors; CLI tests with 
 ## Notes
 
 Source: the M_NE3C7K M7 follow-ups.
+
+## Implementation notes
+
+- Status log and PdStatusBuffer are unbounded — M7b, with parked meters
+- Second-meter opened-file release (F1) and the showInFullView reverse leak — left for M7b; outside this FR's ACs
+- No CHANGELOG entry for pd decode exit 2 and the pdClear shape — left for M7b; outside this FR's ACs
+- FirstSeen filter lists need a look — left for M7b; outside this FR's ACs
+- pdStore shifts 100k columns — left for M7b; outside this FR's ACs
+- dropped() is not surfaced on attach — left for M7b; outside this FR's ACs
+- limit() is test-only — left for M7b; outside this FR's ACs
+- mockBackend #openedPd on connect needs a look — left for M7b; outside this FR's ACs
+- Floor test gaps remain — left for M7b; outside this FR's ACs
+- Simulator leftovers remain — left for M7b; outside this FR's ACs

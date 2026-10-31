@@ -1,8 +1,8 @@
 ---
 title: Housekeeping
 milestone: M_3KPN7D
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-31T13:10:58Z
 id: fr_01M65KVDYC49QF1V7N1Y4PJRVP
 created_at: 2026-10-30T05:17:20.204Z
 changelog_category: Changed
@@ -37,3 +37,8 @@ The gate's probe run and a link check.
 ## Notes
 
 User approval for the settings.json and CLAUDE.md edits: 2026-10-30.
+
+## Implementation notes
+
+- CLAUDE.md:11 still says USB / IO (planned) — the approved CLAUDE.md edit covered only the Architecture tree and the Rust pin
+- [doc] tags need a look — left for M7b; outside this FR's ACs

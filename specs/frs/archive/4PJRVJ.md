@@ -1,8 +1,8 @@
 ---
 title: Firmware update fixes
 milestone: M_3KPN7D
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-31T13:10:58Z
 id: fr_01M65KVDYC49QF1V7N1Y4PJRVJ
 created_at: 2026-10-30T05:17:20.204Z
 changelog_category: Fixed
@@ -43,3 +43,24 @@ Simulator tests for cancel at each stage, reload/attach state and the tolerant i
 ## Notes
 
 Source: the M_MJ7KE9 M7 follow-ups. Flashing on the real meter is not repeated.
+
+## Implementation notes
+
+- Engine wait_for does not poll stop, up to 120 s — left for M7b; outside this FR's ACs
+- Reload loses the Replug prompt and the true outcome — left for M7b; outside this FR's ACs
+- AC.2 prompt matches by id only and the backend does not enforce it — left for M7b; outside this FR's ACs
+- Checks use plain string equality — left for M7b; outside this FR's ACs
+- devices_changed is false during a flash — left for M7b; outside this FR's ACs
+- Blank fields in JSON and the PD header — left for M7b; outside this FR's ACs
+- MIN_SUPPORTED_FIRMWARE and KNOWN_LATEST_FIRMWARE are test-only — left for M7b; outside this FR's ACs
+- FirmwareWarning::UpdateRequired and HeadReply::update_required() are dead — left for M7b; outside this FR's ACs
+- ERASE_BEGAN and CANCEL_TOO_LATE are duplicated — left for M7b; outside this FR's ACs
+- Focus after Keep recording needs a look — left for M7b; outside this FR's ACs
+- u32::parse accepts + — left for M7b; outside this FR's ACs
+- cancelFlash is optional — left for M7b; outside this FR's ACs
+- FR Testing promises notice tests that do not exist — left for M7b; outside this FR's ACs
+- Duplicate asserts at firmware_flash.rs:2895 and sim_firmware.rs:102 — left for M7b; outside this FR's ACs
+- followedEnded note lingers and its role=status is inserted late — left for M7b; outside this FR's ACs
+- Recording.stop returns true while starting or stopping, and a failed stop still calls #end() — left for M7b; outside this FR's ACs
+- Pre-release tags compare equal, Display drops the tag, 2.0.7- parses as pre-release — left for M7b; outside this FR's ACs
+- released is a public field — left for M7b; outside this FR's ACs

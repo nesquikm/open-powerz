@@ -1,8 +1,8 @@
 ---
 title: Trigger panel and console fixes
 milestone: M_3KPN7D
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-31T13:10:58Z
 id: fr_01M65KVDYC49QF1V7N1Y4PJRVH
 created_at: 2026-10-30T05:17:20.204Z
 changelog_category: Fixed
@@ -43,3 +43,16 @@ Unit and component tests for each AC; Playwright for the card and console fields
 ## Notes
 
 Source: the M_X4VEQ3 M7 follow-ups. Charger coverage gaps that need hardware are out of scope.
+
+## Implementation notes
+
+- console_refusal uses plain is_whitespace — left for M7b; outside this FR's ACs
+- Root cause of the rejected stop is unknown — left for M7b; outside this FR's ACs
+- Other views drop hints — left for M7b; outside this FR's ACs
+- Backticks show raw in trigger hints — left for M7b; outside this FR's ACs
+- entry bc/apple waits 3 s — left for M7b; outside this FR's ACs
+- A stale hint can come from latest_record — left for M7b; outside this FR's ACs
+- Poll failures are silent while PDM is open — left for M7b; outside this FR's ACs
+- Mock divergences remain — left for M7b; outside this FR's ACs
+- pdm open/close wording is not pinned by a test — left for M7b; outside this FR's ACs
+- The other? path skips flush — left for M7b; outside this FR's ACs

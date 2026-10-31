@@ -1,8 +1,8 @@
 ---
 milestone: M_3KPN7D
 id: fr_01M65KVDYBFQHCXFN1BG3KPN7D
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-31T13:10:58Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -31,12 +31,12 @@ codename: Loose Ends
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [4PJRVH](../frs/4PJRVH.md) | Trigger panel and console fixes | n/a |
-| [4PJRVJ](../frs/4PJRVJ.md) | Firmware update fixes | n/a |
-| [4PJRVK](../frs/4PJRVK.md) | PD analyzer, replug and CLI fixes | n/a |
-| [4PJRVM](../frs/4PJRVM.md) | Several meters, records and settings fixes | n/a |
-| [4PJRVN](../frs/4PJRVN.md) | Release pipeline fixes | n/a |
-| [4PJRVP](../frs/4PJRVP.md) | Housekeeping | n/a |
+| [4PJRVH](../frs/archive/4PJRVH.md) | Trigger panel and console fixes | n/a |
+| [4PJRVJ](../frs/archive/4PJRVJ.md) | Firmware update fixes | n/a |
+| [4PJRVK](../frs/archive/4PJRVK.md) | PD analyzer, replug and CLI fixes | n/a |
+| [4PJRVM](../frs/archive/4PJRVM.md) | Several meters, records and settings fixes | n/a |
+| [4PJRVN](../frs/archive/4PJRVN.md) | Release pipeline fixes | n/a |
+| [4PJRVP](../frs/archive/4PJRVP.md) | Housekeeping | n/a |
 
 Build order: 4PJRVP, 4PJRVN, 4PJRVK, 4PJRVH, 4PJRVJ, 4PJRVM.
 

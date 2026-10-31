@@ -1,8 +1,8 @@
 ---
 title: Release pipeline fixes
 milestone: M_3KPN7D
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-10-31T13:10:58Z
 id: fr_01M65KVDYC49QF1V7N1Y4PJRVN
 created_at: 2026-10-30T05:17:20.204Z
 changelog_category: Fixed
@@ -40,3 +40,11 @@ Script unit tests against the fake GitHub API for tag name, Latest and id addres
 ## Notes
 
 Source: the M_WBBQ7F M7 follow-ups and the v0.6.0 publish repair.
+
+## Implementation notes
+
+- Version compare ignores -rc suffixes — left for M7b; outside this FR's ACs
+- AppImage name is hard-coded in versions.ts — left for M7b; outside this FR's ACs
+- Release notes blank lines need a look — left for M7b; outside this FR's ACs
+- The msrv job has not run yet — it runs first in CI on this PR
+- A tag mismatch leaves the release public — left for M7b; outside this FR's ACs
