@@ -144,17 +144,7 @@ export class Recording {
   /** Start when idle, stop when recording; ignored while a start or stop is pending. */
   async toggle(deps: RecordingDeps): Promise<void> {
     if (this.phase === "recording") {
-      this.phase = "stopping";
-      try {
-        const summary = await deps.stopRecording();
-        if (this.phase === "stopping") this.#saved(summary);
-      } catch (err) {
-        // An unplug can end the recording (with its own notice) while the stop
-        // is on its way; the stop's "not connected" is then old news.
-        if (this.phase === "stopping") this.error = toUiError(err);
-      }
-      // An event may already have ended it, and a new recording may have begun.
-      if (this.phase === "stopping") this.#end();
+      await this.stop(deps);
       return;
     }
     if (this.phase !== "idle" || !deps.canRecord) return;
@@ -179,6 +169,28 @@ export class Recording {
       this.error = toUiError(err);
       this.phase = "idle";
     }
+  }
+
+  /** Stops a running recording; with none it does nothing. False when the stop failed,
+   * with the reason in {@link error}. */
+  async stop(deps: RecordingDeps): Promise<boolean> {
+    if (this.phase !== "recording") return true;
+    this.phase = "stopping";
+    let stopped = true;
+    try {
+      const summary = await deps.stopRecording();
+      if (this.phase === "stopping") this.#saved(summary);
+    } catch (err) {
+      // An unplug can end the recording (with its own notice) while the stop
+      // is on its way; the stop's "not connected" is then old news.
+      if (this.phase === "stopping") {
+        this.error = toUiError(err);
+        stopped = false;
+      }
+    }
+    // An event may already have ended it, and a new recording may have begun.
+    if (this.phase === "stopping") this.#end();
+    return stopped;
   }
 
   /** Picks up a recording the backend kept running across a reload (FR VEDDFD):

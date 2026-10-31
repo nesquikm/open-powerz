@@ -459,6 +459,8 @@ impl FlashError {
 /// safe boundaries: before JUMP_DFU, before the descriptor and after each
 /// payload write's SYNC read (never between a write and its SYNC). Once the
 /// meter is in its bootloader a stop sends nothing more and leaves it there.
+/// The desktop app stops asking once the erase has begun, so it never stops
+/// a write.
 pub fn flash<O: MeterOpener, C: Clock>(
     _ack: FlashAck,
     container: &FirmwareContainer<'_>,
@@ -1158,6 +1160,10 @@ fn download<P: FlashTransport, C: Clock>(
         return Err(interrupted("before the descriptor"));
     }
     progress(FlashProgress::Erasing);
+    // A stop accepted just before the stage above was reported still holds.
+    if stopped(stop) {
+        return Err(interrupted("before the descriptor"));
+    }
     // The descriptor: a raw write, then a short read that must time out
     // (else −107). An ACCEPT echoing the descriptor id there or during the
     // erase wait means the erase is done: the real bootloader ACKs as soon

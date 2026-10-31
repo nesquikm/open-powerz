@@ -522,3 +522,37 @@ fn an_unlisted_meter_cannot_be_taken_for_an_update() {
     };
     assert_eq!(e.kind, ErrorKind::Usage, "{e:?}");
 }
+
+#[test]
+fn an_update_of_another_device_leaves_the_connected_meter_alone() {
+    // FR 4PJRVJ, AC .2.
+    let clock = clock();
+    let opener = LoggingOpener {
+        clock: clock.clone(),
+        logs: Arc::default(),
+    };
+    let mut m = DeviceManager::new(|| Ok(vec![listed("APP", 4)]), opener, clock.clone());
+    let devices = m.list_devices();
+    let id = devices
+        .iter()
+        .find(|d| d.demo_scenario.is_none())
+        .expect("the meter is listed")
+        .id
+        .clone();
+    let other = devices
+        .iter()
+        .find(|d| d.demo_scenario.is_some())
+        .expect("a demo device is listed")
+        .id
+        .clone();
+    let (events, sink) = capture(&clock);
+    m.connect(&id, 50, sink)
+        .unwrap_or_else(|e| panic!("the meter did not connect: {e:?}"));
+    wait_connected(&events, 0);
+
+    let _lease = m
+        .begin_flash(&other)
+        .unwrap_or_else(|e| panic!("the update could not take its target: {e:?}"));
+    assert_eq!(m.running_ids(), vec![id.clone()], "the meter keeps running");
+    assert!(m.control_for(&id).is_ok(), "and is not refused");
+}

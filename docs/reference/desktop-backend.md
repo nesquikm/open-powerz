@@ -142,8 +142,8 @@ Device mode and firmware version:
 |---|---|
 | `DeviceMode` | `"application"`, `"bootloader"` or `"unknown"`, from the USB string of the meter's vendor interface (`APP` in application mode). |
 | `DeviceListing.mode` | A meter in bootloader mode is listed; `deviceOptionLabel` ends its picker label in "(bootloader mode)". `Session` will not connect to it, and the backend refuses that connect too. |
-| `ConnectedInfo` | Adds `mode`, `bootloader_version`, `warnings`, `update_required` (`boolean \| null`: `null` when the HEAD reply could not be read) and `firmware_problems` (one line per part of the firmware status that could not be read, shown as "Firmware status" rows). |
-| `FirmwareWarningCode` | `"too_old"` (below 1.7.0), `"outdated"` (below 2.0.7, the newest version known) and `"update_required"` (reserved: no HEAD reply is read as "update required" until its meaning is confirmed on a meter). |
+| `ConnectedInfo` | Adds `mode`, `bootloader_version`, `warnings`, `update_required` (`boolean \| null`: `null` when the HEAD reply could not be read or was not recognised), `firmware_problems` (one line per part of the firmware status that could not be read, shown as "Firmware status" rows), and `min_supported_firmware` and `known_latest_firmware`, the versions the warnings go by. |
+| `FirmwareWarningCode` | `"too_old"` (below 1.7.0) and `"outdated"` (below 2.0.7, the newest version known). No HEAD reply is read as "update required" until its meaning is confirmed on a meter. |
 
 Update commands:
 
@@ -152,6 +152,8 @@ Update commands:
 | `firmwareInspect(path: string): Promise<FirmwareFileInfo>` | Reads a local firmware container and answers its metadata; needs no meter. The file is never decrypted; files over 8 MiB are refused before they are read. A broken file rejects with `usage`, prefixed with the file name. |
 | `firmwareChoose(): Promise<string \| null>` | Opens the open dialog filtered to `.mencrypt` files; `null` when it was cancelled. |
 | `firmwareFlash(deviceId: string, path: string, confirmation: string, onStage: (event: FlashEvent) => void): Promise<FlashDone>` | Updates the meter with the file at `path`. Before anything is sent the backend checks that `confirmation` is the file's version and reads the file again. Each event goes to `onStage` over a channel, about one write message per percent. Rejects with the error and its recovery hint. |
+| `firmwareCancel(): Promise<void>` | Asks the running update to stop. Accepted until the erase begins, and refused after that. An accepted cancel ends the update as a failure at its next safe point, which is after the meter has switched if it is switching. |
+| `firmwareFlashStatus(): Promise<FlashStatus \| null>` | The running update, for a reloaded page: `device_id` and `stage` (the latest stage, or null before the first). Null when none runs. |
 
 Types:
 

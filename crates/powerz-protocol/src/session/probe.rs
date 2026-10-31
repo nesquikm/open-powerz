@@ -43,8 +43,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// answers. Only CONNECT (0x02) and HEAD (0x40) frames are sent; a
     /// REJECT, a timeout or an undecodable reply is data; any other error
     /// is returned (no HEAD is sent after such a CONNECT failure). A SYNC
-    /// reply to either frame is [`Error::BootloaderMidDownload`]: nothing
-    /// more is sent.
+    /// reply of any id to either frame is
+    /// [`Error::BootloaderMidDownload`]: nothing more is sent.
     pub fn probe(&mut self) -> Result<ProbeReport, Error> {
         self.probe_with_head_reply().map(|(report, _)| report)
     }
@@ -59,7 +59,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
             Err(Error::Transport(transport::Error::Timeout)) => ConnectOutcome::TimedOut,
             Err(e) => return Err(e),
         };
-        let (head, reply) = match self.head_exchange() {
+        let (head, reply) = match self.head_exchange_taking_sync() {
             Ok(reply) if is_sync(&reply) => return Err(Error::BootloaderMidDownload),
             Ok(reply) if head::is_reject(&reply) => (HeadOutcome::Rejected(reply.clone()), reply),
             Ok(reply) => match HeadReply::decode(&reply) {

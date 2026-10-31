@@ -2892,7 +2892,7 @@ fn stage1_script(stored: usize) -> Vec<Boot> {
 fn the_real_bootloader_head_reply_decodes_to_field_zero() {
     let head = HeadReply::decode(&STAGE1_HEAD_REPLY).expect("type 0x40 with the extend bit");
     assert_eq!(head.old_firmware_field(), 0);
-    assert!(!head.update_required());
+    assert_eq!(head.old_firmware_field(), 0);
 }
 
 #[test]

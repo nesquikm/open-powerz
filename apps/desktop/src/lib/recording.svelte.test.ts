@@ -199,6 +199,24 @@ describe("Recording state (AC-0P7HSJ.3, AC-0P7HSJ.6, AC-0P7HSJ.7)", () => {
   });
 });
 
+describe("Recording.stop (AC-4PJRVJ.2)", () => {
+  it("says when the stop failed", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    const failed = deps({ stopRecording: vi.fn(() => Promise.reject(new Error("no"))) });
+    expect(await r.stop(failed)).toBe(false);
+    expect(r.error).not.toBeNull();
+  });
+
+  it("starts nothing when the recording has already ended", async () => {
+    const r = new Recording();
+    const d = deps();
+    expect(await r.stop(d)).toBe(true);
+    expect(d.startRecording).not.toHaveBeenCalled();
+    expect(r.phase).toBe("idle");
+  });
+});
+
 describe("ExportJob (AC-0P7HSJ.5)", () => {
   it("proposes a file name, tracks progress and reports the rows", async () => {
     const job = new ExportJob();

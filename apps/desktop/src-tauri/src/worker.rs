@@ -15,6 +15,7 @@ use powerz_protocol::adcnew::Content;
 use powerz_protocol::decode::pd_packet::CaptureClock;
 use powerz_protocol::decode::{QueueRecord, Rate};
 use powerz_protocol::firmware::DeviceMode;
+use powerz_protocol::firmware::version::{KNOWN_LATEST, MIN_SUPPORTED};
 use powerz_protocol::pdcap;
 use powerz_protocol::session::{
     self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer,
@@ -80,13 +81,13 @@ pub struct ConnectedInfo {
     pub mode: &'static str,
     /// Bootloader version, e.g. `2.5`; empty when the block is blank.
     pub bootloader_version: String,
-    /// Firmware warning codes (`too_old`, `outdated`, `update_required`).
+    /// Firmware warning codes (`too_old`, `outdated`).
     pub warnings: Vec<&'static str>,
     /// The HEAD reply asked for a firmware update; `None` (JSON `null`)
     /// when HEAD could not be read.
     pub update_required: Option<bool>,
     /// What could not be read while getting the firmware status, one line
-    /// per failed step (an info block or HEAD).
+    /// per failed step (an info, OTP or UID block, or HEAD).
     pub firmware_problems: Vec<String>,
     /// Serial number.
     pub serial: String,
@@ -96,6 +97,10 @@ pub struct ConnectedInfo {
     pub rate_locked: bool,
     /// Session history id.
     pub session_id: u64,
+    /// Oldest supported firmware, for wording the `too_old` warning.
+    pub min_supported_firmware: String,
+    /// Newest firmware known, for wording the `outdated` warning.
+    pub known_latest_firmware: String,
 }
 
 /// Connection status changes.
@@ -364,7 +369,7 @@ type InOrder = Box<dyn FnMut(Box<dyn FnOnce() + Send>) + Send>;
 
 /// What the worker thread hands its sink forwarder (FR X2SPDW).
 enum Forward {
-    Event(BackendEvent),
+    Event(Box<BackendEvent>),
     Run(Box<dyn FnOnce() + Send>),
 }
 
@@ -407,6 +412,8 @@ fn connected_info(
         rate_sps: (!rate_locked).then(|| rate.sps()),
         rate_locked,
         session_id,
+        min_supported_firmware: MIN_SUPPORTED.to_string(),
+        known_latest_firmware: KNOWN_LATEST.to_string(),
     }
 }
 
@@ -457,6 +464,8 @@ fn cdc_connected_info(config: &WorkerConfig) -> ConnectedInfo {
         rate_sps: Some(config.rate.sps()),
         rate_locked: false,
         session_id: config.session_id,
+        min_supported_firmware: MIN_SUPPORTED.to_string(),
+        known_latest_firmware: KNOWN_LATEST.to_string(),
     }
 }
 
@@ -492,13 +501,13 @@ fn open_queue_session<T: Transport, C: Clock>(
     let mut session = Session::with_clock(GuardedTransport::new(transport), clock);
     let mut run =
         || -> Result<(session::DeviceInfo, session::FirmwareStatus, bool), session::Error> {
-            // CONNECT, then both info blocks and HEAD (read-only, FR V9SK52).
+            // CONNECT, then both info blocks, HEAD, OTP and UID, once each
+            // (read-only, FR V9SK52).
             session.connect()?;
-            // A HEAD or info block that timed out or did not decode only
-            // costs the firmware status; an unplugged or refused meter
-            // still fails the connect.
-            let fw = session.read_firmware_status_or_unknown()?;
-            let info = session.device_info()?;
+            // A block or HEAD that timed out or did not decode only costs
+            // that part; an unplugged or refused meter still fails the
+            // connect.
+            let (info, fw) = session.read_device_info_and_status()?;
             let started = session.authenticate(1).and_then(|_| {
                 match session.start_stream(config.rate) {
                     // A queue started by an earlier session still runs [device]:
@@ -2197,6 +2206,7 @@ where
         for item in queued {
             let ran = catch_unwind(AssertUnwindSafe(|| match item {
                 Forward::Event(event) => {
+                    let event = *event;
                     let batch = matches!(event, BackendEvent::Batch(_));
                     marking(event);
                     if batch {
@@ -2234,8 +2244,8 @@ where
             )
         }));
         if let Err(payload) = ran {
-            let _ = sink.send(Forward::Event(disconnected(Some(ui_error::from_panic(
-                payload.as_ref(),
+            let _ = sink.send(Forward::Event(Box::new(disconnected(Some(
+                ui_error::from_panic(payload.as_ref()),
             )))));
         }
         // Every event is out before the thread ends, so a reconnect or an
@@ -2293,7 +2303,7 @@ fn run_worker<T, C, O>(
             depth.fetch_add(1, Ordering::SeqCst);
         }
         blocked(forward_meter.as_ref(), || {
-            let _ = sink.send(Forward::Event(event));
+            let _ = sink.send(Forward::Event(Box::new(event)));
         });
     });
     let opened = open()

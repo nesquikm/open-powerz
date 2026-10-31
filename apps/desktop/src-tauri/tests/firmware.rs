@@ -479,3 +479,94 @@ fn an_unknown_mode_meter_that_connects_reports_unknown_mode() {
         "the listing's mode, not application: {v}"
     );
 }
+
+// ---------------------------------------------------------------- FR 4PJRVJ
+
+/// A field of the `connected` status, however the event wraps it.
+fn connected_field<'a>(v: &'a Value, key: &str) -> &'a Value {
+    v.get("data").unwrap_or(v).get(key).unwrap_or(&Value::Null)
+}
+
+#[test]
+fn connected_status_carries_the_firmware_thresholds_of_the_library() {
+    use powerz_protocol::firmware::version::{KNOWN_LATEST, MIN_SUPPORTED};
+    let clock = clock();
+    let (v, _) = connect(sim(&clock), &clock);
+    assert_eq!(
+        connected_field(&v, "min_supported_firmware"),
+        &json!(MIN_SUPPORTED.to_string()),
+        "{v}"
+    );
+    assert_eq!(
+        connected_field(&v, "known_latest_firmware"),
+        &json!(KNOWN_LATEST.to_string()),
+        "{v}"
+    );
+}
+
+/// The simulator with the memory reads numbered in `fail` timing out.
+struct FlakyInfo {
+    inner: Pipe,
+    fail: Vec<usize>,
+    reads: Arc<AtomicUsize>,
+}
+
+impl Transport for FlakyInfo {
+    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        // Memory read (0x44) `[static]`.
+        if request[0] & 0x7F == 0x44 {
+            let n = self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.fail.contains(&n) {
+                return Err(transport::Error::Timeout);
+            }
+        }
+        self.inner.transact(request, timeout)
+    }
+
+    fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+        self.inner.read(timeout)
+    }
+
+    fn recover(&mut self) -> Result<(), transport::Error> {
+        self.inner.recover()
+    }
+}
+
+#[test]
+fn a_failing_info_block_does_not_abort_the_connect() {
+    for k in 0..4 {
+        let clock = clock();
+        let pipe = Pipe::new(sim(&clock), &clock, PipeOpts::default());
+        let log = Arc::clone(&pipe.log);
+        let flaky = FlakyInfo {
+            inner: pipe,
+            fail: vec![k],
+            reads: Arc::default(),
+        };
+        let (v, _) = connect_over(flaky, &log, &clock);
+        assert_eq!(
+            connected_field(&v, "model"),
+            &json!("KM003C"),
+            "read {k}: {v}"
+        );
+        let problems = connected_field(&v, "firmware_problems");
+        assert_ne!(problems, &json!([]), "read {k} shows as a problem: {v}");
+    }
+}
+
+#[test]
+fn a_connect_reads_each_info_block_once() {
+    let clock = clock();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let pipe = Pipe::new(sim(&clock), &clock, PipeOpts::default());
+    let log = Arc::clone(&pipe.log);
+    let flaky = FlakyInfo {
+        inner: pipe,
+        fail: Vec::new(),
+        reads: Arc::clone(&reads),
+    };
+    let _ = connect_over(flaky, &log, &clock);
+    // Two info blocks, OTP, UID and one more 0x44 frame the connect sends
+    // after them.
+    assert_eq!(reads.load(Ordering::SeqCst), 5);
+}

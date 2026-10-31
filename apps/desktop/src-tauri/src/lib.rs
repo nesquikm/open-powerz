@@ -24,7 +24,9 @@ use powerz_protocol::transport::discovery;
 use tauri::ipc::Channel;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::devices::{AppOpener, AttachedSession, DeviceListing, DeviceManager, WatchHandle};
+use crate::devices::{
+    AppOpener, AttachedSession, DeviceListing, DeviceManager, FlashStatus, WatchHandle,
+};
 use crate::recording::{ExportProgress, RecordingSummary};
 use crate::ui_error::UiError;
 use crate::worker::BackendEvent;
@@ -844,9 +846,12 @@ async fn firmware_flash(
     blocking(move || {
         let lease = state.manager().begin_flash(&device_id)?;
         let device = lease.device().clone();
-        let stop = AtomicBool::new(false);
+        let control = Arc::clone(lease.control());
+        let stop = control.stop();
+        let observer = Arc::clone(&control);
         let mut last_step = None;
         let mut progress = move |stage: firmware_flash::FlashStage| {
+            observer.observe(&stage);
             if let firmware_flash::FlashStage::Writing { done, total } = stage {
                 // One message per percent, plus the last write.
                 let step = done.saturating_mul(100) / total.max(1);
@@ -871,7 +876,7 @@ async fn firmware_flash(
                     &confirmation,
                     &mut meter,
                     SystemClock,
-                    &stop,
+                    stop,
                     &mut progress,
                 )
             }
@@ -882,7 +887,7 @@ async fn firmware_flash(
                     &confirmation,
                     &mut opener,
                     SystemClock,
-                    &stop,
+                    stop,
                     &mut progress,
                 )
             }
@@ -891,6 +896,22 @@ async fn firmware_flash(
         done
     })
     .await
+}
+
+/// Ask the running firmware update to stop; refused once its erase has
+/// begun (AC-4PJRVJ.1).
+#[tauri::command]
+async fn firmware_cancel(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || state.manager().cancel_flash()).await
+}
+
+/// The running firmware update, if any, for a reloaded page to pick up
+/// (AC-4PJRVJ.3).
+#[tauri::command]
+async fn firmware_flash_status(state: Shared<'_>) -> Result<Option<FlashStatus>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(state.manager().flash_status())).await
 }
 
 /// The save dialog's file type for a proposed file name: a PD capture for
@@ -1254,6 +1275,8 @@ pub fn run() {
             firmware_inspect,
             firmware_choose,
             firmware_flash,
+            firmware_cancel,
+            firmware_flash_status,
             trigger_open,
             trigger_detect,
             trigger_list,

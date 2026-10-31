@@ -19,7 +19,7 @@ use crate::output::write_json;
 /// `firmware_problems` (what could not be read, one line each), `serial`,
 /// `uid`. Text output adds `Update check: unavailable (<reason>)` when
 /// HEAD was not read and one `Firmware status: <problem>` line per other
-/// status part (info block, recovery) that could not be read.
+/// status part (info, OTP or UID block, recovery) that could not be read.
 ///
 /// Reports application mode: an open session is only answered by the
 /// application firmware. [`info_in_mode`] reports the opened meter's mode.
@@ -35,8 +35,8 @@ pub fn info<T: Transport, C: Clock>(
 /// interface's USB string.
 ///
 /// Outside application mode only the mode is reported and nothing is sent.
-/// In application mode the session is already connected: the device info,
-/// then both info blocks and HEAD are read. A HEAD or info block that timed
+/// In application mode the session is already connected: both info blocks,
+/// HEAD, the OTP block and the UID are read, once each. A step that timed
 /// out or did not decode costs only that part, and is shown as a problem.
 pub fn info_in_mode<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
@@ -66,8 +66,7 @@ pub fn info_in_mode<T: Transport, C: Clock>(
         writeln!(out, "Mode:       {}", mode.name())?;
         return Ok(());
     }
-    let d = session.device_info()?;
-    let fw = session.read_firmware_status_or_unknown()?;
+    let (d, fw) = session.read_device_info_and_status()?;
     if json {
         let block = |b: &Option<DeviceInfoBlock>| {
             b.as_ref().map(|b| {
@@ -96,10 +95,11 @@ pub fn info_in_mode<T: Transport, C: Clock>(
             }),
         );
     }
-    // Without an info block (status unread) fall back to the device info.
+    // Without an info block the version was not read.
     let with_date = |b: &Option<DeviceInfoBlock>, fallback: &str| match b {
         Some(b) if !b.date().is_empty() => format!("{} ({})", b.version(), b.date()),
         Some(b) => b.version().to_owned(),
+        None if fallback.is_empty() => "unknown".to_owned(),
         None => fallback.to_owned(),
     };
     writeln!(out, "Model:      {}", d.model)?;

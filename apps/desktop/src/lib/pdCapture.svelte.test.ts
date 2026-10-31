@@ -122,6 +122,8 @@ describe("a new backend session (reconnect, FR TGE839)", () => {
       rate_sps: 50,
       rate_locked: false,
       session_id: 2,
+      min_supported_firmware: "1.7.0",
+      known_latest_firmware: "2.0.7",
     },
   };
 
@@ -224,6 +226,8 @@ describe("emptied counter for the view's selection", () => {
         rate_sps: 50,
         rate_locked: false,
         session_id: 1,
+        min_supported_firmware: "1.7.0",
+        known_latest_firmware: "2.0.7",
       },
     } as BackendEvent);
     expect(pd.emptied).toBe(start + 1);
@@ -268,6 +272,8 @@ describe("the table's first index (FR TGE83E, AC .2)", () => {
         rate_sps: 50,
         rate_locked: false,
         session_id: 1,
+        min_supported_firmware: "1.7.0",
+        known_latest_firmware: "2.0.7",
       },
     } as BackendEvent);
     expect(pd.firstIndex).toBe(0);

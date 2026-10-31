@@ -28,10 +28,11 @@ export interface DetailRow {
   value: string;
 }
 
-/** The update check in plain words: unavailable when HEAD was not read. */
+/** The update check in plain words: unavailable when HEAD was not read, and never
+ * "update required" until that meaning is confirmed on a meter (AC-V9SK52.3). */
 function updateCheckLabel(updateRequired: boolean | null): string {
   if (updateRequired === null) return "unavailable";
-  return updateRequired ? "update required" : "up to date";
+  return updateRequired ? "not recognised" : "up to date";
 }
 
 /** The device details rows of the connected meter; a missing value shows a dash,
@@ -54,11 +55,9 @@ export function firmwareWarningText(code: FirmwareWarningCode, info: ConnectedIn
   const fw = info.firmware_version;
   switch (code) {
     case "too_old":
-      return `Firmware ${fw} is older than ${MIN_SUPPORTED_FIRMWARE}, the oldest supported version. Update the meter.`;
+      return `Firmware ${fw} is older than ${info.min_supported_firmware}, the oldest supported version. Update the meter.`;
     case "outdated":
-      return `Firmware ${fw} is older than ${KNOWN_LATEST_FIRMWARE}, the newest version known.`;
-    case "update_required":
-      return "The meter reports update required: its firmware is old.";
+      return `Firmware ${fw} is older than ${info.known_latest_firmware}, the newest version known.`;
   }
 }
 

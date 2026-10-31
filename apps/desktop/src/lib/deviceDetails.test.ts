@@ -27,6 +27,8 @@ function info(over: Partial<ConnectedInfo> = {}): ConnectedInfo {
     rate_sps: 50,
     rate_locked: false,
     session_id: 1,
+    min_supported_firmware: "1.7.0",
+    known_latest_firmware: "2.0.7",
     ...over,
   };
 }
@@ -123,12 +125,6 @@ describe("firmwareWarningText", () => {
     const text = firmwareWarningText("too_old", info({ firmware_version: "1.6.0" }));
     expect(text).toContain("1.6.0");
     expect(text).toContain("1.7.0");
-  });
-
-  it("update required says so", () => {
-    expect(firmwareWarningText("update_required", info()).toLowerCase()).toContain(
-      "update required",
-    );
   });
 });
 

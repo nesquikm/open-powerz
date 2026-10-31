@@ -6,6 +6,8 @@
     connectedMeters,
     currentMeterCommands,
     meterBackend,
+    firmwareCancel,
+    firmwareFlashStatus,
     firmwareChoose,
     firmwareFlash,
     firmwareInspect,
@@ -324,6 +326,18 @@
     choose: firmwareChoose,
     inspect: firmwareInspect,
     flash: firmwareFlash,
+    cancelFlash: firmwareCancel,
+    flashStatus: firmwareFlashStatus,
+    isRecording: (id) =>
+      meters.inFullView(id) ? recording.phase === "recording" : meters.hasParked(id),
+    stopRecording: async (id) => {
+      if (meters.inFullView(id)) {
+        if (!(await recording.stop(recordingDeps()))) throw recording.error;
+        return;
+      }
+      await commandsOf(id).stopRecording();
+      meters.unpark(id);
+    },
   });
   /** While an update runs the meter is held for it (AC .4): no device switching, no
    * connect, and the PD analyzer, Trigger and Records tabs are disabled. */
@@ -680,6 +694,9 @@
   // with none, the app starts disconnected as on a first launch (FR VEDDFD).
   onMount(() => {
     if (!backendAvailable()) return;
+    void firmware.reattach().then(() => {
+      if (firmware.busy) view = "firmware";
+    });
     void attachSession(
       attach,
       (e) => routeAttached(e),
@@ -767,14 +784,19 @@
       .catch((err: unknown) => session.reportError(toUiError(err)));
   }
 
-  /** Record button / Space: start (save dialog first) or stop the CSV recording. */
-  function toggleRecording(): void {
-    void recording.toggle({
+  /** What the recording needs from the app, for the meter the full view shows. */
+  function recordingDeps() {
+    return {
       canRecord,
-      startRecording: (name) => act().startRecording(name),
+      startRecording: (name: string) => act().startRecording(name),
       stopRecording: () => act().stopRecording(),
       now: () => new Date(),
-    });
+    };
+  }
+
+  /** Record button / Space: start (save dialog first) or stop the CSV recording. */
+  function toggleRecording(): void {
+    void recording.toggle(recordingDeps());
   }
 
   /** R shortcut: zero the session statistics. */
@@ -973,9 +995,7 @@
           if (leftStack(e)) holdNotices("focus", false);
         }}
       >
-        {#if firmwareWarnings.length > 0}
-          <FirmwareNotice warnings={firmwareWarnings} />
-        {/if}
+        <FirmwareNotice warnings={firmwareWarnings} />
         {#if recording.notice !== null || recording.error !== null}
           <Notice
             tone={recording.error ? "error" : "info"}
@@ -1130,9 +1150,6 @@
     overflow-y: auto;
     pointer-events: none;
   }
-  .notice-stack:empty {
-    display: none;
-  }
   .notice-stack > :global(.notice) {
     margin: 0;
     pointer-events: auto;
@@ -1268,7 +1285,8 @@
       flex: 1 0 auto;
       contain: none;
     }
-    .notice-stack:not(.pd-notices) {
+    /* With nothing to show it stays fixed, so the page keeps no gap for it. */
+    .notice-stack:not(.pd-notices):has(> :global(:not(:empty))) {
       position: static;
       width: auto;
       max-width: none;

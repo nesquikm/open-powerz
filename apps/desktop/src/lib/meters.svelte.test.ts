@@ -47,6 +47,8 @@ function connected(serial: string, session_id: number): BackendEvent {
       rate_sps: 50,
       rate_locked: false,
       session_id,
+      min_supported_firmware: "1.7.0",
+      known_latest_firmware: "2.0.7",
     },
   };
 }

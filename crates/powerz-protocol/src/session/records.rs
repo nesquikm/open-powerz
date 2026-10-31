@@ -100,7 +100,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
             })?;
         let timeout = transport::default_timeout(&request);
         let first = self.transport.transact_record_table(&request, timeout)?;
-        let reply = self.reread_until_id(first, request[1], timeout)?;
+        let reply = self.reread_until_id(first, request[1], timeout, |_| false)?;
         match frame::classify_reply(&reply)? {
             // The KM003C answers FINISHED with the request id \[device\].
             Reply::Accept(_) | Reply::Finished(_) => {}

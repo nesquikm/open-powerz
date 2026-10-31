@@ -17,6 +17,7 @@ import type {
   FirmwareFileInfo,
   FlashDone,
   FlashEvent,
+  FlashStatus,
   Gap,
   HistoryGap,
   HistorySeries,
@@ -57,6 +58,7 @@ import type {
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
 import { lineRefusal, messageRefusal } from "./console.svelte";
+import { CANCEL_TOO_LATE } from "./firmwareUpdate.svelte";
 import { PD_CYCLE_MS, pdContractAt, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
@@ -71,6 +73,12 @@ const PROGRESS_MS = 500;
 function usage(message: string): UiError {
   return { kind: "usage", message, hint: null };
 }
+
+/** `firmware-running`: the update a reloaded page finds running (AC-4PJRVJ.3). */
+const MOCK_RUNNING_FLASH: FlashStatus = {
+  device_id: "demo:idle",
+  stage: { stage: "writing", done: 4096, total: 8192 },
+};
 
 /** Why the mock refuses a request while a firmware update holds the meter (FR V9SK55). */
 const FLASH_REFUSAL = "A firmware update is running. Wait for it to finish before using the meter.";
@@ -509,6 +517,7 @@ export const MOCK_MODES = [
   "firmware-fail-returning",
   "firmware-other-model",
   "firmware-bad-file",
+  "firmware-running",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -577,6 +586,8 @@ function connectedStatus(serial: string, rateSps: number | null, sessionId = 1):
       rate_sps: rateSps,
       rate_locked: rateSps === null,
       session_id: sessionId,
+      min_supported_firmware: "1.7.0",
+      known_latest_firmware: "2.0.7",
     },
   };
 }
@@ -926,6 +937,9 @@ export class MockBackend {
   #firmwareFlashes: { deviceId: string; path: string; confirmation: string }[] = [];
   /** A firmware update holds the meter (FR V9SK55, AC .4). */
   #flashing = false;
+  /** The running update was asked to stop / has begun its erase (AC-4PJRVJ.1). */
+  #flashStop = false;
+  #flashErasing = false;
   #options: MockOptions;
   #revealed: string[] = [];
   /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
@@ -970,6 +984,7 @@ export class MockBackend {
   ) {
     this.#mode = mode;
     this.#options = options;
+    this.#flashing = mode === "firmware-running";
   }
 
   /** `replug`: the real meter's listing while the OS lists it; `bootloader`: the
@@ -1721,6 +1736,8 @@ export class MockBackend {
       throw usage(`Type the file's version, ${info.version}, to confirm the update.`);
     }
     this.#flashing = true;
+    this.#flashStop = false;
+    this.#flashErasing = false;
     this.#firmwareFlashes.push({ deviceId, path, confirmation });
     // Like the backend: the trigger session and the stream let go of the meter first.
     const s = this.#session;
@@ -1742,6 +1759,14 @@ export class MockBackend {
       const fromBootloader = isMeter && meter?.mode === "bootloader";
       for (const stage of ["switching", "erasing"] as const) {
         if (stage === "switching" && fromBootloader) continue;
+        if (this.#flashStop) {
+          throw {
+            kind: "protocol",
+            message: `The firmware update failed: interrupted: stopped by the user before the ${stage === "erasing" ? "descriptor" : "update started"}.`,
+            hint: FLASH_RECOVERY_HINT,
+          } satisfies UiError;
+        }
+        if (stage === "erasing") this.#flashErasing = true;
         onStage({ stage });
         await sleep(MOCK_FLASH_MS[stage]);
         if (failAt === stage) throw fail(stage);
@@ -1768,6 +1793,19 @@ export class MockBackend {
     } finally {
       this.#flashing = false;
     }
+  }
+
+  /** Asks the running update to stop, like the backend: until the erase starts. */
+  async firmwareCancel(): Promise<void> {
+    if (!this.#flashing) throw usage("No firmware update is running.");
+    if (this.#flashErasing) throw usage(CANCEL_TOO_LATE);
+    this.#flashStop = true;
+  }
+
+  /** The update running across a reload: only `firmware-running` has one, since the
+   * mock's own updates end with the page. */
+  async firmwareFlashStatus(): Promise<FlashStatus | null> {
+    return this.#mode === "firmware-running" ? MOCK_RUNNING_FLASH : null;
   }
 
   /** The updates this mock ran (FR V9SK55), for the UI tests to check nothing was sent. */

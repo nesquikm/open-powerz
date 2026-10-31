@@ -103,7 +103,7 @@ export interface DeviceListing {
 export type DeviceMode = "application" | "bootloader" | "unknown";
 
 /** Firmware warning codes (mirrors `version::FirmwareWarning::code`). */
-export type FirmwareWarningCode = "too_old" | "outdated" | "update_required";
+export type FirmwareWarningCode = "too_old" | "outdated";
 
 export interface ConnectedInfo {
   model: string;
@@ -113,7 +113,7 @@ export interface ConnectedInfo {
   mode: DeviceMode;
   /** Firmware warnings for this meter, none when it is up to date. */
   warnings: FirmwareWarningCode[];
-  /** The HEAD "update required" flag, null when HEAD could not be read (FR V9SK52). */
+  /** The HEAD check: false when current, null when HEAD was not read or not recognised (FR V9SK52). */
   update_required: boolean | null;
   /** Why parts of the firmware status could not be read, empty when all of it was. */
   firmware_problems: string[];
@@ -121,6 +121,10 @@ export interface ConnectedInfo {
   rate_sps: number | null;
   rate_locked: boolean;
   session_id: number;
+  /** Oldest supported firmware, from the protocol library. */
+  min_supported_firmware: string;
+  /** Newest firmware known, from the protocol library. */
+  known_latest_firmware: string;
 }
 
 export type Status =
@@ -696,6 +700,25 @@ export async function firmwareFlash(
     confirmation,
     onProgress: channel,
   });
+}
+
+/** Asks the running update to stop (AC-4PJRVJ.1); rejects once its erase has begun. */
+export async function firmwareCancel(): Promise<void> {
+  if (mock) return mock.firmwareCancel();
+  return invoke<void>("firmware_cancel");
+}
+
+/** A running firmware update as the backend reports it (AC-4PJRVJ.3); `stage` is null
+ * before its first stage. */
+export interface FlashStatus {
+  device_id: string;
+  stage: FlashStage | null;
+}
+
+/** The update the backend is running, null when none: a reloaded page picks it up. */
+export async function firmwareFlashStatus(): Promise<FlashStatus | null> {
+  if (mock) return mock.firmwareFlashStatus();
+  return invoke<FlashStatus | null>("firmware_flash_status");
 }
 
 /** What a PD clear answers. */

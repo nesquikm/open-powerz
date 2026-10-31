@@ -38,7 +38,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
             .transport
             .transact_settings(&request, timeout)
             .map_err(Error::from)
-            .and_then(|first| self.reread_until_id(first, request[1], timeout));
+            .and_then(|first| self.reread_until_id(first, request[1], timeout, |_| false));
         match reply {
             Ok(reply) => match frame::classify_reply(&reply)? {
                 Reply::Accept(_) | Reply::Finished(_) => {}

@@ -48,11 +48,13 @@ impl HeadReply {
         self.field
     }
 
-    /// Whether the meter asks for a firmware update.
+    /// Whether the meter asks for a firmware update: `Some(false)` for a
+    /// field of 0 (current firmware).
     ///
-    /// Any non-zero field means "update required" `[static]`.
-    pub fn update_required(&self) -> bool {
-        self.field != 0
+    /// Any other value is `None`: an unrecognised reply, never "update
+    /// required", until its meaning is confirmed on the device (AC-V9SK52.3).
+    pub fn update_required(&self) -> Option<bool> {
+        (self.field == 0).then_some(false)
     }
 }
 

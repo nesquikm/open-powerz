@@ -22,6 +22,7 @@ use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{PdScenario, Persona, Scenario, SimDevice};
 use serde::Serialize;
 
+use crate::firmware_flash::{FlashControl, FlashStage};
 use crate::history::{HistoryGap, Series, SeriesBuckets};
 use crate::recording::{ExportProgress, RecordingSummary};
 use crate::stats::StatsSnapshot;
@@ -492,9 +493,10 @@ pub struct DeviceManager<O, C> {
     /// Raised while a firmware update holds the meter (FR V9SK55, AC .4);
     /// shared with its [`FlashLease`].
     flashing: Arc<AtomicBool>,
-    /// The meters the firmware update took (FR 1HHT03); empty while
-    /// flashing means every meter is held.
+    /// The meters the firmware update took (FR 1HHT03).
     flash_targets: Arc<Mutex<Vec<String>>>,
+    /// The running update, shared with its [`FlashLease`].
+    flash_run: Arc<Mutex<Option<FlashRun>>>,
     /// The simulator serials given to second (third, ...) demo meters, by
     /// serial: the demo device id that got each (FR 1HHT03).
     demo_serials: HashMap<String, String>,
@@ -515,6 +517,24 @@ pub struct FlashLease {
     device: DeviceListing,
     flashing: Arc<AtomicBool>,
     targets: Arc<Mutex<Vec<String>>>,
+    control: Arc<FlashControl>,
+    run: Arc<Mutex<Option<FlashRun>>>,
+}
+
+/// The running update: its meter and its control.
+#[derive(Debug)]
+struct FlashRun {
+    device_id: String,
+    control: Arc<FlashControl>,
+}
+
+/// A running firmware update as the page sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlashStatus {
+    /// The meter being updated.
+    pub device_id: String,
+    /// The latest stage, `None` before the first.
+    pub stage: Option<FlashStage>,
 }
 
 impl FlashLease {
@@ -522,10 +542,16 @@ impl FlashLease {
     pub fn device(&self) -> &DeviceListing {
         &self.device
     }
+
+    /// The update's stop request and stage.
+    pub fn control(&self) -> &Arc<FlashControl> {
+        &self.control
+    }
 }
 
 impl Drop for FlashLease {
     fn drop(&mut self) {
+        *self.run.lock().unwrap_or_else(PoisonError::into_inner) = None;
         // Targets first: a flash begun in between keeps the ones it set.
         self.targets
             .lock()
@@ -645,7 +671,7 @@ impl Attacher {
             device_id,
             model: info.model,
             firmware_version: info.firmware_version,
-            serial: Some(info.serial),
+            serial: Some(info.serial).filter(|s| !s.is_empty()),
             rate_sps: info.rate_sps,
             rate_locked: info.rate_locked,
             session_id: info.session_id,
@@ -845,6 +871,7 @@ where
             waiting: Arc::default(),
             flashing: Arc::default(),
             flash_targets: Arc::default(),
+            flash_run: Arc::default(),
             demo_serials: HashMap::new(),
             on_connected: Arc::new(|| {}),
         }
@@ -932,8 +959,10 @@ where
     /// Take the listed device `id` for a firmware update (FR V9SK55,
     /// AC .4): that meter's trigger session and measurement stream close
     /// first (waiting for the worker to let go of the pipe), its wait for an
-    /// unplug ends, and everything else that talks to a meter is refused
-    /// until the lease is dropped. A bootloader-mode meter can be taken too.
+    /// unplug ends, and that meter is refused until the lease is dropped; the
+    /// others keep running (AC-4PJRVJ.2). A real session that cannot be told
+    /// apart from a real target lets go too: without a serial on both sides
+    /// it may be the same meter. A bootloader-mode meter can be taken too.
     pub fn begin_flash(&mut self, id: &str) -> Result<FlashLease, UiError> {
         self.ensure_not_flashing()?;
         let device = self
@@ -941,8 +970,7 @@ where
             .into_iter()
             .find(|d| d.id == id)
             .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
-        // The session of that meter (by id, or by serial after a replug);
-        // when none matches, every session lets go of its meter.
+        // The session of that meter (by id, or by serial after a replug).
         let same = |m: &Meter| {
             m.named(id)
                 || (device.demo_scenario.is_none()
@@ -951,22 +979,39 @@ where
                     && m.device.serial == device.serial)
         };
         let any = self.meters.iter().any(same);
+        // No session matched: a real meter with no serial to compare may
+        // still be the target, seen at another address.
+        let unsure = |m: &Meter| {
+            !any && device.demo_scenario.is_none()
+                && m.device.demo_scenario.is_none()
+                && (device.serial.is_none() || m.device.serial.is_none())
+        };
+        let held = |m: &Meter| same(m) || unsure(m);
+        let mut targets: Vec<String> = self
+            .meters
+            .iter()
+            .filter(|m| held(m))
+            .map(|m| m.id.clone())
+            .collect();
+        if targets.is_empty() {
+            targets.push(id.to_owned());
+        }
         // The targets are in place before the flag is raised, so the other
         // meters are never refused, not even for a moment.
         *self
             .flash_targets
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = if any {
-            self.meters
-                .iter()
-                .filter(|m| same(m))
-                .map(|m| m.id.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+            .unwrap_or_else(PoisonError::into_inner) = targets;
+        let control = Arc::new(FlashControl::default());
+        *self
+            .flash_run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(FlashRun {
+            device_id: id.to_owned(),
+            control: Arc::clone(&control),
+        });
         self.flashing.store(true, Ordering::SeqCst);
-        for m in self.meters.iter_mut().filter(|m| !any || same(m)) {
+        for m in self.meters.iter_mut().filter(|m| held(m)) {
             m.release();
             forget_wait(&self.waiting, &m.id);
         }
@@ -974,7 +1019,34 @@ where
             device,
             flashing: Arc::clone(&self.flashing),
             targets: Arc::clone(&self.flash_targets),
+            control,
+            run: Arc::clone(&self.flash_run),
         })
+    }
+
+    /// The running firmware update, if any.
+    pub fn flash_status(&self) -> Option<FlashStatus> {
+        let run = self
+            .flash_run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        run.as_ref().map(|r| FlashStatus {
+            device_id: r.device_id.clone(),
+            stage: r.control.stage(),
+        })
+    }
+
+    /// Ask the running firmware update to stop (AC-4PJRVJ.1); refused when
+    /// none runs or its erase has begun.
+    pub fn cancel_flash(&self) -> Result<(), UiError> {
+        let run = self
+            .flash_run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match run.as_ref() {
+            Some(r) => r.control.cancel(),
+            None => Err(UiError::usage("No firmware update is running.")),
+        }
     }
 
     /// Serial of the unplugged meter the app waits for, if any.

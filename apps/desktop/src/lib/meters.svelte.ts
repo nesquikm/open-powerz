@@ -114,6 +114,11 @@ export class Meters {
     this.#parked.set(id, recording);
   }
 
+  /** A recording is parked for meter `id`. */
+  hasParked(id: string): boolean {
+    return this.#parked.has(id);
+  }
+
   /** The recording parked for meter `id`, once; undefined when none. */
   unpark(id: string): RecordingSnapshot | undefined {
     const rec = this.#parked.get(id);

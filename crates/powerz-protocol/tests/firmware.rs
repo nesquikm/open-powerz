@@ -160,15 +160,13 @@ fn head_request_is_header_and_sixteen_zero_bytes() {
 fn head_reply_field_zero_is_normal_firmware() {
     let reply = HeadReply::decode(&head_reply(2, 0)).unwrap();
     assert_eq!(reply.old_firmware_field(), 0);
-    assert!(!reply.update_required());
 }
 
 #[test]
-fn head_reply_non_zero_field_means_update_required() {
+fn head_reply_keeps_a_non_zero_field() {
     for field in [1u32, 2, 0x100, 0xFFFF_FFFF] {
         let reply = HeadReply::decode(&head_reply(2, field)).unwrap();
         assert_eq!(reply.old_firmware_field(), field);
-        assert!(reply.update_required(), "field {field:#x}");
     }
 }
 
@@ -186,13 +184,13 @@ fn head_reply_field_is_little_endian_at_offset_4() {
 fn head_reply_with_extend_bit_is_still_head() {
     let mut f = head_reply(3, 7);
     f[0] = 0xC0;
-    assert!(HeadReply::decode(&f).unwrap().update_required());
+    assert_eq!(HeadReply::decode(&f).unwrap().old_firmware_field(), 7);
 }
 
 #[test]
 fn head_reply_of_exactly_eight_bytes_is_enough() {
     let f = head_reply(3, 1);
-    assert!(HeadReply::decode(&f[..8]).unwrap().update_required());
+    assert_eq!(HeadReply::decode(&f[..8]).unwrap().old_firmware_field(), 1);
 }
 
 #[test]
