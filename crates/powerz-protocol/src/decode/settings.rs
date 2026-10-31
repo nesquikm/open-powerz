@@ -31,18 +31,53 @@ const OVERLAY: std::ops::Range<usize> = 0x10..0x14;
 /// change. A word with a decoded field in it counts as decoded as a whole.
 const UNDECODED: [std::ops::Range<usize>; 4] = [0x04..0x10, 0x14..0x1C, 0x44..0x58, 0x64..0xB0];
 
+/// Unix times the overlay can hold when the meter saves its block: 2020
+/// through the end of the signed 32-bit range [inferred]; later reads also
+/// bound it by the boot time shown.
+const OVERLAY_TIMES: RangeInclusive<u32> = 0x5E0B_E100..=0x7FFF_FFFF;
+
+/// `bits` steps of the reflected CRC-32 register, backwards.
+fn crc_unstep(reg: u32, bits: u32) -> u32 {
+    (0..bits).fold(reg, |r, _| {
+        if r & 0x8000_0000 != 0 {
+            ((r ^ 0xEDB8_8320) << 1) | 1
+        } else {
+            r << 1
+        }
+    })
+}
+
+/// The one overlay word that makes the CRC at 0x5C match the other bytes of
+/// block A: the register is run forward up to the overlay and backward from
+/// the stored CRC, and the word is what lies between the two.
+fn overlay_at_crc_time(b: &[u8]) -> u32 {
+    let before = !crc32fast::hash(&b[..OVERLAY.start]);
+    let after = b[OVERLAY.end..0x5C]
+        .iter()
+        .rev()
+        .fold(!u32_at(b, 0x5C), |reg, &byte| {
+            crc_unstep(reg, 8) ^ u32::from(byte)
+        });
+    crc_unstep(after, 32) ^ before
+}
+
 impl Settings {
     /// Decode the 180-byte SETTINGS section payload.
     pub fn decode(payload: &[u8]) -> Result<Settings, DecodeError> {
         need("SETTINGS", payload, LEN)?;
         let mut raw = [0u8; LEN];
         raw.copy_from_slice(&payload[..LEN]);
-        // Bytes 0x10..0x14 are a RAM overlay (the boot time after a reboot)
-        // that the stored CRC does not cover; it was computed over 0xFFFFFFFF.
-        let mut flash = raw;
-        flash[OVERLAY].fill(0xFF);
+        // Bytes 0x10..0x14 are a RAM overlay (the boot time after a reboot).
+        // The stored CRC covers what they held when the meter last saved the
+        // block: 0xFFFFFFFF or the time of that boot [device]. Four free bytes
+        // can match any CRC, so the check is that the word is one of those,
+        // from a boot no later than the one the block shows now.
+        let saved = overlay_at_crc_time(&raw);
+        let shown = u32_at(&raw, OVERLAY.start);
         Ok(Settings {
-            block_a_crc_ok: crc_ok(&raw, 0x00..0x5C, 0x5C) || crc_ok(&flash, 0x00..0x5C, 0x5C),
+            block_a_crc_ok: crc_ok(&raw, 0x00..0x5C, 0x5C)
+                || saved == 0xFFFF_FFFF
+                || (OVERLAY_TIMES.contains(&saved) && saved <= shown),
             block_b_crc_ok: crc_ok(&raw, 0x60..0xB0, 0xB0),
             raw,
         })
@@ -841,6 +876,65 @@ mod tests {
         p[0x10..0x14].copy_from_slice(&0x6AD7_84A2u32.to_le_bytes());
         p[0x20] ^= 0x01;
         assert!(!Settings::decode(&p).unwrap().block_a_crc_ok());
+    }
+
+    // ---- M7a read-only run: a block saved in an earlier boot ----
+
+    fn rebooted() -> Vec<u8> {
+        let hex: String = include_str!("../../tests/vectors/settings_207_rebooted.hex")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        hex.split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn decode_block_a_crc_saved_with_an_earlier_boot_time_passes() {
+        // The real block: 0x10 shows this boot, the CRC covers an older one.
+        let p = rebooted();
+        assert_eq!(p.len(), 180);
+        assert_eq!(u32_at(&p, 0x10), 0x6AE5_9BA6);
+        let s = Settings::decode(&p).unwrap();
+        assert!(s.block_a_crc_ok());
+        assert_eq!(s.meter_settings().unwrap().brightness.value, 50);
+    }
+
+    #[test]
+    fn decode_block_a_crc_saved_with_an_earlier_boot_time_still_finds_corruption() {
+        for (off, bit) in [(0x00, 0x01), (0x20, 0x01), (0x34, 0x80), (0x58, 0x10)] {
+            let mut p = rebooted();
+            p[off] ^= bit;
+            assert!(
+                !Settings::decode(&p).unwrap().block_a_crc_ok(),
+                "flip at {off:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_block_a_crc_saved_after_the_boot_shown_fails() {
+        // The saved word is a boot before this one, never after it.
+        let mut p = rebooted();
+        p[0x10..0x14].copy_from_slice(&0x6AE0_8E2Fu32.to_le_bytes());
+        assert!(!Settings::decode(&p).unwrap().block_a_crc_ok());
+    }
+
+    #[test]
+    fn decode_block_a_crc_saved_earlier_passes_while_the_overlay_is_unset() {
+        // 0xFFFFFFFF until this boot's time arrives.
+        let mut p = rebooted();
+        p[0x10..0x14].fill(0xFF);
+        assert!(Settings::decode(&p).unwrap().block_a_crc_ok());
+    }
+
+    #[test]
+    fn overlay_at_crc_time_finds_the_word_the_crc_covered() {
+        let p = rebooted();
+        assert_eq!(overlay_at_crc_time(&p), 0x6AE0_8E30);
+        assert_eq!(overlay_at_crc_time(&captured()), 0xFFFF_FFFF);
     }
 
     // ---- AC-E88WR5.6: CRCs, rate code, name, raw bytes ----

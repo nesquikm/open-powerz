@@ -23,3 +23,9 @@ Several meters, records and settings change as follows:
 - `record_delete_table` refuses a delete before any backup is written.
 - `write_settings_checked` adds `warnings` for undecoded bytes that changed.
 - A serial port another program holds is `PortHeld`, from `open_listed`.
+- `Settings::decode` accepts a block A the meter saved in an earlier boot. Only
+  the word at 0x10 may differ from what the CRC covered, and that word must be
+  0xFFFFFFFF, or a Unix time from 2020 on no later than the time shown there.
+- An I/O failure on a bulk pipe whose meter has left USB is
+  `transport::Error::Disconnected`, and `map_io_error` reads ENXIO and ENODEV
+  the same way outside Windows, so the banner and `app.log` both say unplugged.

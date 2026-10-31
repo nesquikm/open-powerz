@@ -42,3 +42,5 @@ Component and store tests per AC; Playwright with two simulators for controls, o
 ## Notes
 
 Source: the M_1HHSZZ and M_CD7M3M M7 follow-ups. The hide-serial option is in M7b.
+
+The M7a read-only run on the real meter (bac9fc3) found two more bugs, fixed here. The settings read failed its block A CRC after a reboot, because the meter saves the boot time of then under that CRC; it had nothing to do with the stream. That check now passes a random corruption of block A about one time in twenty; `docs/protocol.md` says what that can reach. An unplug on macOS ended the bulk pipe with an I/O error, so `app.log` said `error` and not `unplugged`. An I/O error on a meter gone from USB now counts as an unplug on every path.

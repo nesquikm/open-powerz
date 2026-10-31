@@ -244,6 +244,9 @@ pub struct FaultPlan {
     ignore_settings_write: bool,
     /// A settings write also changes a byte of the block no field decodes.
     stir_undecoded_settings: bool,
+    /// The SETTINGS read answers with the real block of a meter that saved
+    /// its settings in an earlier boot.
+    settings_saved_before_reboot: bool,
     /// Pad the record table to this many entries.
     record_count: Option<usize>,
 }
@@ -333,6 +336,14 @@ impl FaultPlan {
         self
     }
 
+    /// The SETTINGS read answers with the bytes of a real meter that saved
+    /// its settings in an earlier boot: the CRC of block A covers the boot
+    /// time of then, not the one the block shows now.
+    pub fn settings_saved_before_reboot(mut self) -> FaultPlan {
+        self.settings_saved_before_reboot = true;
+        self
+    }
+
     /// The record table is padded to `count` entries with synthetic records
     /// that have no samples (a shorter table is left alone).
     pub fn record_count(mut self, count: usize) -> FaultPlan {
@@ -342,7 +353,7 @@ impl FaultPlan {
 
     /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`,
     /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`,
-    /// `stir-undecoded-settings`.
+    /// `stir-undecoded-settings`, `settings-saved-before-reboot`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -367,12 +378,13 @@ impl FaultPlan {
                 ("ignore-table-write", None) => plan.ignore_table_write(),
                 ("ignore-settings-write", None) => plan.ignore_settings_write(),
                 ("stir-undecoded-settings", None) => plan.stir_undecoded_settings(),
+                ("settings-saved-before-reboot", None) => plan.settings_saved_before_reboot(),
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
                          disconnect@N, wrong-id@N, permission, corrupt-adcnew@N, echo-start, \
-                         reject-record-reads, ignore-table-write, ignore-settings-write or \
-                         stir-undecoded-settings)"
+                         reject-record-reads, ignore-table-write, ignore-settings-write, \
+                         stir-undecoded-settings or settings-saved-before-reboot)"
                     ));
                 }
             };

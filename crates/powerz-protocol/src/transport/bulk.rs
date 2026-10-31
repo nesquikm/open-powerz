@@ -44,6 +44,9 @@ pub struct BulkTransport {
     out_ep: Endpoint<Bulk, Out>,
     in_ep: Endpoint<Bulk, In>,
     max_packet: usize,
+    pid: u16,
+    bus: String,
+    address: u8,
 }
 
 impl BulkTransport {
@@ -145,19 +148,42 @@ impl BulkTransport {
             out_ep,
             in_ep,
             max_packet,
+            pid: device.pid,
+            bus: device.bus.clone(),
+            address: device.address,
         };
         drain_stale(&mut t, DRAIN_TIMEOUT)?;
         Ok(t)
+    }
+
+    /// The meter this pipe was opened on is still listed on USB.
+    fn listed(&self) -> Option<bool> {
+        let mut devices = nusb::list_devices().wait().ok()?;
+        Some(devices.any(|d| {
+            d.vendor_id() == crate::VID
+                && d.product_id() == self.pid
+                && d.bus_id() == self.bus
+                && d.device_address() == self.address
+        }))
+    }
+
+    /// The transport error for a failed transfer on this pipe.
+    fn failed(&self, e: TransferError) -> Error {
+        settle_gone(
+            transfer_error(e),
+            || self.listed(),
+            || std::thread::sleep(GONE_PAUSE),
+        )
     }
 
     fn write(&mut self, data: &[u8], timeout: Duration) -> Result<(), Error> {
         let c = self
             .out_ep
             .transfer_blocking(Buffer::from(data.to_vec()), timeout);
-        c.status.map_err(transfer_error)?;
+        c.status.map_err(|e| self.failed(e))?;
         if needs_zlp(data.len(), self.max_packet) {
             let c = self.out_ep.transfer_blocking(Buffer::new(0), timeout);
-            c.status.map_err(transfer_error)?;
+            c.status.map_err(|e| self.failed(e))?;
         }
         Ok(())
     }
@@ -173,7 +199,7 @@ impl Transport for BulkTransport {
         let c = self
             .in_ep
             .transfer_blocking(Buffer::new(MAX_REPLY), timeout);
-        c.status.map_err(transfer_error)?;
+        c.status.map_err(|e| self.failed(e))?;
         let mut data = c.buffer.into_vec();
         data.truncate(c.actual_len);
         Ok(data)
@@ -247,6 +273,34 @@ fn nusb_error(e: nusb::Error) -> Error {
     map_io_error(&std::io::Error::from(e), std::env::consts::OS)
 }
 
+/// How often, and how far apart, a failed transfer looks for the meter on USB.
+const GONE_LOOKS: usize = 5;
+const GONE_PAUSE: Duration = Duration::from_millis(50);
+
+/// [`Error::Disconnected`] when an [`Error::Io`] came with the meter leaving
+/// USB: macOS can end a transfer on a pulled cable with a status nusb does not
+/// map to its disconnect error, and the listing can lag that transfer.
+/// `listed` says whether the meter is listed (`None` when USB cannot be
+/// listed, which proves nothing).
+fn settle_gone(
+    err: Error,
+    mut listed: impl FnMut() -> Option<bool>,
+    mut pause: impl FnMut(),
+) -> Error {
+    if !matches!(err, Error::Io(_)) {
+        return err;
+    }
+    for look in 1..=GONE_LOOKS {
+        match listed() {
+            Some(false) => return Error::Disconnected,
+            None => return err,
+            Some(true) if look < GONE_LOOKS => pause(),
+            Some(true) => {}
+        }
+    }
+    err
+}
+
 fn transfer_error(e: TransferError) -> Error {
     match e {
         TransferError::Cancelled => Error::Timeout,
@@ -259,6 +313,52 @@ fn transfer_error(e: TransferError) -> Error {
 mod tests {
     use super::*;
     use crate::transport::mock::{MockTransport, Step};
+
+    fn pause() -> impl FnMut() {
+        || {}
+    }
+
+    #[test]
+    fn io_failure_of_a_meter_gone_from_usb_is_an_unplug() {
+        let e = Error::Io("unknown (error 0xe00002ed)".into());
+        assert_eq!(settle_gone(e, || Some(false), pause()), Error::Disconnected);
+    }
+
+    #[test]
+    fn io_failure_waits_for_the_system_to_drop_the_meter() {
+        let mut listed = [true, true, false].into_iter();
+        let e = Error::Io("endpoint stalled".into());
+        let got = settle_gone(e, || listed.next(), pause());
+        assert_eq!(got, Error::Disconnected);
+    }
+
+    #[test]
+    fn io_failure_of_a_meter_still_listed_stays_an_io_failure() {
+        let e = Error::Io("endpoint stalled".into());
+        let mut looks = 0;
+        let got = settle_gone(
+            e.clone(),
+            || {
+                looks += 1;
+                Some(true)
+            },
+            pause(),
+        );
+        assert_eq!(got, e);
+        assert_eq!(looks, GONE_LOOKS);
+    }
+
+    #[test]
+    fn io_failure_stays_when_usb_cannot_be_listed() {
+        let e = Error::Io("endpoint stalled".into());
+        assert_eq!(settle_gone(e.clone(), || None, pause()), e);
+    }
+
+    #[test]
+    fn other_errors_do_not_look_at_usb() {
+        let got = settle_gone(Error::Timeout, || panic!("listed USB"), pause());
+        assert_eq!(got, Error::Timeout);
+    }
 
     const T: Duration = Duration::from_millis(50);
 
