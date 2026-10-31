@@ -131,7 +131,8 @@ reports that line's number (the header is line 1). A line is damaged when it:
 
 A truncated file therefore loads everything before the cut. `powerz pd decode`
 prints those records, then the error with the line number, and exits with
-code 5. The desktop app shows the loaded part and names the line.
+code 2. The desktop app shows the loaded part, even when that is nothing, and
+names the line.
 
 A file whose first line is missing, is not a header, or has a `format` other
 than `pdcap` is not loaded at all.

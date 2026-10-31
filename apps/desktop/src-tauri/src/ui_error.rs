@@ -143,6 +143,7 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
         },
         T::Permission(_) => permission_denied(target_os),
         T::Io(detail) if is_busy(detail) => device_busy(target_os),
+        T::PortHeld { .. } => port_held(),
         T::NotFound => UiError {
             kind: ErrorKind::Disconnected,
             message: "No meter was found.".to_owned(),
@@ -169,6 +170,30 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
     }
 }
 
+/// Map a failure to open the serial port for a settings write: a port held
+/// by another program is named as such. On Windows that shows up as "access
+/// denied", which elsewhere means missing rights.
+pub fn settings_port_error(err: &transport::Error, target_os: &str) -> UiError {
+    use transport::Error as T;
+    let held = match err {
+        T::Io(detail) => is_busy(detail),
+        T::Permission(_) => target_os == "windows",
+        _ => false,
+    };
+    if !held {
+        return from_transport(err, target_os);
+    }
+    port_held()
+}
+
+fn port_held() -> UiError {
+    UiError {
+        kind: ErrorKind::DeviceBusy,
+        message: "The meter's serial port is in use by another program.".to_owned(),
+        hint: Some("Close that program, then try again.".to_owned()),
+    }
+}
+
 /// Map a session error to a plain-language UI error.
 pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
     use session::Error as S;
@@ -192,9 +217,19 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
                 .to_owned(),
             hint: Some("Delete more records at once, or all of them.".to_owned()),
         },
-        S::RecordTableMismatch { .. } => UiError {
+        S::RecordTableMismatch { expected, actual } => UiError {
             kind: ErrorKind::Protocol,
-            message: "The record list does not match after the delete.".to_owned(),
+            message: if expected == actual {
+                format!(
+                    "The record list does not match after the delete: \
+                     {actual} records as expected, but the entries differ."
+                )
+            } else {
+                format!(
+                    "The record list does not match after the delete: \
+                     the meter lists {actual} records, expected {expected}."
+                )
+            },
             hint: Some("Read the list again; nothing was retried.".to_owned()),
         },
         S::SettingsWrite(e @ SettingsWriteError::OutOfRange { .. }) => {

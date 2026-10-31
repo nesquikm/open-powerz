@@ -4,9 +4,9 @@
 //! `powerz stream` uses, so both files are byte-for-byte alike. The worker
 //! thread owns the open recording: file I/O never runs on the UI thread.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use powerz_protocol::decode::QueueRecord;
 use powerz_record::CsvRecorder;
@@ -57,6 +57,74 @@ pub struct ExportProgress {
     pub done: u64,
     /// Rows to write.
     pub total: u64,
+}
+
+/// Claim a new file in `dir` (created when missing) for a recording that has
+/// no place chosen yet: `name` when that is free, else `<stem>-2.csv` and so
+/// on. Creating the file is what claims it, so two meters starting in the
+/// same second never share one and an existing file is never touched.
+pub fn default_recording_path(dir: &Path, name: &str) -> Result<PathBuf, UiError> {
+    fs::create_dir_all(dir).map_err(|e| io_error(&e))?;
+    let stem = Path::new(name)
+        .file_stem()
+        .map_or_else(|| "powerz".into(), |s| s.to_string_lossy());
+    let mut attempt = 1u32;
+    loop {
+        let file = if attempt == 1 {
+            format!("{stem}.csv")
+        } else {
+            format!("{stem}-{attempt}.csv")
+        };
+        let path = dir.join(file);
+        match File::options().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => attempt += 1,
+            Err(e) => return Err(io_error(&e)),
+        }
+    }
+}
+
+/// Move the finished recording `from` to `to`, replacing a file there. On a
+/// failure the recording stays at `from`.
+pub fn save_recording_as(from: &Path, to: &Path) -> Result<(), UiError> {
+    match fs::rename(from, to) {
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => move_across_volumes(from, to),
+        moved => moved,
+    }
+    .map_err(|e| io_error(&e))
+}
+
+/// Copy beside `to` first, so a failed copy never damages a file already there.
+fn move_across_volumes(from: &Path, to: &Path) -> io::Result<()> {
+    let part = claim_part(to)?;
+    let copied = fs::copy(from, &part).and_then(|_| fs::rename(&part, to));
+    if copied.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    copied?;
+    // The recording is safe at `to`: a copy left behind is no failed move.
+    let _ = fs::remove_file(from);
+    Ok(())
+}
+
+/// A new file beside `to` to copy into; one that exists is never touched.
+fn claim_part(to: &Path) -> io::Result<PathBuf> {
+    let mut attempt = 1u32;
+    loop {
+        let part = to.with_extension(format!("open-powerz-part-{attempt}"));
+        match File::options().write(true).create_new(true).open(&part) {
+            Ok(_) => return Ok(part),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => attempt += 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Whether `path` is a file directly in the recordings folder `dir`: the only
+/// files Save As may move.
+pub fn is_recording_in(dir: &Path, path: &Path) -> bool {
+    let resolved = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned());
+    path.file_name().is_some() && path.parent().map(resolved) == Some(resolved(dir))
 }
 
 /// A file error in plain language (no raw OS error text).
@@ -278,4 +346,28 @@ pub fn export_iter<W: Write>(
         progress(ExportProgress { done: 0, total: 0 });
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_move_across_volumes_leaves_a_user_file_with_the_part_name_alone() {
+        let dir = std::env::temp_dir().join(format!("powerz-part-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let from = dir.join("from.csv");
+        let to = dir.join("to.csv");
+        let theirs = to.with_extension("open-powerz-part-1");
+        fs::write(&from, "rows").expect("recording");
+        fs::write(&theirs, "theirs").expect("their file");
+
+        move_across_volumes(&from, &to).expect("moved");
+
+        assert_eq!(fs::read_to_string(&to).expect("moved file"), "rows");
+        assert_eq!(fs::read_to_string(&theirs).expect("their file"), "theirs");
+        assert!(!from.exists(), "the source stays behind");
+        assert!(!to.with_extension("open-powerz-part-2").exists());
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
 }

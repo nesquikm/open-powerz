@@ -165,8 +165,11 @@ pub fn settings_set<T: Transport, C: Clock>(
         return Err(CliError::Usage(SETTINGS_RISK.into()));
     }
     let changes = parse_changes(args)?;
-    let after = session.write_settings(&changes)?;
-    write_rows(&after.rows(), out)?;
+    let written = session.write_settings_checked(&changes)?;
+    write_rows(&written.settings.rows(), out)?;
     writeln!(note, "{SETTINGS_SAVED_NOTE}")?;
+    for warning in written.warnings() {
+        writeln!(note, "warning: {warning}")?;
+    }
     Ok(())
 }

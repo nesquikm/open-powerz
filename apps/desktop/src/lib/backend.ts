@@ -103,7 +103,7 @@ export interface DeviceListing {
 export type DeviceMode = "application" | "bootloader" | "unknown";
 
 /** Firmware warning codes (mirrors `version::FirmwareWarning::code`). */
-export type FirmwareWarningCode = "too_old" | "outdated" | "update_required";
+export type FirmwareWarningCode = "too_old" | "outdated";
 
 export interface ConnectedInfo {
   model: string;
@@ -113,7 +113,7 @@ export interface ConnectedInfo {
   mode: DeviceMode;
   /** Firmware warnings for this meter, none when it is up to date. */
   warnings: FirmwareWarningCode[];
-  /** The HEAD "update required" flag, null when HEAD could not be read (FR V9SK52). */
+  /** The HEAD check: false when current, null when HEAD was not read or not recognised (FR V9SK52). */
   update_required: boolean | null;
   /** Why parts of the firmware status could not be read, empty when all of it was. */
   firmware_problems: string[];
@@ -121,6 +121,10 @@ export interface ConnectedInfo {
   rate_sps: number | null;
   rate_locked: boolean;
   session_id: number;
+  /** Oldest supported firmware, from the protocol library. */
+  min_supported_firmware: string;
+  /** Newest firmware known, from the protocol library. */
+  known_latest_firmware: string;
 }
 
 export type Status =
@@ -329,6 +333,8 @@ export async function connect(
 export interface RecordingSnapshot {
   rows: number;
   elapsed_ms: number;
+  /** Its file. */
+  path?: string | null | undefined;
 }
 
 /** The running session as a new page picks it up after a reload (mirrors `devices.rs`). */
@@ -383,8 +389,8 @@ export async function setRate(rateSps: number): Promise<void> {
   await invoke("set_rate", { rateSps });
 }
 
-/** Opens the save dialog proposing `suggestedName` and starts recording to the chosen
- * file. Resolves to the path, or `null` when the dialog was cancelled. */
+/** Starts recording at once to a default file named after `suggestedName`. Resolves to
+ * its path; {@link saveRecordingAs} moves the finished file. */
 export async function startRecording(suggestedName: string): Promise<string | null> {
   if (mock) return mock.startRecording(suggestedName);
   return invoke<string | null>("start_recording", { suggestedName });
@@ -394,6 +400,13 @@ export async function startRecording(suggestedName: string): Promise<string | nu
 export async function stopRecording(): Promise<RecordingSummary> {
   if (mock) return mock.stopRecording();
   return invoke<RecordingSummary>("stop_recording");
+}
+
+/** Opens the save dialog for the finished recording at `path` and moves it to the chosen
+ * file. Resolves to the new path, or `null` when the dialog was cancelled. */
+export async function saveRecordingAs(path: string): Promise<string | null> {
+  if (mock) return mock.saveRecordingAs(path);
+  return invoke<string | null>("save_recording_as", { path });
 }
 
 /** Opens the save dialog proposing `suggestedName` and exports the session so far,
@@ -487,6 +500,8 @@ export interface MeterSettingField {
 /** The connected meter's settings, in display order (FR 1HHT01). */
 export interface MeterSettings {
   fields: MeterSettingField[];
+  /** What a write changed beyond the fields, in plain words; a warning, not a failure. */
+  warnings?: string[];
 }
 
 /** Reads the connected meter's settings (GET_DATA 0x008 only); rejects with the
@@ -594,14 +609,19 @@ export async function recordsDelete(
  * numbered from 0. */
 export interface PdOpened {
   path: string;
+  /** The rows the capture keeps (at most its record limit). */
   rows: PdRow[];
   status: PdStatusSample[];
+  /** Records the capture dropped past its limit (the oldest ones): not in `rows`. */
+  dropped: number;
   /** The 1-based line where reading stopped when the file is truncated or corrupt
    * (AC-TGE83E.3); every valid line before it was loaded. `null` for a whole file. */
   damaged_line: number | null;
   /** Vendor log rows skipped because their record bytes are oversized (0 for a pdcap
    * file). */
   oversized: number;
+  /** Vendor log rows skipped because they hold no whole record (0 for a pdcap file). */
+  skipped: number;
   /** The vendor log has more rows than the import takes: only the first ones were
    * imported (false for a pdcap file). */
   truncated: boolean;
@@ -693,11 +713,39 @@ export async function firmwareFlash(
   });
 }
 
-/** Drops every captured PD record; resolves to the index of the next record. Rows
- * numbered below it were sent before the clear and are stale. */
-export async function pdClear(): Promise<number> {
+/** Asks the running update to stop (AC-4PJRVJ.1); rejects once its erase has begun. */
+export async function firmwareCancel(): Promise<void> {
+  if (mock) return mock.firmwareCancel();
+  return invoke<void>("firmware_cancel");
+}
+
+/** A running firmware update as the backend reports it (AC-4PJRVJ.3); `stage` is null
+ * before its first stage. */
+export interface FlashStatus {
+  device_id: string;
+  stage: FlashStage | null;
+}
+
+/** The update the backend is running, null when none: a reloaded page picks it up. */
+export async function firmwareFlashStatus(): Promise<FlashStatus | null> {
+  if (mock) return mock.firmwareFlashStatus();
+  return invoke<FlashStatus | null>("firmware_flash_status");
+}
+
+/** What a PD clear answers. */
+export interface PdCleared {
+  /** Index of the next record: rows numbered below it were sent before the clear and
+   * are stale. */
+  next_index: number;
+  /** Session time (ms) of the latest status sample the backend had at the clear, 0 if
+   * none: status samples carry no index, so those at or below it are stale. */
+  status_floor_ms: number;
+}
+
+/** Drops every captured PD record; resolves to {@link PdCleared}. */
+export async function pdClear(): Promise<PdCleared> {
   if (mock) return mock.pdClear();
-  return invoke<number>("pd_clear");
+  return invoke<PdCleared>("pd_clear");
 }
 
 /** Opens the save dialog proposing `suggestedName` and saves the PD capture so far as a
@@ -763,6 +811,8 @@ export interface Detection {
   apple: SupportName;
   entries: DetectEntry[];
   complete: boolean;
+  /** The D+/D- charging-mode hint line, absent without a measurement. */
+  hint?: string | null;
 }
 
 export type OfferKind = "fixed" | "battery" | "variable" | "pps" | "spr-avs" | "epr-avs";
@@ -950,6 +1000,7 @@ export interface MeterBackend {
   setRate(rateSps: number): Promise<void>;
   startRecording(suggestedName: string): Promise<string | null>;
   stopRecording(): Promise<RecordingSummary>;
+  saveRecordingAs(path: string): Promise<string | null>;
   exportSession(
     suggestedName: string,
     onProgress: (progress: ExportProgress) => void,
@@ -967,7 +1018,7 @@ export interface MeterBackend {
   pdStart(): Promise<void>;
   pdStop(): Promise<void>;
   pdDetails(index: number, opened?: boolean): Promise<PdDetails>;
-  pdClear(): Promise<number>;
+  pdClear(): Promise<PdCleared>;
   pdSave(suggestedName: string): Promise<ExportResult | null>;
   meterSettings(): Promise<MeterSettings>;
   meterSettingsWrite(changes: SettingChanges): Promise<MeterSettings>;
@@ -999,6 +1050,7 @@ export const currentMeterCommands: MeterCommands = {
   setRate,
   startRecording,
   stopRecording,
+  saveRecordingAs,
   exportSession,
   stats,
   historyRange,
@@ -1047,6 +1099,7 @@ export function meterBackend(deviceId: string): MeterBackend {
     },
     startRecording: (suggestedName) => call("start_recording", { suggestedName }),
     stopRecording: () => call("stop_recording"),
+    saveRecordingAs: (path) => call("save_recording_as", { path }),
     exportSession: (suggestedName, onProgress) => {
       const channel = new Channel<ExportProgress>();
       channel.onmessage = onProgress;

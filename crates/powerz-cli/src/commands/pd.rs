@@ -13,11 +13,13 @@ use powerz_protocol::transport::Transport;
 use serde_json::json;
 
 use crate::error::CliError;
+use crate::output::is_closed_pipe;
 
 /// `powerz pd`: start the PD sniffer, poll it every
 /// [`PdSniffer::POLL_PERIOD`] and print one line per record (text, or JSON
-/// Lines with `json`) until `stop` is set (Ctrl-C). The stop request is
-/// sent on Ctrl-C, after a device or output error, and on normal exit.
+/// Lines with `json`) until `stop` is set (Ctrl-C); a closed output pipe
+/// ends it with [`CliError::OutputClosed`]. The stop request is sent on
+/// Ctrl-C, after a device or output error, and on normal exit.
 pub fn pd<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     json: bool,
@@ -60,12 +62,16 @@ fn also_unsaved(e: CliError, f: &std::io::Error) -> CliError {
         CliError::NoDevice(m) => CliError::NoDevice(note(m)),
         CliError::Permission(m) => CliError::Permission(note(m)),
         CliError::Device(m) => CliError::Device(note(m)),
+        // Harmless alone, but the file is not: that is the failure to tell.
+        CliError::OutputClosed => {
+            CliError::Device(format!("the capture file could not be finished: {f}"))
+        }
     }
 }
 
 /// `powerz pd decode FILE`: print the records of a pdcap file in the
 /// live `pd` format. No device is involved. On a damaged line the records
-/// before it are printed and the error names the line.
+/// before it are printed and the error names the file and the line.
 pub fn pd_decode(
     input: impl BufRead,
     name: &str,
@@ -84,20 +90,33 @@ pub fn pd_decode(
                 &mut decoder,
                 &CapturedRecord { elapsed_ms, record },
                 json,
-            )?,
+            )
+            .map_err(output_error)?,
             Ok(pdcap::Entry::Status { .. }) => {}
             Err(e) => {
-                out.flush()?;
+                out.flush().map_err(output_error)?;
                 return Err(damaged(name, &e));
             }
         }
     }
-    out.flush()?;
+    out.flush().map_err(output_error)?;
     Ok(())
 }
 
+/// A failed write to our output: a closed pipe (`powerz pd decode FILE | head`)
+/// just ends the command, as it ends `capture`.
+fn output_error(e: std::io::Error) -> CliError {
+    if is_closed_pipe(&e) {
+        CliError::OutputClosed
+    } else {
+        e.into()
+    }
+}
+
+/// A file that does not read as pdcap: refused like any other bad input
+/// file, as `firmware info` refuses one, since no meter is involved.
 fn damaged(name: &str, e: &pdcap::Error) -> CliError {
-    CliError::Device(format!("{name}: {e}"))
+    CliError::Usage(format!("{name}: {e}"))
 }
 
 /// The live capture loop of [`pd`] and [`pd_save`].
@@ -110,6 +129,7 @@ fn capture<T: Transport, C: Clock>(
 ) -> Result<(), CliError> {
     let mut sniffer = PdSniffer::start(session, PdOptions::default())?;
     let mut write_err: Option<std::io::Error> = None;
+    let mut closed = false;
     // Session time base of the records: meter time minus elapsed time,
     // fixed by the first record so session time keeps the meter's spacing.
     let mut base: Option<i64> = None;
@@ -117,22 +137,27 @@ fn capture<T: Transport, C: Clock>(
     // Source_Capabilities seen before it.
     let mut decoder = Capture::new();
     let polled = sniffer.run(|poll| {
-        let written = poll
+        let shown = poll
             .records
             .iter()
             .try_for_each(|r| write_record(out, &mut decoder, r, json))
-            .and_then(|()| out.flush())
-            .and_then(|()| match save.as_deref_mut() {
+            .and_then(|()| out.flush());
+        // A closed output pipe only ends the capture: this poll still goes
+        // to the file, and a failing file stays an error.
+        closed = shown.as_ref().err().is_some_and(is_closed_pipe);
+        let written = if closed { Ok(()) } else { shown }.and_then(|()| {
+            match save.as_deref_mut() {
                 // Flushed once per poll, like stdout, so the file on disk
                 // keeps up with the capture.
                 Some(w) => save_poll(w, poll, &mut base).and_then(|()| w.flush()),
                 None => Ok(()),
-            });
+            }
+        });
         if let Err(e) = written {
             write_err = Some(e);
             return false;
         }
-        !stop.load(Ordering::SeqCst)
+        !closed && !stop.load(Ordering::SeqCst)
     });
     if let Err(e) = polled {
         // Dropping the sniffer sends the stop request.
@@ -143,7 +168,11 @@ fn capture<T: Transport, C: Clock>(
     if let Some(e) = write_err {
         return Err(e.into());
     }
-    stopped.map_err(CliError::from)
+    stopped?;
+    if closed {
+        return Err(CliError::OutputClosed);
+    }
+    Ok(())
 }
 
 /// Write one poll's status block and records to the pdcap file.

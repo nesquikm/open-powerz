@@ -36,15 +36,14 @@ function blockAfter(src: string[], i: number): string[] {
 }
 
 /** The block of the top-level key `key:` (e.g. `on`, `jobs`, `permissions`), or []. */
-function topBlock(key: string): string[] {
-  const src = lines();
+function topBlock(key: string, src: string[] = lines()): string[] {
   const at = src.findIndex((l) => new RegExp(`^["']?${key}["']?:\\s*$`).test(l));
   return at < 0 ? [] : blockAfter(src, at);
 }
 
 /** The jobs as { id, lines } (job ids sit one level under `jobs:`). */
-function jobs(): { id: string; lines: string[] }[] {
-  const body = topBlock("jobs");
+function jobs(src: string[] = lines()): { id: string; lines: string[] }[] {
+  const body = topBlock("jobs", src);
   const keyed = body.filter((l) => /^\s+[\w-]+:\s*$/.test(l) && !isComment(l));
   if (keyed.length === 0) return [];
   const jobIndent = Math.min(...keyed.map(indentOf));
@@ -441,5 +440,65 @@ describe("permissions, pins and tokens (AC-E1ZJ2N.9)", () => {
     expect(all).toMatch(/rustup toolchain install/);
     expect(all).not.toMatch(/^\s+toolchain:/m);
     expect(scanWorkflow(all, "release.yml")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR 4PJRVN, AC-4PJRVN.6: a CI job builds and tests with the declared MSRV
+// ---------------------------------------------------------------------------
+
+const CI_PATH = join(REPO_ROOT, ".github/workflows/ci.yml");
+const CARGO_TOML = join(REPO_ROOT, "Cargo.toml");
+const ciText = (): string => (existsSync(CI_PATH) ? readFileSync(CI_PATH, "utf8") : "");
+
+/** The ci.yml job that reads `rust-version` from Cargo.toml, or undefined. */
+const msrvJob = () => jobs(ciText().split(/\r?\n/)).find((j) => /rust-version/.test(jobText(j)));
+
+describe("MSRV job in ci.yml (AC-4PJRVN.6)", () => {
+  it("Cargo.toml still declares rust-version = 1.96 for the workspace", () => {
+    expect(readFileSync(CARGO_TOML, "utf8")).toMatch(/^rust-version\s*=\s*"1\.96"\s*$/m);
+  });
+
+  it("has a job that reads the MSRV from Cargo.toml's rust-version at run time", () => {
+    const j = msrvJob();
+    expect(j, "no ci.yml job reads rust-version").toBeDefined();
+    const t = jobText(j!);
+    expect(t).toMatch(/Cargo\.toml/);
+    expect(t).toMatch(/rust-version/);
+  });
+
+  it("never hard-codes a Rust version in the job", () => {
+    const t = jobText(msrvJob() ?? { lines: [] });
+    expect(t, "the MSRV job is missing").not.toBe("");
+    // Action pins (`@v4.4.0`, `# v2.9.3`) aside, no literal 1.x version appears.
+    const bare = t.replace(/@[0-9a-f]{40}/g, "").replace(/\bv\d+\.\d+\.\d+\b/g, "");
+    expect(bare).not.toMatch(/\b1\.\d{2,3}(?:\.\d+)?\b/);
+  });
+
+  it("builds and tests the default members with --locked, without the desktop crate", () => {
+    const t = jobText(msrvJob() ?? { lines: [] });
+    expect(t).toMatch(/\bcargo build\b[^\n]*--locked/);
+    expect(t).toMatch(/\bcargo test\b[^\n]*--locked/);
+    // The default members are the five non-desktop crates; --workspace would pull the
+    // Tauri crate in (it needs a newer Rust and the web build).
+    expect(t).not.toMatch(/--workspace|--all\b/);
+    expect(t).not.toMatch(/open-powerz-desktop|src-tauri|build:web/);
+  });
+
+  it("installs the Linux libraries the CLI crates link against", () => {
+    const t = jobText(msrvJob() ?? { lines: [] });
+    expect(t).toMatch(/libudev-dev/);
+    expect(t).toMatch(/libusb-1\.0-0-dev/);
+  });
+
+  it("keeps the gate job on the pinned toolchain", () => {
+    const gate = jobs(ciText().split(/\r?\n/)).find((j) => j.id === "gate");
+    expect(gate, "the gate job is gone").toBeDefined();
+    expect(jobText(gate!)).toMatch(/rustup toolchain install\s*$/m);
+  });
+
+  it("passes the toolchain-pin scan (no named version, channel or cargo +toolchain)", () => {
+    expect(msrvJob(), "the MSRV job is missing").toBeDefined();
+    expect(scanWorkflow(ciText(), "ci.yml")).toEqual([]);
   });
 });

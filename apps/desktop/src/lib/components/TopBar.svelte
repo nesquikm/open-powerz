@@ -7,6 +7,7 @@
     RATE_OPTIONS,
     formatRecordingElapsed,
     ratePicker,
+    recordButton,
     recordingRowsSuffix,
     type ExportJob,
     type Recording,
@@ -44,6 +45,8 @@
     exportJob,
     canExport,
     onExport,
+    controlsLabel,
+    controlsInTiles,
     views,
   }: {
     session: Session;
@@ -66,6 +69,10 @@
     /** The session holds samples that can be exported. */
     canExport: boolean;
     onExport: () => void;
+    /** Names the meter these controls act on; null with no meter to name. */
+    controlsLabel: string | null;
+    /** The meter grid shows: each tile carries its meter's controls, so none stay here. */
+    controlsInTiles: boolean;
     /** The view tabs, in a strip just under the bar that stays in view with it. They are
      * out of the bar's row, so they never take its room (lib/topBarFit.ts). */
     views?: Snippet;
@@ -190,11 +197,9 @@
   const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
   /** The locked rate is news worth showing; "stop to change" is only a tooltip. */
   const rateNote = $derived(session.state === "rate_locked" ? picker.label : null);
-  const recordDisabled = $derived(
-    recording.phase === "starting" ||
-      recording.phase === "stopping" ||
-      (recording.phase === "idle" && !canRecord),
-  );
+  /** The name of the bar's controls; the grid's tiles name their own. */
+  const scopeLabel = $derived(controlsInTiles ? null : controlsLabel);
+  const record = $derived(recordButton(recording.phase, canRecord));
 </script>
 
 <svelte:window
@@ -258,151 +263,164 @@
 {/snippet}
 
 <header class="top-bar" aria-label="Device controls" bind:this={bar}>
-  <div class="group start">
-    <span class="brand">open-powerz</span>
-    <DevicePicker {session} />
-    <span class="source-inline">{@render sourceSelect()}</span>
-    <button
-      type="button"
-      class:primary={!session.active}
-      disabled={!session.canToggleConnect}
-      onclick={onToggleConnect}
-    >
-      {session.active ? "Disconnect" : "Connect"}
-    </button>
-    <span class="badge" data-state={session.state} role="status" aria-live="polite"
-      >{badgeLabel(session.state)}</span
-    >
-  </div>
-  <div class="group end">
-    <span class="rate">
-      <span class="rate-inline">{@render rateSelect()}</span>
-      <!-- Short of room: the note moves into the "⋯" menu (the select keeps it as a tooltip). -->
-      {#if rateNote !== null}
-        <span class="rate-note inline-note">{rateNote}</span>
+  <div
+    class="named-meter"
+    role={scopeLabel === null ? undefined : "group"}
+    aria-label={scopeLabel ?? undefined}
+  >
+    <div class="group start">
+      <span class="brand">open-powerz</span>
+      <DevicePicker {session} />
+      <span class="source-inline">{@render sourceSelect()}</span>
+      {#if !controlsInTiles}
+        <button
+          type="button"
+          class:primary={!session.active}
+          disabled={!session.canToggleConnect}
+          onclick={onToggleConnect}
+        >
+          {session.active ? "Disconnect" : "Connect"}
+        </button>
       {/if}
-    </span>
-    {#if recording.indicator !== null}
-      <!-- Narrow windows show just the time; the row count stays for screen readers. -->
-      <span class="rec-indicator" role="timer" title={`Recording to CSV: ${recording.indicator}`}
-        ><span class="rec-dot" aria-hidden="true"></span><span class="visually-hidden"
-          >Recording:
-        </span>REC {formatRecordingElapsed(recording.elapsedMs)}<span class="narrow-hidden"
-          >{recordingRowsSuffix(recording.rows)}</span
-        ></span
+      <span class="badge" data-state={session.state} role="status" aria-live="polite"
+        >{badgeLabel(session.state)}</span
       >
-    {/if}
-    <button
-      type="button"
-      title="Record to CSV (Space)"
-      aria-pressed={recording.phase === "recording"}
-      disabled={recordDisabled}
-      onclick={onToggleRecording}
-    >
-      {recording.phase === "recording" || recording.phase === "stopping" ? "Stop" : "Record"}
-    </button>
-    <!-- The progress fills the disabled Export button's own box, so starting an export
+    </div>
+    <div class="group end">
+      {#if !controlsInTiles}
+        <span class="rate">
+          <span class="rate-inline">{@render rateSelect()}</span>
+          <!-- Short of room: the note moves into the "⋯" menu (the select keeps it as a tooltip). -->
+          {#if rateNote !== null}
+            <span class="rate-note inline-note">{rateNote}</span>
+          {/if}
+        </span>
+        {#if recording.indicator !== null}
+          <!-- Narrow windows show just the time; the row count stays for screen readers. -->
+          <span
+            class="rec-indicator"
+            role="timer"
+            title={`Recording to CSV: ${recording.indicator}`}
+            ><span class="rec-dot" aria-hidden="true"></span><span class="visually-hidden"
+              >Recording:
+            </span>REC {formatRecordingElapsed(recording.elapsedMs)}<span class="narrow-hidden"
+              >{recordingRowsSuffix(recording.rows)}</span
+            ></span
+          >
+        {/if}
+        <button
+          type="button"
+          title="Record to CSV (Space)"
+          aria-pressed={recording.phase === "recording"}
+          disabled={record.disabled}
+          onclick={onToggleRecording}
+        >
+          {record.label}
+        </button>
+        <!-- The progress fills the disabled Export button's own box, so starting an export
          moves no item and adds nothing to the row's width (lib/topBarFit.ts). -->
-    <span class="export-slot" class:exporting={exportJob.running}>
-      {@render exportButton(false)}
-      {#if exportJob.running}
-        {@const count = `Exporting ${exportJob.done.toLocaleString("en-US")} / ${exportJob.total.toLocaleString("en-US")}`}
-        <span class="export-progress" role="status" title={count}>
-          <progress
-            aria-label="Export progress"
-            max={exportJob.total || 1}
-            value={exportJob.total > 0 ? exportJob.done : undefined}
-          ></progress>
-          <span class="visually-hidden">{count}</span>
+        <span class="export-slot" class:exporting={exportJob.running}>
+          {@render exportButton(false)}
+          {#if exportJob.running}
+            {@const count = `Exporting ${exportJob.done.toLocaleString("en-US")} / ${exportJob.total.toLocaleString("en-US")}`}
+            <span class="export-progress" role="status" title={count}>
+              <progress
+                aria-label="Export progress"
+                max={exportJob.total || 1}
+                value={exportJob.total > 0 ? exportJob.done : undefined}
+              ></progress>
+              <span class="visually-hidden">{count}</span>
+            </span>
+          {/if}
         </span>
       {/if}
-    </span>
-    <!-- Room to spare: theme and About inline. Short of room: behind the "⋯" menu. -->
-    <span class="settings-inline">
-      <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
-      <button type="button" id="top-bar-about" onclick={(e) => onAbout(e.currentTarget)}
-        >About</button
-      >
-    </span>
-    <span class="settings-menu">
-      <button
-        type="button"
-        class="more"
-        id="top-bar-more"
-        bind:this={moreButton}
-        aria-label={moreMenuLabel(level)}
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-        aria-controls={level >= SETTINGS_IN_MENU_LEVEL ? "top-bar-menu" : undefined}
-        onclick={(e) => {
-          // A click with no pointer (detail 0) came from Enter or Space.
-          if (menuOpen) closeMenu(false);
-          else void openMenu(e.detail === 0);
-        }}>⋯</button
-      >
-      {#if menuOpen}
-        <!-- Only the source picker in the menu: Escape still closes it. -->
-        <div
-          class="menu panel"
-          bind:this={menuPanel}
-          role="presentation"
-          onkeydown={(e) => {
-            if (e.key === "Escape" && level < SETTINGS_IN_MENU_LEVEL) {
-              e.preventDefault();
-              e.stopPropagation();
-              closeMenu(true);
-            }
-          }}
+      <!-- Room to spare: theme and About inline. Short of room: behind the "⋯" menu. -->
+      <span class="settings-inline">
+        <ThemeControl choice={themeChoice} onChoose={onSetTheme} />
+        <button type="button" id="top-bar-about" onclick={(e) => onAbout(e.currentTarget)}
+          >About</button
         >
-          <!-- The rate picker and its note are not menu items, so they sit beside the menu. -->
-          {#if level >= SOURCE_IN_MENU_LEVEL}
-            <div class="menu-extra">
-              {#if level >= SOURCE_IN_MENU_LEVEL}
-                {@render sourceSelect()}
-              {/if}
-              {#if level >= RATE_IN_MENU_LEVEL}
-                {@render rateSelect()}
-              {/if}
-              {#if rateNote !== null && level >= SETTINGS_IN_MENU_LEVEL}
-                <p class="rate-note menu-note">{rateNote}</p>
-              {/if}
-            </div>
-          {/if}
-          {#if level >= SETTINGS_IN_MENU_LEVEL}
-            <div
-              id="top-bar-menu"
-              class="menu-list"
-              role="menu"
-              tabindex="-1"
-              aria-labelledby="top-bar-more"
-              bind:this={menuList}
-              onkeydown={onMenuKeydown}
-              onfocusout={(e) => {
-                // Tab out of the menu closes it (menu pattern); a move between items doesn't.
-                const to = e.relatedTarget instanceof Node ? e.relatedTarget : null;
-                if (to && (menuPanel?.contains(to) || moreButton?.contains(to))) return;
-                if (to) closeMenu(false);
-              }}
-            >
-              {#if level >= EXPORT_IN_MENU_LEVEL}
-                {@render exportButton(true)}
-              {/if}
-              <ThemeControl
-                choice={themeChoice}
-                onChoose={(choice) => pick(() => onSetTheme(choice))}
-                inMenu
-              />
-              <button
-                type="button"
-                role="menuitem"
+      </span>
+      <span class="settings-menu">
+        <button
+          type="button"
+          class="more"
+          id="top-bar-more"
+          bind:this={moreButton}
+          aria-label={moreMenuLabel(level)}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-controls={level >= SETTINGS_IN_MENU_LEVEL ? "top-bar-menu" : undefined}
+          onclick={(e) => {
+            // A click with no pointer (detail 0) came from Enter or Space.
+            if (menuOpen) closeMenu(false);
+            else void openMenu(e.detail === 0);
+          }}>⋯</button
+        >
+        {#if menuOpen}
+          <!-- Only the source picker in the menu: Escape still closes it. -->
+          <div
+            class="menu panel"
+            bind:this={menuPanel}
+            role="presentation"
+            onkeydown={(e) => {
+              if (e.key === "Escape" && level < SETTINGS_IN_MENU_LEVEL) {
+                e.preventDefault();
+                e.stopPropagation();
+                closeMenu(true);
+              }
+            }}
+          >
+            <!-- The rate picker and its note are not menu items, so they sit beside the menu. -->
+            {#if level >= SOURCE_IN_MENU_LEVEL}
+              <div class="menu-extra">
+                {#if level >= SOURCE_IN_MENU_LEVEL}
+                  {@render sourceSelect()}
+                {/if}
+                {#if level >= RATE_IN_MENU_LEVEL && !controlsInTiles}
+                  {@render rateSelect()}
+                {/if}
+                {#if rateNote !== null && level >= SETTINGS_IN_MENU_LEVEL}
+                  <p class="rate-note menu-note">{rateNote}</p>
+                {/if}
+              </div>
+            {/if}
+            {#if level >= SETTINGS_IN_MENU_LEVEL}
+              <div
+                id="top-bar-menu"
+                class="menu-list"
+                role="menu"
                 tabindex="-1"
-                onclick={() => pick(() => onAbout(moreButton ?? null))}>About</button
+                aria-labelledby="top-bar-more"
+                bind:this={menuList}
+                onkeydown={onMenuKeydown}
+                onfocusout={(e) => {
+                  // Tab out of the menu closes it (menu pattern); a move between items doesn't.
+                  const to = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+                  if (to && (menuPanel?.contains(to) || moreButton?.contains(to))) return;
+                  if (to) closeMenu(false);
+                }}
               >
-            </div>
-          {/if}
-        </div>
-      {/if}
-    </span>
+                {#if level >= EXPORT_IN_MENU_LEVEL && !controlsInTiles}
+                  {@render exportButton(true)}
+                {/if}
+                <ThemeControl
+                  choice={themeChoice}
+                  onChoose={(choice) => pick(() => onSetTheme(choice))}
+                  inMenu
+                />
+                <button
+                  type="button"
+                  role="menuitem"
+                  tabindex="-1"
+                  onclick={() => pick(() => onAbout(moreButton ?? null))}>About</button
+                >
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </span>
+    </div>
   </div>
   {#if views}
     <div class="views-strip">{@render views()}</div>
@@ -427,6 +445,10 @@
     position: sticky;
     top: 0;
     z-index: 1;
+  }
+  /* Names the bar's controls for assistive tech; for the layout its groups stay the bar's. */
+  .named-meter {
+    display: contents;
   }
   .views-strip {
     position: absolute;

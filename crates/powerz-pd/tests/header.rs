@@ -153,6 +153,7 @@ fn name(kind: MessageKind, code: u16) -> (String, bool) {
         MessageKind::Control => header(false, 0, 0, 1, REV3, 1, code),
         MessageKind::Data => header(false, 1, 0, 1, REV3, 1, code),
         MessageKind::Extended => header(true, 1, 0, 1, REV3, 1, code),
+        other => panic!("unexpected message kind {other:?}"),
     };
     let t = Header::decode(h, Sop::Sop).message_type;
     assert_eq!(t.kind(), kind);

@@ -74,20 +74,29 @@ const RUSTUP_SELECT =
 // rustup flags that take a value, so the value is not mistaken for a toolchain.
 const VALUE_FLAGS = new Set(["--profile", "-c", "--component", "-t", "--target"]);
 
-/** Drops a full-line comment or a trailing ` #` comment, leaving a `#` inside quotes alone. */
+/**
+ * Drops a full-line comment or a trailing ` #` comment, leaving a `#` inside quotes alone.
+ * A quote that never closes on the line (`Rust's`, `don\'t`) is read as a plain character.
+ */
 function stripComment(line: string): string {
-  let quote = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quote) {
-      if (c === quote) quote = "";
-    } else if (c === '"' || c === "'") {
-      quote = c;
-    } else if (c === "#" && (i === 0 || /\s/.test(line[i - 1] ?? ""))) {
-      return line.slice(0, i);
+  const literal = new Set<number>();
+  for (;;) {
+    let quote = "";
+    let quoteAt = -1;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (quote) {
+        if (c === quote) quote = "";
+      } else if ((c === '"' || c === "'") && !literal.has(i)) {
+        quote = c;
+        quoteAt = i;
+      } else if (c === "#" && (i === 0 || /\s/.test(line[i - 1] ?? ""))) {
+        return line.slice(0, i);
+      }
     }
+    if (!quote) return line;
+    literal.add(quoteAt);
   }
-  return line;
 }
 
 /** True when the rest of a rustup command names an explicit toolchain argument. */

@@ -79,6 +79,7 @@ pub struct AvsRdo {
 
 /// A request data object, typed by the PDO it points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Rdo {
     /// Against a fixed supply PDO.
     Fixed(FixedRdo),
@@ -267,7 +268,7 @@ impl Rdo {
 
 impl Request {
     /// Resolve `raw` against the remembered `caps` (a Request).
-    pub(crate) fn against_caps(raw: u32, caps: Option<&[SourcePdo]>) -> (Request, Vec<Issue>) {
+    pub fn against_caps(raw: u32, caps: Option<&[SourcePdo]>) -> (Request, Vec<Issue>) {
         let position = bits(raw, 31, 28) as u8;
         let mut issues = Vec::new();
         let pdo = match caps {
@@ -294,7 +295,7 @@ impl Request {
     }
 
     /// Decode `raw` against the message's own copy of the PDO (EPR_Request).
-    pub(crate) fn with_copy(raw: u32, copy: u32) -> Request {
+    pub fn with_copy(raw: u32, copy: u32) -> Request {
         let pdo = SourcePdo::decode(copy);
         Request {
             rdo: Rdo::decode(raw, Some(&pdo)),

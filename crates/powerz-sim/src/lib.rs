@@ -141,6 +141,29 @@ impl Scenario {
     }
 }
 
+/// What the meter measures: the demo [`Scenario`], with VBUS on the PD
+/// contract while a capture plays, so both tell the same story.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Measured {
+    scenario: Scenario,
+    contract: Option<pd::Contract>,
+}
+
+impl Measured {
+    /// The reading at simulated device uptime `t_ms`.
+    pub(crate) fn sample(self, t_ms: u64) -> Sample {
+        let mut s = self.scenario.sample(t_ms);
+        if let Some(mv) = self.contract.and_then(|c| c.mv_at(t_ms)) {
+            s.vbus_v = f64::from(mv) / 1000.0;
+            let live = mv > 1000;
+            s.ibus_a = if live { s.ibus_a } else { 0.0 };
+            s.dp_v = if live { 0.6 } else { 0.0 };
+            s.dm_v = s.dp_v;
+        }
+        s
+    }
+}
+
 /// Injected simulated time. Clones share one time line; time moves only by
 /// [`advance`](SimClock::advance) or a session [`Clock::sleep`].
 #[derive(Debug, Clone)]
@@ -216,8 +239,16 @@ pub struct FaultPlan {
     reject_record_reads: bool,
     /// A record-table write is ACCEPTed but the old table is kept.
     ignore_table_write: bool,
-    /// A settings write is ACCEPTed but the old SETTINGS block is kept.
+    /// A settings write is answered with FINISHED but the old SETTINGS block
+    /// is kept.
     ignore_settings_write: bool,
+    /// A settings write also changes a byte of the block no field decodes.
+    stir_undecoded_settings: bool,
+    /// The SETTINGS read answers with the real block of a meter that saved
+    /// its settings in an earlier boot.
+    settings_saved_before_reboot: bool,
+    /// Pad the record table to this many entries.
+    record_count: Option<usize>,
 }
 
 impl FaultPlan {
@@ -290,15 +321,39 @@ impl FaultPlan {
         self
     }
 
-    /// A settings write (type 0x0A) is ACCEPTed but the meter keeps its old
-    /// SETTINGS block, so the re-read after the write does not match.
+    /// A settings write (type 0x0A) is answered with FINISHED but the meter
+    /// keeps its old SETTINGS block, so the re-read after the write does not
+    /// match.
     pub fn ignore_settings_write(mut self) -> FaultPlan {
         self.ignore_settings_write = true;
         self
     }
 
+    /// A settings write is applied and also changes a byte of the SETTINGS
+    /// block that no field decodes.
+    pub fn stir_undecoded_settings(mut self) -> FaultPlan {
+        self.stir_undecoded_settings = true;
+        self
+    }
+
+    /// The SETTINGS read answers with the bytes of a real meter that saved
+    /// its settings in an earlier boot: the CRC of block A covers the boot
+    /// time of then, not the one the block shows now.
+    pub fn settings_saved_before_reboot(mut self) -> FaultPlan {
+        self.settings_saved_before_reboot = true;
+        self
+    }
+
+    /// The record table is padded to `count` entries with synthetic records
+    /// that have no samples (a shorter table is left alone).
+    pub fn record_count(mut self, count: usize) -> FaultPlan {
+        self.record_count = Some(count);
+        self
+    }
+
     /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`,
-    /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`.
+    /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`,
+    /// `stir-undecoded-settings`, `settings-saved-before-reboot`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -322,11 +377,14 @@ impl FaultPlan {
                 ("reject-record-reads", None) => plan.reject_record_reads(),
                 ("ignore-table-write", None) => plan.ignore_table_write(),
                 ("ignore-settings-write", None) => plan.ignore_settings_write(),
+                ("stir-undecoded-settings", None) => plan.stir_undecoded_settings(),
+                ("settings-saved-before-reboot", None) => plan.settings_saved_before_reboot(),
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
                          disconnect@N, wrong-id@N, permission, corrupt-adcnew@N, echo-start, \
-                         reject-record-reads, ignore-table-write or ignore-settings-write)"
+                         reject-record-reads, ignore-table-write, ignore-settings-write, \
+                         stir-undecoded-settings or settings-saved-before-reboot)"
                     ));
                 }
             };
@@ -506,6 +564,14 @@ impl SimDevice {
         }
     }
 
+    /// What the meter measures right now.
+    pub(crate) fn measured(&self) -> Measured {
+        Measured {
+            scenario: self.scenario,
+            contract: self.pd.contract(),
+        }
+    }
+
     /// Play `scenario` on the PD sniffer: from each sniffer start (0x10,
     /// mode 1) PD_PACKET polls carry its records. Without a PD scenario the
     /// sniffer captures nothing (status block only).
@@ -594,6 +660,9 @@ impl SimDevice {
     /// Inject `faults`.
     pub fn with_faults(mut self, faults: FaultPlan) -> SimDevice {
         self.echo_since_ms = faults.echo_start.then(|| self.uptime_ms());
+        if let Some(count) = faults.record_count {
+            records::pad_table(&mut self.record_table, count);
+        }
         self.faults = faults;
         self
     }
@@ -628,8 +697,10 @@ impl SimDevice {
                 self.adcnew = Some(match request.get(1) {
                     Some(att) => adcnew::AdcnewStream::start(att & 0x0F, now, None),
                     None => {
-                        let body =
-                            adcnew::first_frame_body(&self.scenario.sample(now), self.rate_code());
+                        let body = adcnew::first_frame_body(
+                            &self.measured().sample(now),
+                            self.rate_code(),
+                        );
                         adcnew::AdcnewStream::start(self.rate_code(), now, Some(body))
                     }
                 });
@@ -645,10 +716,11 @@ impl SimDevice {
 
     /// Queue every ADCNEW frame due up to uptime `now` on the IN pipe.
     fn adcnew_push(&mut self, now: u64) {
+        let measured = self.measured();
         let Some(stream) = self.adcnew.as_mut() else {
             return;
         };
-        for (att, body) in stream.due(self.scenario, now) {
+        for (att, body) in stream.due(measured, now) {
             self.adcnew_sent += 1;
             let corrupt = self.faults.corrupt_adcnew_at.contains(&self.adcnew_sent);
             self.pending.push_back(adcnew::encode(att, &body, corrupt));

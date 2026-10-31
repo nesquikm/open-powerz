@@ -3,6 +3,8 @@
 // Headings look like `## [0.6.0] — 2026-10-28 — "Special Delivery"`; the date and
 // the codename (quoted or not) are optional. A section ends at the next `## `
 // heading or at the Keep a Changelog link references (`[0.6.0]: https://…`).
+// An unquoted codename never starts like a date (`2026-10-2`, `2026/10/28`), so a
+// heading with a malformed date is not a release heading at all.
 
 /** One version's CHANGELOG section. */
 export interface ReleaseSection {
@@ -14,7 +16,7 @@ export interface ReleaseSection {
 }
 
 const HEADING_RE =
-  /^## \[([^\]]+)\](?:\s*[—–-]\s*(\d{4}-\d{2}-\d{2}))?(?:\s*[—–-]\s*(?:"([^"]*)"|([^"\s].*?)))?\s*$/;
+  /^## \[([^\]]+)\](?:\s*[—–-]\s*(\d{4}-\d{2}-\d{2}))?(?:\s*[—–-]\s*(?:"([^"]*)"|(?!\d+[-/.]\d+[-/.]\d)([^"\s].*?)))?\s*$/;
 const LINK_REF_RE = /^\[[^\]]+\]:\s/;
 
 /**

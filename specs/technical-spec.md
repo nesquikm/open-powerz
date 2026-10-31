@@ -4,16 +4,21 @@
 
 ### System Overview
 
-A Rust cargo workspace with three crates and one web UI:
+A Rust cargo workspace with six crates and one web UI:
 
 - `powerz-protocol` (library): everything that knows the device. Transports (vendor bulk via
   `nusb`, HID via `hidapi`, CDC via `serialport`) behind a transport trait; frame building and
   parsing (main header, extended section headers); decoders for ADC snapshots, ADC-queue
   records, PD/UFCS capture records, SETTINGS and offline-record tables; AES-128-ECB auth and
-  memory read; the PDM text-command layer and the CDC binary/text demux. Pure decode
+  memory read; the PDM text-command layer (protocol triggering, detection, custom PD
+  messages, raw console) and the CDC binary/text demux; the ADCNEW push stream on the CDC
+  port (start, poll, keep-alive, stop; CRC-8 frames, resync after a bad one); the two meter
+  writes (offline-record delete, settings write) and firmware update. Pure decode
   functions are separated from I/O so they are testable with byte vectors.
-- `powerz-cli` (`powerz` binary): device listing, live readout, CSV streaming, raw frame
-  dumps for protocol work and device tests.
+- `powerz-cli` (`powerz` binary): device listing, info, live readout (`watch`), CSV
+  streaming (`stream`, over the ADC queue or the ADCNEW stream), settings read and write,
+  offline records (list, get, delete), PD capture, protocol triggering and detection over
+  PDM, the raw PDM console, firmware update, and raw frame dumps for protocol work.
 - `open-powerz-desktop` (Tauri 2 backend, `apps/desktop/src-tauri`): a device manager (listing
   plus hotplug polling, real meters and demo-device scenarios) and one session worker thread
   per connected meter. The worker owns the `Session`, interleaves queue polls with ADC
@@ -29,12 +34,12 @@ A Rust cargo workspace with three crates and one web UI:
   in CI) for the later web edition; `powerz-protocol` re-exports it as `powerz_protocol::pd`.
 - `powerz-sim` (library): a stateful simulated KM003C behind the same `Transport` trait, with
   bulk, CDC and HID personas, named scenarios and fault injection. It is both the e2e test
-  device and a shipped "demo device" (`powerz --transport sim`, and the desktop picker in
-  M_R4WG4Q).
+  device and a shipped "demo device" (`powerz --transport sim`, and the desktop device
+  picker).
 - Web UI (`apps/desktop/src`): Svelte 5 + TypeScript, uPlot charts, built by Vite and embedded
   into the Tauri binary.
 
-The protocol reference will live in the repo's `docs/` tree as `protocol.md` (planned): rewritten in our own words from the
+The protocol reference lives in `docs/protocol.md`: rewritten in our own words from the
 research notes (outside the repo), keeping `[device]` / `[static]` / `[inferred]` tags.
 
 ### Directory Structure
@@ -42,7 +47,7 @@ research notes (outside the repo), keeping `[device]` / `[static]` / `[inferred]
 ```
 Cargo.toml                       # workspace: resolver 3, edition 2024, MSRV 1.96
 package.json / bun.lock          # Bun workspace root (apps/desktop)
-crates/powerz-protocol/src/      # lib.rs (+ transport/, frame/, decode/, auth/ as they land)
+crates/powerz-protocol/src/      # transport/, frame, decode/, session/, crypto/, pdm/, adcnew, firmware/, pdcap
 crates/powerz-cli/src/main.rs    # `powerz` binary
 crates/powerz-record/src/        # shared CSV recorder + charge/energy integrator
 crates/powerz-pd/src/            # USB PD message decoder (no deps, no I/O, wasm32-clean)
@@ -71,7 +76,7 @@ specs/                           # SDD specs (this file)
 
 ## 2. Data Model
 
-To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`,
+Defined per FR. Core types: `Frame`/`MainHeader`/`SectionHeader`,
 `AdcSnapshot`, `QueueRecord`, `PdRecord`/`PdEvent`, `Settings`, `DeviceInfo`; all in SI units
 (`f64` volts/amps or fixed-point integers with explicit scale) with signed current.
 
@@ -82,7 +87,7 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
 - Tauri commands: `app_info`, `list_devices`, `watch_devices`, `connect`, `attach` (a reloaded page
   takes over the running session), `disconnect`, `set_rate`,
   `history_range`, `history_gaps`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
-  `stop_recording`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter),
+  `stop_recording`, `save_recording_as`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter),
   `running_meters` (the running sessions' device ids, for a reload), `meter_settings`,
   `records_list` and `record_download` (read-only meter data), `records_delete` and
   `meter_settings_write` (the two meter writes, each confirmed in the UI first), and
@@ -97,7 +102,7 @@ To be defined per FR. Core types (planned): `Frame`/`MainHeader`/`SectionHeader`
   seam the Playwright mock replaces. Every command that acts on a meter takes an optional
   `device_id` (several meters at once; without it, the most recently connected running meter),
   and `connect` takes a `source`: `queue` (ADC queue over bulk) or `cdc` (the ADCNEW stream).
-- CLI: `powerz <subcommand>` with `clap` once the first command lands.
+- CLI: `powerz <subcommand>` with `clap` (derive).
 
 ## 4. Key Patterns
 
@@ -119,20 +124,20 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | tauri / tauri-build | 2.12.4 / 2.7.3 | Desktop shell |
 | serde / serde_json | 1.x | Tauri IPC payloads; the `.pdcap` capture file format (`powerz-protocol`) |
 | rusqlite | 0.40.x, `bundled` | Read-only import of the vendor PD log database (desktop) |
-| nusb | 0.2.x (planned) | Vendor bulk transport, hotplug |
-| hidapi | 2.6.x (planned) | HID transport |
-| serialport | 4.10.x (planned) | CDC transport |
-| aes, crc32fast | 0.9.x, 1.5.x (planned) | Auth / memory read crypto, CRC-32 |
-| thiserror / clap | 2.x / 4.6.x (planned) | Errors / CLI args |
-| csv, ctrlc | latest (planned) | CLI stream export, Ctrl-C handling |
-| proptest, assert_cmd | latest (planned, dev) | No-panic parser properties, CLI tests |
+| nusb | 0.2.x | Vendor bulk transport, hotplug |
+| hidapi | 2.6.x (`hid` feature, default on) | HID transport |
+| serialport | 4.10.x | CDC transport: the binary protocol, the ADCNEW stream and the PDM text session |
+| aes, crc32fast | 0.8.x, 1.5.x | Auth / memory read crypto, CRC-32 |
+| thiserror / clap | 2.x / 4.6.x | Errors / CLI args |
+| ctrlc / csv | 3.5.x / 1.4.x (dev) | CLI Ctrl-C handling / CSV checks in CLI tests |
+| proptest, assert_cmd | 1.12.x, 2.2.x (dev) | No-panic parser properties, CLI tests |
 | svelte | ^5.57.2 | UI framework |
 | vite / @sveltejs/vite-plugin-svelte | ^8.3.4 / ^7.3.1 | Bundler |
 | @tauri-apps/api / @tauri-apps/cli | ^2.12.4 / ^2.12.3 | Tauri JS bindings / CLI |
 | uplot | ^1.6.32 | Charts |
 | tauri-plugin-dialog | 2.8.x | Save dialogs (recording, export, PD capture) and open dialogs (PD capture, vendor PD log) |
-| @wdio/cli + tauri-driver | latest (planned, dev) | Real-app e2e (Linux, Windows) |
-| @playwright/test + @axe-core/playwright | latest (planned, dev) | UI e2e and accessibility scan |
+| @wdio/cli + tauri-driver | 10.1.0 (dev) | Real-app e2e (Linux, Windows) |
+| @playwright/test + @axe-core/playwright | 1.64.1 / 4.14.0 (dev) | UI e2e and accessibility scan |
 | typescript | ~6.0.3 | Types (svelte-check and typescript-eslint do not support TS 7 yet) |
 | vitest | ^5.0.5 | TS unit tests |
 | eslint / typescript-eslint / eslint-plugin-svelte / prettier | ^10.13 / ^8.72 / ^3.23 / ^3.9 | Lint + format |
@@ -150,6 +155,15 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
   the ADC snapshot (GET_DATA mask 0x001). The only writes past it are two narrow paths, each
   checked frame by frame: the record table (SET_DATA 0x48, attribute 0x28) and the settings
   write (type 0x0A, over CDC only).
+- **Meter writes:** deleting offline records rewrites the record table with one SET_DATA
+  0x48 (attribute 0x28) carrying the kept entries in order, then re-reads the list; a
+  mismatch is an error and nothing is retried. The desktop app first backs the affected
+  records up as CSV (`open-powerz-backups/records-<time>` under Downloads) and needs the
+  typed record name (or "all"). The settings write reads SETTINGS, sends one type 0x0A
+  write with the changed display / rate fields over the values just read (calibration,
+  startup logo and auto-rotate are never written), then reads SETTINGS back; a changed
+  field without its new value, or any other field that moved, is an error. [device]
+  (single-record delete and settings write; delete-all is checked on the simulator only)
 - **WebKitGTK** on Linux is slower; chart decimation must happen in Rust.
 - **Tauri build order:** `apps/desktop/dist` must exist before the Tauri crate compiles.
 

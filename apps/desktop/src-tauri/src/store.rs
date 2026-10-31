@@ -217,6 +217,12 @@ impl SessionStore {
         self.lock().history.len()
     }
 
+    /// The newest record of the history.
+    pub(crate) fn latest_record(&self) -> Option<QueueRecord> {
+        let data = self.lock();
+        data.history.get(data.history.len().checked_sub(1)?)
+    }
+
     /// Min / max buckets of the history over `t0..=t1` (session time).
     pub fn history_range(
         &self,

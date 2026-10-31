@@ -13,6 +13,7 @@ import type {
   FlashEvent,
   FlashReplug,
   FlashStage,
+  FlashStatus,
   UiError,
 } from "./backend";
 
@@ -37,6 +38,14 @@ export interface FirmwareUpdateApi {
     confirmation: string,
     onStage: (stage: FlashEvent) => void,
   ) => Promise<FlashDone>;
+  /** Asks the running update to stop. */
+  cancelFlash?: () => Promise<void>;
+  /** The update the backend is running, null when none. */
+  flashStatus?: () => Promise<FlashStatus | null>;
+  /** A recording is running on meter `deviceId`. */
+  isRecording?: (deviceId: string) => boolean;
+  /** Ends the recording on meter `deviceId`. */
+  stopRecording?: (deviceId: string) => Promise<void>;
 }
 
 /** The picked device (`listing`) as the update's meter, with the connected meter's
@@ -85,6 +94,24 @@ export const FLASH_STAGES: readonly FlashStage["stage"][] = [
 export const UPDATE_WARNING =
   "Keep the meter connected and the laptop on power until the update finishes, and unplug the meter only when the screen asks you to replug it: an interrupted update leaves the meter in its bootloader.";
 
+/** Why Cancel is off once the erase has begun (AC-4PJRVJ.1). */
+export const CANCEL_TOO_LATE = "The erase has started, so the update can no longer be cancelled.";
+
+/** Why Cancel is off once it was asked for: the meter is on its way to the bootloader. */
+export const CANCEL_PENDING = "Stopping: the update ends once the meter has switched.";
+
+/** What a reloaded page says when the update it followed has ended: the outcome went to
+ * the page that started it. */
+export const FOLLOWED_UPDATE_ENDED =
+  "The update has ended, but its result went to the page before the reload. Check the firmware version; a meter that stays in its bootloader needs the update run again.";
+
+/** What a reloaded page says when the backend stops answering: the update may still run. */
+export const FOLLOWED_UPDATE_LOST =
+  "The app lost track of the update, and it may still be running. Leave the meter plugged in for a few minutes, then check the firmware version.";
+
+/** The model a reloaded page shows for the meter being updated: only its id is known. */
+const FOLLOWED_METER_MODEL = "Meter being updated";
+
 /** How to recover the meter after a failed update (AC .5). */
 export const RECOVERY_STEPS: readonly string[] = [
   "Unplug the meter, then hold Back while plugging it in again to start it in its bootloader.",
@@ -127,6 +154,11 @@ export function stageNameLabel(
   return progress === null ? "Writing the image" : stageLabel({ stage: "writing", ...progress });
 }
 
+/** How often a reloaded page asks the backend about the running update (AC-4PJRVJ.3). */
+const STATUS_POLL_MS = 500;
+/** Failed polls in a row after which a reloaded page stops following the update. */
+const STATUS_POLL_TRIES = 20;
+
 export type FirmwareUpdatePhase = "idle" | "confirming" | "updating" | "done" | "failed";
 
 export class FirmwareUpdate {
@@ -145,8 +177,18 @@ export class FirmwareUpdate {
   failedStage = $state<FlashStage["stage"] | null>(null);
   /** The replug the update waits for, null when none (AC .4). */
   replug = $state.raw<Omit<FlashReplug, "stage"> | null>(null);
+  /** The update waits for the user: its meter is recording (AC-4PJRVJ.2). */
+  recordingPrompt = $state(false);
+  /** The agreed recording is being ended. */
+  #endingRecording = false;
   /** The meter as it was when the update started; the update disconnects it. */
   #updating = $state.raw<FirmwareMeter | null>(null);
+  /** Cancel was accepted: the update stops at its next safe point. */
+  cancelling = $state(false);
+  /** The update a reloaded page followed has ended (AC-4PJRVJ.3). */
+  followedEnded = $state(false);
+  /** A reloaded page stopped hearing about the update it followed (AC-4PJRVJ.3). */
+  followedLost = $state(false);
 
   constructor(api: FirmwareUpdateApi) {
     this.#api = api;
@@ -157,10 +199,17 @@ export class FirmwareUpdate {
     return this.phase === "updating";
   }
 
+  /** The meter the running update holds, null when none runs (AC-4PJRVM.4). */
+  get updatingId(): string | null {
+    return this.busy ? (this.#updating?.id ?? null) : null;
+  }
+
   /** The meter to show: as it was at the start while the update runs, since the update
    * disconnects it and its versions are no longer read; else `meter` as it is now. */
   meterShown(meter: FirmwareMeter | null): FirmwareMeter | null {
-    return this.busy && this.#updating !== null ? this.#updating : meter;
+    if (!this.busy || this.#updating === null) return meter;
+    const followed = this.#updating.model === FOLLOWED_METER_MODEL;
+    return followed && meter?.id === this.#updating.id ? meter : this.#updating;
   }
 
   /** The typed text is exactly the chosen file's version. */
@@ -222,9 +271,49 @@ export class FirmwareUpdate {
 
   /** Starts the update once the target version was typed. */
   async start(meter: FirmwareMeter | null): Promise<void> {
+    if (meter === null || !this.#startable(meter)) return;
+    if (this.#api.isRecording?.(meter.id)) {
+      this.recordingPrompt = true;
+      return;
+    }
+    await this.#run(meter);
+  }
+
+  /** Back to the confirmation: the recording goes on and the update does not start. */
+  declineEndRecording(): void {
+    if (!this.#endingRecording) this.recordingPrompt = false;
+  }
+
+  /** Ends the recording on `meter`, then starts the update. A failed stop leaves the
+   * update unstarted: nothing has reached the meter. */
+  async confirmEndRecording(meter: FirmwareMeter | null): Promise<void> {
+    if (!this.recordingPrompt || this.#endingRecording || meter === null) return;
+    this.#endingRecording = true;
+    try {
+      await this.#api.stopRecording?.(meter.id);
+    } catch (e) {
+      this.#clearOutcome();
+      this.error = (e as UiError | null) ?? { kind: "internal", message: String(e), hint: null };
+      this.phase = "failed";
+      return;
+    } finally {
+      this.#endingRecording = false;
+      this.recordingPrompt = false;
+    }
+    if (this.#startable(meter)) await this.#run(meter);
+  }
+
+  /** The confirmation is open, its version typed, and `meter` fits the file. */
+  #startable(meter: FirmwareMeter): boolean {
+    return (
+      this.phase === "confirming" && this.confirmed && this.path !== null && this.canUpdate(meter)
+    );
+  }
+
+  /** Runs the update to its end. */
+  async #run(meter: FirmwareMeter): Promise<void> {
     const path = this.path;
-    if (this.phase !== "confirming" || !this.confirmed || meter === null || path === null) return;
-    if (!this.canUpdate(meter)) return;
+    if (path === null) return;
     this.#updating = meter;
     this.phase = "updating";
     this.#clearOutcome();
@@ -235,10 +324,7 @@ export class FirmwareUpdate {
           return;
         }
         this.replug = null;
-        this.stage = stage;
-        if (stage.stage === "writing") {
-          this.writeProgress = { done: stage.done, total: stage.total };
-        }
+        this.#showStage(stage);
       });
       this.replug = null;
       this.phase = "done";
@@ -256,11 +342,83 @@ export class FirmwareUpdate {
     }
   }
 
+  /** Shows `stage` as the update's latest. */
+  #showStage(stage: FlashStage): void {
+    this.stage = stage;
+    if (stage.stage === "writing") {
+      this.writeProgress = { done: stage.done, total: stage.total };
+    }
+  }
+
+  /** Picks up an update that outlived the page (AC-4PJRVJ.3): holds the meter and shows
+   * the backend's stage until its update ends. No answer means no update to pick up. */
+  async reattach(): Promise<void> {
+    const status = await this.#flashStatus().catch(() => null);
+    if (status === null || this.phase !== "idle") return;
+    this.phase = "updating";
+    this.#clearOutcome();
+    this.#updating = {
+      id: status.device_id,
+      model: FOLLOWED_METER_MODEL,
+      mode: "unknown",
+      firmwareVersion: null,
+      bootloaderVersion: null,
+    };
+    if (status.stage !== null) this.#showStage(status.stage);
+    void this.#followBackend();
+  }
+
+  /** The update the backend is running, null when none. */
+  async #flashStatus(): Promise<FlashStatus | null> {
+    return (await this.#api.flashStatus?.()) ?? null;
+  }
+
+  /** Follows the backend's update to its end, then says so: its outcome went to the page
+   * that started it. A failed poll says nothing: the next one decides, up to
+   * {@link STATUS_POLL_TRIES} in a row, and then all it can say is that it lost track. */
+  async #followBackend(): Promise<void> {
+    let failed = 0;
+    while (failed < STATUS_POLL_TRIES) {
+      await new Promise((resolve) => setTimeout(resolve, STATUS_POLL_MS));
+      try {
+        const status = await this.#flashStatus();
+        if (status === null) break;
+        failed = 0;
+        if (status.stage !== null) this.#showStage(status.stage);
+      } catch {
+        failed += 1;
+      }
+    }
+    this.phase = "idle";
+    this.#clearOutcome();
+    if (failed < STATUS_POLL_TRIES) this.followedEnded = true;
+    else this.followedLost = true;
+  }
+
   /** Closes the confirmation without sending anything. */
   cancel(): void {
     if (this.phase !== "confirming") return;
     this.phase = "idle";
     this.confirmation = "";
+  }
+
+  /** Why the running update can no longer be cancelled, null while it can. */
+  get cancelBlocker(): string | null {
+    const stage = this.stage?.stage;
+    if (stage !== undefined && stage !== "switching") return CANCEL_TOO_LATE;
+    return this.cancelling ? CANCEL_PENDING : null;
+  }
+
+  /** Asks the running update to stop; it then ends as a failure. A refusal is dropped:
+   * it means the erase has just begun, and that stage's report turns Cancel off. */
+  async cancelUpdate(): Promise<void> {
+    if (this.phase !== "updating" || this.cancelBlocker !== null) return;
+    try {
+      await this.#api.cancelFlash?.();
+      this.cancelling = true;
+    } catch {
+      // See above.
+    }
   }
 
   /** Clears a finished or failed update's outcome; the chosen file stays for a retry. */
@@ -279,5 +437,8 @@ export class FirmwareUpdate {
     this.error = null;
     this.failedStage = null;
     this.replug = null;
+    this.cancelling = false;
+    this.followedEnded = false;
+    this.followedLost = false;
   }
 }

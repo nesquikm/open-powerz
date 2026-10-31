@@ -535,3 +535,31 @@ fn a_mismatching_re_read_is_a_device_error_naming_the_backup_and_is_not_retried(
     assert_eq!(files_in(&dir), vec!["02_charger_test.csv".to_string()]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- AC-4PJRVM.6: the refusal comes before the backup ----
+
+#[test]
+fn delete_leaving_22_entries_is_refused_before_the_backup() {
+    let dir = out_dir("too-long");
+    let long: Vec<E> = (0..23u32)
+        .map(|k| E {
+            name: Box::leak(format!("R{k:02}").into_boxed_str()),
+            points: 2,
+            offset: 0x1000 * (k + 1),
+        })
+        .collect();
+    let entries: Vec<&E> = long.iter().collect();
+    let mut s = session(Meter::new(script(&entries, vec![])));
+    let mut out = Vec::new();
+    let err = records_delete(
+        &mut s,
+        RecordSelection::One(1),
+        &opts(&dir, true, true),
+        &mut std::io::empty(),
+        &mut out,
+    )
+    .expect_err("22 entries do not fit one table write");
+    let text = err.to_string();
+    assert!(text.contains("22 records"), "{text}");
+    assert!(files_in(&dir).is_empty(), "no backup was written");
+}

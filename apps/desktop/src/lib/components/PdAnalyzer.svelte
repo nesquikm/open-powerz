@@ -4,7 +4,7 @@
   import type { PdCapture } from "../pdCapture.svelte";
   import type { PdSelection } from "../pdSelection.svelte";
   import PdClearDialog from "./PdClearDialog.svelte";
-  import { DEFAULT_PD_FILTER, type PdFilter } from "../pdStore";
+  import { DEFAULT_PD_FILTER, pdDroppedText, type PdFilter } from "../pdStore";
   import {
     directionLabel,
     FollowState,
@@ -90,6 +90,12 @@
   const sopOptions = $derived.by(() => {
     void pd.version;
     return pd.store.sops();
+  });
+
+  /** Says that a long capture lost its oldest records, if it did. */
+  const droppedNotice = $derived.by(() => {
+    void pd.version;
+    return pdDroppedText(pd.store.dropped);
   });
 
   /** Store positions the filters let through. */
@@ -533,6 +539,9 @@
         <option value={name}>{name}</option>
       {/each}
     </select>
+    {#if droppedNotice}
+      <p class="reason">{droppedNotice}</p>
+    {/if}
   </div>
 
   <div

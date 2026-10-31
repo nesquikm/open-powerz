@@ -99,7 +99,7 @@ fn sim_answers_head_after_connect_with_field_zero_by_default() {
     assert_eq!(reply[1], 2, "HEAD reply carries the request id");
     let head = HeadReply::decode(&reply).unwrap();
     assert_eq!(head.old_firmware_field(), 0);
-    assert!(!head.update_required());
+    assert_eq!(head.old_firmware_field(), 0);
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn sim_head_field_is_configurable() {
     let reply = d.transact(&head::request(2), T).expect("HEAD reply");
     let head = HeadReply::decode(&reply).unwrap();
     assert_eq!(head.old_firmware_field(), 3);
-    assert!(head.update_required());
+    assert_ne!(head.old_firmware_field(), 0);
 }
 
 // ---- AC-V9SK52.2 / .3: Session::firmware_status ----

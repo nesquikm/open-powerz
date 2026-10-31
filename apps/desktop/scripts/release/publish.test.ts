@@ -44,10 +44,15 @@ interface FakeOptions {
   releases?: {
     tag_name: string;
     draft?: boolean;
+    prerelease?: boolean;
     name?: string;
     assets?: string[];
     id?: unknown;
   }[];
+  /** The tag of the release that holds the Latest badge before the run (default: the highest published final version). */
+  latest?: string;
+  /** GitHub reports this tag for the release once it is published, whatever was sent. */
+  retagOnPublish?: string;
   /** Tags that exist in the repository. */
   tags?: string[];
   /** listReleases misses a release created in this run for this many calls (Infinity = never shows it). */
@@ -61,6 +66,21 @@ interface FakeOptions {
 const isValidId = (id: unknown): boolean =>
   typeof id === "number" && Number.isInteger(id) && id > 0;
 
+/** Semantic order of two `vX.Y.Z[-pre]` tags (negative when a < b); a pre-release sorts before its final. */
+function compareTags(a: string, b: string): number {
+  const parse = (t: string) => {
+    const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(t);
+    return m ? { n: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] } : { n: [0, 0, 0] };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < 3; i++) if (x.n[i] !== y.n[i]) return (x.n[i] ?? 0) - (y.n[i] ?? 0);
+  if (x.pre === y.pre) return 0;
+  if (x.pre === undefined) return 1;
+  if (y.pre === undefined) return -1;
+  return x.pre < y.pre ? -1 : 1;
+}
+
 class FakeGitHub implements GitHubClient {
   calls: Call[] = [];
   releases: FakeRelease[] = [];
@@ -72,6 +92,9 @@ class FakeGitHub implements GitHubClient {
   private drop: Set<string>;
   private createdId: unknown;
   private hasCreatedId: boolean;
+  private retag: string | undefined;
+  /** The id of the release that holds the Latest badge, or undefined. */
+  latestId: unknown;
 
   constructor(opts: FakeOptions = {}) {
     this.tags = new Set(opts.tags ?? []);
@@ -84,12 +107,42 @@ class FakeGitHub implements GitHubClient {
         id: "id" in r ? r.id : this.nextReleaseId++,
         tag_name: r.tag_name,
         draft: r.draft ?? false,
-        prerelease: false,
+        prerelease: r.prerelease ?? false,
         name: r.name ?? r.tag_name,
         body: "",
         assets: (r.assets ?? []).map((name) => ({ id: this.nextAssetId++, name })),
       });
     }
+    this.retag = opts.retagOnPublish;
+    const latest =
+      opts.latest !== undefined
+        ? this.releases.find((r) => r.tag_name === opts.latest)
+        : this.highestFinal();
+    this.latestId = latest?.id;
+  }
+
+  /** The published, non-pre-release release with the highest version (GitHub's "legacy" rule). */
+  private highestFinal(): FakeRelease | undefined {
+    return this.releases
+      .filter((r) => !r.draft && !r.prerelease)
+      .sort((a, b) => compareTags(a.tag_name, b.tag_name))
+      .at(-1);
+  }
+
+  /** The tag of the release that holds the Latest badge, or undefined. */
+  latestTag(): string | undefined {
+    return this.releases.find((r) => r.id === this.latestId)?.tag_name;
+  }
+
+  private view(r: FakeRelease) {
+    return {
+      id: r.id as number,
+      tag_name: r.tag_name,
+      draft: r.draft,
+      prerelease: r.prerelease,
+      name: r.name,
+      body: r.body,
+    };
   }
 
   private record(method: string, ...args: unknown[]): void {
@@ -110,14 +163,7 @@ class FakeGitHub implements GitHubClient {
       this.lagLeft--;
       if (this.lagLeft <= 0) this.hidden.clear();
     }
-    return visible.map((r) => ({
-      id: r.id as number,
-      tag_name: r.tag_name,
-      draft: r.draft,
-      prerelease: r.prerelease,
-      name: r.name,
-      body: r.body,
-    }));
+    return visible.map((r) => this.view(r));
   };
 
   tagExists = async (tag: string) => {
@@ -151,6 +197,7 @@ class FakeGitHub implements GitHubClient {
   updateRelease = async (
     id: number,
     patch: {
+      tag_name?: string;
       name?: string;
       body?: string;
       draft?: boolean;
@@ -160,19 +207,39 @@ class FakeGitHub implements GitHubClient {
   ) => {
     this.record("updateRelease", id, patch);
     const r = this.byId(id);
+    const publishing = r.draft && patch.draft === false;
+    if (patch.tag_name !== undefined) r.tag_name = patch.tag_name;
+    // Like GitHub on the v0.6.0 run: publishing a draft with a PATCH that carries no
+    // tag_name leaves the release on an "untagged-…" tag.
+    else if (publishing) r.tag_name = `untagged-${(r.id as number).toString(16)}`;
     if (patch.name !== undefined) r.name = patch.name;
     if (patch.body !== undefined) r.body = patch.body;
     if (patch.draft !== undefined) r.draft = patch.draft;
     if (patch.prerelease !== undefined) r.prerelease = patch.prerelease;
     if (patch.make_latest !== undefined) r.make_latest = patch.make_latest;
-    return {
-      id: r.id as number,
-      tag_name: r.tag_name,
-      draft: r.draft,
-      prerelease: r.prerelease,
-      name: r.name,
-      body: r.body,
-    };
+    if (publishing && this.retag !== undefined) r.tag_name = this.retag;
+    // The Latest badge: "true" takes it, "false" leaves it, "legacy" goes to the highest
+    // published final version; GitHub's default for a newly published release is "true".
+    if (!r.draft && !r.prerelease) {
+      const mode = patch.make_latest ?? (publishing ? "true" : undefined);
+      if (mode === "true") this.latestId = r.id;
+      else if (mode === "legacy") this.latestId = this.highestFinal()?.id;
+    }
+    return this.view(r);
+  };
+
+  /** GET /releases/{id}. */
+  getRelease = async (id: number) => {
+    this.record("getRelease", id);
+    return this.view(this.byId(id));
+  };
+
+  /** GET /releases/latest. */
+  getLatestRelease = async () => {
+    this.record("getLatestRelease");
+    const r = this.releases.find((x) => x.id === this.latestId);
+    if (!r) throw new Error("gh: Not Found (HTTP 404) for the latest release");
+    return this.view(r);
   };
 
   listAssets = async (id: number) => {
@@ -205,7 +272,7 @@ class FakeGitHub implements GitHubClient {
   /** Calls whose first argument is a release id. */
   idCalls(): Call[] {
     return this.calls.filter((c) =>
-      ["updateRelease", "listAssets", "uploadAsset"].includes(c.method),
+      ["updateRelease", "listAssets", "uploadAsset", "getRelease"].includes(c.method),
     );
   }
 
@@ -699,7 +766,9 @@ describe("GitHub client over fetch", () => {
 
     it.each(bad)("updateRelease(%s)", async (_, id) => {
       const { client, fetchFn } = make(async () => json({}));
-      await expect(client.updateRelease(id as number, { draft: false })).rejects.toThrow(/id/i);
+      await expect(
+        client.updateRelease(id as number, { tag_name: TAG, draft: false }),
+      ).rejects.toThrow(/id/i);
       expect(fetchFn).not.toHaveBeenCalled();
     });
 
@@ -782,11 +851,17 @@ describe("GitHub client over fetch", () => {
 
   it("publishes by id with a PATCH", async () => {
     const { client, fetchFn } = make(async () => json({ id: 42, tag_name: TAG, draft: false }));
-    await client.updateRelease(42, { draft: false, prerelease: false, make_latest: "true" });
+    await client.updateRelease(42, {
+      tag_name: TAG,
+      draft: false,
+      prerelease: false,
+      make_latest: "true",
+    });
     const [input, init] = fetchFn.mock.calls[0]! as FetchArgs;
     expect(urlOf([input])).toBe("https://api.github.com/repos/nesquikm/open-powerz/releases/42");
     expect(init?.method).toBe("PATCH");
     expect(JSON.parse(String(init?.body))).toEqual({
+      tag_name: TAG,
       draft: false,
       prerelease: false,
       make_latest: "true",
@@ -834,5 +909,325 @@ describe("GitHub client over fetch", () => {
       async () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }),
     );
     await expect(client.listAssets(42)).rejects.toThrow(/404/);
+  });
+});
+
+// ===========================================================================
+// FR 4PJRVN: release pipeline fixes
+// ===========================================================================
+
+const updates = (gh: FakeGitHub): Call[] => gh.calls.filter((c) => c.method === "updateRelease");
+
+// ---------------------------------------------------------------------------
+// AC-4PJRVN.1: every update sends the tag name; the published tag is checked
+// ---------------------------------------------------------------------------
+
+describe("tag name on every release update (AC-4PJRVN.1)", () => {
+  it("sends the tag name with every update of a fresh draft, the final publish included", async () => {
+    const gh = new FakeGitHub({ tags: [TAG] });
+    await publishRelease(gh, options());
+
+    const us = updates(gh);
+    expect(us.length, "the draft was never updated").toBeGreaterThan(0);
+    for (const u of us)
+      expect((u.args[1] as { tag_name?: string }).tag_name, "an update without tag_name").toBe(TAG);
+  });
+
+  it("sends the tag name with every update of an existing release", async () => {
+    const gh = new FakeGitHub({
+      tags: [TAG],
+      releases: [{ tag_name: TAG, draft: true, name: "stale title", assets: FILE_NAMES }],
+    });
+    await publishRelease(gh, options());
+
+    const us = updates(gh);
+    expect(us.length).toBeGreaterThanOrEqual(2);
+    for (const u of us) expect((u.args[1] as { tag_name?: string }).tag_name).toBe(TAG);
+  });
+
+  it("v0.6.0 replay: the published draft keeps its tag instead of becoming untagged-…", async () => {
+    const gh = new FakeGitHub({ tags: [TAG] });
+    await publishRelease(gh, options());
+
+    expect(gh.releases.map((r) => r.tag_name)).toEqual([TAG]);
+    expect(gh.releases.some((r) => r.tag_name.startsWith("untagged-"))).toBe(false);
+    const r = releaseFor(gh)[0]!;
+    expect(r.draft).toBe(false);
+  });
+
+  it("fails, naming both tags, when the published release carries another tag", async () => {
+    const gh = new FakeGitHub({ tags: [TAG], retagOnPublish: "untagged-5a1b2c" });
+    const err = await publishRelease(gh, options()).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err, "a release on the wrong tag passed the check").toBeInstanceOf(Error);
+    expect((err as Error).message).toContain(TAG);
+    expect((err as Error).message).toContain("untagged-5a1b2c");
+    // The check runs after the publish, against what GitHub reports.
+    expect(finalPublish(gh), "the check ran before publishing").toBeDefined();
+  });
+
+  it("fails on a mismatched tag for an existing release too", async () => {
+    const gh = new FakeGitHub({
+      tags: [TAG],
+      releases: [{ tag_name: TAG, draft: true, assets: [] }],
+      retagOnPublish: "v0.5.9",
+    });
+    await expect(publishRelease(gh, options())).rejects.toThrow(/v0\.5\.9/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-4PJRVN.2: an older tag does not take the Latest badge
+// ---------------------------------------------------------------------------
+
+describe("the Latest badge (AC-4PJRVN.2)", () => {
+  const notTrue = (gh: FakeGitHub) =>
+    expect(
+      (finalPublish(gh)?.args[1] as { make_latest?: string })?.make_latest,
+      "an older tag asked for the Latest badge",
+    ).not.toBe("true");
+
+  it("a manual re-run of an older, already published tag leaves Latest on the newer release", async () => {
+    const gh = new FakeGitHub({
+      tags: [TAG, "v0.7.0"],
+      releases: [
+        { tag_name: "v0.7.0", draft: false },
+        { tag_name: TAG, draft: false, assets: FILE_NAMES },
+      ],
+      latest: "v0.7.0",
+    });
+    await publishRelease(gh, options());
+
+    expect(gh.latestTag()).toBe("v0.7.0");
+    expect(releaseFor(gh)[0]!.draft).toBe(false);
+    notTrue(gh);
+  });
+
+  it("a manual run for an older tag with no release yet does not take Latest", async () => {
+    const gh = new FakeGitHub({
+      tags: [TAG, "v0.7.0"],
+      releases: [{ tag_name: "v0.7.0", draft: false }],
+      latest: "v0.7.0",
+    });
+    await publishRelease(gh, options());
+
+    expect(gh.latestTag()).toBe("v0.7.0");
+    expect(releaseFor(gh)[0]!.draft).toBe(false);
+    notTrue(gh);
+  });
+
+  it("compares versions by number, not as text (v0.9.0 is older than v0.10.0)", async () => {
+    const tag = "v0.9.0";
+    const gh = new FakeGitHub({
+      tags: [tag, "v0.10.0"],
+      releases: [{ tag_name: "v0.10.0", draft: false }],
+      latest: "v0.10.0",
+    });
+    await publishRelease(gh, options({ tag, title: tag }));
+
+    expect(gh.latestTag()).toBe("v0.10.0");
+  });
+
+  it("a newer tag takes Latest from an older release", async () => {
+    const tag = "v0.10.0";
+    const gh = new FakeGitHub({
+      tags: [tag, "v0.9.0"],
+      releases: [{ tag_name: "v0.9.0", draft: false }],
+      latest: "v0.9.0",
+    });
+    await publishRelease(gh, options({ tag, title: tag }));
+
+    expect(gh.latestTag()).toBe(tag);
+  });
+
+  it("a re-run of the current Latest keeps the badge", async () => {
+    const gh = new FakeGitHub({
+      tags: [TAG, "v0.5.0"],
+      releases: [
+        { tag_name: "v0.5.0", draft: false },
+        { tag_name: TAG, draft: false, assets: FILE_NAMES },
+      ],
+      latest: TAG,
+    });
+    await publishRelease(gh, options());
+
+    expect(gh.latestTag()).toBe(TAG);
+  });
+
+  it("a newer draft or pre-release does not stop a final release from taking Latest", async () => {
+    const gh = new FakeGitHub({
+      tags: [TAG, "v0.5.0", "v0.9.0", "v1.0.0-rc.1"],
+      releases: [
+        { tag_name: "v0.5.0", draft: false },
+        { tag_name: "v0.9.0", draft: true },
+        { tag_name: "v1.0.0-rc.1", draft: false, prerelease: true },
+      ],
+      latest: "v0.5.0",
+    });
+    await publishRelease(gh, options());
+
+    expect(gh.latestTag()).toBe(TAG);
+  });
+
+  it("the first release of the repository takes Latest", async () => {
+    const gh = new FakeGitHub({ tags: [TAG] });
+    await publishRelease(gh, options());
+
+    expect(gh.latestTag()).toBe(TAG);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-4PJRVN.3: edit, upload and delete-asset calls address the release by id
+// ---------------------------------------------------------------------------
+
+interface Req {
+  method: string;
+  url: URL;
+  body: unknown;
+}
+
+const respond = (status: number, data?: unknown): Response =>
+  data === undefined
+    ? new Response(null, { status })
+    : new Response(JSON.stringify(data), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+
+/**
+ * A fetch that serves the GitHub REST routes the publish script may use from a
+ * FakeGitHub's state, and records every request.
+ */
+function fakeGitHubFetch(gh: FakeGitHub, repo: string) {
+  const requests: Req[] = [];
+  const base = `/repos/${repo}`;
+  const fetchFn = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = new URL(
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+    );
+    const method = (init?.method ?? "GET").toUpperCase();
+    let body: unknown;
+    if (typeof init?.body === "string") body = JSON.parse(init.body);
+    requests.push({ method, url, body });
+    const path = url.pathname;
+    const route = (re: RegExp) => (path.startsWith(base) ? re.exec(path.slice(base.length)) : null);
+    try {
+      let m: RegExpExecArray | null;
+      if (url.origin === "https://uploads.github.com") {
+        m = route(/^\/releases\/(\d+)\/assets$/);
+        if (method === "POST" && m) {
+          await gh.uploadAsset(Number(m[1]), url.searchParams.get("name") ?? "", files[0]!);
+          return respond(201, { id: 1, name: url.searchParams.get("name") });
+        }
+        return respond(404, { message: "Not Found" });
+      }
+      if (method === "GET" && (m = route(/^\/git\/ref\/tags\/(.+)$/)))
+        return (await gh.tagExists(decodeURIComponent(m[1]!)))
+          ? respond(200, { ref: `refs/tags/${m[1]}` })
+          : respond(404, { message: "Not Found" });
+      if (method === "GET" && route(/^\/releases$/)) return respond(200, await gh.listReleases());
+      if (method === "POST" && route(/^\/releases$/))
+        return respond(201, await gh.createDraftRelease(body as never));
+      if (method === "GET" && route(/^\/releases\/latest$/))
+        return respond(200, await gh.getLatestRelease());
+      if (method === "GET" && (m = route(/^\/releases\/tags\/(.+)$/))) {
+        const r = gh.releases.find((x) => x.tag_name === decodeURIComponent(m![1]!) && !x.draft);
+        return r ? respond(200, { id: r.id, tag_name: r.tag_name }) : respond(404, {});
+      }
+      if (method === "GET" && (m = route(/^\/releases\/(\d+)$/)))
+        return respond(200, await gh.getRelease(Number(m[1])));
+      if (method === "PATCH" && (m = route(/^\/releases\/(\d+)$/)))
+        return respond(200, await gh.updateRelease(Number(m[1]), body as never));
+      if (method === "GET" && (m = route(/^\/releases\/(\d+)\/assets$/)))
+        return respond(200, await gh.listAssets(Number(m[1])));
+      if (method === "DELETE" && (m = route(/^\/releases\/assets\/(\d+)$/))) {
+        await gh.deleteAsset(Number(m[1]));
+        return respond(204);
+      }
+      return respond(404, { message: `no route for ${method} ${path}` });
+    } catch (e) {
+      return respond(/422/.test(String(e)) ? 422 : 404, { message: String(e) });
+    }
+  };
+  return { fetchFn, requests };
+}
+
+describe("release addressed by id over the REST API (AC-4PJRVN.3)", () => {
+  const REPO = "nesquikm/open-powerz";
+
+  const run = async (gh: FakeGitHub) => {
+    const { fetchFn, requests } = fakeGitHubFetch(gh, REPO);
+    const client = createGitHubClient({
+      token: "test-token",
+      repo: REPO,
+      fetch: fetchFn as unknown as typeof fetch,
+    });
+    await publishRelease(client, options());
+    return requests;
+  };
+
+  const scenarios: [string, () => FakeGitHub][] = [
+    ["a fresh tag", () => new FakeGitHub({ tags: [TAG] })],
+    [
+      "a re-run with leftover assets",
+      () =>
+        new FakeGitHub({
+          tags: [TAG],
+          releases: [{ tag_name: TAG, draft: true, assets: [...FILE_NAMES, "stray.txt"] }],
+        }),
+    ],
+  ];
+
+  it.each(scenarios)("edits, uploads and deletes by numeric id on %s", async (_, make) => {
+    const gh = make();
+    const requests = await run(gh);
+    const id = releaseFor(gh)[0]!.id as number;
+
+    const edits = requests.filter((r) => r.method === "PATCH");
+    const uploads = requests.filter((r) => r.url.origin === "https://uploads.github.com");
+    const deletes = requests.filter((r) => r.method === "DELETE");
+    expect(edits.length).toBeGreaterThan(0);
+    expect(uploads).toHaveLength(FILE_NAMES.length);
+    for (const r of edits) expect(r.url.pathname).toBe(`/repos/${REPO}/releases/${id}`);
+    for (const r of uploads) expect(r.url.pathname).toBe(`/repos/${REPO}/releases/${id}/assets`);
+    for (const r of deletes)
+      expect(r.url.pathname).toMatch(/^\/repos\/[^/]+\/[^/]+\/releases\/assets\/\d+$/);
+    expect(releaseFor(gh)[0]!.draft).toBe(false);
+  });
+
+  it.each(scenarios)("never puts the tag in a release path on %s", async (_, make) => {
+    const requests = await run(make());
+    const releasePaths = requests.map((r) => r.url.pathname).filter((p) => p.includes("/releases"));
+    for (const p of releasePaths) {
+      expect(p, "a request looked the release up by tag").not.toMatch(/\/releases\/tags\//);
+      expect(p).not.toContain(TAG);
+    }
+  });
+
+  it("sends the tag name in every PATCH body (AC-4PJRVN.1 over the API)", async () => {
+    const requests = await run(new FakeGitHub({ tags: [TAG] }));
+    const edits = requests.filter((r) => r.method === "PATCH");
+    expect(edits.length).toBeGreaterThan(0);
+    for (const r of edits) expect((r.body as { tag_name?: string }).tag_name).toBe(TAG);
+  });
+
+  it("deletes only assets of the release it publishes", async () => {
+    const gh = new FakeGitHub({
+      tags: [TAG, "v0.5.0"],
+      releases: [
+        { tag_name: "v0.5.0", draft: false, assets: ["stray.txt", "old.dmg"] },
+        { tag_name: TAG, draft: true, assets: ["stray.txt"] },
+      ],
+    });
+    const otherIds = gh.releases.find((r) => r.tag_name === "v0.5.0")!.assets.map((a) => a.id);
+    await publishRelease(gh, options());
+
+    const deleted = gh.calls.filter((c) => c.method === "deleteAsset").map((c) => c.args[0]);
+    expect(deleted.length).toBeGreaterThan(0);
+    for (const d of deleted) expect(otherIds).not.toContain(d);
+    expect(gh.releases.find((r) => r.tag_name === "v0.5.0")!.assets).toHaveLength(2);
   });
 });

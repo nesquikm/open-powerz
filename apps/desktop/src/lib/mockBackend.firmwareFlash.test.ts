@@ -151,7 +151,7 @@ describe("MockBackend firmware update", () => {
     await expect(backend.firmwareInspect(path)).rejects.toMatchObject({ kind: "usage" });
   });
 
-  it("holds the meter during the update: stream, PD, trigger and switching are refused", async () => {
+  it("holds the meter during the update: stream, PD and trigger are refused", async () => {
     const backend = new MockBackend();
     const events: BackendEvent[] = [];
     await backend.connect(DEMO, 50, (e) => events.push(e));
@@ -168,7 +168,6 @@ describe("MockBackend firmware update", () => {
     expect(events.some((e) => e.type === "status" && e.data.state === "disconnected")).toBe(true);
     const refusals = [
       backend.connect(DEMO, 50, () => {}),
-      backend.connect("demo:idle", 50, () => {}),
       backend.pdStart(),
       backend.triggerOpen(),
       backend.firmwareFlash(DEMO, path, "2.0.7", () => {}),
@@ -179,6 +178,9 @@ describe("MockBackend firmware update", () => {
         message: expect.stringMatching(/firmware/i),
       });
     }
+    // Another meter is not held by the update (AC-4PJRVM.4).
+    await expect(backend.connect("demo:idle", 50, () => {})).resolves.toBeUndefined();
+    await backend.disconnect();
     await vi.runAllTimersAsync();
     await flashing;
     // Released afterwards.

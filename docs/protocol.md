@@ -143,10 +143,10 @@ Control types (main header type below 0x40):
 | 0x04 | RESET | none | not used by the vendor app; never sent by us | [doc] [inferred] |
 | 0x05 | ACCEPT | reply only | | [doc] [static] [device] |
 | 0x06 | REJECT | reply only | | [doc] [static] [device] |
-| 0x07 | FINISHED | reply only | acknowledges flash-write chunks; also the KM003C's answer to the record-table write (SET_DATA 0x28) | [doc] [static]; record table [device] (2026-10-29) |
+| 0x07 | FINISHED | reply only | acknowledges flash-write chunks; also the KM003C's answer to the record-table write (SET_DATA 0x28) and to a settings write (0x0A), with the request's id | [doc] [static]; record table and settings write [device] (2026-10-29) |
 | 0x08 | JUMP_APROM | 0 | none; leaves DFU mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
 | 0x09 | JUMP_DFU | 0 | none; enters firmware-update mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
-| 0x0A | settings write (named GET_STATUS in the API doc) | key / value entries, see Settings write | unknown; the vendor settings dialog sends it over CDC and does not wait for a reply; over bulk the meter ignores it (no reply, no change) [device]; our app sends it only on CDC, from the settings write path, and checks the result by reading SETTINGS again | [doc] [static] [device] |
+| 0x0A | settings write (named GET_STATUS in the API doc) | key / value entries, see Settings write | FINISHED over CDC [device] (2026-10-29); the vendor settings dialog sends it over CDC and does not wait for a reply; over bulk the meter ignores it (no reply, no change) [device]; our app sends it only on CDC, from the settings write path, and checks the result by reading SETTINGS again | [doc] [static] [device] |
 | 0x0B | ERROR | | no handler in the vendor app | [doc] |
 | 0x0C | GET_DATA | attribute bit mask | PUT_DATA (0x41) | [doc] [static] [device] |
 | 0x0D | GET_FILE | | unused by the vendor app | [doc] [static] |
@@ -301,7 +301,7 @@ first 96 bytes; device overrides its "96 bytes" reading.
 | off | type | field | tag |
 |---|---|---|---|
 | 0x00..0x5F | bytes | block A (96 bytes) | [static] [device] (firmware 2.0.6) |
-| 0x10 | u32 | run-time overlay: 0xFFFFFFFF at first, later a Unix time near the last reboot; the stored block-A CRC was computed with 0xFFFFFFFF here, so decoders check the CRC with these 4 bytes restored | [device]; meaning [inferred] |
+| 0x10 | u32 | run-time overlay: 0xFFFFFFFF at first, later a Unix time near the last reboot. The stored block-A CRC covers what this word held when the meter last saved the block: 0xFFFFFFFF on a block not saved since, or the boot time of then (firmware 2.0.7: 0x6AE08E30 under the CRC while 0x10 showed 0x6AE59BA6 after a replug). So a decoder cannot check the CRC against the word it reads. It works out the one word that makes the CRC match the other bytes and accepts 0xFFFFFFFF, or a Unix time from 2020 on that is no later than the word at 0x10. Four free bytes can match any CRC, so a corrupt block A gets past this about one time in twenty, and about one in seven while 0x10 still reads 0xFFFFFFFF. A settings write sends every display key at its read value, so a wrong display field that gets past this is written back and the read-back cannot see it; calibration is never sent and values out of range are refused | [device]; meaning and the range [inferred] |
 | 0x1C | 5 x i32 | an array (5 equal values seen), not a single 1e6-scaled gain as static notes said; device overrides | [device] [inferred] |
 | 0x30 | 10 x i32 | an array of values near 1 000 000 (likely gains, 1e6 = 1.0) | [static] [device] [inferred] |
 | 0x5C | u32 | CRC-32 of bytes 0x00..0x5B | [static] [device] (firmware 2.0.6) |
@@ -395,12 +395,14 @@ Message layout (all words little-endian):
   ones, and ends with key 0x7FFF = 0x1234. That last entry is read as a
   "save" marker [inferred]. Our writer sends the same full set: changed keys
   at their new values, the others at the values just read. [static]
-- The vendor app does not wait for or check a reply. [static] What the
-  meter answers is unknown. We take ACCEPT or FINISHED (FINISHED is what it
-  sends for the record-table write [device]), and also no reply at all.
+- The vendor app does not wait for or check a reply. [static] The KM003C
+  answers FINISHED with the write's id, at once. [device] We also take
+  ACCEPT, and no reply at all.
   REJECT or any other reply is an error, with no read-back. After the
   other three we read SETTINGS again and compare every field; that read
-  alone decides when no reply came. [inferred]
+  alone decides when no reply came. The bytes no field decodes are compared
+  too, leaving out the RAM overlay and the CRC words; a difference there is
+  only a warning. [inferred]
 
 | key | field | values | tag |
 |---|---|---|---|
@@ -504,8 +506,8 @@ Firmware status (FR V9SK52). All requests below are read-only:
 |---|---|---|
 | mode | the interface string (string 2) of the vendor-class (0xFF) interface, picked by class and read from the OS device list without opening the device: `APP` is application mode [device] (firmware 2.0.6), a string naming BOOT or DFU is boot-loader mode [inferred], and anything else (or no string) is reported as unknown | [static] [device] [inferred] |
 | sequence | CONNECT, the info blocks `0x420` (boot loader) and `0x4420` (application), then 50 ms later HEAD. The vendor app sends HEAD first; we read the blocks first so a failed HEAD cannot cost them. Each step that fails is reported as a problem (a HEAD problem includes the raw reply in hex), followed by one CONNECT to recover the pipe; what was read is kept, and the update check is reported as unknown when HEAD was not read | [static] [device] (firmware 2.0.6: blocks read; HEAD answered with id 0, see the HEAD rows below) |
-| warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated | [static] [inferred] |
-| HEAD in application mode | the meter answers with reply id 0 (not the request's id): `40 00 00 01 00 10 00 00`, i.e. type 0x40, id 0, and a u32 at offset 4 of 0x00001000 on firmware 2.0.6, followed by 12 stale bytes from its own transmit buffer (20 bytes in all). We accept a type-0x40, id-0 reply only as the first transfer after our HEAD. A field of 0 means current; any other value is reported as an unrecognised reply, never as "update required", because the vendor's reading (non-zero = update required) does not fit a meter on normal firmware | [device] (firmware 2.0.6) [static] |
+| warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated. Version strings are read tolerantly: surrounding whitespace and one leading `v` or `V` are dropped, a `-` suffix makes a pre-release, which sorts below its release (`2.0.7-beta` is outdated), and a `+` suffix is ignored (`v2.0.7+build5` is 2.0.7), and a string that still does not parse gives no version warning | [static] [inferred] |
+| HEAD in application mode | the meter answers with reply id 0 (not the request's id): `40 00 00 01 00 10 00 00`, i.e. type 0x40, id 0, and a u32 at offset 4 of 0x00001000 on firmware 2.0.6 and 2.0.7, followed by 12 stale bytes from its own transmit buffer (20 bytes in all). We accept a type-0x40, id-0 reply only as the first transfer after our HEAD. A field of 0 means current; any other value is reported as an unrecognised reply, never as "update required", because the vendor's reading (non-zero = update required) does not fit a meter on normal firmware | [device] (firmware 2.0.6, 2.0.7) [static] |
 | HEAD in boot-loader mode | the flash path accepts only a reply that echoes its own request id, with field 0; anything else stops before the descriptor | [static]; boot loader 2.5 answers `c0 <id> 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00`, field 0, with or without a valid application [device] |
 
 ## Offline records

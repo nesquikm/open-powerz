@@ -40,6 +40,8 @@ function connected(rate_locked = false, rate_sps: number | null = 50): BackendEv
       rate_sps,
       rate_locked,
       session_id: 1,
+      min_supported_firmware: "1.7.0",
+      known_latest_firmware: "2.0.7",
     },
   };
 }
@@ -227,6 +229,8 @@ describe("Session lifecycle edges (review round 1)", () => {
       rate_sps: 1000,
       rate_locked: false,
       session_id: 1,
+      min_supported_firmware: "1.7.0",
+      known_latest_firmware: "2.0.7",
     },
   };
   const disconnected: BackendEvent = {
@@ -433,6 +437,8 @@ describe("Session waits for an unplugged meter (AC-TGE839.1–AC-TGE839.5)", () 
         rate_sps,
         rate_locked: false,
         session_id: 7,
+        min_supported_firmware: "1.7.0",
+        known_latest_firmware: "2.0.7",
       },
     };
   }

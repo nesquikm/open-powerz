@@ -19,3 +19,8 @@ export function tileTitle(
   const name = listing.demo_scenario !== null ? deviceOptionLabel(listing) : listing.model;
   return { name, suffix: serialSuffix(reportedSerial ?? listing.serial) };
 }
+
+/** What a control bar is called: it names the meter its controls act on (AC-4PJRVM.1). */
+export function controlsLabel(title: { name: string; suffix: string }): string {
+  return `Controls for ${title.name}${title.suffix ? ` ${title.suffix}` : ""}`;
+}

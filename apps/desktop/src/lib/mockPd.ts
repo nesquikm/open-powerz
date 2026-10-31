@@ -13,6 +13,11 @@ import type { PdDetails, PdDirection, PdField, PdRow } from "./backend";
 /** One cycle of the script, ms. */
 export const PD_CYCLE_MS = 800;
 
+/** The PS_RDY that starts the 9 V contract, ms into a cycle. */
+const PS_RDY_MS = 420;
+/** The Hard Reset that ends it, ms into a cycle. */
+const HARD_RESET_MS = 700;
+
 type Sender = "source" | "sink" | "cable";
 
 interface MessageStep {
@@ -129,7 +134,15 @@ const SCRIPT: Step[] = [
     objects: [],
     acks: 7,
   },
-  { at: 420, kind: "message", sop: 0, sender: "source", type: 6, name: "PS_RDY", objects: [] },
+  {
+    at: PS_RDY_MS,
+    kind: "message",
+    sop: 0,
+    sender: "source",
+    type: 6,
+    name: "PS_RDY",
+    objects: [],
+  },
   {
     at: 421,
     kind: "message",
@@ -140,7 +153,7 @@ const SCRIPT: Step[] = [
     objects: [],
     acks: 9,
   },
-  { at: 700, kind: "event", name: "Hard Reset", code: 3 },
+  { at: HARD_RESET_MS, kind: "event", name: "Hard Reset", code: 3 },
 ];
 
 /** MessageID of every message step: a counter per SOP and sender, from 0 each cycle
@@ -227,15 +240,20 @@ function summary(step: Step): string {
   }
 }
 
-/** VBUS and IBUS at script position `pos`: 5 V until the PS_RDY, 9 V after it. */
-function power(pos: number): { vbus_v: number; ibus_a: number } {
-  return pos >= 7 && pos < 11 ? { vbus_v: 9.02, ibus_a: 1.5 } : { vbus_v: 5.01, ibus_a: 0.05 };
+/** VBUS and IBUS `ms` into the capture: 5 V until the PS_RDY, 9 V from it through the
+ * Hard Reset. The rows and the measurement stream both read this one contract. */
+export function pdContractAt(ms: number): { vbus_v: number; ibus_a: number } {
+  const t = ms % PD_CYCLE_MS;
+  return t >= PS_RDY_MS && t <= HARD_RESET_MS
+    ? { vbus_v: 9.02, ibus_a: 1.5 }
+    : { vbus_v: 5.01, ibus_a: 0.05 };
 }
 
 /** The table row of script record `k` as record `index` of the capture. */
 export function pdRow(k: number, index: number): PdRow {
   const { step, pos } = stepOf(k);
-  const base = { index, elapsed_ms: pdRecordTime(k), ...power(pos), summary: summary(step) };
+  const elapsed_ms = pdRecordTime(k);
+  const base = { index, elapsed_ms, ...pdContractAt(elapsed_ms), summary: summary(step) };
   if (step.kind === "event") {
     return {
       ...base,

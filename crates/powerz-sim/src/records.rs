@@ -101,6 +101,18 @@ pub(crate) fn initial_table() -> Vec<[u8; ENTRY_LEN]> {
     SPECS.iter().map(entry).collect()
 }
 
+/// Pad `table` to `count` entries with uniquely named records of no samples.
+pub(crate) fn pad_table(table: &mut Vec<[u8; ENTRY_LEN]>, count: usize) {
+    for k in table.len()..count {
+        let mut e = [0u8; ENTRY_LEN];
+        let name = format!("EMPTY_{k:02}");
+        e[..name.len()].copy_from_slice(name.as_bytes());
+        e[0x11] = 1;
+        e[0x14..0x18].copy_from_slice(&CAPACITY_POINTS.to_le_bytes());
+        table.push(e);
+    }
+}
+
 /// The RecordList payload of `table`: every entry back to back.
 pub(crate) fn list_payload(table: &[[u8; ENTRY_LEN]]) -> Vec<u8> {
     table.concat()

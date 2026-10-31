@@ -137,9 +137,15 @@ pub(crate) fn adc_json(a: &AdcSnapshot) -> serde_json::Value {
     })
 }
 
+/// The reader of our output went away, as `powerz watch | head` makes it do.
+/// Not a failure: a streaming command simply ends.
+pub(crate) fn is_closed_pipe(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::BrokenPipe
+}
+
 /// The snapshot as labelled lines, one value per line, 3 decimals
 /// (temperature 1).
-pub(crate) fn write_adc_lines(out: &mut dyn Write, a: &Reading) -> Result<(), CliError> {
+pub(crate) fn write_adc_lines(out: &mut dyn Write, a: &Reading) -> io::Result<()> {
     let temp = temp_text(a);
     writeln!(out, "VBUS:   {} V", fixed3(a.vbus_v))?;
     writeln!(out, "IBUS:   {} A", fixed3(a.ibus_a))?;
@@ -153,7 +159,7 @@ pub(crate) fn write_adc_lines(out: &mut dyn Write, a: &Reading) -> Result<(), Cl
 }
 
 /// The snapshot as one line, for `watch` when stdout is not a terminal.
-pub(crate) fn write_adc_line(out: &mut dyn Write, a: &Reading) -> Result<(), CliError> {
+pub(crate) fn write_adc_line(out: &mut dyn Write, a: &Reading) -> io::Result<()> {
     let temp = temp_text(a);
     writeln!(
         out,

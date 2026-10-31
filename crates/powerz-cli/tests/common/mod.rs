@@ -296,6 +296,16 @@ pub fn read_firmware_status_steps(first: u8) -> Vec<Step> {
     .concat()
 }
 
+/// Script of the OTP block and the UID from request id `first`, the last
+/// steps of `Session::read_device_info_and_status`.
+pub fn otp_uid_steps(first: u8) -> Vec<Step> {
+    [
+        memread_steps(first, OTP_ADDR, &otp_block()),
+        memread_steps(first + 1, UID_ADDR, &SYNTH_UID),
+    ]
+    .concat()
+}
+
 // ---------------------------------------------------------------- simulated meter
 
 /// Key-3 variant the meter encrypts its auth reply with: byte 1 is `X`.

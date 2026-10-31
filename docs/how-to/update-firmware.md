@@ -72,6 +72,16 @@ plugging it in, then run the same command. Check it first with
 While the update runs, the measurement stream, PD capture, the trigger panel
 and device switching are blocked, and the window cannot be closed.
 
+Cancel update works until the erase begins. If the meter is switching to its
+bootloader, the update stops once it gets there and the meter stays in its
+bootloader, with the application untouched (see below). After the erase has begun,
+Cancel is off and says why. If you reload the page during an update, the page
+shows the running stage, but the update's result stays with the page that
+started it: check the firmware version afterwards.
+
+If the meter is recording when you start the update, the app asks before it
+ends the recording.
+
 ## If something goes wrong
 
 Nothing is retried automatically. After a failure the meter stays in its

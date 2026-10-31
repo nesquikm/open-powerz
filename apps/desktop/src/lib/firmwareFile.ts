@@ -40,6 +40,12 @@ export function firmwareNotes(info: FirmwareFileInfo): string[] {
     .filter((line) => line !== "");
 }
 
+/** Whether every note carries its own number ("1. ", "2、", "3) "), so bullets would be
+ * a second marker. A version such as "2.0.7 was released." is not a number. */
+export function notesNumbered(notes: string[]): boolean {
+  return notes.length > 0 && notes.every((line) => /^\d+[.)、](?:\s+\S|[^\s\d])/.test(line));
+}
+
 /** The text shown when inspecting a file failed: the backend's reason, or the generic
  * text for an unexpected error. */
 export function firmwareFileErrorText(err: unknown): string {

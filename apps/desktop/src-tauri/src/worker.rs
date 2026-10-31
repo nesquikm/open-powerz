@@ -15,16 +15,17 @@ use powerz_protocol::adcnew::Content;
 use powerz_protocol::decode::pd_packet::CaptureClock;
 use powerz_protocol::decode::{QueueRecord, Rate};
 use powerz_protocol::firmware::DeviceMode;
+use powerz_protocol::firmware::version::{KNOWN_LATEST, MIN_SUPPORTED};
 use powerz_protocol::pdcap;
 use powerz_protocol::session::{
-    self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer,
+    self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer, record_delete_table,
 };
 use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
 use serde::{Deserialize, Serialize};
 
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Series, SeriesBuckets};
-use crate::pd_capture::{PdCapture, PdDetails, PdRow, PdStatusSample};
+use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
 use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
 use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, temp_at};
@@ -80,13 +81,13 @@ pub struct ConnectedInfo {
     pub mode: &'static str,
     /// Bootloader version, e.g. `2.5`; empty when the block is blank.
     pub bootloader_version: String,
-    /// Firmware warning codes (`too_old`, `outdated`, `update_required`).
+    /// Firmware warning codes (`too_old`, `outdated`).
     pub warnings: Vec<&'static str>,
     /// The HEAD reply asked for a firmware update; `None` (JSON `null`)
     /// when HEAD could not be read.
     pub update_required: Option<bool>,
     /// What could not be read while getting the firmware status, one line
-    /// per failed step (an info block or HEAD).
+    /// per failed step (an info, OTP or UID block, or HEAD).
     pub firmware_problems: Vec<String>,
     /// Serial number.
     pub serial: String,
@@ -96,6 +97,10 @@ pub struct ConnectedInfo {
     pub rate_locked: bool,
     /// Session history id.
     pub session_id: u64,
+    /// Oldest supported firmware, for wording the `too_old` warning.
+    pub min_supported_firmware: String,
+    /// Newest firmware known, for wording the `outdated` warning.
+    pub known_latest_firmware: String,
 }
 
 /// Connection status changes.
@@ -167,17 +172,21 @@ pub struct PdStatusBatch {
 }
 
 /// The meter's settings as the panel shows them, in display order (FR
-/// 1HHT01); each row serializes as `{key, label, value, tag}`.
+/// 1HHT01); each row serializes as `{key, label, value, tag}`. A settings
+/// write fills `warnings`; a plain read leaves it empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MeterSettingsView {
     /// Every decoded field.
     pub fields: Vec<powerz_protocol::decode::settings::Row>,
+    /// What a write changed beyond the fields, in plain words.
+    pub warnings: Vec<String>,
 }
 
 impl From<&powerz_protocol::decode::settings::MeterSettings> for MeterSettingsView {
     fn from(settings: &powerz_protocol::decode::settings::MeterSettings) -> Self {
         Self {
             fields: settings.rows(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -364,7 +373,7 @@ type InOrder = Box<dyn FnMut(Box<dyn FnOnce() + Send>) + Send>;
 
 /// What the worker thread hands its sink forwarder (FR X2SPDW).
 enum Forward {
-    Event(BackendEvent),
+    Event(Box<BackendEvent>),
     Run(Box<dyn FnOnce() + Send>),
 }
 
@@ -407,6 +416,8 @@ fn connected_info(
         rate_sps: (!rate_locked).then(|| rate.sps()),
         rate_locked,
         session_id,
+        min_supported_firmware: MIN_SUPPORTED.to_string(),
+        known_latest_firmware: KNOWN_LATEST.to_string(),
     }
 }
 
@@ -457,6 +468,8 @@ fn cdc_connected_info(config: &WorkerConfig) -> ConnectedInfo {
         rate_sps: Some(config.rate.sps()),
         rate_locked: false,
         session_id: config.session_id,
+        min_supported_firmware: MIN_SUPPORTED.to_string(),
+        known_latest_firmware: KNOWN_LATEST.to_string(),
     }
 }
 
@@ -492,13 +505,13 @@ fn open_queue_session<T: Transport, C: Clock>(
     let mut session = Session::with_clock(GuardedTransport::new(transport), clock);
     let mut run =
         || -> Result<(session::DeviceInfo, session::FirmwareStatus, bool), session::Error> {
-            // CONNECT, then both info blocks and HEAD (read-only, FR V9SK52).
+            // CONNECT, then both info blocks, HEAD, OTP and UID, once each
+            // (read-only, FR V9SK52).
             session.connect()?;
-            // A HEAD or info block that timed out or did not decode only
-            // costs the firmware status; an unplugged or refused meter
-            // still fails the connect.
-            let fw = session.read_firmware_status_or_unknown()?;
-            let info = session.device_info()?;
+            // A block or HEAD that timed out or did not decode only costs
+            // that part; an unplugged or refused meter still fails the
+            // connect.
+            let (info, fw) = session.read_device_info_and_status()?;
             let started = session.authenticate(1).and_then(|_| {
                 match session.start_stream(config.rate) {
                     // A queue started by an earlier session still runs [device]:
@@ -565,6 +578,8 @@ pub struct Worker<T: Transport, C: Clock> {
     /// Holds on the queue polling (FR DGSQ6S): while any is held, no
     /// GET_DATA goes out, but the session stays connected.
     poll_holds: u32,
+    /// Whether a PDM session is open on this meter, when the owner tells.
+    pdm_open: Option<PdmOpen>,
 }
 
 /// A running PD sniffer.
@@ -655,6 +670,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             pd: PdCapture::new(),
             pd_meter: (info.model.clone(), info.firmware_version.clone()),
             poll_holds: 0,
+            pdm_open: None,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -1033,8 +1049,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 self.pd.push(&poll.records, poll.status);
                 Step::Continue
             }
-            Err(e) => self.lose_session(&e),
+            Err(e) => self.poll_failed(&e),
         }
+    }
+
+    /// A poll failed. A bad reply from a meter still on the line leaves an
+    /// open PDM session alone: ending the stream would close it, and the
+    /// reconnect's bulk CONNECT would silence it [device]. The next polls
+    /// try again; once PDM is closed a fault that stays ends the session.
+    fn poll_failed(&mut self, e: &session::Error) -> Step {
+        let pdm_open = self.pdm_open.as_ref();
+        if !is_device_loss(e) && blocked(self.meter.as_ref(), || pdm_open.is_some_and(|f| f())) {
+            return Step::Continue;
+        }
+        self.lose_session(e)
     }
 
     /// The pipe failed: drop the session, end the recording and a running
@@ -1116,8 +1144,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
 
     /// Drop every captured PD record; a running capture goes on. Returns
     /// the index the next record gets.
-    pub fn clear_pd(&mut self) -> Result<u64, UiError> {
-        Ok(self.pd.clear())
+    pub fn clear_pd(&mut self) -> Result<PdCleared, UiError> {
+        Ok(self.pd.clear_with_floor())
     }
 
     /// Read the meter's SETTINGS block (GET_DATA 0x008 only) for the
@@ -1137,7 +1165,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// unknown or read-only key and a value out of range are usage errors
     /// that send nothing. Otherwise one settings write goes out between two
     /// SETTINGS reads; the answer is the settings as read back, and a
-    /// mismatching re-read is an error naming the field, never retried.
+    /// mismatching re-read is an error naming the field, never retried. A
+    /// difference in the bytes no field decodes is a warning on the answer.
     /// The meter takes the write only on its CDC port \[device\]: a session
     /// on bulk sends the write and both reads over the meter's CDC pipe,
     /// opened for them alone (no CONNECT there) while the stream waits.
@@ -1166,20 +1195,28 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
-        let settings = if self.source == MeasurementSource::Cdc {
-            blocked(self.meter.as_ref(), || session.write_settings(&parsed))
+        let written = if self.source == MeasurementSource::Cdc {
+            blocked(self.meter.as_ref(), || {
+                session.write_settings_checked(&parsed)
+            })
+            .map_err(|e| session_error(&e))
         } else {
             let clock = self.clock.clone();
             blocked(self.meter.as_ref(), || {
                 let pipe = session
                     .transport_mut()
                     .settings_pipe()
-                    .unwrap_or(Err(transport::Error::SettingsNeedCdc))?;
-                Session::with_clock(GuardedTransport::new(pipe), clock).write_settings(&parsed)
+                    .unwrap_or(Err(transport::Error::SettingsNeedCdc))
+                    .map_err(|e| ui_error::settings_port_error(&e, std::env::consts::OS))?;
+                Session::with_clock(GuardedTransport::new(pipe), clock)
+                    .write_settings_checked(&parsed)
+                    .map_err(|e| session_error(&e))
             })
-        }
-        .map_err(|e| session_error(&e))?;
-        Ok(MeterSettingsView::from(&settings))
+        }?;
+        Ok(MeterSettingsView {
+            warnings: written.warnings(),
+            ..MeterSettingsView::from(&written.settings)
+        })
     }
 
     /// List the meter's offline records (GET_DATA 0x200 only) for the
@@ -1237,6 +1274,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// in `backup_dir` (created if missing); a failed backup deletes
     /// nothing. Then the record table is rewritten once and read again; a
     /// failure after the write names the backup folder and is not retried.
+    /// A table too long to write is refused before the backup, and "all" on
+    /// an empty list sends nothing.
     pub fn delete_records(
         &mut self,
         target: Option<usize>,
@@ -1264,6 +1303,14 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 "The typed confirmation does not match; nothing was deleted.",
             ));
         }
+        if positions.is_empty() {
+            return Ok(RecordDeleteView {
+                records: Vec::new(),
+                backup_dir: backup_dir.display().to_string(),
+                backups: Vec::new(),
+            });
+        }
+        record_delete_table(&entries, &positions).map_err(|e| session_error(&e))?;
         let backup_failed = |detail: String| UiError {
             kind: ErrorKind::Internal,
             message: format!("The backup failed, so nothing was deleted: {detail}"),
@@ -1360,7 +1407,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 }
                 Step::Continue
             }
-            Err(e) => self.lose_session(&e),
+            Err(e) => self.poll_failed(&e),
         }
     }
 
@@ -1465,10 +1512,13 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::Handover(swap, reply) => {
                 // Read here and swapped behind the events already sent, so
                 // the new sink gets exactly the events after this answer.
+                let path = self.recording_path.as_ref();
+                let path = path.map(|p| p.to_string_lossy().into_owned());
                 let progress = self.recording_progress();
+                let held = progress.map(|(rows, elapsed_ms)| (rows, elapsed_ms, path));
                 (self.in_order)(Box::new(move || {
                     swap();
-                    let _ = reply.send(progress);
+                    let _ = reply.send(held);
                 }));
             }
         }
@@ -1490,7 +1540,7 @@ enum Command {
     StartPd(mpsc::Sender<Result<(), UiError>>),
     StopPd(mpsc::Sender<Result<(), UiError>>),
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
-    ClearPd(mpsc::Sender<Result<u64, UiError>>),
+    ClearPd(mpsc::Sender<Result<PdCleared, UiError>>),
     PdSave(mpsc::Sender<PdSave>),
     ReadSettings(mpsc::Sender<Result<MeterSettingsView, UiError>>),
     WriteSettings(
@@ -1511,7 +1561,10 @@ enum Command {
     /// Run the sink swap of an attach, then answer the open recording's
     /// progress: both on the worker thread, which sends every recording
     /// event, so none can fall between them (FR VEDDFD).
-    Handover(Box<dyn FnOnce() + Send>, mpsc::Sender<Option<(u64, u64)>>),
+    Handover(
+        Box<dyn FnOnce() + Send>,
+        mpsc::Sender<Option<HeldRecording>>,
+    ),
 }
 
 impl std::fmt::Debug for Command {
@@ -1546,6 +1599,9 @@ impl std::fmt::Debug for Command {
 }
 
 type ProgressFn = Box<dyn FnMut(ExportProgress) + Send>;
+
+/// A running recording at a handover: rows, elapsed ms and its file.
+pub type HeldRecording = (u64, u64, Option<String>);
 
 /// Export every record of `store` to `out` on a thread of its own; the
 /// export works on a snapshot that shares the stored samples. `now_ms` is
@@ -1795,7 +1851,10 @@ impl WorkerControl {
     /// open recording's rows and elapsed ms then (`None` when nothing is
     /// being recorded): no recording event is sent between the two. On an
     /// error `swap` has not run and never will.
-    pub fn hand_over(&self, swap: Box<dyn FnOnce() + Send>) -> Result<Option<(u64, u64)>, UiError> {
+    pub fn hand_over(
+        &self,
+        swap: Box<dyn FnOnce() + Send>,
+    ) -> Result<Option<HeldRecording>, UiError> {
         self.hand_over_within(swap, COMMAND_TIMEOUT)
     }
 
@@ -1803,7 +1862,7 @@ impl WorkerControl {
         &self,
         swap: Box<dyn FnOnce() + Send>,
         timeout: Duration,
-    ) -> Result<Option<(u64, u64)>, UiError> {
+    ) -> Result<Option<HeldRecording>, UiError> {
         // `None` while waiting; `Some(true)` once the swap ran, `Some(false)`
         // once the caller gave up, so a late command does nothing.
         let gate = Arc::new(Mutex::new(None::<bool>));
@@ -1838,6 +1897,11 @@ impl WorkerControl {
         self.ask(Command::HoldPolling(hold, reply), &answer)
     }
 
+    /// The newest measurement of the session, if any.
+    pub(crate) fn latest_record(&self) -> Option<QueueRecord> {
+        self.store.latest_record()
+    }
+
     /// Start the PD capture.
     pub fn start_pd(&self) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
@@ -1857,7 +1921,7 @@ impl WorkerControl {
     }
 
     /// Drop every captured PD record; returns the index the next one gets.
-    pub fn clear_pd(&self) -> Result<u64, UiError> {
+    pub fn clear_pd(&self) -> Result<PdCleared, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::ClearPd(reply), &answer)?
     }
@@ -2038,6 +2102,19 @@ impl Drop for WorkerHandle {
     }
 }
 
+/// Whether a PDM session is open on the worker's meter.
+pub type PdmOpen = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Whether `e` can mean the meter is gone. Only a reply that arrived and
+/// made no sense proves it is still on the line. \[inferred\]
+fn is_device_loss(e: &session::Error) -> bool {
+    use session::Error as S;
+    !matches!(
+        e,
+        S::Protocol(_) | S::Rejected { .. } | S::Decode(_) | S::Frame(_)
+    )
+}
+
 /// Open the pipe with `open` on a dedicated thread and run a worker there.
 pub fn spawn<T, C, O>(open: O, clock: C, config: WorkerConfig, sink: impl EventSink) -> WorkerHandle
 where
@@ -2080,7 +2157,27 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, None)
+    spawn_inner(open, clock, config, store, sink, stop, None, None)
+}
+
+/// [`spawn_with_store`] for a meter that can hold a PDM session: while
+/// `pdm_open` says one is open, a stream error that is not a device loss
+/// does not end the session.
+pub fn spawn_watching_pdm<T, C, O>(
+    open: O,
+    clock: C,
+    config: WorkerConfig,
+    store: SessionStore,
+    sink: impl EventSink,
+    stop: Arc<AtomicBool>,
+    pdm_open: PdmOpen,
+) -> WorkerHandle
+where
+    T: Transport,
+    C: Clock + Clone + Send + 'static,
+    O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
+{
+    spawn_inner(open, clock, config, store, sink, stop, None, Some(pdm_open))
 }
 
 /// [`spawn_with_store`] adding the wall time the worker spends blocked in
@@ -2099,9 +2196,10 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, Some(meter))
+    spawn_inner(open, clock, config, store, sink, stop, Some(meter), None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_inner<T, C, O>(
     open: O,
     clock: C,
@@ -2110,6 +2208,7 @@ fn spawn_inner<T, C, O>(
     sink: impl EventSink,
     stop: Arc<AtomicBool>,
     meter: Option<BlockedMeter>,
+    pdm_open: Option<PdmOpen>,
 ) -> WorkerHandle
 where
     T: Transport,
@@ -2142,6 +2241,7 @@ where
         for item in queued {
             let ran = catch_unwind(AssertUnwindSafe(|| match item {
                 Forward::Event(event) => {
+                    let event = *event;
                     let batch = matches!(event, BackendEvent::Batch(_));
                     marking(event);
                     if batch {
@@ -2175,11 +2275,12 @@ where
                 worker_sink,
                 depth,
                 meter,
+                pdm_open,
             )
         }));
         if let Err(payload) = ran {
-            let _ = sink.send(Forward::Event(disconnected(Some(ui_error::from_panic(
-                payload.as_ref(),
+            let _ = sink.send(Forward::Event(Box::new(disconnected(Some(
+                ui_error::from_panic(payload.as_ref()),
             )))));
         }
         // Every event is out before the thread ends, so a reconnect or an
@@ -2212,6 +2313,7 @@ fn run_worker<T, C, O>(
     sink: mpsc::Sender<Forward>,
     depth: Arc<AtomicUsize>,
     meter: Option<BlockedMeter>,
+    pdm_open: Option<PdmOpen>,
 ) where
     T: Transport,
     C: Clock + Clone,
@@ -2236,7 +2338,7 @@ fn run_worker<T, C, O>(
             depth.fetch_add(1, Ordering::SeqCst);
         }
         blocked(forward_meter.as_ref(), || {
-            let _ = sink.send(Forward::Event(event));
+            let _ = sink.send(Forward::Event(Box::new(event)));
         });
     });
     let opened = open()
@@ -2256,6 +2358,7 @@ fn run_worker<T, C, O>(
             return;
         }
     };
+    worker.pdm_open = pdm_open;
     'run: while !stop.load(Ordering::SeqCst) {
         loop {
             match inbox.try_recv() {

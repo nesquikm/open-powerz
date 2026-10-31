@@ -14,7 +14,11 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p powerz-pd --no-deps --locked --open
 ```
 
 This page is a map of the public items. Every item is exported from the crate
-root.
+root. Public enums are `#[non_exhaustive]`: match them with a wildcard arm, as
+new variants may be added. Visibility rule: the `decode` of a whole wire value
+(header, data object, message body, such as `Vdm::decode`,
+`Request::against_caps` and `Request::with_copy`) is `pub`; a decoder of one
+variant's body stays private to its module.
 
 ## Decoding a capture
 
@@ -28,7 +32,7 @@ against the offer it points at) and the chunks of a long extended message.
 | `Input<'a>` | `Message { sop: u8, header: u16, body: &'a [u8] }` (the meter's SOP code, the 16-bit header, the bytes after it), `HardReset`, `CableReset`, `Attach`, `Detach` |
 | `Decoded` | `header: Header`, `extended_header: Option<ExtendedHeader>`, `message: Message`, `issues: Vec<Issue>`; `summary(&self) -> String` (one line for the packet table, starting with the type name); `fields(&self) -> Vec<Field>` (the field tree) |
 | `Message` | The typed body: `Control`, `SourceCapabilities(Vec<SourcePdo>)`, `SinkCapabilities(Vec<SinkPdo>)`, `Request(Request)`, `EprRequest(Request)`, `Vdm(Vdm)`, `EprMode(EprMode)`, `ExtendedControl(ExtendedControl)`, `EprSourceCapabilities(Vec<SourcePdo>)` and `EprSinkCapabilities(Vec<SinkPdo>)` (reassembled when chunked), `Chunk { chunk_number, data_size }`, `ChunkRequest { chunk_number }`, `Data(Vec<u32>)` and `Extended(Vec<u8>)` for types without a typed body |
-| `Issue` | Problems found while decoding: `NoSourceCapabilities`, `PositionOutOfRange { position, available }`, `MissingChunk { expected, got }`, `ShortBody { expected, got }` |
+| `Issue` | Implements `Display` (a readable sentence with its numbers). Problems found while decoding: `NoSourceCapabilities`, `PositionOutOfRange { position, available }`, `MissingChunk { expected, got }`, `ShortBody { expected, got }` |
 
 The decoder never panics on any input; anything it cannot type is kept raw.
 
@@ -66,7 +70,7 @@ The decoder never panics on any input; anything it cannot type is kept raw.
 
 | item | signature or contents |
 |---|---|
-| `Vdm` | `header: VdmHeader`, `body: VdmBody` |
+| `Vdm` | `header: VdmHeader`, `body: VdmBody`; `Vdm::decode(objects: &[u32], sop: Sop) -> Option<Vdm>` (`None` without a header object) |
 | `VdmHeader` | `Structured(StructuredVdmHeader)` or unstructured (`UnstructuredVdmHeader`); `VdmHeader::decode(raw: u32) -> VdmHeader` |
 | `VdmBody` | `DiscoverIdentity(DiscoverIdentity)`, `DiscoverSvids(Vec<u16>)`, `DiscoverModes(Vec<u32>)`, `Objects(Vec<u32>)` |
 | `VdmCommand` | `name(self) -> String` (for example `Discover Identity`) |

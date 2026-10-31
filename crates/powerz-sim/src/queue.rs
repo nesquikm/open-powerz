@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use crate::{Sample, Scenario};
+use crate::{Measured, Sample};
 
 /// Records one reply (and the meter's buffer) holds: the 6-bit `chunk`.
 pub(crate) const MAX_RECORDS: usize = 63;
@@ -56,7 +56,7 @@ impl AdcQueue {
 
     /// Produce every record due up to `now`; the oldest are dropped when the
     /// buffer overflows.
-    pub(crate) fn fill(&mut self, scenario: Scenario, now: u64) {
+    pub(crate) fn fill(&mut self, measured: Measured, now: u64) {
         if self.next_ms > now {
             return;
         }
@@ -69,7 +69,7 @@ impl AdcQueue {
         while self.next_ms <= now {
             let t = self.next_ms;
             self.records
-                .push_back(record(&scenario.sample(t), t, self.code));
+                .push_back(record(&measured.sample(t), t, self.code));
             if self.records.len() > MAX_RECORDS {
                 self.records.pop_front();
             }

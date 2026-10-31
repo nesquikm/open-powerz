@@ -462,15 +462,10 @@ fn the_update_takes_the_meter_from_the_stream_and_refuses_everything_else_until_
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(sent(&logs), before, "frames were sent during the update");
 
-    // The stream, PD capture (and recording), triggering and device
-    // switching are all refused while the update holds the meter.
+    // The stream, PD capture (and recording) and triggering are all refused
+    // while the update holds the meter.
     let (_e2, sink2) = capture(&clock);
     refused_for_update("reconnecting the stream", m.connect(&id, 50, sink2));
-    let (_e3, sink3) = capture(&clock);
-    refused_for_update(
-        "switching to the demo device",
-        m.connect("demo:idle", 50, sink3),
-    );
     refused_for_update("the session control (PD capture, recording)", m.control());
     refused_for_update("opening a trigger session", m.trigger_opener());
     refused_for_update("a second update", m.begin_flash(&id));
@@ -479,6 +474,12 @@ fn the_update_takes_the_meter_from_the_stream_and_refuses_everything_else_until_
         "a re-enumerated meter reconnected during the update"
     );
     assert_eq!(sent(&logs), before, "a refused request reached the meter");
+
+    // Another meter is not held by the update (AC-4PJRVM.4).
+    let (_e3, sink3) = capture(&clock);
+    m.connect("demo:idle", 50, sink3)
+        .unwrap_or_else(|e| panic!("the other meter did not connect: {e:?}"));
+    assert_eq!(sent(&logs), before, "the other meter reached this one");
 
     // Released afterwards: the meter connects again.
     drop(lease);
@@ -521,4 +522,110 @@ fn an_unlisted_meter_cannot_be_taken_for_an_update() {
         Ok(_) => panic!("an unlisted meter was taken"),
     };
     assert_eq!(e.kind, ErrorKind::Usage, "{e:?}");
+}
+
+/// AC-4PJRVM.4: a real meter that may be the flash target at a new address
+/// stays refused; one that cannot be it connects.
+#[test]
+fn a_meter_that_may_be_the_flash_target_at_a_new_address_is_refused() {
+    let clock = clock();
+    let opener = LoggingOpener {
+        clock: clock.clone(),
+        logs: Arc::default(),
+    };
+    let entries = Arc::new(Mutex::new(vec![listed("APP", 4)]));
+    let listing = Arc::clone(&entries);
+    let mut m = DeviceManager::new(
+        move || Ok(listing.lock().unwrap().clone()),
+        opener,
+        clock.clone(),
+    );
+    let id = m
+        .list_devices()
+        .iter()
+        .find(|d| d.demo_scenario.is_none())
+        .expect("the meter is listed")
+        .id
+        .clone();
+    let _lease = m
+        .begin_flash(&id)
+        .unwrap_or_else(|e| panic!("the update could not take its target: {e:?}"));
+
+    let moved = |entry: DeviceEntry| DeviceEntry {
+        address: 9,
+        ..entry
+    };
+    let same_serial = moved(listed("APP", 4));
+    let no_serial = DeviceEntry {
+        serial: None,
+        ..moved(listed("APP", 5))
+    };
+    let unknown_mode = DeviceEntry {
+        interface_string: None,
+        ..moved(listed("APP", 5))
+    };
+    let bootloader = moved(listed("BOOT", 5));
+    for (what, entry) in [
+        ("the same serial", same_serial),
+        ("no serial", no_serial),
+        ("a mode it cannot read", unknown_mode),
+        ("bootloader mode", bootloader),
+    ] {
+        *entries.lock().unwrap() = vec![entry];
+        let new_id = m
+            .list_devices()
+            .iter()
+            .find(|d| d.demo_scenario.is_none())
+            .expect("the meter is listed")
+            .id
+            .clone();
+        let (_events, sink) = capture(&clock);
+        refused_for_update(what, m.connect(&new_id, 50, sink));
+    }
+
+    *entries.lock().unwrap() = vec![listed("APP", 5)];
+    let other = m
+        .list_devices()
+        .iter()
+        .find(|d| d.demo_scenario.is_none())
+        .expect("the meter is listed")
+        .id
+        .clone();
+    let (_events, sink) = capture(&clock);
+    m.connect(&other, 50, sink)
+        .unwrap_or_else(|e| panic!("another meter was refused: {e:?}"));
+}
+
+#[test]
+fn an_update_of_another_device_leaves_the_connected_meter_alone() {
+    // FR 4PJRVJ, AC .2.
+    let clock = clock();
+    let opener = LoggingOpener {
+        clock: clock.clone(),
+        logs: Arc::default(),
+    };
+    let mut m = DeviceManager::new(|| Ok(vec![listed("APP", 4)]), opener, clock.clone());
+    let devices = m.list_devices();
+    let id = devices
+        .iter()
+        .find(|d| d.demo_scenario.is_none())
+        .expect("the meter is listed")
+        .id
+        .clone();
+    let other = devices
+        .iter()
+        .find(|d| d.demo_scenario.is_some())
+        .expect("a demo device is listed")
+        .id
+        .clone();
+    let (events, sink) = capture(&clock);
+    m.connect(&id, 50, sink)
+        .unwrap_or_else(|e| panic!("the meter did not connect: {e:?}"));
+    wait_connected(&events, 0);
+
+    let _lease = m
+        .begin_flash(&other)
+        .unwrap_or_else(|e| panic!("the update could not take its target: {e:?}"));
+    assert_eq!(m.running_ids(), vec![id.clone()], "the meter keeps running");
+    assert!(m.control_for(&id).is_ok(), "and is not refused");
 }

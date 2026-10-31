@@ -4,7 +4,7 @@
    * Display only: choosing the file and updating the meter live elsewhere.
    */
   import type { FirmwareFileInfo } from "../backend";
-  import { firmwareFileRows, firmwareNotes } from "../firmwareFile";
+  import { firmwareFileRows, firmwareNotes, notesNumbered } from "../firmwareFile";
 
   let {
     info,
@@ -26,7 +26,7 @@
   </dl>
   <h3>Release notes</h3>
   {#if notes.length > 0}
-    <ul>
+    <ul class:numbered={notesNumbered(notes)}>
       {#each notes as line, i (i)}<li>{line}</li>{/each}
     </ul>
   {:else}
@@ -59,6 +59,10 @@
   ul {
     margin: 0;
     padding-left: 1.25rem;
+  }
+  ul.numbered {
+    list-style: none;
+    padding-left: 0;
   }
   .none {
     margin: 0;

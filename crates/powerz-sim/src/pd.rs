@@ -311,6 +311,21 @@ fn vbus_at(t: u64) -> u16 {
         .map_or(0, |(_, mv)| *mv)
 }
 
+/// The VBUS contract of a capture being played: what the meter measures
+/// from the sniffer start on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Contract {
+    /// Uptime the sniffer was started at.
+    start: u64,
+}
+
+impl Contract {
+    /// VBUS at uptime `t_ms`, mV; `None` before the sniffer start.
+    pub(crate) fn mv_at(self, t_ms: u64) -> Option<u16> {
+        t_ms.checked_sub(self.start).map(vbus_at)
+    }
+}
+
 /// The sniffer state of the simulated meter.
 #[derive(Debug, Default)]
 pub(crate) struct PdSniffer {
@@ -341,6 +356,12 @@ impl PdSniffer {
         self.started = None;
         self.script.clear();
         self.ready.clear();
+    }
+
+    /// The contract being played, if a scenario is playing.
+    pub(crate) fn contract(&self) -> Option<Contract> {
+        self.scenario?;
+        self.started.map(|start| Contract { start })
     }
 
     /// One PD_PACKET payload at uptime `now`: the status block, then the

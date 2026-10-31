@@ -138,6 +138,8 @@ export class MeterSettingsPanel {
   applying = $state(false);
   /** Set to SAVED_NOTICE after a successful write; cleared by the next edit. */
   notice = $state<string | null>(null);
+  /** The warnings of the last write; cleared by the next edit. */
+  warnings = $state<string[]>([]);
   readonly #read: () => Promise<MeterSettings>;
   readonly #write: (changes: SettingChanges) => Promise<MeterSettings>;
   /** Bumped on disconnect and on each read, so a stale answer is dropped. */
@@ -175,6 +177,7 @@ export class MeterSettingsPanel {
     this.draft = settingCodes(this.settings);
     this.error = null;
     this.notice = null;
+    this.warnings = [];
     this.editing = true;
   }
 
@@ -207,6 +210,7 @@ export class MeterSettingsPanel {
       this.settings = after;
       this.error = null;
       this.notice = SAVED_NOTICE;
+      this.warnings = after.warnings ?? [];
       this.editing = false;
       this.draft = {};
     } catch (e) {
@@ -248,6 +252,7 @@ export class MeterSettingsPanel {
     this.settings = null;
     this.error = null;
     this.notice = null;
+    this.warnings = [];
     this.loading = false;
     this.editing = false;
     this.draft = {};

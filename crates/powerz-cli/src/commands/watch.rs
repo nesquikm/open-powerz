@@ -11,7 +11,7 @@ use powerz_protocol::transport::Transport;
 
 use super::stream::{MAX_START_ECHOES, too_many_echoes};
 use crate::error::CliError;
-use crate::output::{Reading, write_adc_line, write_adc_lines};
+use crate::output::{Reading, is_closed_pipe, write_adc_line, write_adc_lines};
 
 /// Record rate `watch --source cdc` asks the ADCNEW stream for: fresher
 /// than any `--interval` allows, light on the port.
@@ -33,7 +33,8 @@ pub struct WatchOptions {
 
 /// `powerz watch`: checks `stop` before every refresh; each refresh reads one
 /// ADC snapshot, draws it, then calls `sleep(interval)`. Returns `Ok` once
-/// `stop` is set (Ctrl-C).
+/// `stop` is set (Ctrl-C); a closed output pipe ends it with
+/// [`CliError::OutputClosed`].
 pub fn watch<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     opts: &WatchOptions,
@@ -54,7 +55,7 @@ pub fn watch<T: Transport, C: Clock>(
 /// only, no sign-in, no CONNECT), then on every refresh draw the latest
 /// pushed record in the same format as [`watch`] (temperature `-`: records
 /// carry none) and call `sleep(interval)`. The stream is stopped (`03`)
-/// when `stop` is set or a refresh fails. Fails at once where the pipe has
+/// when `stop` is set, the output pipe closes or a refresh fails. Fails at once where the pipe has
 /// no ADCNEW stream (anything but CDC).
 pub fn watch_cdc<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
@@ -123,12 +124,28 @@ struct View {
 }
 
 impl View {
+    /// Draw one refresh; a closed output pipe is [`CliError::OutputClosed`].
     fn draw(
         &mut self,
         opts: &WatchOptions,
         reading: &Reading,
         out: &mut dyn Write,
     ) -> Result<(), CliError> {
+        self.write(opts, reading, out).map_err(|e| {
+            if is_closed_pipe(&e) {
+                CliError::OutputClosed
+            } else {
+                e.into()
+            }
+        })
+    }
+
+    fn write(
+        &mut self,
+        opts: &WatchOptions,
+        reading: &Reading,
+        out: &mut dyn Write,
+    ) -> std::io::Result<()> {
         if opts.tty {
             let mut view = Vec::new();
             write_adc_lines(&mut view, reading)?;
@@ -141,7 +158,6 @@ impl View {
         } else {
             write_adc_line(out, reading)?;
         }
-        out.flush()?;
-        Ok(())
+        out.flush()
     }
 }

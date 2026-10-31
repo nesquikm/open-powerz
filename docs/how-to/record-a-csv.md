@@ -44,8 +44,11 @@ Measurement source picker before connecting.
 
 The desktop app writes the same CSV layout.
 
-- **Record** asks for a file name, then writes every sample from that moment
-  until you press Stop. The sample rate is locked while it runs.
+- **Record** starts at once, on a new file in your Downloads folder under
+  `open-powerz-recordings` (the app's data folder if there is no Downloads
+  folder), and writes every sample until you press Stop. Stop then asks where
+  to keep the file; cancel and it stays where it is. The sample rate is locked
+  while it runs.
 - **Export** saves everything the session history holds so far.
 
 After a recording stops or an export finishes, a notice names the rows written

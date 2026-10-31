@@ -3,6 +3,8 @@
 
 import { SvelteMap } from "svelte/reactivity";
 import type { BackendEvent, DeviceListing, RecordingSnapshot } from "./backend";
+import type { PdCapture } from "./pdCapture.svelte";
+import { ExportJob, Recording } from "./recording.svelte";
 import { Session } from "./session.svelte";
 
 /** A session end the user asked for (a disconnect), not an unplug or a failure. */
@@ -12,30 +14,35 @@ function askedToEnd(event: BackendEvent): boolean {
   );
 }
 
-/** One connected meter: its picker entry and its session store. */
+/** One connected meter: its picker entry, its session store, and its own recording and
+ * export while it is outside the full view (the full view's meter uses the app's). */
 export interface MeterEntry {
   listing: DeviceListing;
   session: Session;
+  recording: Recording;
+  exportJob: ExportJob;
 }
 
 export class Meters {
-  /** Every meter, in the order they were added. */
+  /** Every meter, in the order they were added (or {@link arrange}d). */
   #entries = $state.raw<MeterEntry[]>([]);
+  /** The PD capture of each meter that left the full view with one running (AC-4PJRVM.4). */
+  #parkedPd = new SvelteMap<string, PdCapture>();
+  /** The order a reload found the meters in, for the ones still to join (AC-4PJRVM.3). */
+  #order: string[] = [];
   /** The tile shown in the full single-meter view, null for the grid. */
   expandedId = $state<string | null>(null);
   /** The meter of the full single-meter view: the id it was connected with, which keeps
    * naming it after a replug moved it to another address; null when the view shows none.
    * It holds through an unplug, the wait and the replug, until the user ends it. */
   fullViewId = $state<string | null>(null);
-  /** Recordings of meters that left the full view while recording, by device id. */
-  #parked = new SvelteMap<string, RecordingSnapshot>();
 
-  /** The meters' device ids, in the order they were added. */
+  /** The meters' device ids, in tile order. */
   get ids(): string[] {
     return this.#entries.map((e) => e.listing.id);
   }
 
-  /** Every meter, in the order they were added. */
+  /** Every meter, in tile order. */
   get entries(): readonly MeterEntry[] {
     return this.#entries;
   }
@@ -49,23 +56,38 @@ export class Meters {
   add(listing: DeviceListing, session: Session = new Session()): MeterEntry {
     const held = this.get(listing.id);
     if (held) return held;
-    const entry = { listing, session };
-    this.#entries = [...this.#entries, entry];
+    const entry = { listing, session, recording: new Recording(), exportJob: new ExportJob() };
+    this.#entries = this.#arranged([...this.#entries, entry]);
     return entry;
+  }
+
+  /** Puts the meters in the backend's connection order `ids`, whichever a reload attaches
+   * first (AC-4PJRVM.3): the ones held now, and the ones that join later. */
+  arrange(ids: string[]): void {
+    this.#order = ids;
+    this.#entries = this.#arranged(this.#entries);
+  }
+
+  /** `entries` in the {@link arrange}d order; a meter outside it keeps its place at the end. */
+  #arranged(entries: MeterEntry[]): MeterEntry[] {
+    const rank = (e: MeterEntry) => {
+      const at = this.#order.indexOf(e.listing.id);
+      return at === -1 ? this.#order.length : at;
+    };
+    return [...entries].sort((a, b) => rank(a) - rank(b));
   }
 
   /** Gives meter `id` another session store; one it does not hold is ignored. */
   replace(id: string, session: Session): void {
-    this.#entries = this.#entries.map((e) =>
-      e.listing.id === id ? { listing: e.listing, session } : e,
-    );
+    this.#entries = this.#entries.map((e) => (e.listing.id === id ? { ...e, session } : e));
   }
 
   /** Drops a meter, with any recording parked for it; an expanded one goes back to the
    * grid of the rest. */
   remove(id: string): void {
     this.#entries = this.#entries.filter((e) => e.listing.id !== id);
-    this.#parked.delete(id);
+    this.#order = this.#order.filter((o) => o !== id);
+    this.#parkedPd.delete(id);
     if (this.expandedId === id) this.expandedId = null;
   }
 
@@ -76,14 +98,15 @@ export class Meters {
 
   /** Routes an event of meter `id`, outside the full view, to its tile. A disconnect the
    * user asked for takes the tile away; an unplug keeps it, to show the wait and the replug.
-   * A recording that ends with the session, or on its own, leaves nothing parked. */
+   * Its recording follows the events too, and ends with the session. */
   handleTileEvent(id: string, event: BackendEvent): void {
     this.handleEvent(id, event);
-    const ended =
-      (event.type === "recording" &&
-        (event.data.state === "stopped" || event.data.state === "failed")) ||
-      (event.type === "status" && event.data.state === "disconnected");
-    if (ended) this.#parked.delete(id);
+    this.#parkedPd.get(id)?.handleEvent(event);
+    const recording = this.get(id)?.recording;
+    if (event.type === "recording") recording?.handleEvent(event.data);
+    if (event.type === "status" && event.data.state === "disconnected") {
+      recording?.sessionEnded();
+    }
     if (askedToEnd(event)) this.remove(id);
   }
 
@@ -109,16 +132,31 @@ export class Meters {
     }
   }
 
+  /** Keeps meter `id`'s PD capture going while the meter is away from the full view. */
+  parkPd(id: string, capture: PdCapture): void {
+    this.#parkedPd.set(id, capture);
+  }
+
+  /** Takes back meter `id`'s parked PD capture, if it has one. */
+  unparkPd(id: string): PdCapture | undefined {
+    const capture = this.#parkedPd.get(id);
+    this.#parkedPd.delete(id);
+    return capture;
+  }
+
   /** Keeps meter `id`'s recording while the meter is away from the full view. */
   park(id: string, recording: RecordingSnapshot): void {
-    this.#parked.set(id, recording);
+    this.get(id)?.recording.adopt(recording);
+  }
+
+  /** A recording is parked for meter `id`. */
+  hasParked(id: string): boolean {
+    return this.get(id)?.recording.phase === "recording";
   }
 
   /** The recording parked for meter `id`, once; undefined when none. */
   unpark(id: string): RecordingSnapshot | undefined {
-    const rec = this.#parked.get(id);
-    this.#parked.delete(id);
-    return rec;
+    return this.get(id)?.recording.detach() ?? undefined;
   }
 
   /** The grid shows for two meters or more, unless one tile is expanded. */

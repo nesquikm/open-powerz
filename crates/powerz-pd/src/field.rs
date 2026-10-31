@@ -15,6 +15,7 @@ pub struct BitRange {
 
 /// Why a field value deserves attention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Flag {
     /// A reserved value, or a reserved bit that is set.
     Reserved,

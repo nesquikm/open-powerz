@@ -140,7 +140,162 @@ describe("AC-DGSQ6T.5: above 5 V needs the confirmation", () => {
     expect(r.command).toBe("pd data=0082102CB10423");
     expect(backend.triggerCommands().slice(before)).toEqual([
       "hello meter",
+      "entry pd",
       "pd data=0082102CB10423",
     ]);
+  });
+});
+
+describe("AC-4PJRVH.8: the mock mirrors the shipped trigger rules", () => {
+  const CONTROL_13: PdMessageRequest = { sop: "sop", msg_type: 13, data_objects: [] };
+
+  describe("PD entry before built messages", () => {
+    it("enters PD first when another protocol was entered last", async () => {
+      const backend = await opened();
+      await backend.triggerList("qc");
+      const before = backend.triggerCommands().length;
+
+      await backend.triggerMessageSend(CONTROL_13, false);
+
+      expect(backend.triggerCommands().slice(before).at(0)).toBe("entry pd");
+      expect(backend.triggerCommands().at(-1)).toBe("pd cmd=13");
+    });
+
+    it("enters PD first when nothing was entered yet", async () => {
+      const backend = await opened();
+      await backend.triggerMessageSend(CONTROL_13, false);
+      expect(backend.triggerCommands().slice(1).at(0)).toBe("entry pd");
+    });
+
+    it("the Discover Identity preset enters PD first too", async () => {
+      const backend = await opened();
+      await backend.triggerList("qc");
+      const before = backend.triggerCommands().length;
+
+      await backend.triggerMessageSend(DISCOVER_CABLE, true);
+
+      expect(backend.triggerCommands().slice(before).at(0)).toBe("entry pd");
+    });
+
+    it("does not enter again with PD entered last", async () => {
+      const backend = await opened();
+      await backend.triggerList("pd");
+      const before = backend.triggerCommands().length;
+
+      await backend.triggerMessageSend(CONTROL_13, false);
+
+      expect(backend.triggerCommands().slice(before)).toEqual(["pd cmd=13"]);
+    });
+
+    it("a refused message enters nothing", async () => {
+      const backend = await opened();
+      await backend.triggerList("qc");
+      const before = backend.triggerCommands().length;
+
+      await expect(backend.triggerMessageSend(REQUEST_9V, false)).rejects.toMatchObject({
+        kind: "usage",
+      });
+
+      expect(backend.triggerCommands().slice(before)).toEqual([]);
+    });
+
+    it("Back to 5 V after a built message goes through PD", async () => {
+      const backend = await opened();
+      await backend.triggerList("qc");
+      await backend.triggerMessageSend(CONTROL_13, false);
+
+      await backend.triggerBackTo5v();
+
+      expect(backend.triggerCommands().at(-1)).toBe("pd req=1");
+    });
+  });
+
+  describe("cable match by VDM", () => {
+    it.each<[string, PdMessageRequest]>([
+      ["SVDM version 1.0", { sop: "sop_prime", msg_type: 15, data_objects: [0xff008001] }],
+      ["the far plug", { sop: "sop_double_prime", msg_type: 15, data_objects: [0xff00a801] }],
+      ["extra objects", { sop: "sop_prime", msg_type: 15, data_objects: [0xff00a801, 0] }],
+    ])("a Discover Identity REQ is answered: %s", async (_name, message) => {
+      const backend = await opened();
+      const reply = await backend.triggerMessageSend(message, true);
+      expect(reply.cable?.vid).toBe(0x050d);
+    });
+
+    it.each<[string, PdMessageRequest]>([
+      ["an ACK", { sop: "sop_prime", msg_type: 15, data_objects: [0xff00a841] }],
+      ["Discover SVIDs", { sop: "sop_prime", msg_type: 15, data_objects: [0xff00a802] }],
+      ["an unstructured VDM", { sop: "sop_prime", msg_type: 15, data_objects: [0xff002801] }],
+      ["to the charger", { sop: "sop", msg_type: 15, data_objects: [0xff00a801] }],
+    ])("anything else is not: %s", async (_name, message) => {
+      const backend = await opened();
+      const reply = await backend.triggerMessageSend(message, true);
+      expect(reply.cable).toBeNull();
+    });
+  });
+
+  describe("swaps above 5 V", () => {
+    it.each([9, 10, 11, 19])("console pd cmd=%i needs a confirmation", async (ty) => {
+      const backend = await opened();
+      const before = backend.triggerCommands().length;
+
+      expect(await backend.triggerConsoleRisk(`pd cmd=${ty}`)).toBe("above_5v");
+      await expect(backend.triggerConsoleSend(`pd cmd=${ty}`, false)).rejects.toMatchObject({
+        kind: "usage",
+      });
+
+      expect(backend.triggerCommands().slice(before)).toEqual([]);
+    });
+
+    it.each([9, 10, 11, 19])("a built swap of type %i needs a confirmation", async (ty) => {
+      const backend = await opened();
+      await backend.triggerList("pd");
+      const before = backend.triggerCommands().length;
+
+      for (const sop of ["sop", "sop_prime"] as const) {
+        const swap: PdMessageRequest = { sop, msg_type: ty, data_objects: [] };
+        expect(await backend.triggerMessageRisk(swap)).toBe("above_5v");
+        await expect(backend.triggerMessageSend(swap, false)).rejects.toMatchObject({
+          kind: "usage",
+        });
+      }
+
+      expect(backend.triggerCommands().slice(before)).toEqual([]);
+    });
+
+    it("other control messages stay at most 5 V", async () => {
+      const backend = await opened();
+      expect(await backend.triggerConsoleRisk("pd cmd=13")).toBe("at_most_5v");
+      expect(await backend.triggerMessageRisk(CONTROL_13)).toBe("at_most_5v");
+    });
+  });
+
+  describe("reserved control types", () => {
+    it.each([0, 0x19, 0x1f])("control type %i is refused as reserved", async (ty) => {
+      const backend = await opened();
+      await backend.triggerList("pd");
+      const before = backend.triggerCommands().length;
+      const message: PdMessageRequest = { sop: "sop", msg_type: ty, data_objects: [] };
+
+      await expect(backend.triggerMessageRisk(message)).rejects.toMatchObject({
+        kind: "usage",
+        message: expect.stringMatching(/reserved/i),
+      });
+      await expect(backend.triggerMessageSend(message, true)).rejects.toMatchObject({
+        kind: "usage",
+        message: expect.stringMatching(/reserved/i),
+      });
+
+      expect(backend.triggerCommands().slice(before)).toEqual([]);
+    });
+
+    it("type 2 without objects is a data message missing its object, not reserved", async () => {
+      const backend = await opened();
+      await expect(
+        backend.triggerMessageSend({ sop: "sop", msg_type: 2, data_objects: [] }, true),
+      ).rejects.toMatchObject({
+        kind: "usage",
+        message: expect.stringMatching(/data object/i),
+      });
+    });
   });
 });

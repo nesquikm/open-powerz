@@ -769,3 +769,62 @@ describe("AC-DGSQ6R.8: the entry checks and the list disagree", () => {
     }
   });
 });
+
+describe("AC-4PJRVH.1: the result never mixes an old and a new request", () => {
+  it("Back to 5 V drops the old request's command and delivered values", async () => {
+    const { panel } = await detected();
+    await at9V(panel);
+    expect(panel.reply?.command).toBe("pd req=2");
+    expect(panel.reply?.delivered_mv).toBe(8865);
+
+    await panel.backTo5v();
+
+    // The card reads `requestedMv` next to `reply`: 5 V beside `pd req=2` is the mix.
+    expect(panel.requestedMv).toBe(5000);
+    expect(panel.reply?.command).not.toBe("pd req=2");
+    expect(panel.reply?.delivered_mv).not.toBe(8865);
+  });
+
+  it("Back to 5 V drops an old request's failure", async () => {
+    const { api, panel } = await detected();
+    const refused: UiError = { kind: "protocol", message: "req error 252", hint: null };
+    api.request = async () => {
+      throw refused;
+    };
+    await panel.ask(PD_5V);
+    expect(panel.requestFailure).toEqual(refused);
+
+    await panel.backTo5v();
+
+    expect(panel.requestFailure).toBeNull();
+  });
+
+  it("a Back to 5 V that failed leaves the last request's result as it was", async () => {
+    const { api, panel } = await detected();
+    await at9V(panel);
+    api.backTo5v = async () => {
+      throw { kind: "protocol", message: "no answer", hint: null } satisfies UiError;
+    };
+
+    await panel.backTo5v();
+
+    // VBUS is still at the old request, and the card still says so.
+    expect(panel.reply?.command).toBe("pd req=2");
+    expect(panel.requestedMv).toBe(9000);
+  });
+
+  it("a Back to 5 V answered after the session ended leaves no card behind", async () => {
+    const { api, panel } = await detected();
+    await at9V(panel);
+    let answer = () => {};
+    api.backTo5v = () => new Promise<void>((resolve) => (answer = resolve));
+
+    const back = panel.backTo5v();
+    panel.handleEvent({ type: "status", data: { state: "disconnected" } } as BackendEvent);
+    answer();
+    await back;
+
+    expect(panel.reply).toBeNull();
+    expect(panel.requestedMv).toBeNull();
+  });
+});

@@ -69,6 +69,13 @@ pub enum Error {
     /// No matching device or port was found.
     #[error("no matching device found")]
     NotFound,
+    /// Discovery listed the meter's serial port, but opening it failed the
+    /// way a port someone else holds does.
+    #[error("the meter's serial port {port} is in use by another program")]
+    PortHeld {
+        /// Port name or path.
+        port: String,
+    },
     /// The mock transport saw something its script did not expect.
     #[error("mock transport: {0}")]
     Mock(String),
@@ -182,6 +189,11 @@ pub fn map_io_error(err: &std::io::Error, target_os: &str) -> Error {
         | ErrorKind::UnexpectedEof
         | ErrorKind::NotFound => Error::Disconnected,
         ErrorKind::PermissionDenied => permission_error(target_os, &err.to_string()),
+        // ENXIO and ENODEV, what a serial port read answers once the cable is
+        // out; the same numbers mean something else on Windows.
+        _ if target_os != "windows" && matches!(err.raw_os_error(), Some(6 | 19)) => {
+            Error::Disconnected
+        }
         _ => Error::Io(err.to_string()),
     }
 }
@@ -280,6 +292,19 @@ mod tests {
         for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::NotConnected] {
             let e = io::Error::new(kind, "gone");
             assert_eq!(map_io_error(&e, "macos"), Error::Disconnected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn map_io_error_no_such_device_codes_are_disconnected_off_windows() {
+        for code in [6, 19] {
+            let e = io::Error::from_raw_os_error(code);
+            assert_eq!(map_io_error(&e, "macos"), Error::Disconnected, "{code}");
+            assert_eq!(map_io_error(&e, "linux"), Error::Disconnected, "{code}");
+            assert!(
+                matches!(map_io_error(&e, "windows"), Error::Io(_)),
+                "{code}"
+            );
         }
     }
 

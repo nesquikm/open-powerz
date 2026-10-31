@@ -7,9 +7,14 @@ use powerz_protocol::pd::{self, Decoded, Field, PowerRole, Sop, SpecRevision};
 use powerz_protocol::pdcap;
 use powerz_protocol::session::CapturedRecord;
 use serde::Serialize;
+use std::collections::VecDeque;
 
 /// Least time between two `pd_rows` batches, ms (at most 60 a second).
 pub const ROW_BATCH_MS: u64 = 17;
+
+/// Records a capture keeps by default (FR 4PJRVK, AC .3); the UI's store
+/// keeps as many rows (`PD_MAX_ROWS`).
+pub const MAX_RECORDS: usize = 100_000;
 
 /// Kind of a table row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -59,6 +64,18 @@ impl From<PdStatus> for PdStatusSample {
             cc2_v: f64::from(s.cc2_mv) / 1000.0,
         }
     }
+}
+
+/// What a clear answers: where record numbering goes on, and the latest
+/// status time the capture had.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct PdCleared {
+    /// Index of the next record; rows numbered below it are stale.
+    pub next_index: u64,
+    /// Session time (ms) of the latest status sample the capture had at the
+    /// clear, 0 if none. Status samples carry no index, so the page drops
+    /// those at or below this time that arrive after the clear.
+    pub status_floor_ms: u64,
 }
 
 /// One row of the packet table.
@@ -127,15 +144,29 @@ struct Entry {
     decoded: Option<Decoded>,
 }
 
-/// The capture of one PD view: the decoder context, every record so far
+/// How many records a capture keeps.
+#[derive(Debug, Clone, Copy)]
+struct RecordLimit(usize);
+
+impl Default for RecordLimit {
+    fn default() -> RecordLimit {
+        RecordLimit(MAX_RECORDS)
+    }
+}
+
+/// The capture of one PD view: the decoder context, the last `limit` records
 /// and the rows waiting to go out.
 #[derive(Debug, Default)]
 pub struct PdCapture {
     decoder: pd::Capture,
     /// Index of `entries[0]`: indices keep counting across a clear, so rows
-    /// sent before it can never be mistaken for rows after it.
+    /// sent before it can never be mistaken for rows after it, and across
+    /// the records dropped past the limit.
     base: u64,
-    entries: Vec<Entry>,
+    entries: VecDeque<Entry>,
+    limit: RecordLimit,
+    /// Records dropped past the limit since the last clear.
+    dropped: u64,
     rows_out: Outbox<PdRow>,
     /// Added to the elapsed time of the running sniffer run's records.
     run_offset_ms: u64,
@@ -152,7 +183,9 @@ pub struct PdCapture {
     session_offset_ms: i64,
     /// Every status block and record kept so far, in capture order, as a
     /// pdcap file saves them (FR TGE83E).
-    log: Vec<pdcap::Entry>,
+    log: VecDeque<pdcap::Entry>,
+    /// Session time of the latest status sample pushed (0 if none).
+    last_status_ms: u64,
 }
 
 /// Items waiting to go out to the UI, sent in batches at most every
@@ -217,6 +250,7 @@ fn sop_name(sop: Sop) -> String {
         Sop::SopPrimeDebug => "SOP'_Debug".to_owned(),
         Sop::SopDoublePrimeDebug => "SOP''_Debug".to_owned(),
         Sop::Other(n) => format!("SOP {n}"),
+        _ => "SOP ?".to_owned(),
     }
 }
 
@@ -226,6 +260,7 @@ fn revision(rev: SpecRevision) -> String {
         SpecRevision::Rev2 => "2.0",
         SpecRevision::Rev3 => "3.x",
         SpecRevision::Reserved => "Reserved",
+        _ => "Reserved",
     }
     .to_owned()
 }
@@ -298,6 +333,45 @@ impl PdCapture {
         PdCapture::default()
     }
 
+    /// An empty capture keeping at most `max_records` records.
+    pub fn with_limit(max_records: usize) -> PdCapture {
+        PdCapture {
+            limit: RecordLimit(max_records),
+            ..PdCapture::default()
+        }
+    }
+
+    /// How many records this capture keeps.
+    pub fn limit(&self) -> usize {
+        self.limit.0
+    }
+
+    /// Index of the oldest record the capture keeps; rows numbered below it
+    /// were dropped past the limit.
+    pub fn first_index(&self) -> u64 {
+        self.base
+    }
+
+    /// Records dropped past the limit since the last clear.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Drop the oldest records past the limit, with the status blocks
+    /// logged before them. Indices keep counting.
+    fn trim(&mut self) {
+        while self.entries.len() > self.limit.0 {
+            self.entries.pop_front();
+            self.base += 1;
+            self.dropped += 1;
+            while let Some(entry) = self.log.pop_front() {
+                if matches!(entry, pdcap::Entry::Record { .. }) {
+                    break;
+                }
+            }
+        }
+    }
+
     /// A new sniffer run starts: decode it without the last run's context
     /// (the bus may have changed in between) and carry on the table's time,
     /// as the run's own clock starts at 0 again.
@@ -322,10 +396,11 @@ impl PdCapture {
             ..PdStatusSample::from(s)
         });
         if let Some(s) = status {
+            self.last_status_ms = self.last_status_ms.max(s.session_ms);
             self.status_out.push(s);
         }
         if let (Some(raw), Some(s)) = (raw_status, status) {
-            self.log.push(pdcap::Entry::Status {
+            self.log.push_back(pdcap::Entry::Status {
                 session_ms: s.session_ms,
                 status: raw,
             });
@@ -343,13 +418,14 @@ impl PdCapture {
                 offset,
             );
             self.last_elapsed_ms = self.last_elapsed_ms.max(elapsed_ms);
-            self.log.push(pdcap::Entry::Record {
+            self.log.push_back(pdcap::Entry::Record {
                 session_ms,
                 elapsed_ms,
                 record: r.record.clone(),
             });
             self.push_row(&r.record, elapsed_ms, session_ms, vbus_v, ibus_a);
         }
+        self.trim();
     }
 
     /// Decode `record` into the next row and keep it for its details.
@@ -375,7 +451,7 @@ impl PdCapture {
                 } else {
                     Direction::SinkToSource
                 };
-                self.entries.push(Entry {
+                self.entries.push_back(Entry {
                     raw,
                     decoded: decoded.clone(),
                 });
@@ -400,7 +476,7 @@ impl PdCapture {
                     PdRecordKind::Event(e) => event_name(e),
                     _ => "Message".to_owned(),
                 };
-                self.entries.push(Entry {
+                self.entries.push_back(Entry {
                     raw: record.raw.clone(),
                     decoded: None,
                 });
@@ -476,7 +552,7 @@ impl PdCapture {
     /// session time: what a pdcap file saves. Rows already sent to the UI
     /// are included; nothing waiting to go out is taken.
     pub fn to_pdcap(&self) -> Vec<pdcap::Entry> {
-        self.log.clone()
+        self.log.iter().cloned().collect()
     }
 
     /// A capture rebuilt from the entries of a pdcap file: every row and
@@ -506,7 +582,8 @@ impl PdCapture {
                 }
             }
         }
-        pd.log = entries.to_vec();
+        pd.log = entries.iter().cloned().collect();
+        pd.trim();
         pd
     }
 
@@ -522,16 +599,27 @@ impl PdCapture {
         let elapsed_ms = self.last_elapsed_ms.max(session_ms);
         self.last_elapsed_ms = elapsed_ms;
         self.push_row(&record, elapsed_ms, session_ms, vbus_v, ibus_a);
-        self.log.push(pdcap::Entry::Record {
+        self.log.push_back(pdcap::Entry::Record {
             session_ms,
             elapsed_ms,
             record,
         });
+        self.trim();
     }
 
     /// Add one imported status sample for the timeline (FR TGE83E, AC .6).
     pub(crate) fn push_imported_status(&mut self, sample: PdStatusSample) {
+        self.last_status_ms = self.last_status_ms.max(sample.session_ms);
         self.status_out.push(sample);
+    }
+
+    /// [`PdCapture::clear`] with the status floor, as the UI needs it.
+    pub fn clear_with_floor(&mut self) -> PdCleared {
+        let status_floor_ms = self.last_status_ms;
+        PdCleared {
+            next_index: self.clear(),
+            status_floor_ms,
+        }
     }
 
     /// Drop every record and return the index the next one gets; indices
@@ -541,6 +629,7 @@ impl PdCapture {
         self.last_elapsed_ms = 0;
         self.base += self.entries.len() as u64;
         self.entries.clear();
+        self.dropped = 0;
         self.log.clear();
         self.rows_out.clear();
         self.status_out.clear();

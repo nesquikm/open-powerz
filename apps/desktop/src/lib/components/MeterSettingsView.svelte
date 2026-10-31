@@ -131,6 +131,9 @@
     {#if panel.notice}
       <p class="notice" role="status">{panel.notice}</p>
     {/if}
+    {#each panel.warnings as warning (warning)}
+      <p class="notice" role="status">{warning}</p>
+    {/each}
     <dl>
       {#each rows as row (row.key)}
         <div class="row">

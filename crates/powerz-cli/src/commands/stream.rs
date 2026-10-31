@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use powerz_protocol::adcnew::Content;
 use powerz_protocol::decode::Rate;
-use powerz_protocol::session::{Clock, Gap, Session, SnapshotCadence, Streamer};
+use powerz_protocol::session::{
+    Clock, Error as SessionError, Gap, Session, SnapshotCadence, Streamer,
+};
 use powerz_protocol::transport::Transport;
 
 use crate::error::CliError;
@@ -187,10 +189,26 @@ pub fn stream<T: Transport, C: Clock>(
     if let Some(e) = write_err {
         return Err(e.into());
     }
-    stopped?;
+    // After a queue backlog overflow the meter may reject the stop
+    // `[device 2026-10-24]`: the recording is whole, so that is only a note.
+    // Gaps are the only sign of an overflow, so the note does not claim one.
+    let stop_rejected = match stopped {
+        Err(SessionError::Rejected { .. }) if !summary.gaps.is_empty() => true,
+        other => {
+            other?;
+            false
+        }
+    };
     recorder.finish()?;
 
     write_summary(err, &summary)?;
+    if stop_rejected {
+        writeln!(
+            err,
+            "note: the meter rejected the stop request after gaps in the stream; \
+             the recording is complete, but the queue may still be running"
+        )?;
+    }
     Ok(summary)
 }
 

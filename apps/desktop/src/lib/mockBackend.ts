@@ -17,6 +17,7 @@ import type {
   FirmwareFileInfo,
   FlashDone,
   FlashEvent,
+  FlashStatus,
   Gap,
   HistoryGap,
   HistorySeries,
@@ -30,6 +31,7 @@ import type {
   RecordList,
   MinMaxAvg,
   PdDetails,
+  PdCleared,
   PdOpened,
   PdRow,
   PdStatusSample,
@@ -55,8 +57,9 @@ import type {
   MeterCommands,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
-import { DISCOVER_IDENTITY_CABLE, lineRefusal, messageRefusal } from "./console.svelte";
-import { PD_CYCLE_MS, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
+import { lineRefusal, messageRefusal } from "./console.svelte";
+import { CANCEL_TOO_LATE } from "./firmwareUpdate.svelte";
+import { PD_CYCLE_MS, pdContractAt, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
@@ -70,6 +73,12 @@ const PROGRESS_MS = 500;
 function usage(message: string): UiError {
   return { kind: "usage", message, hint: null };
 }
+
+/** `firmware-running`: the update a reloaded page finds running (AC-4PJRVJ.3). */
+const MOCK_RUNNING_FLASH: FlashStatus = {
+  device_id: "demo:idle",
+  stage: { stage: "writing", done: 4096, total: 8192 },
+};
 
 /** Why the mock refuses a request while a firmware update holds the meter (FR V9SK55). */
 const FLASH_REFUSAL = "A firmware update is running. Wait for it to finish before using the meter.";
@@ -398,6 +407,17 @@ const PD_SEED_BATCH = 10_000;
 /** The meter's PD status block period while the sniffer runs, ms (FR TGE83D). */
 const PD_STATUS_MS = 5;
 
+/** What session `s`'s meter reads at session time `tMs`: its scenario, on the PD
+ * contract while a capture runs, so the two tell the same story. */
+function measuredAt(s: Running, tMs: number): Sample {
+  const sample = sampleAt(s.scenario, tMs);
+  if (s.pd.timer === null) return sample;
+  const contract = pdContractAt(tMs - s.pd.sessionOffsetMs);
+  sample.vbus_v = contract.vbus_v + 0.01 * Math.sin(tMs / 140);
+  sample.ibus_a = contract.ibus_a;
+  return sample;
+}
+
 /** The PD capture of a mock session (FR TGE83C). */
 interface MockPdCapture {
   /** The PD sniffer runs. */
@@ -416,6 +436,8 @@ interface MockPdCapture {
   sessionOffsetMs: number;
   /** The row of every captured record, by record index minus `base`. */
   rows: PdRow[];
+  /** Session time of the latest status sample sent, 0 if none. */
+  statusMs: number;
 }
 
 /** A PD capture saved, or opened, in the mock: script records and rows from index 0. */
@@ -495,6 +517,7 @@ export const MOCK_MODES = [
   "firmware-fail-returning",
   "firmware-other-model",
   "firmware-bad-file",
+  "firmware-running",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -563,6 +586,8 @@ function connectedStatus(serial: string, rateSps: number | null, sessionId = 1):
       rate_sps: rateSps,
       rate_locked: rateSps === null,
       session_id: sessionId,
+      min_supported_firmware: "1.7.0",
+      known_latest_firmware: "2.0.7",
     },
   };
 }
@@ -584,9 +609,28 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
     "(see `docs/linux.md`).",
 };
 
+/** The role swaps (DR, PR, VCONN, FR): control messages the library classifier does
+ * not prove to stay at 5 V. */
+const SWAP_CONTROL_TYPES: readonly number[] = [9, 10, 11, 19];
+
+/** Vendor_Defined, the data message type of a VDM. */
+const VENDOR_DEFINED = 15;
+
+/** Like the library's check: a Vendor_Defined message to a cable plug whose first object
+ * is a structured VDM header for a Discover Identity REQ, whatever its SVID, version or
+ * other objects. */
+function isCableDiscoverIdentity(m: PdMessageRequest): boolean {
+  const vdm = m.data_objects[0];
+  if (m.sop === "sop" || m.msg_type !== VENDOR_DEFINED || vdm === undefined) return false;
+  const structured = (vdm >>> 15) & 1;
+  const commandType = (vdm >>> 6) & 3;
+  const command = vdm & 0x1f;
+  return structured === 1 && commandType === 0 && command === 1;
+}
+
 /** Like the library's builder: a control message on SOP is `pd cmd=<type>`, anything
- * else `pd data=<SOP byte><header LE><objects LE>` in uppercase hex; GoodCRC and
- * malformed messages are a usage error. */
+ * else `pd data=<SOP byte><header LE><objects LE>` in uppercase hex; GoodCRC, reserved
+ * control types and malformed messages are a usage error. */
 function renderMockMessage(m: PdMessageRequest): string {
   const { msg_type: ty, data_objects: objects } = m;
   if (!Number.isInteger(ty) || ty < 0 || ty > 31) {
@@ -595,7 +639,8 @@ function renderMockMessage(m: PdMessageRequest): string {
   const refusal = messageRefusal(m);
   if (refusal !== null) throw usage(refusal);
   if (objects.length === 0) {
-    if (ty < 3 || ty > 0x18) throw usage("A data message needs at least one data object.");
+    if (ty === 0 || ty > 0x18) throw usage(`Control message type ${ty} is reserved in USB PD.`);
+    if (ty === 2) throw usage("A data message needs at least one data object.");
   }
   if (objects.length > 7) {
     throw usage(`${objects.length} data objects: a PD message carries at most 7.`);
@@ -615,7 +660,10 @@ function mockLineRisk(text: string): RiskClass {
   if (["pdm parm", "pd pdo", "ufcs pdo"].includes(text)) return "read_only";
   if (/^(pdm open|pdm close|reset|pd hrst|entry \S+)$/.test(text)) return "at_most_5v";
   const cmd = /^pd cmd=(\d+)$/.exec(text);
-  if (cmd) return Number(cmd[1]) <= 24 ? "at_most_5v" : "above_5v";
+  if (cmd) {
+    const ty = Number(cmd[1]);
+    return ty >= 1 && ty <= 24 && !SWAP_CONTROL_TYPES.includes(ty) ? "at_most_5v" : "above_5v";
+  }
   const req = /^pd req=(\d+)$/.exec(text);
   if (req) {
     const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === Number(req[1]));
@@ -889,6 +937,11 @@ export class MockBackend {
   #firmwareFlashes: { deviceId: string; path: string; confirmation: string }[] = [];
   /** A firmware update holds the meter (FR V9SK55, AC .4). */
   #flashing = false;
+  /** The meter the running update holds; another one can connect (AC-4PJRVM.4). */
+  #flashTarget: string | null = null;
+  /** The running update was asked to stop / has begun its erase (AC-4PJRVJ.1). */
+  #flashStop = false;
+  #flashErasing = false;
   #options: MockOptions;
   #revealed: string[] = [];
   /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
@@ -933,6 +986,8 @@ export class MockBackend {
   ) {
     this.#mode = mode;
     this.#options = options;
+    this.#flashing = mode === "firmware-running";
+    this.#flashTarget = this.#flashing ? MOCK_RUNNING_FLASH.device_id : null;
   }
 
   /** `replug`: the real meter's listing while the OS lists it; `bootloader`: the
@@ -1013,6 +1068,7 @@ export class MockBackend {
       setRate: on(this.setRate),
       startRecording: on(this.startRecording),
       stopRecording: on(this.stopRecording),
+      saveRecordingAs: on(this.saveRecordingAs),
       exportSession: on(this.exportSession),
       stats: on(this.stats),
       historyRange: on(this.historyRange) as MockBackend["historyRange"],
@@ -1043,6 +1099,14 @@ export class MockBackend {
     };
   }
 
+  /** The running update holds meter `id`, or may: like the backend, a real meter is not
+   * told apart from a real target, which can come back at a new address. */
+  #heldByFlash(id: string): boolean {
+    const target = this.#flashTarget;
+    if (!this.#flashing || target === null) return false;
+    return id === target || (!id.startsWith("demo:") && !target.startsWith("demo:"));
+  }
+
   /** The source the running session streams from, `null` when none runs (FR 1HHT02). */
   connectedSource(): MeasurementSource | null {
     return this.#session?.source ?? null;
@@ -1054,7 +1118,7 @@ export class MockBackend {
     onEvent: (event: BackendEvent) => void,
     source: MeasurementSource = "queue",
   ): Promise<void> {
-    if (this.#flashing) throw usage(FLASH_REFUSAL);
+    if (this.#heldByFlash(deviceId)) throw usage(FLASH_REFUSAL);
     if (this.#sessions.some((x) => x.id === deviceId || x.deviceId === deviceId)) {
       throw usage("This meter is already connected. Disconnect it first.");
     }
@@ -1112,6 +1176,7 @@ export class MockBackend {
         seeded: false,
         sessionOffsetMs: 0,
         rows: [],
+        statusMs: 0,
       },
       timer: setInterval(() => this.#tick(session), BATCH_MS),
     };
@@ -1195,7 +1260,7 @@ export class MockBackend {
     const step = 1000 / s.rateSps;
     const samples: Sample[] = [];
     for (let i = 0; i < n; i++) {
-      const sample = sampleAt(s.scenario, Math.round(s.nextMs));
+      const sample = measuredAt(s, Math.round(s.nextMs));
       if (s.triggerVbusV !== null) {
         sample.vbus_v = s.triggerVbusV + 0.01 * Math.sin(s.nextMs / 140);
       }
@@ -1248,7 +1313,7 @@ export class MockBackend {
       rate_sps: s.rateSps,
       rate_locked: s.rateLocked,
       session_id: s.sessionId,
-      recording: rec ? { rows: rec.rows, elapsed_ms: rec.elapsedMs } : null,
+      recording: rec ? { rows: rec.rows, elapsed_ms: rec.elapsedMs, path: rec.path } : null,
     };
   }
 
@@ -1307,7 +1372,7 @@ export class MockBackend {
     s.onEvent({ type: "status", data: { state: "rate", rate_sps: rateSps, rate_locked: false } });
   }
 
-  /** There is no save dialog in the browser: the proposed name is the "path". */
+  /** There is no folder in the browser: the proposed name is the "path". */
   async startRecording(suggestedName: string): Promise<string | null> {
     const s = this.#open();
     if (s.recording) throw usage("A recording is already running.");
@@ -1322,6 +1387,11 @@ export class MockBackend {
     if (!rec) throw usage("Nothing is being recorded.");
     s.recording = null;
     return { rows: rec.rows, gaps: [], disconnected: false };
+  }
+
+  /** There is no save dialog in the browser: the file stays where it is. */
+  async saveRecordingAs(path: string): Promise<string | null> {
+    return path;
   }
 
   /** Exports every sample streamed so far, finishing on the next timer tick (`slow-export`:
@@ -1438,7 +1508,7 @@ export class MockBackend {
     const samples: PdStatusSample[] = [];
     for (let t = pd.nowMs; t < pd.nowMs + BATCH_MS; t += PD_STATUS_MS) {
       const ms = t + pd.sessionOffsetMs;
-      const m = sampleAt(s.scenario, ms);
+      const m = measuredAt(s, ms);
       samples.push({
         session_ms: ms,
         vbus_v: m.vbus_v,
@@ -1448,6 +1518,7 @@ export class MockBackend {
       });
     }
     pd.nowMs += BATCH_MS;
+    pd.statusMs = Math.max(pd.statusMs, samples[samples.length - 1]?.session_ms ?? 0);
     if (rows.length > 0) s.onEvent({ type: "pd_rows", data: { rows } });
     s.onEvent({ type: "pd_status", data: { samples } });
   }
@@ -1596,16 +1667,17 @@ export class MockBackend {
   }
 
   /** Drops every captured PD record; a running capture goes on. Like the backend,
-   * indices keep counting: resolves to the index of the next record. */
-  async pdClear(): Promise<number> {
+   * indices keep counting: resolves to the index of the next record and the latest
+   * status session time. */
+  async pdClear(): Promise<PdCleared> {
     const hadOpened = this.#openedPd !== null;
     this.#openedPd = null;
-    if (hadOpened && this.#session === null) return 0;
+    if (hadOpened && this.#session === null) return { next_index: 0, status_floor_ms: 0 };
     const pd = this.#open().pd;
     pd.base += pd.records.length;
     pd.records = [];
     pd.rows = [];
-    return pd.base;
+    return { next_index: pd.base, status_floor_ms: pd.statusMs };
   }
 
   /** There is no save dialog: the proposed name is the path. Resolves to the number of
@@ -1630,8 +1702,10 @@ export class MockBackend {
       path: saved.path,
       rows: saved.rows.map((r) => ({ ...r })),
       status: [],
+      dropped: 0,
       damaged_line: null,
       oversized: 0,
+      skipped: 0,
       truncated: false,
     };
   }
@@ -1679,6 +1753,9 @@ export class MockBackend {
       throw usage(`Type the file's version, ${info.version}, to confirm the update.`);
     }
     this.#flashing = true;
+    this.#flashTarget = deviceId;
+    this.#flashStop = false;
+    this.#flashErasing = false;
     this.#firmwareFlashes.push({ deviceId, path, confirmation });
     // Like the backend: the trigger session and the stream let go of the meter first.
     const s = this.#session;
@@ -1700,6 +1777,14 @@ export class MockBackend {
       const fromBootloader = isMeter && meter?.mode === "bootloader";
       for (const stage of ["switching", "erasing"] as const) {
         if (stage === "switching" && fromBootloader) continue;
+        if (this.#flashStop) {
+          throw {
+            kind: "protocol",
+            message: `The firmware update failed: interrupted: stopped by the user before the ${stage === "erasing" ? "descriptor" : "update started"}.`,
+            hint: FLASH_RECOVERY_HINT,
+          } satisfies UiError;
+        }
+        if (stage === "erasing") this.#flashErasing = true;
         onStage({ stage });
         await sleep(MOCK_FLASH_MS[stage]);
         if (failAt === stage) throw fail(stage);
@@ -1728,6 +1813,19 @@ export class MockBackend {
     }
   }
 
+  /** Asks the running update to stop, like the backend: until the erase starts. */
+  async firmwareCancel(): Promise<void> {
+    if (!this.#flashing) throw usage("No firmware update is running.");
+    if (this.#flashErasing) throw usage(CANCEL_TOO_LATE);
+    this.#flashStop = true;
+  }
+
+  /** The update running across a reload: only `firmware-running` has one, since the
+   * mock's own updates end with the page. */
+  async firmwareFlashStatus(): Promise<FlashStatus | null> {
+    return this.#mode === "firmware-running" ? MOCK_RUNNING_FLASH : null;
+  }
+
   /** The updates this mock ran (FR V9SK55), for the UI tests to check nothing was sent. */
   firmwareFlashLog(): { deviceId: string; path: string; confirmation: string }[] {
     return this.#firmwareFlashes.map((f) => ({ ...f }));
@@ -1744,8 +1842,10 @@ export class MockBackend {
       path: "vendor-pd-log.sqlite",
       rows: rows.map((r) => ({ ...r })),
       status: [],
+      dropped: 0,
       damaged_line: null,
       oversized: 0,
+      skipped: 0,
       truncated: false,
     };
   }
@@ -1810,6 +1910,8 @@ export class MockBackend {
         { name: "vfcp", support: "not-supported", vbus_mv: null, ibus_ma: null },
       ],
       complete: false,
+      // The demo stream's D+ / D- levels, as `detect::hint` labels them.
+      hint: "hint: DCP / QC2 12 V (D+ 0.600 V, D- 0.600 V)",
     };
   }
 
@@ -2012,11 +2114,14 @@ export class MockBackend {
 
   // ---- Custom PD messages and the raw console (FR DGSQ6T) ----
 
-  /** The library risk class of a built message; GoodCRC is refused with a reason. */
+  /** The library risk class of a built message; GoodCRC and reserved control types are
+   * refused with a reason. */
   async triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass> {
     this.#openTrigger();
     renderMockMessage(message);
-    if (message.data_objects.length === 0) return "at_most_5v";
+    if (message.data_objects.length === 0) {
+      return SWAP_CONTROL_TYPES.includes(message.msg_type) ? "above_5v" : "at_most_5v";
+    }
     // Request / EPR_Request go by the requested position; every other data message
     // is above 5 V, like the library classifier.
     if (message.sop !== "sop" || (message.msg_type !== 2 && message.msg_type !== 9)) {
@@ -2029,19 +2134,20 @@ export class MockBackend {
 
   /** Sends a built message to the scripted charger (or the demo e-marked cable). */
   async triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply> {
-    this.#openTrigger();
+    const t = this.#openTrigger();
     const command = renderMockMessage(message);
     if ((await this.triggerMessageRisk(message)) === "above_5v" && !confirmed) {
       throw usage("A message that can raise VBUS above 5 V needs your confirmation.");
     }
+    // Like the backend: PD first, unless PD is what was entered last.
+    if (t.entered !== "pd") {
+      this.#triggerLog.push("entry pd");
+      t.entered = "pd";
+    }
     this.#triggerLog.push(command);
     // The demo e-marked cable (the session-2 240 W passive cable) answers a
     // Discover Identity REQ to a cable plug.
-    const discover =
-      message.sop !== "sop" &&
-      message.msg_type === 15 &&
-      message.data_objects.length === 1 &&
-      message.data_objects[0] === DISCOVER_IDENTITY_CABLE.data_objects[0];
+    const discover = isCableDiscoverIdentity(message);
     return {
       command,
       lines: [{ at_ms: Date.now(), direction: "tx", text: command, block: null }],
@@ -2066,6 +2172,7 @@ export class MockBackend {
       throw usage("A line that can raise VBUS above 5 V needs your confirmation.");
     }
     this.#triggerLog.push(text);
+    if (this.#mode === "trigger-out-of-sync") throw outOfSyncError();
     const at = Date.now();
     const lines: ConsoleLine[] = [{ at_ms: at, direction: "tx", text, block: null }];
     const rx = (reply: string, block: string | null = null): void => {

@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { PdRow } from "./backend";
-import { DEFAULT_PD_FILTER, PdStore, type PdFilter } from "./pdStore";
+import { DEFAULT_PD_FILTER, PD_MAX_ROWS, PdStore, pdDroppedText, type PdFilter } from "./pdStore";
 
 function msg(index: number, name: string, sop = "SOP", extra: Partial<PdRow> = {}): PdRow {
   return {
@@ -177,5 +177,122 @@ describe("PdStore filters (AC-TGE83C.3)", () => {
     expect(shown).toHaveLength(50_000);
     expect(typed).toHaveLength(Math.ceil(100_000 / 6));
     expect(took).toBeLessThan(50);
+  });
+});
+
+describe("a long capture is capped (AC-4PJRVK.3)", () => {
+  const rows = (from: number, n: number, name = "Accept"): PdRow[] =>
+    Array.from({ length: n }, (_, i) => msg(from + i, name));
+
+  it("keeps every row up to the limit", () => {
+    const store = new PdStore(4, { maxRows: 100 });
+    store.append(rows(0, 100));
+    expect(store.length).toBe(100);
+    expect(store.dropped).toBe(0);
+  });
+
+  it("drops the oldest rows past the limit and counts them", () => {
+    const store = new PdStore(4, { maxRows: 100 });
+    store.append(rows(0, 60));
+    store.append(rows(60, 90));
+    expect(store.length).toBe(100);
+    expect(store.dropped).toBe(50);
+    expect(store.row(0).index).toBe(50);
+    expect(store.row(99).index).toBe(149);
+  });
+
+  it("takes a single batch bigger than the limit", () => {
+    const store = new PdStore(4, { maxRows: 10 });
+    store.append(rows(0, 35));
+    expect(store.length).toBe(10);
+    expect(store.dropped).toBe(25);
+    expect(store.row(0).index).toBe(25);
+    expect(store.row(9).index).toBe(34);
+  });
+
+  it("finds the kept rows by index and not the dropped ones", () => {
+    const store = new PdStore(4, { maxRows: 100 });
+    store.append(rows(0, 150));
+    expect(store.positionOf(49)).toBe(-1);
+    expect(store.positionOf(50)).toBe(0);
+    expect(store.positionOf(149)).toBe(99);
+  });
+
+  it("filters the kept rows only", () => {
+    const store = new PdStore(4, { maxRows: 10 });
+    store.append([msg(0, "Request"), ...rows(1, 20)]);
+    const shown = store.filter({ ...DEFAULT_PD_FILTER, types: new Set(["Accept"]) });
+    expect(shown.length).toBe(10);
+    expect(store.filter({ ...DEFAULT_PD_FILTER, types: new Set(["Request"]) }).length).toBe(0);
+  });
+
+  it("keeps the session order flag true for sorted rows across the drop", () => {
+    const store = new PdStore(4, { maxRows: 3 });
+    store.append(rows(0, 8).map((r) => ({ ...r, session_ms: r.index * 10 })));
+    expect(store.sessionSorted).toBe(true);
+    expect(store.sessionMs(0)).toBe(50);
+  });
+
+  it("a clear starts the count again", () => {
+    const store = new PdStore(4, { maxRows: 10 });
+    store.append(rows(0, 15));
+    store.clear();
+    expect(store.dropped).toBe(0);
+    expect(store.length).toBe(0);
+    store.append(rows(15, 2));
+    expect(store.row(0).index).toBe(15);
+  });
+
+  it("caps a default store too, above the 100,000 records the analyzer promises", () => {
+    expect(PD_MAX_ROWS).toBeGreaterThanOrEqual(100_000);
+    expect(Number.isFinite(PD_MAX_ROWS)).toBe(true);
+    const store = new PdStore();
+    store.append(rows(0, PD_MAX_ROWS + 5));
+    expect(store.length).toBe(PD_MAX_ROWS);
+    expect(store.dropped).toBe(5);
+  });
+
+  it("words the notice: nothing when nothing was dropped, else how many", () => {
+    expect(pdDroppedText(0)).toBeNull();
+    expect(pdDroppedText(1)).toContain("oldest");
+    expect(pdDroppedText(1)).toContain("1 record");
+    expect(pdDroppedText(1234)).toContain("1,234 records");
+  });
+});
+
+describe("the type and SOP lists update incrementally (AC-4PJRVK.3)", () => {
+  it("does not rebuild a list while nothing new arrived", () => {
+    const store = new PdStore();
+    store.append(negotiation());
+    const types = store.messageTypes();
+    const sops = store.sops();
+    store.append([msg(100, "Accept")]);
+    expect(store.messageTypes()).toBe(types);
+    expect(store.sops()).toBe(sops);
+  });
+
+  it("gives a new list when a new type or SOP arrives, in first-seen order", () => {
+    const store = new PdStore();
+    store.append([msg(0, "Accept"), msg(1, "Request")]);
+    const before = store.messageTypes();
+    store.append([msg(2, "PS_RDY", "SOP'")]);
+    expect(store.messageTypes()).not.toBe(before);
+    expect(store.messageTypes()).toEqual(["Accept", "Request", "PS_RDY"]);
+    expect(store.sops()).toEqual(["SOP", "SOP'"]);
+  });
+
+  it("does not list events", () => {
+    const store = new PdStore();
+    store.append([event(0, "Attach"), msg(1, "Accept")]);
+    expect(store.messageTypes()).toEqual(["Accept"]);
+  });
+
+  it("starts over on a clear", () => {
+    const store = new PdStore();
+    store.append([msg(0, "Request", "SOP'"), msg(1, "Accept")]);
+    expect(store.messageTypes()).toEqual(["Request", "Accept"]);
+    store.clear();
+    expect(store.messageTypes()).toEqual([]);
+    expect(store.sops()).toEqual([]);
   });
 });

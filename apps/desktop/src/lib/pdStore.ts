@@ -1,7 +1,8 @@
 /**
  * The PD analyzer's record store (FR TGE83C): rows arrive in `pd_rows` batches and live
  * in columns (typed arrays, with repeated strings interned), so 100,000 records stay
- * cheap to keep and to filter. Filters pick store positions and never drop data.
+ * cheap to keep and to filter. Filters pick store positions and never drop data; only
+ * the row limit does (FR 4PJRVK, AC .3): past it, the oldest rows go and are counted.
  */
 
 import type { PdDirection, PdRow } from "./backend";
@@ -22,6 +23,17 @@ export const DEFAULT_PD_FILTER: Readonly<PdFilter> = Object.freeze({
   types: null,
   sop: null,
 });
+
+/** Rows a store keeps by default; the backend keeps as many records (`MAX_RECORDS`), so
+ * every row in the table still has its details. */
+export const PD_MAX_ROWS = 100_000;
+
+/** The notice of a capture that dropped `dropped` rows, or null when it dropped none. */
+export function pdDroppedText(dropped: number): string | null {
+  if (dropped === 0) return null;
+  const n = dropped.toLocaleString("en-US");
+  return `Dropped the oldest ${n} ${dropped === 1 ? "record" : "records"}: a capture keeps the last ${PD_MAX_ROWS.toLocaleString("en-US")}.`;
+}
 
 /** Code of a missing value in the interned columns. */
 const NONE = 0;
@@ -52,11 +64,26 @@ class Interner {
   }
 }
 
+/** Distinct values in first-seen order; {@link values} changes identity only when a new
+ * value arrives. */
+class FirstSeen {
+  #seen = new Set<string>();
+  values: readonly string[] = [];
+
+  add(value: string | null): void {
+    if (value === null || this.#seen.has(value)) return;
+    this.#seen.add(value);
+    this.values = [...this.values, value];
+  }
+}
+
 const KIND_EVENT = 1;
 
 export class PdStore {
   length = 0;
   #capacity: number;
+  #maxRows: number;
+  #dropped = 0;
   #index = new Float64Array(0);
   #elapsed = new Float64Array(0);
   /** Session time (FR TGE83D); NaN when the row had none. */
@@ -75,10 +102,18 @@ export class PdStore {
   #strings = new Interner();
   /** Session times never go back (and none is missing) since the last clear. */
   #sessionSorted = true;
+  #types = new FirstSeen();
+  #sops = new FirstSeen();
 
-  constructor(capacity = 1024) {
-    this.#capacity = Math.max(1, capacity);
+  constructor(capacity = 1024, { maxRows = PD_MAX_ROWS }: { maxRows?: number } = {}) {
+    this.#maxRows = Math.max(1, maxRows);
+    this.#capacity = Math.min(Math.max(1, capacity), this.#maxRows);
     this.#alloc(this.#capacity);
+  }
+
+  /** Rows dropped since the last clear to stay within the row limit. */
+  get dropped(): number {
+    return this.#dropped;
   }
 
   #alloc(capacity: number): void {
@@ -105,12 +140,47 @@ export class PdStore {
     this.#capacity = capacity;
   }
 
-  /** Appends a batch, in order. */
-  append(rows: readonly PdRow[]): void {
-    if (this.length + rows.length > this.#capacity) {
-      this.#alloc(Math.max(this.length + rows.length, this.#capacity * 2));
+  /** Drops the oldest `n` rows; the rest move to the front of the columns. */
+  #dropOldest(n: number): void {
+    for (const col of [
+      this.#index,
+      this.#elapsed,
+      this.#session,
+      this.#vbus,
+      this.#ibus,
+      this.#messageId,
+      this.#objects,
+      this.#kind,
+      this.#name,
+      this.#sop,
+      this.#direction,
+      this.#revision,
+    ]) {
+      col.copyWithin(0, n, this.length);
     }
-    for (const r of rows) {
+    this.#summary.splice(0, n);
+    this.length -= n;
+    this.#dropped += n;
+  }
+
+  /** Counts `n` rows that never got here because the backend dropped them past its
+   * limit (an opened capture), so {@link dropped} stays right. */
+  addDropped(n: number): void {
+    this.#dropped += Math.max(0, n);
+  }
+
+  /** Appends a batch, in order, dropping the oldest rows past the row limit. */
+  append(rows: readonly PdRow[]): void {
+    const skipped = Math.max(0, rows.length - this.#maxRows);
+    const kept = skipped > 0 ? rows.slice(skipped) : rows;
+    this.#dropped += skipped;
+    const over = this.length + kept.length - this.#maxRows;
+    if (over > 0) this.#dropOldest(over);
+    const needed = this.length + kept.length;
+    if (needed > this.#capacity) {
+      this.#alloc(Math.min(this.#maxRows, Math.max(needed, this.#capacity * 2)));
+    }
+    for (const r of kept) {
       const i = this.length++;
       this.#index[i] = r.index;
       this.#elapsed[i] = r.elapsed_ms;
@@ -129,6 +199,10 @@ export class PdStore {
       this.#direction[i] = this.#strings.id(r.direction);
       this.#revision[i] = this.#strings.id(r.spec_revision);
       this.#summary[i] = r.summary;
+      if (r.kind !== "event") {
+        this.#types.add(r.name);
+        this.#sops.add(r.sop);
+      }
     }
   }
 
@@ -200,6 +274,9 @@ export class PdStore {
     this.length = 0;
     this.#summary = [];
     this.#sessionSorted = true;
+    this.#dropped = 0;
+    this.#types = new FirstSeen();
+    this.#sops = new FirstSeen();
   }
 
   /** The store positions `filter` lets through, in capture order. */
@@ -228,27 +305,15 @@ export class PdStore {
     return out.subarray(0, n);
   }
 
-  /** The message types seen, in first-seen order (for the filter menu). */
-  messageTypes(): string[] {
-    return this.#distinct(this.#name);
+  /** The message types seen since the last clear, in first-seen order (for the filter
+   * menu); a new list only when a new type arrived. */
+  messageTypes(): readonly string[] {
+    return this.#types.values;
   }
 
-  /** The SOPs seen, in first-seen order (for the filter menu). */
-  sops(): string[] {
-    return this.#distinct(this.#sop);
-  }
-
-  #distinct(col: Uint32Array): string[] {
-    const seen = new Set<number>();
-    const out: string[] = [];
-    for (let i = 0; i < this.length; i++) {
-      if (this.#kind[i] === KIND_EVENT) continue;
-      const id = col[i] as number;
-      if (id === NONE || seen.has(id)) continue;
-      seen.add(id);
-      const v = this.#strings.value(id);
-      if (v !== null) out.push(v);
-    }
-    return out;
+  /** The SOPs seen since the last clear, in first-seen order (for the filter menu); a
+   * new list only when a new SOP arrived. */
+  sops(): readonly string[] {
+    return this.#sops.values;
   }
 }

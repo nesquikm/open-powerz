@@ -6,7 +6,8 @@
 //! has passed inspection and the confirmation equals its version.
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use powerz_protocol::firmware::container::{FirmwareContainer, read_container_file};
 use powerz_protocol::firmware::flash::{
@@ -70,6 +71,62 @@ impl From<FlashProgress> for FlashStage {
                 reply: reply.to_string(),
             },
         }
+    }
+}
+
+/// Why Cancel is refused once the erase has begun (AC-4PJRVJ.1).
+pub const ERASE_BEGAN: &str = "The erase has started, so the update can no longer be cancelled.";
+
+/// The stop request of one running update, and the stage it has reached.
+/// Cancel is accepted only until the erase starts (AC-4PJRVJ.1).
+#[derive(Debug, Default)]
+pub struct FlashControl {
+    stop: AtomicBool,
+    gate: Mutex<FlashGate>,
+}
+
+/// One lock around these, so a cancel and the erase's stage cannot cross.
+#[derive(Debug, Default)]
+struct FlashGate {
+    stage: Option<FlashStage>,
+    erase_began: bool,
+}
+
+impl FlashControl {
+    /// The flag the engine polls.
+    pub fn stop(&self) -> &AtomicBool {
+        &self.stop
+    }
+
+    /// Note a stage the engine reported. A replug prompt is not a stage of
+    /// its own and changes nothing.
+    pub fn observe(&self, stage: &FlashStage) {
+        let mut gate = self.gate();
+        match stage {
+            FlashStage::Replug { .. } => return,
+            FlashStage::Switching => {}
+            _ => gate.erase_began = true,
+        }
+        gate.stage = Some(stage.clone());
+    }
+
+    /// Ask the update to stop; refused once the erase has begun.
+    pub fn cancel(&self) -> Result<(), UiError> {
+        let gate = self.gate();
+        if gate.erase_began {
+            return Err(UiError::usage(ERASE_BEGAN));
+        }
+        self.stop.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// The latest stage, `None` before the first.
+    pub fn stage(&self) -> Option<FlashStage> {
+        self.gate().stage.clone()
+    }
+
+    fn gate(&self) -> std::sync::MutexGuard<'_, FlashGate> {
+        self.gate.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

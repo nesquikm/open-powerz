@@ -7,6 +7,8 @@
    * outcome: the version read back, or the error with the recovery steps (AC .5).
    */
   import {
+    FOLLOWED_UPDATE_ENDED,
+    FOLLOWED_UPDATE_LOST,
     FLASH_STAGES,
     RECOVERY_STEPS,
     firmwareMeterRows,
@@ -16,6 +18,7 @@
     type FirmwareUpdate,
   } from "../firmwareUpdate.svelte";
   import FirmwareConfirmDialog from "./FirmwareConfirmDialog.svelte";
+  import FirmwareRecordingDialog from "./FirmwareRecordingDialog.svelte";
   import FirmwareFileInfo from "./FirmwareFileInfo.svelte";
 
   let {
@@ -120,6 +123,13 @@
   {/if}
 </div>
 
+{#if firmware.followedEnded}
+  <p role="status">{FOLLOWED_UPDATE_ENDED}</p>
+{/if}
+{#if firmware.followedLost}
+  <p role="status">{FOLLOWED_UPDATE_LOST}</p>
+{/if}
+
 {#if firmware.phase === "updating" || firmware.phase === "done" || firmware.phase === "failed"}
   <section class="progress" aria-label="Update progress" tabindex="-1" bind:this={progressEl}>
     <h3>Update progress</h3>
@@ -144,6 +154,20 @@
       aria-valuemax="100"
       aria-valuenow={writePercent}
     ></progress>
+    {#if firmware.phase === "updating"}
+      <div class="cancel">
+        <button
+          type="button"
+          disabled={firmware.cancelBlocker !== null}
+          onclick={() => void firmware.cancelUpdate()}
+          aria-describedby={firmware.cancelBlocker !== null ? "firmware-cancel-blocker" : undefined}
+          >{firmware.cancelling ? "Cancelling…" : "Cancel update"}</button
+        >
+        {#if firmware.cancelBlocker !== null}
+          <p id="firmware-cancel-blocker" class="blocker">{firmware.cancelBlocker}</p>
+        {/if}
+      </div>
+    {/if}
   </section>
 {/if}
 
@@ -182,7 +206,12 @@
   <button type="button" bind:this={closeEl} onclick={() => firmware.dismiss()}>Close</button>
 {/if}
 
-{#if firmware.phase === "confirming" && firmware.info !== null}
+{#if firmware.recordingPrompt}
+  <FirmwareRecordingDialog
+    onKeep={() => firmware.declineEndRecording()}
+    onEnd={() => void firmware.confirmEndRecording(meter)}
+  />
+{:else if firmware.phase === "confirming" && firmware.info !== null}
   <FirmwareConfirmDialog
     version={firmware.info.version}
     bind:confirmation={firmware.confirmation}
@@ -213,7 +242,8 @@
   .file,
   .actions,
   .progress,
-  .outcome {
+  .outcome,
+  .cancel {
     margin-top: 1rem;
   }
   .replug {

@@ -348,3 +348,44 @@ describe("repository gate", () => {
     expect(section).toMatch(/pull request|\bPR\b/);
   });
 });
+
+// FR 4PJRVN (AC-4PJRVN.4): an apostrophe that never closes must not hide a trailing
+// comment from the comment stripper, or the comment's words get flagged.
+describe("scanWorkflow: unpaired apostrophes (AC-4PJRVN.4)", () => {
+  it("drops a trailing comment after an unpaired apostrophe in a step name", () => {
+    const text = [
+      "steps:",
+      "  - name: Rust's toolchain # never rustup default stable here",
+      "    run: rustup toolchain install",
+    ].join("\n");
+    expect(scanWorkflow(text, "ci.yml")).toEqual([]);
+  });
+
+  it("drops a trailing comment after an unpaired apostrophe in a run line", () => {
+    const text = [
+      "steps:",
+      "  - run: echo don\\'t pin here # cargo +nightly fmt, RUSTUP_TOOLCHAIN=beta",
+      "  - run: echo it's built # toolchain: stable",
+    ].join("\n");
+    expect(scanWorkflow(text, "ci.yml")).toEqual([]);
+  });
+
+  it("drops a trailing comment after an apostrophe inside a multi-line run block", () => {
+    const text = [
+      "steps:",
+      "  - run: |",
+      '      echo "the pin\'s in rust-toolchain.toml"',
+      "      echo that's all # rustup override set nightly",
+      "      cargo build --locked",
+    ].join("\n");
+    expect(scanWorkflow(text, "ci.yml")).toEqual([]);
+  });
+
+  it("still flags a real pin on a line with an unpaired apostrophe", () => {
+    expectSingleFinding("steps:\n  - run: echo it's here && rustup default nightly\n", 2);
+  });
+
+  it("still flags a real pin after a paired quote that holds a #", () => {
+    expectSingleFinding("steps:\n  - run: echo 'a # b' && rustup default stable # it's fine\n", 2);
+  });
+});

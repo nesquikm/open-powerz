@@ -1,6 +1,6 @@
 //! Memory read (0x44) and the device-info blocks built on it.
 
-use super::{Clock, Error, Session};
+use super::{Clock, Error, Session, is_sync};
 use crate::crypto;
 use std::time::Duration;
 
@@ -76,6 +76,10 @@ pub enum FirmwareProblemKind {
     /// The recovery CONNECT after a failed step; the remaining steps were
     /// skipped.
     Recovery,
+    /// The OTP block (serial number).
+    OtpBlock,
+    /// The MCU unique ID block.
+    UidBlock,
 }
 
 /// One step of the firmware status that could not be read.
@@ -201,20 +205,12 @@ impl<T: Transport, C: Clock> Session<T, C> {
         let firmware = DeviceInfoBlock::decode(&self.read_block(FIRMWARE_INFO)?)?;
         let otp = OtpBlock::decode(&self.read_block(OTP)?)?;
         let uid = Uid::decode(&self.read_block(UID)?)?;
-        let model = firmware
-            .as_ref()
-            .or(hardware.as_ref())
-            .map(|b| b.model().to_owned())
+        let model = block_model(&firmware, &hardware)
             .ok_or_else(|| Error::Protocol("both device-info blocks are empty".into()))?;
-        let version = |b: &Option<DeviceInfoBlock>| {
-            b.as_ref()
-                .map(|b| b.version().to_owned())
-                .unwrap_or_default()
-        };
         Ok(DeviceInfo {
             model,
-            firmware_version: version(&firmware),
-            hardware_version: version(&hardware),
+            firmware_version: block_version(&firmware),
+            hardware_version: block_version(&hardware),
             serial: otp.serial(),
             uid: uid.to_string(),
         })
@@ -285,14 +281,29 @@ impl<T: Transport, C: Clock> Session<T, C> {
         name: &str,
         problems: &mut Vec<FirmwareProblem>,
     ) -> Result<(Option<DeviceInfoBlock>, bool), Error> {
-        let read = self
-            .read_block(block)
-            .and_then(|raw| Ok(DeviceInfoBlock::decode(&raw)?));
+        let name = format!("{name} info block");
+        let decode = |raw: &[u8]| Ok(DeviceInfoBlock::decode(raw)?);
+        let (block, go_on) = self.block_or_problem(block, kind, &name, decode, problems)?;
+        Ok((block.flatten(), go_on))
+    }
+
+    /// Read and decode one block: a non-link-fatal failure records a `kind`
+    /// problem naming `name` and sends one recovery CONNECT. The flag is
+    /// `false` when that CONNECT failed.
+    fn block_or_problem<B>(
+        &mut self,
+        block: (u32, u32),
+        kind: FirmwareProblemKind,
+        name: &str,
+        decode: impl FnOnce(&[u8]) -> Result<B, Error>,
+        problems: &mut Vec<FirmwareProblem>,
+    ) -> Result<(Option<B>, bool), Error> {
+        let read = self.read_block(block).and_then(|raw| decode(&raw));
         match read {
-            Ok(b) => Ok((b, true)),
+            Ok(b) => Ok((Some(b), true)),
             Err(e) if e.is_link_fatal() => Err(e),
             Err(e) => {
-                let text = format!("{name} info block ({:#x}) not read: {e}", block.0);
+                let text = format!("{name} ({:#x}) not read: {e}", block.0);
                 let go_on = self.record_and_recover(FirmwareProblem::new(kind, text), problems)?;
                 Ok((None, go_on))
             }
@@ -361,6 +372,49 @@ impl<T: Transport, C: Clock> Session<T, C> {
         Ok(st)
     }
 
+    /// The device info and the firmware status of one connected session,
+    /// each block read once: the steps of
+    /// [`read_firmware_status_or_unknown`](Self::read_firmware_status_or_unknown),
+    /// then the OTP block and the UID. A failed step costs only its part (a
+    /// blank field of the [`DeviceInfo`]) and is recorded in
+    /// [`FirmwareStatus::problems`]; once a recovery CONNECT has failed the
+    /// remaining blocks are skipped. A [link-fatal](Error::is_link_fatal)
+    /// error is returned.
+    pub fn read_device_info_and_status(&mut self) -> Result<(DeviceInfo, FirmwareStatus), Error> {
+        let mut st = self.read_firmware_status_or_unknown()?;
+        if st.application.is_none() && st.bootloader.is_none() && st.problems.is_empty() {
+            st.problems.push(FirmwareProblem::new(
+                FirmwareProblemKind::ApplicationBlock,
+                "both device-info blocks are empty".to_owned(),
+            ));
+        }
+        let mut go_on = !st
+            .problems
+            .iter()
+            .any(|p| p.kind == FirmwareProblemKind::Recovery);
+        let mut otp = None;
+        if go_on {
+            let decode = |raw: &[u8]| Ok(OtpBlock::decode(raw)?);
+            let kind = FirmwareProblemKind::OtpBlock;
+            (otp, go_on) =
+                self.block_or_problem(OTP, kind, "OTP block", decode, &mut st.problems)?;
+        }
+        let mut uid = None;
+        if go_on {
+            let decode = |raw: &[u8]| Ok(Uid::decode(raw)?);
+            let kind = FirmwareProblemKind::UidBlock;
+            (uid, _) = self.block_or_problem(UID, kind, "UID block", decode, &mut st.problems)?;
+        }
+        let info = DeviceInfo {
+            model: block_model(&st.application, &st.bootloader).unwrap_or_default(),
+            firmware_version: block_version(&st.application),
+            hardware_version: block_version(&st.bootloader),
+            serial: otp.map(|o| o.serial()).unwrap_or_default(),
+            uid: uid.map(|u| u.to_string()).unwrap_or_default(),
+        };
+        Ok((info, st))
+    }
+
     /// The HEAD step that follows CONNECT: wait [`HEAD_DELAY`], send one
     /// HEAD (0x40) and return the raw reply, undecoded.
     ///
@@ -368,11 +422,40 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// `[device]`, so a type-0x40 id-0 first transfer is taken as the answer;
     /// anything else must carry the request id as usual.
     pub(super) fn head_exchange(&mut self) -> Result<Vec<u8>, Error> {
+        self.head_exchange_taking(|_| false)
+    }
+
+    /// [`head_exchange`](Self::head_exchange) that also takes a SYNC reply,
+    /// whatever its id, for the probe to stop on.
+    pub(super) fn head_exchange_taking_sync(&mut self) -> Result<Vec<u8>, Error> {
+        self.head_exchange_taking(is_sync)
+    }
+
+    fn head_exchange_taking(&mut self, take_any: impl Fn(&[u8]) -> bool) -> Result<Vec<u8>, Error> {
         self.sleep(HEAD_DELAY);
         let request = head::request(self.counter.next());
         let timeout = transport::default_timeout(&request);
-        self.exchange_taking_first(&request, timeout, is_id_0_head)
+        self.exchange_taking(&request, timeout, is_id_0_head, take_any)
     }
+}
+
+/// The model of the application block, else of the bootloader block.
+fn block_model(
+    application: &Option<DeviceInfoBlock>,
+    bootloader: &Option<DeviceInfoBlock>,
+) -> Option<String> {
+    application
+        .as_ref()
+        .or(bootloader.as_ref())
+        .map(|b| b.model().to_owned())
+}
+
+/// The block's version, empty when the block is blank.
+fn block_version(block: &Option<DeviceInfoBlock>) -> String {
+    block
+        .as_ref()
+        .map(|b| b.version().to_owned())
+        .unwrap_or_default()
 }
 
 /// `reply` as spaced hex, cut after [`HEAD_HEX_MAX`] bytes with an ellipsis.

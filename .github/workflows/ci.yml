@@ -85,6 +85,42 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo build -p powerz-pd --target wasm32-unknown-unknown --locked
 
+  # FR 4PJRVN (AC .6): build and test the default members (the library and CLI crates,
+  # not the Tauri app) with the MSRV that Cargo.toml declares as `rust-version`. The job
+  # reads that value at run time and writes it into rust-toolchain.toml's channel, so
+  # rustup installs it from the file like every other job and no version is named here.
+  msrv:
+    name: msrv (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Linux system dependencies (hidapi, serialport)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
+      - name: Rust toolchain (MSRV from Cargo.toml rust-version)
+        run: |
+          msrv="$(sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$msrv" ]; then echo "Cargo.toml declares no rust-version" >&2; exit 1; fi
+          echo "MSRV: $msrv"
+          sed -i -E "s/^channel[[:space:]]*=.*/channel = \"$msrv\"/" rust-toolchain.toml
+          cat rust-toolchain.toml
+          rustup toolchain install
+          rustc --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: msrv
+
+      - name: Rust build (MSRV, default members)
+        run: cargo build --locked
+
+      - name: Rust test (MSRV, default members)
+        run: cargo test --locked
+
   # Desktop end-to-end suites, separate from the gate. Both jobs are plain required jobs
   # (no continue-on-error): list them as required checks in branch protection.
   #

@@ -80,6 +80,23 @@ fn read_settings_returns_every_field_with_a_tag() {
     worker.stop();
 }
 
+/// M7a read-only run: on a real meter that saved its settings in an earlier
+/// boot, the read on connect said the reply was not understood.
+#[test]
+fn read_settings_takes_a_block_saved_before_the_last_reboot() {
+    let clock = clock();
+    let pipe = Pipe::sim(
+        Scenario::Load5v1a,
+        FaultPlan::new().settings_saved_before_reboot(),
+        &clock,
+        PipeOpts::default(),
+    );
+    let (_events, sink) = capture(&clock);
+    let mut worker = Worker::start(pipe, clock.clone(), WorkerConfig::new(Rate::Sps50, 1), sink)
+        .unwrap_or_else(|e| panic!("worker did not start: {e:?}"));
+    assert!(worker.read_settings().is_ok());
+}
+
 #[test]
 fn read_settings_through_the_spawned_worker_control() {
     let clock = clock();

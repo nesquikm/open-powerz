@@ -705,7 +705,13 @@ fn attach_snapshot_carries_the_open_recording() {
     let snap = m.attach(new_sink).expect("attach while recording");
     let rec = snap
         .recording
+        .clone()
         .expect("the snapshot lost the open recording");
+    assert_eq!(
+        rec.path.as_deref(),
+        std::fs::canonicalize(&path).unwrap().to_str(),
+        "the snapshot lost the recording's file (AC-4PJRVM.2)"
+    );
     assert!(
         rec.rows >= rows_before,
         "snapshot rows {} < {rows_before} already reported",

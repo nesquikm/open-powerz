@@ -343,6 +343,7 @@ pub struct EprAvs {
 
 /// A source power data object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SourcePdo {
     /// Fixed supply.
     Fixed(FixedSource),
@@ -466,6 +467,7 @@ impl SourcePdo {
 
 /// A sink power data object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SinkPdo {
     /// Fixed supply.
     Fixed(FixedSink),

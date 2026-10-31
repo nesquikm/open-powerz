@@ -5,8 +5,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { BackendEvent, PdRow } from "./backend";
+import type { BackendEvent, PdRow, PdStatusSample } from "./backend";
 import { PdCapture } from "./pdCapture.svelte";
+import { PD_MAX_ROWS, pdDroppedText } from "./pdStore";
 
 function row(index: number, name = "Accept"): PdRow {
   return {
@@ -121,6 +122,8 @@ describe("a new backend session (reconnect, FR TGE839)", () => {
       rate_sps: 50,
       rate_locked: false,
       session_id: 2,
+      min_supported_firmware: "1.7.0",
+      known_latest_firmware: "2.0.7",
     },
   };
 
@@ -223,6 +226,8 @@ describe("emptied counter for the view's selection", () => {
         rate_sps: 50,
         rate_locked: false,
         session_id: 1,
+        min_supported_firmware: "1.7.0",
+        known_latest_firmware: "2.0.7",
       },
     } as BackendEvent);
     expect(pd.emptied).toBe(start + 1);
@@ -267,6 +272,8 @@ describe("the table's first index (FR TGE83E, AC .2)", () => {
         rate_sps: 50,
         rate_locked: false,
         session_id: 1,
+        min_supported_firmware: "1.7.0",
+        known_latest_firmware: "2.0.7",
       },
     } as BackendEvent);
     expect(pd.firstIndex).toBe(0);
@@ -289,5 +296,119 @@ describe("Open capture and Import vendor log (FR TGE83E)", () => {
     expect(c.openReason).toMatch(/stop the capture first/i);
     pd.handleEvent(stopped);
     expect(pd.controls(true).canOpen).toBe(true);
+  });
+});
+
+describe("PD status samples in flight at a Clear (AC-4PJRVK.4)", () => {
+  const status = (session_ms: number): BackendEvent =>
+    ({
+      type: "pd_status",
+      data: { samples: [{ session_ms, vbus_v: 5, ibus_a: 0.1, cc1_v: 1.6, cc2_v: 0 }] },
+    }) as BackendEvent;
+
+  it("drops samples that arrive while the clear waits for its answer", () => {
+    const pd = new PdCapture();
+    pd.handleEvent(status(5));
+    const ticket = pd.beginClear();
+    const version = pd.statusVersion;
+    pd.handleEvent(status(6));
+    pd.handleEvent(status(7));
+    expect(pd.status.length).toBe(0);
+    expect(pd.statusVersion).toBe(version);
+    pd.endClear(3, ticket);
+    expect(pd.status.length).toBe(0);
+  });
+
+  it("takes samples again once the clear has its answer", () => {
+    const pd = new PdCapture();
+    const ticket = pd.beginClear();
+    pd.handleEvent(status(6));
+    pd.endClear(3, ticket);
+    pd.handleEvent(status(8));
+    expect(pd.status.length).toBe(1);
+    expect(pd.status.columns.t[0]).toBe(8);
+  });
+
+  it("a new session ends a clear still waiting, so its samples are kept", () => {
+    const pd = new PdCapture();
+    pd.beginClear();
+    pd.handleEvent({
+      type: "status",
+      data: { state: "connected", session_id: 2 },
+    } as BackendEvent);
+    pd.handleEvent(status(9));
+    expect(pd.status.length).toBe(1);
+  });
+});
+
+describe("a capture past the row limit (AC-4PJRVK.3)", () => {
+  it("counts the rows the store dropped, and a clear or new session forgets them", () => {
+    const pd = new PdCapture();
+    const rows = Array.from({ length: PD_MAX_ROWS + 7 }, (_, i) => row(i));
+    pd.handleEvent({ type: "pd_rows", data: { rows } });
+    expect(pd.store.length).toBe(PD_MAX_ROWS);
+    expect(pd.store.dropped).toBe(7);
+    pd.clear(PD_MAX_ROWS + 7);
+    expect(pd.store.dropped).toBe(0);
+  });
+});
+
+function sample(session_ms: number): PdStatusSample {
+  return { session_ms, vbus_v: 5, ibus_a: 0, cc1_v: 0, cc2_v: 0 };
+}
+const statusEvent = (...times: number[]): BackendEvent => ({
+  type: "pd_status",
+  data: { samples: times.map(sample) },
+});
+const connected = {
+  type: "status",
+  data: { state: "connected" },
+} as unknown as BackendEvent;
+
+describe("Clear against status samples in flight (FR 4PJRVK)", () => {
+  it("drops a pre-clear batch that arrives after the clear ends, and keeps later samples", () => {
+    const pd = new PdCapture();
+    const ticket = pd.beginClear();
+    pd.endClear(0, ticket, 1000);
+    pd.handleEvent(statusEvent(900, 1000));
+    expect(pd.status.length).toBe(0);
+    pd.handleEvent(statusEvent(1000, 1010, 1020));
+    expect(pd.status.length).toBe(2);
+  });
+
+  it("a new session forgets the floor, as its time may restart", () => {
+    const pd = new PdCapture();
+    pd.clear(0, 5000);
+    pd.handleEvent(connected);
+    pd.handleEvent(statusEvent(10));
+    expect(pd.status.length).toBe(1);
+  });
+
+  it("keeps every sample when the clear had no status yet", () => {
+    const pd = new PdCapture();
+    pd.clear(0, 0);
+    pd.handleEvent(statusEvent(0, 5));
+    expect(pd.status.length).toBe(2);
+  });
+});
+
+describe("An opened capture's dropped count (FR 4PJRVK)", () => {
+  it("loses no rows when its meter leaves the view during a clear", () => {
+    const pd = new PdCapture();
+    const parked = new PdCapture();
+    const ticket = pd.beginClear();
+    pd.handleEvent({ type: "pd_rows", data: { rows: [row(7)] } });
+    pd.swapWith(parked);
+    pd.endClear(5, ticket);
+    parked.handleEvent({ type: "pd_rows", data: { rows: [row(8)] } });
+    expect(parked.store.length).toBe(2);
+  });
+
+  it("shows in the dropped notice though the backend sent only the kept rows", () => {
+    const pd = new PdCapture();
+    pd.open([row(15), row(16)], [], 15);
+    expect(pd.store.length).toBe(2);
+    expect(pd.store.dropped).toBe(15);
+    expect(pdDroppedText(pd.store.dropped)).toMatch(/Dropped the oldest 15 records/);
   });
 });

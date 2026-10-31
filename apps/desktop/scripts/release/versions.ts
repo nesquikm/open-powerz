@@ -95,6 +95,23 @@ export function checkRelease(files: ReleaseFiles): string[] {
   return msgs;
 }
 
+// A release asset carries no file mode, so a downloaded AppImage is never executable.
+// Tauri names it `<productName>_<version>_amd64.AppImage`.
+export function appImageNote(version: string): string {
+  const file = `open-powerz_${version}_amd64.AppImage`;
+  return [
+    "### Linux AppImage",
+    "",
+    "The AppImage is not executable after download. Make it so, then run it:",
+    "",
+    "```sh",
+    `chmod +x ${file}`,
+    `./${file}`,
+    "```",
+    "",
+  ].join("\n");
+}
+
 function main(argv: string[]): number {
   let tagArg: string | undefined;
   let root = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -150,7 +167,9 @@ function main(argv: string[]): number {
   }
   const { version, prerelease } = parseTag(tag);
   const section = extractRelease(files.changelog, version);
-  if (notesPath !== undefined) writeFileSync(notesPath, `${section?.notes ?? ""}\n`);
+  if (notesPath !== undefined) {
+    writeFileSync(notesPath, `${section?.notes ?? ""}\n\n${appImageNote(version)}`);
+  }
   process.stdout.write(
     [
       `tag=${tag}`,

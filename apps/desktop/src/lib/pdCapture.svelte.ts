@@ -31,13 +31,13 @@ export const PD_STOP_FIRST_REASON = "Stop the capture first to open or import a 
 export class PdCapture {
   /** The PD sniffer runs. */
   capturing = $state(false);
-  /** Every captured row (not reactive itself: watch {@link version}). */
-  readonly store = new PdStore();
+  /** The captured rows, up to the row limit (not reactive itself: watch {@link version}). */
+  store = new PdStore();
   /** Bumped on every change to the store. */
   version = $state(0);
   /** The PD status blocks of the session (FR TGE83D; not reactive: watch
    * {@link statusVersion}). */
-  readonly status = new PdStatusBuffer();
+  status = new PdStatusBuffer();
   /** Bumped on every change to {@link status}. */
   statusVersion = $state(0);
   /** Bumped when the store is emptied (a clear, a new session): row indices start
@@ -48,6 +48,9 @@ export class PdCapture {
   opened = $state(false);
   /** Rows numbered below this were sent before the last clear: dropped. */
   #from = 0;
+  /** Status samples at or below this session time were sent before the last clear
+   * (they carry no index): dropped. Reset by a new session, whose time may restart. */
+  #statusFloor = 0;
 
   /** Index of the table's first row: an opened file numbers its rows from 0, the live
    * capture from its last clear. Rows are numbered on screen from here. */
@@ -65,6 +68,27 @@ export class PdCapture {
     const open = { canOpen: !live, openReason: live ? PD_STOP_FIRST_REASON : null };
     if (!connected) return { canStart: false, canStop: false, reason: PD_NO_METER_REASON, ...open };
     return { canStart: !this.capturing, canStop: this.capturing, reason: null, ...open };
+  }
+
+  /** Trades everything held with `other`: a meter leaving the PD view keeps its capture,
+   * and the rows that arrive while it is away, in a capture of its own (AC-4PJRVM.4). */
+  swapWith(other: PdCapture): void {
+    // A clear still on its way cannot find its capture after the swap: as a failed
+    // clear, it keeps the rows it held back.
+    this.endClear(0);
+    other.endClear(0);
+    [this.store, other.store] = [other.store, this.store];
+    [this.status, other.status] = [other.status, this.status];
+    [this.capturing, other.capturing] = [other.capturing, this.capturing];
+    [this.opened, other.opened] = [other.opened, this.opened];
+    [this.#from, other.#from] = [other.#from, this.#from];
+    [this.#statusFloor, other.#statusFloor] = [other.#statusFloor, this.#statusFloor];
+    for (const capture of [this, other]) {
+      capture.#ticket++;
+      capture.emptied++;
+      capture.version++;
+      capture.statusVersion++;
+    }
   }
 
   /** Takes the PD events of the session channel; a session that ends stops the capture. */
@@ -86,11 +110,18 @@ export class PdCapture {
         this.version++;
         break;
       }
-      case "pd_status":
-        if (this.opened || event.data.samples.length === 0) break;
-        this.status.append(event.data.samples);
+      case "pd_status": {
+        // Samples carry no record index to sort by: all those that arrive while a
+        // clear waits for its answer are dropped, not held.
+        if (this.opened || this.#held) break;
+        const floor = this.#statusFloor;
+        const samples =
+          floor > 0 ? event.data.samples.filter((s) => s.session_ms > floor) : event.data.samples;
+        if (samples.length === 0) break;
+        this.status.append(samples);
         this.statusVersion++;
         break;
+      }
       case "status":
         if (event.data.state === "disconnected" || event.data.state === "waiting") {
           this.capturing = false;
@@ -100,6 +131,7 @@ export class PdCapture {
           this.#ticket++;
           this.#held = null;
           this.#from = 0;
+          this.#statusFloor = 0;
           this.opened = false;
           this.store.clear();
           this.emptied++;
@@ -114,13 +146,15 @@ export class PdCapture {
   }
 
   /** Shows a capture opened from a file in place of the live one: its `rows` (numbered
-   * from 0) and `status` samples. A pending clear is abandoned. */
-  open(rows: PdRow[], status: PdStatusSample[]): void {
+   * from 0) and `status` samples; `dropped` counts the records the backend dropped
+   * past its limit. A pending clear is abandoned. */
+  open(rows: PdRow[], status: PdStatusSample[], dropped = 0): void {
     this.#ticket++;
     this.#held = null;
     this.opened = true;
     this.store.clear();
     this.store.append(rows);
+    this.store.addDropped(dropped);
     this.emptied++;
     this.version++;
     this.status.clear();
@@ -130,8 +164,8 @@ export class PdCapture {
 
   /** Empties the store; a running capture goes on. `from` is the backend's next
    * record index: rows numbered below it that arrive later are stale. */
-  clear(from = 0): void {
-    this.endClear(from, this.beginClear());
+  clear(from = 0, statusFloor = 0): void {
+    this.endClear(from, this.beginClear(), statusFloor);
   }
 
   /** First half of a clear, as it is asked of the backend: empties the store now and
@@ -149,11 +183,14 @@ export class PdCapture {
 
   /** Second half of a clear, with the backend's next record index `from` (0 when the
    * backend did not answer): keeps the held rows numbered `from` or more. A ticket
-   * other than the latest clear's (a newer clear, or a new session) changes nothing. */
-  endClear(from: number, ticket = this.#ticket): void {
+   * other than the latest clear's (a newer clear, or a new session) changes nothing.
+   * `statusFloor` is the backend's latest status session time at the clear: status
+   * samples at or below it that arrive later are stale. */
+  endClear(from: number, ticket = this.#ticket, statusFloor = 0): void {
     const held = this.#held;
     if (held === null || ticket !== this.#ticket) return;
     this.#held = null;
+    this.#statusFloor = Math.max(this.#statusFloor, statusFloor);
     this.#from = Math.max(this.#from, from);
     const rows = held.filter((r) => r.index >= this.#from);
     if (rows.length === 0) return;

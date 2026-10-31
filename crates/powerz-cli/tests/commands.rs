@@ -103,7 +103,7 @@ fn list_json_with_no_meter_is_empty_array() {
 #[test]
 fn info_prints_model_versions_serial_and_uid() {
     let mut s = session(MockTransport::new(
-        [device_info_steps(1), read_firmware_status_steps(5)].concat(),
+        [read_firmware_status_steps(1), otp_uid_steps(4)].concat(),
     ));
     let mut out = Vec::new();
     info(&mut s, false, &mut out).unwrap();
@@ -117,7 +117,7 @@ fn info_prints_model_versions_serial_and_uid() {
 #[test]
 fn info_json_is_one_object() {
     let mut s = session(MockTransport::new(
-        [device_info_steps(1), read_firmware_status_steps(5)].concat(),
+        [read_firmware_status_steps(1), otp_uid_steps(4)].concat(),
     ));
     let mut out = Vec::new();
     info(&mut s, true, &mut out).unwrap();
@@ -183,7 +183,7 @@ fn info_in_application_mode_sends_no_connect_of_its_own() {
         let (r, out, sent) = info_mode(
             DeviceMode::Application,
             json,
-            [device_info_steps(1), read_firmware_status_steps(5)].concat(),
+            [read_firmware_status_steps(1), otp_uid_steps(4)].concat(),
         );
         assert!(r.is_ok(), "json={json}: {r:?}");
         assert!(out.contains(SYNTH_FW), "{out}");
@@ -202,23 +202,23 @@ fn info_with_bad_head(json: bool, head: Step) -> (Result<(), CliError>, String) 
     (r, out)
 }
 
-/// Device info (ids 1..4), both info blocks (ids 5, 6), the failing `head`
-/// (id 7), then the recovery CONNECT (id 8) the shared degrade helper sends.
+/// Both info blocks (ids 1, 2), the failing `head` (id 3), the recovery
+/// CONNECT (id 4) the shared degrade helper sends, then OTP and UID (ids 5, 6).
 fn bad_head_script(head: Step) -> Vec<Step> {
     [
-        device_info_steps(1),
-        memread_steps(5, HW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_HW)),
-        memread_steps(6, FW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_FW)),
+        memread_steps(1, HW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_HW)),
+        memread_steps(2, FW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_FW)),
         vec![
             head,
-            Step::transact(powerz_protocol::frame::connect(8).to_vec(), accept(8)),
+            Step::transact(powerz_protocol::frame::connect(4).to_vec(), accept(4)),
         ],
+        otp_uid_steps(5),
     ]
     .concat()
 }
 
 fn bad_heads() -> Vec<(&'static str, Step)> {
-    let req = powerz_protocol::decode::head::request(7).to_vec();
+    let req = powerz_protocol::decode::head::request(3).to_vec();
     vec![
         (
             "timeout",
@@ -227,7 +227,7 @@ fn bad_heads() -> Vec<(&'static str, Step)> {
         // Header only: too short for the old-firmware field.
         (
             "undecodable",
-            Step::transact(req, vec![0x40, 7, 0x00, 0x01]),
+            Step::transact(req, vec![0x40, 3, 0x00, 0x01]),
         ),
     ]
 }
@@ -281,8 +281,8 @@ fn info_reconnects_once_after_a_failed_head_before_continuing() {
             let after: Vec<u8> = sent[head_at + 1..].iter().map(|f| f[0]).collect();
             assert_eq!(
                 after,
-                vec![0x02],
-                "{what} json={json}: one recovery CONNECT after the failed HEAD"
+                vec![0x02, 0x44, 0x44],
+                "{what} json={json}: one recovery CONNECT after the failed HEAD, then OTP and UID"
             );
             assert_eq!(
                 s.transport().remaining(),
@@ -304,26 +304,23 @@ fn squash(s: &str) -> String {
         .to_lowercase()
 }
 
-/// A 2.0.6 / 2.5 meter (dated `20260101`): device info (ids 1..4), both
-/// info blocks (ids 5, 6), HEAD (id 7) answered with REJECT, then the
-/// recovery CONNECT (id 8).
+/// A 2.0.6 / 2.5 meter (dated `20260101`): both info blocks (ids 1, 2), HEAD
+/// (id 3) answered with REJECT, the recovery CONNECT (id 4), then OTP and UID
+/// (ids 5, 6).
 fn rejected_head_script() -> Vec<Step> {
     let boot = info_block(SYNTH_MODEL, "2.5");
     let app = info_block(SYNTH_MODEL, "2.0.6");
     [
         memread_steps(1, HW_INFO_ADDR, &boot),
         memread_steps(2, FW_INFO_ADDR, &app),
-        memread_steps(3, OTP_ADDR, &otp_block()),
-        memread_steps(4, UID_ADDR, &SYNTH_UID),
-        memread_steps(5, HW_INFO_ADDR, &boot),
-        memread_steps(6, FW_INFO_ADDR, &app),
         vec![
             Step::transact(
-                powerz_protocol::decode::head::request(7).to_vec(),
-                vec![0x06, 0x07, 0x00, 0x00],
+                powerz_protocol::decode::head::request(3).to_vec(),
+                vec![0x06, 0x03, 0x00, 0x00],
             ),
-            Step::transact(powerz_protocol::frame::connect(8).to_vec(), accept(8)),
+            Step::transact(powerz_protocol::frame::connect(4).to_vec(), accept(4)),
         ],
+        otp_uid_steps(5),
     ]
     .concat()
 }
@@ -373,7 +370,7 @@ fn info_with_a_rejected_head_says_the_update_check_is_unavailable_and_why() {
         "the reason: {check:?}"
     );
     assert!(
-        squash(check).contains("06070000"),
+        squash(check).contains("06030000"),
         "the raw reply: {check:?}"
     );
 }
@@ -404,7 +401,7 @@ fn info_json_with_a_rejected_head_keeps_both_blocks_and_lists_the_problem() {
         .find(|p| p.contains("HEAD"))
         .unwrap_or_else(|| panic!("a HEAD problem: {v}"));
     assert!(head.contains("the meter sent REJECT"), "{head:?}");
-    assert!(squash(head).contains("06070000"), "{head:?}");
+    assert!(squash(head).contains("06030000"), "{head:?}");
 }
 
 #[test]
@@ -413,32 +410,32 @@ fn info_with_a_rejected_head_reads_the_blocks_before_head_and_reconnects_once() 
     let types: Vec<u8> = sent.iter().map(|f| f[0]).collect();
     assert_eq!(
         types,
-        vec![0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x40, 0x02],
-        "device info, both blocks, HEAD, one recovery CONNECT"
+        vec![0x44, 0x44, 0x40, 0x02, 0x44, 0x44],
+        "both blocks, HEAD, one recovery CONNECT, OTP, UID"
     );
 }
 
 // ---- AC-V9SK52.4: every firmware-status problem is shown in text ----
 
-/// Device info (ids 1..4), the bootloader block (id 5) or its timeout,
-/// the application block (id 6, 0x4420) timing out, one recovery CONNECT
-/// per failed step, then HEAD answered or rejected.
+/// The bootloader block (id 1) or its timeout, the application block
+/// (0x4420) timing out, one recovery CONNECT per failed step, HEAD answered
+/// or rejected, then OTP and UID.
 fn bad_block_script(boot_fails: bool, head_rejected: bool) -> Vec<Step> {
     let timeout = |id: u8, addr: u32| {
         Step::transact_err(memory_read_request(id, addr, 64), transport::Error::Timeout)
     };
     let connect = |id: u8| Step::transact(powerz_protocol::frame::connect(id).to_vec(), accept(id));
-    let mut steps = device_info_steps(1);
+    let mut steps = Vec::new();
     if boot_fails {
-        steps.extend([timeout(5, HW_INFO_ADDR), connect(6)]);
+        steps.extend([timeout(1, HW_INFO_ADDR), connect(2)]);
     } else {
         steps.extend(memread_steps(
-            5,
+            1,
             HW_INFO_ADDR,
             &info_block(SYNTH_MODEL, SYNTH_HW),
         ));
     }
-    let app_id = if boot_fails { 7 } else { 6 };
+    let app_id = if boot_fails { 3 } else { 2 };
     steps.extend([timeout(app_id, FW_INFO_ADDR), connect(app_id + 1)]);
     let head_id = app_id + 2;
     let head_req = powerz_protocol::decode::head::request(head_id).to_vec();
@@ -453,6 +450,7 @@ fn bad_block_script(boot_fails: bool, head_rejected: bool) -> Vec<Step> {
             vec![0x40, head_id, 0x00, 0x01, 0, 0, 0, 0],
         ));
     }
+    steps.extend(otp_uid_steps(head_id + if head_rejected { 2 } else { 1 }));
     steps
 }
 
@@ -463,7 +461,7 @@ fn status_lines(out: &str) -> Vec<&str> {
 }
 
 #[test]
-fn info_with_an_unread_application_block_says_why_the_version_is_a_fallback() {
+fn info_with_an_unread_application_block_says_why_the_version_is_missing() {
     let (r, out, _) = info_mode(
         DeviceMode::Application,
         false,
@@ -471,8 +469,8 @@ fn info_with_an_unread_application_block_says_why_the_version_is_a_fallback() {
     );
     assert!(r.is_ok(), "{r:?}");
     assert!(
-        line_of(&out, "Firmware:").contains(SYNTH_FW),
-        "the device-info fallback: {out}"
+        line_of(&out, "Firmware:").contains("unknown"),
+        "read once, so no second try to fall back on: {out}"
     );
     let lines = status_lines(&out);
     assert_eq!(lines.len(), 1, "one problem, one line:\n{out}");
@@ -1442,26 +1440,22 @@ fn stream_unix_zero_uses_wall_clock_at_first_record() {
 
 // ---- AC-V9SK52.4: a failed recovery CONNECT is shown, routed by kind ----
 
-/// Device info (ids 1..4), both blocks (ids 5, 6), HEAD (id 7) rejected,
-/// then the recovery CONNECT (id 8) rejected too.
+/// Both blocks (ids 1, 2), HEAD (id 3) rejected, then the recovery CONNECT
+/// (id 4) rejected too, which ends the reads.
 fn rejected_recovery_script() -> Vec<Step> {
     let boot = info_block(SYNTH_MODEL, "2.5");
     let app = info_block(SYNTH_MODEL, "2.0.6");
     [
         memread_steps(1, HW_INFO_ADDR, &boot),
         memread_steps(2, FW_INFO_ADDR, &app),
-        memread_steps(3, OTP_ADDR, &otp_block()),
-        memread_steps(4, UID_ADDR, &SYNTH_UID),
-        memread_steps(5, HW_INFO_ADDR, &boot),
-        memread_steps(6, FW_INFO_ADDR, &app),
         vec![
             Step::transact(
-                powerz_protocol::decode::head::request(7).to_vec(),
-                vec![0x06, 0x07, 0x00, 0x00],
+                powerz_protocol::decode::head::request(3).to_vec(),
+                vec![0x06, 0x03, 0x00, 0x00],
             ),
             Step::transact(
-                powerz_protocol::frame::connect(8).to_vec(),
-                vec![0x06, 0x08, 0x00, 0x00],
+                powerz_protocol::frame::connect(4).to_vec(),
+                vec![0x06, 0x04, 0x00, 0x00],
             ),
         ],
     ]
@@ -1525,17 +1519,17 @@ fn real_id0_head_reply() -> Vec<u8> {
     ]
 }
 
-/// Device info (ids 1..4), both info blocks (ids 5, 6), then HEAD (id 7)
-/// answered with the real id-0 reply; nothing after it.
+/// Both info blocks (ids 1, 2), HEAD (id 3) answered with the real id-0
+/// reply, then OTP and UID (ids 4, 5).
 fn real_head_script() -> Vec<Step> {
     [
-        device_info_steps(1),
-        memread_steps(5, HW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_HW)),
-        memread_steps(6, FW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_FW)),
+        memread_steps(1, HW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_HW)),
+        memread_steps(2, FW_INFO_ADDR, &info_block(SYNTH_MODEL, SYNTH_FW)),
         vec![Step::transact(
-            powerz_protocol::decode::head::request(7).to_vec(),
+            powerz_protocol::decode::head::request(3).to_vec(),
             real_id0_head_reply(),
         )],
+        otp_uid_steps(4),
     ]
     .concat()
 }
@@ -1563,7 +1557,7 @@ fn info_with_the_real_head_reply_says_the_update_check_is_unavailable_naming_the
     let types: Vec<u8> = sent.iter().map(|f| f[0]).collect();
     assert_eq!(
         types,
-        vec![0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x40],
+        vec![0x44, 0x44, 0x40, 0x44, 0x44],
         "one HEAD, no recovery CONNECT"
     );
 }

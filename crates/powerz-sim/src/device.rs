@@ -107,6 +107,24 @@ pub(crate) const SETTINGS_206: [u8; SETTINGS_LEN] = [
     0xE9, 0x3D, 0x2E, 0x39,
 ];
 
+/// The FW 2.0.7 SETTINGS block as read after a replug [device] (no serial or
+/// UID in it): the meter saved it with an earlier boot time at 0x10, so the
+/// CRC at 0x5C matches neither the time now shown there nor 0xFFFFFFFF.
+pub(crate) const SETTINGS_207_REBOOTED: [u8; SETTINGS_LEN] = [
+    0x91, 0x01, 0x08, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x41, 0xFF, 0x00, 0x00, 0x00, 0x00,
+    0xA6, 0x9B, 0xE5, 0x6A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x5E, 0x02, 0x00, 0x00,
+    0x5E, 0x02, 0x00, 0x00, 0x5E, 0x02, 0x00, 0x00, 0x5E, 0x02, 0x00, 0x00, 0x5E, 0x02, 0x00, 0x00,
+    0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00,
+    0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00,
+    0x3C, 0x35, 0x0F, 0x00, 0x3C, 0x35, 0x0F, 0x00, 0x50, 0x00, 0x00, 0x00, 0x7F, 0xFB, 0x69, 0x0E,
+    0x49, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x50, 0x4F, 0x57, 0x45, 0x52, 0x2D, 0x5A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xE9, 0x3D, 0x2E, 0x39,
+];
+
 /// Encode the 180-byte SETTINGS payload from `block` with
 /// `rate_code` in bits 2..3 of the block B flags word (0x60), then refresh
 /// the CRC-32s of block A (0x00..0x5C, at 0x5C) and block B (0x60..0xB0,
@@ -206,10 +224,11 @@ impl SimDevice {
     fn get_data(&mut self, req: &[u8], id: u8) -> Vec<u8> {
         let mask = frame::get_data_mask(req).map_or(0, Attribute::bits);
         let now = self.uptime_ms();
-        self.queue.fill(self.scenario, now);
+        let measured = self.measured();
+        self.queue.fill(measured, now);
         let mut sections: Vec<(Attribute, u8, Vec<u8>)> = Vec::new();
         if mask & Attribute::ADC.bits() != 0 {
-            let sample = self.scenario.sample(now);
+            let sample = measured.sample(now);
             sections.push((Attribute::ADC, 0, adc_payload(&sample, self.queue.code())));
         }
         if mask & Attribute::ADC_QUEUE.bits() != 0 {
@@ -218,7 +237,7 @@ impl SimDevice {
             sections.push((Attribute::ADC_QUEUE, n, records.concat()));
         }
         if mask & Attribute::PD_PACKET.bits() != 0 {
-            let s = self.scenario.sample(now);
+            let s = measured.sample(now);
             let mv = |v: f64| (v * 1000.0).round().clamp(0.0, 65535.0) as u16;
             let ma = (s.ibus_a * 1000.0).round().clamp(-32768.0, 32767.0) as i16;
             let fallback = (mv(s.vbus_v), ma, mv(s.cc1_v), mv(s.cc2_v));
@@ -227,7 +246,11 @@ impl SimDevice {
         if mask & Attribute::SETTINGS.bits() != 0 {
             sections.push((Attribute::SETTINGS, 0, {
                 let stored = self.stored();
-                settings_payload(&stored.settings, stored.rate_code)
+                if self.faults.settings_saved_before_reboot {
+                    SETTINGS_207_REBOOTED.to_vec()
+                } else {
+                    settings_payload(&stored.settings, stored.rate_code)
+                }
             }));
         }
         // RecordList: served from level 1; at level 0 the reply is empty.
@@ -357,23 +380,25 @@ impl SimDevice {
     }
 
     /// 0x0A on CDC: a settings write laid out as `check_settings_write` demands
-    /// (only the documented keys, in order, values in range) is ACCEPTed
-    /// and applied to the SETTINGS block (kept as is under the
-    /// `ignore-settings-write` fault) the way the meter stores it
-    /// (`apply_settings_write`: key 0x15 sets the rate code, 0x14 the bits 0..1
-    /// of 0x60 `[device]`). Every
-    /// other 0x0A frame, such as one carrying the factory-reset key, is
-    /// REJECTed and changes nothing.
+    /// (only the documented keys, in order, values in range) is answered with
+    /// FINISHED, as the KM003C does `[device]`, and applied to the SETTINGS
+    /// block (kept as is under the `ignore-settings-write` fault) the way the
+    /// meter stores it (`apply_settings_write`: key 0x15 sets the rate code,
+    /// 0x14 the bits 0..1 of 0x60 `[device]`). Every other 0x0A frame, such as
+    /// one carrying the factory-reset key, is REJECTed and changes nothing.
     fn settings_write(&mut self, req: &[u8], id: u8) -> Vec<u8> {
         if !self.link_open() || check_settings_write(req).is_err() {
             return self.control(msg::REJECT, id);
         }
         if self.faults.ignore_settings_write {
-            return self.control(msg::ACCEPT, id);
+            return self.control(msg::FINISHED, id);
         }
         let mut stored = self.stored();
         let old_rate = stored.rate_code;
         apply_settings_write(&mut stored.settings, req);
+        if self.faults.stir_undecoded_settings {
+            stored.settings[0x08] ^= 0x01;
+        }
         let w60 = u32::from_le_bytes([
             stored.settings[0x60],
             stored.settings[0x61],
@@ -389,7 +414,7 @@ impl SimDevice {
             let now = self.uptime_ms();
             self.queue.set_rate(code, now);
         }
-        self.control(msg::ACCEPT, id)
+        self.control(msg::FINISHED, id)
     }
 
     /// 0x4C: grant level 1 for the UID, 2 for the OTP credential, else 0.

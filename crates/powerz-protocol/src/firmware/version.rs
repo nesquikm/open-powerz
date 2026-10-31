@@ -12,6 +12,8 @@ pub struct Version {
     pub minor: u32,
     /// Patch component.
     pub patch: u32,
+    /// False for a pre-release, which sorts below the release of its numbers.
+    pub released: bool,
 }
 
 /// Oldest application firmware the app supports.
@@ -26,15 +28,27 @@ impl Version {
             major,
             minor,
             patch,
+            released: true,
         }
     }
 
     /// Parse a dotted version string.
     ///
     /// `major`, `major.minor` or `major.minor.patch` (missing components
-    /// are 0); anything else is `None`.
+    /// are 0). Surrounding whitespace and one leading `v` or `V` are dropped
+    /// (`v2.0.7` is 2.0.7). A suffix from the first `-` on makes a
+    /// pre-release, as in semver: `2.0.7-beta` sorts below 2.0.7, so it never
+    /// hides a warning the release would get. A `+` suffix is build metadata
+    /// and is ignored: `2.0.7+build5` is 2.0.7. Anything else is `None`, such
+    /// as `2.x.7`, `2.0.7.1`, `vv2.0.7`, or a suffix with no numbers before it.
     pub fn parse(s: &str) -> Option<Version> {
-        let mut parts = s.trim().split('.').map(|p| p.parse::<u32>().ok());
+        let s = s.trim();
+        let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
+        let (numbers, suffix) = match s.find(['-', '+']) {
+            Some(at) => s.split_at(at),
+            None => (s, ""),
+        };
+        let mut parts = numbers.split('.').map(|p| p.parse::<u32>().ok());
         let major = parts.next()??;
         let minor = match parts.next() {
             Some(p) => p?,
@@ -47,7 +61,10 @@ impl Version {
         if parts.next().is_some() {
             return None;
         }
-        Some(Version::new(major, minor, patch))
+        Some(Version {
+            released: !suffix.starts_with('-'),
+            ..Version::new(major, minor, patch)
+        })
     }
 }
 

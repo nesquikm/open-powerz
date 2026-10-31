@@ -81,7 +81,7 @@ pub enum ErrorKind {
     #[error("the file is empty, a pdcap header was expected")]
     MissingHeader,
     /// The line is not the JSON object it should be.
-    #[error("{0}")]
+    #[error("{}", json_reason(.0))]
     Json(#[from] serde_json::Error),
     /// The line is not valid UTF-8.
     #[error("the line is not UTF-8 text")]
@@ -104,6 +104,17 @@ pub enum ErrorKind {
     /// A record line's bytes are not one whole record.
     #[error("`raw` is not one whole PD record")]
     BadRecord,
+}
+
+/// `e` without its own line number: it parsed one line of the file, so its
+/// "line 1" would contradict the file line [`Error`] names.
+fn json_reason(e: &serde_json::Error) -> String {
+    let text = e.to_string();
+    let own_place = format!(" at line {} column {}", e.line(), e.column());
+    match text.strip_suffix(&own_place) {
+        Some(reason) => format!("{reason} at column {}", e.column()),
+        None => text,
+    }
 }
 
 /// A pdcap file could not be read past line [`Error::line`].

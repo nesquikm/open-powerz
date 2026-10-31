@@ -71,6 +71,8 @@ const DETAILS: ConnectedInfo = {
   rate_sps: 50,
   rate_locked: false,
   session_id: 1,
+  min_supported_firmware: "1.7.0",
+  known_latest_firmware: "2.0.7",
 };
 
 /** A controllable flash: the test reports stages and settles it. */

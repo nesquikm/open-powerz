@@ -66,8 +66,8 @@ async function commands(page: Page): Promise<string[]> {
 }
 
 /** Open the app, connect the demo device, show the trigger view and detect. */
-async function detected(page: Page): Promise<void> {
-  await open(page);
+async function detected(page: Page, query = ""): Promise<void> {
+  await open(page, query);
   await streamDemo(page);
   await page.getByRole("tab", { name: "Trigger" }).click();
   await expect(view(page)).toBeVisible();
@@ -103,6 +103,44 @@ test("the console shows a parsed pdo block (AC-DGSQ6T.4)", async ({ page }) => {
   await detected(page);
   await typeLine(page, "entry pd");
   await expect(transcript(page)).toContainText(new RegExp(`${TIME} < pdo.*9\\.00 V`));
+});
+
+// ---- AC-4PJRVH.3: the command field ----
+
+function commandField(page: Page): Locator {
+  return consoleRegion(page).getByLabel("Command");
+}
+
+test("the command field clears once a line is sent (AC-4PJRVH.3)", async ({ page }) => {
+  await detected(page);
+  await typeLine(page, "pdm parm");
+  await expect(transcript(page)).toContainText("> pdm parm");
+  await expect(commandField(page)).toHaveValue("");
+});
+
+test("the command field clears once a confirmed line is sent (AC-4PJRVH.3)", async ({ page }) => {
+  await detected(page);
+  await typeLine(page, "hello meter");
+  await dialog(page).getByRole("button", { name: "Confirm" }).click();
+  await expect(transcript(page)).toContainText("> hello meter");
+  await expect(commandField(page)).toHaveValue("");
+});
+
+test("a console failure shows its hint after the message (AC-4PJRVH.2)", async ({ page }) => {
+  await detected(page, "?mock=trigger-out-of-sync");
+  await typeLine(page, "pdm parm");
+  await expect(alert(page)).toContainText(/\S\.? Power-cycle the meter/);
+});
+
+test("a line that was not sent stays in the command field (AC-4PJRVH.3)", async ({ page }) => {
+  await detected(page);
+  await typeLine(page, "pd cmd=1");
+  await expect(alert(page)).toContainText("GoodCRC");
+  await expect(commandField(page)).toHaveValue("pd cmd=1");
+
+  await typeLine(page, "hello meter");
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  await expect(commandField(page)).toHaveValue("hello meter");
 });
 
 // ---- AC-DGSQ6T.3: GoodCRC ----
@@ -166,7 +204,7 @@ test("a built Request for 9 V asks for the confirmation first (AC-DGSQ6T.1, .5)"
   await expect(dialog(page)).toBeHidden();
   await expect
     .poll(async () => (await commands(page)).slice(before))
-    .toEqual(["pd data=0082102CB10423"]);
+    .toEqual(["entry pd", "pd data=0082102CB10423"]);
 });
 
 // ---- AC-DGSQ6T.1: control messages ----

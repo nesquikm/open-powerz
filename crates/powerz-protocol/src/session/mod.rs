@@ -37,8 +37,23 @@ pub use memory::{
 };
 pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer};
 pub use probe::{ConnectOutcome, HeadOutcome, ProbeReport};
-pub use records::{RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_table_request};
+pub use records::{
+    RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_delete_table, record_table_request,
+};
+pub use settings_write::SettingsWritten;
 pub use stream::{Gap, SnapshotCadence, StreamPoll, Streamer};
+
+/// Text of [`Error::RecordTableMismatch`]: a matching count alone would read
+/// as no mismatch at all, so that case says the entries differ.
+fn record_table_mismatch_text(expected: usize, actual: usize) -> String {
+    if expected == actual {
+        format!(
+            "after the delete the meter lists {actual} records as expected, but the entries differ"
+        )
+    } else {
+        format!("after the delete the meter lists {actual} records, expected {expected}")
+    }
+}
 
 /// Errors from a [`Session`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -88,7 +103,7 @@ pub enum Error {
     },
     /// After a record delete the meter lists something other than the
     /// table that was written.
-    #[error("after the delete the meter lists {actual} records, expected {expected}")]
+    #[error("{}", record_table_mismatch_text(*.expected, *.actual))]
     RecordTableMismatch {
         /// Entries in the table that was written.
         expected: usize,
@@ -282,24 +297,37 @@ impl<T: Transport, C: Clock> Session<T, C> {
         timeout: Duration,
         take_first: impl Fn(&[u8]) -> bool,
     ) -> Result<Vec<u8>, Error> {
+        self.exchange_taking(request, timeout, take_first, |_| false)
+    }
+
+    /// [`exchange_taking_first`](Self::exchange_taking_first) that also takes
+    /// any transfer `take_any` accepts, first or re-read, whatever its id.
+    fn exchange_taking(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+        take_first: impl Fn(&[u8]) -> bool,
+        take_any: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>, Error> {
         let expected_id = if request[0] == 0x4C { 0 } else { request[1] };
         let reply = self.transport.transact(request, timeout)?;
         if take_first(&reply) {
             return Ok(reply);
         }
-        self.reread_until_id(reply, expected_id, timeout)
+        self.reread_until_id(reply, expected_id, timeout, take_any)
     }
 
-    /// Return `reply` if its id is `expected_id`, else read again (up to
-    /// [`MAX_STALE_REPLIES`] times) until one is.
+    /// Return `reply` if its id is `expected_id` or `take_any` accepts it,
+    /// else read again (up to [`MAX_STALE_REPLIES`] times) until one is.
     fn reread_until_id(
         &mut self,
         mut reply: Vec<u8>,
         expected_id: u8,
         timeout: Duration,
+        take_any: impl Fn(&[u8]) -> bool,
     ) -> Result<Vec<u8>, Error> {
         let mut rereads = 0;
-        while reply.get(1) != Some(&expected_id) {
+        while reply.get(1) != Some(&expected_id) && !take_any(&reply) {
             if rereads == MAX_STALE_REPLIES {
                 return Err(Error::Protocol(format!(
                     "no reply with id {expected_id:#04x} after {MAX_STALE_REPLIES} re-reads"
@@ -329,7 +357,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
     }
 
     /// [`expect_accept_within`](Self::expect_accept_within); with
-    /// `stop_on_sync`, a SYNC reply is [`Error::BootloaderMidDownload`].
+    /// `stop_on_sync`, a SYNC reply of any id is
+    /// [`Error::BootloaderMidDownload`].
     fn expect_accept_checked(
         &mut self,
         request: &[u8],
@@ -337,7 +366,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
         timeout: Duration,
         stop_on_sync: bool,
     ) -> Result<(), Error> {
-        let reply = self.exchange_within(request, timeout)?;
+        let reply =
+            self.exchange_taking(request, timeout, |_| false, |r| stop_on_sync && is_sync(r))?;
         if stop_on_sync && is_sync(&reply) {
             return Err(Error::BootloaderMidDownload);
         }
@@ -356,9 +386,9 @@ impl<T: Transport, C: Clock> Session<T, C> {
         self.connect_checked(false)
     }
 
-    /// [`connect`](Self::connect); with `stop_on_sync`, a SYNC reply to
-    /// either CONNECT is [`Error::BootloaderMidDownload`] and nothing more
-    /// is sent.
+    /// [`connect`](Self::connect); with `stop_on_sync`, a SYNC reply of any
+    /// id to either CONNECT is [`Error::BootloaderMidDownload`] and nothing
+    /// more is sent.
     fn connect_checked(&mut self, stop_on_sync: bool) -> Result<(), Error> {
         let request = frame::connect(self.counter.next());
         let first = match self.expect_accept_checked(

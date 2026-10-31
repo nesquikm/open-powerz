@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -22,11 +22,13 @@ use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{PdScenario, Persona, Scenario, SimDevice};
 use serde::Serialize;
 
+use crate::app_log::AppLog;
+use crate::firmware_flash::{FlashControl, FlashStage};
 use crate::history::{HistoryGap, Series, SeriesBuckets};
 use crate::recording::{ExportProgress, RecordingSummary};
 use crate::stats::StatsSnapshot;
 use crate::store::SessionStore;
-use crate::ui_error::UiError;
+use crate::ui_error::{ErrorKind, UiError};
 use crate::worker::{
     self, BackendEvent, ConnectedInfo, EventSink, Gap, GapKind, MeasurementSource, Status,
     WorkerConfig, WorkerHandle,
@@ -140,12 +142,14 @@ pub fn list_devices_from(
 }
 
 /// An open recording as a re-attached page picks it up (FR VEDDFD).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecordingSnapshot {
     /// Rows written so far.
     pub rows: u64,
     /// Time since the recording started, ms.
     pub elapsed_ms: u64,
+    /// Its file: Stop asks where to keep it (AC-4PJRVM.2).
+    pub path: Option<String>,
 }
 
 /// The running session as a new page (after a reload) picks it up (FR VEDDFD).
@@ -373,6 +377,44 @@ impl Drop for WatchHandle {
 /// the serial it waits to see again.
 type Waiting = Arc<Mutex<Vec<(String, String)>>>;
 
+/// First wait before the next automatic reconnect of a meter that failed to
+/// open (FR 4PJRVK); doubles with each failed try. Longer than a few hotplug
+/// polls, so a meter held by another app is not hammered.
+const FIRST_BACK_OFF_MS: u64 = 2_000;
+
+/// The longest a meter that keeps failing to open waits for its next try.
+const MOST_BACK_OFF_MS: u64 = 60_000;
+
+/// Paces a session's automatic reconnects (FR 4PJRVK): every try that does
+/// not end in samples pushes the next one further out, up to the cap.
+#[derive(Debug, Default)]
+struct ReconnectBackOff {
+    /// Tries since the meter last delivered samples. Shared with the
+    /// session's event sink, which clears it when samples arrive.
+    tries: Arc<AtomicU32>,
+    /// Earliest time of the next try, once there has been one.
+    next_try_ms: u64,
+}
+
+impl ReconnectBackOff {
+    /// Whether a reconnect may start at `now_ms`.
+    fn due(&self, now_ms: u64) -> bool {
+        self.tries.load(Ordering::SeqCst) == 0 || now_ms >= self.next_try_ms
+    }
+
+    /// A reconnect starts at `now_ms`.
+    fn tried(&mut self, now_ms: u64) {
+        let earlier = self.tries.fetch_add(1, Ordering::SeqCst);
+        let delay = FIRST_BACK_OFF_MS.saturating_mul(1 << earlier.min(16));
+        self.next_try_ms = now_ms.saturating_add(delay.min(MOST_BACK_OFF_MS));
+    }
+
+    /// Start over: the next try may run at once.
+    fn reset(&self) {
+        self.tries.store(0, Ordering::SeqCst);
+    }
+}
+
 /// One meter's session (FR 1HHT03): every connected meter has its own
 /// worker, data, page, trigger session and wait.
 struct Meter {
@@ -400,6 +442,12 @@ struct Meter {
     /// The queue rate to restore when the trigger session closes, if it was
     /// capped for it.
     rate_before_trigger: Option<Rate>,
+    /// Counts the PDM sessions opening, open or closing on this meter
+    /// ([`crate::trigger::PdmHold`]). Wider than [`Meter::trigger`], which is
+    /// empty during the handshake and while a taken session closes.
+    pdm_holds: Arc<AtomicUsize>,
+    /// When the next automatic reconnect may start (FR 4PJRVK).
+    back_off: ReconnectBackOff,
 }
 
 impl Meter {
@@ -448,12 +496,18 @@ pub struct DeviceManager<O, C> {
     /// Raised while a firmware update holds the meter (FR V9SK55, AC .4);
     /// shared with its [`FlashLease`].
     flashing: Arc<AtomicBool>,
-    /// The meters the firmware update took (FR 1HHT03); empty while
-    /// flashing means every meter is held.
+    /// The meters the firmware update took (FR 1HHT03).
     flash_targets: Arc<Mutex<Vec<String>>>,
+    /// The running update, shared with its [`FlashLease`].
+    flash_run: Arc<Mutex<Option<FlashRun>>>,
     /// The simulator serials given to second (third, ...) demo meters, by
     /// serial: the demo device id that got each (FR 1HHT03).
     demo_serials: HashMap<String, String>,
+    /// Called each time a session reports `connected`, just before the page
+    /// is told: the moment the page drops a capture opened from a file.
+    on_connected: Arc<dyn Fn() + Send + Sync>,
+    /// Where the session events go (AC-4PJRVM.5).
+    log: AppLog,
 }
 
 /// Why a request is refused while a firmware update runs.
@@ -461,13 +515,32 @@ const FLASH_REFUSAL: &str =
     "A firmware update is running. Wait for it to finish before using the meter.";
 
 /// Exclusive use of a meter for a firmware update (FR V9SK55, AC .4): while
-/// it is held the manager refuses the measurement stream, PD capture,
-/// recording, triggering and device switching. Dropping it releases them.
+/// it is held the manager refuses that meter's measurement stream, PD
+/// capture, recording and triggering, a second update, and any real meter
+/// that may be that meter (AC-4PJRVM.4). Dropping it releases them.
 #[derive(Debug)]
 pub struct FlashLease {
     device: DeviceListing,
     flashing: Arc<AtomicBool>,
     targets: Arc<Mutex<Vec<String>>>,
+    control: Arc<FlashControl>,
+    run: Arc<Mutex<Option<FlashRun>>>,
+}
+
+/// The running update: its meter and its control.
+#[derive(Debug)]
+struct FlashRun {
+    device: DeviceListing,
+    control: Arc<FlashControl>,
+}
+
+/// A running firmware update as the page sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlashStatus {
+    /// The meter being updated.
+    pub device_id: String,
+    /// The latest stage, `None` before the first.
+    pub stage: Option<FlashStage>,
 }
 
 impl FlashLease {
@@ -475,11 +548,17 @@ impl FlashLease {
     pub fn device(&self) -> &DeviceListing {
         &self.device
     }
+
+    /// The update's stop request and stage.
+    pub fn control(&self) -> &Arc<FlashControl> {
+        &self.control
+    }
 }
 
 impl Drop for FlashLease {
     fn drop(&mut self) {
-        // Targets first: a flash begun in between keeps the ones it set.
+        *self.run.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        // Targets before the flag: a new flash waits until both are clear.
         self.targets
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -598,11 +677,15 @@ impl Attacher {
             device_id,
             model: info.model,
             firmware_version: info.firmware_version,
-            serial: Some(info.serial),
+            serial: Some(info.serial).filter(|s| !s.is_empty()),
             rate_sps: info.rate_sps,
             rate_locked: info.rate_locked,
             session_id: info.session_id,
-            recording: recording.map(|(rows, elapsed_ms)| RecordingSnapshot { rows, elapsed_ms }),
+            recording: recording.map(|(rows, elapsed_ms, path)| RecordingSnapshot {
+                rows,
+                elapsed_ms,
+                path,
+            }),
         })
     }
 }
@@ -659,11 +742,13 @@ fn history_sink(history: Arc<Mutex<History>>, mut sink: impl EventSink) -> impl 
 
 /// Opens a trigger session for the connected meter (see
 /// [`DeviceManager::trigger_opener`]); a simulated one for a demo device.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TriggerOpener {
     demo: bool,
     serial: Option<String>,
     now_ms: u64,
+    /// Covers the handshake, before the session reaches the manager.
+    _hold: crate::trigger::PdmHold,
 }
 
 impl TriggerOpener {
@@ -695,6 +780,40 @@ fn take(
     lock(slot).take()
 }
 
+/// Wrap `sink` so `hook` runs when the session reports `connected`, before
+/// the event goes on.
+fn connected_sink(hook: Arc<dyn Fn() + Send + Sync>, mut sink: impl EventSink) -> impl EventSink {
+    move |event: BackendEvent| {
+        if matches!(event, BackendEvent::Status(Status::Connected(_))) {
+            hook();
+        }
+        sink(event);
+    }
+}
+
+/// Wrap `sink` so the session's connect and end reach `log` (AC-4PJRVM.5).
+/// `id` and `model` come from the listing; the serial stays out of the log.
+fn log_sink(log: AppLog, id: String, model: String, mut sink: impl EventSink) -> impl EventSink {
+    let mut connected = false;
+    move |event: BackendEvent| {
+        match &event {
+            BackendEvent::Status(Status::Connected(_)) => {
+                connected = true;
+                log.line(&format!("connected {id} ({model})"));
+            }
+            BackendEvent::Status(Status::Disconnected { error }) => log.line(&match error {
+                None => format!("disconnected {id}"),
+                Some(e) if connected && matches!(e.kind, ErrorKind::Disconnected) => {
+                    format!("unplugged {id}")
+                }
+                Some(e) => format!("error {id}: {}", e.message),
+            }),
+            _ => {}
+        }
+        sink(event);
+    }
+}
+
 /// Forget any wait for the meter whose session is `id`.
 fn forget_wait(waiting: &Waiting, id: &str) {
     waiting
@@ -724,15 +843,20 @@ fn trigger_sink(
 /// Wrap `sink` so a real meter's session that ends without being asked to,
 /// after it delivered samples, is followed by a waiting status for `serial`,
 /// and the manager remembers that session `id` waits for that serial
-/// (FR TGE839).
+/// (FR TGE839). Samples clear the count of failed reconnects in `tries`
+/// (FR 4PJRVK).
 fn waiting_sink(
     waiting: Waiting,
     id: String,
     serial: String,
     history: Arc<Mutex<History>>,
+    tries: Arc<AtomicU32>,
     mut sink: impl EventSink,
 ) -> impl EventSink {
     move |event: BackendEvent| {
+        if matches!(&event, BackendEvent::Batch(batch) if !batch.samples.is_empty()) {
+            tries.store(0, Ordering::SeqCst);
+        }
         let ended = matches!(event, BackendEvent::Status(Status::Disconnected { .. }));
         sink(event);
         if !ended {
@@ -780,8 +904,22 @@ where
             waiting: Arc::default(),
             flashing: Arc::default(),
             flash_targets: Arc::default(),
+            flash_run: Arc::default(),
             demo_serials: HashMap::new(),
+            on_connected: Arc::new(|| {}),
+            log: AppLog::default(),
         }
+    }
+
+    /// Call `hook` whenever a session (a user connect or an automatic
+    /// reconnect) reports `connected`, before the page is told.
+    pub fn set_on_connected(&mut self, hook: impl Fn() + Send + Sync + 'static) {
+        self.on_connected = Arc::new(hook);
+    }
+
+    /// Log the events of the sessions opened from now on to `log`.
+    pub fn set_app_log(&mut self, log: AppLog) {
+        self.log = log;
     }
 
     /// Refuse a request while a firmware update holds the meter.
@@ -803,6 +941,27 @@ where
             if targets.is_empty() || targets.iter().any(|t| t == id) {
                 return Err(UiError::usage(FLASH_REFUSAL));
             }
+        }
+        Ok(())
+    }
+
+    /// Refuse connecting `device` while a firmware update may hold it
+    /// (AC-4PJRVM.4): a real meter with the target's serial, or with no
+    /// serial to compare on either side, can be the target at a new address.
+    /// So can one that is not in application mode, whatever its serial says.
+    fn ensure_not_flash_target(&self, device: &DeviceListing) -> Result<(), UiError> {
+        let run = self
+            .flash_run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(target) = run.as_ref().map(|r| &r.device) else {
+            return Ok(());
+        };
+        let real = target.demo_scenario.is_none() && device.demo_scenario.is_none();
+        let unsure = target.serial.is_none() || device.serial.is_none();
+        let application = device.mode == DeviceMode::Application;
+        if real && (unsure || !application || target.serial == device.serial) {
+            return Err(UiError::usage(FLASH_REFUSAL));
         }
         Ok(())
     }
@@ -860,8 +1019,10 @@ where
     /// Take the listed device `id` for a firmware update (FR V9SK55,
     /// AC .4): that meter's trigger session and measurement stream close
     /// first (waiting for the worker to let go of the pipe), its wait for an
-    /// unplug ends, and everything else that talks to a meter is refused
-    /// until the lease is dropped. A bootloader-mode meter can be taken too.
+    /// unplug ends, and that meter is refused until the lease is dropped; the
+    /// others keep running (AC-4PJRVJ.2). A real session that cannot be told
+    /// apart from a real target lets go too: without a serial on both sides
+    /// it may be the same meter. A bootloader-mode meter can be taken too.
     pub fn begin_flash(&mut self, id: &str) -> Result<FlashLease, UiError> {
         self.ensure_not_flashing()?;
         let device = self
@@ -869,8 +1030,7 @@ where
             .into_iter()
             .find(|d| d.id == id)
             .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
-        // The session of that meter (by id, or by serial after a replug);
-        // when none matches, every session lets go of its meter.
+        // The session of that meter (by id, or by serial after a replug).
         let same = |m: &Meter| {
             m.named(id)
                 || (device.demo_scenario.is_none()
@@ -879,22 +1039,39 @@ where
                     && m.device.serial == device.serial)
         };
         let any = self.meters.iter().any(same);
+        // No session matched: a real meter with no serial to compare may
+        // still be the target, seen at another address.
+        let unsure = |m: &Meter| {
+            !any && device.demo_scenario.is_none()
+                && m.device.demo_scenario.is_none()
+                && (device.serial.is_none() || m.device.serial.is_none())
+        };
+        let held = |m: &Meter| same(m) || unsure(m);
+        let mut targets: Vec<String> = self
+            .meters
+            .iter()
+            .filter(|m| held(m))
+            .map(|m| m.id.clone())
+            .collect();
+        if !targets.iter().any(|t| t == id) {
+            targets.push(id.to_owned());
+        }
         // The targets are in place before the flag is raised, so the other
         // meters are never refused, not even for a moment.
         *self
             .flash_targets
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = if any {
-            self.meters
-                .iter()
-                .filter(|m| same(m))
-                .map(|m| m.id.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+            .unwrap_or_else(PoisonError::into_inner) = targets;
+        let control = Arc::new(FlashControl::default());
+        *self
+            .flash_run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(FlashRun {
+            device: device.clone(),
+            control: Arc::clone(&control),
+        });
         self.flashing.store(true, Ordering::SeqCst);
-        for m in self.meters.iter_mut().filter(|m| !any || same(m)) {
+        for m in self.meters.iter_mut().filter(|m| held(m)) {
             m.release();
             forget_wait(&self.waiting, &m.id);
         }
@@ -902,7 +1079,34 @@ where
             device,
             flashing: Arc::clone(&self.flashing),
             targets: Arc::clone(&self.flash_targets),
+            control,
+            run: Arc::clone(&self.flash_run),
         })
+    }
+
+    /// The running firmware update, if any.
+    pub fn flash_status(&self) -> Option<FlashStatus> {
+        let run = self
+            .flash_run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        run.as_ref().map(|r| FlashStatus {
+            device_id: r.device.id.clone(),
+            stage: r.control.stage(),
+        })
+    }
+
+    /// Ask the running firmware update to stop (AC-4PJRVJ.1); refused when
+    /// none runs or its erase has begun.
+    pub fn cancel_flash(&self) -> Result<(), UiError> {
+        let run = self
+            .flash_run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match run.as_ref() {
+            Some(r) => r.control.cancel(),
+            None => Err(UiError::usage("No firmware update is running.")),
+        }
     }
 
     /// Serial of the unplugged meter the app waits for, if any.
@@ -918,6 +1122,15 @@ where
             .iter()
             .map(|(_, serial)| serial.clone())
             .collect()
+    }
+
+    /// Arm a wait for `serial` on session `id`, as an unplug does.
+    #[cfg(test)]
+    pub(crate) fn arm_wait(&self, id: &str, serial: &str) {
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((id.to_owned(), serial.to_owned()));
     }
 
     /// Stop waiting for unplugged meters: the user picked another device,
@@ -937,7 +1150,9 @@ where
     /// The hotplug watcher's changed device list; returns whether it
     /// started a connect. Only an awaited meter that is listed again is
     /// reconnected, into its own session; nothing else is ever connected on
-    /// its own.
+    /// its own. A meter whose reconnect failed is tried again only once its
+    /// back-off has passed, or at once when it left the list and came back
+    /// (FR 4PJRVK).
     pub fn devices_changed(&mut self, devices: &[DeviceListing]) -> bool {
         if self.flashing() {
             return false;
@@ -947,6 +1162,7 @@ where
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        let now_ms = self.clock.now_ms();
         let mut started = false;
         for (id, serial) in waits {
             let Some(index) = self.meters.iter().position(|m| m.id == id) else {
@@ -962,8 +1178,12 @@ where
                 .find(|d| d.demo_scenario.is_none() && d.serial.as_deref() == Some(serial.as_str()))
                 .cloned()
             else {
+                meter.back_off.reset();
                 continue;
             };
+            if !meter.back_off.due(now_ms) {
+                continue;
+            }
             // A meter back in bootloader mode is listed but not opened; keep
             // waiting for its application-mode return.
             if device.ensure_connectable().is_err() {
@@ -991,7 +1211,9 @@ where
             if let Some(old) = meter.worker.take() {
                 old.retire();
             }
+            self.log.line(&format!("replug {id} at {}", device.id));
             meter.device = device;
+            meter.back_off.tried(now_ms);
             self.open_session(index, rate);
             started = true;
         }
@@ -1049,7 +1271,7 @@ where
         sink: impl EventSink,
         stop: Arc<AtomicBool>,
     ) -> Result<(), UiError> {
-        self.ensure_not_flashing()?;
+        self.ensure_not_flashing_for(id)?;
         if self.meter(id).is_some_and(|m| m.running_worker().is_some()) {
             return Err(UiError::usage(
                 "This meter is already connected. Disconnect it first.",
@@ -1061,6 +1283,7 @@ where
             .into_iter()
             .find(|d| d.id == id)
             .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
+        self.ensure_not_flash_target(&device)?;
         device.ensure_connectable()?;
         // Sessions that ended (unplugged, failed or disconnected) make way,
         // and their waits end, as with a single meter. While other meters
@@ -1118,6 +1341,8 @@ where
             device: device.clone(),
             trigger: Arc::default(),
             rate_before_trigger: None,
+            pdm_holds: Arc::default(),
+            back_off: ReconnectBackOff::default(),
         });
         self.current = Some(device.id);
         self.open_session(self.meters.len() - 1, rate);
@@ -1212,24 +1437,41 @@ where
             source,
             ..WorkerConfig::new(rate, session_id)
         };
-        let sink = trigger_sink(
-            Arc::clone(&m.trigger),
-            history_sink(
-                Arc::clone(&history),
-                listing_sink(device.clone(), live_sink(Arc::clone(&m.live))),
+        let sink = log_sink(
+            self.log.clone(),
+            m.id.clone(),
+            device.model.clone(),
+            connected_sink(
+                Arc::clone(&self.on_connected),
+                trigger_sink(
+                    Arc::clone(&m.trigger),
+                    history_sink(
+                        Arc::clone(&history),
+                        listing_sink(device.clone(), live_sink(Arc::clone(&m.live))),
+                    ),
+                ),
             ),
         );
         let sink: Box<dyn FnMut(BackendEvent) + Send> = match waits_for {
-            Some(serial) => Box::new(waiting_sink(waiting, m.id.clone(), serial, history, sink)),
+            Some(serial) => Box::new(waiting_sink(
+                waiting,
+                m.id.clone(),
+                serial,
+                history,
+                Arc::clone(&m.back_off.tries),
+                sink,
+            )),
             None => Box::new(sink),
         };
-        m.worker = Some(worker::spawn_with_store(
+        let pdm_holds = Arc::clone(&m.pdm_holds);
+        m.worker = Some(worker::spawn_watching_pdm(
             move || opener.open_source(&device, source),
             clock,
             config,
             store,
             sink,
             Arc::clone(&m.stop),
+            Arc::new(move || pdm_holds.load(Ordering::SeqCst) > 0),
         ));
     }
 
@@ -1441,7 +1683,8 @@ where
             while !flag.load(Ordering::SeqCst) {
                 // While the app waits for a meter, report every poll, changed or
                 // not: a replug seen before the wait was armed, or a reconnect
-                // that failed to open, gets another try (FR TGE839).
+                // that failed to open, gets another try (FR TGE839), paced by
+                // the session's back-off (FR 4PJRVK).
                 if !waiting
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -1557,6 +1800,7 @@ where
         }
         // Polling pauses while the automatic list runs (AC-DGSQ6S.11).
         worker.pause_during_list(control);
+        worker.hold_until_closed(crate::trigger::PdmHold::new(&meter.pdm_holds));
         *lock(&meter.trigger) = Some(worker);
         Ok(())
     }
@@ -1595,6 +1839,7 @@ where
             demo: meter.device.demo_scenario.is_some(),
             serial: meter.device.serial.clone(),
             now_ms: self.clock.clone().now_ms(),
+            _hold: crate::trigger::PdmHold::new(&meter.pdm_holds),
         })
     }
 

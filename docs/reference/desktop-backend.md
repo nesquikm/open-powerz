@@ -34,7 +34,7 @@ Commands:
 |---|---|
 | `pdStart(): Promise<void>` | Starts the PD capture on the open session. Rows and the capture state arrive on the session channel. |
 | `pdStop(): Promise<void>` | Stops the capture. The captured records stay. |
-| `pdClear(): Promise<number>` | Drops every captured record and answers the index of the next record. Rows numbered below it were sent before the clear and are stale. |
+| `pdClear(): Promise<PdCleared>` | Drops every captured record and answers `next_index`, the index of the next record, and `status_floor_ms`, the latest status session time at the clear (0 if none). Rows numbered below `next_index` and status samples at or below `status_floor_ms` were sent before the clear and are stale. |
 | `pdDetails(index: number, opened = false): Promise<PdDetails>` | The raw bytes and field tree of record `index`: of the capture opened from a file when `opened`, of the live capture otherwise. |
 | `pdSave(suggestedName: string): Promise<ExportResult \| null>` | Opens the save dialog and saves the capture so far as a [pdcap file](pdcap.md). Answers `{ path, rows }`, or `null` when the dialog was cancelled. |
 | `pdOpen(): Promise<PdOpened \| null>` | Opens the open dialog and loads a pdcap file. Needs no meter. `null` when cancelled. |
@@ -57,7 +57,10 @@ Types:
 | `PdDetails` | `index`, `raw` (the record's bytes), `fields` (a `PdField` tree) |
 | `PdField` | `name`, `meaning`, `raw`, `bytes` (`[start, end)` in the record's raw bytes), `children` |
 | `PdStatusSample` | `session_ms`, `vbus_v`, `ibus_a` (signed), `cc1_v`, `cc2_v` |
-| `PdOpened` | `path`, `rows`, `status`, `damaged_line` (1-based line where reading stopped, `null` for a whole file), `oversized` (vendor log rows skipped, 0 for pdcap), `truncated` (the vendor log had more rows than the import takes) |
+| `PdOpened` | `path`, `rows`, `status`, `damaged_line` (1-based line where reading stopped, `null` for a whole file), `oversized` (vendor log rows skipped for oversized record bytes, 0 for pdcap), `skipped` (vendor log rows skipped for holding no whole record, 0 for pdcap), `truncated` (the vendor log had more rows than the import takes), `dropped` (the oldest records past the capture's limit, not in `rows`) |
+
+A capture keeps its latest 100,000 records and drops the oldest, with a
+notice. Status samples are not part of this limit.
 
 On the UI side, `PdCapture` (in `pdCapture.svelte.ts`) holds the rows and the
 status samples for the table and the chart. `THEME_COLORS` and
@@ -93,7 +96,7 @@ Types (they mirror `src-tauri/src/trigger.rs`):
 | type | fields |
 |---|---|
 | `TriggerProtocol` | `"pd"`, `"qc"`, `"fcp"`, `"afc"`, `"sfcp"`, `"scp"`, `"vfcp"`, `"tfcp"`, `"ufcs"`. `TRIGGER_PROTOCOLS` lists them, PD first. |
-| `Detection` | `bc12`, `apple` (each a `SupportName`: `"supported"`, `"not-supported"` or `"unknown"`), `entries` (`DetectEntry[]`: `name`, `support`, `vbus_mv`, `ibus_ma`), `complete` (false when the list stalled or was cut off) |
+| `Detection` | `bc12`, `apple` (each a `SupportName`: `"supported"`, `"not-supported"` or `"unknown"`), `entries` (`DetectEntry[]`: `name`, `support`, `vbus_mv`, `ibus_ma`), `complete` (false when the list stalled or was cut off), `hint` (the D+/D− charging-mode text from the newest measurement, null before the first one) |
 | `ProtocolSection` | `protocol`, `supported`, `offers` (`TriggerOffer[]`, PD only), `limits` (`TriggerLimits[]`), `settings` (`PdEmulation`: `pd_type`, `emarker`, `sink`; PD only, else `null`) |
 | `TriggerOffer` | `position`, `kind` (`"fixed"`, `"battery"`, `"variable"`, `"pps"`, `"spr-avs"`, `"epr-avs"`), `min_voltage_mv`, `max_voltage_mv`, `max_current_ma`, `max_power_mw`, `epr` |
 | `TriggerLimits` | `index` (the UFCS capability number, else `null`), `min_voltage_mv`, `max_voltage_mv`, `min_current_ma`, `max_current_ma`, `max_power_mw` |
@@ -142,8 +145,8 @@ Device mode and firmware version:
 |---|---|
 | `DeviceMode` | `"application"`, `"bootloader"` or `"unknown"`, from the USB string of the meter's vendor interface (`APP` in application mode). |
 | `DeviceListing.mode` | A meter in bootloader mode is listed; `deviceOptionLabel` ends its picker label in "(bootloader mode)". `Session` will not connect to it, and the backend refuses that connect too. |
-| `ConnectedInfo` | Adds `mode`, `bootloader_version`, `warnings`, `update_required` (`boolean \| null`: `null` when the HEAD reply could not be read) and `firmware_problems` (one line per part of the firmware status that could not be read, shown as "Firmware status" rows). |
-| `FirmwareWarningCode` | `"too_old"` (below 1.7.0), `"outdated"` (below 2.0.7, the newest version known) and `"update_required"` (reserved: no HEAD reply is read as "update required" until its meaning is confirmed on a meter). |
+| `ConnectedInfo` | Adds `mode`, `bootloader_version`, `warnings`, `update_required` (`boolean \| null`: `null` when the HEAD reply could not be read or was not recognised), `firmware_problems` (one line per part of the firmware status that could not be read, shown as "Firmware status" rows), and `min_supported_firmware` and `known_latest_firmware`, the versions the warnings go by. |
+| `FirmwareWarningCode` | `"too_old"` (below 1.7.0) and `"outdated"` (below 2.0.7, the newest version known). No HEAD reply is read as "update required" until its meaning is confirmed on a meter. |
 
 Update commands:
 
@@ -152,6 +155,8 @@ Update commands:
 | `firmwareInspect(path: string): Promise<FirmwareFileInfo>` | Reads a local firmware container and answers its metadata; needs no meter. The file is never decrypted; files over 8 MiB are refused before they are read. A broken file rejects with `usage`, prefixed with the file name. |
 | `firmwareChoose(): Promise<string \| null>` | Opens the open dialog filtered to `.mencrypt` files; `null` when it was cancelled. |
 | `firmwareFlash(deviceId: string, path: string, confirmation: string, onStage: (event: FlashEvent) => void): Promise<FlashDone>` | Updates the meter with the file at `path`. Before anything is sent the backend checks that `confirmation` is the file's version and reads the file again. Each event goes to `onStage` over a channel, about one write message per percent. Rejects with the error and its recovery hint. |
+| `firmwareCancel(): Promise<void>` | Asks the running update to stop. Accepted until the erase begins, and refused after that. An accepted cancel ends the update as a failure at its next safe point, which is after the meter has switched if it is switching. |
+| `firmwareFlashStatus(): Promise<FlashStatus \| null>` | The running update, for a reloaded page: `device_id` and `stage` (the latest stage, or null before the first). Null when none runs. |
 
 Types:
 
@@ -165,21 +170,38 @@ Types:
 
 Behaviour:
 
-- **The meter is held for the whole update.** Connecting, PD capture,
+- **The meter is held for the whole update.** Connecting it, PD capture,
   recording, the rate, the trigger panel and hotplug reconnects are refused
   until it ends, and closing the window or quitting is refused while it runs.
   `Session.flashing` is set meanwhile, which disables the device picker and
   Connect.
+- **Another meter is not held.** It can connect during an update, unless it
+  may be the flashing meter at a new address: a real meter with the target's
+  serial, with no serial on either side, or not in application mode is refused.
 - **The Firmware tab is opt-in.** It appears only when **Advanced firmware**
   is switched on in About. The switch is stored in the browser, off by
   default, and cannot be turned off while an update runs.
+
+## Recording
+
+| Function | Behavior |
+| --- | --- |
+| `startRecording(suggestedName): Promise<string \| null>` | Starts the recording at once on a new file in the recordings folder (Tauri command `start_recording`), with no dialog, and resolves to its path. The folder is `open-powerz-recordings` in Downloads, or in the app data folder when there is no Downloads. An existing file is never taken. |
+| `saveRecordingAs(path): Promise<string \| null>` | After Stop, asks where to keep the finished file at `path` and moves it there (Tauri command `save_recording_as`). Resolves to the new path, or `null` when the dialog was cancelled, which leaves the file where it is. Only a file directly in the recordings folder is accepted. |
+
+A page that attaches to a running meter gets the open file's path in
+`RecordingSnapshot.path`, so Stop can still offer to save it. A stop forced by
+a firmware update opens no dialog.
+
+The app also keeps `app.log` in the OS log folder: one UTC line per connect, session
+end and replug, naming the device id and model, never the serial or UID.
 
 ## Meter settings
 
 | function | what it does |
 |---|---|
 | `meterSettings(): Promise<MeterSettings>` | Reads the connected meter's settings block (Tauri command `meter_settings`). Only one GET_DATA for the settings attribute (0x008) goes out; the stream keeps running. Rejects with `usage` when no meter is connected, and with the backend's error when the block fails its CRC check. |
-| `meterSettingsWrite(changes): Promise<MeterSettings>` | Writes `changes` (`SettingChanges`: the new wire code per changed field) to the connected meter (Tauri command `meter_settings_write`): one settings read, one settings write over the meter's CDC port, one read back, and resolves to the settings as read back. Rejects with `usage` for a value out of range or no meter, and with the backend's error when the read-back does not match (naming the field) or the meter holds a value out of range for a field not being changed. Nothing is retried. |
+| `meterSettingsWrite(changes): Promise<MeterSettings>` | Writes `changes` (`SettingChanges`: the new wire code per changed field) to the connected meter (Tauri command `meter_settings_write`): one settings read, one settings write over the meter's CDC port, one read back, and resolves to the settings as read back, with `warnings` naming any undecoded bytes the read-back found changed (these do not fail the write). Rejects with `usage` for a value out of range or no meter, and with the backend's error when the read-back does not match (naming the field) or the meter holds a value out of range for a field not being changed. Nothing is retried. |
 
 Types:
 
@@ -273,7 +295,8 @@ Every Tauri command that acts on a meter takes an optional `deviceId`.
 Without it the backend uses its current meter: the most recently connected
 meter that is still running. Connecting another meter keeps the sessions that
 are already running, including one that waits for an unplugged meter. While a
-firmware update runs, connecting any meter is refused.
+firmware update runs, the updating meter stays held and another meter can still
+connect (see [Firmware](#firmware)).
 
 On the UI side, `Meters` (in `meters.svelte.ts`) holds one entry per
 connected meter with its own `Session` store; `fullViewId` names the meter

@@ -29,3 +29,5 @@ assert_cmd = "2.2.2"
 csv = "1.4.0"
 insta = "1.49.0"
 predicates = "3.1.4"
+# AC-4PJRVM.7: tests build the error a held port really opens with.
+serialport = "4.10.1"

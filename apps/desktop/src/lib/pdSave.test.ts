@@ -43,6 +43,10 @@ describe("PD capture open and import notices (FR TGE83E, AC .3 / AC .6)", () => 
     );
   });
 
+  it("names the line of a file damaged on its first entry (AC-4PJRVK.6)", () => {
+    expect(pdOpenDamageText(opened(0, 2))).toBe("Loaded 0 records; the file is damaged at line 2");
+  });
+
   it("says nothing about a whole file", () => {
     expect(pdOpenDamageText(opened(5, null))).toBeNull();
   });
@@ -55,12 +59,19 @@ describe("PD capture open and import notices (FR TGE83E, AC .3 / AC .6)", () => 
 });
 
 describe("what a vendor log import left out (FR TGE83E, AC .6)", () => {
-  const imported = (rows: number, oversized: number, truncated: boolean): PdOpened => ({
+  const imported = (
+    rows: number,
+    oversized: number,
+    truncated: boolean,
+    skipped = 0,
+  ): PdOpened => ({
     path: "/tmp/log.sqlite",
     rows: Array.from({ length: rows }) as PdOpened["rows"],
     status: [],
+    dropped: 0,
     damaged_line: null,
     oversized,
+    skipped,
     truncated,
   });
 
@@ -76,6 +87,27 @@ describe("what a vendor log import left out (FR TGE83E, AC .6)", () => {
     );
     expect(pdImportNoticeText(imported(2, 1200, false))).toBe(
       "Imported 2 records from the vendor log /tmp/log.sqlite; 1,200 rows with oversized record bytes were skipped",
+    );
+  });
+
+  it("says how many rows without a whole record were skipped (AC-4PJRVK.6)", () => {
+    expect(pdImportNoticeText(imported(2, 0, false, 1))).toBe(
+      "Imported 2 records from the vendor log /tmp/log.sqlite; 1 row without a whole record was skipped",
+    );
+    expect(pdImportNoticeText(imported(2, 0, false, 1200))).toBe(
+      "Imported 2 records from the vendor log /tmp/log.sqlite; 1,200 rows without a whole record were skipped",
+    );
+  });
+
+  it("names both kinds of skipped rows (AC-4PJRVK.6)", () => {
+    expect(pdImportNoticeText(imported(2, 3, false, 4))).toBe(
+      "Imported 2 records from the vendor log /tmp/log.sqlite; 3 rows with oversized record bytes were skipped; 4 rows without a whole record were skipped",
+    );
+  });
+
+  it("says nothing of skipped rows when there are none (AC-4PJRVK.6)", () => {
+    expect(pdImportNoticeText(imported(2, 0, false, 0))).toBe(
+      "Imported 2 records from the vendor log /tmp/log.sqlite",
     );
   });
 });

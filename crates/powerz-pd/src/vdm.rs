@@ -2,6 +2,7 @@
 
 /// Command Type of a structured VDM (bits 7..6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CommandType {
     /// 00b: request.
     Req,
@@ -15,6 +16,7 @@ pub enum CommandType {
 
 /// Command of a structured VDM (bits 4..0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VdmCommand {
     /// 1.
     DiscoverIdentity,
@@ -66,6 +68,7 @@ pub struct UnstructuredVdmHeader {
 
 /// A VDM header, by VDM Type (bit 15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VdmHeader {
     /// VDM Type 1.
     Structured(StructuredVdmHeader),
@@ -182,6 +185,7 @@ pub struct DfpVdo {
 
 /// A product type VDO of a Discover Identity ACK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProductTypeVdo {
     /// Passive cable.
     PassiveCable(PassiveCableVdo),
@@ -212,6 +216,7 @@ pub struct DiscoverIdentity {
 
 /// What follows the VDM header.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VdmBody {
     /// Discover Identity ACK.
     DiscoverIdentity(DiscoverIdentity),
@@ -774,7 +779,7 @@ fn product_type_vdo(id: &IdHeader, cable: bool, index: usize, raw: u32) -> Produ
 impl Vdm {
     /// Decode a Vendor_Defined message from its data objects (`objects[0]`
     /// is the VDM header). `None` when there is no header.
-    pub(crate) fn decode(objects: &[u32], sop: Sop) -> Option<Vdm> {
+    pub fn decode(objects: &[u32], sop: Sop) -> Option<Vdm> {
         let (&raw, vdos) = objects.split_first()?;
         let header = VdmHeader::decode(raw);
         let raw_body = || VdmBody::Objects(vdos.to_vec());

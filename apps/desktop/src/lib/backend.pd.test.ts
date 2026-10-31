@@ -49,9 +49,9 @@ describe("PD capture commands (AC-TGE83C.1, .4, .7)", () => {
     expect(invoke).toHaveBeenCalledWith("pd_details", { index: 7 });
   });
 
-  it("clearing resolves to the index the backend numbers the next record with", async () => {
-    invoke.mockResolvedValue(25);
-    await expect(pdClear()).resolves.toBe(25);
+  it("clearing resolves to the next record index and the status floor", async () => {
+    invoke.mockResolvedValue({ next_index: 25, status_floor_ms: 1234 });
+    await expect(pdClear()).resolves.toEqual({ next_index: 25, status_floor_ms: 1234 });
   });
 
   it("clears the capture", async () => {

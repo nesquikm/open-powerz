@@ -11,7 +11,7 @@ use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::container::read_container_file;
 use powerz_protocol::firmware::flash::{FlashAck, FlashTransport, JumpTarget, Meter, MeterOpener};
 use powerz_protocol::frame;
-use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint};
+use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint, hint_from_volts};
 use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
 use powerz_protocol::pdm::{self, FixedProtocol, PdmSession};
 use powerz_protocol::session::{Clock, Session, SystemClock};
@@ -46,7 +46,7 @@ use crate::trace::{TracePort, TraceTransport, TracedOpener};
 /// Run the parsed command line against real devices; returns the exit code.
 pub fn run(cli: Cli) -> i32 {
     match try_run(&cli) {
-        Ok(()) => 0,
+        Ok(()) | Err(CliError::OutputClosed) => 0,
         Err(e) => {
             eprintln!("powerz: {e}");
             e.exit_code()
@@ -598,16 +598,7 @@ fn detect_hint(cli: &Cli) -> Result<Option<Hint>, CliError> {
             }
         }
     };
-    Ok(Some(dpdm_hint(
-        volts_to_mv(a.dp_v()),
-        volts_to_mv(a.dm_v()),
-    )))
-}
-
-/// Volts to whole millivolts (negative readings clamp to 0).
-fn volts_to_mv(v: f64) -> u32 {
-    // The cast saturates; ADC volts are far below u32::MAX mV.
-    (v * 1000.0).round().max(0.0) as u32
+    Ok(Some(hint_from_volts(a.dp_v(), a.dm_v())))
 }
 
 /// One ADC snapshot on `t` (traced with `--trace`; CONNECT where needed).

@@ -381,3 +381,43 @@ fn the_number_of_rows_imported_is_capped_and_reported() {
         "the status samples are capped too"
     );
 }
+
+// ---- AC-4PJRVK.6: rows without a whole record are counted ----
+
+#[test]
+fn rows_without_a_whole_record_are_skipped_and_counted() {
+    use open_powerz_desktop_lib::pd_import::{ImportLimits, import_vendor_pd_log_with};
+
+    let dir = scratch("skipped");
+    let path = dir.join("capture.sqlite");
+    vendor_db(&path);
+    let db = Connection::open(&path).expect("open");
+    for raw in [
+        "insert into pd_table(Time,Vbus,Ibus,Raw)values(2.0,5.0,0.0,NULL)",
+        "insert into pd_table(Time,Vbus,Ibus,Raw)values(2.1,5.0,0.0,'text, not bytes')",
+        "insert into pd_table(Time,Vbus,Ibus,Raw)values(2.2,5.0,0.0,x'FFFF')",
+    ] {
+        db.execute(raw, []).expect("a row without a record");
+    }
+    db.close().expect("closed");
+
+    let mut got = import_vendor_pd_log_with(&path, &ImportLimits::DEFAULT).expect("imports");
+    assert_eq!(got.skipped, 3, "every row without a record is counted");
+    assert_eq!(got.oversized, 0);
+    assert_eq!(
+        got.capture.take_all().map(|r| r.len()),
+        Some(table_rows().len()),
+        "the good rows are all imported"
+    );
+}
+
+#[test]
+fn a_clean_log_skips_nothing() {
+    use open_powerz_desktop_lib::pd_import::{ImportLimits, import_vendor_pd_log_with};
+
+    let dir = scratch("nothing-skipped");
+    let path = dir.join("capture.sqlite");
+    vendor_db(&path);
+    let got = import_vendor_pd_log_with(&path, &ImportLimits::DEFAULT).expect("imports");
+    assert_eq!(got.skipped, 0);
+}
