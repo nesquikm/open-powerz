@@ -167,21 +167,38 @@ Types:
 
 Behaviour:
 
-- **The meter is held for the whole update.** Connecting, PD capture,
+- **The meter is held for the whole update.** Connecting it, PD capture,
   recording, the rate, the trigger panel and hotplug reconnects are refused
   until it ends, and closing the window or quitting is refused while it runs.
   `Session.flashing` is set meanwhile, which disables the device picker and
   Connect.
+- **Another meter is not held.** It can connect during an update, unless it
+  may be the flashing meter at a new address: a real meter with the target's
+  serial, with no serial on either side, or not in application mode is refused.
 - **The Firmware tab is opt-in.** It appears only when **Advanced firmware**
   is switched on in About. The switch is stored in the browser, off by
   default, and cannot be turned off while an update runs.
+
+## Recording
+
+| Function | Behavior |
+| --- | --- |
+| `startRecording(suggestedName): Promise<string \| null>` | Starts the recording at once on a new file in the recordings folder (Tauri command `start_recording`), with no dialog, and resolves to its path. The folder is `open-powerz-recordings` in Downloads, or in the app data folder when there is no Downloads. An existing file is never taken. |
+| `saveRecordingAs(path): Promise<string \| null>` | After Stop, asks where to keep the finished file at `path` and moves it there (Tauri command `save_recording_as`). Resolves to the new path, or `null` when the dialog was cancelled, which leaves the file where it is. Only a file directly in the recordings folder is accepted. |
+
+A page that attaches to a running meter gets the open file's path in
+`RecordingSnapshot.path`, so Stop can still offer to save it. A stop forced by
+a firmware update opens no dialog.
+
+The app also keeps `app.log` in the OS log folder: one UTC line per connect, session
+end and replug, naming the device id and model, never the serial or UID.
 
 ## Meter settings
 
 | function | what it does |
 |---|---|
 | `meterSettings(): Promise<MeterSettings>` | Reads the connected meter's settings block (Tauri command `meter_settings`). Only one GET_DATA for the settings attribute (0x008) goes out; the stream keeps running. Rejects with `usage` when no meter is connected, and with the backend's error when the block fails its CRC check. |
-| `meterSettingsWrite(changes): Promise<MeterSettings>` | Writes `changes` (`SettingChanges`: the new wire code per changed field) to the connected meter (Tauri command `meter_settings_write`): one settings read, one settings write over the meter's CDC port, one read back, and resolves to the settings as read back. Rejects with `usage` for a value out of range or no meter, and with the backend's error when the read-back does not match (naming the field) or the meter holds a value out of range for a field not being changed. Nothing is retried. |
+| `meterSettingsWrite(changes): Promise<MeterSettings>` | Writes `changes` (`SettingChanges`: the new wire code per changed field) to the connected meter (Tauri command `meter_settings_write`): one settings read, one settings write over the meter's CDC port, one read back, and resolves to the settings as read back, with `warnings` naming any undecoded bytes the read-back found changed (these do not fail the write). Rejects with `usage` for a value out of range or no meter, and with the backend's error when the read-back does not match (naming the field) or the meter holds a value out of range for a field not being changed. Nothing is retried. |
 
 Types:
 

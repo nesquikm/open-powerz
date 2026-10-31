@@ -199,6 +199,11 @@ export class FirmwareUpdate {
     return this.phase === "updating";
   }
 
+  /** The meter the running update holds, null when none runs (AC-4PJRVM.4). */
+  get updatingId(): string | null {
+    return this.busy ? (this.#updating?.id ?? null) : null;
+  }
+
   /** The meter to show: as it was at the start while the update runs, since the update
    * disconnects it and its versions are no longer read; else `meter` as it is now. */
   meterShown(meter: FirmwareMeter | null): FirmwareMeter | null {

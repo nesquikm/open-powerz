@@ -18,7 +18,7 @@ use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::firmware::version::{KNOWN_LATEST, MIN_SUPPORTED};
 use powerz_protocol::pdcap;
 use powerz_protocol::session::{
-    self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer,
+    self, Clock, PdOptions, PdSniffer, Session, SnapshotCadence, Streamer, record_delete_table,
 };
 use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
 use serde::{Deserialize, Serialize};
@@ -172,17 +172,21 @@ pub struct PdStatusBatch {
 }
 
 /// The meter's settings as the panel shows them, in display order (FR
-/// 1HHT01); each row serializes as `{key, label, value, tag}`.
+/// 1HHT01); each row serializes as `{key, label, value, tag}`. A settings
+/// write fills `warnings`; a plain read leaves it empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MeterSettingsView {
     /// Every decoded field.
     pub fields: Vec<powerz_protocol::decode::settings::Row>,
+    /// What a write changed beyond the fields, in plain words.
+    pub warnings: Vec<String>,
 }
 
 impl From<&powerz_protocol::decode::settings::MeterSettings> for MeterSettingsView {
     fn from(settings: &powerz_protocol::decode::settings::MeterSettings) -> Self {
         Self {
             fields: settings.rows(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -1161,7 +1165,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// unknown or read-only key and a value out of range are usage errors
     /// that send nothing. Otherwise one settings write goes out between two
     /// SETTINGS reads; the answer is the settings as read back, and a
-    /// mismatching re-read is an error naming the field, never retried.
+    /// mismatching re-read is an error naming the field, never retried. A
+    /// difference in the bytes no field decodes is a warning on the answer.
     /// The meter takes the write only on its CDC port \[device\]: a session
     /// on bulk sends the write and both reads over the meter's CDC pipe,
     /// opened for them alone (no CONNECT there) while the stream waits.
@@ -1190,20 +1195,28 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
-        let settings = if self.source == MeasurementSource::Cdc {
-            blocked(self.meter.as_ref(), || session.write_settings(&parsed))
+        let written = if self.source == MeasurementSource::Cdc {
+            blocked(self.meter.as_ref(), || {
+                session.write_settings_checked(&parsed)
+            })
+            .map_err(|e| session_error(&e))
         } else {
             let clock = self.clock.clone();
             blocked(self.meter.as_ref(), || {
                 let pipe = session
                     .transport_mut()
                     .settings_pipe()
-                    .unwrap_or(Err(transport::Error::SettingsNeedCdc))?;
-                Session::with_clock(GuardedTransport::new(pipe), clock).write_settings(&parsed)
+                    .unwrap_or(Err(transport::Error::SettingsNeedCdc))
+                    .map_err(|e| ui_error::settings_port_error(&e, std::env::consts::OS))?;
+                Session::with_clock(GuardedTransport::new(pipe), clock)
+                    .write_settings_checked(&parsed)
+                    .map_err(|e| session_error(&e))
             })
-        }
-        .map_err(|e| session_error(&e))?;
-        Ok(MeterSettingsView::from(&settings))
+        }?;
+        Ok(MeterSettingsView {
+            warnings: written.warnings(),
+            ..MeterSettingsView::from(&written.settings)
+        })
     }
 
     /// List the meter's offline records (GET_DATA 0x200 only) for the
@@ -1261,6 +1274,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// in `backup_dir` (created if missing); a failed backup deletes
     /// nothing. Then the record table is rewritten once and read again; a
     /// failure after the write names the backup folder and is not retried.
+    /// A table too long to write is refused before the backup, and "all" on
+    /// an empty list sends nothing.
     pub fn delete_records(
         &mut self,
         target: Option<usize>,
@@ -1288,6 +1303,14 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 "The typed confirmation does not match; nothing was deleted.",
             ));
         }
+        if positions.is_empty() {
+            return Ok(RecordDeleteView {
+                records: Vec::new(),
+                backup_dir: backup_dir.display().to_string(),
+                backups: Vec::new(),
+            });
+        }
+        record_delete_table(&entries, &positions).map_err(|e| session_error(&e))?;
         let backup_failed = |detail: String| UiError {
             kind: ErrorKind::Internal,
             message: format!("The backup failed, so nothing was deleted: {detail}"),
@@ -1489,10 +1512,13 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::Handover(swap, reply) => {
                 // Read here and swapped behind the events already sent, so
                 // the new sink gets exactly the events after this answer.
+                let path = self.recording_path.as_ref();
+                let path = path.map(|p| p.to_string_lossy().into_owned());
                 let progress = self.recording_progress();
+                let held = progress.map(|(rows, elapsed_ms)| (rows, elapsed_ms, path));
                 (self.in_order)(Box::new(move || {
                     swap();
-                    let _ = reply.send(progress);
+                    let _ = reply.send(held);
                 }));
             }
         }
@@ -1535,7 +1561,10 @@ enum Command {
     /// Run the sink swap of an attach, then answer the open recording's
     /// progress: both on the worker thread, which sends every recording
     /// event, so none can fall between them (FR VEDDFD).
-    Handover(Box<dyn FnOnce() + Send>, mpsc::Sender<Option<(u64, u64)>>),
+    Handover(
+        Box<dyn FnOnce() + Send>,
+        mpsc::Sender<Option<HeldRecording>>,
+    ),
 }
 
 impl std::fmt::Debug for Command {
@@ -1570,6 +1599,9 @@ impl std::fmt::Debug for Command {
 }
 
 type ProgressFn = Box<dyn FnMut(ExportProgress) + Send>;
+
+/// A running recording at a handover: rows, elapsed ms and its file.
+pub type HeldRecording = (u64, u64, Option<String>);
 
 /// Export every record of `store` to `out` on a thread of its own; the
 /// export works on a snapshot that shares the stored samples. `now_ms` is
@@ -1819,7 +1851,10 @@ impl WorkerControl {
     /// open recording's rows and elapsed ms then (`None` when nothing is
     /// being recorded): no recording event is sent between the two. On an
     /// error `swap` has not run and never will.
-    pub fn hand_over(&self, swap: Box<dyn FnOnce() + Send>) -> Result<Option<(u64, u64)>, UiError> {
+    pub fn hand_over(
+        &self,
+        swap: Box<dyn FnOnce() + Send>,
+    ) -> Result<Option<HeldRecording>, UiError> {
         self.hand_over_within(swap, COMMAND_TIMEOUT)
     }
 
@@ -1827,7 +1862,7 @@ impl WorkerControl {
         &self,
         swap: Box<dyn FnOnce() + Send>,
         timeout: Duration,
-    ) -> Result<Option<(u64, u64)>, UiError> {
+    ) -> Result<Option<HeldRecording>, UiError> {
         // `None` while waiting; `Some(true)` once the swap ran, `Some(false)`
         // once the caller gave up, so a late command does nothing.
         let gate = Arc::new(Mutex::new(None::<bool>));

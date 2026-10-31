@@ -69,6 +69,13 @@ pub enum Error {
     /// No matching device or port was found.
     #[error("no matching device found")]
     NotFound,
+    /// Discovery listed the meter's serial port, but opening it failed the
+    /// way a port someone else holds does.
+    #[error("the meter's serial port {port} is in use by another program")]
+    PortHeld {
+        /// Port name or path.
+        port: String,
+    },
     /// The mock transport saw something its script did not expect.
     #[error("mock transport: {0}")]
     Mock(String),

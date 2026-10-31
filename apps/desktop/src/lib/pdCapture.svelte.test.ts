@@ -393,6 +393,17 @@ describe("Clear against status samples in flight (FR 4PJRVK)", () => {
 });
 
 describe("An opened capture's dropped count (FR 4PJRVK)", () => {
+  it("loses no rows when its meter leaves the view during a clear", () => {
+    const pd = new PdCapture();
+    const parked = new PdCapture();
+    const ticket = pd.beginClear();
+    pd.handleEvent({ type: "pd_rows", data: { rows: [row(7)] } });
+    pd.swapWith(parked);
+    pd.endClear(5, ticket);
+    parked.handleEvent({ type: "pd_rows", data: { rows: [row(8)] } });
+    expect(parked.store.length).toBe(2);
+  });
+
   it("shows in the dropped notice though the backend sent only the kept rows", () => {
     const pd = new PdCapture();
     pd.open([row(15), row(16)], [], 15);

@@ -358,23 +358,25 @@ impl SimDevice {
     }
 
     /// 0x0A on CDC: a settings write laid out as `check_settings_write` demands
-    /// (only the documented keys, in order, values in range) is ACCEPTed
-    /// and applied to the SETTINGS block (kept as is under the
-    /// `ignore-settings-write` fault) the way the meter stores it
-    /// (`apply_settings_write`: key 0x15 sets the rate code, 0x14 the bits 0..1
-    /// of 0x60 `[device]`). Every
-    /// other 0x0A frame, such as one carrying the factory-reset key, is
-    /// REJECTed and changes nothing.
+    /// (only the documented keys, in order, values in range) is answered with
+    /// FINISHED, as the KM003C does `[device]`, and applied to the SETTINGS
+    /// block (kept as is under the `ignore-settings-write` fault) the way the
+    /// meter stores it (`apply_settings_write`: key 0x15 sets the rate code,
+    /// 0x14 the bits 0..1 of 0x60 `[device]`). Every other 0x0A frame, such as
+    /// one carrying the factory-reset key, is REJECTed and changes nothing.
     fn settings_write(&mut self, req: &[u8], id: u8) -> Vec<u8> {
         if !self.link_open() || check_settings_write(req).is_err() {
             return self.control(msg::REJECT, id);
         }
         if self.faults.ignore_settings_write {
-            return self.control(msg::ACCEPT, id);
+            return self.control(msg::FINISHED, id);
         }
         let mut stored = self.stored();
         let old_rate = stored.rate_code;
         apply_settings_write(&mut stored.settings, req);
+        if self.faults.stir_undecoded_settings {
+            stored.settings[0x08] ^= 0x01;
+        }
         let w60 = u32::from_le_bytes([
             stored.settings[0x60],
             stored.settings[0x61],
@@ -390,7 +392,7 @@ impl SimDevice {
             let now = self.uptime_ms();
             self.queue.set_rate(code, now);
         }
-        self.control(msg::ACCEPT, id)
+        self.control(msg::FINISHED, id)
     }
 
     /// 0x4C: grant level 1 for the UID, 2 for the OTP credential, else 0.

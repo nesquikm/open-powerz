@@ -6,6 +6,31 @@ use crate::decode::settings::{MeterSettings, WritableField, settings_write_reque
 use crate::frame::{self, Reply};
 use crate::transport::{self, Transport};
 
+/// What a settings write left on the meter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsWritten {
+    /// The settings as read again.
+    pub settings: MeterSettings,
+    /// Offsets of the bytes no field decodes that the write moved.
+    pub undecoded_changed: Vec<usize>,
+}
+
+impl SettingsWritten {
+    /// The difference in the undecoded bytes in plain words, if any. It does
+    /// not fail the write: nothing says those bytes should have stayed.
+    pub fn warnings(&self) -> Vec<String> {
+        let Some(first) = self.undecoded_changed.first() else {
+            return Vec::new();
+        };
+        let n = self.undecoded_changed.len();
+        let bytes = if n == 1 { "byte" } else { "bytes" };
+        vec![format!(
+            "{n} {bytes} of the meter's settings that the app does not decode \
+             changed as well (first at offset {first:#04x})."
+        )]
+    }
+}
+
 /// Fields that are never written; a write must leave them as read.
 const KEPT: [&str; 5] = [
     "startup_logo",
@@ -31,7 +56,17 @@ impl<T: Transport, C: Clock> Session<T, C> {
         &mut self,
         changes: &[(WritableField, i32)],
     ) -> Result<MeterSettings, Error> {
-        let before = self.read_meter_settings()?;
+        Ok(self.write_settings_checked(changes)?.settings)
+    }
+
+    /// [`Session::write_settings`], also reporting the bytes no field decodes
+    /// that differ between the two reads. The same frames go out.
+    pub fn write_settings_checked(
+        &mut self,
+        changes: &[(WritableField, i32)],
+    ) -> Result<SettingsWritten, Error> {
+        let block_before = self.read_settings()?;
+        let before = block_before.meter_settings()?;
         let request = settings_write_request(self.counter.next(), &before, changes)?;
         let timeout = transport::default_timeout(&request);
         let reply = self
@@ -48,9 +83,13 @@ impl<T: Transport, C: Clock> Session<T, C> {
             Err(Error::Transport(transport::Error::Timeout)) => {}
             Err(e) => return Err(e),
         }
-        let after = self.read_meter_settings()?;
+        let block_after = self.read_settings()?;
+        let after = block_after.meter_settings()?;
         verify(&before, &after, changes)?;
-        Ok(after)
+        Ok(SettingsWritten {
+            settings: after,
+            undecoded_changed: block_before.undecoded_diff(&block_after),
+        })
     }
 }
 

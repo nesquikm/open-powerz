@@ -239,8 +239,13 @@ pub struct FaultPlan {
     reject_record_reads: bool,
     /// A record-table write is ACCEPTed but the old table is kept.
     ignore_table_write: bool,
-    /// A settings write is ACCEPTed but the old SETTINGS block is kept.
+    /// A settings write is answered with FINISHED but the old SETTINGS block
+    /// is kept.
     ignore_settings_write: bool,
+    /// A settings write also changes a byte of the block no field decodes.
+    stir_undecoded_settings: bool,
+    /// Pad the record table to this many entries.
+    record_count: Option<usize>,
 }
 
 impl FaultPlan {
@@ -313,15 +318,31 @@ impl FaultPlan {
         self
     }
 
-    /// A settings write (type 0x0A) is ACCEPTed but the meter keeps its old
-    /// SETTINGS block, so the re-read after the write does not match.
+    /// A settings write (type 0x0A) is answered with FINISHED but the meter
+    /// keeps its old SETTINGS block, so the re-read after the write does not
+    /// match.
     pub fn ignore_settings_write(mut self) -> FaultPlan {
         self.ignore_settings_write = true;
         self
     }
 
+    /// A settings write is applied and also changes a byte of the SETTINGS
+    /// block that no field decodes.
+    pub fn stir_undecoded_settings(mut self) -> FaultPlan {
+        self.stir_undecoded_settings = true;
+        self
+    }
+
+    /// The record table is padded to `count` entries with synthetic records
+    /// that have no samples (a shorter table is left alone).
+    pub fn record_count(mut self, count: usize) -> FaultPlan {
+        self.record_count = Some(count);
+        self
+    }
+
     /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`,
-    /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`.
+    /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`,
+    /// `stir-undecoded-settings`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -345,11 +366,13 @@ impl FaultPlan {
                 ("reject-record-reads", None) => plan.reject_record_reads(),
                 ("ignore-table-write", None) => plan.ignore_table_write(),
                 ("ignore-settings-write", None) => plan.ignore_settings_write(),
+                ("stir-undecoded-settings", None) => plan.stir_undecoded_settings(),
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
                          disconnect@N, wrong-id@N, permission, corrupt-adcnew@N, echo-start, \
-                         reject-record-reads, ignore-table-write or ignore-settings-write)"
+                         reject-record-reads, ignore-table-write, ignore-settings-write or \
+                         stir-undecoded-settings)"
                     ));
                 }
             };
@@ -625,6 +648,9 @@ impl SimDevice {
     /// Inject `faults`.
     pub fn with_faults(mut self, faults: FaultPlan) -> SimDevice {
         self.echo_since_ms = faults.echo_start.then(|| self.uptime_ms());
+        if let Some(count) = faults.record_count {
+            records::pad_table(&mut self.record_table, count);
+        }
         self.faults = faults;
         self
     }

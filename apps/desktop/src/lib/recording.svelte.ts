@@ -115,13 +115,28 @@ export function revealActionLabel(platform: string): string {
 export interface RecordingDeps {
   /** A stream is running that can be recorded. */
   canRecord: boolean;
-  /** Opens the save dialog with the proposed name; `null` when cancelled. */
+  /** Starts recording to a default file named after the proposal; answers its path. */
   startRecording: (suggestedName: string) => Promise<string | null>;
   stopRecording: () => Promise<RecordingSummary>;
+  /** Opens the save dialog for the finished file and moves it to the choice; `null` when
+   * cancelled. Without it a stop keeps the default file (a stop nobody asked to save). */
+  saveRecordingAs?: (path: string) => Promise<string | null>;
   now: () => Date;
 }
 
 export type RecordingPhase = "idle" | "starting" | "recording" | "stopping";
+
+/** How a Record button looks: it reads Stop while a recording runs or ends, and takes no
+ * press while a start or a stop is on its way, or with nothing to record. */
+export function recordButton(
+  phase: RecordingPhase,
+  canRecord: boolean,
+): { label: "Record" | "Stop"; disabled: boolean } {
+  return {
+    label: phase === "recording" || phase === "stopping" ? "Stop" : "Record",
+    disabled: phase === "starting" || phase === "stopping" || (phase === "idle" && !canRecord),
+  };
+}
 
 /** Reactive state of the CSV recording (Record button / Space). */
 export class Recording {
@@ -154,7 +169,7 @@ export class Recording {
     this.error = null;
     try {
       const path = await deps.startRecording(defaultRecordingName(deps.now()));
-      // The session may have ended while the save dialog was open.
+      // The session may have ended while the start was on its way.
       if (this.phase !== "starting") return;
       if (path === null) {
         this.phase = "idle";
@@ -179,7 +194,12 @@ export class Recording {
     let stopped = true;
     try {
       const summary = await deps.stopRecording();
-      if (this.phase === "stopping") this.#saved(summary);
+      if (this.phase === "stopping") {
+        const path = this.path;
+        const file = await this.#chooseFile(deps);
+        // An unplug during the dialog named the old place; the file has moved since.
+        if (this.phase === "stopping" || this.savedPath === path) this.#saved(summary, file);
+      }
     } catch (err) {
       // An unplug can end the recording (with its own notice) while the stop
       // is on its way; the stop's "not connected" is then old news.
@@ -199,6 +219,7 @@ export class Recording {
     this.notice = null;
     this.savedPath = null;
     this.error = null;
+    this.path = snapshot.path ?? null;
     this.rows = snapshot.rows;
     this.elapsedMs = snapshot.elapsed_ms;
     this.phase = "recording";
@@ -240,7 +261,11 @@ export class Recording {
    * comes back; null (and nothing changes) when no recording runs. */
   detach(): RecordingSnapshot | null {
     if (this.phase !== "recording") return null;
-    const snapshot = { rows: this.rows, elapsed_ms: this.elapsedMs };
+    const snapshot = {
+      rows: this.rows,
+      elapsed_ms: this.elapsedMs,
+      path: this.path ?? undefined,
+    };
     this.#end();
     return snapshot;
   }
@@ -252,10 +277,23 @@ export class Recording {
     this.error = null;
   }
 
+  /** Where the finished file ends up: the place asked for, or the default path
+   * when the dialog is cancelled or the move fails (with the reason in {@link error}). */
+  async #chooseFile(deps: RecordingDeps): Promise<string | null> {
+    const path = this.path;
+    if (path === null || deps.saveRecordingAs === undefined) return path;
+    try {
+      return (await deps.saveRecordingAs(path)) ?? path;
+    } catch (err) {
+      this.error = toUiError(err);
+      return path;
+    }
+  }
+
   /** The recording's file is complete: the summary names it. */
-  #saved(summary: RecordingSummary): void {
-    this.savedPath = this.path;
-    this.notice = recordingSummaryText(summary, this.path);
+  #saved(summary: RecordingSummary, path = this.path): void {
+    this.savedPath = path;
+    this.notice = recordingSummaryText(summary, path);
   }
 
   #end(): void {

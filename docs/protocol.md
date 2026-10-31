@@ -143,10 +143,10 @@ Control types (main header type below 0x40):
 | 0x04 | RESET | none | not used by the vendor app; never sent by us | [doc] [inferred] |
 | 0x05 | ACCEPT | reply only | | [doc] [static] [device] |
 | 0x06 | REJECT | reply only | | [doc] [static] [device] |
-| 0x07 | FINISHED | reply only | acknowledges flash-write chunks; also the KM003C's answer to the record-table write (SET_DATA 0x28) | [doc] [static]; record table [device] (2026-10-29) |
+| 0x07 | FINISHED | reply only | acknowledges flash-write chunks; also the KM003C's answer to the record-table write (SET_DATA 0x28) and to a settings write (0x0A), with the request's id | [doc] [static]; record table and settings write [device] (2026-10-29) |
 | 0x08 | JUMP_APROM | 0 | none; leaves DFU mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
 | 0x09 | JUMP_DFU | 0 | none; enters firmware-update mode; sent only by the firmware flash path (see Firmware download) | [doc] [static] |
-| 0x0A | settings write (named GET_STATUS in the API doc) | key / value entries, see Settings write | unknown; the vendor settings dialog sends it over CDC and does not wait for a reply; over bulk the meter ignores it (no reply, no change) [device]; our app sends it only on CDC, from the settings write path, and checks the result by reading SETTINGS again | [doc] [static] [device] |
+| 0x0A | settings write (named GET_STATUS in the API doc) | key / value entries, see Settings write | FINISHED over CDC [device] (2026-10-29); the vendor settings dialog sends it over CDC and does not wait for a reply; over bulk the meter ignores it (no reply, no change) [device]; our app sends it only on CDC, from the settings write path, and checks the result by reading SETTINGS again | [doc] [static] [device] |
 | 0x0B | ERROR | | no handler in the vendor app | [doc] |
 | 0x0C | GET_DATA | attribute bit mask | PUT_DATA (0x41) | [doc] [static] [device] |
 | 0x0D | GET_FILE | | unused by the vendor app | [doc] [static] |
@@ -395,12 +395,14 @@ Message layout (all words little-endian):
   ones, and ends with key 0x7FFF = 0x1234. That last entry is read as a
   "save" marker [inferred]. Our writer sends the same full set: changed keys
   at their new values, the others at the values just read. [static]
-- The vendor app does not wait for or check a reply. [static] What the
-  meter answers is unknown. We take ACCEPT or FINISHED (FINISHED is what it
-  sends for the record-table write [device]), and also no reply at all.
+- The vendor app does not wait for or check a reply. [static] The KM003C
+  answers FINISHED with the write's id, at once. [device] We also take
+  ACCEPT, and no reply at all.
   REJECT or any other reply is an error, with no read-back. After the
   other three we read SETTINGS again and compare every field; that read
-  alone decides when no reply came. [inferred]
+  alone decides when no reply came. The bytes no field decodes are compared
+  too, leaving out the RAM overlay and the CRC words; a difference there is
+  only a warning. [inferred]
 
 | key | field | values | tag |
 |---|---|---|---|

@@ -26,6 +26,11 @@ fn crc_ok(b: &[u8], data: core::ops::Range<usize>, crc_off: usize) -> bool {
 /// RAM overlay inside block A (device session 1, FW 2.0.6) [inferred].
 const OVERLAY: std::ops::Range<usize> = 0x10..0x14;
 
+/// The bytes no field of [`MeterSettings`] reads. Left out as well: the RAM
+/// overlay, which moves by itself, and the two CRC words, which follow any
+/// change. A word with a decoded field in it counts as decoded as a whole.
+const UNDECODED: [std::ops::Range<usize>; 4] = [0x04..0x10, 0x14..0x1C, 0x44..0x58, 0x64..0xB0];
+
 impl Settings {
     /// Decode the 180-byte SETTINGS section payload.
     pub fn decode(payload: &[u8]) -> Result<Settings, DecodeError> {
@@ -66,6 +71,15 @@ impl Settings {
     /// The raw 180 payload bytes.
     pub fn raw(&self) -> &[u8] {
         &self.raw
+    }
+
+    /// Offsets of the bytes no decoded field reads that differ in `other`.
+    pub fn undecoded_diff(&self, other: &Settings) -> Vec<usize> {
+        UNDECODED
+            .into_iter()
+            .flatten()
+            .filter(|&i| self.raw[i] != other.raw[i])
+            .collect()
     }
 
     /// Typed fields, or [`DecodeError::Crc`] if either CRC-32 block fails.

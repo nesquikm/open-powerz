@@ -345,6 +345,26 @@ pub(crate) fn open_serial(
     Ok(port)
 }
 
+/// Open the port in `ports` that [`match_port`] picks for `serial`, through
+/// `open`. `serialport` 4.10.1 reports a held port (EBUSY on unix,
+/// ERROR_ACCESS_DENIED on Windows) as kind `NoDevice`, the kind of a missing
+/// one; a port discovery just listed is not missing, so here that kind is
+/// [`Error::PortHeld`]. No matching port is [`Error::NotFound`].
+pub fn open_listed<P>(
+    ports: &[PortCandidate],
+    serial: &str,
+    open: impl FnOnce(String) -> Result<P, serialport::Error>,
+) -> Result<P, Error> {
+    let name = match_port(ports, serial)
+        .ok_or(Error::NotFound)?
+        .name
+        .clone();
+    open(name.clone()).map_err(|e| match e.kind {
+        serialport::ErrorKind::NoDevice => Error::PortHeld { port: name },
+        _ => serial_error(e),
+    })
+}
+
 /// The CDC transport on an OS serial port, as [`CdcTransport::open`] opens it.
 pub type SerialCdcTransport = CdcTransport<Box<dyn serialport::SerialPort>>;
 
@@ -353,11 +373,7 @@ impl SerialCdcTransport {
     /// [`FIRST_FRAME_DELAY`].
     pub fn open(serial: &str) -> Result<GuardedTransport<Self>, Error> {
         let ports = usb_ports().map_err(serial_error)?;
-        let name = match_port(&ports, serial)
-            .ok_or(Error::NotFound)?
-            .name
-            .clone();
-        let port = open_serial(name).map_err(serial_error)?;
+        let port = open_listed(&ports, serial, open_serial)?;
         std::thread::sleep(FIRST_FRAME_DELAY);
         Ok(CdcTransport::with_port(port))
     }
@@ -1023,5 +1039,94 @@ mod tests {
             match_port(&two, "SERIAL-0002").is_none(),
             "ambiguous: never guess"
         );
+    }
+
+    // AC-4PJRVM.7: `serialport` 4.10.1 reports a port someone else holds as
+    // kind `NoDevice` (EBUSY in posix/error.rs, a failed flock in
+    // posix/flock.rs, ERROR_ACCESS_DENIED in windows/error.rs), so the kind
+    // alone cannot tell it from a missing port: what can is that discovery
+    // listed the port a moment ago.
+
+    fn held() -> serialport::Error {
+        serialport::Error::new(serialport::ErrorKind::NoDevice, "Resource busy")
+    }
+
+    fn meter_port(name: &str, serial: &str) -> PortCandidate {
+        PortCandidate {
+            name: name.into(),
+            vid: crate::VID,
+            pid: 0x0001,
+            serial: Some(serial.into()),
+        }
+    }
+
+    #[test]
+    fn no_device_from_opening_a_listed_port_means_it_is_held() {
+        let ports = [meter_port("/dev/cu.usbmodem1101", "KM1")];
+        let mut opened = None;
+        let result = open_listed(&ports, "KM1", |name| {
+            opened = Some(name);
+            Err::<(), _>(held())
+        });
+        assert_eq!(opened.as_deref(), Some("/dev/cu.usbmodem1101"));
+        assert!(matches!(result, Err(Error::PortHeld { .. })), "{result:?}");
+    }
+
+    #[test]
+    fn no_device_with_no_listed_port_stays_not_found_and_opens_nothing() {
+        let other_meter = [meter_port("/dev/cu.usbmodem1101", "KM2"), {
+            let mut twin = meter_port("/dev/cu.usbmodem1102", "KM3");
+            twin.vid = 0x1234;
+            twin
+        }];
+        for ports in [&other_meter[..], &[]] {
+            let result = open_listed(ports, "KM1", |_| -> Result<(), _> {
+                panic!("no port matched, nothing to open")
+            });
+            assert_eq!(result, Err(Error::NotFound));
+        }
+    }
+
+    #[test]
+    fn no_device_from_discovery_stays_not_found() {
+        assert_eq!(serial_error(held()), Error::NotFound);
+    }
+
+    #[test]
+    fn other_open_failures_of_a_listed_port_keep_their_own_mapping() {
+        let ports = [meter_port("/dev/cu.usbmodem1101", "KM1")];
+        let refused = serialport::Error::new(
+            serialport::ErrorKind::Io(io::ErrorKind::PermissionDenied),
+            "Permission denied",
+        );
+        let result = open_listed(&ports, "KM1", |_| Err::<(), _>(refused));
+        assert!(matches!(result, Err(Error::Permission(_))), "{result:?}");
+        let gone = serialport::Error::new(serialport::ErrorKind::Unknown, "odd");
+        let result = open_listed(&ports, "KM1", |_| Err::<(), _>(gone));
+        assert_eq!(result, Err(Error::Io("odd".into())));
+    }
+
+    #[test]
+    fn a_listed_port_that_opens_is_handed_back() {
+        let ports = [meter_port("/dev/cu.usbmodem1101", "KM1")];
+        assert_eq!(open_listed(&ports, "KM1", |_| Ok(7)), Ok(7));
+    }
+
+    /// The whole chain on a real tty: discovery names a pty, this process
+    /// already holds it, and the port opener the transport uses meets it.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_pty_already_open_comes_back_as_held() {
+        use serialport::SerialPort as _;
+
+        // Held through `set_exclusive`: on macOS `open` cannot finish on a
+        // pty, its baud ioctl fails with ENOTTY after taking the lock.
+        let (_master, mut holder) = serialport::TTYPort::pair().expect("a pty");
+        let path = holder.name().expect("a pty slave has a path");
+        holder.set_exclusive(true).expect("the first hold succeeds");
+
+        let ports = [meter_port(&path, "KM1")];
+        let result = open_listed(&ports, "KM1", open_serial).map(|_| ());
+        assert!(matches!(result, Err(Error::PortHeld { .. })), "{result:?}");
     }
 }

@@ -15,11 +15,16 @@ With two or more meters the Meter tab shows a grid: one tile per meter with
 its name, the last digits of its serial number, its state and a live readout.
 A wide window shows two columns; a narrow one stacks the tiles.
 
+Each tile has its own **Record**, **Export**, rate and **Disconnect** controls,
+named after its meter, so they act on that meter only. The tiles keep their
+order across a reload.
+
 ## Look at one meter
 
 - **Expand** on a tile opens that meter in the full single-meter view: chart,
   statistics, Meter settings, recording, PD analyzer and trigger panel all act
-  on that meter. **All meters** goes back to the grid.
+  on that meter. **All meters** goes back to the grid. A PD capture keeps
+  running when its meter leaves the full view.
 - **Disconnect** on a tile ends only that meter's session. With one meter
   left, the app goes back to the single-meter view.
 
@@ -30,6 +35,13 @@ A wide window shows two columns; a narrow one stacks the tiles.
   in [Explore a session](explore-a-session.md).
 - A reload of the window picks up every running meter, each with its session
   and any open recording.
+
+## Update firmware on one meter
+
+While one meter updates, you can still add or keep using another. The meter
+being updated stays locked. So does any meter the app cannot tell apart from
+it, which is one with the same serial number, one with none, or one not in
+application mode.
 
 ## Try it without hardware
 

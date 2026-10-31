@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod app_log;
 pub mod batch;
 pub mod devices;
 #[cfg(feature = "e2e")]
@@ -1008,29 +1009,68 @@ fn save_with<P, R>(
     then(prepared, &path).map(Some)
 }
 
-/// Open the save dialog with `suggested_name` and record the stream to the
-/// chosen file. Resolves to the path, or `null` when the dialog was
-/// cancelled (nothing starts).
+/// The folder recordings stay in until the user picks a place:
+/// `open-powerz-recordings` under the Downloads folder (the app data folder
+/// when there is none). The e2e build records into
+/// `$OPEN_POWERZ_E2E_SAVE_DIR` when that is set.
+fn recordings_dir(app: &tauri::AppHandle) -> Result<PathBuf, UiError> {
+    use tauri::Manager;
+    #[cfg(feature = "e2e")]
+    if let Some(dir) = std::env::var_os(e2e::SAVE_DIR_ENV).filter(|dir| !dir.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    let base = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().app_data_dir())
+        .map_err(|_| UiError::usage("No folder found to write the recording to."))?;
+    Ok(base.join("open-powerz-recordings"))
+}
+
+/// Record the stream at once to a new default file named after
+/// `suggested_name`, and resolve to its path. Where the file ends up is asked
+/// at Stop: see [`save_recording_as`].
 #[tauri::command]
 async fn start_recording(
     app: tauri::AppHandle,
     state: Shared<'_>,
     device_id: Option<String>,
     suggested_name: String,
-) -> Result<Option<String>, UiError> {
+) -> Result<String, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        with_save_path(
-            &state,
-            &app,
-            device_id.as_deref(),
-            &suggested_name,
-            |m: &AppManager, id| m.control_for(id),
-            |control, path| {
-                control.record_to(path)?;
-                Ok(path.to_string_lossy().into_owned())
-            },
-        )
+        let control = control(&state, device_id.as_deref())?;
+        let path = recording::default_recording_path(&recordings_dir(&app)?, &suggested_name)?;
+        if let Err(refused) = control.record_to(&path) {
+            let _ = std::fs::remove_file(&path);
+            return Err(refused);
+        }
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+}
+
+/// Ask where to keep the finished recording at `path` and move it there.
+/// Resolves to the new path, or `null` when the dialog was cancelled (the
+/// file stays where it is).
+#[tauri::command]
+async fn save_recording_as(app: tauri::AppHandle, path: String) -> Result<Option<String>, UiError> {
+    blocking(move || {
+        let from = PathBuf::from(path);
+        if !recording::is_recording_in(&recordings_dir(&app)?, &from) {
+            return Err(UiError::usage(
+                "Only a recording in the app's own folder can be moved.",
+            ));
+        }
+        let name = from
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some(to) = choose_save_path(&app, &name)? else {
+            return Ok(None);
+        };
+        recording::save_recording_as(&from, &to)?;
+        Ok(Some(to.to_string_lossy().into_owned()))
     })
     .await
 }
@@ -1242,6 +1282,20 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(AppState::new()))
+        .setup(|app| {
+            use tauri::Manager;
+            // Session events go to app.log (AC-4PJRVM.5); without the file
+            // the app runs on, unlogged.
+            let log = app.path().app_log_dir().map_err(|e| e.to_string());
+            let log = log.and_then(|dir| {
+                app_log::AppLog::open(&dir.join("app.log")).map_err(|e| e.to_string())
+            });
+            match log {
+                Ok(log) => app.state::<Arc<AppState>>().manager().set_app_log(log),
+                Err(e) => eprintln!("open-powerz: app.log is not available: {e}"),
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
             list_devices,
@@ -1254,6 +1308,7 @@ pub fn run() {
             set_rate,
             start_recording,
             stop_recording,
+            save_recording_as,
             export_session,
             history_range,
             history_gaps,

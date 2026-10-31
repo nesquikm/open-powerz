@@ -42,6 +42,37 @@ pub fn record_table_request(id: u8, table: &[u8]) -> Option<Vec<u8>> {
     Some(f)
 }
 
+/// The entries a delete of `positions` keeps and the table that writes them,
+/// without touching the meter, so a caller can refuse a delete before it
+/// writes a backup. A position outside `list` fails with [`Error::Protocol`]
+/// and a table longer than [`RECORD_TABLE_MAX_LEN`] with
+/// [`Error::RecordTableTooLong`].
+pub fn record_delete_table(
+    list: &[RecordEntry],
+    positions: &[usize],
+) -> Result<(Vec<RecordEntry>, Vec<u8>), Error> {
+    if let Some(bad) = positions.iter().find(|&&p| p >= list.len()) {
+        return Err(Error::Protocol(format!(
+            "record {bad} is not in the list of {} records",
+            list.len()
+        )));
+    }
+    let kept: Vec<RecordEntry> = list
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !positions.contains(i))
+        .map(|(_, e)| e.clone())
+        .collect();
+    let table = encode_record_table(&kept);
+    if table.len() > RECORD_TABLE_MAX_LEN {
+        return Err(Error::RecordTableTooLong {
+            remaining: kept.len(),
+            len: table.len(),
+        });
+    }
+    Ok((kept, table))
+}
+
 impl<T: Transport, C: Clock> Session<T, C> {
     /// Read and decode the record list, authenticating at level 1 first
     /// when the session is below it. An empty list is not an error; a reply
@@ -80,19 +111,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         list: &[RecordEntry],
         positions: &[usize],
     ) -> Result<Vec<RecordEntry>, Error> {
-        if let Some(bad) = positions.iter().find(|&&p| p >= list.len()) {
-            return Err(Error::Protocol(format!(
-                "record {bad} is not in the list of {} records",
-                list.len()
-            )));
-        }
-        let kept: Vec<RecordEntry> = list
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !positions.contains(i))
-            .map(|(_, e)| e.clone())
-            .collect();
-        let table = encode_record_table(&kept);
+        let (kept, table) = record_delete_table(list, positions)?;
         let request =
             record_table_request(self.counter.next(), &table).ok_or(Error::RecordTableTooLong {
                 remaining: kept.len(),

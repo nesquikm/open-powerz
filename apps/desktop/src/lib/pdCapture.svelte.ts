@@ -32,12 +32,12 @@ export class PdCapture {
   /** The PD sniffer runs. */
   capturing = $state(false);
   /** The captured rows, up to the row limit (not reactive itself: watch {@link version}). */
-  readonly store = new PdStore();
+  store = new PdStore();
   /** Bumped on every change to the store. */
   version = $state(0);
   /** The PD status blocks of the session (FR TGE83D; not reactive: watch
    * {@link statusVersion}). */
-  readonly status = new PdStatusBuffer();
+  status = new PdStatusBuffer();
   /** Bumped on every change to {@link status}. */
   statusVersion = $state(0);
   /** Bumped when the store is emptied (a clear, a new session): row indices start
@@ -68,6 +68,27 @@ export class PdCapture {
     const open = { canOpen: !live, openReason: live ? PD_STOP_FIRST_REASON : null };
     if (!connected) return { canStart: false, canStop: false, reason: PD_NO_METER_REASON, ...open };
     return { canStart: !this.capturing, canStop: this.capturing, reason: null, ...open };
+  }
+
+  /** Trades everything held with `other`: a meter leaving the PD view keeps its capture,
+   * and the rows that arrive while it is away, in a capture of its own (AC-4PJRVM.4). */
+  swapWith(other: PdCapture): void {
+    // A clear still on its way cannot find its capture after the swap: as a failed
+    // clear, it keeps the rows it held back.
+    this.endClear(0);
+    other.endClear(0);
+    [this.store, other.store] = [other.store, this.store];
+    [this.status, other.status] = [other.status, this.status];
+    [this.capturing, other.capturing] = [other.capturing, this.capturing];
+    [this.opened, other.opened] = [other.opened, this.opened];
+    [this.#from, other.#from] = [other.#from, this.#from];
+    [this.#statusFloor, other.#statusFloor] = [other.#statusFloor, this.#statusFloor];
+    for (const capture of [this, other]) {
+      capture.#ticket++;
+      capture.emptied++;
+      capture.version++;
+      capture.statusVersion++;
+    }
   }
 
   /** Takes the PD events of the session channel; a session that ends stops the capture. */

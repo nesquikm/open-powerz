@@ -6,7 +6,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use powerz_protocol::decode::records::RecordEntry;
-use powerz_protocol::session::{Clock, Session};
+use powerz_protocol::session::{Clock, Session, record_delete_table};
 use powerz_protocol::transport::Transport;
 use powerz_record::{offline_record_csv, offline_record_file_name, sig8};
 
@@ -194,8 +194,9 @@ pub const DELETE_RISK: &str = "deleting offline records cannot be undone; \
 /// `powerz records delete`: read the record list, ask for the record name
 /// (or "all") unless `--yes`, back the affected records up to `NN_<name>.csv`
 /// files in `opts.out` (the `records get` download) and only then rewrite
-/// the record table and read it again. A failed backup deletes nothing; a
-/// failure after the write names the backup folder and is not retried.
+/// the record table and read it again. A table too long to write is refused
+/// before any of that. A failed backup deletes nothing; a failure after the
+/// write names the backup folder and is not retried.
 pub fn records_delete<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     which: RecordSelection,
@@ -223,6 +224,7 @@ pub fn records_delete<T: Transport, C: Clock>(
         writeln!(out, "No offline records on the meter.")?;
         return Ok(());
     }
+    record_delete_table(&entries, &positions)?;
     if !opts.yes {
         write!(out, "Type {expected:?} to delete it for good: ")?;
         out.flush()?;

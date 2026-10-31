@@ -109,7 +109,7 @@ fn the_written_block_keeps_valid_crcs_and_its_name() {
     let reply = d
         .transact_settings(&settings_frame(5, &entries), T)
         .expect("reply");
-    assert_eq!(&reply[..2], &[0x05, 0x05], "ACCEPT: {reply:02x?}");
+    assert_eq!(&reply[..2], &[0x07, 0x05], "FINISHED: {reply:02x?}");
     let p = raw_settings(&mut d, 6);
     let block = Settings::decode(&p).unwrap();
     assert!(block.block_a_crc_ok() && block.block_b_crc_ok());
@@ -165,7 +165,7 @@ fn keys_0x14_and_0x15_land_where_the_meter_put_them() {
     let reply = d
         .transact_settings(&settings_frame(3, &entries), T)
         .expect("reply");
-    assert_eq!(&reply[..2], &[0x05, 0x03], "ACCEPT: {reply:02x?}");
+    assert_eq!(&reply[..2], &[0x07, 0x03], "FINISHED: {reply:02x?}");
     let m = MeterSettings::decode(&raw_settings(&mut d, 4)).unwrap();
     assert_eq!(m.rotation.value, Rotation::Deg180);
     assert_eq!(m.sample_rate.value, Rate::Sps10);

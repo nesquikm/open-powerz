@@ -1,21 +1,41 @@
 <script lang="ts">
   /** One tile per connected meter (FR 1HHT03): its name, serial suffix and live readout,
    * two side by side on a wide window and stacked on a narrow one. */
+  import type { Snippet } from "svelte";
   import { badgeLabel } from "../format";
-  import { tileTitle } from "../meterGrid";
-  import type { Meters } from "../meters.svelte";
+  import { controlsLabel, tileTitle } from "../meterGrid";
+  import type { MeterEntry, Meters } from "../meters.svelte";
+  import type { ExportJob, Recording } from "../recording.svelte";
+  import MeterControls from "./MeterControls.svelte";
   import Readout from "./Readout.svelte";
 
   let {
     meters,
     onExpand,
     onDisconnect,
+    recordingOf,
+    exportJobOf,
+    defaultRateSps,
+    onSelectRate,
+    onToggleRecording,
+    onExport,
+    fileActions,
   }: {
     meters: Meters;
     /** "Expand": meter `id` in the full single-meter view. */
     onExpand: (id: string) => void;
     /** "Disconnect": ends meter `id`'s session only (AC-1HHT03.3). */
     onDisconnect: (id: string) => void;
+    /** The recording and the export of a tile's meter. */
+    recordingOf: (entry: MeterEntry) => Recording;
+    exportJobOf: (entry: MeterEntry) => ExportJob;
+    /** The rate shown until a meter reports its own. */
+    defaultRateSps: number;
+    onSelectRate: (entry: MeterEntry, sps: number) => void;
+    onToggleRecording: (entry: MeterEntry) => void;
+    onExport: (entry: MeterEntry) => void;
+    /** What can be done with a saved file. */
+    fileActions: Snippet<[string]>;
   } = $props();
 </script>
 
@@ -35,8 +55,19 @@
         <button type="button" class="expand" onclick={() => onExpand(entry.listing.id)}>
           Expand
         </button>
-        <button type="button" onclick={() => onDisconnect(entry.listing.id)}>Disconnect</button>
       </header>
+      <MeterControls
+        label={controlsLabel(title)}
+        session={entry.session}
+        recording={recordingOf(entry)}
+        exportJob={exportJobOf(entry)}
+        rateSps={entry.session.rateSps ?? defaultRateSps}
+        onSelectRate={(sps) => onSelectRate(entry, sps)}
+        onToggleRecording={() => onToggleRecording(entry)}
+        onExport={() => onExport(entry)}
+        onDisconnect={() => onDisconnect(entry.listing.id)}
+        {fileActions}
+      />
       <Readout session={entry.session} />
     </article>
   {/each}

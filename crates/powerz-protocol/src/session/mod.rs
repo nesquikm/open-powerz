@@ -37,8 +37,23 @@ pub use memory::{
 };
 pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer};
 pub use probe::{ConnectOutcome, HeadOutcome, ProbeReport};
-pub use records::{RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_table_request};
+pub use records::{
+    RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_delete_table, record_table_request,
+};
+pub use settings_write::SettingsWritten;
 pub use stream::{Gap, SnapshotCadence, StreamPoll, Streamer};
+
+/// Text of [`Error::RecordTableMismatch`]: a matching count alone would read
+/// as no mismatch at all, so that case says the entries differ.
+fn record_table_mismatch_text(expected: usize, actual: usize) -> String {
+    if expected == actual {
+        format!(
+            "after the delete the meter lists {actual} records as expected, but the entries differ"
+        )
+    } else {
+        format!("after the delete the meter lists {actual} records, expected {expected}")
+    }
+}
 
 /// Errors from a [`Session`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -88,7 +103,7 @@ pub enum Error {
     },
     /// After a record delete the meter lists something other than the
     /// table that was written.
-    #[error("after the delete the meter lists {actual} records, expected {expected}")]
+    #[error("{}", record_table_mismatch_text(*.expected, *.actual))]
     RecordTableMismatch {
         /// Entries in the table that was written.
         expected: usize,

@@ -10,7 +10,7 @@ mod common;
 #[path = "../../powerz-protocol/tests/support/fw_container.rs"]
 mod fw_container;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::*;
 use fw_container::*;
@@ -422,6 +422,33 @@ fn sim_model_mismatch_sends_no_write_capable_frame() {
     );
     assert!(chunks(&m.writes()).is_empty());
     assert_eq!(m.mode(), DeviceMode::Application);
+}
+
+// ---- AC-4PJRVJ.1: a stop that lands as the erase stage is reported ----
+
+#[test]
+fn sim_a_stop_set_at_the_erasing_report_sends_no_descriptor_and_no_write() {
+    let bytes = container();
+    let c = parse(&bytes);
+    let (m, clock) = meter(DeviceMode::Bootloader, None);
+    let mut opener = m.clone();
+    let stop = AtomicBool::new(false);
+    let r = flash::flash(
+        FlashAck::acknowledge(),
+        &c,
+        &mut opener,
+        clock.clone(),
+        &stop,
+        &mut |p| {
+            if matches!(p, FlashProgress::Erasing) {
+                stop.store(true, Ordering::SeqCst);
+            }
+        },
+    );
+    let e = r.expect_err("the stop ends the update");
+    assert!(matches!(e, FlashError::Interrupted { .. }), "got {e:?}");
+    assert_eq!(framed_types(&m.writes()), vec![0x02, 0x40]);
+    assert!(chunks(&m.writes()).is_empty());
 }
 
 // ---- AC-V9SK54.8 + .5: the version check after the return ----

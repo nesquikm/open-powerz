@@ -87,7 +87,7 @@ Defined per FR. Core types: `Frame`/`MainHeader`/`SectionHeader`,
 - Tauri commands: `app_info`, `list_devices`, `watch_devices`, `connect`, `attach` (a reloaded page
   takes over the running session), `disconnect`, `set_rate`,
   `history_range`, `history_gaps`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
-  `stop_recording`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter),
+  `stop_recording`, `save_recording_as`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter),
   `running_meters` (the running sessions' device ids, for a reload), `meter_settings`,
   `records_list` and `record_download` (read-only meter data), `records_delete` and
   `meter_settings_write` (the two meter writes, each confirmed in the UI first), and

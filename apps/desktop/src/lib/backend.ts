@@ -333,6 +333,8 @@ export async function connect(
 export interface RecordingSnapshot {
   rows: number;
   elapsed_ms: number;
+  /** Its file. */
+  path?: string | null | undefined;
 }
 
 /** The running session as a new page picks it up after a reload (mirrors `devices.rs`). */
@@ -387,8 +389,8 @@ export async function setRate(rateSps: number): Promise<void> {
   await invoke("set_rate", { rateSps });
 }
 
-/** Opens the save dialog proposing `suggestedName` and starts recording to the chosen
- * file. Resolves to the path, or `null` when the dialog was cancelled. */
+/** Starts recording at once to a default file named after `suggestedName`. Resolves to
+ * its path; {@link saveRecordingAs} moves the finished file. */
 export async function startRecording(suggestedName: string): Promise<string | null> {
   if (mock) return mock.startRecording(suggestedName);
   return invoke<string | null>("start_recording", { suggestedName });
@@ -398,6 +400,13 @@ export async function startRecording(suggestedName: string): Promise<string | nu
 export async function stopRecording(): Promise<RecordingSummary> {
   if (mock) return mock.stopRecording();
   return invoke<RecordingSummary>("stop_recording");
+}
+
+/** Opens the save dialog for the finished recording at `path` and moves it to the chosen
+ * file. Resolves to the new path, or `null` when the dialog was cancelled. */
+export async function saveRecordingAs(path: string): Promise<string | null> {
+  if (mock) return mock.saveRecordingAs(path);
+  return invoke<string | null>("save_recording_as", { path });
 }
 
 /** Opens the save dialog proposing `suggestedName` and exports the session so far,
@@ -491,6 +500,8 @@ export interface MeterSettingField {
 /** The connected meter's settings, in display order (FR 1HHT01). */
 export interface MeterSettings {
   fields: MeterSettingField[];
+  /** What a write changed beyond the fields, in plain words; a warning, not a failure. */
+  warnings?: string[];
 }
 
 /** Reads the connected meter's settings (GET_DATA 0x008 only); rejects with the
@@ -989,6 +1000,7 @@ export interface MeterBackend {
   setRate(rateSps: number): Promise<void>;
   startRecording(suggestedName: string): Promise<string | null>;
   stopRecording(): Promise<RecordingSummary>;
+  saveRecordingAs(path: string): Promise<string | null>;
   exportSession(
     suggestedName: string,
     onProgress: (progress: ExportProgress) => void,
@@ -1038,6 +1050,7 @@ export const currentMeterCommands: MeterCommands = {
   setRate,
   startRecording,
   stopRecording,
+  saveRecordingAs,
   exportSession,
   stats,
   historyRange,
@@ -1086,6 +1099,7 @@ export function meterBackend(deviceId: string): MeterBackend {
     },
     startRecording: (suggestedName) => call("start_recording", { suggestedName }),
     stopRecording: () => call("stop_recording"),
+    saveRecordingAs: (path) => call("save_recording_as", { path }),
     exportSession: (suggestedName, onProgress) => {
       const channel = new Channel<ExportProgress>();
       channel.onmessage = onProgress;

@@ -937,6 +937,8 @@ export class MockBackend {
   #firmwareFlashes: { deviceId: string; path: string; confirmation: string }[] = [];
   /** A firmware update holds the meter (FR V9SK55, AC .4). */
   #flashing = false;
+  /** The meter the running update holds; another one can connect (AC-4PJRVM.4). */
+  #flashTarget: string | null = null;
   /** The running update was asked to stop / has begun its erase (AC-4PJRVJ.1). */
   #flashStop = false;
   #flashErasing = false;
@@ -985,6 +987,7 @@ export class MockBackend {
     this.#mode = mode;
     this.#options = options;
     this.#flashing = mode === "firmware-running";
+    this.#flashTarget = this.#flashing ? MOCK_RUNNING_FLASH.device_id : null;
   }
 
   /** `replug`: the real meter's listing while the OS lists it; `bootloader`: the
@@ -1065,6 +1068,7 @@ export class MockBackend {
       setRate: on(this.setRate),
       startRecording: on(this.startRecording),
       stopRecording: on(this.stopRecording),
+      saveRecordingAs: on(this.saveRecordingAs),
       exportSession: on(this.exportSession),
       stats: on(this.stats),
       historyRange: on(this.historyRange) as MockBackend["historyRange"],
@@ -1095,6 +1099,14 @@ export class MockBackend {
     };
   }
 
+  /** The running update holds meter `id`, or may: like the backend, a real meter is not
+   * told apart from a real target, which can come back at a new address. */
+  #heldByFlash(id: string): boolean {
+    const target = this.#flashTarget;
+    if (!this.#flashing || target === null) return false;
+    return id === target || (!id.startsWith("demo:") && !target.startsWith("demo:"));
+  }
+
   /** The source the running session streams from, `null` when none runs (FR 1HHT02). */
   connectedSource(): MeasurementSource | null {
     return this.#session?.source ?? null;
@@ -1106,7 +1118,7 @@ export class MockBackend {
     onEvent: (event: BackendEvent) => void,
     source: MeasurementSource = "queue",
   ): Promise<void> {
-    if (this.#flashing) throw usage(FLASH_REFUSAL);
+    if (this.#heldByFlash(deviceId)) throw usage(FLASH_REFUSAL);
     if (this.#sessions.some((x) => x.id === deviceId || x.deviceId === deviceId)) {
       throw usage("This meter is already connected. Disconnect it first.");
     }
@@ -1301,7 +1313,7 @@ export class MockBackend {
       rate_sps: s.rateSps,
       rate_locked: s.rateLocked,
       session_id: s.sessionId,
-      recording: rec ? { rows: rec.rows, elapsed_ms: rec.elapsedMs } : null,
+      recording: rec ? { rows: rec.rows, elapsed_ms: rec.elapsedMs, path: rec.path } : null,
     };
   }
 
@@ -1360,7 +1372,7 @@ export class MockBackend {
     s.onEvent({ type: "status", data: { state: "rate", rate_sps: rateSps, rate_locked: false } });
   }
 
-  /** There is no save dialog in the browser: the proposed name is the "path". */
+  /** There is no folder in the browser: the proposed name is the "path". */
   async startRecording(suggestedName: string): Promise<string | null> {
     const s = this.#open();
     if (s.recording) throw usage("A recording is already running.");
@@ -1375,6 +1387,11 @@ export class MockBackend {
     if (!rec) throw usage("Nothing is being recorded.");
     s.recording = null;
     return { rows: rec.rows, gaps: [], disconnected: false };
+  }
+
+  /** There is no save dialog in the browser: the file stays where it is. */
+  async saveRecordingAs(path: string): Promise<string | null> {
+    return path;
   }
 
   /** Exports every sample streamed so far, finishing on the next timer tick (`slow-export`:
@@ -1736,6 +1753,7 @@ export class MockBackend {
       throw usage(`Type the file's version, ${info.version}, to confirm the update.`);
     }
     this.#flashing = true;
+    this.#flashTarget = deviceId;
     this.#flashStop = false;
     this.#flashErasing = false;
     this.#firmwareFlashes.push({ deviceId, path, confirmation });

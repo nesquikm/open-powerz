@@ -70,6 +70,7 @@
   import { Session } from "./lib/session.svelte";
   import { copyLive, Meters, type MeterEntry } from "./lib/meters.svelte";
   import MeterGrid from "./lib/components/MeterGrid.svelte";
+  import { controlsLabel, tileTitle } from "./lib/meterGrid";
   import AddMeterDialog from "./lib/components/AddMeterDialog.svelte";
   import { canConnectTo } from "./lib/deviceDetails";
   import { StatsControls } from "./lib/stats.svelte";
@@ -165,12 +166,12 @@
       away.selectedId = shownId;
       const rec = recording.detach();
       if (rec) meters.park(shownId, rec);
-      // The PD view shows one meter's capture: the meter leaving it stops its
-      // own, unless it left because it ended (an unplug ended its capture).
+      // The PD view shows one meter's capture: the meter leaving it keeps its own
+      // running, unless it left because it ended (an unplug ended its capture).
       if (pd.capturing && session.active) {
-        void commandsOf(shownId)
-          .pdStop()
-          .catch((err: unknown) => session.reportError(toUiError(err)));
+        const parked = new PdCapture();
+        parked.swapWith(pd);
+        meters.parkPd(shownId, parked);
       }
       meters.replace(shownId, away);
       // An expanded meter that leaves the view goes back to the grid.
@@ -183,12 +184,73 @@
     meters.replace(id, session);
     const rec = meters.unpark(id);
     if (rec) recording.adopt(rec);
-    if (entry.session.details !== null) {
-      pd.handleEvent({ type: "status", data: { state: "connected", ...entry.session.details } });
+    const parkedPd = meters.unparkPd(id);
+    if (parkedPd) {
+      pd.swapWith(parkedPd);
+    } else {
+      if (entry.session.details !== null) {
+        pd.handleEvent({ type: "status", data: { state: "connected", ...entry.session.details } });
+      }
+      pd.capturing = false;
     }
-    pd.capturing = false;
     chart?.reset();
     chart?.backfillFromHistory();
+  }
+
+  /** Names the meter the top bar's controls act on. */
+  const topBarControlsLabel = $derived.by(() => {
+    const id = meters.fullViewId ?? session.selectedId;
+    if (id === null) return null;
+    const listing = meters.get(id)?.listing ?? session.devices.find((d) => d.id === id);
+    return listing ? controlsLabel(tileTitle(listing, session.details?.serial ?? null)) : null;
+  });
+
+  /** A tile's recording and export: the full view's meter keeps the app's. */
+  function recordingOf(entry: MeterEntry): Recording {
+    return entry.session === session ? recording : entry.recording;
+  }
+  function exportJobOf(entry: MeterEntry): ExportJob {
+    return entry.session === session ? exportJob : entry.exportJob;
+  }
+
+  /** The rate picker of a tile: acts on that meter only. */
+  function selectMeterRate(entry: MeterEntry, sps: number): void {
+    if (entry.session === session) {
+      void selectRate(sps);
+      return;
+    }
+    void commandsOf(entry.listing.id)
+      .setRate(sps)
+      .catch((err: unknown) => session.reportError(toUiError(err)));
+  }
+
+  /** Record on a tile: starts or stops that meter's recording only. */
+  function toggleMeterRecording(entry: MeterEntry): void {
+    if (entry.session === session) {
+      toggleRecording();
+      return;
+    }
+    const commands = commandsOf(entry.listing.id);
+    void entry.recording.toggle({
+      canRecord: entry.session.meterConnected,
+      startRecording: (name) => commands.startRecording(name),
+      stopRecording: () => commands.stopRecording(),
+      saveRecordingAs: (path) => commands.saveRecordingAs(path),
+      now: () => new Date(),
+    });
+  }
+
+  /** Export on a tile: that meter's session so far. */
+  function exportMeter(entry: MeterEntry): void {
+    if (entry.session === session) {
+      exportHistory();
+      return;
+    }
+    const commands = commandsOf(entry.listing.id);
+    void entry.exportJob.run({
+      exportSession: (name, onProgress) => commands.exportSession(name, onProgress),
+      now: () => new Date(),
+    });
   }
 
   /** "Expand" on a tile: that meter in the full single-meter view. */
@@ -220,15 +282,7 @@
       .catch((err: unknown) => session.reportError(toUiError(err)));
   }
 
-  /** Another meter can be added while one streams. */
-  const canAddMeter = $derived(
-    !session.flashing && (session.state === "streaming" || session.state === "rate_locked"),
-  );
   let addMeterOpen = $state(false);
-  /** The devices "Add meter" offers: every connectable one not connected yet. */
-  const addableDevices = $derived(
-    session.devices.filter((d) => canConnectTo(d) && meters.get(d.id) === undefined),
-  );
 
   /** Enter and Space press the "Add meter" control, as on a button. */
   function onAddMeterKeydown(e: KeyboardEvent): void {
@@ -244,6 +298,12 @@
     addMeterOpen = false;
     const listing = session.devices.find((d) => d.id === id);
     if (!listing) return;
+    // A firmware update took the only meter: this one takes the empty full view.
+    if (meters.fullViewId === null) {
+      session.selectedId = id;
+      await connectSelected();
+      return;
+    }
     const added = meters.add(listing);
     added.session.beginConnect();
     try {
@@ -302,6 +362,8 @@
   });
   /** The view the tabs show. */
   let view: "meter" | "pd" | "trigger" | "records" | "firmware" = $state("meter");
+  /** The grid shows, so each tile carries its meter's controls (AC-4PJRVM.1). */
+  const controlsInTiles = $derived(view === "meter" && meters.showGrid);
   const ALL_VIEWS = ["meter", "pd", "records", "trigger", "firmware"] as const;
   const ALL_VIEW_TABS = [
     { id: "meter", label: "Meter" },
@@ -339,10 +401,22 @@
       meters.unpark(id);
     },
   });
+  /** Another meter can be added while one streams or a firmware update holds one
+   * (AC-4PJRVM.4). */
+  const canAddMeter = $derived(firmware.busy || session.meterConnected);
+  /** The devices "Add meter" offers: every connectable one not connected yet, and not the
+   * one a firmware update holds. */
+  const addableDevices = $derived(
+    session.devices.filter(
+      (d) => canConnectTo(d) && meters.get(d.id) === undefined && d.id !== firmware.updatingId,
+    ),
+  );
   /** While an update runs the meter is held for it (AC .4): no device switching, no
-   * connect, and the PD analyzer, Trigger and Records tabs are disabled. */
+   * connect, and the PD analyzer, Trigger and Records tabs are disabled. A meter that runs
+   * in the view beside the update is not held (AC-4PJRVM.4). */
   $effect(() => {
-    session.flashing = firmware.busy;
+    session.flashing =
+      firmware.busy && (!session.active || session.selectedId === firmware.updatingId);
   });
   function tabDisabled(id: string): boolean {
     return firmware.busy && (id === "pd" || id === "trigger" || id === "records");
@@ -671,6 +745,8 @@
       console.warn("open-powerz: listing the running meters failed", err);
       return;
     }
+    // The tiles keep the order they had, whichever meter attaches first (AC-4PJRVM.3).
+    meters.arrange(ids);
     // All at once: each meter's events go to the old page until it is attached.
     await Promise.all(
       ids
@@ -728,6 +804,11 @@
         .finally(() => (disconnecting = false));
       return;
     }
+    await connectSelected();
+  }
+
+  /** Connects the picked device into the full view. */
+  async function connectSelected(): Promise<void> {
     const id = session.selectedId;
     if (id === null) return;
     session.beginConnect();
@@ -794,9 +875,12 @@
     };
   }
 
-  /** Record button / Space: start (save dialog first) or stop the CSV recording. */
+  /** Record button / Space: start at once, or stop and ask where to save the CSV file. */
   function toggleRecording(): void {
-    void recording.toggle(recordingDeps());
+    void recording.toggle({
+      ...recordingDeps(),
+      saveRecordingAs: (path) => act().saveRecordingAs(path),
+    });
   }
 
   /** R shortcut: zero the session statistics. */
@@ -817,17 +901,18 @@
 
   function dispatchShortcut(action: ShortcutAction): void {
     switch (action.kind) {
+      // In the grid no meter is the obvious one: its tiles' controls are named instead.
       case "record":
-        toggleRecording();
+        if (!controlsInTiles) toggleRecording();
         break;
       case "connect":
-        void toggleConnection();
+        if (!controlsInTiles) void toggleConnection();
         break;
       case "reset_stats":
         resetStats();
         break;
       case "rate":
-        void selectRate(action.sps);
+        if (!controlsInTiles) void selectRate(action.sps);
         break;
       case "live":
         returnChartToLive();
@@ -907,6 +992,8 @@
     {exportJob}
     {canExport}
     onExport={exportHistory}
+    controlsLabel={topBarControlsLabel}
+    {controlsInTiles}
     rateSps={session.rateSps ?? requestedRateSps}
     source={requestedSource}
     onSelectSource={(source) => (requestedSource = source)}
@@ -1035,7 +1122,18 @@
       </div>
     </div>
     {#if view === "meter" && meters.showGrid}
-      <MeterGrid {meters} onExpand={expandMeter} onDisconnect={disconnectMeter} />
+      <MeterGrid
+        {meters}
+        onExpand={expandMeter}
+        onDisconnect={disconnectMeter}
+        {recordingOf}
+        {exportJobOf}
+        defaultRateSps={requestedRateSps}
+        onSelectRate={selectMeterRate}
+        onToggleRecording={toggleMeterRecording}
+        onExport={exportMeter}
+        {fileActions}
+      />
     {/if}
     {#if view === "trigger"}
       <div class="trigger-view" role="tabpanel" id="view-trigger" aria-labelledby="tab-trigger">
