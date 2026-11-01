@@ -6,6 +6,8 @@ use powerz_protocol::session;
 use powerz_protocol::transport;
 use serde::Serialize;
 
+use crate::devices::FlashHold;
+
 /// Error category the UI branches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +27,9 @@ pub enum ErrorKind {
     /// The meter's text replies are out of step with the commands: it needs
     /// a power cycle, and the trigger session refuses requests until reopened.
     OutOfSync,
+    /// A firmware update would release sessions the user has not agreed to
+    /// release; [`UiError::sessions`] lists all of them (FR AXHK2F).
+    FlashNeedsConsent,
     /// Anything else.
     Internal,
 }
@@ -38,6 +43,9 @@ pub struct UiError {
     pub message: String,
     /// What to try next, if anything.
     pub hint: Option<String>,
+    /// The sessions a `flash_needs_consent` refusal names; sent only then.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<FlashHold>,
 }
 
 impl UiError {
@@ -47,6 +55,17 @@ impl UiError {
             kind: ErrorKind::Usage,
             message: message.into(),
             hint: None,
+            sessions: Vec::new(),
+        }
+    }
+
+    /// A firmware update refused until the user agrees to release `sessions`.
+    pub fn flash_needs_consent(sessions: Vec<FlashHold>) -> UiError {
+        UiError {
+            kind: ErrorKind::FlashNeedsConsent,
+            message: "The firmware update would end a running session.".to_owned(),
+            hint: Some("Agree to end it, or keep it running and cancel the update.".to_owned()),
+            sessions,
         }
     }
 
@@ -55,6 +74,7 @@ impl UiError {
             kind: ErrorKind::Internal,
             message: "Something went wrong inside the app.".to_owned(),
             hint: None,
+            sessions: Vec::new(),
         }
     }
 }
@@ -97,6 +117,7 @@ fn permission_denied(target_os: &str) -> UiError {
         kind: ErrorKind::PermissionDenied,
         message: "The system did not allow the app to open the meter.".to_owned(),
         hint: Some(hint),
+        sessions: Vec::new(),
     }
 }
 
@@ -112,6 +133,7 @@ fn device_busy(target_os: &str) -> UiError {
         kind: ErrorKind::DeviceBusy,
         message: "The meter is busy or in use by another program or driver.".to_owned(),
         hint: Some(hint),
+        sessions: Vec::new(),
     }
 }
 
@@ -120,6 +142,7 @@ fn timeout() -> UiError {
         kind: ErrorKind::Timeout,
         message: "The meter did not answer in time.".to_owned(),
         hint: Some("Check the cable, then replug the meter and try again.".to_owned()),
+        sessions: Vec::new(),
     }
 }
 
@@ -128,6 +151,7 @@ fn protocol() -> UiError {
         kind: ErrorKind::Protocol,
         message: "The meter sent a reply the app did not understand.".to_owned(),
         hint: Some("Replug the meter and try again; updating its firmware may help.".to_owned()),
+        sessions: Vec::new(),
     }
 }
 
@@ -140,6 +164,7 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
             kind: ErrorKind::Disconnected,
             message: "The meter was unplugged.".to_owned(),
             hint: Some("Plug the meter back in.".to_owned()),
+            sessions: Vec::new(),
         },
         T::Permission(_) => permission_denied(target_os),
         T::Io(detail) if is_busy(detail) => device_busy(target_os),
@@ -148,6 +173,7 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
             kind: ErrorKind::Disconnected,
             message: "No meter was found.".to_owned(),
             hint: Some("Plug the meter in and try again.".to_owned()),
+            sessions: Vec::new(),
         },
         T::Forbidden { .. }
         | T::UnsupportedOnHid
@@ -159,12 +185,14 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
             kind: ErrorKind::Usage,
             message: "The meter takes settings changes only over its serial (CDC) port, which could not be used.".to_owned(),
             hint: Some("Close any other program using the meter's serial port and try again.".to_owned()),
+            sessions: Vec::new(),
         },
         T::HidReplyTooLong { .. } => protocol(),
         T::Io(_) => UiError {
             kind: ErrorKind::Internal,
             message: "Talking to the meter failed.".to_owned(),
             hint: Some("Replug the meter and try again.".to_owned()),
+            sessions: Vec::new(),
         },
         T::Mock(_) => UiError::internal(),
     }
@@ -191,6 +219,7 @@ fn port_held() -> UiError {
         kind: ErrorKind::DeviceBusy,
         message: "The meter's serial port is in use by another program.".to_owned(),
         hint: Some("Close that program, then try again.".to_owned()),
+        sessions: Vec::new(),
     }
 }
 
@@ -204,18 +233,21 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
             kind: ErrorKind::Protocol,
             message: "The meter refused the request.".to_owned(),
             hint: Some("Updating the meter's firmware may help.".to_owned()),
+            sessions: Vec::new(),
         },
         S::Forbidden { .. } => UiError::usage("The app refused a request that is not safe."),
         S::AuthFailed => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter did not accept the app's sign-in.".to_owned(),
             hint: Some("Replug the meter and try again.".to_owned()),
+            sessions: Vec::new(),
         },
         S::RecordTableTooLong { .. } => UiError {
             kind: ErrorKind::Usage,
             message: "Deleting that would leave more records than one table write can hold."
                 .to_owned(),
             hint: Some("Delete more records at once, or all of them.".to_owned()),
+            sessions: Vec::new(),
         },
         S::RecordTableMismatch { expected, actual } => UiError {
             kind: ErrorKind::Protocol,
@@ -231,6 +263,7 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
                 )
             },
             hint: Some("Read the list again; nothing was retried.".to_owned()),
+            sessions: Vec::new(),
         },
         S::SettingsWrite(e @ SettingsWriteError::OutOfRange { .. }) => {
             UiError::usage(format!("That setting value is out of range: {e}."))
@@ -242,6 +275,7 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
                     "The meter holds {field} = {value}, which this app cannot write back."
                 ),
                 hint: Some(format!("Change {field} too, then apply again.")),
+                sessions: Vec::new(),
             }
         }
         S::SettingsMismatch {
@@ -254,11 +288,13 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
                 "The meter's settings do not match after the change: {field} reads {actual}, expected {expected}."
             ),
             hint: Some("Read the settings again; nothing was retried.".to_owned()),
+            sessions: Vec::new(),
         },
         S::BootloaderMidDownload => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter's bootloader was left mid-download.".to_owned(),
             hint: Some("Unplug the meter, then hold Back while plugging it back in.".to_owned()),
+            sessions: Vec::new(),
         },
     }
 }

@@ -220,7 +220,7 @@ fn the_backend_reports_a_running_update_with_its_meter_and_stage() {
     let (mut m, id) = manager_with_meter();
     assert_eq!(m.flash_status(), None, "no update runs");
 
-    let lease = m.begin_flash(&id).expect("the meter is free");
+    let lease = m.begin_flash(&id, &[]).expect("the meter is free");
     let status = m.flash_status().expect("the lease is held");
     assert_eq!(status.device_id, id);
     assert_eq!(status.stage, None, "no stage reported yet");
@@ -246,12 +246,12 @@ fn the_manager_cancels_the_running_update_until_the_erase() {
     let (mut m, id) = manager_with_meter();
     assert!(m.cancel_flash().is_err(), "nothing runs to cancel");
 
-    let lease = m.begin_flash(&id).expect("the meter is free");
+    let lease = m.begin_flash(&id, &[]).expect("the meter is free");
     m.cancel_flash().expect("not erasing yet");
     assert!(lease.control().stop().load(Ordering::SeqCst));
     drop(lease);
 
-    let lease = m.begin_flash(&id).expect("released");
+    let lease = m.begin_flash(&id, &[]).expect("released");
     assert!(
         !lease.control().stop().load(Ordering::SeqCst),
         "a new update starts with the flag down"

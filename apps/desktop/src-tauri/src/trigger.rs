@@ -964,11 +964,13 @@ pub(crate) fn pdm_error(err: &pdm::Error) -> UiError {
             kind: ErrorKind::Timeout,
             message: "The meter did not answer in time.".to_owned(),
             hint: Some("Check the cable, then try again.".to_owned()),
+            sessions: Vec::new(),
         },
         E::Disconnected | E::NotFound => UiError {
             kind: ErrorKind::Disconnected,
             message: "The meter's serial port went away.".to_owned(),
             hint: Some("Plug the meter back in.".to_owned()),
+            sessions: Vec::new(),
         },
         E::HighVoltageNotConfirmed { .. } => {
             UiError::usage("A request above 5 V needs your confirmation.")
@@ -988,16 +990,19 @@ pub(crate) fn pdm_error(err: &pdm::Error) -> UiError {
                  session again."
                     .to_owned(),
             ),
+            sessions: Vec::new(),
         },
         E::Malformed { .. } | E::LineTooLong { .. } | E::UnexpectedReply { .. } => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter sent a reply the app did not understand.".to_owned(),
             hint: None,
+            sessions: Vec::new(),
         },
         E::Io(_) => UiError {
             kind: ErrorKind::Internal,
             message: "Talking to the meter's serial port failed.".to_owned(),
             hint: Some("Replug the meter and try again.".to_owned()),
+            sessions: Vec::new(),
         },
     }
 }
@@ -1009,6 +1014,7 @@ fn pd_error(err: &pd::Error) -> UiError {
             kind: ErrorKind::Protocol,
             message: format!("The charger refused the request ({reply})."),
             hint: None,
+            sessions: Vec::new(),
         },
         other => UiError::usage(other.to_string()),
     }
@@ -1169,6 +1175,7 @@ impl TriggerWorker {
                 hint: Some(
                     "Unplug the charger from the meter if VBUS is still above 5 V.".to_owned(),
                 ),
+                sessions: Vec::new(),
             }),
         }
     }

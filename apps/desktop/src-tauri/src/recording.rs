@@ -147,6 +147,7 @@ pub fn io_error(err: &io::Error) -> UiError {
         kind,
         message: message.to_owned(),
         hint: Some("Pick another place to save the file.".to_owned()),
+        sessions: Vec::new(),
     }
 }
 

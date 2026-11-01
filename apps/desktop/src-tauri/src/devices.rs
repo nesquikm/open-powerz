@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use powerz_protocol::transport::discovery::{self, DeviceEntry, Model};
 use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{PdScenario, Persona, Scenario, SimDevice};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::app_log::AppLog;
 use crate::firmware_flash::{FlashControl, FlashStage};
@@ -446,8 +446,17 @@ struct Meter {
     /// ([`crate::trigger::PdmHold`]). Wider than [`Meter::trigger`], which is
     /// empty during the handshake and while a taken session closes.
     pdm_holds: Arc<AtomicUsize>,
+    /// Counts the recording starts on this meter that are not settled yet
+    /// ([`worker::RecordingStartHold`]).
+    recording_starts: Arc<AtomicUsize>,
     /// When the next automatic reconnect may start (FR 4PJRVK).
     back_off: ReconnectBackOff,
+    /// The worker threads taken to be closed outside the manager lock; each
+    /// holds the meter until it is gone (FR AXHK2F).
+    closing_workers: Vec<Weak<()>>,
+    /// The PDM counts of the sessions this one replaced, while a PDM session
+    /// on them has not finished closing (FR AXHK2F).
+    closing_holds: Vec<Arc<AtomicUsize>>,
 }
 
 impl Meter {
@@ -460,6 +469,31 @@ impl Meter {
     /// The session's worker, unless it has ended by itself.
     fn running_worker(&self) -> Option<&WorkerHandle> {
         self.worker.as_ref().filter(|w| !w.is_finished())
+    }
+
+    /// A session of this meter is on its way out of the manager's sight: its
+    /// worker was taken and still runs, or a PDM session is held that is not
+    /// the one in the slot (opening, or taken and closing), here or on a
+    /// session this one replaced. Neither can be released from here, so what
+    /// holds the meter is not yet known to be gone.
+    fn closing(&self) -> bool {
+        // The holds first: a session leaving the slot between the two reads
+        // then counts as closing.
+        let holds = self.pdm_holds.load(Ordering::SeqCst);
+        let in_slot = usize::from(lock(&self.trigger).is_some());
+        holds > in_slot
+            || self.closing_workers.iter().any(|w| w.strong_count() > 0)
+            || self
+                .closing_holds
+                .iter()
+                .any(|h| h.load(Ordering::SeqCst) > 0)
+    }
+
+    /// `worker` leaves this meter and still runs: it holds the meter until
+    /// its thread is gone.
+    fn watch_closing(&mut self, worker: &WorkerHandle) {
+        self.closing_workers.retain(|w| w.strong_count() > 0);
+        self.closing_workers.push(worker.thread_alive());
     }
 
     /// Let go of the meter: the trigger session returns to 5 V and closes,
@@ -514,6 +548,31 @@ pub struct DeviceManager<O, C> {
 const FLASH_REFUSAL: &str =
     "A firmware update is running. Wait for it to finish before using the meter.";
 
+/// Why an update does not start while a session it would release is closing.
+const FLASH_WHILE_CLOSING: &str =
+    "A session on this meter is still closing. Wait a moment, then start the update again.";
+
+/// Why an update does not start past a recording start not settled yet.
+const FLASH_WHILE_RECORDING_STARTS: &str =
+    "A recording is starting on this meter. Wait a moment, then start the update again.";
+
+/// A recording start registered with the manager and not sent yet: until it
+/// settles, a firmware update of that meter is refused (AC-AXHK2F.5).
+/// Dropping it gives the start up.
+#[derive(Debug)]
+pub struct RecordingStart {
+    control: worker::WorkerControl,
+    hold: worker::RecordingStartHold,
+}
+
+impl RecordingStart {
+    /// Record to a new file at `path`. The start stays registered past a
+    /// timed-out answer, until the worker has applied the request.
+    pub fn record_to(self, path: &Path) -> Result<(), UiError> {
+        self.control.record_to(path, self.hold)
+    }
+}
+
 /// Exclusive use of a meter for a firmware update (FR V9SK55, AC .4): while
 /// it is held the manager refuses that meter's measurement stream, PD
 /// capture, recording and triggering, a second update, and any real meter
@@ -541,6 +600,32 @@ pub struct FlashStatus {
     pub device_id: String,
     /// The latest stage, `None` before the first.
     pub stage: Option<FlashStage>,
+}
+
+/// A session a firmware update would release, as the prompt names it
+/// (FR AXHK2F). The page sends back the ones the user agreed to release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlashHold {
+    /// The session's id.
+    pub id: String,
+    /// Its name for the prompt.
+    pub label: String,
+    /// It is recording.
+    pub recording: bool,
+    /// Which recording, so a consent covers that one and no later one on
+    /// the same session (AC-AXHK2F.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_id: Option<u64>,
+}
+
+impl FlashHold {
+    /// Whether the consent in `agreed` covers this session: it names the
+    /// session, and names the recording if there is one now.
+    fn covered_by(&self, agreed: &[FlashHold]) -> bool {
+        agreed
+            .iter()
+            .any(|a| a.id == self.id && (!self.recording || a.recording_id == self.recording_id))
+    }
 }
 
 impl FlashLease {
@@ -1016,23 +1101,14 @@ where
         close_allowed(self.flashing())
     }
 
-    /// Take the listed device `id` for a firmware update (FR V9SK55,
-    /// AC .4): that meter's trigger session and measurement stream close
-    /// first (waiting for the worker to let go of the pipe), its wait for an
-    /// unplug ends, and that meter is refused until the lease is dropped; the
-    /// others keep running (AC-4PJRVJ.2). A real session that cannot be told
-    /// apart from a real target lets go too: without a serial on both sides
-    /// it may be the same meter. A bootloader-mode meter can be taken too.
-    pub fn begin_flash(&mut self, id: &str) -> Result<FlashLease, UiError> {
-        self.ensure_not_flashing()?;
-        let device = self
-            .list_devices()
-            .into_iter()
-            .find(|d| d.id == id)
-            .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
+    /// The sessions an update of `device` lets go of, as indices into
+    /// [`DeviceManager::meters`]; ended ones are among them, for their waits.
+    /// A real session that cannot be told apart from a real target counts:
+    /// without a serial on both sides it may be the same meter.
+    fn flash_scope(&self, device: &DeviceListing) -> Vec<usize> {
         // The session of that meter (by id, or by serial after a replug).
         let same = |m: &Meter| {
-            m.named(id)
+            m.named(&device.id)
                 || (device.demo_scenario.is_none()
                     && m.device.demo_scenario.is_none()
                     && device.serial.is_some()
@@ -1046,13 +1122,73 @@ where
                 && m.device.demo_scenario.is_none()
                 && (device.serial.is_none() || m.device.serial.is_none())
         };
-        let held = |m: &Meter| same(m) || unsure(m);
-        let mut targets: Vec<String> = self
-            .meters
+        self.meters
             .iter()
-            .filter(|m| held(m))
-            .map(|m| m.id.clone())
-            .collect();
+            .enumerate()
+            .filter(|(_, m)| same(m) || unsure(m))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The running sessions among `scope`: the ones releasing would end.
+    fn flash_holds_in(&self, scope: &[usize]) -> Vec<FlashHold> {
+        scope
+            .iter()
+            .filter_map(|&i| {
+                let m = &self.meters[i];
+                m.running_worker().map(|worker| {
+                    let recording_id = worker.recording_id();
+                    FlashHold {
+                        id: m.id.clone(),
+                        label: m.device.label.clone(),
+                        recording: recording_id.is_some(),
+                        recording_id,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// The sessions an update of the listed device `id` would end, for the
+    /// prompt (FR AXHK2F); none for a device that is not listed.
+    pub fn flash_holds(&self, id: &str) -> Vec<FlashHold> {
+        self.attached(id).map_or_else(
+            |_| Vec::new(),
+            |d| self.flash_holds_in(&self.flash_scope(&d)),
+        )
+    }
+
+    /// Take the listed device `id` for a firmware update (FR V9SK55,
+    /// AC .4): that meter's trigger session and measurement stream close
+    /// first (waiting for the worker to let go of the pipe), its wait for an
+    /// unplug ends, and that meter is refused until the lease is dropped; the
+    /// others keep running (AC-4PJRVJ.2). Refused, with nothing released or
+    /// sent, unless `agreed` covers every session of
+    /// [`flash_holds`](Self::flash_holds), or while a session in its scope
+    /// is still closing outside the manager lock or has a recording start
+    /// not settled yet (FR AXHK2F). A bootloader-mode meter can be taken too.
+    pub fn begin_flash(&mut self, id: &str, agreed: &[FlashHold]) -> Result<FlashLease, UiError> {
+        self.ensure_not_flashing()?;
+        let device = self.attached(id)?;
+        let scope = self.flash_scope(&device);
+        if scope.iter().any(|&i| self.meters[i].closing()) {
+            return Err(UiError::usage(FLASH_WHILE_CLOSING));
+        }
+        // The starts first: one found settled has its recording id out by now.
+        let starting = scope
+            .iter()
+            .any(|&i| self.meters[i].recording_starts.load(Ordering::SeqCst) > 0);
+        let holds = self.flash_holds_in(&scope);
+        let covered = holds.iter().all(|hold| hold.covered_by(agreed));
+        // A recording in sight is asked about at once: its own start may be
+        // the one not settled yet, and the prompt can answer for it.
+        if starting && (covered || !holds.iter().any(|hold| hold.recording)) {
+            return Err(UiError::usage(FLASH_WHILE_RECORDING_STARTS));
+        }
+        if !covered {
+            return Err(UiError::flash_needs_consent(holds));
+        }
+        let mut targets: Vec<String> = scope.iter().map(|&i| self.meters[i].id.clone()).collect();
         if !targets.iter().any(|t| t == id) {
             targets.push(id.to_owned());
         }
@@ -1071,7 +1207,8 @@ where
             control: Arc::clone(&control),
         });
         self.flashing.store(true, Ordering::SeqCst);
-        for m in self.meters.iter_mut().filter(|m| held(m)) {
+        for i in scope {
+            let m = &mut self.meters[i];
             m.release();
             forget_wait(&self.waiting, &m.id);
         }
@@ -1209,6 +1346,7 @@ where
             // The ended worker shares the page's stop flag: let it go without
             // raising that flag, and without joining it under the manager lock.
             if let Some(old) = meter.worker.take() {
+                meter.watch_closing(&old);
                 old.retire();
             }
             self.log.line(&format!("replug {id} at {}", device.id));
@@ -1223,6 +1361,14 @@ where
     /// Every attached meter plus the demo entries; never opens a device.
     pub fn list_devices(&self) -> Vec<DeviceListing> {
         list_devices_from((self.discover)())
+    }
+
+    /// The listed device `id`, refused when it is not attached any more.
+    fn attached(&self, id: &str) -> Result<DeviceListing, UiError> {
+        self.list_devices()
+            .into_iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| UiError::usage("That meter is no longer attached."))
     }
 
     /// Connect to the device with id `id` at `rate_sps` on a dedicated worker
@@ -1278,11 +1424,7 @@ where
             ));
         }
         let rate = supported_rate(rate_sps)?;
-        let mut device = self
-            .list_devices()
-            .into_iter()
-            .find(|d| d.id == id)
-            .ok_or_else(|| UiError::usage("That meter is no longer attached."))?;
+        let mut device = self.attached(id)?;
         self.ensure_not_flash_target(&device)?;
         device.ensure_connectable()?;
         // Sessions that ended (unplugged, failed or disconnected) make way,
@@ -1306,15 +1448,24 @@ where
                     && m.device.serial == device.serial);
             let waited =
                 waits.iter().any(|(slot, _)| slot == &m.id) && !m.stop.load(Ordering::SeqCst);
-            adding && waited && !same_meter
+            // One still closing stays visible to a firmware update's start;
+            // a new session of the same meter inherits what is closing below.
+            (adding && waited || m.closing()) && !same_meter
         };
         let (kept, ended): (Vec<Meter>, Vec<Meter>) =
             std::mem::take(&mut self.meters).into_iter().partition(keep);
         self.meters = kept;
+        let mut closing_workers = Vec::new();
+        let mut closing_holds = Vec::new();
         for mut m in ended {
             self.stop_waiting_for(&m.id);
             m.release();
+            closing_workers.append(&mut m.closing_workers);
+            closing_holds.append(&mut m.closing_holds);
+            // Its slot is empty now: what it still counts is on the way out.
+            closing_holds.push(m.pdm_holds);
         }
+        closing_holds.retain(|h| h.load(Ordering::SeqCst) > 0);
         // A second demo meter reports a serial of its own, so the two never
         // share a session; a demo meter connected again gets the one it had,
         // even once the shared demo serial is free again.
@@ -1342,7 +1493,10 @@ where
             trigger: Arc::default(),
             rate_before_trigger: None,
             pdm_holds: Arc::default(),
+            recording_starts: Arc::default(),
             back_off: ReconnectBackOff::default(),
+            closing_workers,
+            closing_holds,
         });
         self.current = Some(device.id);
         self.open_session(self.meters.len() - 1, rate);
@@ -1545,14 +1699,27 @@ where
             .ok_or_else(|| UiError::usage(NOT_CONNECTED))
     }
 
+    /// Register a recording start on meter `id`, so a caller can wait for the
+    /// worker's answer after releasing its lock on the manager. Taken under
+    /// the lock a firmware update's start takes, so either the update sees
+    /// the start or the start is refused (AC-AXHK2F.5).
+    pub fn recording_start_for(&self, id: &str) -> Result<RecordingStart, UiError> {
+        let control = self.control_for(id)?;
+        let hold = self
+            .meter(id)
+            .map(|m| worker::RecordingStartHold::new(&m.recording_starts))
+            .ok_or_else(|| UiError::usage(NOT_CONNECTED))?;
+        Ok(RecordingStart { control, hold })
+    }
+
     /// Record the open session's stream to a new file at `path`.
     pub fn start_recording(&self, path: &Path) -> Result<(), UiError> {
-        self.control()?.record_to(path)
+        self.start_recording_for(&self.current_id(), path)
     }
 
     /// Record meter `id`'s stream to a new file at `path`.
     pub fn start_recording_for(&self, id: &str, path: &Path) -> Result<(), UiError> {
-        self.control_for(id)?.record_to(path)
+        self.recording_start_for(id)?.record_to(path)
     }
 
     /// Stop the recording and return what it wrote.
@@ -1654,7 +1821,11 @@ where
     /// [`DeviceManager::take_session`] of meter `id`; its data stays.
     pub fn take_session_for(&mut self, id: &str) -> Result<WorkerHandle, UiError> {
         self.meter_mut(id)
-            .and_then(|m| m.worker.take())
+            .and_then(|m| {
+                let worker = m.worker.take()?;
+                m.watch_closing(&worker);
+                Some(worker)
+            })
             .ok_or_else(|| UiError::usage(NOT_CONNECTED))
     }
 
@@ -2062,5 +2233,1039 @@ mod tests {
             "gap runs backwards: {:?}",
             gaps[0]
         );
+    }
+
+    // ---- FR AXHK2F: a firmware update never ends a session unasked ----
+
+    /// Frame types of the safe command set (`docs/protocol.md`).
+    const SAFE_TYPES: [u8; 8] = [0x02, 0x03, 0x0C, 0x0E, 0x0F, 0x40, 0x44, 0x4C];
+
+    const AT_4: &str = "usb:1:4";
+    const AT_5: &str = "usb:1:5";
+    const AT_6: &str = "usb:1:6";
+
+    /// A real meter at `address`; `None` is one that reports no serial. Every
+    /// serial here is synthetic.
+    fn entry(address: u8, serial: Option<&str>) -> DeviceEntry {
+        DeviceEntry {
+            model: Model::Km003c,
+            pid: 0x0063,
+            serial: serial.map(str::to_owned),
+            product: Some("POWER-Z KM003C".to_owned()),
+            interface_string: Some("APP".to_owned()),
+            bus: "1".to_owned(),
+            address,
+        }
+    }
+
+    /// Stalls a fake meter's pipe, so its worker answers no command.
+    #[derive(Default)]
+    struct Stall {
+        /// The meters whose pipe waits when used.
+        meters: Mutex<Vec<String>>,
+        /// How many workers are waiting on a pipe now.
+        waiting: AtomicUsize,
+    }
+
+    impl Stall {
+        fn stalls(&self, id: &str) -> bool {
+            self.meters.lock().unwrap().iter().any(|held| held == id)
+        }
+
+        /// Let every stalled worker go on.
+        fn end(&self) {
+            self.meters.lock().unwrap().clear();
+        }
+    }
+
+    /// The simulator behind a plug, logging the type of every request.
+    struct FakeMeter {
+        sim: SimDevice,
+        id: String,
+        pulled: Arc<Mutex<Vec<String>>>,
+        sent: Arc<Mutex<Vec<u8>>>,
+        stall: Arc<Stall>,
+    }
+
+    impl FakeMeter {
+        fn check_plug(&self) -> Result<(), transport::Error> {
+            if self.stall.stalls(&self.id) {
+                self.stall.waiting.fetch_add(1, Ordering::SeqCst);
+                // Bounded: an update that wrongly starts joins this worker,
+                // and must fail its test rather than hang it.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while self.stall.stalls(&self.id) {
+                    if std::time::Instant::now() >= deadline {
+                        self.stall.end();
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                self.stall.waiting.fetch_sub(1, Ordering::SeqCst);
+            }
+            if self.pulled.lock().unwrap().contains(&self.id) {
+                return Err(transport::Error::Disconnected);
+            }
+            Ok(())
+        }
+    }
+
+    impl Transport for FakeMeter {
+        fn transact(
+            &mut self,
+            request: &[u8],
+            timeout: Duration,
+        ) -> Result<Vec<u8>, transport::Error> {
+            self.check_plug()?;
+            if let Some(first) = request.first() {
+                self.sent.lock().unwrap().push(first & 0x7F);
+            }
+            self.sim.transact(request, timeout)
+        }
+
+        fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+            self.check_plug()?;
+            self.sim.read(timeout)
+        }
+    }
+
+    struct FakeOpener {
+        clock: powerz_sim::SimClock,
+        pulled: Arc<Mutex<Vec<String>>>,
+        sent: Arc<Mutex<Vec<u8>>>,
+        stall: Arc<Stall>,
+    }
+
+    impl Opener for FakeOpener {
+        type Transport = FakeMeter;
+        fn open(&self, device: &DeviceListing) -> Result<FakeMeter, transport::Error> {
+            Ok(FakeMeter {
+                sim: SimDevice::with_clock(Persona::Bulk, Scenario::Load5v1a, self.clock.clone()),
+                id: device.id.clone(),
+                pulled: Arc::clone(&self.pulled),
+                sent: Arc::clone(&self.sent),
+                stall: Arc::clone(&self.stall),
+            })
+        }
+    }
+
+    /// A manager over fake real meters; the demo device is listed as usual.
+    struct Rig {
+        m: DeviceManager<FakeOpener, powerz_sim::SimClock>,
+        pulled: Arc<Mutex<Vec<String>>>,
+        sent: Arc<Mutex<Vec<u8>>>,
+        stall: Arc<Stall>,
+        files: Vec<std::path::PathBuf>,
+    }
+
+    impl Rig {
+        fn new(entries: Vec<DeviceEntry>) -> Rig {
+            let clock = powerz_sim::SimClock::new(1_790_000_000_000);
+            let pulled: Arc<Mutex<Vec<String>>> = Arc::default();
+            let sent: Arc<Mutex<Vec<u8>>> = Arc::default();
+            let stall: Arc<Stall> = Arc::default();
+            let m = DeviceManager::new(
+                move || Ok(entries.clone()),
+                FakeOpener {
+                    clock: clock.clone(),
+                    pulled: Arc::clone(&pulled),
+                    sent: Arc::clone(&sent),
+                    stall: Arc::clone(&stall),
+                },
+                clock,
+            );
+            Rig {
+                m,
+                pulled,
+                sent,
+                stall,
+                files: Vec::new(),
+            }
+        }
+
+        /// Connect meter `id` and wait for its first samples.
+        fn stream(&mut self, id: &str) -> std::sync::mpsc::Receiver<BackendEvent> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.m
+                .connect(id, 50, move |e| {
+                    let _ = tx.send(e);
+                })
+                .unwrap_or_else(|e| panic!("connect {id}: {e:?}"));
+            wait_for(
+                &rx,
+                |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+            );
+            rx
+        }
+
+        /// A fresh recording file, removed with the rig.
+        fn fresh_file(&mut self) -> std::path::PathBuf {
+            let name = format!(
+                "open-powerz-axhk2f-{}-{:?}-{}.csv",
+                std::process::id(),
+                std::thread::current().id(),
+                self.files.len()
+            );
+            let path = std::env::temp_dir().join(name);
+            self.files.push(path.clone());
+            path
+        }
+
+        /// Start a recording on meter `id`, to a fresh file.
+        fn record(&mut self, id: &str) {
+            let path = self.fresh_file();
+            self.m
+                .start_recording_for(id, &path)
+                .unwrap_or_else(|e| panic!("record on {id}: {e:?}"));
+        }
+
+        /// Pull meter `id`'s cable: its pipe fails from now on.
+        fn unplug(&self, id: &str) {
+            self.pulled.lock().unwrap().push(id.to_owned());
+        }
+
+        /// Hang meter `id`'s worker on its pipe until [`Stall::end`]; from
+        /// the return on it applies no command.
+        fn stall(&self, id: &str) {
+            self.stall.meters.lock().unwrap().push(id.to_owned());
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while self.stall.waiting.load(Ordering::SeqCst) == 0 {
+                assert!(std::time::Instant::now() < deadline, "{id} never stalled");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        /// Open a trigger session on meter `id`.
+        fn open_trigger(&mut self, id: &str) {
+            let clock = powerz_sim::SimClock::new(1_790_000_000_000);
+            let pdm = powerz_sim::SimPdm::new(powerz_sim::SimCharger::Epr140W, clock.clone());
+            let worker = crate::trigger::TriggerWorker::spawn(pdm.open_port(), clock)
+                .expect("the trigger session opens");
+            self.m
+                .install_trigger_for(id, worker)
+                .expect("the trigger session is installed");
+        }
+
+        /// Give meter `id` an ended worker whose thread is still alive, as
+        /// when it is still delivering its last events to a slow page. The
+        /// thread goes on when the returned sender is dropped.
+        fn linger_after_the_end(&mut self, id: &str) -> std::sync::mpsc::Sender<()> {
+            let (thread_ends, gate) = std::sync::mpsc::channel::<()>();
+            let clock = powerz_sim::SimClock::new(1_790_000_000_000);
+            let lingering = worker::spawn(
+                || -> Result<FakeMeter, transport::Error> { Err(transport::Error::Disconnected) },
+                clock,
+                WorkerConfig::new(Rate::Sps50, 1),
+                move |event: BackendEvent| {
+                    if matches!(event, BackendEvent::Status(Status::Disconnected { .. })) {
+                        let _ = gate.recv();
+                    }
+                },
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !lingering.is_finished() {
+                assert!(std::time::Instant::now() < deadline, "it never ended");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let meter = self.m.meter_mut(id).expect("the meter has a session");
+            // The ended worker shares the page's stop flag, as in a replug.
+            if let Some(ended) = meter.worker.replace(lingering) {
+                ended.retire();
+            }
+            thread_ends
+        }
+
+        /// What the `disconnect` command does under the manager lock: both
+        /// are taken here and finish closing later, without the lock.
+        fn take_to_close(&mut self, id: &str) -> Closing {
+            let trigger = self.m.take_trigger_for(id);
+            let session = self.m.take_session_for(id);
+            Closing { trigger, session }
+        }
+
+        /// The manager holds no trace of an update, for the meters in `ids`.
+        fn assert_no_update(&self, ids: &[&str]) {
+            assert!(!self.m.flashing(), "the update flag stayed up");
+            assert_eq!(self.m.flash_status(), None, "an update is still reported");
+            for id in ids {
+                assert!(
+                    self.m.ensure_not_flashing_for(id).is_ok(),
+                    "{id} is still refused for an update"
+                );
+            }
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            self.stall.end();
+            for id in self.m.connected_ids() {
+                let _ = self.m.disconnect_for(&id);
+            }
+            for file in &self.files {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+    }
+
+    /// A session the `disconnect` command has taken and not finished closing.
+    struct Closing {
+        trigger: Option<crate::trigger::TriggerWorker>,
+        session: Result<WorkerHandle, UiError>,
+    }
+
+    impl Closing {
+        /// Back to 5 V and `pdm close`, as the command does first.
+        fn close_trigger(&mut self) {
+            if let Some(trigger) = self.trigger.take() {
+                let _ = trigger.close();
+            }
+        }
+
+        /// The worker's part alone, with the trigger left closing.
+        fn close_session(&mut self) {
+            let taken = std::mem::replace(&mut self.session, Err(UiError::usage(NOT_CONNECTED)));
+            if let Ok(session) = taken {
+                session.disconnect();
+            }
+        }
+
+        /// The rest of the command, outside the manager lock.
+        fn finish(mut self) {
+            self.close_trigger();
+            if let Ok(session) = self.session {
+                session.disconnect();
+            }
+        }
+    }
+
+    /// The refusal of a start that met a session still closing: said in plain
+    /// words, and not as a consent question, which no prompt could answer.
+    fn assert_refused_while_closing(e: &UiError, what: &str) {
+        assert_eq!(e.kind, ErrorKind::Usage, "{what}: {e:?}");
+        assert!(e.sessions.is_empty(), "{what}: {e:?}");
+        assert!(e.message.ends_with('.'), "{what}: a sentence: {e:?}");
+        assert_ne!(e.message, FLASH_REFUSAL, "{what}: no update runs: {e:?}");
+        assert_ne!(e.message, NOT_CONNECTED, "{what}: {e:?}");
+    }
+
+    /// Receive events until `want` matches one.
+    fn wait_for(
+        rx: &std::sync::mpsc::Receiver<BackendEvent>,
+        mut want: impl FnMut(&BackendEvent) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = rx.recv_timeout(left).expect("the event never arrived");
+            if want(&event) {
+                return;
+            }
+        }
+    }
+
+    /// The error of an update start that must be refused.
+    fn refused(result: Result<FlashLease, UiError>) -> UiError {
+        match result {
+            Err(e) => e,
+            Ok(lease) => panic!("the update started on {}", lease.device().id),
+        }
+    }
+
+    /// The sessions a consent refusal names, as the page receives them.
+    fn consent_sessions(e: &UiError) -> Vec<(String, bool)> {
+        assert_eq!(e.kind, ErrorKind::FlashNeedsConsent, "{e:?}");
+        let sent = serde_json::to_value(e).expect("serialises");
+        assert_eq!(sent["kind"], "flash_needs_consent");
+        sent["sessions"]
+            .as_array()
+            .expect("the refusal carries its sessions")
+            .iter()
+            .map(|s| {
+                let id = s["id"].as_str().expect("an id").to_owned();
+                assert!(s["label"].as_str().is_some_and(|l| !l.is_empty()), "{s}");
+                (id, s["recording"].as_bool().expect("a recording flag"))
+            })
+            .collect()
+    }
+
+    fn named(sessions: &[(&str, bool)]) -> Vec<(String, bool)> {
+        sessions
+            .iter()
+            .map(|(id, recording)| ((*id).to_owned(), *recording))
+            .collect()
+    }
+
+    /// Wait until the session's end has reached the page and its worker is gone.
+    fn wait_ended(rig: &Rig, rx: &std::sync::mpsc::Receiver<BackendEvent>, id: &str) {
+        wait_for(rx, |e| {
+            matches!(e, BackendEvent::Status(Status::Disconnected { .. }))
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while rig.m.connected_ids().iter().any(|c| c == id) {
+            assert!(std::time::Instant::now() < deadline, "{id} kept running");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn flash_refuses_an_unsure_recording_session_it_was_not_told_to_end() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        rig.record(AT_4);
+
+        let e = refused(rig.m.begin_flash(AT_5, &[]));
+
+        assert_eq!(consent_sessions(&e), named(&[(AT_4, true)]));
+        assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()]);
+        rig.assert_no_update(&[AT_4, AT_5]);
+        rig.m
+            .stop_recording_for(AT_4)
+            .expect("the recording kept running");
+    }
+
+    // ---- AC-AXHK2F.2 ----
+
+    #[test]
+    fn flash_holds_names_each_session_an_update_would_release() {
+        let mut rig = Rig::new(vec![
+            entry(4, Some("SERIAL-A")),
+            entry(5, Some("SERIAL-A")),
+            entry(6, Some("SERIAL-B")),
+        ]);
+        let _a = rig.stream(AT_4);
+        let _b = rig.stream(AT_6);
+        rig.record(AT_4);
+
+        let holds = rig.m.flash_holds(AT_5);
+
+        let named: Vec<_> = holds
+            .iter()
+            .map(|h| (h.id.as_str(), h.label.as_str(), h.recording))
+            .collect();
+        assert_eq!(
+            named,
+            vec![(AT_4, "KM003C — SERIAL-A", true)],
+            "the same serial at another address, and not the other meter"
+        );
+        assert!(rig.m.flash_holds(AT_6).iter().all(|h| !h.recording));
+    }
+
+    #[test]
+    fn a_session_of_the_target_itself_needs_consent_even_when_it_only_streams() {
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-A"))]);
+        let _rx = rig.stream(AT_4);
+
+        let e = refused(rig.m.begin_flash(AT_4, &[]));
+
+        assert_eq!(consent_sessions(&e), named(&[(AT_4, false)]));
+        assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()]);
+        rig.assert_no_update(&[AT_4]);
+    }
+
+    #[test]
+    fn a_demo_session_of_the_target_needs_consent_too() {
+        let demo = Scenario::ALL[0].name();
+        let id = format!("demo:{demo}");
+        let mut rig = Rig::new(Vec::new());
+        let _rx = rig.stream(&id);
+
+        let e = refused(rig.m.begin_flash(&id, &[]));
+
+        assert_eq!(consent_sessions(&e), named(&[(id.as_str(), false)]));
+        assert_eq!(rig.m.running_ids(), vec![id]);
+    }
+
+    #[test]
+    fn a_refused_start_sends_nothing_outside_the_safe_set_and_leaves_no_lock() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+
+        let _ = refused(rig.m.begin_flash(AT_5, &[]));
+        std::thread::sleep(Duration::from_millis(50));
+
+        let sent = rig.sent.lock().unwrap().clone();
+        assert!(
+            sent.iter().all(|ty| SAFE_TYPES.contains(ty)),
+            "an unsafe frame left the host: {sent:02X?}"
+        );
+        rig.m
+            .control_for(AT_4)
+            .expect("the session still takes requests");
+        rig.m
+            .set_rate_for(AT_4, 10)
+            .expect("the session still takes requests");
+    }
+
+    #[test]
+    fn consent_to_some_of_the_sessions_releases_none_of_them() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None), entry(6, None)]);
+        let _a = rig.stream(AT_4);
+        let _b = rig.stream(AT_5);
+        let holds = rig.m.flash_holds(AT_6);
+        assert_eq!(holds.len(), 2, "{holds:?}");
+
+        let e = refused(rig.m.begin_flash(AT_6, &holds[..1]));
+
+        assert_eq!(
+            consent_sessions(&e),
+            named(&[(AT_4, false), (AT_5, false)]),
+            "the refusal lists all of them, so the prompt can ask once"
+        );
+        assert_eq!(rig.m.running_ids().len(), 2, "both keep running");
+        rig.assert_no_update(&[AT_4, AT_5, AT_6]);
+    }
+
+    #[test]
+    fn consent_to_every_session_starts_the_update_and_releases_them() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let rx = rig.stream(AT_4);
+        let holds = rig.m.flash_holds(AT_5);
+
+        let lease = rig
+            .m
+            .begin_flash(AT_5, &holds)
+            .expect("every session agreed");
+
+        assert_eq!(lease.device().id, AT_5);
+        wait_ended(&rig, &rx, AT_4);
+        assert!(rig.m.flashing());
+    }
+
+    #[test]
+    fn a_meter_with_no_session_to_release_starts_at_once() {
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-A"))]);
+        assert_eq!(rig.m.flash_holds(AT_4), Vec::new());
+        let lease = rig.m.begin_flash(AT_4, &[]).expect("nothing to agree to");
+        assert_eq!(lease.device().id, AT_4);
+    }
+
+    // ---- AC-AXHK2F.3 ----
+
+    #[test]
+    fn an_idle_session_that_may_be_the_target_needs_the_same_consent() {
+        for (what, session, target) in [
+            ("no serial on the session", None, Some("SERIAL-T")),
+            ("no serial on the target", Some("SERIAL-S"), None),
+            ("no serial on either side", None, None),
+        ] {
+            let mut rig = Rig::new(vec![entry(4, session), entry(5, target)]);
+            let _rx = rig.stream(AT_4);
+
+            let e = refused(rig.m.begin_flash(AT_5, &[]));
+
+            assert_eq!(consent_sessions(&e), named(&[(AT_4, false)]), "{what}");
+            assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()], "{what}");
+
+            let holds = rig.m.flash_holds(AT_5);
+            rig.m.begin_flash(AT_5, &holds).expect("agreed");
+        }
+    }
+
+    #[test]
+    fn a_recording_unsure_session_with_a_serial_on_one_side_needs_consent() {
+        for (what, session, target) in [
+            ("no serial on the session", None, Some("SERIAL-T")),
+            ("no serial on the target", Some("SERIAL-S"), None),
+        ] {
+            let mut rig = Rig::new(vec![entry(4, session), entry(5, target)]);
+            let _rx = rig.stream(AT_4);
+            rig.record(AT_4);
+
+            let e = refused(rig.m.begin_flash(AT_5, &[]));
+
+            assert_eq!(consent_sessions(&e), named(&[(AT_4, true)]), "{what}");
+            assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()], "{what}");
+            rig.assert_no_update(&[AT_4, AT_5]);
+            rig.m
+                .stop_recording_for(AT_4)
+                .unwrap_or_else(|e| panic!("{what}: the recording ended: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn a_session_that_cannot_be_the_target_is_neither_named_nor_released() {
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-A")), entry(5, Some("SERIAL-B"))]);
+        let _rx = rig.stream(AT_4);
+        rig.record(AT_4);
+
+        assert_eq!(rig.m.flash_holds(AT_5), Vec::new());
+        let _lease = rig.m.begin_flash(AT_5, &[]).expect("another meter");
+        assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()]);
+    }
+
+    #[test]
+    fn a_demo_session_is_never_taken_for_a_real_target() {
+        let demo = format!("demo:{}", Scenario::ALL[0].name());
+        let mut rig = Rig::new(vec![entry(4, None)]);
+        let _rx = rig.stream(&demo);
+
+        assert_eq!(rig.m.flash_holds(AT_4), Vec::new());
+        let _lease = rig.m.begin_flash(AT_4, &[]).expect("a demo is no meter");
+        assert_eq!(rig.m.running_ids(), vec![demo]);
+    }
+
+    // ---- AC-AXHK2F.5 ----
+
+    #[test]
+    fn a_recording_that_starts_after_the_consent_is_not_covered_by_it() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+        assert_eq!(consent.len(), 1);
+        assert!(!consent[0].recording);
+
+        rig.record(AT_4);
+        let e = refused(rig.m.begin_flash(AT_5, &consent));
+
+        assert_eq!(consent_sessions(&e), named(&[(AT_4, true)]));
+        assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()]);
+        rig.assert_no_update(&[AT_4, AT_5]);
+        rig.m
+            .stop_recording_for(AT_4)
+            .expect("the recording kept running");
+    }
+
+    #[test]
+    fn consent_given_while_recording_still_covers_a_recording_stopped_since() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        rig.record(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+        rig.m.stop_recording_for(AT_4).expect("stops");
+
+        rig.m
+            .begin_flash(AT_5, &consent)
+            .expect("the page ends the recording, then starts the update");
+    }
+
+    #[test]
+    fn consent_to_a_recording_still_running_covers_it() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        rig.record(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+
+        rig.m
+            .begin_flash(AT_5, &consent)
+            .expect("the user agreed to end this recording");
+    }
+
+    #[test]
+    fn consent_to_a_recording_does_not_cover_the_next_one_on_that_session() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        rig.record(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+        assert!(consent[0].recording);
+
+        rig.m.stop_recording_for(AT_4).expect("stops");
+        rig.record(AT_4);
+        let e = refused(rig.m.begin_flash(AT_5, &consent));
+
+        assert_eq!(consent_sessions(&e), named(&[(AT_4, true)]));
+        assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()]);
+        rig.assert_no_update(&[AT_4, AT_5]);
+
+        let again = rig.m.flash_holds(AT_5);
+        rig.m
+            .begin_flash(AT_5, &again)
+            .expect("consent to the new recording covers it");
+    }
+
+    /// The refusal of a start that met a recording start not finished yet.
+    fn assert_refused_while_recording_starts(e: &UiError, what: &str) {
+        assert_refused_while_closing(e, what);
+        assert!(
+            e.message.to_lowercase().contains("recording"),
+            "{what}: says what it waits for: {e:?}"
+        );
+    }
+
+    #[test]
+    fn a_registered_recording_start_refuses_an_update_with_nothing_released() {
+        for target in [AT_4, AT_5] {
+            let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+            let _rx = rig.stream(AT_4);
+            let consent = rig.m.flash_holds(target);
+            assert_eq!(consent.len(), 1, "{consent:?}");
+
+            let start = rig.m.recording_start_for(AT_4).expect("registered");
+
+            for agreed in [&consent[..], &[]] {
+                let e = refused(rig.m.begin_flash(target, agreed));
+                assert_refused_while_recording_starts(&e, target);
+            }
+            assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()], "{target}");
+            rig.assert_no_update(&[AT_4, AT_5]);
+            let sent = rig.sent.lock().unwrap().clone();
+            assert!(
+                sent.iter().all(|ty| SAFE_TYPES.contains(ty)),
+                "an unsafe frame left the host: {sent:02X?}"
+            );
+            drop(start);
+        }
+    }
+
+    #[test]
+    fn a_completed_recording_start_needs_consent_as_usual() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        let before = rig.m.flash_holds(AT_5);
+        let path = rig.fresh_file();
+
+        let start = rig.m.recording_start_for(AT_4).expect("registered");
+        start.record_to(&path).expect("the recording runs");
+
+        let e = refused(rig.m.begin_flash(AT_5, &before));
+        assert_eq!(consent_sessions(&e), named(&[(AT_4, true)]));
+        assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()]);
+        rig.assert_no_update(&[AT_4, AT_5]);
+
+        let holds = rig.m.flash_holds(AT_5);
+        assert!(holds[0].recording, "{holds:?}");
+        rig.m
+            .begin_flash(AT_5, &holds)
+            .expect("the user agreed to end this recording");
+    }
+
+    #[test]
+    fn an_update_can_proceed_after_a_recording_start_failed() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+
+        let start = rig.m.recording_start_for(AT_4).expect("registered");
+        let folder = std::env::temp_dir();
+        let failed = start.record_to(&folder);
+
+        assert!(failed.is_err(), "a folder takes no recording");
+        assert_eq!(rig.m.flash_holds(AT_5), consent);
+        rig.m
+            .begin_flash(AT_5, &consent)
+            .expect("no recording started");
+    }
+
+    #[test]
+    fn an_update_can_proceed_after_a_recording_start_was_given_up_unsent() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+
+        let start = rig.m.recording_start_for(AT_4).expect("registered");
+        drop(start);
+
+        rig.m
+            .begin_flash(AT_5, &consent)
+            .expect("no recording was asked for");
+    }
+
+    #[test]
+    fn a_recording_start_the_worker_has_not_applied_stays_registered_past_its_timeout() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+        let path = rig.fresh_file();
+        rig.stall(AT_4);
+
+        let start = rig.m.recording_start_for(AT_4).expect("registered");
+        let late = start.record_to(&path);
+        assert_eq!(late.map_err(|e| e.kind), Err(ErrorKind::Timeout));
+
+        let e = refused(rig.m.begin_flash(AT_5, &consent));
+        assert_refused_while_recording_starts(&e, "asked for and not applied yet");
+        assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()]);
+        rig.assert_no_update(&[AT_4, AT_5]);
+
+        rig.stall.end();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !rig.m.flash_holds(AT_5)[0].recording {
+            assert!(std::time::Instant::now() < deadline, "it never ran");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let e = refused(rig.m.begin_flash(AT_5, &consent));
+        assert_eq!(consent_sessions(&e), named(&[(AT_4, true)]));
+    }
+
+    #[test]
+    fn a_recording_start_on_a_meter_outside_the_update_does_not_hold_it_back() {
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-A")), entry(5, Some("SERIAL-B"))]);
+        let _rx = rig.stream(AT_4);
+
+        let start = rig.m.recording_start_for(AT_4).expect("registered");
+        let lease = rig.m.begin_flash(AT_5, &[]).expect("another meter");
+
+        assert_eq!(lease.device().id, AT_5);
+        drop(start);
+    }
+
+    // ---- AC-AXHK2F.6: each order of the race ----
+
+    #[test]
+    fn the_worker_gone_after_the_consent_still_starts_cleanly() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let rx = rig.stream(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+
+        rig.unplug(AT_4);
+        wait_ended(&rig, &rx, AT_4);
+        let lease = rig.m.begin_flash(AT_5, &consent).expect("nothing left");
+        assert!(rig.m.connected_ids().is_empty());
+
+        drop(lease);
+        rig.assert_no_update(&[AT_4, AT_5]);
+    }
+
+    #[test]
+    fn a_disconnect_after_the_consent_still_starts_cleanly() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+
+        rig.m.disconnect_for(AT_4).expect("connected");
+        let lease = rig.m.begin_flash(AT_5, &consent).expect("nothing left");
+
+        drop(lease);
+        rig.assert_no_update(&[AT_4, AT_5]);
+        let _again = rig.stream(AT_4);
+    }
+
+    #[test]
+    fn a_detached_page_ending_the_session_after_the_consent_still_starts_cleanly() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let rx = rig.stream(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+
+        let attacher = rig.m.attacher_for(AT_4).expect("running");
+        attacher.stop().store(true, Ordering::SeqCst);
+        wait_ended(&rig, &rx, AT_4);
+        let lease = rig.m.begin_flash(AT_5, &consent).expect("nothing left");
+
+        drop(lease);
+        rig.assert_no_update(&[AT_4, AT_5]);
+    }
+
+    #[test]
+    fn an_ended_session_needs_no_consent_and_its_wait_still_ends() {
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-A"))]);
+        let rx = rig.stream(AT_4);
+        rig.unplug(AT_4);
+        wait_for(&rx, |e| {
+            matches!(e, BackendEvent::Status(Status::Waiting { .. }))
+        });
+        assert_eq!(rig.m.waiting_for().as_deref(), Some("SERIAL-A"));
+
+        assert_eq!(rig.m.flash_holds(AT_4), Vec::new());
+        let _lease = rig.m.begin_flash(AT_4, &[]).expect("nothing to release");
+
+        assert_eq!(rig.m.waiting_for(), None, "the wait ended with the update");
+    }
+
+    #[test]
+    fn a_start_is_refused_while_a_session_that_may_be_the_target_finishes_closing() {
+        for (what, session, target, target_id) in [
+            ("the target's own", Some("SERIAL-A"), None, AT_4),
+            (
+                "the same serial elsewhere",
+                Some("SERIAL-A"),
+                Some("SERIAL-A"),
+                AT_5,
+            ),
+            ("no serial on the session", None, Some("SERIAL-T"), AT_5),
+            ("no serial on the target", Some("SERIAL-S"), None, AT_5),
+            ("no serial on either side", None, None, AT_5),
+        ] {
+            let entries = if target_id == AT_4 {
+                vec![entry(4, session)]
+            } else {
+                vec![entry(4, session), entry(5, target)]
+            };
+            let mut rig = Rig::new(entries);
+            let _rx = rig.stream(AT_4);
+            let consent = rig.m.flash_holds(target_id);
+
+            let closing = rig.take_to_close(AT_4);
+            let e = refused(rig.m.begin_flash(target_id, &consent));
+
+            assert_refused_while_closing(&e, what);
+            rig.assert_no_update(&[AT_4, AT_5]);
+
+            closing.finish();
+            let lease = rig
+                .m
+                .begin_flash(target_id, &[])
+                .unwrap_or_else(|e| panic!("{what}: closed, yet refused: {e:?}"));
+            drop(lease);
+            rig.assert_no_update(&[AT_4, AT_5]);
+        }
+    }
+
+    #[test]
+    fn a_refused_start_during_a_close_releases_no_other_session() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None), entry(6, None)]);
+        let _closing = rig.stream(AT_4);
+        let _other = rig.stream(AT_6);
+        rig.record(AT_6);
+        let consent = rig.m.flash_holds(AT_5);
+        assert_eq!(consent.len(), 2, "{consent:?}");
+
+        let closing = rig.take_to_close(AT_4);
+        let e = refused(rig.m.begin_flash(AT_5, &consent));
+
+        assert_refused_while_closing(&e, "another session in scope");
+        assert_eq!(rig.m.running_ids(), vec![AT_6.to_owned()]);
+        rig.assert_no_update(&[AT_4, AT_5, AT_6]);
+        let sent = rig.sent.lock().unwrap().clone();
+        assert!(
+            sent.iter().all(|ty| SAFE_TYPES.contains(ty)),
+            "an unsafe frame left the host: {sent:02X?}"
+        );
+        rig.m
+            .stop_recording_for(AT_6)
+            .expect("the recording kept running");
+
+        closing.finish();
+        let holds = rig.m.flash_holds(AT_5);
+        rig.m
+            .begin_flash(AT_5, &holds)
+            .expect("the close is over and the rest agreed");
+    }
+
+    #[test]
+    fn a_start_waits_for_the_trigger_and_the_session_of_a_close() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let _rx = rig.stream(AT_4);
+        rig.open_trigger(AT_4);
+        let consent = rig.m.flash_holds(AT_5);
+
+        let mut closing = rig.take_to_close(AT_4);
+        assert!(closing.trigger.is_some(), "the session had a trigger open");
+        let e = refused(rig.m.begin_flash(AT_5, &consent));
+        assert_refused_while_closing(&e, "the trigger is still open");
+        rig.assert_no_update(&[AT_4, AT_5]);
+
+        closing.close_trigger();
+        let e = refused(rig.m.begin_flash(AT_5, &consent));
+        assert_refused_while_closing(&e, "the worker is still stopping");
+        rig.assert_no_update(&[AT_4, AT_5]);
+
+        closing.finish();
+        rig.m.begin_flash(AT_5, &[]).expect("all closed");
+    }
+
+    #[test]
+    fn a_start_is_refused_until_the_worker_a_replug_retired_has_finished() {
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-A")), entry(5, Some("SERIAL-A"))]);
+        let rx = rig.stream(AT_4);
+        rig.unplug(AT_4);
+        wait_for(&rx, |e| {
+            matches!(e, BackendEvent::Status(Status::Waiting { .. }))
+        });
+        let thread_ends = rig.linger_after_the_end(AT_4);
+
+        let back: Vec<DeviceListing> = rig
+            .m
+            .list_devices()
+            .into_iter()
+            .filter(|d| d.id == AT_5)
+            .collect();
+        assert!(rig.m.devices_changed(&back), "the replug reconnects");
+        let consent = rig.m.flash_holds(AT_5);
+        assert_eq!(consent.len(), 1, "the new session: {consent:?}");
+
+        let e = refused(rig.m.begin_flash(AT_5, &consent));
+
+        assert_refused_while_closing(&e, "the retired worker still runs");
+        assert_eq!(rig.m.running_ids(), vec![AT_5.to_owned()]);
+        rig.assert_no_update(&[AT_4, AT_5]);
+
+        drop(thread_ends);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let lease = loop {
+            match rig.m.begin_flash(AT_5, &consent) {
+                Ok(lease) => break lease,
+                Err(e) => {
+                    assert_refused_while_closing(&e, "the retired worker is finishing");
+                    assert!(std::time::Instant::now() < deadline, "still refused: {e:?}");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        };
+        assert_eq!(lease.device().id, AT_5);
+    }
+
+    #[test]
+    fn a_connect_over_a_closing_trigger_leaves_the_start_refused_until_it_has_closed() {
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-A"))]);
+        let _first = rig.stream(AT_4);
+        rig.open_trigger(AT_4);
+
+        let mut closing = rig.take_to_close(AT_4);
+        assert!(closing.trigger.is_some(), "the session had a trigger open");
+        closing.close_session();
+        let _second = rig.stream(AT_4);
+        let consent = rig.m.flash_holds(AT_4);
+        assert_eq!(consent.len(), 1, "the new session: {consent:?}");
+
+        let e = refused(rig.m.begin_flash(AT_4, &consent));
+
+        assert_refused_while_closing(&e, "the replaced entry's trigger is still open");
+        assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()]);
+        rig.assert_no_update(&[AT_4]);
+
+        closing.close_trigger();
+        rig.m
+            .begin_flash(AT_4, &consent)
+            .expect("the trigger has closed");
+    }
+
+    #[test]
+    fn a_meter_outside_the_update_closing_does_not_hold_the_start_back() {
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-A")), entry(5, Some("SERIAL-B"))]);
+        let _rx = rig.stream(AT_4);
+        rig.open_trigger(AT_4);
+
+        let closing = rig.take_to_close(AT_4);
+        let lease = rig
+            .m
+            .begin_flash(AT_5, &[])
+            .expect("that meter is not the target");
+
+        assert_eq!(lease.device().id, AT_5);
+        assert!(rig.m.flashing());
+        closing.finish();
+    }
+
+    #[test]
+    fn the_lease_dropped_before_the_disconnect_leaves_a_known_state() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let rx = rig.stream(AT_4);
+        let holds = rig.m.flash_holds(AT_5);
+        let lease = rig.m.begin_flash(AT_5, &holds).expect("agreed");
+        wait_ended(&rig, &rx, AT_4);
+
+        drop(lease);
+        let late = rig.m.disconnect_for(AT_4);
+
+        assert_eq!(late.map_err(|e| e.kind), Err(ErrorKind::Usage));
+        assert!(rig.m.connected_ids().is_empty());
+        rig.assert_no_update(&[AT_4, AT_5]);
+        let _again = rig.stream(AT_4);
+    }
+
+    #[test]
+    fn the_disconnect_before_the_lease_drops_leaves_a_known_state() {
+        let mut rig = Rig::new(vec![entry(4, None), entry(5, None)]);
+        let rx = rig.stream(AT_4);
+        let holds = rig.m.flash_holds(AT_5);
+        let lease = rig.m.begin_flash(AT_5, &holds).expect("agreed");
+        wait_ended(&rig, &rx, AT_4);
+
+        let late = rig.m.disconnect_for(AT_4);
+        assert_eq!(late.map_err(|e| e.kind), Err(ErrorKind::Usage));
+        assert!(rig.m.flashing(), "the update still holds its meters");
+
+        drop(lease);
+        rig.assert_no_update(&[AT_4, AT_5]);
+        let _again = rig.stream(AT_4);
     }
 }

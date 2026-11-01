@@ -390,8 +390,6 @@
     flash: firmwareFlash,
     cancelFlash: firmwareCancel,
     flashStatus: firmwareFlashStatus,
-    isRecording: (id) =>
-      meters.inFullView(id) ? recording.phase === "recording" : meters.hasParked(id),
     stopRecording: async (id) => {
       if (meters.inFullView(id)) {
         if (!(await recording.stop(recordingDeps()))) throw recording.error;

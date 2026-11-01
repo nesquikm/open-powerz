@@ -40,6 +40,7 @@ No saved-file notice appears, and the backend releases the opened file while the
 - AC-AXHK2K.5: An opened PD file is released only by a command the page sends when it closes the file or replaces it. Connecting any meter, automatic reconnects included, no longer releases it.
 - AC-AXHK2K.6: The mock backend matches: `#openedPd` follows the same rule, and a test pins it.
 - AC-AXHK2K.7: After a page reload, a tile meter's PD capture state is read from the backend, not assumed idle.
+- AC-AXHK2K.8: A recording start that times out keeps its file, because the worker may still apply the start and write to it. A definite refusal still removes the empty placeholder.
 
 ## Technical Design
 

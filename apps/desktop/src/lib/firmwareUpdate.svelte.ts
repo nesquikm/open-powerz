@@ -11,6 +11,7 @@ import type {
   FirmwareFileInfo,
   FlashDone,
   FlashEvent,
+  FlashHold,
   FlashReplug,
   FlashStage,
   FlashStatus,
@@ -37,16 +38,24 @@ export interface FirmwareUpdateApi {
     path: string,
     confirmation: string,
     onStage: (stage: FlashEvent) => void,
+    /** The sessions the user agreed to end (FR AXHK2F). */
+    agreed?: FlashHold[],
   ) => Promise<FlashDone>;
   /** Asks the running update to stop. */
   cancelFlash?: () => Promise<void>;
   /** The update the backend is running, null when none. */
   flashStatus?: () => Promise<FlashStatus | null>;
-  /** A recording is running on meter `deviceId`. */
-  isRecording?: (deviceId: string) => boolean;
-  /** Ends the recording on meter `deviceId`. */
+  /** Ends the recording on meter `deviceId`. Rejects with the reason, or with `null`
+   * while a start or stop of that recording is in flight. */
   stopRecording?: (deviceId: string) => Promise<void>;
 }
+
+/** Why a recording could not be stopped for the update: one is on its way in or out. */
+const RECORDING_BUSY: UiError = {
+  kind: "usage",
+  message: "A recording is still starting or stopping. Try the update again once it has finished.",
+  hint: null,
+};
 
 /** The picked device (`listing`) as the update's meter, with the connected meter's
  * versions from `details` (null while none is connected); null when nothing is picked. */
@@ -177,10 +186,11 @@ export class FirmwareUpdate {
   failedStage = $state<FlashStage["stage"] | null>(null);
   /** The replug the update waits for, null when none (AC .4). */
   replug = $state.raw<Omit<FlashReplug, "stage"> | null>(null);
-  /** The update waits for the user: its meter is recording (AC-4PJRVJ.2). */
-  recordingPrompt = $state(false);
-  /** The agreed recording is being ended. */
-  #endingRecording = false;
+  /** The sessions the update would end, while it waits for the user to agree; null when
+   * it does not wait. The backend names them when it refuses the start (FR AXHK2F). */
+  releasePrompt = $state.raw<FlashHold[] | null>(null);
+  /** The agreed recordings are being ended. */
+  #releasing = false;
   /** The meter as it was when the update started; the update disconnects it. */
   #updating = $state.raw<FirmwareMeter | null>(null);
   /** Cancel was accepted: the update stops at its next safe point. */
@@ -271,36 +281,34 @@ export class FirmwareUpdate {
 
   /** Starts the update once the target version was typed. */
   async start(meter: FirmwareMeter | null): Promise<void> {
-    if (meter === null || !this.#startable(meter)) return;
-    if (this.#api.isRecording?.(meter.id)) {
-      this.recordingPrompt = true;
-      return;
-    }
-    await this.#run(meter);
+    if (meter !== null && this.#startable(meter)) await this.#run(meter, []);
   }
 
-  /** Back to the confirmation: the recording goes on and the update does not start. */
-  declineEndRecording(): void {
-    if (!this.#endingRecording) this.recordingPrompt = false;
+  /** Back to the confirmation: every session goes on and the update does not start. */
+  declineRelease(): void {
+    if (!this.#releasing) this.releasePrompt = null;
   }
 
-  /** Ends the recording on `meter`, then starts the update. A failed stop leaves the
-   * update unstarted: nothing has reached the meter. */
-  async confirmEndRecording(meter: FirmwareMeter | null): Promise<void> {
-    if (!this.recordingPrompt || this.#endingRecording || meter === null) return;
-    this.#endingRecording = true;
+  /** Ends each recording of the agreed sessions, then starts the update naming all of
+   * them. A failed stop leaves the update unstarted: nothing has reached the meter. */
+  async confirmRelease(meter: FirmwareMeter | null): Promise<void> {
+    const agreed = this.releasePrompt;
+    if (agreed === null || this.#releasing || meter === null) return;
+    this.#releasing = true;
     try {
-      await this.#api.stopRecording?.(meter.id);
+      for (const session of agreed) {
+        if (session.recording) await this.#api.stopRecording?.(session.id);
+      }
     } catch (e) {
       this.#clearOutcome();
-      this.error = (e as UiError | null) ?? { kind: "internal", message: String(e), hint: null };
+      this.error = (e as UiError | null) ?? RECORDING_BUSY;
       this.phase = "failed";
       return;
     } finally {
-      this.#endingRecording = false;
-      this.recordingPrompt = false;
+      this.#releasing = false;
+      this.releasePrompt = null;
     }
-    if (this.#startable(meter)) await this.#run(meter);
+    if (this.#startable(meter)) await this.#run(meter, agreed);
   }
 
   /** The confirmation is open, its version typed, and `meter` fits the file. */
@@ -310,27 +318,40 @@ export class FirmwareUpdate {
     );
   }
 
-  /** Runs the update to its end. */
-  async #run(meter: FirmwareMeter): Promise<void> {
+  /** Runs the update to its end, unless the backend refuses it for a session `agreed`
+   * does not cover: that reopens the prompt and nothing has reached the meter. */
+  async #run(meter: FirmwareMeter, agreed: FlashHold[]): Promise<void> {
     const path = this.path;
     if (path === null) return;
     this.#updating = meter;
     this.phase = "updating";
     this.#clearOutcome();
     try {
-      this.result = await this.#api.flash(meter.id, path, this.confirmation, (stage) => {
-        if (stage.stage === "replug") {
-          this.replug = { to: stage.to, reply: stage.reply };
-          return;
-        }
-        this.replug = null;
-        this.#showStage(stage);
-      });
+      this.result = await this.#api.flash(
+        meter.id,
+        path,
+        this.confirmation,
+        (stage) => {
+          if (stage.stage === "replug") {
+            this.replug = { to: stage.to, reply: stage.reply };
+            return;
+          }
+          this.replug = null;
+          this.#showStage(stage);
+        },
+        agreed,
+      );
       this.replug = null;
       this.phase = "done";
     } catch (e) {
       this.replug = null;
-      this.error = (e as UiError | null) ?? {
+      const refused = e as UiError | null;
+      if (refused?.kind === "flash_needs_consent") {
+        this.releasePrompt = refused.sessions ?? [];
+        this.phase = "confirming";
+        return;
+      }
+      this.error = refused ?? {
         kind: "internal",
         message: String(e),
         hint: null,

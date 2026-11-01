@@ -198,6 +198,31 @@ impl MeterOpener for UsbFlashOpener {
     }
 }
 
+/// The container in `bytes`, read from `path`, once it passes inspection and
+/// `confirmation` equals its version; either refusal is a usage error.
+fn confirmed_container<'a>(
+    path: &Path,
+    bytes: &'a [u8],
+    confirmation: &str,
+) -> Result<FirmwareContainer<'a>, UiError> {
+    let container = FirmwareContainer::parse(bytes)
+        .map_err(|e| UiError::usage(format!("{}: {e}", path.display())))?;
+    let version = container.firmware_version().trim();
+    if confirmation.trim() != version {
+        return Err(UiError::usage(format!(
+            "Type the file's version, {version}, to confirm the update."
+        )));
+    }
+    Ok(container)
+}
+
+/// The refusals of [`flash_file`] that need no meter, for a start to make
+/// before it lets go of any session (AC-AXHK2F.2).
+pub fn check_confirmation(path: &Path, confirmation: &str) -> Result<(), UiError> {
+    let bytes = read_container_file(path).map_err(|e| UiError::usage(e.to_string()))?;
+    confirmed_container(path, &bytes, confirmation).map(|_| ())
+}
+
 /// Update the meter `opener` finds with the firmware container at `path`.
 ///
 /// Nothing is sent unless the file passes inspection and `confirmation`
@@ -213,14 +238,7 @@ pub fn flash_file<O: FlashOpener, C: Clock>(
     progress: &mut dyn FnMut(FlashStage),
 ) -> Result<FlashDone, UiError> {
     let bytes = read_container_file(path).map_err(|e| UiError::usage(e.to_string()))?;
-    let container = FirmwareContainer::parse(&bytes)
-        .map_err(|e| UiError::usage(format!("{}: {e}", path.display())))?;
-    let version = container.firmware_version().trim();
-    if confirmation.trim() != version {
-        return Err(UiError::usage(format!(
-            "Type the file's version, {version}, to confirm the update."
-        )));
-    }
+    let container = confirmed_container(path, &bytes, confirmation)?;
     opener.arm(FlashAck::acknowledge());
     let outcome = flash(
         FlashAck::acknowledge(),
@@ -247,5 +265,6 @@ fn flash_error(e: &FlashError) -> UiError {
         kind,
         message: format!("The firmware update failed: {e}."),
         hint: Some(RECOVERY_HINT.to_owned()),
+        sessions: Vec::new(),
     }
 }

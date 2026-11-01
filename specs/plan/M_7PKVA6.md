@@ -45,7 +45,7 @@ codename: Fine Print
 Build order: the table's order. AXHK2W goes last so it measures the finished chart.
 
 **Tasks:**
-- [ ] A firmware update never ends a recording unasked — AXHK2F
+- [x] A firmware update never ends a recording unasked — AXHK2F
   verify: targeted `devices.rs` tests, Vitest, Playwright prompt path
 - [ ] The app log records errors and firmware updates — AXHK2G
   verify: temporary-log unit tests, including the serial scan

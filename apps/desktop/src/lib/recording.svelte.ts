@@ -187,10 +187,15 @@ export class Recording {
   }
 
   /** Stops a running recording; with none it does nothing. False when the stop failed,
-   * with the reason in {@link error}. */
+   * with the reason in {@link error} and the recording still running, and while a start
+   * or stop is in flight (that one goes on, this call changes nothing, {@link error}
+   * included). Also false when a failure ended the recording during the stop: the file
+   * is not complete, and {@link error} and the notice come from that failure. */
   async stop(deps: RecordingDeps): Promise<boolean> {
+    if (this.phase === "starting" || this.phase === "stopping") return false;
     if (this.phase !== "recording") return true;
     this.phase = "stopping";
+    this.error = null;
     let stopped = true;
     try {
       const summary = await deps.stopRecording();
@@ -205,6 +210,10 @@ export class Recording {
       // is on its way; the stop's "not connected" is then old news.
       if (this.phase === "stopping") {
         this.error = toUiError(err);
+        this.phase = "recording";
+        stopped = false;
+      } else if (this.error !== null) {
+        // ...unless what ended it was a failure, whose event outran this rejection.
         stopped = false;
       }
     }

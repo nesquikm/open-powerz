@@ -1,16 +1,25 @@
 <script lang="ts">
   /**
-   * Asked before a firmware update ends a running recording (FR 4PJRVJ, AC .2): a modal
-   * dialog that opens with Keep recording focused, keeps Tab inside, and treats Escape
-   * as Keep recording.
+   * Asked before a firmware update ends running sessions (FR AXHK2F, AC .4): a modal
+   * dialog that names each session and says which are recording. It opens with its Keep
+   * button focused, keeps Tab inside, and treats Escape as Keep.
    */
+  import type { FlashHold } from "../backend";
+
   let {
+    sessions,
     onKeep,
     onEnd,
   }: {
+    /** The sessions the update would end. */
+    sessions: FlashHold[];
     onKeep: () => void;
     onEnd: () => void;
   } = $props();
+
+  const anyRecording = $derived(sessions.some((s) => s.recording));
+  /** What the title and the buttons call what would end. */
+  const noun = $derived(anyRecording ? "recording" : "sessions");
 
   function focusOnMount(el: HTMLElement): void {
     el.focus();
@@ -34,7 +43,7 @@
   }
 </script>
 
-<!-- Escape keeps recording even when focus has left the dialog (a click on the backdrop). -->
+<!-- Escape keeps the sessions even when focus has left the dialog (a click on the backdrop). -->
 <svelte:window
   onkeydown={(e) => {
     if (e.key === "Escape") {
@@ -54,14 +63,19 @@
     tabindex="-1"
     onkeydown={onKey}
   >
-    <h2 id="firmware-recording-title">End the running recording?</h2>
+    <h2 id="firmware-recording-title">End the running {noun}?</h2>
     <p id="firmware-recording-text">
-      This meter is recording, and the update disconnects it. Ending the recording saves the rows
-      written so far.
+      The update disconnects these meters, which ends their sessions.
+      {#if anyRecording}Ending a recording saves the rows written so far.{/if}
     </p>
+    <ul>
+      {#each sessions as session (session.id)}
+        <li>{session.label}{session.recording ? " (recording)" : ""}</li>
+      {/each}
+    </ul>
     <div class="actions">
-      <button type="button" use:focusOnMount onclick={onKeep}>Keep recording</button>
-      <button type="button" class="primary" onclick={onEnd}>End recording and update</button>
+      <button type="button" use:focusOnMount onclick={onKeep}>Keep {noun}</button>
+      <button type="button" class="primary" onclick={onEnd}>End {noun} and update</button>
     </div>
   </div>
 </div>
@@ -85,6 +99,11 @@
   }
   .confirm p {
     margin: 0 0 1rem;
+    font-size: 0.875rem;
+  }
+  .confirm ul {
+    margin: 0 0 1rem;
+    padding-left: 1.25rem;
     font-size: 0.875rem;
   }
   .actions {

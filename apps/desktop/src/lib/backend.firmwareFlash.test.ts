@@ -21,7 +21,14 @@ vi.mock("@tauri-apps/api/core", () => {
   return { invoke, Channel, isTauri: () => true };
 });
 
-import { firmwareChoose, firmwareFlash, type FlashDone, type FlashEvent } from "./backend";
+import {
+  firmwareChoose,
+  firmwareFlash,
+  toUiError,
+  type FlashDone,
+  type FlashEvent,
+  type FlashHold,
+} from "./backend";
 
 beforeEach(() => {
   invoke.mockReset();
@@ -38,6 +45,29 @@ describe("firmwareChoose", () => {
   it("resolves to null when the dialog was cancelled", async () => {
     invoke.mockResolvedValue(null);
     await expect(firmwareChoose()).resolves.toBeNull();
+  });
+});
+
+describe("firmwareFlash consent (AC-AXHK2F.2)", () => {
+  const HOLD: FlashHold = { id: "usb:1:4", label: "KM003C — 1234", recording: true };
+
+  it("names the sessions the user agreed to release", async () => {
+    invoke.mockResolvedValue({ outcome: "verified", version: "2.0.7" });
+    await firmwareFlash("usb:1:5", "/fw/a.mencrypt", "2.0.7", () => {}, [HOLD]);
+    const [, args] = invoke.mock.calls[0] as [string, Record<string, unknown>];
+    expect(args.agreed).toEqual([HOLD]);
+  });
+
+  it("agrees to nothing unless told to", async () => {
+    invoke.mockResolvedValue({ outcome: "verified", version: "2.0.7" });
+    await firmwareFlash("usb:1:5", "/fw/a.mencrypt", "2.0.7", () => {});
+    const [, args] = invoke.mock.calls[0] as [string, Record<string, unknown>];
+    expect(args.agreed).toEqual([]);
+  });
+
+  it("keeps the refusal's kind and sessions through toUiError", () => {
+    const refusal = { kind: "flash_needs_consent", message: "m", hint: null, sessions: [HOLD] };
+    expect(toUiError(refusal)).toEqual(refusal);
   });
 });
 

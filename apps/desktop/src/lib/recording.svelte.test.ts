@@ -217,6 +217,132 @@ describe("Recording.stop (AC-4PJRVJ.2)", () => {
   });
 });
 
+describe("Recording.stop while it cannot stop yet (AC-AXHK2F.7)", () => {
+  it("answers false while a start is in flight, and the start goes on", async () => {
+    const r = new Recording();
+    let started: (path: string | null) => void = () => {};
+    const d = deps({
+      startRecording: vi.fn(() => new Promise<string | null>((res) => (started = res))),
+    });
+    const starting = r.toggle(d);
+    expect(r.phase).toBe("starting");
+
+    expect(await r.stop(d)).toBe(false);
+    expect(d.stopRecording).not.toHaveBeenCalled();
+
+    started("/tmp/rec.csv");
+    await starting;
+    expect(r.phase).toBe("recording");
+  });
+
+  it("answers false while a stop is in flight, and that stop goes on", async () => {
+    const r = new Recording();
+    let stopped: (s: RecordingSummary) => void = () => {};
+    const d = deps({
+      stopRecording: vi.fn(() => new Promise<RecordingSummary>((res) => (stopped = res))),
+    });
+    await r.toggle(d);
+    const stopping = r.stop(d);
+    expect(r.phase).toBe("stopping");
+
+    expect(await r.stop(d)).toBe(false);
+    expect(d.stopRecording).toHaveBeenCalledTimes(1);
+
+    stopped(summary(5));
+    expect(await stopping).toBe(true);
+    expect(r.phase).toBe("idle");
+  });
+
+  it("a failed stop does not mark the recording ended", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    const failed = deps({ stopRecording: vi.fn(() => Promise.reject(diskFull)) });
+
+    expect(await r.stop(failed)).toBe(false);
+
+    expect(r.phase).toBe("recording");
+    expect(r.path).toBe("/tmp/rec.csv");
+    expect(r.indicator).toMatch(/^REC /);
+    expect(r.notice).toBeNull();
+    expect(r.error).toEqual(diskFull);
+  });
+
+  it("a stop that failed can be tried again", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    await r.stop(deps({ stopRecording: vi.fn(() => Promise.reject(diskFull)) }));
+
+    expect(await r.stop(deps())).toBe(true);
+    expect(r.phase).toBe("idle");
+    expect(r.notice).toMatch(/5 rows/);
+  });
+});
+
+describe("Recording.stop retried after a failure (AC-AXHK2F.7)", () => {
+  it("clears the earlier error when the retry succeeds", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    await r.stop(deps({ stopRecording: vi.fn(() => Promise.reject(diskFull)) }));
+    expect(r.error).toEqual(diskFull);
+
+    expect(await r.stop(deps())).toBe(true);
+
+    expect(r.error).toBeNull();
+    expect(r.phase).toBe("idle");
+  });
+});
+
+describe("Recording.stop whose last flush fails (AC-AXHK2F.7)", () => {
+  // The backend has dropped the recording by then: it sends `failed` and rejects the stop,
+  // and either can reach the page first.
+  const lost: RecordingEvent = { state: "failed", rows: 4, error: diskFull };
+  const nothing: UiError = { kind: "usage", message: "Nothing is being recorded.", hint: null };
+
+  async function stoppedLosing(order: "event first" | "rejection first"): Promise<{
+    r: Recording;
+    answer: boolean;
+  }> {
+    const r = new Recording();
+    await r.toggle(deps());
+    let fail: (e: unknown) => void = () => {};
+    const stopping = r.stop(
+      deps({ stopRecording: vi.fn(() => new Promise<RecordingSummary>((_, rej) => (fail = rej))) }),
+    );
+    if (order === "event first") r.handleEvent(lost);
+    fail(diskFull);
+    const answer = await stopping;
+    if (order === "rejection first") r.handleEvent(lost);
+    return { r, answer };
+  }
+
+  it.each(["event first", "rejection first"] as const)(
+    "answers false and shows no running recording (%s)",
+    async (order) => {
+      const { r, answer } = await stoppedLosing(order);
+
+      expect(answer).toBe(false);
+      expect(r.phase).toBe("idle");
+      expect(r.indicator).toBeNull();
+      expect(r.error).toEqual(diskFull);
+      expect(r.notice).toMatch(/4 rows/);
+      expect(r.savedPath).toBe("/tmp/rec.csv");
+    },
+  );
+
+  it.each(["event first", "rejection first"] as const)(
+    "a retry asks the backend nothing and keeps the real reason (%s)",
+    async (order) => {
+      const { r } = await stoppedLosing(order);
+      const retry = deps({ stopRecording: vi.fn(() => Promise.reject(nothing)) });
+
+      expect(await r.stop(retry)).toBe(true);
+
+      expect(retry.stopRecording).not.toHaveBeenCalled();
+      expect(r.error).toEqual(diskFull);
+    },
+  );
+});
+
 describe("ExportJob (AC-0P7HSJ.5)", () => {
   it("proposes a file name, tracks progress and reports the rows", async () => {
     const job = new ExportJob();

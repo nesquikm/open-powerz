@@ -149,11 +149,6 @@ export class Meters {
     this.get(id)?.recording.adopt(recording);
   }
 
-  /** A recording is parked for meter `id`. */
-  hasParked(id: string): boolean {
-    return this.get(id)?.recording.phase === "recording";
-  }
-
   /** The recording parked for meter `id`, once; undefined when none. */
   unpark(id: string): RecordingSnapshot | undefined {
     return this.get(id)?.recording.detach() ?? undefined;

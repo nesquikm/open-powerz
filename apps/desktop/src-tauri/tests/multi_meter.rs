@@ -494,7 +494,8 @@ fn a_firmware_update_takes_only_the_meter_it_names() {
     let mut rig = Rig::new();
     let (rx_a, rx_b) = stream_both(&mut rig);
 
-    let lease = rig.m.begin_flash(METER_A).expect("flash meter A");
+    let holds = rig.m.flash_holds(METER_A);
+    let lease = rig.m.begin_flash(METER_A, &holds).expect("flash meter A");
     recv_until(&rx_a, |e| {
         matches!(e, BackendEvent::Status(Status::Disconnected { .. }))
     });

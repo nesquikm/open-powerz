@@ -17,6 +17,7 @@ import type {
   FirmwareFileInfo,
   FlashDone,
   FlashEvent,
+  FlashHold,
   FlashStatus,
   Gap,
   HistoryGap,
@@ -488,6 +489,8 @@ interface Running {
 }
 
 interface MockRecording {
+  /** Which recording: no two share one, like the backend's. */
+  id: number;
   path: string;
   rows: number;
   elapsedMs: number;
@@ -929,6 +932,7 @@ export class MockBackend {
   /** Every running session, in the order the meters were connected (FR 1HHT03). */
   #sessions: Running[] = [];
   #nextSessionId = 1;
+  #lastRecordingId = 0;
   /** The PD capture saved last in the page, and the one opened (FR TGE83E). */
   #savedPd: MockPdFile | null = null;
   #openedPd: MockPdFile | null = null;
@@ -1376,7 +1380,13 @@ export class MockBackend {
   async startRecording(suggestedName: string): Promise<string | null> {
     const s = this.#open();
     if (s.recording) throw usage("A recording is already running.");
-    s.recording = { path: suggestedName, rows: 0, elapsedMs: 0, sinceProgressMs: 0 };
+    s.recording = {
+      id: ++this.#lastRecordingId,
+      path: suggestedName,
+      rows: 0,
+      elapsedMs: 0,
+      sinceProgressMs: 0,
+    };
     s.onEvent({ type: "recording", data: { state: "started" } });
     return suggestedName;
   }
@@ -1734,35 +1744,59 @@ export class MockBackend {
     return "/mock/KM003C_V2.0.7.mencrypt";
   }
 
-  /** Plays a firmware update like the backend (FR V9SK55, AC .4): the typed confirmation
-   * is re-checked first, then the meter is taken from the stream and everything else is
-   * refused until the update ends; each stage goes to `onStage`, the write stage with its
-   * progress. `firmware-fail-<stage>` fails at that stage with the recovery steps. */
+  /** Plays a firmware update like the backend (FR V9SK55, AC .4), checking in its order:
+   * the file and the typed confirmation first, then a session of the meter that `agreed`
+   * does not cover refuses it, with nothing released (FR AXHK2F). The meter is then taken
+   * from the stream and everything else is refused until the update ends; each stage goes
+   * to `onStage`, the write stage with its progress. `firmware-fail-<stage>` fails at that
+   * stage with the recovery steps. */
   async firmwareFlash(
     deviceId: string,
     path: string,
     confirmation: string,
     onStage: (stage: FlashEvent) => void,
+    agreed: FlashHold[] = [],
   ): Promise<FlashDone> {
+    const info = await this.firmwareInspect(path);
+    if (confirmation.trim() !== info.version) {
+      throw usage(`Type the file's version, ${info.version}, to confirm the update.`);
+    }
     if (this.#flashing) throw usage(FLASH_REFUSAL);
     const meter = this.#listedMeter();
     const isMeter = meter?.id === deviceId;
     if (!isMeter && !scenarioOf(deviceId)) throw usage("That meter is no longer attached.");
-    const info = await this.firmwareInspect(path);
-    if (confirmation.trim() !== info.version) {
-      throw usage(`Type the file's version, ${info.version}, to confirm the update.`);
+    const s = this.#sessions.find((x) => x.id === deviceId || x.deviceId === deviceId);
+    if (s) {
+      const listed = (await this.listDevices()).find((d) => d.id === s.deviceId);
+      const rec = s.recording;
+      const hold: FlashHold = {
+        id: s.id,
+        label: listed?.label ?? s.id,
+        recording: rec !== null,
+        ...(rec && { recording_id: rec.id }),
+      };
+      if (!agreed.some((a) => a.id === hold.id && (!rec || a.recording_id === rec.id))) {
+        throw {
+          kind: "flash_needs_consent",
+          message: "The firmware update would end a running session.",
+          hint: null,
+          sessions: [hold],
+        } satisfies UiError;
+      }
     }
     this.#flashing = true;
     this.#flashTarget = deviceId;
     this.#flashStop = false;
     this.#flashErasing = false;
     this.#firmwareFlashes.push({ deviceId, path, confirmation });
-    // Like the backend: the trigger session and the stream let go of the meter first.
-    const s = this.#session;
+    // Like the backend: the meter's trigger session and stream let go of it first, and
+    // the other meters keep running.
     if (s) {
-      this.#closeTrigger();
-      if (this.#replugTimer !== null) clearTimeout(this.#replugTimer);
-      this.#replugTimer = null;
+      if (this.#session === s) this.#closeTrigger();
+      if (this.#replugTimer !== null && this.#replugFor === s) {
+        clearTimeout(this.#replugTimer);
+        this.#replugTimer = null;
+      }
       this.#endSession(s, null);
     }
     const failAt = this.#mode?.startsWith("firmware-fail-")

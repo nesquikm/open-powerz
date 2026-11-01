@@ -51,7 +51,6 @@ function fakeBackend(overrides: Partial<FirmwareUpdateApi> = {}) {
     ),
     cancelFlash: vi.fn(async () => {}),
     flashStatus: vi.fn(async () => null),
-    isRecording: vi.fn(() => false),
     stopRecording: vi.fn(async () => {}),
     ...overrides,
   } as FirmwareUpdateApi;
@@ -124,48 +123,14 @@ describe("cancel (AC-4PJRVJ.1)", () => {
 });
 
 describe("a running recording (AC-4PJRVJ.2)", () => {
-  function recording() {
-    return fakeBackend({ isRecording: vi.fn((id: string) => id === METER.id) });
-  }
-
-  it("asks first, and neither stops the recording nor starts the update", async () => {
-    const b = recording();
-    const fw = await confirming(b.api);
-    await fw.start(METER);
-    expect(fw.recordingPrompt).toBe(true);
-    expect(b.api.flash).not.toHaveBeenCalled();
-    expect(b.api.stopRecording).not.toHaveBeenCalled();
-  });
-
-  it("keeps recording when the user declines", async () => {
-    const b = recording();
-    const fw = await confirming(b.api);
-    await fw.start(METER);
-    fw.declineEndRecording();
-    expect(fw.recordingPrompt).toBe(false);
-    expect(fw.phase).toBe("confirming");
-    expect(b.api.flash).not.toHaveBeenCalled();
-    expect(b.api.stopRecording).not.toHaveBeenCalled();
-  });
-
-  it("ends the recording and then updates when the user agrees", async () => {
-    const b = recording();
-    const fw = await confirming(b.api);
-    await fw.start(METER);
-    void fw.confirmEndRecording(METER);
-    await settle();
-    expect(b.api.stopRecording).toHaveBeenCalledWith(METER.id);
-    expect(b.api.flash).toHaveBeenCalledOnce();
-    expect(fw.recordingPrompt).toBe(false);
-    expect(fw.phase).toBe("updating");
-  });
-
-  it("does not ask for a recording on another meter", async () => {
-    const b = fakeBackend({ isRecording: vi.fn((id: string) => id === "usb:1:9") });
+  // The prompt itself is the backend's refusal now (FR AXHK2F): see
+  // firmwareUpdate.consent.svelte.test.ts.
+  it("does not ask while the backend does not refuse", async () => {
+    const b = fakeBackend();
     const fw = await confirming(b.api);
     void fw.start(METER);
     await settle();
-    expect(fw.recordingPrompt).toBe(false);
+    expect(fw.releasePrompt).toBeNull();
     expect(b.api.flash).toHaveBeenCalledOnce();
     expect(b.api.stopRecording).not.toHaveBeenCalled();
   });

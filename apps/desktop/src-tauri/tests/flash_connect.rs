@@ -13,7 +13,8 @@ include!("common/two_meters.inc.rs");
 fn another_meter_connects_while_one_flashes_and_the_flashing_one_stays_locked() {
     let mut rig = Rig::new();
     let (rx_a, _) = stream(&mut rig, METER_A);
-    let lease = rig.m.begin_flash(METER_A).expect("flash meter A");
+    let holds = rig.m.flash_holds(METER_A);
+    let lease = rig.m.begin_flash(METER_A, &holds).expect("flash meter A");
     recv_until(&rx_a, |e| {
         matches!(e, BackendEvent::Status(Status::Disconnected { .. }))
     });
@@ -43,12 +44,16 @@ fn another_meter_connects_while_one_flashes_and_the_flashing_one_stays_locked() 
 fn a_second_update_stays_refused_while_one_runs() {
     let mut rig = Rig::new();
     let (_rx_a, _) = stream(&mut rig, METER_A);
-    let lease = rig.m.begin_flash(METER_A).expect("flash meter A");
+    let holds = rig.m.flash_holds(METER_A);
+    let lease = rig.m.begin_flash(METER_A, &holds).expect("flash meter A");
     let (_rx_b, sink) = channel_sink();
     rig.m
         .connect(METER_B, 50, sink)
         .unwrap_or_else(|e| panic!("meter B refused: {}", e.message));
-    assert!(rig.m.begin_flash(METER_B).is_err(), "one update at a time");
+    assert!(
+        rig.m.begin_flash(METER_B, &[]).is_err(),
+        "one update at a time"
+    );
     drop(lease);
     rig.m.disconnect_for(METER_B).unwrap();
 }

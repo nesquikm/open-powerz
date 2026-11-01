@@ -297,6 +297,11 @@ test.describe("firmware update (FR V9SK55)", () => {
     await streamDemo(page);
     await chooseAndConfirm(page);
     await startUpdate(page);
+    // The meter streams, so the update asks first (FR AXHK2F).
+    await page
+      .getByRole("dialog", { name: /session|recording/i })
+      .getByRole("button", { name: /^end /i })
+      .click();
 
     const progress = firmwarePanel(page).getByRole("region", { name: "Update progress" });
     await expect(progress).toBeVisible();

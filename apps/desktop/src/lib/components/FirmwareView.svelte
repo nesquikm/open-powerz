@@ -206,10 +206,11 @@
   <button type="button" bind:this={closeEl} onclick={() => firmware.dismiss()}>Close</button>
 {/if}
 
-{#if firmware.recordingPrompt}
+{#if firmware.releasePrompt !== null}
   <FirmwareRecordingDialog
-    onKeep={() => firmware.declineEndRecording()}
-    onEnd={() => void firmware.confirmEndRecording(meter)}
+    sessions={firmware.releasePrompt}
+    onKeep={() => firmware.declineRelease()}
+    onEnd={() => void firmware.confirmRelease(meter)}
   />
 {:else if firmware.phase === "confirming" && firmware.info !== null}
   <FirmwareConfirmDialog

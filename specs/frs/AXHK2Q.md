@@ -25,7 +25,7 @@ A persistent option hides every serial number and UID in the desktop UI, and a C
 ## Acceptance Criteria
 
 - AC-AXHK2Q.1: A "Hide serial numbers" switch persists across restarts and is off by default.
-- AC-AXHK2Q.2: With it on, no serial or UID value appears anywhere in the page text, attributes or labels: tiles, picker, top bar, meter details, About, firmware view and settings. A Playwright test scans the DOM for the demo serial.
+- AC-AXHK2Q.2: With it on, no serial or UID value appears anywhere in the page text, attributes or labels: tiles, picker, top bar, meter details, About, firmware view and its session prompt, and settings. A Playwright test scans the DOM for the demo serial.
 - AC-AXHK2Q.3: Hidden fields read "Hidden", and turning the switch off restores them with no reconnect.
 - AC-AXHK2Q.4: With it on, meter tiles are titled by model and position ("KM003C 2"), so two meters stay distinct, including two with no serial.
 - AC-AXHK2Q.5: Chart images, recording file names and default export names carry no serial, with the option on or off.

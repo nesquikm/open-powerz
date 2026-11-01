@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -562,6 +562,10 @@ pub struct Worker<T: Transport, C: Clock> {
     store: SessionStore,
     /// The open recording, if any.
     recording: Option<Recorder>,
+    /// Which recording [`Worker::recording`] holds, 0 for none, for those
+    /// outside the worker thread: asking the thread would wait on it
+    /// (FR AXHK2F).
+    recording_id: Arc<AtomicU64>,
     /// The file the open recording writes, when it was opened by path.
     recording_path: Option<PathBuf>,
     sink: Sink,
@@ -662,6 +666,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             next_poll_ms: now,
             store,
             recording: None,
+            recording_id: Arc::default(),
             recording_path: None,
             sink,
             in_order,
@@ -790,9 +795,15 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         }
     }
 
+    /// Take the open recording, which is over from here on.
+    fn take_recording(&mut self) -> Option<Recorder> {
+        self.recording_id.store(0, Ordering::SeqCst);
+        self.recording.take()
+    }
+
     /// End the open recording after a write error, keeping its rows.
     fn fail_recording(&mut self, error: UiError) {
-        if let Some(rec) = self.recording.take() {
+        if let Some(rec) = self.take_recording() {
             // Rows still waiting in the buffer never reached the file.
             let rows = rec.kept_rows();
             // Closing the file is all that is left to do; the error is the news.
@@ -820,7 +831,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// Close the open recording because the session ended; `unplugged` when
     /// the meter went away rather than being disconnected on request.
     fn end_recording(&mut self, unplugged: bool) {
-        if let Some(rec) = self.recording.take() {
+        if let Some(rec) = self.take_recording() {
             let event = match rec.finish(unplugged) {
                 Ok(summary) => RecordingEvent::Stopped(summary),
                 Err((rows, error)) => RecordingEvent::Failed { rows, error },
@@ -850,7 +861,15 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             return Err(UiError::usage("A recording is already running."));
         }
         let now = self.clock.now_ms();
-        let rec = Recorder::start(out, now).map_err(|e| recording::io_error(&e))?;
+        // Out before the header, the first sign of the recording outside this
+        // thread, so a reader never finds a recording with no id
+        // (AC-AXHK2F.5).
+        let id = NEXT_RECORDING_ID.fetch_add(1, Ordering::SeqCst);
+        self.recording_id.store(id, Ordering::SeqCst);
+        let rec = Recorder::start(out, now).map_err(|e| {
+            self.recording_id.store(0, Ordering::SeqCst);
+            recording::io_error(&e)
+        })?;
         self.recording = Some(rec);
         self.emit(BackendEvent::Recording(RecordingEvent::Started));
         Ok(())
@@ -897,13 +916,19 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Ok(self.export(Box::new(file), progress))
     }
 
-    /// Stop the recording: flush and close the file.
+    /// Stop the recording: flush and close the file. When the last flush fails
+    /// the recording is over all the same, so the page hears that it ended.
     pub fn stop_recording(&mut self) -> Result<RecordingSummary, UiError> {
         let rec = self
-            .recording
-            .take()
+            .take_recording()
             .ok_or_else(|| UiError::usage("Nothing is being recorded."))?;
-        rec.finish(false).map_err(|(_, error)| error)
+        rec.finish(false).map_err(|(rows, error)| {
+            self.emit(BackendEvent::Recording(RecordingEvent::Failed {
+                rows,
+                error: error.clone(),
+            }));
+            error
+        })
     }
 
     /// Export every record of this session to `out` on a thread of its own,
@@ -1315,6 +1340,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             kind: ErrorKind::Internal,
             message: format!("The backup failed, so nothing was deleted: {detail}"),
             hint: None,
+            sessions: Vec::new(),
         };
         std::fs::create_dir_all(backup_dir)
             .map_err(|e| backup_failed(format!("cannot create {}: {e}", backup_dir.display())))?;
@@ -1466,8 +1492,11 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::SetRate(rate, reply) => {
                 let _ = reply.send(self.set_rate(rate));
             }
-            Command::RecordTo(path, reply) => {
-                let _ = reply.send(self.record_to(&path));
+            Command::RecordTo(path, hold, reply) => {
+                let started = self.record_to(&path);
+                // Before the answer: whoever hears it finds the start settled.
+                drop(hold);
+                let _ = reply.send(started);
             }
             Command::ExportTo(path, progress, reply) => {
                 let _ = reply.send(self.export_to(&path, progress));
@@ -1530,7 +1559,11 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
 /// on the caller's thread against the [`SessionStore`].
 enum Command {
     SetRate(Rate, mpsc::Sender<Result<(), UiError>>),
-    RecordTo(PathBuf, mpsc::Sender<Result<(), UiError>>),
+    RecordTo(
+        PathBuf,
+        RecordingStartHold,
+        mpsc::Sender<Result<(), UiError>>,
+    ),
     ExportTo(
         PathBuf,
         ProgressFn,
@@ -1571,7 +1604,7 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Command::SetRate(rate, _) => f.debug_tuple("SetRate").field(rate).finish(),
-            Command::RecordTo(path, _) => f.debug_tuple("RecordTo").field(path).finish(),
+            Command::RecordTo(path, ..) => f.debug_tuple("RecordTo").field(path).finish(),
             Command::ExportTo(path, ..) => f.debug_tuple("ExportTo").field(path).finish(),
             Command::StopRecording(_) => f.write_str("StopRecording"),
             Command::StartPd(_) => f.write_str("StartPd"),
@@ -1772,6 +1805,11 @@ impl PdSave {
 /// A running export: joins to the rows written.
 pub type ExportJob = JoinHandle<Result<u64, UiError>>;
 
+/// The next recording's id, across every session of the app: a session that
+/// reconnects under its old id must not reuse one (AC-AXHK2F.5). Starts at 1,
+/// as 0 means no recording.
+static NEXT_RECORDING_ID: AtomicU64 = AtomicU64::new(1);
+
 /// How long a request to the worker may take before the UI gives up.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -1804,6 +1842,7 @@ fn busy() -> UiError {
         kind: ErrorKind::Timeout,
         message: "The meter is busy. Try again.".to_owned(),
         hint: None,
+        sessions: Vec::new(),
     }
 }
 
@@ -1835,10 +1874,12 @@ impl WorkerControl {
 
     /// Record to a new file at `path`. The worker checks first and creates
     /// the file only when it is going to record, so a refused start (or a
-    /// timed-out answer) never truncates or deletes anything.
-    pub fn record_to(&self, path: &Path) -> Result<(), UiError> {
+    /// timed-out answer) never truncates or deletes anything. `hold` travels
+    /// with the request, so it outlasts a timed-out answer: it goes once the
+    /// worker has applied the request, or when the worker can no longer do so.
+    pub fn record_to(&self, path: &Path, hold: RecordingStartHold) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(Command::RecordTo(path.to_owned(), reply), &answer)?
+        self.ask(Command::RecordTo(path.to_owned(), hold, reply), &answer)?
     }
 
     /// Stop the recording and return what it wrote.
@@ -2027,6 +2068,26 @@ impl WorkerControl {
     }
 }
 
+/// One count on a meter's recording starts that are asked for and not
+/// settled yet: a firmware update does not start past one, as the recording
+/// it may become is not known yet (AC-AXHK2F.5).
+#[derive(Debug)]
+pub struct RecordingStartHold(Arc<AtomicUsize>);
+
+impl RecordingStartHold {
+    /// Take one count on `starts`.
+    pub fn new(starts: &Arc<AtomicUsize>) -> RecordingStartHold {
+        starts.fetch_add(1, Ordering::SeqCst);
+        RecordingStartHold(Arc::clone(starts))
+    }
+}
+
+impl Drop for RecordingStartHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Handle to a worker running on its own thread. Dropping it stops the
 /// worker without waiting for it.
 #[derive(Debug)]
@@ -2034,9 +2095,13 @@ pub struct WorkerHandle {
     stop: Arc<AtomicBool>,
     /// Set when the `disconnected` status has been sent.
     ended: Arc<AtomicBool>,
+    /// The recording the worker has open, 0 for none.
+    recording_id: Arc<AtomicU64>,
     commands: mpsc::Sender<Command>,
     store: SessionStore,
     thread: Option<JoinHandle<()>>,
+    /// Gone once the worker thread has let go of the meter.
+    thread_alive: Weak<()>,
 }
 
 impl WorkerHandle {
@@ -2045,6 +2110,25 @@ impl WorkerHandle {
     pub fn is_finished(&self) -> bool {
         self.ended.load(Ordering::SeqCst)
             || self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    /// A probe that outlives this handle: it stops upgrading once the worker
+    /// thread has returned, and with it let go of the meter (FR AXHK2F).
+    pub fn thread_alive(&self) -> Weak<()> {
+        Weak::clone(&self.thread_alive)
+    }
+
+    /// A recording is open. Answers at once, whatever the worker is doing,
+    /// and sends nothing to the meter (FR AXHK2F).
+    pub fn is_recording(&self) -> bool {
+        self.recording_id().is_some()
+    }
+
+    /// Which recording is open, like [`is_recording`](Self::is_recording):
+    /// no two recordings of the app share an id, so a consent can name the
+    /// one the user was told of (AC-AXHK2F.5).
+    pub fn recording_id(&self) -> Option<u64> {
+        Some(self.recording_id.load(Ordering::SeqCst)).filter(|&id| id != 0)
     }
 
     /// Restart the running queue at `rate`.
@@ -2262,7 +2346,12 @@ where
     let sink = forward.clone();
     let worker_sink = forward;
     let worker_store = store.clone();
+    let recording_id: Arc<AtomicU64> = Arc::default();
+    let worker_recording_id = Arc::clone(&recording_id);
+    let alive = Arc::new(());
+    let thread_alive = Arc::downgrade(&alive);
     let thread = std::thread::spawn(move || {
+        let _alive = alive;
         crate::activity::raise_poll_thread_qos();
         let ran = catch_unwind(AssertUnwindSafe(|| {
             run_worker(
@@ -2276,6 +2365,7 @@ where
                 depth,
                 meter,
                 pdm_open,
+                worker_recording_id,
             )
         }));
         if let Err(payload) = ran {
@@ -2291,9 +2381,11 @@ where
     WorkerHandle {
         stop,
         ended,
+        recording_id,
         commands,
         store,
         thread: Some(thread),
+        thread_alive,
     }
 }
 
@@ -2314,6 +2406,7 @@ fn run_worker<T, C, O>(
     depth: Arc<AtomicUsize>,
     meter: Option<BlockedMeter>,
     pdm_open: Option<PdmOpen>,
+    recording_id: Arc<AtomicU64>,
 ) where
     T: Transport,
     C: Clock + Clone,
@@ -2359,6 +2452,7 @@ fn run_worker<T, C, O>(
         }
     };
     worker.pdm_open = pdm_open;
+    worker.recording_id = recording_id;
     'run: while !stop.load(Ordering::SeqCst) {
         loop {
             match inbox.try_recv() {
@@ -2602,5 +2696,80 @@ mod tests {
             held <= window + free,
             "the meter grew {held:?} in a {window:?} window"
         );
+    }
+
+    /// A recording's output that notes, at each write, the recording id any
+    /// other thread reads at that moment.
+    struct IdAtWrite {
+        id: Arc<AtomicU64>,
+        seen: Arc<Mutex<Vec<u64>>>,
+        fails: bool,
+    }
+
+    impl Write for IdAtWrite {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(self.id.load(Ordering::SeqCst));
+            if self.fails {
+                return Err(std::io::Error::other("disk full"));
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn recording_worker() -> Worker<powerz_sim::SimDevice, powerz_sim::SimClock> {
+        use powerz_sim::{Persona, Scenario, SimClock, SimDevice};
+        let clock = SimClock::new(1_790_000_000_000);
+        let device = SimDevice::with_clock(Persona::Bulk, Scenario::Load5v1a, clock.clone());
+        let config = WorkerConfig::new(Rate::Sps50, 1);
+        Worker::start(device, clock, config, |_event: BackendEvent| {})
+            .unwrap_or_else(|e| panic!("the worker did not start: {e:?}"))
+    }
+
+    /// AC-AXHK2F.5: the header in the file is the first sign of a recording
+    /// outside the worker; by then its id is out, so a reader never finds a
+    /// running recording with no id.
+    #[test]
+    fn a_recording_id_is_visible_no_later_than_the_recording_itself() {
+        let mut worker = recording_worker();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let out = IdAtWrite {
+            id: Arc::clone(&worker.recording_id),
+            seen: Arc::clone(&seen),
+            fails: false,
+        };
+
+        worker.start_recording(Box::new(out)).expect("starts");
+
+        let seen = seen.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "the header was never written");
+        assert!(
+            seen.iter().all(|&id| id != 0),
+            "written with no id visible: {seen:?}"
+        );
+        assert_eq!(worker.recording_id.load(Ordering::SeqCst), seen[0]);
+    }
+
+    /// AC-AXHK2F.5: a start that could not write its header leaves no id, or
+    /// a consent would be asked for a recording that never ran.
+    #[test]
+    fn a_recording_that_failed_to_start_leaves_no_id() {
+        let mut worker = recording_worker();
+        let out = IdAtWrite {
+            id: Arc::clone(&worker.recording_id),
+            seen: Arc::default(),
+            fails: true,
+        };
+
+        assert!(worker.start_recording(Box::new(out)).is_err());
+
+        assert_eq!(worker.recording_id.load(Ordering::SeqCst), 0);
+        assert!(!worker.is_recording());
     }
 }

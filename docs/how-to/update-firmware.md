@@ -79,8 +79,9 @@ Cancel is off and says why. If you reload the page during an update, the page
 shows the running stage, but the update's result stays with the page that
 started it: check the firmware version afterwards.
 
-If the meter is recording when you start the update, the app asks before it
-ends the recording.
+If the update would end a session on the meter, or on another meter the app
+cannot tell from it, the app lists those sessions, says which are recording,
+and waits for your answer. Keep leaves everything running.
 
 ## If something goes wrong
 

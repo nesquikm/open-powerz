@@ -1,0 +1,7 @@
+{
+ "strategy": "regex-fallback",
+ "modules": [],
+ "warnings": [
+  "signature extraction for this stack uses regex fallback; manual review of generated reference docs is strongly advised."
+ ]
+}

@@ -44,13 +44,27 @@ export type ErrorKind =
   | "disconnected"
   | "usage"
   | "out_of_sync"
+  | "flash_needs_consent"
   | "internal";
+
+/** A session a firmware update would release, as the prompt names it (FR AXHK2F); the
+ * page sends back the ones the user agreed to release (mirrors `devices.rs`). */
+export interface FlashHold {
+  id: string;
+  label: string;
+  recording: boolean;
+  /** Which recording, sent only while there is one: a consent covers that recording and
+   * no later one on the same session (AC-AXHK2F.5). */
+  recording_id?: number;
+}
 
 /** A plain-language error. */
 export interface UiError {
   kind: ErrorKind;
   message: string;
   hint: string | null;
+  /** The sessions a `flash_needs_consent` refusal names; sent only then. */
+  sessions?: FlashHold[];
 }
 
 const ERROR_KINDS: readonly ErrorKind[] = [
@@ -61,6 +75,7 @@ const ERROR_KINDS: readonly ErrorKind[] = [
   "disconnected",
   "usage",
   "out_of_sync",
+  "flash_needs_consent",
   "internal",
 ];
 
@@ -81,7 +96,10 @@ export const INTERNAL_MESSAGE = "Something went wrong inside the app.";
 /** Turns a rejected invoke payload (a backend UiError) or any other thrown value into a
  * UiError. Anything else is a bug: its raw text goes to the console, never to the banner. */
 export function toUiError(err: unknown): UiError {
-  if (isUiError(err)) return { kind: err.kind, message: err.message, hint: err.hint ?? null };
+  if (isUiError(err)) {
+    const { kind, message, hint, sessions } = err;
+    return { kind, message, hint: hint ?? null, ...(sessions ? { sessions } : {}) };
+  }
   console.error("open-powerz: unexpected error", err);
   return { kind: "internal", message: INTERNAL_MESSAGE, hint: null };
 }
@@ -695,20 +713,24 @@ export type FlashDone =
  * backend holds the meter for the update, re-checks that `confirmation` is the file's
  * version before anything is sent, and reports each stage (and each replug prompt) to
  * `onStage`. Resolves to the
- * outcome, or rejects with the error and its recovery steps. */
+ * outcome, or rejects with the error and its recovery steps. `agreed` names the sessions
+ * the user agreed to release; a session it does not cover gets a `flash_needs_consent`
+ * refusal, with nothing released or sent (FR AXHK2F). */
 export async function firmwareFlash(
   deviceId: string,
   path: string,
   confirmation: string,
   onStage: (stage: FlashEvent) => void,
+  agreed: FlashHold[] = [],
 ): Promise<FlashDone> {
-  if (mock) return mock.firmwareFlash(deviceId, path, confirmation, onStage);
+  if (mock) return mock.firmwareFlash(deviceId, path, confirmation, onStage, agreed);
   const channel = new Channel<FlashEvent>();
   channel.onmessage = onStage;
   return invoke<FlashDone>("firmware_flash", {
     deviceId,
     path,
     confirmation,
+    agreed,
     onProgress: channel,
   });
 }

@@ -833,19 +833,24 @@ async fn firmware_choose(app: tauri::AppHandle) -> Result<Option<String>, UiErro
 /// Update the meter `device_id` with the firmware container at `path`
 /// (FR V9SK55, AC .4): takes the meter from every other use for the
 /// update, re-checks that `confirmation` is the file's version before
-/// anything is sent, streams each stage over `on_progress` (the write
-/// stage about every percent) and releases the meter afterwards.
+/// anything is released or sent, streams each stage over `on_progress` (the write
+/// stage about every percent) and releases the meter afterwards. `agreed`
+/// names the sessions the user agreed to release (FR AXHK2F).
 #[tauri::command]
 async fn firmware_flash(
     state: Shared<'_>,
     device_id: String,
     path: String,
     confirmation: String,
+    agreed: Vec<devices::FlashHold>,
     on_progress: Channel<firmware_flash::FlashStage>,
 ) -> Result<firmware_flash::FlashDone, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let lease = state.manager().begin_flash(&device_id)?;
+        // Before the lock: a slow file stalls no other command, and a start
+        // that could not go on releases nothing (AC-AXHK2F.2).
+        firmware_flash::check_confirmation(Path::new(&path), &confirmation)?;
+        let lease = state.manager().begin_flash(&device_id, &agreed)?;
         let device = lease.device().clone();
         let control = Arc::clone(lease.control());
         let stop = control.stop();
@@ -1039,9 +1044,12 @@ async fn start_recording(
 ) -> Result<String, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = control(&state, device_id.as_deref())?;
+        let start = {
+            let manager = state.manager();
+            manager.recording_start_for(&manager.target(device_id.as_deref()))?
+        };
         let path = recording::default_recording_path(&recordings_dir(&app)?, &suggested_name)?;
-        if let Err(refused) = control.record_to(&path) {
+        if let Err(refused) = start.record_to(&path) {
             let _ = std::fs::remove_file(&path);
             return Err(refused);
         }
