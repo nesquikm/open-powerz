@@ -2,11 +2,14 @@
   /**
    * The trigger view's confirmation for a request above 5 V (FR DGSQ6S): a modal
    * dialog that names the voltage and the output, opens with Cancel focused (the safer
-   * choice), keeps Tab inside, and treats Escape as Cancel.
+   * choice), keeps Tab inside, and treats Escape as Cancel. A request the backend calls
+   * rememberable also gets the "don't ask again" box (FR AXHK2N).
    */
   let {
     voltageMv,
     text,
+    rememberable = false,
+    remember = $bindable(false),
     onCancel,
     onConfirm,
   }: {
@@ -14,6 +17,10 @@
     voltageMv: number;
     /** What the dialog says. */
     text: string;
+    /** The dialog offers "don't ask again". */
+    rememberable?: boolean;
+    /** The box is checked. */
+    remember?: boolean;
     onCancel: () => void;
     onConfirm: () => void;
   } = $props();
@@ -23,6 +30,8 @@
       ? `Request ${Number((voltageMv / 1000).toFixed(2))} V?`
       : "Request more than 5 V?",
   );
+
+  let box = $state<HTMLElement>();
 
   /** Focuses `el` on mount and gives the focus back to what had it when the dialog closes. */
   function focusOnMount(el: HTMLElement): { destroy: () => void } {
@@ -42,12 +51,15 @@
       onCancel();
     } else if (e.key === "Tab") {
       // Keep focus inside the dialog.
-      const buttons = Array.from(
-        (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>("button"),
+      const controls = Array.from(
+        (e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>("input, button"),
       );
-      const first = buttons[0];
-      const last = buttons[buttons.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      // A click on the dialog's text leaves the focus on the dialog itself.
+      const atStart =
+        document.activeElement === first || document.activeElement === e.currentTarget;
+      if (e.shiftKey && atStart) {
         e.preventDefault();
         last?.focus();
       } else if (!e.shiftKey && document.activeElement === last) {
@@ -58,18 +70,22 @@
   }
 </script>
 
-<!-- Escape cancels even when focus has left the dialog (a click on the backdrop). -->
+<!-- Escape cancels and Tab comes back, even when focus has left the dialog (a click on the backdrop). -->
 <svelte:window
   onkeydown={(e) => {
     if (e.key === "Escape") {
       e.preventDefault();
       onCancel();
+    } else if (e.key === "Tab" && !box?.contains(document.activeElement)) {
+      e.preventDefault();
+      box?.querySelector("button")?.focus();
     }
   }}
 />
 
 <div class="backdrop">
   <div
+    bind:this={box}
     class="confirm panel"
     role="dialog"
     aria-modal="true"
@@ -80,6 +96,12 @@
   >
     <h2 id="trigger-confirm-title">{title}</h2>
     <p id="trigger-confirm-text">{text}</p>
+    {#if rememberable}
+      <label class="remember">
+        <input type="checkbox" bind:checked={remember} />
+        Don't ask again until I go back to 5 V or disconnect
+      </label>
+    {/if}
     <div class="actions">
       <button type="button" use:focusOnMount onclick={onCancel}>Cancel</button>
       <button type="button" class="primary" onclick={onConfirm}>Confirm</button>
@@ -105,6 +127,13 @@
     font-size: 1rem;
   }
   .confirm p {
+    margin: 0 0 1rem;
+    font-size: 0.875rem;
+  }
+  .remember {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
     margin: 0 0 1rem;
     font-size: 0.875rem;
   }

@@ -75,6 +75,8 @@ class FakeApi implements TriggerApi {
   calls: string[] = [];
   sent: { request: TriggerRequest; confirmed: boolean }[] = [];
   supported: TriggerProtocol[] = ["pd", "qc"];
+  /** What `armed` answers. */
+  armedNow = false;
 
   async open(): Promise<void> {
     this.calls.push("open");
@@ -120,6 +122,13 @@ class FakeApi implements TriggerApi {
   }
   async close(): Promise<void> {
     this.calls.push("close");
+  }
+  async armed(): Promise<boolean> {
+    return this.armedNow;
+  }
+  async disarm(): Promise<void> {
+    this.calls.push("disarm");
+    this.armedNow = false;
   }
 }
 
@@ -826,5 +835,323 @@ describe("AC-4PJRVH.1: the result never mixes an old and a new request", () => {
 
     expect(panel.reply).toBeNull();
     expect(panel.requestedMv).toBeNull();
+  });
+});
+
+/**
+ * FR AXHK2N: "don't ask again". The backend's rules, as the panel sees them: PD up to
+ * 20 V is rememberable (position 5 here goes to 21 V), every other request above 5 V
+ * is not; once armed a rememberable request is `armed` and sends unconfirmed; anything
+ * at or below 5 V, Back to 5 V, Detect and closing disarm. Records the exact arguments
+ * of every request.
+ */
+class ArmedApi extends FakeApi {
+  requestArgs: unknown[][] = [];
+
+  static rememberable(r: TriggerRequest): boolean {
+    return r.protocol === "pd" && requestMv(r) <= 20000;
+  }
+
+  override async detect(): Promise<Detection> {
+    this.armedNow = false;
+    return super.detect();
+  }
+  override async risk(request: TriggerRequest): Promise<RiskClass> {
+    this.calls.push("risk");
+    if (requestMv(request) <= 5000) return "at_most_5v";
+    if (!ArmedApi.rememberable(request)) return "above_5v";
+    return this.armedNow ? "armed" : "above_5v_rememberable";
+  }
+  override async request(
+    ...args: [request: TriggerRequest, confirmed: boolean, remember?: boolean]
+  ): Promise<TriggerReply> {
+    this.requestArgs.push(args);
+    const [request, confirmed, remember] = args;
+    const mv = requestMv(request);
+    if (mv > 5000 && !confirmed && !(this.armedNow && ArmedApi.rememberable(request))) {
+      throw { kind: "usage", message: "Above 5 V needs confirmation.", hint: null };
+    }
+    if (remember && !ArmedApi.rememberable(request)) {
+      throw { kind: "usage", message: "This request cannot be remembered.", hint: null };
+    }
+    if (mv <= 5000) this.armedNow = false;
+    if (remember) this.armedNow = true;
+    return super.request(request, true);
+  }
+  override async backTo5v(): Promise<void> {
+    this.armedNow = false;
+    return super.backTo5v();
+  }
+  override async close(): Promise<void> {
+    this.armedNow = false;
+    return super.close();
+  }
+}
+
+const PD_15V: TriggerRequest = { protocol: "pd", position: 3, voltage_mv: null, current_ma: null };
+const PPS_12V: TriggerRequest = {
+  protocol: "pd",
+  position: 5,
+  voltage_mv: 12000,
+  current_ma: 1000,
+};
+const PPS_21V: TriggerRequest = {
+  protocol: "pd",
+  position: 5,
+  voltage_mv: 21000,
+  current_ma: 1000,
+};
+const QC_9V: TriggerRequest = { protocol: "qc", volts: 9 };
+
+async function rememberPanel(): Promise<{ api: ArmedApi; panel: TriggerPanel }> {
+  const api = new ArmedApi();
+  const panel = new TriggerPanel(api);
+  await panel.detect();
+  return { api, panel };
+}
+
+/** A panel armed by a confirmed 9 V with the box checked. */
+async function armedPanel(): Promise<{ api: ArmedApi; panel: TriggerPanel }> {
+  const { api, panel } = await rememberPanel();
+  await panel.ask(PD_9V);
+  panel.remember = true;
+  await panel.confirm();
+  expect(panel.armed).toBe(true);
+  return { api, panel };
+}
+
+describe("AC-AXHK2N.1: the checkbox", () => {
+  it("is offered for a rememberable request", async () => {
+    const { panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    expect(panel.pending?.request).toEqual(PD_9V);
+    expect(panel.pending?.rememberable).toBe(true);
+  });
+
+  it("is not offered for any other request above 5 V", async () => {
+    const { panel } = await rememberPanel();
+    for (const request of [PPS_21V, QC_9V]) {
+      await panel.ask(request);
+      expect(panel.pending?.request).toEqual(request);
+      expect(panel.pending?.rememberable).toBe(false);
+      panel.cancel();
+    }
+  });
+
+  it("starts unchecked every time a dialog opens", async () => {
+    const { panel } = await rememberPanel();
+    expect(panel.remember).toBe(false);
+    await panel.ask(PD_9V);
+    expect(panel.remember).toBe(false);
+    panel.remember = true;
+    panel.cancel();
+    await panel.ask(PD_9V);
+    expect(panel.remember).toBe(false);
+    panel.remember = true;
+    await panel.confirm();
+    panel.cancel();
+    await panel.backTo5v();
+    await panel.ask(PD_15V);
+    expect(panel.remember).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.2: remembered requests", () => {
+  it("passes remember only when the box is checked", async () => {
+    const { api, panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    await panel.confirm();
+    expect(api.requestArgs.at(-1)).toEqual([PD_9V, true]);
+    expect(api.requestArgs.at(-1)).toHaveLength(2);
+    expect(panel.armed).toBe(false);
+    await panel.ask(PD_15V);
+    panel.remember = true;
+    await panel.confirm();
+    expect(api.requestArgs.at(-1)).toEqual([PD_15V, true, true]);
+    expect(panel.armed).toBe(true);
+  });
+
+  it("sends later rememberable requests with no dialog, unconfirmed", async () => {
+    const { api, panel } = await armedPanel();
+    for (const request of [PD_15V, PPS_12V]) {
+      await panel.ask(request);
+      expect(panel.pending).toBeNull();
+      expect(api.requestArgs.at(-1)).toEqual([request, false]);
+    }
+    expect(panel.reply?.command).toBe("pd req=5");
+    expect(panel.armed).toBe(true);
+  });
+
+  it("a checked box on a dialog that does not offer it remembers nothing", async () => {
+    const { api, panel } = await rememberPanel();
+    await panel.ask(PPS_21V);
+    panel.remember = true;
+    await panel.confirm();
+    expect(api.requestArgs.at(-1)).toEqual([PPS_21V, true]);
+    expect(api.requestArgs.at(-1)).toHaveLength(2);
+    expect(panel.armed).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.3: what always asks", () => {
+  it("armed, a request that does not qualify opens the dialog and Cancel sends nothing", async () => {
+    const { api, panel } = await armedPanel();
+    const sent = api.requestArgs.length;
+    for (const request of [PPS_21V, QC_9V]) {
+      await panel.ask(request);
+      expect(panel.pending?.rememberable).toBe(false);
+      panel.cancel();
+    }
+    expect(api.requestArgs).toHaveLength(sent);
+  });
+});
+
+describe("AC-AXHK2N.4: the status follows the backend", () => {
+  it("Back to 5 V clears it", async () => {
+    const { panel } = await armedPanel();
+    await panel.backTo5v();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a Back to 5 V that fails clears it too", async () => {
+    const { api, panel } = await armedPanel();
+    api.backTo5v = async () => {
+      api.armedNow = false;
+      throw { kind: "out_of_sync", message: "Out of step.", hint: null };
+    };
+    await panel.backTo5v();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("leaving the view clears it", async () => {
+    const { panel } = await armedPanel();
+    await panel.leave();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a meter that disconnects clears it", async () => {
+    const { panel } = await armedPanel();
+    panel.handleEvent({
+      type: "status",
+      data: { state: "disconnected" },
+    } as BackendEvent);
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a new page starts unarmed and shows what an armed backend reports", async () => {
+    const api = new ArmedApi();
+    api.armedNow = true;
+    const panel = new TriggerPanel(api);
+    expect(panel.armed).toBe(false);
+    await panel.refreshArmed();
+    expect(panel.armed).toBe(true);
+  });
+
+  it("a page reload does not arm a backend that is not armed", async () => {
+    const api = new ArmedApi();
+    const panel = new TriggerPanel(api);
+    await panel.refreshArmed();
+    expect(panel.armed).toBe(false);
+    expect(api.armedNow).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.5: Clear", () => {
+  it("disarms the backend at once, and the dialog comes back", async () => {
+    const { api, panel } = await armedPanel();
+    await panel.clearArmed();
+    expect(api.calls).toContain("disarm");
+    expect(api.armedNow).toBe(false);
+    expect(panel.armed).toBe(false);
+    await panel.ask(PD_15V);
+    expect(panel.pending?.rememberable).toBe(true);
+  });
+});
+
+describe("AC-AXHK2N.6: the backend decides", () => {
+  it("a refused arming request leaves the panel unarmed, with the failure shown", async () => {
+    const { api, panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    api.request = async () => {
+      throw { kind: "usage", message: "This request cannot be remembered.", hint: null };
+    };
+    panel.remember = true;
+    await panel.confirm();
+    expect(panel.armed).toBe(false);
+    expect(panel.error).toMatchObject({ kind: "usage" });
+  });
+});
+
+describe("AC-AXHK2N.8: the status follows every other way it ends", () => {
+  it("a request at 5 V clears it", async () => {
+    const { panel } = await armedPanel();
+    await panel.ask(PD_5V);
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a request that fails clears it", async () => {
+    const { api, panel } = await armedPanel();
+    api.request = async () => {
+      api.armedNow = false;
+      throw { kind: "protocol", message: "The charger refused the request.", hint: null };
+    };
+    await panel.ask(PD_15V);
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a held request whose offer changed goes back to asking", async () => {
+    const { api, panel } = await armedPanel();
+    const send = api.request;
+    api.request = async () => {
+      api.armedNow = false;
+      throw { kind: "usage", message: "The charger's offers changed.", hint: null };
+    };
+    await panel.ask(PD_15V);
+    expect(panel.error).toMatchObject({ kind: "usage" });
+    expect(panel.armed).toBe(false);
+    api.request = send;
+    await panel.ask(PD_15V);
+    expect(panel.pending?.rememberable).toBe(true);
+  });
+
+  it("a risk that is no longer armed takes the status down with the dialog", async () => {
+    const { api, panel } = await armedPanel();
+    api.armedNow = false;
+    api.risk = async () => "above_5v_rememberable";
+    await panel.ask(PD_15V);
+    expect(panel.pending).not.toBeNull();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a confirmed request the backend disarmed on takes the status down", async () => {
+    const { api, panel } = await armedPanel();
+    api.risk = async () => "above_5v";
+    await panel.ask(PD_15V);
+    api.armedNow = false;
+    await panel.confirm();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("Detect clears it", async () => {
+    const { panel } = await armedPanel();
+    await panel.detect();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("refreshArmed takes in what a console line or built message did", async () => {
+    const { api, panel } = await armedPanel();
+    api.armedNow = false;
+    await panel.refreshArmed();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a refresh that fails reads as not armed and is no error", async () => {
+    const { api, panel } = await armedPanel();
+    api.armed = async () => {
+      throw { kind: "usage", message: "The trigger session is closed.", hint: null };
+    };
+    await panel.refreshArmed();
+    expect(panel.armed).toBe(false);
+    expect(panel.error).toBeNull();
   });
 });

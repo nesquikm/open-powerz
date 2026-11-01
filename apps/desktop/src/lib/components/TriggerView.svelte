@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import type { TriggerLimits, TriggerOffer, TriggerProtocol } from "../backend";
   import {
     LEGACY_FIXED_VOLTS,
@@ -32,6 +33,9 @@
   } = $props();
 
   let busy = $state(false);
+
+  // A reloaded page starts unarmed; an armed backend says so here.
+  onMount(() => void panel.refreshArmed());
 
   const reason = $derived(connected ? null : "Connect a meter to detect the charger's protocols.");
 
@@ -194,6 +198,13 @@
     Keep the meter's output empty: detection lets the meter probe protocols, which can briefly raise
     VBUS above 5 V on some chargers.
   </p>
+
+  {#if panel.armed}
+    <p class="armed" role="status">
+      Not asking up to 20 V
+      <button type="button" onclick={() => void panel.clearArmed()}>Clear</button>
+    </p>
+  {/if}
 
   {#if panel.error}
     <p class="error" role="alert">
@@ -434,6 +445,8 @@
     <TriggerConfirmDialog
       voltageMv={panel.pending.voltageMv}
       text={panel.pending.text}
+      rememberable={panel.pending.rememberable}
+      bind:remember={panel.remember}
       onCancel={() => panel.cancel()}
       onConfirm={() => void panel.confirm()}
     />
@@ -461,6 +474,14 @@
   }
   .error {
     margin: 0;
+  }
+  .armed {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
   }
   .live {
     margin: 0;

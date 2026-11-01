@@ -95,7 +95,7 @@ describe("AC-DGSQ6S.3: the 5 V risk gate", () => {
     await backend.triggerList("pd");
     await backend.triggerList("qc");
     await expect(backend.triggerRisk(PD_5V)).resolves.toBe("at_most_5v");
-    await expect(backend.triggerRisk(PD_9V)).resolves.toBe("above_5v");
+    await expect(backend.triggerRisk(PD_9V)).resolves.toBe("above_5v_rememberable");
     await expect(backend.triggerRisk({ protocol: "qc", volts: 9 })).resolves.toBe("above_5v");
     await expect(backend.triggerRisk({ protocol: "qc", volts: 5 })).resolves.toBe("at_most_5v");
   });
@@ -309,5 +309,211 @@ describe("AC-DGSQ6S.8: `?mock=trigger-all`, a charger that speaks every protocol
       vi.advanceTimersByTime(500);
       expect(lastVbus(events)).toBeCloseTo(5, 0);
     }
+  });
+});
+
+/** FR AXHK2N, AC .7: the mock follows the backend's "don't ask again" rules. */
+describe("AC-AXHK2N.7: the mock's \"don't ask again\"", () => {
+  const PD_15V: TriggerRequest = {
+    protocol: "pd",
+    position: 3,
+    voltage_mv: null,
+    current_ma: null,
+  };
+  const PD_20V: TriggerRequest = {
+    protocol: "pd",
+    position: 4,
+    voltage_mv: null,
+    current_ma: null,
+  };
+  const PD_28V: TriggerRequest = {
+    protocol: "pd",
+    position: 8,
+    voltage_mv: null,
+    current_ma: null,
+  };
+  const pps = (voltage_mv: number): TriggerRequest => ({
+    protocol: "pd",
+    position: 5,
+    voltage_mv,
+    current_ma: 1000,
+  });
+  const AVS_18V: TriggerRequest = {
+    protocol: "pd",
+    position: 9,
+    voltage_mv: 18000,
+    current_ma: 1000,
+  };
+  const QC_9V: TriggerRequest = { protocol: "qc", volts: 9 };
+
+  async function ready(): Promise<MockBackend> {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    return backend;
+  }
+
+  async function armed(): Promise<MockBackend> {
+    const backend = await ready();
+    await backend.triggerRequest(PD_9V, true, true);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+    return backend;
+  }
+
+  /** Disarmed: risk asks again and an unconfirmed 9 V is refused, nothing sent. */
+  async function expectDisarmed(backend: MockBackend): Promise<void> {
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await expect(backend.triggerRisk(PD_9V)).resolves.toBe("above_5v_rememberable");
+    const before = backend.triggerCommands().length;
+    await expect(backend.triggerRequest(PD_9V, false)).rejects.toMatchObject({ kind: "usage" });
+    expect(backend.triggerCommands()).toHaveLength(before);
+  }
+
+  it("classifies what can be remembered", async () => {
+    const backend = await ready();
+    for (const r of [PD_9V, PD_15V, PD_20V, pps(9000), pps(20000)]) {
+      await expect(backend.triggerRisk(r), JSON.stringify(r)).resolves.toBe(
+        "above_5v_rememberable",
+      );
+    }
+    for (const r of [PD_28V, pps(20100), pps(21000), AVS_18V, QC_9V]) {
+      await expect(backend.triggerRisk(r), JSON.stringify(r)).resolves.toBe("above_5v");
+    }
+  });
+
+  it("starts unarmed; a plain confirmation does not arm", async () => {
+    const backend = await ready();
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await backend.triggerRequest(PD_9V, true);
+    await expectDisarmed(backend);
+  });
+
+  it("armed, a later request up to 20 V sends unconfirmed", async () => {
+    const backend = await armed();
+    for (const [r, command] of [
+      [PD_15V, "pd req=3"],
+      [PD_20V, "pd req=4"],
+      [pps(20000), "pd req=5,volt=20000,cur=1000"],
+    ] as [TriggerRequest, string][]) {
+      await expect(backend.triggerRisk(r)).resolves.toBe("armed");
+      await expect(backend.triggerRequest(r, false)).resolves.toMatchObject({ command });
+      expect(backend.triggerCommands().at(-1)).toBe(command);
+    }
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+  });
+
+  it("armed, anything else still asks and sends nothing unconfirmed", async () => {
+    const backend = await armed();
+    await backend.triggerList("qc");
+    const before = backend.triggerCommands().length;
+    for (const r of [PD_28V, pps(21000), AVS_18V, QC_9V]) {
+      await expect(backend.triggerRisk(r), JSON.stringify(r)).resolves.toBe("above_5v");
+      await expect(backend.triggerRequest(r, false), JSON.stringify(r)).rejects.toMatchObject({
+        kind: "usage",
+      });
+    }
+    await expect(backend.triggerConsoleRisk("pd req=3")).resolves.toBe("above_5v");
+    await expect(backend.triggerConsoleSend("pd req=3", false)).rejects.toMatchObject({
+      kind: "usage",
+    });
+    const built = { sop: "sop", msg_type: 2, data_objects: [0x2304b12c] } as const;
+    await expect(
+      backend.triggerMessageRisk({ ...built, data_objects: [...built.data_objects] }),
+    ).resolves.toBe("above_5v");
+    expect(backend.triggerCommands()).toHaveLength(before);
+  });
+
+  it("refuses to remember a request that does not qualify, and sends nothing", async () => {
+    const backend = await ready();
+    await backend.triggerList("qc");
+    const before = backend.triggerCommands().length;
+    for (const r of [PD_28V, pps(21000), AVS_18V, QC_9V]) {
+      await expect(backend.triggerRequest(r, true, true), JSON.stringify(r)).rejects.toMatchObject({
+        kind: "usage",
+      });
+    }
+    expect(backend.triggerCommands()).toHaveLength(before);
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+  });
+
+  it("remember without a confirmation arms nothing and sends nothing", async () => {
+    const backend = await ready();
+    const before = backend.triggerCommands().length;
+    await expect(backend.triggerRequest(PD_9V, false, true)).rejects.toMatchObject({
+      kind: "usage",
+    });
+    expect(backend.triggerCommands()).toHaveLength(before);
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+  });
+
+  it("Clear disarms and sends nothing", async () => {
+    const backend = await armed();
+    const before = backend.triggerCommands().length;
+    await backend.triggerDisarm();
+    expect(backend.triggerCommands()).toHaveLength(before);
+    await expectDisarmed(backend);
+  });
+
+  it("Back to 5 V disarms", async () => {
+    const backend = await armed();
+    await backend.triggerBackTo5v();
+    await expectDisarmed(backend);
+  });
+
+  it("a request at or below 5 V disarms", async () => {
+    const backend = await armed();
+    await backend.triggerRequest(PD_5V, false);
+    await expectDisarmed(backend);
+  });
+
+  it("Detect disarms", async () => {
+    const backend = await armed();
+    await backend.triggerDetect();
+    await backend.triggerList("pd");
+    await expectDisarmed(backend);
+  });
+
+  it("any built message disarms", async () => {
+    const backend = await armed();
+    await backend.triggerMessageSend({ sop: "sop", msg_type: 13, data_objects: [] }, false);
+    await expectDisarmed(backend);
+  });
+
+  it("a console line that is not read-only disarms", async () => {
+    const backend = await armed();
+    await backend.triggerConsoleSend("pd hrst", false);
+    await expectDisarmed(backend);
+  });
+
+  it("a read-only console line stays armed", async () => {
+    const backend = await armed();
+    await backend.triggerConsoleSend("pdm parm", false);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+  });
+
+  it("listing the same offers stays armed", async () => {
+    const backend = await armed();
+    await backend.triggerList("pd");
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+  });
+
+  it("closing the session disarms; a new session starts unarmed", async () => {
+    const backend = await armed();
+    await backend.triggerClose();
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await backend.triggerOpen();
+    await backend.triggerList("pd");
+    await expectDisarmed(backend);
+  });
+
+  it("disconnecting disarms", async () => {
+    const backend = await armed();
+    await backend.disconnect();
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+  });
+
+  it("with no session it reports false and clearing does nothing", async () => {
+    const backend = new MockBackend(null, { pdSynthetic: null });
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await expect(backend.triggerDisarm()).resolves.toBeUndefined();
   });
 });

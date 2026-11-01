@@ -17,9 +17,11 @@ vi.mock("@tauri-apps/api/core", () => {
 
 import {
   TRIGGER_PROTOCOLS,
+  triggerArmed,
   triggerBackTo5v,
   triggerClose,
   triggerDetect,
+  triggerDisarm,
   triggerList,
   triggerOpen,
   triggerRequest,
@@ -109,5 +111,45 @@ describe("AC-DGSQ6S.5: Back to 5 V and close", () => {
     await triggerClose();
     expect(invoke).toHaveBeenNthCalledWith(1, "trigger_back_to_5v");
     expect(invoke).toHaveBeenNthCalledWith(2, "trigger_close");
+  });
+});
+
+describe('AC-AXHK2N.2, .5: the "don\'t ask again" commands', () => {
+  const REPLY: TriggerReply = {
+    command: "pd req=2",
+    requested_mv: 9000,
+    requested_ma: 3000,
+    delivered_mv: 8865,
+    delivered_ma: 0,
+    reply: null,
+  };
+
+  it("sends remember only when it is true", async () => {
+    invoke.mockResolvedValue(REPLY);
+    await triggerRequest(PD_9V, true, true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_request", {
+      request: PD_9V,
+      confirmed: true,
+      remember: true,
+    });
+    await triggerRequest(PD_9V, true, false);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_request", { request: PD_9V, confirmed: true });
+    await triggerRequest(PD_9V, false);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_request", {
+      request: PD_9V,
+      confirmed: false,
+    });
+  });
+
+  it("reports the armed state", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(triggerArmed()).resolves.toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_armed");
+  });
+
+  it("clears the armed state", async () => {
+    invoke.mockResolvedValue(undefined);
+    await triggerDisarm();
+    expect(invoke).toHaveBeenLastCalledWith("trigger_disarm");
   });
 });

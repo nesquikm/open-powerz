@@ -86,6 +86,11 @@ class FakeApi implements TriggerApi {
   calls: string[] = [];
   sent: { request: TriggerRequest; confirmed: boolean }[] = [];
 
+  async armed(): Promise<boolean> {
+    return false;
+  }
+  async disarm(): Promise<void> {}
+
   async open(): Promise<void> {
     this.calls.push("open");
   }

@@ -947,6 +947,48 @@ fn an_unplug_while_triggering_returns_to_5v_and_closes_the_trigger_session() {
     assert!(back < close, "{writes:?}");
 }
 
+// ---- AC-AXHK2N.4: a meter that drops out ends "don't ask again" ----
+
+#[test]
+fn an_unplug_while_armed_disarms() {
+    use open_powerz_desktop_lib::trigger::{
+        Confirm, RiskClass, TriggerProtocol, TriggerRequest, TriggerWorker,
+    };
+    use powerz_sim::{SimCharger, SimPdm};
+
+    const NINE_VOLTS: TriggerRequest = TriggerRequest::Pd {
+        position: 2,
+        voltage_mv: None,
+        current_ma: None,
+    };
+    let mut rig = Rig::new();
+    let (rx, _) = stream_meter_a(&mut rig, 50);
+    let pdm = SimPdm::new(SimCharger::Epr140W, SimClock::new(1_790_000_000_000));
+    let w = TriggerWorker::spawn(pdm.open_port(), SimClock::new(1_790_000_000_000))
+        .expect("the trigger session opens");
+    rig.m.install_trigger(w).expect("install");
+    let c = rig.m.trigger_control().expect("a trigger session is open");
+    c.list(TriggerProtocol::Pd).expect("list pd");
+    c.request(NINE_VOLTS, Confirm::YesRemember).expect("9 V");
+    assert!(c.armed().expect("armed"));
+
+    unplug_and_wait(&mut rig, &rx);
+
+    assert!(!c.armed().unwrap_or(false), "the ended session reads armed");
+    // The next session on that meter asks again.
+    let next = TriggerWorker::spawn(pdm.open_port(), SimClock::new(1_790_000_000_000))
+        .expect("a new session");
+    let c = next.control();
+    assert!(!c.armed().expect("armed"));
+    c.list(TriggerProtocol::Pd).expect("list pd");
+    assert_eq!(
+        c.risk(NINE_VOLTS).expect("risk"),
+        RiskClass::Above5VRememberable
+    );
+    c.request(NINE_VOLTS, false).expect_err("it asks again");
+    next.close().expect("close");
+}
+
 // ---- AC-AXHK2J.5: OS errors 6 and 19 at open ----
 
 fn log_lines(path: &std::path::Path) -> Vec<String> {

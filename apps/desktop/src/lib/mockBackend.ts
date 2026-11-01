@@ -696,6 +696,8 @@ interface MockTrigger {
   entered: "pd" | "legacy" | null;
   /** The queue rate before the session capped it at 50 SPS, if it did. */
   rateBefore: number | null;
+  /** "Don't ask again" is on (FR AXHK2N). */
+  armed: boolean;
 }
 
 /** The queue rate cap while a trigger session is open, SPS. [inferred] */
@@ -1095,6 +1097,8 @@ export class MockBackend {
       triggerList: on(this.triggerList),
       triggerRisk: on(this.triggerRisk),
       triggerRequest: on(this.triggerRequest),
+      triggerArmed: on(this.triggerArmed),
+      triggerDisarm: on(this.triggerDisarm),
       triggerBackTo5v: on(this.triggerBackTo5v),
       triggerClose: on(this.triggerClose),
       triggerMessageRisk: on(this.triggerMessageRisk),
@@ -1925,7 +1929,7 @@ export class MockBackend {
       rateBefore = s.rateSps;
       await this.setRate(TRIGGER_MAX_SPS);
     }
-    s.trigger = { entered: null, rateBefore };
+    s.trigger = { entered: null, rateBefore, armed: false };
     this.#triggerLog.push("pdm open");
   }
 
@@ -1939,6 +1943,7 @@ export class MockBackend {
    * then the `pdm parm` check that the meter is still in step. */
   async triggerDetect(): Promise<Detection> {
     const t = this.#openTrigger();
+    t.armed = false;
     this.#triggerLog.push("entry bc", "entry apple", "entry list", "reset", "pdm parm");
     t.entered = null;
     if (this.#mode === "trigger-list-lag") {
@@ -2004,9 +2009,23 @@ export class MockBackend {
 
   /** Like the library classifier: above 5 V, or unknown, needs a confirmation. */
   async triggerRisk(request: TriggerRequest): Promise<RiskClass> {
-    this.#openTrigger();
+    const t = this.#openTrigger();
     const mv = this.#requestMv(request);
-    return mv !== null && mv <= 5000 ? "at_most_5v" : "above_5v";
+    if (mv !== null && mv <= 5000) return "at_most_5v";
+    if (!this.#rememberable(request)) return "above_5v";
+    return t.armed ? "armed" : "above_5v_rememberable";
+  }
+
+  /** Like the library's `pd::rememberable`: a fixed, PPS or SPR AVS offer at an SPR
+   * position, at or below 20 V. */
+  #rememberable(request: TriggerRequest): boolean {
+    if (request.protocol !== "pd") return false;
+    const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === request.position);
+    if (!offer || offer.epr) return false;
+    const { voltage_mv: requested } = request;
+    if (offer.kind === "fixed") return requested === null && offer.max_voltage_mv <= 20000;
+    if (offer.kind !== "pps" && offer.kind !== "spr-avs") return false;
+    return requested !== null && Math.max(requested, offer.min_voltage_mv) <= 20000;
   }
 
   /** The command text the meter would receive for `request`. */
@@ -2070,19 +2089,43 @@ export class MockBackend {
     }
   }
 
-  /** Refuses an unconfirmed above-5 V request before anything is sent. */
-  async triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply> {
-    this.#openTrigger();
+  /** Whether "don't ask again" is armed; false with no trigger session. */
+  async triggerArmed(): Promise<boolean> {
+    return this.#trigger?.armed ?? false;
+  }
+
+  /** Ends "don't ask again"; does nothing with no trigger session. */
+  async triggerDisarm(): Promise<void> {
+    if (this.#trigger) this.#trigger.armed = false;
+  }
+
+  /** Refuses an unconfirmed above-5 V request before anything is sent, and a `remember`
+   * the offers do not allow; an armed session covers what is rememberable. */
+  async triggerRequest(
+    request: TriggerRequest,
+    confirmed: boolean,
+    remember = false,
+  ): Promise<TriggerReply> {
+    const t = this.#openTrigger();
     const mv = this.#requestMv(request);
     if (mv === null && request.protocol === "pd") {
       throw usage(`The charger offers nothing at position ${request.position}.`);
     }
     const refusal = this.#refusal(request);
     if (refusal !== null) throw usage(refusal);
-    if ((await this.triggerRisk(request)) === "above_5v" && !confirmed) {
+    const risk = await this.triggerRisk(request);
+    const arming = confirmed && remember;
+    if (arming && risk !== "above_5v_rememberable" && risk !== "armed") {
+      throw usage("This request cannot be remembered.");
+    }
+    if ((risk === "above_5v" || risk === "above_5v_rememberable") && !confirmed) {
       throw usage("A request above 5 V needs your confirmation.");
     }
     const command = this.#commandText(request);
+    // Like the session: disarmed before the first write, so a failure leaves "don't ask
+    // again" ended. Only a request that qualifies keeps it.
+    const wasArmed = t.armed;
+    t.armed = false;
     this.#triggerLog.push(command);
     if (this.#mode === "trigger-out-of-sync") {
       // The meter answers with another command's reply (`type=...`), like the backend's
@@ -2098,7 +2141,8 @@ export class MockBackend {
         hint: null,
       } satisfies UiError;
     }
-    this.#openTrigger().entered = request.protocol === "pd" ? "pd" : "legacy";
+    t.entered = request.protocol === "pd" ? "pd" : "legacy";
+    t.armed = arming || (wasArmed && risk === "armed");
     if (this.#session && mv !== null) {
       // The demo VBUS follows the request; `trigger-sag` keeps it 12 % below.
       this.#session.triggerVbusV = (mv / 1000) * (this.#mode === "trigger-sag" ? 0.88 : 0.985);
@@ -2136,6 +2180,7 @@ export class MockBackend {
   }
 
   #returnTo5v(t: MockTrigger): void {
+    t.armed = false;
     if (t.entered === "pd") this.#triggerLog.push("pd req=1");
     else if (t.entered === "legacy") this.#triggerLog.push("reset");
     if (this.#session) this.#session.triggerVbusV = null;
@@ -2185,6 +2230,7 @@ export class MockBackend {
     if ((await this.triggerMessageRisk(message)) === "above_5v" && !confirmed) {
       throw usage("A message that can raise VBUS above 5 V needs your confirmation.");
     }
+    t.armed = false;
     // Like the backend: PD first, unless PD is what was entered last.
     if (t.entered !== "pd") {
       this.#triggerLog.push("entry pd");
@@ -2214,9 +2260,11 @@ export class MockBackend {
     // Like the backend: GoodCRC is refused before anything is sent.
     const refusal = lineRefusal(text);
     if (refusal !== null) throw usage(refusal);
-    if (mockLineRisk(text) === "above_5v" && !confirmed) {
+    const risk = mockLineRisk(text);
+    if (risk === "above_5v" && !confirmed) {
       throw usage("A line that can raise VBUS above 5 V needs your confirmation.");
     }
+    if (risk !== "read_only") t.armed = false;
     this.#triggerLog.push(text);
     if (this.#mode === "trigger-out-of-sync") throw outOfSyncError();
     const at = Date.now();

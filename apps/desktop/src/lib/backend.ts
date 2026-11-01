@@ -900,8 +900,9 @@ export type TriggerRequest =
   | { protocol: "scp" | "vfcp" | "tfcp"; voltage_mv: number; current_ma: number }
   | { protocol: "ufcs"; index: number; voltage_mv: number; current_ma: number };
 
-/** The library risk class of a request. */
-export type RiskClass = "read_only" | "at_most_5v" | "above_5v";
+/** The library risk class of a request. `above_5v_rememberable` is `above_5v` whose
+ * dialog offers "don't ask again"; `armed` is covered by one and needs no dialog. */
+export type RiskClass = "read_only" | "at_most_5v" | "above_5v" | "above_5v_rememberable" | "armed";
 
 /** What the charger answered. */
 export interface TriggerReply {
@@ -931,19 +932,43 @@ export async function triggerList(protocol: TriggerProtocol): Promise<ProtocolSe
   return invoke<ProtocolSection>("trigger_list", { protocol });
 }
 
-/** The risk class of `request`: `above_5v` needs the user's confirmation. */
+/** The risk class of `request`: `above_5v` and `above_5v_rememberable` need the user's
+ * confirmation. */
 export async function triggerRisk(request: TriggerRequest): Promise<RiskClass> {
   if (mock) return mock.triggerRisk(request);
   return invoke<RiskClass>("trigger_risk", { request });
 }
 
-/** Sends `request`; the backend refuses an above-5 V one unless `confirmed`. */
+/** Sends `request`; the backend refuses an above-5 V one unless `confirmed` or armed.
+ * `remember` with `confirmed` asks it to arm "don't ask again" (FR AXHK2N). */
 export async function triggerRequest(
   request: TriggerRequest,
   confirmed: boolean,
+  remember = false,
 ): Promise<TriggerReply> {
-  if (mock) return mock.triggerRequest(request, confirmed);
-  return invoke<TriggerReply>("trigger_request", { request, confirmed });
+  if (mock) return mock.triggerRequest(request, confirmed, remember);
+  return invoke<TriggerReply>("trigger_request", requestArgs(request, confirmed, remember));
+}
+
+/** The `trigger_request` arguments; `remember` goes only when it is true. */
+function requestArgs(
+  request: TriggerRequest,
+  confirmed: boolean,
+  remember?: boolean,
+): Record<string, unknown> {
+  return remember ? { request, confirmed, remember } : { request, confirmed };
+}
+
+/** Whether "don't ask again" is armed; false with no trigger session. */
+export async function triggerArmed(): Promise<boolean> {
+  if (mock) return mock.triggerArmed();
+  return invoke<boolean>("trigger_armed");
+}
+
+/** Ends "don't ask again"; does nothing with no trigger session. */
+export async function triggerDisarm(): Promise<void> {
+  if (mock) return mock.triggerDisarm();
+  await invoke("trigger_disarm");
 }
 
 /** Back to 5 V; the session stays open. */
@@ -1067,7 +1092,13 @@ export interface MeterBackend {
   triggerDetect(): Promise<Detection>;
   triggerList(protocol: TriggerProtocol): Promise<ProtocolSection>;
   triggerRisk(request: TriggerRequest): Promise<RiskClass>;
-  triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply>;
+  triggerRequest(
+    request: TriggerRequest,
+    confirmed: boolean,
+    remember?: boolean,
+  ): Promise<TriggerReply>;
+  triggerArmed(): Promise<boolean>;
+  triggerDisarm(): Promise<void>;
   triggerBackTo5v(): Promise<void>;
   triggerClose(): Promise<void>;
   triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>;
@@ -1110,6 +1141,8 @@ export const currentMeterCommands: MeterCommands = {
   triggerList,
   triggerRisk,
   triggerRequest,
+  triggerArmed,
+  triggerDisarm,
   triggerBackTo5v,
   triggerClose,
   triggerMessageRisk,
@@ -1175,7 +1208,12 @@ export function meterBackend(deviceId: string): MeterBackend {
     triggerDetect: () => call("trigger_detect"),
     triggerList: (protocol) => call("trigger_list", { protocol }),
     triggerRisk: (request) => call("trigger_risk", { request }),
-    triggerRequest: (request, confirmed) => call("trigger_request", { request, confirmed }),
+    triggerRequest: (request, confirmed, remember) =>
+      call("trigger_request", requestArgs(request, confirmed, remember)),
+    triggerArmed: () => call("trigger_armed"),
+    triggerDisarm: async () => {
+      await call("trigger_disarm");
+    },
     triggerBackTo5v: async () => {
       await call("trigger_back_to_5v");
     },

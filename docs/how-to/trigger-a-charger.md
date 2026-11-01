@@ -14,8 +14,9 @@ charger). Before you start:
   the output empty, or connect only a device rated for the voltage you ask
   for. Detection can also briefly raise VBUS above 5 V on some chargers.
 - **Every request above 5 V needs your confirmation.** The app asks in a
-  dialog every time; the CLI refuses unless you pass `--allow-high-voltage`.
-  The confirmation covers one request only.
+  dialog; the CLI refuses unless you pass `--allow-high-voltage`. The
+  confirmation covers one request only, unless you turn on
+  [Don't ask again](#dont-ask-again).
 - **Know the way back.** In the app, **Back to 5 V** is always shown while a
   trigger session is open. The CLI returns to 5 V on its own when a command
   ends, on error and on Ctrl-C. Leaving the Trigger tab, disconnecting the
@@ -59,7 +60,8 @@ In the app:
    voltage buttons, a QC 3.0 voltage slider, or voltage and current sliders
    inside the charger's limits.
 3. For anything above 5 V, a dialog names the voltage. Check the output, then
-   press **Confirm**. **Cancel** (or Escape) sends nothing.
+   press **Confirm**. **Cancel** (or Escape) sends nothing. The dialog does not
+   appear for a request that [Don't ask again](#dont-ask-again) covers.
 4. Read the **Request result** card: the command, the requested and delivered
    values, and the reply. **Live VBUS** comes from the measurement stream.
    The card warns when VBUS is more than 5 % away from the request after 2 s.
@@ -80,6 +82,47 @@ Without `--hold`, the CLI holds the voltage until you press Ctrl-C. Then it
 returns to 5 V and closes the session. A request the charger does not offer
 is refused before anything is sent. See the
 [CLI reference](../reference/cli.md#protocol-triggering) for every protocol.
+
+## Don't ask again
+
+The dialog for a PD request can offer a checkbox: **Don't ask again until I go
+back to 5 V or disconnect**. It starts unchecked every time. Check it and press
+**Confirm**, and the app sends that request and stops asking for the next ones.
+
+**What it covers.** USB PD fixed, PPS and SPR AVS offers. It stops at 20 V.
+
+**What always asks.** The dialog still appears for:
+
+- a request above 20 V, or at an unknown voltage
+- an EPR position, at any voltage
+- a battery or variable offer
+- QC, FCP, UFCS and every other protocol that is not PD
+- built PD messages and Console lines above 5 V, or of unknown effect
+
+**What ends it.** While it is on, the panel shows **Not asking up to 20 V**
+with a **Clear** button. Press **Clear** to end it at once. These end it too:
+
+- **Back to 5 V**, or any request at or below 5 V
+- a hard reset
+- a request that fails after something was sent
+- **Detect**
+- any built PD message
+- any Console line that is not read-only
+- a change in what the charger offers
+- a request that does not qualify, once you confirm it
+- closing the session: leaving the Trigger tab, disconnecting, losing the meter,
+  reloading the page or quitting the app
+
+A reload closes the trigger session and returns the charger to 5 V. A new
+session always starts with it off.
+
+If the offers change, a request that names a changed offer is refused and not
+sent. Press **Detect** to see the new offers. The app can only see a change the
+meter reports, so end it yourself before you swap chargers.
+
+**The CLI does not change.** `powerz` has no such option. Each command above
+5 V still needs `--allow-high-voltage`, and nothing carries over to the next
+command.
 
 ## Send PD messages and raw commands
 

@@ -107,8 +107,10 @@ Commands:
 | `triggerOpen(): Promise<void>` | Opens the trigger session on the connected meter (a simulated one for a demo device). Fails with `usage` when no meter is connected or a session is already open. |
 | `triggerDetect(): Promise<Detection>` | BC1.2, Apple and the automatic list. Nothing above 5 V is asked. The stream's polling pauses while it runs (see below). |
 | `triggerList(protocol: TriggerProtocol): Promise<ProtocolSection>` | Enters `protocol` and reports its section. A protocol the charger does not answer is `supported: false`, not an error. |
-| `triggerRisk(request: TriggerRequest): Promise<RiskClass>` | The library's risk class of `request`, given what the charger offered. `above_5v` needs the user's confirmation. |
-| `triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply>` | Sends `request`. The backend is the final gate: above 5 V it is refused unless `confirmed`. A request for another protocol than the one entered enters that protocol again first. |
+| `triggerRisk(request: TriggerRequest): Promise<RiskClass>` | The library's risk class of `request`, given what the charger offered. `above_5v` and `above_5v_rememberable` need the user's confirmation; the second one lets the dialog offer "Don't ask again". `armed` is covered by it and needs no dialog. |
+| `triggerRequest(request: TriggerRequest, confirmed: boolean, remember?: boolean): Promise<TriggerReply>` | Sends `request`. The backend is the final gate: above 5 V it is refused unless `confirmed` or armed. `remember` with `confirmed` arms "Don't ask again"; a request that does not qualify fails with `usage` and sends nothing. A request above 5 V whose offer differs from the one last listed is refused with `usage` and not sent. A request for another protocol than the one entered enters that protocol again first. |
+| `triggerArmed(): Promise<boolean>` | Whether "Don't ask again" is armed. `false` with no session. |
+| `triggerDisarm(): Promise<void>` | Ends "Don't ask again" and sends nothing. Does nothing with no session. |
 | `triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>` | The risk class of a built PD message. GoodCRC and malformed messages fail with `usage` and the reason. |
 | `triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>` | Sends a built PD message; above 5 V only when `confirmed`. |
 | `triggerConsoleRisk(line: string): Promise<RiskClass>` | The risk class of a raw console line. |
@@ -126,7 +128,7 @@ Types (they mirror `src-tauri/src/trigger.rs`):
 | `TriggerOffer` | `position`, `kind` (`"fixed"`, `"battery"`, `"variable"`, `"pps"`, `"spr-avs"`, `"epr-avs"`), `min_voltage_mv`, `max_voltage_mv`, `max_current_ma`, `max_power_mw`, `epr` |
 | `TriggerLimits` | `index` (the UFCS capability number, else `null`), `min_voltage_mv`, `max_voltage_mv`, `min_current_ma`, `max_current_ma`, `max_power_mw` |
 | `TriggerRequest` | One of `{ protocol: "pd"; position; voltage_mv; current_ma }` (the last two `null` for a fixed offer), `{ protocol: "qc" \| "fcp" \| "afc" \| "sfcp"; volts }`, `{ protocol: "qc3"; voltage_mv }`, `{ protocol: "scp" \| "vfcp" \| "tfcp"; voltage_mv; current_ma }`, `{ protocol: "ufcs"; index; voltage_mv; current_ma }` |
-| `RiskClass` | `"read_only"`, `"at_most_5v"` or `"above_5v"` |
+| `RiskClass` | `"read_only"`, `"at_most_5v"`, `"above_5v"`, `"above_5v_rememberable"` or `"armed"` |
 | `TriggerReply` | `command`, `requested_mv`, `requested_ma`, `delivered_mv`, `delivered_ma`, `reply` |
 | `PdMessageRequest` | `sop` (`"sop"`, `"sop_prime"` or `"sop_double_prime"`), `msg_type` (the 5-bit Message Type), `data_objects` (32-bit numbers; none means a control message) |
 | `ConsoleLine` | `at_ms` (clock time, ms since the Unix epoch), `direction` (`"tx"` or `"rx"`), `text`, `block` (a parsed binary block in words, or `null`) |

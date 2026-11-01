@@ -181,6 +181,12 @@ pub enum RiskClass {
     AtMost5V,
     #[serde(rename = "above_5v")]
     Above5V,
+    /// Above 5 V, and the dialog may offer "don't ask again" (FR AXHK2N).
+    #[serde(rename = "above_5v_rememberable")]
+    Above5VRememberable,
+    /// Above 5 V, and covered by a "don't ask again": no dialog (FR AXHK2N).
+    #[serde(rename = "armed")]
+    Armed,
 }
 
 /// What the charger answered to a request.
@@ -257,6 +263,22 @@ pub struct PdSendReply {
     pub cable: Option<CableView>,
 }
 
+/// How the user answered the above-5 V question (FR AXHK2N).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confirm {
+    No,
+    Yes,
+    /// Confirmed with "don't ask again" checked. The session judges from the
+    /// charger's offers whether the request may arm it.
+    YesRemember,
+}
+
+impl From<bool> for Confirm {
+    fn from(confirmed: bool) -> Confirm {
+        if confirmed { Confirm::Yes } else { Confirm::No }
+    }
+}
+
 /// A handle to the running trigger session: every call is answered by the
 /// session thread. Cheap to clone, so a command never holds the device
 /// manager's lock while it waits.
@@ -297,7 +319,14 @@ impl TriggerControl {
     ) -> Result<T, UiError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         let job: Job = Box::new(move |engine| {
-            let _ = reply_tx.send(job(engine));
+            let result = job(&mut *engine);
+            // The port failed: the meter may be gone, so nothing stays armed.
+            if let Err(e) = &result
+                && matches!(e.kind, ErrorKind::Disconnected | ErrorKind::Internal)
+            {
+                engine.disarm();
+            }
+            let _ = reply_tx.send(result);
         });
         self.tx.send(Msg::Job(job)).map_err(|_| closed())?;
         reply_rx.recv().map_err(|_| closed())?
@@ -330,13 +359,29 @@ impl TriggerControl {
     }
 
     /// Send `request`. A request classified above 5 V is refused (a usage
-    /// error, nothing written) unless `confirmed`.
+    /// error, nothing written) unless confirmed or covered by an armed "don't
+    /// ask again"; [`Confirm::YesRemember`] arms once the request succeeded
+    /// and is refused for a request that may not be remembered.
     pub fn request(
         &self,
         request: TriggerRequest,
-        confirmed: bool,
+        confirm: impl Into<Confirm>,
     ) -> Result<TriggerReply, UiError> {
-        self.call(move |e| e.request(request, confirmed))
+        let confirm = confirm.into();
+        self.call(move |e| e.request(request, confirm))
+    }
+
+    /// Whether "don't ask again" is armed. An ended session answers an error.
+    pub fn armed(&self) -> Result<bool, UiError> {
+        self.call(|e| Ok(e.armed()))
+    }
+
+    /// End "don't ask again"; nothing is written.
+    pub fn disarm(&self) -> Result<(), UiError> {
+        self.call(|e| {
+            e.disarm();
+            Ok(())
+        })
     }
 
     /// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
@@ -387,8 +432,10 @@ trait Engine {
     fn request(
         &mut self,
         request: TriggerRequest,
-        confirmed: bool,
+        confirm: Confirm,
     ) -> Result<TriggerReply, UiError>;
+    fn armed(&mut self) -> bool;
+    fn disarm(&mut self);
     fn back_to_5v(&mut self) -> Result<(), UiError>;
     fn message_risk(&mut self, message: PdMessageRequest) -> Result<RiskClass, UiError>;
     fn send_message(
@@ -421,6 +468,8 @@ enum Entered {
 struct Session<P: Read + Write, C: Clock> {
     pdm: PdmSession<P, C>,
     offers: Vec<pd::Offer>,
+    /// The offers last listed: what the page's buttons and dialog go by.
+    shown: Vec<pd::Offer>,
     entered: Entered,
     /// A PD request was accepted and not yet undone: it is always ended
     /// through PD (`pd req=1`, Hard Reset as the fallback), whatever was
@@ -429,13 +478,19 @@ struct Session<P: Read + Write, C: Clock> {
     /// The way back to 5 V went out blind while the meter was out of sync
     /// with a contract above 5 V possibly active: VBUS is not confirmed.
     vbus_unconfirmed: bool,
+    /// "Don't ask again" (FR AXHK2N): set only by a request that succeeded
+    /// and qualified. It covers only what `pd::rememberable` allows.
+    armed: bool,
 }
 
 impl<P: Read + Write, C: Clock> Session<P, C> {
     /// Back to 5 V where the protocol allows it: PD `pd req=1` (Hard Reset
     /// as the fallback), the others `reset`. Out of sync, the library's
     /// safety path writes `pd hrst` / `reset` blind and `pdm close` follows.
+    /// Disarms before anything is written, so a failed way back ends "don't
+    /// ask again" too.
     fn return_to_5v(&mut self) -> Result<(), UiError> {
+        self.disarm();
         if let Err(e) = self.pdm.check_in_step() {
             return Err(self.blind_return_to_5v(&e));
         }
@@ -504,7 +559,8 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
             Err(e) => return Err(pd_error(&e)),
         };
         self.entered = Entered::Pd;
-        self.offers = negotiation.offers;
+        self.set_offers(negotiation.offers);
+        self.shown = self.offers.clone();
         let settings = pd::read_settings(&mut self.pdm).map_err(|e| pd_error(&e))?;
         Ok(ProtocolSection {
             protocol: TriggerProtocol::Pd,
@@ -546,9 +602,7 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
         match effect {
             Some(console::Effect::EnteredPd) => {
                 self.entered = Entered::Pd;
-                if self.pdm.capabilities().pd.is_some() {
-                    self.offers = pd::offers(self.pdm.capabilities());
-                }
+                self.sync_offers();
             }
             Some(console::Effect::PdContract) => self.pd_contract = true,
             Some(console::Effect::Legacy) => self.entered = Entered::Legacy,
@@ -564,9 +618,60 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
     fn enter_pd(&mut self) -> Result<(), UiError> {
         if let Some(negotiation) = pd::ensure_entered(&mut self.pdm).map_err(|e| pd_error(&e))? {
             self.entered = Entered::Pd;
-            self.offers = negotiation.offers;
+            self.set_offers(negotiation.offers);
         }
         Ok(())
+    }
+
+    /// Replace the offers. Any change ends "don't ask again": being armed
+    /// stands on the offers it was judged from.
+    fn set_offers(&mut self, offers: Vec<pd::Offer>) {
+        if offers != self.offers {
+            self.disarm();
+        }
+        self.offers = offers;
+    }
+
+    /// Take in the meter's latest `pdo:` block, which may have arrived
+    /// unasked (another charger plugged in) between two commands.
+    fn sync_offers(&mut self) {
+        if self.armed {
+            self.read_unasked();
+        }
+        if self.pdm.capabilities().pd.is_some() {
+            self.set_offers(pd::offers(self.pdm.capabilities()));
+        }
+    }
+
+    /// Whether a "don't ask again" may cover `request`, judged from the
+    /// charger's offers, never from a UI value.
+    fn rememberable(&self, request: &LibRequest) -> bool {
+        match request {
+            LibRequest::Pd(r) => pd::rememberable(&self.offers, r),
+            LibRequest::Legacy(_) => false,
+        }
+    }
+
+    /// The offer `request` names differs from the one the page was shown. A
+    /// position the page never listed named no voltage, so nothing moved.
+    fn offer_moved(&self, request: &pd::Request) -> bool {
+        pd::offer_of(&self.shown, request)
+            .is_some_and(|shown| Some(shown) != pd::offer_of(&self.offers, request))
+    }
+
+    /// Read what is waiting on the port. Nothing else reads it between
+    /// commands, so a new charger's `pdo:` block would stay unseen until the
+    /// next reply, after an armed request had gone out.
+    fn read_unasked(&mut self) {
+        for _ in 0..UNASKED_ITEMS {
+            match self.pdm.next_item(UNASKED_WAIT) {
+                Ok(_) => {}
+                Err(pdm::Error::Timeout { .. }) => return,
+                Err(_) => break,
+            }
+        }
+        // A port that fails or never falls quiet proves nothing: ask again.
+        self.disarm();
     }
 
     /// Validate `request` against what the charger offered and render its
@@ -583,6 +688,8 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
 
 impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
     fn detect(&mut self) -> Result<Detection, UiError> {
+        // Before the first write, so a failed detection ends it too.
+        self.disarm();
         let bc12 = detect::bc12(&mut self.pdm).map_err(|e| pdm_error(&e))?;
         let apple = detect::apple(&mut self.pdm).map_err(|e| pdm_error(&e))?;
         let list = detect::list(&mut self.pdm, &ListOptions::default(), &mut |_| {})
@@ -613,35 +720,66 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
     }
 
     fn risk(&mut self, request: TriggerRequest) -> Result<RiskClass, UiError> {
-        let command = self.command_of(&lib_request(request)?)?;
-        Ok(risk_class(self.pdm.risk(&command)))
+        let lib = lib_request(request)?;
+        // So an unasked `pdo:` block shows as a dialog, not as a refusal.
+        self.sync_offers();
+        let command = self.command_of(&lib)?;
+        Ok(match risk_class(self.pdm.risk(&command)) {
+            RiskClass::Above5V if self.rememberable(&lib) => {
+                if self.armed {
+                    RiskClass::Armed
+                } else {
+                    RiskClass::Above5VRememberable
+                }
+            }
+            class => class,
+        })
     }
 
     fn request(
         &mut self,
         request: TriggerRequest,
-        confirmed: bool,
+        confirm: Confirm,
     ) -> Result<TriggerReply, UiError> {
         let lib = lib_request(request)?;
         // A meter out of step refuses everything, before any validation.
         self.pdm.check_in_step().map_err(|e| pdm_error(&e))?;
+        // An unasked `pdo:` block disarms here, before anything is judged.
+        self.sync_offers();
         // Validation first: an invalid request writes nothing.
         let command = self.command_of(&lib)?;
         let above = self.pdm.risk(&command) == pdm::Risk::Above5V;
-        // The final gate: above 5 V without the user's confirmation is
-        // refused before anything is written.
-        if above && !confirmed {
-            return Err(UiError::usage(
-                "A request above 5 V needs your confirmation.",
-            ));
+        let rememberable = above && self.rememberable(&lib);
+        if confirm == Confirm::YesRemember && !rememberable {
+            return Err(UiError::usage("This request cannot be remembered."));
+        }
+        let covered = confirm == Confirm::No && self.armed && rememberable;
+        // The final gate: above 5 V without the user's confirmation or an
+        // armed "don't ask again" is refused before anything is written.
+        if above && confirm == Confirm::No && !covered {
+            return Err(not_confirmed());
         }
         let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
+        // Past the refusals: disarmed before the first write, so a failure after
+        // it leaves "don't ask again" ended. Only a request that qualifies keeps it.
+        let was_armed = std::mem::take(&mut self.armed);
         match lib {
             LibRequest::Pd(r) => {
+                // The dialog named what the page was shown, so a "yes" stands
+                // on that offer: refused, not sent, once it changed.
+                if above && self.offer_moved(&r) {
+                    return Err(offers_changed());
+                }
+                let judged = self.offers.clone();
                 // Another protocol (or none) entered since PD: enter PD
                 // again so the request goes to a PD session, and check it
                 // against what the charger offers now. (AC-DGSQ6S.13)
                 self.enter_pd()?;
+                // Being armed stands on all the offers, not only this one.
+                let same_offers = judged == self.offers;
+                if (above && self.offer_moved(&r)) || (covered && !same_offers) {
+                    return Err(offers_changed());
+                }
                 let outcome =
                     pd::request(&mut self.pdm, &self.offers, &r, confirmation).map_err(|e| {
                         // Written, then out of step: the charger may have
@@ -653,6 +791,8 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
                     })?;
                 self.entered = Entered::Pd;
                 self.pd_contract = true;
+                self.armed =
+                    confirm == Confirm::YesRemember || (was_armed && rememberable && same_offers);
                 Ok(TriggerReply {
                     command: command_text(&outcome.command),
                     requested_mv: Some(outcome.requested.voltage_mv),
@@ -679,6 +819,15 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
                 })
             }
         }
+    }
+
+    fn armed(&mut self) -> bool {
+        self.sync_offers();
+        self.armed
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 
     fn back_to_5v(&mut self) -> Result<(), UiError> {
@@ -710,6 +859,8 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
                 "A message that can raise VBUS above 5 V needs your confirmation.",
             ));
         }
+        // Every sent message ends "don't ask again", before the first write.
+        self.disarm();
         // Like `powerz pd send`: PD first (again, when another protocol was
         // entered since), so the message has a PD session and the way back
         // to 5 V (`pd req=1`, Hard Reset as the fallback) works.
@@ -752,13 +903,19 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
 
     fn console_send(&mut self, line: String, confirmed: bool) -> Result<Vec<ConsoleLine>, UiError> {
         let command = console::command_of(&line);
-        let above = self.pdm.risk(&command) == pdm::Risk::Above5V;
+        let risk = self.pdm.risk(&command);
+        let above = risk == pdm::Risk::Above5V;
         // The final gate: above 5 V (any unparsable line too) without the
         // user's confirmation is refused before anything is written.
         if above && !confirmed {
             return Err(UiError::usage(
                 "A line that can raise VBUS above 5 V needs your confirmation.",
             ));
+        }
+        // A line that is not read-only ends "don't ask again"; before the
+        // write, so a failed one ends it too.
+        if risk != pdm::Risk::ReadOnly {
+            self.disarm();
         }
         let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
         let listen = console::listen_for(&command);
@@ -772,6 +929,16 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         }
         Ok(sent.entries.iter().map(console_line).collect())
     }
+}
+
+/// The refusal of a request above 5 V that nothing confirmed.
+fn not_confirmed() -> UiError {
+    UiError::usage("A request above 5 V needs your confirmation.")
+}
+
+/// The refusal of a request held on offers that changed.
+fn offers_changed() -> UiError {
+    UiError::usage("The charger's offers changed, so the request was not sent. Press Detect.")
 }
 
 /// A library console entry as the UI's line; a block is described in words.
@@ -1028,6 +1195,11 @@ fn legacy_error(err: &legacy::Error) -> UiError {
     }
 }
 
+/// How long a quiet port is read for an unasked block before an armed request.
+const UNASKED_WAIT: Duration = Duration::from_millis(20);
+/// The most items read that way, so a chatty port cannot hold a request.
+const UNASKED_ITEMS: usize = 64;
+
 /// One count on a meter's open PDM sessions: taken before `pdm open` and let
 /// go once the session has closed, so the stream worker sees the session
 /// through the hand-overs on either side of the manager's slot.
@@ -1094,9 +1266,11 @@ impl TriggerWorker {
                 let mut session = Session {
                     pdm,
                     offers: Vec::new(),
+                    shown: Vec::new(),
                     entered: Entered::None,
                     pd_contract: false,
                     vbus_unconfirmed: false,
+                    armed: false,
                 };
                 // Every handle gone without a close: still back to 5 V and close.
                 let mut reply = None;
@@ -1411,7 +1585,13 @@ mod tests {
         let c = w.control();
         c.list(TriggerProtocol::Pd).expect("list pd");
         assert_eq!(c.risk(pd(1)).expect("risk"), RiskClass::AtMost5V);
-        assert_eq!(c.risk(pd(2)).expect("risk"), RiskClass::Above5V);
+        assert_eq!(c.risk(pd(2)).expect("risk"), RiskClass::Above5VRememberable);
+        assert_eq!(c.risk(pd(8)).expect("risk"), RiskClass::Above5V);
+        assert_eq!(
+            serde_json::to_value(RiskClass::Above5VRememberable).unwrap(),
+            "above_5v_rememberable"
+        );
+        assert_eq!(serde_json::to_value(RiskClass::Armed).unwrap(), "armed");
         assert_eq!(
             serde_json::to_value(RiskClass::Above5V).unwrap(),
             "above_5v"
@@ -1518,7 +1698,7 @@ mod tests {
             voltage_mv: Some(7000),
             current_ma: Some(1000),
         };
-        assert_eq!(c.risk(req).expect("risk"), RiskClass::Above5V);
+        assert_eq!(c.risk(req).expect("risk"), RiskClass::Above5VRememberable);
         let reply = c.request(req, true).expect("confirmed request");
         assert_eq!(reply.requested_mv, Some(7000));
         assert_eq!(reply.requested_ma, Some(1000));
@@ -1955,6 +2135,537 @@ mod tests {
             .expect("answered")
             .expect("list pd");
         assert_eq!(n, 6);
+        w.close().expect("close");
+    }
+
+    // ---- FR AXHK2N: "don't ask again" ----
+
+    fn armed_session(charger: SimCharger) -> (SimPdm, TriggerWorker) {
+        let (sim, w) = worker(charger);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), Confirm::YesRemember)
+            .expect("9 V, remembered");
+        assert!(c.armed().expect("armed"), "the arming request arms");
+        (sim, w)
+    }
+
+    fn pps(voltage_mv: u32) -> TriggerRequest {
+        TriggerRequest::Pd {
+            position: 5,
+            voltage_mv: Some(voltage_mv),
+            current_ma: Some(1000),
+        }
+    }
+
+    fn avs(voltage_mv: u32) -> TriggerRequest {
+        TriggerRequest::Pd {
+            position: 9,
+            voltage_mv: Some(voltage_mv),
+            current_ma: Some(1000),
+        }
+    }
+
+    /// Soft_Reset, a built control message at or below 5 V.
+    fn soft_reset() -> PdMessageRequest {
+        PdMessageRequest {
+            sop: MessageSop::Sop,
+            msg_type: 13,
+            data_objects: Vec::new(),
+        }
+    }
+
+    /// A built Request for position 2 (9 V): above 5 V.
+    fn built_9v() -> PdMessageRequest {
+        PdMessageRequest {
+            sop: MessageSop::Sop,
+            msg_type: 2,
+            data_objects: vec![0x2304_B12C],
+        }
+    }
+
+    /// `c` is disarmed: an unconfirmed 9 V is refused with nothing written.
+    fn disarmed(sim: &SimPdm, c: &TriggerControl) {
+        assert!(!c.armed().expect("armed"), "still armed");
+        assert_eq!(c.risk(pd(2)).expect("risk"), RiskClass::Above5VRememberable);
+        let before = sim.writes().len();
+        let err = c.request(pd(2), false).expect_err("needs a confirmation");
+        assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+        assert_eq!(writes_after(sim, before), Vec::<String>::new());
+    }
+
+    /// A handle to an ended session never reads as armed, and the next session
+    /// on the same meter starts disarmed.
+    fn ended_disarmed(sim: &SimPdm, old: &TriggerControl) {
+        assert!(
+            !old.armed().unwrap_or(false),
+            "an ended session reads armed"
+        );
+        let (_, clock) = self::sim(SimCharger::Epr140W);
+        let next = TriggerWorker::spawn(sim.open_port(), clock).expect("a new session");
+        let c = next.control();
+        assert!(!c.armed().expect("armed"), "a new session starts armed");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        disarmed(sim, &c);
+        next.close().expect("close");
+    }
+
+    // ---- AC-AXHK2N.1, .6: what can arm ----
+
+    #[test]
+    fn a_session_starts_disarmed() {
+        let (sim, w) = worker(SimCharger::Epr140W);
+        let c = w.control();
+        assert!(!c.armed().expect("armed"));
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn confirm_maps_from_the_old_flag() {
+        assert_eq!(Confirm::from(false), Confirm::No);
+        assert_eq!(Confirm::from(true), Confirm::Yes);
+    }
+
+    #[test]
+    fn an_offer_of_known_voltage_up_to_20v_is_rememberable() {
+        let (_sim, w) = worker(SimCharger::Pps65W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        for r in [pd(2), pd(3), pd(4), pps(9000), pps(20_000)] {
+            assert_eq!(
+                c.risk(r).expect("risk"),
+                RiskClass::Above5VRememberable,
+                "{r:?}"
+            );
+        }
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_plain_confirmation_does_not_arm() {
+        let (sim, w) = worker(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), true).expect("9 V");
+        assert!(!c.armed().expect("armed"));
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn remembering_a_request_that_does_not_qualify_is_refused_with_nothing_written() {
+        let (sim, w) = worker(SimCharger::Pps65W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let before = sim.writes().len();
+        let err = c
+            .request(pps(21_000), Confirm::YesRemember)
+            .expect_err("above 20 V");
+        assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        assert!(!c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn remembering_an_epr_request_is_refused_with_nothing_written() {
+        let (sim, w) = worker(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let before = sim.writes().len();
+        for r in [pd(8), avs(18_000)] {
+            let err = c.request(r, Confirm::YesRemember).expect_err("EPR");
+            assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+        }
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        assert!(!c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn remembering_a_legacy_request_is_refused_with_nothing_written() {
+        let (sim, w) = worker(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        let before = sim.writes().len();
+        let err = c
+            .request(TriggerRequest::Qc { volts: 9 }, Confirm::YesRemember)
+            .expect_err("not PD");
+        assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        assert!(!c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    // ---- AC-AXHK2N.2: armed requests send unconfirmed ----
+
+    #[test]
+    fn armed_a_fixed_request_up_to_20v_sends_unconfirmed() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        for (r, cmd) in [(pd(3), "pd req=3"), (pd(4), "pd req=4")] {
+            assert_eq!(c.risk(r).expect("risk"), RiskClass::Armed);
+            let before = sim.writes().len();
+            let reply = c.request(r, false).expect("no confirmation needed");
+            assert_eq!(reply.command, cmd);
+            assert!(writes_after(&sim, before).iter().any(|w| w == cmd));
+        }
+        assert!(c.armed().expect("armed"), "still armed");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn armed_a_pps_request_up_to_20v_sends_unconfirmed() {
+        let (sim, w) = armed_session(SimCharger::Pps65W);
+        let c = w.control();
+        assert_eq!(c.risk(pps(20_000)).expect("risk"), RiskClass::Armed);
+        let reply = c.request(pps(20_000), false).expect("20 V");
+        assert_eq!(reply.requested_mv, Some(20_000));
+        assert!(sim.vbus_mv() > 19_000, "VBUS {} mV", sim.vbus_mv());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_pps_request_can_arm() {
+        let (_sim, w) = worker(SimCharger::Pps65W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pps(12_000), Confirm::YesRemember).expect("12 V");
+        assert!(c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn listing_the_same_offers_again_stays_armed() {
+        let (_sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        assert!(c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_request_refused_before_anything_is_written_stays_armed() {
+        let (sim, w) = armed_session(SimCharger::Pps65W);
+        let c = w.control();
+        let before = sim.writes().len();
+        c.request(pps(25_000), false).expect_err("out of range");
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        assert!(c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    // ---- AC-AXHK2N.3: what always asks, armed or not ----
+
+    /// Armed, `request` still asks: risk `above_5v`, refused unconfirmed with
+    /// nothing written.
+    fn always_asks(sim: &SimPdm, c: &TriggerControl, request: TriggerRequest) {
+        assert_eq!(c.risk(request).expect("risk"), RiskClass::Above5V);
+        let before = sim.writes().len();
+        let err = c.request(request, false).expect_err("needs a confirmation");
+        assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+        assert_eq!(writes_after(sim, before), Vec::<String>::new());
+    }
+
+    #[test]
+    fn armed_a_request_above_20v_asks() {
+        let (sim, w) = armed_session(SimCharger::Pps65W);
+        always_asks(&sim, &w.control(), pps(20_100));
+        always_asks(&sim, &w.control(), pps(21_000));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn armed_an_epr_fixed_request_asks() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        always_asks(&sim, &w.control(), pd(8));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn armed_an_epr_avs_request_asks_even_at_18v() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        always_asks(&sim, &w.control(), avs(18_000));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_confirmed_request_that_does_not_qualify_disarms() {
+        let (_sim, w) = armed_session(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.request(TriggerRequest::Qc { volts: 9 }, true)
+            .expect("confirmed");
+        assert!(!c.armed().expect("armed"));
+        w.close().expect("close");
+        let (_sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        c.request(pd(8), true).expect("confirmed");
+        assert!(!c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn armed_a_non_pd_request_asks() {
+        let (sim, w) = armed_session(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        always_asks(&sim, &c, TriggerRequest::Qc { volts: 9 });
+        c.list(TriggerProtocol::Ufcs).expect("list ufcs");
+        always_asks(
+            &sim,
+            &c,
+            TriggerRequest::Ufcs {
+                index: 1,
+                voltage_mv: 9000,
+                current_ma: 1000,
+            },
+        );
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn armed_a_raw_console_line_asks() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        for line in ["pd req=3", "unknown text"] {
+            assert_eq!(
+                c.console_risk(line.to_owned()).expect("risk"),
+                RiskClass::Above5V
+            );
+            let before = sim.writes().len();
+            let err = c
+                .console_send(line.to_owned(), false)
+                .expect_err("needs a confirmation");
+            assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+            assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        }
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn armed_a_built_message_asks() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        assert_eq!(
+            c.message_risk(built_9v()).expect("risk"),
+            RiskClass::Above5V
+        );
+        let before = sim.writes().len();
+        let err = c
+            .send_message(built_9v(), false)
+            .expect_err("needs a confirmation");
+        assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    // ---- AC-AXHK2N.4: the ways it ends ----
+
+    #[test]
+    fn back_to_5v_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        c.back_to_5v().expect("back to 5 V");
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_hard_reset_from_the_console_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        c.console_send("pd hrst".to_owned(), false)
+            .expect("at most 5 V");
+        assert!(sim.writes().iter().any(|w| w.trim() == "pd hrst"));
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn disconnecting_the_meter_disarms() {
+        let (mut m, _events) = connected(50);
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        m.install_trigger(w).expect("install");
+        let c = m.trigger_control().expect("open");
+        m.disconnect().expect("disconnect");
+        ended_disarmed(&sim, &c);
+    }
+
+    #[test]
+    fn losing_the_serial_port_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        // Reopening the tty makes the session's own handle fail.
+        let _other = sim.open_port();
+        c.request(pd(3), false).expect_err("the port is gone");
+        assert!(!c.armed().expect("armed"), "still armed");
+        drop(w);
+    }
+
+    #[test]
+    fn closing_the_trigger_session_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        w.close().expect("close");
+        ended_disarmed(&sim, &c);
+    }
+
+    #[test]
+    fn dropping_the_trigger_session_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        drop(w);
+        ended_disarmed(&sim, &c);
+    }
+
+    #[test]
+    fn quitting_the_app_disarms() {
+        let (mut m, _events) = connected(50);
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        m.install_trigger(w).expect("install");
+        let c = m.trigger_control().expect("open");
+        m.shutdown();
+        ended_disarmed(&sim, &c);
+    }
+
+    // ---- AC-AXHK2N.5: Clear ----
+
+    #[test]
+    fn disarm_clears_at_once_and_writes_nothing() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        let before = sim.writes().len();
+        c.disarm().expect("disarm");
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn disarming_a_disarmed_session_is_a_no_op() {
+        let (_sim, w) = worker(SimCharger::Epr140W);
+        let c = w.control();
+        c.disarm().expect("disarm");
+        assert!(!c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    // ---- AC-AXHK2N.8: the other ways it ends ----
+
+    #[test]
+    fn a_pd_request_at_5v_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        c.request(pd(1), false).expect("5 V");
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_pps_request_at_or_below_5v_disarms() {
+        let (_sim, w) = armed_session(SimCharger::Pps65W);
+        let c = w.control();
+        c.request(pps(5000), false).expect("5 V");
+        assert!(!c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_legacy_request_at_5v_disarms() {
+        let (_sim, w) = armed_session(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.request(TriggerRequest::Qc { volts: 5 }, false)
+            .expect("5 V");
+        assert!(!c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn detect_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        c.detect().expect("detect");
+        assert!(!c.armed().expect("armed"), "still armed");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_built_message_at_or_below_5v_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        assert_eq!(
+            c.message_risk(soft_reset()).expect("risk"),
+            RiskClass::AtMost5V
+        );
+        c.send_message(soft_reset(), false).expect("sent");
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_confirmed_built_message_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        c.send_message(built_9v(), true).expect("sent");
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_console_line_at_or_below_5v_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        c.console_send("pd cmd=13".to_owned(), false).expect("sent");
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_confirmed_console_line_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        c.console_send("pd req=3".to_owned(), true).expect("sent");
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_read_only_console_line_stays_armed() {
+        let (_sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        assert_eq!(
+            c.console_risk("pdm parm".to_owned()).expect("risk"),
+            RiskClass::ReadOnly
+        );
+        c.console_send("pdm parm".to_owned(), false).expect("sent");
+        assert!(c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn message_and_console_risk_never_report_the_new_classes() {
+        let (_sim, w) = worker(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let check = |c: &TriggerControl| {
+            assert_eq!(
+                c.message_risk(built_9v()).expect("risk"),
+                RiskClass::Above5V
+            );
+            assert_eq!(
+                c.console_risk("pd req=2".to_owned()).expect("risk"),
+                RiskClass::Above5V
+            );
+        };
+        check(&c);
+        c.request(pd(2), Confirm::YesRemember).expect("9 V");
+        check(&c);
         w.close().expect("close");
     }
 }
@@ -2405,6 +3116,10 @@ mod sync_tests {
         }
         fn writes(&self) -> Vec<String> {
             self.0.lock().unwrap().writes.clone()
+        }
+        /// Bytes waiting on the port that nothing asked for.
+        fn arrive(&self, bytes: &[u8]) {
+            self.0.lock().unwrap().pending.extend(bytes);
         }
     }
 
@@ -3043,5 +3758,308 @@ mod sync_tests {
         let err = c.back_to_5v().expect_err("VBUS is not confirmed");
         assert!(text(&err).contains("above 5 v"), "{err:?}");
         assert_eq!(&port.writes()[before..], ["pd hrst", "pdm close"]);
+    }
+
+    // ---- AC-AXHK2N.2, .4, .6, .8: failures and changed offers while armed ----
+
+    const NOT_ARMED: &str = "still armed";
+
+    /// `entry pd` on a charger whose four SPR offers are `pdos`.
+    fn entry_pd_offering(pdos: [u32; 4]) -> Vec<u8> {
+        let mut b = b"ok\ncc1 attach\npdo:4\x0b".to_vec();
+        for p in pdos {
+            b.extend(p.to_le_bytes());
+        }
+        b.extend([0u8; 7 * 4]);
+        b.extend(b"\nready:5191mV,0mA\n");
+        b
+    }
+
+    /// The offers `entry_pd_reply` gives, with position 2 at 12 V instead of 9 V.
+    const OFFERS_12V_AT_2: [u32; 4] = [0x0981_912C, 0x0003_C12C, 0x0004_B12C, 0x0006_41D6];
+
+    /// The 140 W charger behind the meter, armed at 9 V.
+    fn armed(extra: &[(&str, &[u8])]) -> (Scripted, TriggerWorker, TriggerControl) {
+        let port = charger(&[("entry qc", b"ok\nready\n")]);
+        let port = extra
+            .iter()
+            .fold(port, |port, (cmd, reply)| port.on(cmd, reply));
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), Confirm::YesRemember).expect("9 V");
+        assert!(c.armed().expect("armed"));
+        (port, w, c)
+    }
+
+    #[test]
+    fn a_failed_arming_request_does_not_arm() {
+        let port = charger(&[("pd req=2", b"req error 252\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), Confirm::YesRemember)
+            .expect_err("the charger refused");
+        assert!(port.writes().iter().any(|w| w == "pd req=2"));
+        assert!(!c.armed().expect("armed"), "armed by a failed request");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_request_the_charger_refuses_disarms() {
+        let (port, w, c) = armed(&[("pd req=3", b"req error 252\n")]);
+        let err = c.request(pd(3), false).expect_err("the charger refused");
+        assert_eq!(err.kind, ErrorKind::Protocol, "{err:?}");
+        assert!(port.writes().iter().any(|w| w == "pd req=3"));
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_request_nobody_answers_disarms() {
+        // No reply is scripted for `pd req=3`: written, then a timeout.
+        let (port, w, c) = armed(&[]);
+        c.request(pd(3), false).expect_err("no reply");
+        assert!(port.writes().iter().any(|w| w == "pd req=3"));
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_request_answered_out_of_sync_disarms() {
+        let (port, w, c) = armed(&[("pd req=3", b"type=0,em=2,sink=0\n")]);
+        let err = c.request(pd(3), false).expect_err("out of sync");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        assert!(port.writes().iter().any(|w| w == "pd req=3"));
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        let _ = c.back_to_5v();
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn back_to_5v_through_a_hard_reset_disarms() {
+        // `pd req=1` fails, so the way back falls to the Hard Reset.
+        let (port, w, c) = armed(&[
+            ("pd req=1", b"req error 252\n"),
+            ("pd hrst", &entry_pd_reply()[b"ok\ncc1 attach\n".len()..]),
+        ]);
+        c.back_to_5v().expect("back through the Hard Reset");
+        assert!(port.writes().iter().any(|w| w == "pd hrst"));
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn back_to_5v_that_fails_out_of_sync_still_disarms() {
+        let (port, w, c) = armed(&[]);
+        let port = port.on("pdm parm", b"req error 252\n");
+        let err = c.list(TriggerProtocol::Pd).expect_err("out of sync");
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        c.back_to_5v().expect_err("VBUS is not confirmed");
+        assert!(port.writes().iter().any(|w| w == "pd hrst"));
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn listing_changed_offers_disarms() {
+        let (port, w, c) = armed(&[]);
+        let _port = port.on("entry pd", &entry_pd_offering(OFFERS_12V_AT_2));
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_console_entry_with_changed_offers_disarms() {
+        // `entry pd` is itself a console line that is not read-only, so
+        // this also holds without the offers check.
+        let (port, w, c) = armed(&[]);
+        let _port = port.on("entry pd", &entry_pd_offering(OFFERS_12V_AT_2));
+        c.console_send("entry pd".to_owned(), false).expect("sent");
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn an_armed_request_whose_offer_changed_is_refused_not_sent() {
+        let (port, w, c) = armed(&[]);
+        // QC entered last, so the request enters PD again and sees the change.
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        let port = port.on("entry pd", &entry_pd_offering(OFFERS_12V_AT_2));
+        let before = port.writes().len();
+        c.request(pd(2), false).expect_err("the offer changed");
+        let writes = port.writes()[before..].to_vec();
+        assert!(writes.iter().any(|w| w == "entry pd"), "{writes:?}");
+        assert!(!writes.iter().any(|w| w == "pd req=2"), "{writes:?}");
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    /// `armed`, then another charger's `pdo:` block arrives unasked, with the
+    /// reply to a read-only line that keeps it armed.
+    fn armed_then_an_unasked_block() -> (Scripted, TriggerWorker, TriggerControl) {
+        let (port, w, c) = armed(&[]);
+        let reply = [
+            entry_pd_offering(OFFERS_12V_AT_2),
+            b"type=0,em=2,sink=0\n".to_vec(),
+        ]
+        .concat();
+        let port = port.on("pdm parm", &reply);
+        c.console_send("pdm parm".to_owned(), false).expect("sent");
+        (port, w, c)
+    }
+
+    #[test]
+    fn an_unasked_block_makes_the_next_risk_ask_again() {
+        let (_port, w, c) = armed_then_an_unasked_block();
+        assert_eq!(c.risk(pd(2)).expect("risk"), RiskClass::Above5VRememberable);
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn an_unasked_block_refuses_the_held_request_with_nothing_sent() {
+        let (port, w, c) = armed_then_an_unasked_block();
+        let before = port.writes().len();
+        c.request(pd(2), false).expect_err("the offers changed");
+        assert_eq!(port.writes()[before..], [] as [String; 0]);
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_block_waiting_unread_on_the_port_refuses_the_held_request() {
+        let (port, w, c) = armed(&[]);
+        port.arrive(&entry_pd_offering(OFFERS_12V_AT_2));
+        let before = port.writes().len();
+        c.request(pd(2), false).expect_err("the offers changed");
+        assert_eq!(port.writes()[before..], [] as [String; 0]);
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_block_waiting_unread_on_the_port_shows_in_risk_and_armed() {
+        let (port, w, c) = armed(&[]);
+        port.arrive(&entry_pd_offering(OFFERS_12V_AT_2));
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+        let (port, w, c) = armed(&[]);
+        port.arrive(&entry_pd_offering(OFFERS_12V_AT_2));
+        assert_eq!(c.risk(pd(2)).expect("risk"), RiskClass::Above5VRememberable);
+        drop(c);
+        let _ = w.close();
+    }
+
+    /// A session whose page was shown 9 V at position 2, with 12 V there now.
+    fn shown_9v_now_12v() -> (Scripted, TriggerWorker, TriggerControl) {
+        let port = charger(&[]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let reply = [
+            entry_pd_offering(OFFERS_12V_AT_2),
+            b"type=0,em=2,sink=0\n".to_vec(),
+        ]
+        .concat();
+        let port = port.on("pdm parm", &reply);
+        c.console_send("pdm parm".to_owned(), false).expect("sent");
+        (port, w, c)
+    }
+
+    #[test]
+    fn a_confirmation_of_a_voltage_the_page_no_longer_shows_is_refused() {
+        let (port, w, c) = shown_9v_now_12v();
+        // The risk call takes the new block in, and the dialog still says 9 V.
+        c.risk(pd(2)).expect("risk");
+        let before = port.writes().len();
+        c.request(pd(2), true).expect_err("the page showed 9 V");
+        c.request(pd(2), Confirm::YesRemember)
+            .expect_err("the page showed 9 V");
+        assert_eq!(port.writes()[before..], [] as [String; 0]);
+        assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn listing_again_shows_the_new_offers_so_the_request_goes_out() {
+        let (port, w, c) = shown_9v_now_12v();
+        let port = port
+            .on("entry pd", &entry_pd_offering(OFFERS_12V_AT_2))
+            .on("pdm parm", b"type=0,em=2,sink=0\n")
+            .on("pd req=2", b"req:12000mV,3000mA\nready:12000mV,0mA\n");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), true).expect("the page shows 12 V now");
+        assert!(port.writes().iter().any(|w| w == "pd req=2"));
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn armed_a_request_of_unknown_voltage_is_refused_with_nothing_sent() {
+        let (port, w, c) = armed(&[]);
+        let before = port.writes().len();
+        // No offer at position 6: nothing says what it would raise VBUS to.
+        c.request(pd(6), false).expect_err("no such offer");
+        assert_eq!(port.writes()[before..], [] as [String; 0]);
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_confirmed_request_whose_offer_changed_is_refused_not_sent() {
+        // The dialog named 9 V; position 2 is 12 V by the time it is answered.
+        let port = charger(&[("entry qc", b"ok\nready\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        let port = port.on("entry pd", &entry_pd_offering(OFFERS_12V_AT_2));
+        let before = port.writes().len();
+        c.request(pd(2), true).expect_err("the offer changed");
+        let writes = port.writes()[before..].to_vec();
+        assert!(!writes.iter().any(|w| w == "pd req=2"), "{writes:?}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_remembered_request_whose_offer_changed_is_refused_and_does_not_arm() {
+        let port = charger(&[("entry qc", b"ok\nready\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        let port = port.on("entry pd", &entry_pd_offering(OFFERS_12V_AT_2));
+        let before = port.writes().len();
+        c.request(pd(2), Confirm::YesRemember)
+            .expect_err("the offer changed");
+        let writes = port.writes()[before..].to_vec();
+        assert!(!writes.iter().any(|w| w == "pd req=2"), "{writes:?}");
+        assert!(!c.armed().expect("armed"), "armed on a changed offer");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn entering_pd_again_with_the_same_offers_stays_armed() {
+        let (port, w, c) = armed(&[("pd req=3", b"req:15000mV,3000mA\nready:14800mV,0mA\n")]);
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.request(pd(3), false).expect("the same offers");
+        assert!(port.writes().iter().any(|w| w == "pd req=3"));
+        assert!(c.armed().expect("armed"));
+        w.close().expect("close");
     }
 }

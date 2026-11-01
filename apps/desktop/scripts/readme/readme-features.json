@@ -14,6 +14,7 @@
   "V9SK55": "firmware-update: advanced firmware switch",
   "V9SK56": null,
   "PR41FT": "protocol-triggers: confirmation above 5 v",
+  "AXHK2N": "protocol-triggers: don't ask again",
   "DGSQ6P": "protocol-triggers: trigger 9 v from a pd charger",
   "DGSQ6Q": "protocol-triggers: qc 2.0/3.0, fcp, afc",
   "DGSQ6R": "protocol-triggers: detect which fast-charge protocols",

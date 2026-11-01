@@ -48,6 +48,7 @@ check the download and open the app past the macOS and Windows warnings.
 
 - Detect which fast-charge protocols a charger speaks ([trigger a charger](docs/how-to/trigger-a-charger.md))
 - Trigger 9 V from a PD charger, or any fixed, PPS or EPR AVS voltage it offers, from the desktop trigger panel or the CLI, with a confirmation above 5 V and a way back to 5 V ([trigger a charger](docs/how-to/trigger-a-charger.md))
+- Skip the dialog for PD requests up to 20 V with "Don't ask again" in the desktop trigger panel, until you go back to 5 V or disconnect ([trigger a charger](docs/how-to/trigger-a-charger.md#dont-ask-again))
 - Trigger QC 2.0/3.0, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS chargers ([CLI triggering](docs/reference/cli.md#protocol-triggering))
 - Send custom PD messages, read a cable's e-marker, or type raw commands in a console ([custom PD messages](docs/reference/cli.md#custom-pd-messages))
 

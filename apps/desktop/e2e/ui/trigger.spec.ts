@@ -640,3 +640,214 @@ test("detection names which check said what when they disagree (AC-DGSQ6R.8)", a
   const detection = view(page).getByRole("region", { name: "Detection" });
   await expect(detection).toContainText("entry bc: not supported · list: supported");
 });
+
+// ---- FR AXHK2N: "don't ask again" ----
+//
+// Page contract: the dialog of a USB PD fixed, PPS or SPR AVS offer up to 20 V has a
+// checkbox named "Don't ask again until I go back to 5 V or disconnect", reachable with
+// Tab; while the backend is armed the view shows "Not asking up to 20 V" with a button
+// named "Clear". The mock's rules are the backend's.
+
+const REMEMBER = "Don't ask again until I go back to 5 V or disconnect";
+const ARMED_STATUS = "Not asking up to 20 V";
+
+function remember(page: Page): Locator {
+  return dialog(page).getByRole("checkbox", { name: REMEMBER });
+}
+
+function armedStatus(page: Page): Locator {
+  return view(page).getByText(ARMED_STATUS);
+}
+
+function clearButton(page: Page): Locator {
+  return view(page).getByRole("button", { name: "Clear", exact: true });
+}
+
+/** Request 9 V and confirm with the box checked: the backend is armed. */
+async function arm(page: Page): Promise<void> {
+  await offerButton(page, 9).click();
+  await remember(page).check();
+  await dialog(page).getByRole("button", { name: "Confirm" }).click();
+  await expect(dialog(page)).toBeHidden();
+  await expect(armedStatus(page)).toBeVisible();
+}
+
+/** Clicks the 15 V offer and expects it to reach the charger with no dialog. */
+async function sends15VUnasked(page: Page): Promise<void> {
+  await offerButton(page, 15).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pd req=3");
+  await expect(dialog(page)).toBeHidden();
+}
+
+/** Clicks the 15 V offer and expects the dialog, then cancels it. */
+async function asks15V(page: Page): Promise<void> {
+  await offerButton(page, 15).click();
+  await expect(dialog(page)).toBeVisible();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog(page)).toBeHidden();
+}
+
+async function typeConsoleLine(page: Page, line: string): Promise<void> {
+  const console = view(page).getByRole("region", { name: "Console", exact: true });
+  await console.getByLabel("Command").fill(line);
+  await console.getByRole("button", { name: "Send", exact: true }).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe(line);
+}
+
+test("the dialog offers the checkbox, unchecked, up to 20 V only (AC-AXHK2N.1)", async ({
+  page,
+}) => {
+  await detected(page);
+  await offerButton(page, 9).click();
+  await expect(remember(page)).toBeVisible();
+  await expect(remember(page)).not.toBeChecked();
+  await remember(page).check();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog(page)).toBeHidden();
+  // Unchecked again the next time.
+  await offerButton(page, 20).click();
+  await expect(remember(page)).not.toBeChecked();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  // Not for an EPR offer, nor for another protocol.
+  await offerButton(page, 28).click();
+  await expect(dialog(page)).toBeVisible();
+  await expect(remember(page)).toHaveCount(0);
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  await section(page, "QC")
+    .getByRole("button", { name: /^9 V\b/ })
+    .click();
+  await expect(dialog(page)).toBeVisible();
+  await expect(remember(page)).toHaveCount(0);
+});
+
+test("Tab stays in the dialog after a click on its text or the backdrop (AC-AXHK2N.1)", async ({
+  page,
+}) => {
+  await detected(page);
+  await offerButton(page, 9).click();
+  await dialog(page).locator("#trigger-confirm-text").click();
+  await page.keyboard.press("Shift+Tab");
+  await expect(dialog(page).locator(":focus")).toHaveCount(1);
+  await page.mouse.click(4, 4);
+  await page.keyboard.press("Tab");
+  await expect(dialog(page).locator(":focus")).toHaveCount(1);
+});
+
+test("the checkbox is reached with Tab and toggled with Space (AC-AXHK2N.1)", async ({ page }) => {
+  await detected(page);
+  await offerButton(page, 9).click();
+  await expect(dialog(page).getByRole("button", { name: "Cancel" })).toBeFocused();
+  await tabTo(page, remember(page), 4);
+  await page.keyboard.press("Space");
+  await expect(remember(page)).toBeChecked();
+});
+
+test("the checked box keeps later requests from asking (AC-AXHK2N.2, .5)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await sends15VUnasked(page);
+  await expect(armedStatus(page)).toBeVisible();
+});
+
+test("an unchecked box leaves the next request asking (AC-AXHK2N.2)", async ({ page }) => {
+  await detected(page);
+  await request9V(page);
+  await expect(armedStatus(page)).toBeHidden();
+  await asks15V(page);
+});
+
+test("armed, EPR, other protocols and the console still ask (AC-AXHK2N.3)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  const before = (await commands(page)).length;
+  await offerButton(page, 28).click();
+  await expect(dialog(page)).toBeVisible();
+  await expect(remember(page)).toHaveCount(0);
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  await section(page, "QC")
+    .getByRole("button", { name: /^9 V\b/ })
+    .click();
+  await expect(dialog(page)).toBeVisible();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  const console = view(page).getByRole("region", { name: "Console", exact: true });
+  await console.getByLabel("Command").fill("pd req=3");
+  await console.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(dialog(page)).toBeVisible();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  expect(await commands(page)).toHaveLength(before);
+  await expect(armedStatus(page)).toBeVisible();
+});
+
+test("Clear brings the dialog back at once (AC-AXHK2N.5)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await clearButton(page).click();
+  await expect(armedStatus(page)).toBeHidden();
+  await expect(clearButton(page)).toBeHidden();
+  await asks15V(page);
+});
+
+test("Back to 5 V ends it (AC-AXHK2N.4)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await backButton(page).click();
+  await expect(armedStatus(page)).toBeHidden();
+  await asks15V(page);
+});
+
+test("a page reload does not arm (AC-AXHK2N.4)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await page.reload();
+  await streamDemo(page);
+  await showTrigger(page);
+  await expect(armedStatus(page)).toBeHidden();
+  await detectButton(page).click();
+  await expect(section(page, "USB PD").getByRole("button").first()).toBeVisible();
+  await asks15V(page);
+});
+
+test("the 5 V offer ends it (AC-AXHK2N.8)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await offerButton(page, 5).click();
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("Detect ends it (AC-AXHK2N.8)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await detectButton(page).click();
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("a console line that is not read-only updates the status (AC-AXHK2N.8)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await typeConsoleLine(page, "pdm parm");
+  await expect(armedStatus(page)).toBeVisible();
+  await typeConsoleLine(page, "pd hrst");
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("a built message updates the status (AC-AXHK2N.8)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  const builder = view(page).getByRole("region", { name: "PD message builder" });
+  await builder.getByLabel("Target").selectOption({ label: "SOP" });
+  await builder.getByLabel("Message type").fill("13");
+  await builder.getByLabel("Data objects").fill("");
+  await builder.getByRole("button", { name: "Send message" }).click();
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("the dialog with the checkbox and the status pass axe (AC-AXHK2N.1, .5)", async ({ page }) => {
+  await detected(page);
+  await offerButton(page, 9).click();
+  await expect(remember(page)).toBeVisible();
+  expect(await axeBlocking(page)).toEqual([]);
+  await remember(page).check();
+  await dialog(page).getByRole("button", { name: "Confirm" }).click();
+  await expect(armedStatus(page)).toBeVisible();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});

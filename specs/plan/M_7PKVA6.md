@@ -57,7 +57,7 @@ Build order: the table's order. AXHK2W goes last so it measures the finished cha
   verify: Vitest and Playwright tile flows
 - [x] Firmware, trigger and release review leftovers — AXHK2M
   verify: per-item unit tests
-- [ ] Trigger panel "don't ask again" — AXHK2N
+- [x] Trigger panel "don't ask again" — AXHK2N
   verify: disarm-path unit tests, Playwright, then a tester runbook
 - [ ] One-click cable e-marker panel — AXHK2P
   verify: simulator cable tests, Playwright, then a tester runbook

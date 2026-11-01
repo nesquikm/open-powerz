@@ -169,6 +169,8 @@
    * its own store as a tile (unless `keepShown` is false, when it ended), and the chart,
    * statistics, recording and PD views follow the meter shown. */
   function showInFullView(entry: MeterEntry, keepShown: boolean): void {
+    // Armed is per meter: the status follows the meter on screen.
+    void trigger.refreshArmed();
     if (entry.session === session) return;
     const shownId = meters.fullViewId;
     if (keepShown && shownId !== null) {
@@ -508,16 +510,22 @@
     detect: () => act().triggerDetect(),
     list: (protocol) => act().triggerList(protocol),
     risk: (request) => act().triggerRisk(request),
-    request: (request, confirmed) => act().triggerRequest(request, confirmed),
+    request: (request, confirmed, remember) => act().triggerRequest(request, confirmed, remember),
+    armed: () => act().triggerArmed(),
+    disarm: () => act().triggerDisarm(),
     backTo5v: () => act().triggerBackTo5v(),
     close: () => act().triggerClose(),
   });
+  /** What the console sends can end "don't ask again": the panel's status follows it. */
+  const refreshingArmed = <T,>(sent: Promise<T>): Promise<T> =>
+    sent.finally(() => trigger.refreshArmed());
   /** The PD message builder and raw console on the trigger session (FR DGSQ6T). */
   const pdConsole = new PdConsole({
     messageRisk: (message) => act().triggerMessageRisk(message),
-    messageSend: (message, confirmed) => act().triggerMessageSend(message, confirmed),
+    messageSend: (message, confirmed) =>
+      refreshingArmed(act().triggerMessageSend(message, confirmed)),
     consoleRisk: (line) => act().triggerConsoleRisk(line),
-    consoleSend: (line, confirmed) => act().triggerConsoleSend(line, confirmed),
+    consoleSend: (line, confirmed) => refreshingArmed(act().triggerConsoleSend(line, confirmed)),
   });
   // A closed trigger session takes the console's transcript, cable and error with it.
   $effect(() => {

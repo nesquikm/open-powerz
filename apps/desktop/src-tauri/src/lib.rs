@@ -459,19 +459,51 @@ async fn trigger_risk(
     .await
 }
 
-/// Send a request; above 5 V it is refused unless `confirmed` (the backend
-/// is the final gate).
+/// Send a request; above 5 V it is refused unless `confirmed` or covered by
+/// an armed "don't ask again" (the backend is the final gate). `remember`
+/// with `confirmed` asks to arm; the session decides whether it may.
 #[tauri::command]
 async fn trigger_request(
     state: Shared<'_>,
     device_id: Option<String>,
     request: trigger::TriggerRequest,
     confirmed: bool,
+    remember: Option<bool>,
 ) -> Result<trigger::TriggerReply, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let control = trigger_control(&state, device_id.as_deref())?;
-        control.request(request, confirmed)
+        let confirm = match (confirmed, remember) {
+            (true, Some(true)) => trigger::Confirm::YesRemember,
+            _ => confirmed.into(),
+        };
+        control.request(request, confirm)
+    })
+    .await
+}
+
+/// Whether "don't ask again" is armed; false with no trigger session.
+#[tauri::command]
+async fn trigger_armed(state: Shared<'_>, device_id: Option<String>) -> Result<bool, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        Ok(trigger_control(&state, device_id.as_deref())
+            .and_then(|control| control.armed())
+            .unwrap_or(false))
+    })
+    .await
+}
+
+/// End "don't ask again"; with no trigger session there is nothing to end.
+#[tauri::command]
+async fn trigger_disarm(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        if let Ok(control) = trigger_control(&state, device_id.as_deref()) {
+            // A session that ended is not armed either.
+            let _ = control.disarm();
+        }
+        Ok(())
     })
     .await
 }
@@ -1373,6 +1405,8 @@ pub fn run() {
             trigger_list,
             trigger_risk,
             trigger_request,
+            trigger_armed,
+            trigger_disarm,
             trigger_back_to_5v,
             trigger_message_risk,
             trigger_message_send,

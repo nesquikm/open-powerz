@@ -25,7 +25,9 @@ export interface TriggerApi {
   detect(): Promise<Detection>;
   list(protocol: TriggerProtocol): Promise<ProtocolSection>;
   risk(request: TriggerRequest): Promise<RiskClass>;
-  request(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply>;
+  request(request: TriggerRequest, confirmed: boolean, remember?: boolean): Promise<TriggerReply>;
+  armed(): Promise<boolean>;
+  disarm(): Promise<void>;
   backTo5v(): Promise<void>;
   close(): Promise<void>;
 }
@@ -128,6 +130,8 @@ export interface PendingConfirmation {
   /** What the dialog says: names the voltage and asks the user to confirm that
    * nothing unsafe is connected to the output. */
   text: string;
+  /** The dialog offers "don't ask again". */
+  rememberable: boolean;
 }
 
 /** Whether `vbusV` differs from `requestedMv` by more than {@link DEVIATION_LIMIT}. */
@@ -223,6 +227,11 @@ export class TriggerPanel {
   sections = $state<SectionView[]>([]);
   /** The request waiting for confirmation, null when none. */
   pending = $state<PendingConfirmation | null>(null);
+  /** The dialog's "don't ask again" box; unchecked each time a dialog opens. */
+  remember = $state(false);
+  /** The backend is armed: later requests up to 20 V send with no dialog. The backend
+   * decides, this only shows it. */
+  armed = $state(false);
   /** The charger's answer to the last request. */
   reply = $state<TriggerReply | null>(null);
   /** Why the last request failed (error reply, timeout, refusal), null when it did not. */
@@ -244,6 +253,8 @@ export class TriggerPanel {
   #settled = false;
   /** The view was left since the last {@link detect} started. */
   #left = false;
+  /** Bumped by each armed read and each session end: only the latest read counts. */
+  #armedRead = 0;
 
   /** The view was left or the session closed: late answers are dropped. */
   get #gone(): boolean {
@@ -289,8 +300,16 @@ export class TriggerPanel {
           await this.leave();
           return;
         }
+        // What the backend says, not what this page last saw.
+        await this.refreshArmed();
+        if (this.#gone) return;
       }
-      this.detection = await this.#api.detect();
+      try {
+        this.detection = await this.#api.detect();
+      } finally {
+        // The backend disarmed before it wrote anything, so a failed detection counts too.
+        if (!this.#gone) await this.refreshArmed();
+      }
       for (const protocol of TRIGGER_PROTOCOLS) {
         if (this.#left || !this.sessionOpen) return;
         const section = await this.#api.list(protocol);
@@ -315,13 +334,19 @@ export class TriggerPanel {
       // The backend's classifier decides, not the UI's own guess.
       const risk = await this.#api.risk(request);
       if (this.#gone) return;
-      if (risk === "above_5v") {
+      // The backend looked at the port for this answer, so it may have just disarmed.
+      if (this.armed && risk !== "armed") await this.refreshArmed();
+      if (this.#gone) return;
+      // `armed` needs no dialog: it is sent unconfirmed, and the backend checks it again.
+      if (risk === "above_5v" || risk === "above_5v_rememberable") {
         const sections = this.sections.flatMap((s) => (s.section ? [s.section] : []));
         const mv = requestVoltageMv(request, sections);
+        this.remember = false;
         this.pending = {
           request,
           voltageMv: mv ?? 0,
           text: mv === null ? UNKNOWN_VOLTAGE_TEXT : confirmationText(mv),
+          rememberable: risk === "above_5v_rememberable",
         };
         return;
       }
@@ -339,7 +364,7 @@ export class TriggerPanel {
     if (this.requestsDisabled) return;
     this.error = null;
     try {
-      await this.#send(pending.request, true);
+      await this.#send(pending.request, true, pending.rememberable && this.remember);
     } catch (e) {
       if (!this.#left) this.#fail(e);
     }
@@ -358,15 +383,19 @@ export class TriggerPanel {
   }
 
   /** Sends `request` and keeps the reply. */
-  async #send(request: TriggerRequest, confirmed: boolean): Promise<void> {
+  async #send(request: TriggerRequest, confirmed: boolean, remember = false): Promise<void> {
     let reply: TriggerReply;
     try {
-      reply = await this.#api.request(request, confirmed);
+      reply = remember
+        ? await this.#api.request(request, confirmed, true)
+        : await this.#api.request(request, confirmed);
     } catch (e) {
       // The failure is this request's result: it replaces the previous reply.
       if (!this.#gone) {
         this.reply = null;
         this.requestFailure = e as UiError;
+        // A failure may have ended "don't ask again"; the backend knows.
+        await this.refreshArmed();
       }
       throw e;
     }
@@ -381,6 +410,30 @@ export class TriggerPanel {
         this.sections.flatMap((s) => (s.section ? [s.section] : [])),
       );
     this.#restartSettle();
+    await this.refreshArmed();
+  }
+
+  /** Takes the armed state from the backend; one that cannot answer is not armed. */
+  async refreshArmed(): Promise<void> {
+    const read = ++this.#armedRead;
+    let armed = false;
+    try {
+      armed = await this.#api.armed();
+    } catch {
+      // Reads as not armed.
+    }
+    if (read === this.#armedRead) this.armed = armed;
+  }
+
+  /** Ends "don't ask again" at once. */
+  async clearArmed(): Promise<void> {
+    this.error = null;
+    try {
+      await this.#api.disarm();
+    } catch (e) {
+      this.#fail(e);
+    }
+    await this.refreshArmed();
   }
 
   /** Clears the flag and compares VBUS again only {@link DEVIATION_DELAY_MS} from now. */
@@ -426,6 +479,8 @@ export class TriggerPanel {
     } catch (e) {
       if (!this.#left) this.#fail(e);
     }
+    // The backend disarmed before it wrote anything, so a failed way back counts too.
+    if (!this.#gone) await this.refreshArmed();
   }
 
   /** The view is left: back to 5 V where the protocol allows it, then close. */
@@ -458,6 +513,8 @@ export class TriggerPanel {
     this.sessionOpen = false;
     this.requestsDisabled = false;
     this.pending = null;
+    this.#armedRead += 1;
+    this.armed = false;
     this.reply = null;
     this.requestFailure = null;
     this.requestedMv = null;

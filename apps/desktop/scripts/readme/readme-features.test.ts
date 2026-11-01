@@ -435,6 +435,14 @@ describe("repository gate", () => {
     expect(checkReadmeLinks(readme, repoRoot)).toEqual([]);
   });
 
+  it('AC-AXHK2N.7: the README and the trigger how-to describe "don\'t ask again"', () => {
+    const triggers = parseFeatureAreas(readme).get("protocol-triggers") ?? [];
+    expect(triggers.join("\n")).toMatch(/don.t ask again/i);
+    const howTo = readFileSync(join(repoRoot, "docs/how-to/trigger-a-charger.md"), "utf8");
+    expect(howTo).toMatch(/don.t ask again/i);
+    expect(howTo).toMatch(/20 V/);
+  });
+
   it("CLI exits 0 on the repository", () => {
     const r = spawnSync("bun", [scriptPath, repoRoot], { encoding: "utf8", timeout: 30_000 });
     expect(r.error).toBeUndefined();

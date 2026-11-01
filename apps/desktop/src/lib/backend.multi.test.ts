@@ -135,6 +135,24 @@ describe("AC-1HHT03.3: a tile's actions name its meter", () => {
     ]);
   });
 
+  it('names the meter in the "don\'t ask again" commands (AC-AXHK2N.2, .5)', async () => {
+    const pd9v: TriggerRequest = {
+      protocol: "pd",
+      position: 2,
+      voltage_mv: null,
+      current_ma: null,
+    };
+    const a = meterBackend(A);
+    await a.triggerRequest(pd9v, true, true);
+    await a.triggerArmed();
+    await a.triggerDisarm();
+    expect(invoke.mock.calls).toEqual([
+      ["trigger_request", { deviceId: A, request: pd9v, confirmed: true, remember: true }],
+      ["trigger_armed", { deviceId: A }],
+      ["trigger_disarm", { deviceId: A }],
+    ]);
+  });
+
   it("keeps two tiles apart", async () => {
     await meterBackend(A).setRate(2);
     await meterBackend(B).setRate(1000);

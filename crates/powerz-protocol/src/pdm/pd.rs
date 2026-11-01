@@ -34,6 +34,9 @@ pub const MAX_READY_LINES: usize = 4;
 /// First object position of the EPR part of the source capabilities.
 pub const FIRST_EPR_POSITION: u8 = 8;
 
+/// The highest voltage a "don't ask again" may cover, mV (FR AXHK2N).
+pub const REMEMBER_LIMIT_MV: u32 = 20_000;
+
 /// What kind of supply an offer is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfferKind {
@@ -371,6 +374,33 @@ pub fn validate(offers: &[Offer], request: &Request) -> Result<Command, Error> {
             })
         }
     }
+}
+
+/// Whether a "don't ask again" may cover `request` (FR AXHK2N): a fixed, PPS or
+/// SPR AVS offer at an SPR position, at or below [`REMEMBER_LIMIT_MV`]. Decided
+/// from `offers` alone. A PPS or AVS request is judged at the larger of the
+/// request and the offer's minimum, as the risk classifier does.
+pub fn rememberable(offers: &[Offer], request: &Request) -> bool {
+    let Some(offer) = offer_of(offers, request) else {
+        return false;
+    };
+    if offer.is_epr() {
+        return false;
+    }
+    let voltage_mv = match (offer.kind, request) {
+        (OfferKind::Fixed, Request::Fixed { .. }) => offer.max_voltage_mv,
+        (OfferKind::Pps | OfferKind::SprAvs, Request::Programmable { voltage_mv, .. }) => {
+            (*voltage_mv).max(offer.min_voltage_mv)
+        }
+        _ => return false,
+    };
+    voltage_mv <= REMEMBER_LIMIT_MV
+}
+
+/// The offer `request` asks for, among `offers`.
+pub fn offer_of<'a>(offers: &'a [Offer], request: &Request) -> Option<&'a Offer> {
+    let (Request::Fixed { position, .. } | Request::Programmable { position, .. }) = *request;
+    offers.iter().find(|o| o.position == position)
 }
 
 /// The most current `offer` allows at `voltage_mv`, mA.
@@ -1131,5 +1161,161 @@ mod tests {
         }
         assert_eq!(PdType::from_code(4), None);
         assert_eq!(Emarker::from_name("bogus"), None);
+    }
+
+    // ---- AC-AXHK2N.1, .3, .6: what "don't ask again" may cover ----
+
+    const F_5V: u32 = 0x0001_912C;
+    const F_9V: u32 = 0x0002_D12C;
+    const F_20V: u32 = 0x0006_4145;
+    /// Fixed 21 V 3 A.
+    const F_21V: u32 = 0x0006_912C;
+    /// Variable 9-20 V 3 A.
+    const VARIABLE_20V: u32 = 0x8000_0000 | (400 << 20) | (180 << 10) | 300;
+    /// Battery 9-20 V 60 W.
+    const BATTERY_20V: u32 = 0x4000_0000 | (400 << 20) | (180 << 10) | 240;
+    /// PPS 3.3-21 V 3.25 A.
+    const PPS_21V: u32 = 0xC1A4_2141;
+    /// PPS 21-25 V 3 A: its minimum alone is above the limit.
+    const PPS_FROM_21V: u32 = 0xC000_0000 | (250 << 17) | (210 << 8) | 60;
+    /// SPR AVS 9-20 V, 3 A at both ranges.
+    const SPR_AVS: u32 = 0xE000_0000 | (300 << 10) | 300;
+    /// EPR AVS 15-28 V 140 W.
+    const EPR_AVS: u32 = 0xD230_968C;
+
+    /// The offers of a block whose slots start with `pdos`; a zero is an empty slot.
+    fn listed(pdos: &[u32]) -> Vec<Offer> {
+        let mut slots = pdos.to_vec();
+        slots.resize(11, 0);
+        offers(&Capabilities {
+            pd: Some(PdoBlock {
+                marker: b'0' + pdos.len() as u8,
+                slots,
+            }),
+            ..Capabilities::default()
+        })
+    }
+
+    fn fixed(position: u8) -> Request {
+        Request::Fixed {
+            position,
+            current_ma: None,
+        }
+    }
+
+    fn programmable(position: u8, voltage_mv: u32) -> Request {
+        Request::Programmable {
+            position,
+            voltage_mv,
+            current_ma: 1000,
+        }
+    }
+
+    #[test]
+    fn the_limit_is_20_v() {
+        assert_eq!(REMEMBER_LIMIT_MV, 20_000);
+    }
+
+    #[test]
+    fn fixed_offers_up_to_20v_are_rememberable_and_above_it_are_not() {
+        let list = listed(&[F_5V, F_9V, F_20V, F_21V]);
+        assert!(rememberable(&list, &fixed(2)));
+        assert!(rememberable(&list, &fixed(3)), "exactly 20 V");
+        assert!(!rememberable(&list, &fixed(4)), "21 V");
+    }
+
+    #[test]
+    fn a_limited_current_does_not_change_a_fixed_offers_answer() {
+        let list = listed(&[F_5V, F_9V, F_20V, F_21V]);
+        let at = |position| Request::Fixed {
+            position,
+            current_ma: Some(1000),
+        };
+        assert!(rememberable(&list, &at(2)));
+        assert!(!rememberable(&list, &at(4)));
+    }
+
+    #[test]
+    fn pps_is_judged_at_the_requested_voltage() {
+        let list = listed(&[F_5V, PPS_21V]);
+        assert!(rememberable(&list, &programmable(2, 9000)));
+        assert!(
+            rememberable(&list, &programmable(2, 20_000)),
+            "exactly 20 V"
+        );
+        assert!(!rememberable(&list, &programmable(2, 20_020)));
+        assert!(!rememberable(&list, &programmable(2, 21_000)));
+    }
+
+    #[test]
+    fn spr_avs_is_judged_at_the_requested_voltage() {
+        let list = listed(&[F_5V, SPR_AVS]);
+        assert_eq!(list[1].kind, OfferKind::SprAvs);
+        assert!(rememberable(&list, &programmable(2, 15_000)));
+        assert!(rememberable(&list, &programmable(2, 20_000)));
+        assert!(!rememberable(&list, &programmable(2, 20_100)));
+    }
+
+    #[test]
+    fn a_request_below_the_minimum_is_judged_at_the_minimum() {
+        let list = listed(&[F_5V, PPS_FROM_21V]);
+        assert_eq!(list[1].min_voltage_mv, 21_000);
+        assert!(!rememberable(&list, &programmable(2, 20_000)));
+        assert!(!rememberable(&list, &programmable(2, 9000)));
+    }
+
+    #[test]
+    fn an_epr_position_is_never_rememberable_at_any_voltage() {
+        // Position 8 is the first EPR slot.
+        let mut pdos = vec![F_5V, 0, 0, 0, 0, 0, 0, F_9V, EPR_AVS];
+        let list = listed(&pdos);
+        assert!(list[1].is_epr());
+        assert!(
+            !rememberable(&list, &fixed(8)),
+            "a 9 V fixed offer at slot 8"
+        );
+        assert!(
+            !rememberable(&list, &programmable(9, 18_000)),
+            "EPR AVS at 18 V"
+        );
+        pdos[7] = PPS_21V;
+        assert!(
+            !rememberable(&listed(&pdos), &programmable(8, 9000)),
+            "a PPS offer at slot 8"
+        );
+    }
+
+    #[test]
+    fn the_140w_chargers_epr_offers_are_not_rememberable() {
+        let list = offers(&epr_caps());
+        assert!(rememberable(&list, &fixed(4)), "20 V at an SPR position");
+        assert!(!rememberable(&list, &fixed(8)), "28 V");
+        assert!(!rememberable(&list, &programmable(9, 18_000)));
+    }
+
+    #[test]
+    fn battery_and_variable_offers_are_not_rememberable() {
+        let list = listed(&[F_5V, VARIABLE_20V, BATTERY_20V]);
+        assert_eq!(list[1].kind, OfferKind::Variable);
+        assert_eq!(list[2].kind, OfferKind::Battery);
+        assert!(!rememberable(&list, &fixed(2)));
+        assert!(!rememberable(&list, &fixed(3)));
+        assert!(!rememberable(&list, &programmable(2, 9000)));
+        assert!(!rememberable(&list, &programmable(3, 9000)));
+    }
+
+    #[test]
+    fn a_position_nothing_is_offered_at_is_not_rememberable() {
+        let list = listed(&[F_5V, F_9V]);
+        assert!(!rememberable(&list, &fixed(3)));
+        assert!(!rememberable(&list, &programmable(3, 9000)));
+        assert!(!rememberable(&[], &fixed(2)));
+    }
+
+    #[test]
+    fn a_request_of_the_wrong_kind_for_its_offer_is_not_rememberable() {
+        let list = listed(&[F_5V, F_9V, PPS_21V]);
+        assert!(!rememberable(&list, &programmable(2, 9000)), "fixed offer");
+        assert!(!rememberable(&list, &fixed(3)), "PPS offer");
     }
 }
