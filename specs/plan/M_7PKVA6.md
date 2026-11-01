@@ -49,7 +49,7 @@ Build order: the table's order. AXHK2W goes last so it measures the finished cha
   verify: targeted `devices.rs` tests, Vitest, Playwright prompt path
 - [x] The app log records errors and firmware updates — AXHK2G
   verify: temporary-log unit tests, including the serial scan
-- [ ] The MSRV job covers the desktop crate — AXHK2H
+- [x] The MSRV job covers the desktop crate — AXHK2H
   verify: `release-workflow.test.ts`, then the job's run on the PR
 - [ ] Settings writes and unplugs are detected reliably — AXHK2J
   verify: session and transport unit tests, then a tester runbook
