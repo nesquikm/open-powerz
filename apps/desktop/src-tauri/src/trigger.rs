@@ -957,7 +957,7 @@ fn closed() -> UiError {
 }
 
 /// A PDM session error, in plain language.
-pub(crate) fn pdm_error(err: &pdm::Error) -> UiError {
+pub fn pdm_error(err: &pdm::Error) -> UiError {
     use pdm::Error as E;
     match err {
         E::Timeout { .. } => UiError {
@@ -972,6 +972,7 @@ pub(crate) fn pdm_error(err: &pdm::Error) -> UiError {
             hint: Some("Plug the meter back in.".to_owned()),
             sessions: Vec::new(),
         },
+        E::PortHeld { .. } => crate::ui_error::port_held(),
         E::HighVoltageNotConfirmed { .. } => {
             UiError::usage("A request above 5 V needs your confirmation.")
         }

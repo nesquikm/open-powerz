@@ -1,6 +1,6 @@
 //! Vendor bulk transport on `nusb` (the default path).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nusb::Endpoint;
 use nusb::MaybeFuture;
@@ -8,7 +8,7 @@ use nusb::transfer::{Buffer, Bulk, In, Out, TransferError};
 
 use super::discovery::{self, DeviceEntry};
 use super::select::{EndpointDesc, InterfaceDesc, select_interfaces};
-use super::{Error, GuardedTransport, Transport, map_io_error};
+use super::{Error, GuardedTransport, Transport, gone_at_open, map_io_error};
 use crate::firmware::flash::{FlashAck, FlashGuard, FlashTransport, Meter, MeterOpener};
 
 /// Bulk max packet size of the meter's endpoints.
@@ -44,9 +44,8 @@ pub struct BulkTransport {
     out_ep: Endpoint<Bulk, Out>,
     in_ep: Endpoint<Bulk, In>,
     max_packet: usize,
-    pid: u16,
-    bus: String,
-    address: u8,
+    /// The meter this pipe was opened on.
+    device: DeviceEntry,
 }
 
 impl BulkTransport {
@@ -101,9 +100,12 @@ impl BulkTransport {
             .map_err(nusb_error)?
             .find(|d| {
                 d.vendor_id() == crate::VID
-                    && d.product_id() == device.pid
-                    && d.bus_id() == device.bus
-                    && d.device_address() == device.address
+                    && device.identifies(
+                        d.product_id(),
+                        d.bus_id(),
+                        d.device_address(),
+                        d.serial_number(),
+                    )
             })
             .ok_or(Error::NotFound)?;
         let dev = info.open().wait().map_err(nusb_error)?;
@@ -148,9 +150,7 @@ impl BulkTransport {
             out_ep,
             in_ep,
             max_packet,
-            pid: device.pid,
-            bus: device.bus.clone(),
-            address: device.address,
+            device: device.clone(),
         };
         drain_stale(&mut t, DRAIN_TIMEOUT)?;
         Ok(t)
@@ -158,32 +158,26 @@ impl BulkTransport {
 
     /// The meter this pipe was opened on is still listed on USB.
     fn listed(&self) -> Option<bool> {
-        let mut devices = nusb::list_devices().wait().ok()?;
-        Some(devices.any(|d| {
-            d.vendor_id() == crate::VID
-                && d.product_id() == self.pid
-                && d.bus_id() == self.bus
-                && d.device_address() == self.address
-        }))
+        let listed = discovery::list_devices().ok()?;
+        Some(discovery::still_listed(&self.device, &listed))
     }
 
-    /// The transport error for a failed transfer on this pipe.
-    fn failed(&self, e: TransferError) -> Error {
-        settle_gone(
-            transfer_error(e),
-            || self.listed(),
-            || std::thread::sleep(GONE_PAUSE),
-        )
+    /// The transport error for a transfer on this pipe that failed after
+    /// waiting `wait`.
+    fn failed(&self, e: TransferError, wait: Duration) -> Error {
+        let start = Instant::now();
+        let listed = within_budget(|| start.elapsed(), || self.listed());
+        settle_failed(e, wait, listed, || std::thread::sleep(GONE_PAUSE))
     }
 
     fn write(&mut self, data: &[u8], timeout: Duration) -> Result<(), Error> {
         let c = self
             .out_ep
             .transfer_blocking(Buffer::from(data.to_vec()), timeout);
-        c.status.map_err(|e| self.failed(e))?;
+        c.status.map_err(|e| self.failed(e, timeout))?;
         if needs_zlp(data.len(), self.max_packet) {
             let c = self.out_ep.transfer_blocking(Buffer::new(0), timeout);
-            c.status.map_err(|e| self.failed(e))?;
+            c.status.map_err(|e| self.failed(e, timeout))?;
         }
         Ok(())
     }
@@ -199,7 +193,7 @@ impl Transport for BulkTransport {
         let c = self
             .in_ep
             .transfer_blocking(Buffer::new(MAX_REPLY), timeout);
-        c.status.map_err(|e| self.failed(e))?;
+        c.status.map_err(|e| self.failed(e, timeout))?;
         let mut data = c.buffer.into_vec();
         data.truncate(c.actual_len);
         Ok(data)
@@ -270,42 +264,104 @@ impl MeterOpener for BulkFlashOpener {
 }
 
 fn nusb_error(e: nusb::Error) -> Error {
-    map_io_error(&std::io::Error::from(e), std::env::consts::OS)
+    let os = std::env::consts::OS;
+    // The `io::Error` nusb converts to does not carry its OS code.
+    let code = e.os_error().and_then(|code| i32::try_from(code).ok());
+    if code.is_some_and(|code| gone_at_open(code, os)) {
+        return Error::Disconnected;
+    }
+    map_io_error(&std::io::Error::from(e), os)
 }
 
 /// How often, and how far apart, a failed transfer looks for the meter on USB.
 const GONE_LOOKS: usize = 5;
 const GONE_PAUSE: Duration = Duration::from_millis(50);
+/// Shortest wait whose cancelled transfer looks for the meter on USB. The
+/// flash erase path expects its 10 ms and 20 ms reads to time out, and a look
+/// there would change its wire timing.
+pub(crate) const GONE_CHECK_MIN_WAIT: Duration = Duration::from_millis(100);
 
-/// [`Error::Disconnected`] when an [`Error::Io`] came with the meter leaving
-/// USB: macOS can end a transfer on a pulled cable with a status nusb does not
-/// map to its disconnect error, and the listing can lag that transfer.
-/// `listed` says whether the meter is listed (`None` when USB cannot be
-/// listed, which proves nothing).
+/// Most time the looks may take in all, so a bus that lists slowly still
+/// settles an unplug inside the 1 s of AC-AXHK2J.3.
+pub(crate) const GONE_BUDGET: Duration = Duration::from_millis(800);
+
+/// `listed`, until `elapsed` passes [`GONE_BUDGET`]: after that it answers
+/// `None`, which proves nothing and ends the looks.
+fn within_budget(
+    elapsed: impl Fn() -> Duration,
+    mut listed: impl FnMut() -> Option<bool>,
+) -> impl FnMut() -> Option<bool> {
+    move || {
+        if elapsed() < GONE_BUDGET {
+            listed()
+        } else {
+            None
+        }
+    }
+}
+
+/// The final error for a transfer that failed after waiting `wait`: a
+/// cancelled transfer that waited less than [`GONE_CHECK_MIN_WAIT`] is a plain
+/// [`Error::Timeout`], everything else goes through [`settle_gone`].
+fn settle_failed(
+    e: TransferError,
+    wait: Duration,
+    listed: impl FnMut() -> Option<bool>,
+    pause: impl FnMut(),
+) -> Error {
+    match transfer_error(e) {
+        Failure::Cancelled if wait < GONE_CHECK_MIN_WAIT => Error::Timeout,
+        failure => settle_gone(failure, listed, pause),
+    }
+}
+
+/// [`Error::Disconnected`] when an [`Error::Io`] or a cancelled transfer came
+/// with the meter leaving USB: macOS can end a transfer on a pulled cable with
+/// a status nusb does not map to its disconnect error, and the listing can lag
+/// that transfer. `listed` says whether the meter is listed (`None` when USB
+/// cannot be listed, which proves nothing). A cancelled transfer of a meter
+/// that did not leave is an [`Error::Timeout`].
 fn settle_gone(
-    err: Error,
+    failure: impl Into<Failure>,
     mut listed: impl FnMut() -> Option<bool>,
     mut pause: impl FnMut(),
 ) -> Error {
-    if !matches!(err, Error::Io(_)) {
-        return err;
-    }
+    let unsettled = match failure.into() {
+        Failure::Cancelled => Error::Timeout,
+        Failure::Other(err @ Error::Io(_)) => err,
+        Failure::Other(other) => return other,
+    };
     for look in 1..=GONE_LOOKS {
         match listed() {
             Some(false) => return Error::Disconnected,
-            None => return err,
+            None => return unsettled,
             Some(true) if look < GONE_LOOKS => pause(),
             Some(true) => {}
         }
     }
-    err
+    unsettled
 }
 
-fn transfer_error(e: TransferError) -> Error {
+/// A failed transfer before [`settle_gone`] has looked for the meter. Cancelled
+/// stays in here: callers only ever see what it settles into.
+enum Failure {
+    /// The transfer ended cancelled: a timeout, unless the meter left USB.
+    Cancelled,
+    /// Any other failure.
+    Other(Error),
+}
+
+impl From<Error> for Failure {
+    fn from(err: Error) -> Failure {
+        Failure::Other(err)
+    }
+}
+
+fn transfer_error(e: TransferError) -> Failure {
     match e {
-        TransferError::Cancelled => Error::Timeout,
-        TransferError::Disconnected => Error::Disconnected,
-        other => Error::Io(other.to_string()),
+        TransferError::Cancelled => Failure::Cancelled,
+        TransferError::Disconnected => Error::Disconnected.into(),
+        other => Error::Io(other.to_string()).into(),
     }
 }
 
@@ -316,6 +372,33 @@ mod tests {
 
     fn pause() -> impl FnMut() {
         || {}
+    }
+
+    #[test]
+    fn looks_stop_when_the_budget_is_spent() {
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        let mut looks = 0;
+        let listed = within_budget(
+            || elapsed.get(),
+            || {
+                looks += 1;
+                elapsed.set(elapsed.get() + GONE_BUDGET / 2 + Duration::from_millis(1));
+                Some(true)
+            },
+        );
+        let got = settle_gone(Failure::Cancelled, listed, pause());
+        assert_eq!(got, Error::Timeout);
+        assert_eq!(looks, 2, "two slow listings spend the budget");
+    }
+
+    #[test]
+    fn a_budget_not_spent_changes_nothing() {
+        let mut seen = [true, false].into_iter();
+        let listed = within_budget(|| Duration::ZERO, || seen.next());
+        assert_eq!(
+            settle_gone(Failure::Cancelled, listed, pause()),
+            Error::Disconnected
+        );
     }
 
     #[test]
@@ -358,6 +441,124 @@ mod tests {
     fn other_errors_do_not_look_at_usb() {
         let got = settle_gone(Error::Timeout, || panic!("listed USB"), pause());
         assert_eq!(got, Error::Timeout);
+    }
+
+    // ---- AC-AXHK2J.3: a cancelled transfer goes through the presence check ----
+
+    /// How a transfer that ended cancelled settles for this listing.
+    fn cancelled(listed: impl FnMut() -> Option<bool>) -> Error {
+        settle_gone(transfer_error(TransferError::Cancelled), listed, pause())
+    }
+
+    #[test]
+    fn a_cancelled_transfer_of_a_meter_gone_from_usb_is_an_unplug() {
+        assert_eq!(cancelled(|| Some(false)), Error::Disconnected);
+    }
+
+    #[test]
+    fn a_cancelled_transfer_waits_for_the_system_to_drop_the_meter() {
+        let mut listed = [true, true, false].into_iter();
+        assert_eq!(cancelled(|| listed.next()), Error::Disconnected);
+    }
+
+    #[test]
+    fn a_cancelled_transfer_settles_as_an_unplug_within_a_second() {
+        let looks = std::cell::Cell::new(0);
+        let waited = std::cell::Cell::new(Duration::ZERO);
+        let got = settle_gone(
+            transfer_error(TransferError::Cancelled),
+            || {
+                looks.set(looks.get() + 1);
+                // The listing drops the meter only on the last look.
+                Some(looks.get() < GONE_LOOKS)
+            },
+            || waited.set(waited.get() + GONE_PAUSE),
+        );
+        assert_eq!(got, Error::Disconnected);
+        assert!(
+            waited.get() < Duration::from_secs(1),
+            "settling took {:?}",
+            waited.get()
+        );
+    }
+
+    #[test]
+    fn a_cancelled_transfer_of_a_meter_still_listed_stays_a_timeout() {
+        assert_eq!(cancelled(|| Some(true)), Error::Timeout);
+    }
+
+    #[test]
+    fn a_cancelled_transfer_stays_a_timeout_when_usb_cannot_be_listed() {
+        assert_eq!(cancelled(|| None), Error::Timeout);
+    }
+
+    // ---- AC-AXHK2J.8: a short wait never looks at USB ----
+
+    /// How a failed transfer that waited `wait` settles, with how many times
+    /// it listed USB and paused. The meter is listed on the first look and
+    /// gone on the second, so a check that runs shows up in all three results.
+    fn settled(e: TransferError, wait: Duration) -> (Error, usize, usize) {
+        let mut looks = 0;
+        let mut pauses = 0;
+        let got = settle_failed(
+            e,
+            wait,
+            || {
+                looks += 1;
+                Some(looks < 2)
+            },
+            || pauses += 1,
+        );
+        (got, looks, pauses)
+    }
+
+    fn ms(wait: u64) -> Duration {
+        Duration::from_millis(wait)
+    }
+
+    #[test]
+    fn a_cancelled_10_ms_wait_is_a_plain_timeout_without_a_look_or_a_pause() {
+        assert_eq!(
+            settled(TransferError::Cancelled, ms(10)),
+            (Error::Timeout, 0, 0)
+        );
+    }
+
+    #[test]
+    fn a_cancelled_20_ms_wait_is_a_plain_timeout_without_a_look_or_a_pause() {
+        assert_eq!(
+            settled(TransferError::Cancelled, ms(20)),
+            (Error::Timeout, 0, 0)
+        );
+    }
+
+    #[test]
+    fn a_cancelled_99_ms_wait_skips_the_presence_check() {
+        assert_eq!(
+            settled(TransferError::Cancelled, ms(99)),
+            (Error::Timeout, 0, 0)
+        );
+    }
+
+    #[test]
+    fn a_cancelled_100_ms_wait_runs_the_presence_check() {
+        assert_eq!(
+            settled(TransferError::Cancelled, ms(100)),
+            (Error::Disconnected, 2, 1)
+        );
+    }
+
+    #[test]
+    fn the_presence_check_starts_at_100_ms() {
+        assert_eq!(GONE_CHECK_MIN_WAIT, ms(100));
+    }
+
+    #[test]
+    fn a_short_wait_still_looks_at_usb_for_an_io_failure() {
+        assert_eq!(
+            settled(TransferError::Fault, ms(10)),
+            (Error::Disconnected, 2, 1)
+        );
     }
 
     const T: Duration = Duration::from_millis(50);

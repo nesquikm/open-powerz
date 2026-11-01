@@ -41,6 +41,7 @@ The wrong field is saved on the meter, and the unplug reads as a timeout.
 - AC-AXHK2J.5: OS errors 6 and 19 at open time count as "meter gone, keep waiting" with one app log line, not as a silent "no meter yet". A test pins the two codes.
 - AC-AXHK2J.6: A flash path test covers an Io error followed by re-enumeration.
 - AC-AXHK2J.7: On a port held by another program, the trigger and PDM paths say so in plain words, as the settings path does. A vanished port is not reported as held.
+- AC-AXHK2J.8: The AC-AXHK2J.3 check never runs for a transfer whose wait is under 100 ms. The firmware erase path's expected 10 ms and 20 ms timeouts neither list USB devices nor pause, so its wire timing does not change.
 
 ## Technical Design
 
@@ -56,3 +57,11 @@ Unit tests with fake transports and the simulator. The tester re-runs a settings
 ## Notes
 
 Source: the M7a settings CRC follow-ups. Timer-sensitive test timings stay as they are.
+
+## Implementation notes
+
+- A vanished port on Windows is told from a held one by a fresh listing, because the OS text is localized.
+- The presence check spends at most 800 ms in all. Timeouts of 100 ms or more with the meter present cost up to that.
+- Left as they are: the two `serial_error` functions (different error enums), and the held-port branches of `settings_port_error`, which a test pins.
+- A listing that loses a known serial reads as gone. Not seen on a stable listing.
+- `gone_at_open` does not fire on the macOS nusb path, where `os_error` is an IOReturn value. macOS relies on the kind mapping.

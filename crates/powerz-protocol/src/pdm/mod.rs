@@ -32,7 +32,7 @@ pub mod session;
 
 pub use caps::{CapBlock, Capabilities, PdoBlock, ScpCaps, TfcpCaps, UfcsCap, UfcsCaps, VfcpCaps};
 pub use command::{Command, FixedProtocol, Protocol};
-pub use port::{find_port, open_port};
+pub use port::{find_port, open_found, open_port};
 pub use reply::{ReplyItem, ReplyReader};
 pub use risk::{Risk, classify};
 pub use session::{HighVoltageConfirmation, PdmSession};
@@ -132,6 +132,13 @@ pub enum Error {
     Ambiguous {
         /// How many candidate ports there were.
         count: usize,
+    },
+    /// The listing named the meter's serial port, but opening it failed the
+    /// way a port someone else holds does.
+    #[error("the meter's serial port {port} is in use by another program")]
+    PortHeld {
+        /// Port name or path.
+        port: String,
     },
     /// The port went away.
     #[error("meter disconnected")]

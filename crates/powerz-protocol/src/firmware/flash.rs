@@ -1246,3 +1246,22 @@ fn download<P: FlashTransport, C: Clock>(
     progress(FlashProgress::Finished);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::bulk::GONE_CHECK_MIN_WAIT;
+
+    // ---- AC-AXHK2J.8: the erase path's expected timeouts stay out of the
+    // presence check, so they neither list USB nor pause ----
+
+    #[test]
+    fn the_descriptor_wait_is_under_the_presence_check_ceiling() {
+        assert!(DESCRIPTOR_WAIT < GONE_CHECK_MIN_WAIT);
+    }
+
+    #[test]
+    fn the_erase_short_wait_is_under_the_presence_check_ceiling() {
+        assert!(ERASE_SHORT_WAIT < GONE_CHECK_MIN_WAIT);
+    }
+}

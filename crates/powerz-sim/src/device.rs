@@ -141,6 +141,15 @@ fn settings_payload(block: &[u8; SETTINGS_LEN], rate_code: u8) -> Vec<u8> {
     p
 }
 
+/// Move the brightness (7 bits at bit 3 of the word at 0x00) to another
+/// value in range.
+fn set_other_brightness(block: &mut [u8; SETTINGS_LEN]) {
+    let word = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
+    let code = if (word >> 3) & 0x7F == 90 { 80 } else { 90 };
+    let word = (word & !(0x7F << 3)) | (code << 3);
+    block[..4].copy_from_slice(&word.to_le_bytes());
+}
+
 impl SimDevice {
     /// Main header for a reply of type `ty` with id `id` and the current
     /// auth level in bits 17..18.
@@ -245,9 +254,15 @@ impl SimDevice {
         }
         if mask & Attribute::SETTINGS.bits() != 0 {
             sections.push((Attribute::SETTINGS, 0, {
-                let stored = self.stored();
+                let mut stored = self.stored();
+                stored.settings_reads += 1;
                 if self.faults.settings_saved_before_reboot {
                     SETTINGS_207_REBOOTED.to_vec()
+                } else if self.faults.flaky_settings_read && stored.settings_reads.is_multiple_of(2)
+                {
+                    let mut block = stored.settings;
+                    set_other_brightness(&mut block);
+                    settings_payload(&block, stored.rate_code)
                 } else {
                     settings_payload(&stored.settings, stored.rate_code)
                 }

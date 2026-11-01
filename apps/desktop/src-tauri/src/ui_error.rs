@@ -34,6 +34,10 @@ pub enum ErrorKind {
     Internal,
 }
 
+/// The message of [`transport::Error::Disconnected`]. "No meter was found"
+/// shares its kind, so this is what tells the two apart.
+const UNPLUGGED: &str = "The meter was unplugged.";
+
 /// A plain-language error for the UI.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UiError {
@@ -49,6 +53,11 @@ pub struct UiError {
 }
 
 impl UiError {
+    /// Whether a meter that was there has gone, as opposed to none being found.
+    pub fn is_unplugged(&self) -> bool {
+        self.kind == ErrorKind::Disconnected && self.message == UNPLUGGED
+    }
+
     /// A usage error (the request is not valid right now).
     pub fn usage(message: impl Into<String>) -> UiError {
         UiError {
@@ -162,7 +171,7 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
         T::Timeout => timeout(),
         T::Disconnected => UiError {
             kind: ErrorKind::Disconnected,
-            message: "The meter was unplugged.".to_owned(),
+            message: UNPLUGGED.to_owned(),
             hint: Some("Plug the meter back in.".to_owned()),
             sessions: Vec::new(),
         },
@@ -214,7 +223,7 @@ pub fn settings_port_error(err: &transport::Error, target_os: &str) -> UiError {
     port_held()
 }
 
-fn port_held() -> UiError {
+pub(crate) fn port_held() -> UiError {
     UiError {
         kind: ErrorKind::DeviceBusy,
         message: "The meter's serial port is in use by another program.".to_owned(),
@@ -278,6 +287,12 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
                 sessions: Vec::new(),
             }
         }
+        S::SettingsReadsDiffer => UiError {
+            kind: ErrorKind::Protocol,
+            message: "Two reads of the meter's settings differ, so nothing was written.".to_owned(),
+            hint: Some("Check the cable, then apply again.".to_owned()),
+            sessions: Vec::new(),
+        },
         S::SettingsMismatch {
             field,
             expected,

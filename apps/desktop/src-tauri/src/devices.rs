@@ -291,7 +291,7 @@ impl Transport for AppTransport {
 }
 
 /// Opens what the picker lists: the demo device for a demo entry, the
-/// meter at the entry's USB bus and address otherwise.
+/// meter [`listed_entry`] finds otherwise.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AppOpener;
 
@@ -329,16 +329,24 @@ impl Opener for AppOpener {
             let serial = device.serial.as_deref().ok_or(transport::Error::NotFound)?;
             return Ok(AppTransport::Cdc(CdcTransport::open(serial)?));
         }
-        let (Some(bus), Some(address)) = (&device.bus, device.address) else {
-            return Err(transport::Error::NotFound);
-        };
-        let entry = discovery::list_devices()?
-            .into_iter()
-            .find(|e| &e.bus == bus && e.address == address)
-            .ok_or(transport::Error::NotFound)?;
+        let listed = discovery::list_devices()?;
+        let entry = listed_entry(device, &listed).ok_or(transport::Error::NotFound)?;
         let serial = entry.serial.clone();
-        Ok(AppTransport::Usb(BulkTransport::open(&entry)?, serial))
+        Ok(AppTransport::Usb(BulkTransport::open(entry)?, serial))
     }
+}
+
+/// The meter `device` names in what the OS lists now: by serial when it has
+/// one, wherever the meter sits (the address can move again between the
+/// watcher's look and the open), else by bus and address.
+pub fn listed_entry<'a>(
+    device: &DeviceListing,
+    listed: &'a [DeviceEntry],
+) -> Option<&'a DeviceEntry> {
+    listed.iter().find(|e| match &device.serial {
+        Some(_) => e.serial == device.serial,
+        None => device.bus.as_ref() == Some(&e.bus) && device.address == Some(e.address),
+    })
 }
 
 /// A queue rate the picker offers, or a plain-language usage error.
@@ -899,6 +907,9 @@ fn log_sink(log: AppLog, id: String, model: String, mut sink: impl EventSink) ->
                 None => session.event("disconnected"),
                 Some(e) if connected && matches!(e.kind, ErrorKind::Disconnected) => {
                     session.event("unplugged");
+                }
+                Some(e) if e.is_unplugged() => {
+                    session.event("meter gone at open");
                 }
                 Some(e) => session.failure(e),
             },

@@ -189,13 +189,21 @@ pub fn map_io_error(err: &std::io::Error, target_os: &str) -> Error {
         | ErrorKind::UnexpectedEof
         | ErrorKind::NotFound => Error::Disconnected,
         ErrorKind::PermissionDenied => permission_error(target_os, &err.to_string()),
-        // ENXIO and ENODEV, what a serial port read answers once the cable is
-        // out; the same numbers mean something else on Windows.
-        _ if target_os != "windows" && matches!(err.raw_os_error(), Some(6 | 19)) => {
+        // What a serial port read answers once the cable is out.
+        _ if err
+            .raw_os_error()
+            .is_some_and(|code| gone_at_open(code, target_os)) =>
+        {
             Error::Disconnected
         }
         _ => Error::Io(err.to_string()),
     }
+}
+
+/// Whether OS error `code` from opening the meter means it has gone: ENXIO
+/// (6) and ENODEV (19). The same numbers mean something else on Windows.
+pub fn gone_at_open(code: i32, target_os: &str) -> bool {
+    target_os != "windows" && matches!(code, 6 | 19)
 }
 
 impl<T: Transport + ?Sized> Transport for Box<T> {

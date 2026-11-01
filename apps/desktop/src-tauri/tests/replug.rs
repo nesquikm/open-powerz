@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
+use open_powerz_desktop_lib::app_log::AppLog;
 use open_powerz_desktop_lib::devices::{DeviceListing, DeviceManager, HOTPLUG_PERIOD_MS, Opener};
 use open_powerz_desktop_lib::recording::RecordingEvent;
 use open_powerz_desktop_lib::worker::{BackendEvent, GapKind, Status};
@@ -63,6 +64,8 @@ struct PlugOpener {
     clock: SimClock,
     plugged: Arc<AtomicBool>,
     opened: Arc<Mutex<Vec<DeviceListing>>>,
+    /// How an open fails while the meter is unplugged.
+    open_error: Arc<Mutex<transport::Error>>,
 }
 
 impl Opener for PlugOpener {
@@ -70,7 +73,7 @@ impl Opener for PlugOpener {
     fn open(&self, device: &DeviceListing) -> Result<Plugged, transport::Error> {
         self.opened.lock().unwrap().push(device.clone());
         if device.demo_scenario.is_none() && !self.plugged.load(Ordering::SeqCst) {
-            return Err(transport::Error::NotFound);
+            return Err(self.open_error.lock().unwrap().clone());
         }
         // A demo entry is always there; it never shares the meter's plug.
         let plugged = if device.demo_scenario.is_some() {
@@ -92,6 +95,7 @@ struct Rig {
     attached: Arc<Mutex<Vec<DeviceEntry>>>,
     plugged: Arc<AtomicBool>,
     opened: Arc<Mutex<Vec<DeviceListing>>>,
+    open_error: Arc<Mutex<transport::Error>>,
 }
 
 impl Rig {
@@ -100,6 +104,7 @@ impl Rig {
         let attached = Arc::new(Mutex::new(vec![meter(SERIAL_A, "1", 7)]));
         let plugged = Arc::new(AtomicBool::new(true));
         let opened = Arc::new(Mutex::new(Vec::new()));
+        let open_error = Arc::new(Mutex::new(transport::Error::NotFound));
         let listed = Arc::clone(&attached);
         let m = DeviceManager::new(
             move || Ok(listed.lock().unwrap().clone()),
@@ -107,6 +112,7 @@ impl Rig {
                 clock: clock.clone(),
                 plugged: Arc::clone(&plugged),
                 opened: Arc::clone(&opened),
+                open_error: Arc::clone(&open_error),
             },
             clock.clone(),
         );
@@ -116,6 +122,7 @@ impl Rig {
             attached,
             plugged,
             opened,
+            open_error,
         }
     }
 
@@ -969,4 +976,81 @@ fn an_unplug_while_triggering_returns_to_5v_and_closes_the_trigger_session() {
         .rposition(|w| w == "pd req=1" || w == "pd hrst")
         .expect("back to 5 V");
     assert!(back < close, "{writes:?}");
+}
+
+// ---- AC-AXHK2J.5: OS errors 6 and 19 at open ----
+
+fn log_lines(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A reconnect whose open fails with `error`, in a rig logging to app.log:
+/// the rig after that try, and the lines the failed try added.
+fn failed_reconnect(
+    tag: &str,
+    error: transport::Error,
+) -> (Rig, mpsc::Receiver<BackendEvent>, Vec<String>) {
+    let dir = std::env::temp_dir().join(format!(
+        "powerz-replug-{}-{tag}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+    let path = dir.join("app.log");
+    let _ = std::fs::remove_file(&path);
+    let mut rig = Rig::new();
+    rig.m
+        .set_app_log(AppLog::open(&path).expect("open app.log"));
+    let (rx, _) = stream_meter_a(&mut rig, 50);
+    unplug_and_wait(&mut rig, &rx);
+    let before = log_lines(&path).len();
+    *rig.open_error.lock().unwrap() = error;
+    list_but_fail_every_open(&mut rig);
+    rig.clock.advance(Duration::from_secs(4));
+    assert!(rig.relist(), "the listed meter was not tried");
+    recv_until(&rx, |e| {
+        matches!(e, BackendEvent::Status(Status::Waiting { .. }))
+    });
+    worker_gone(&rig);
+    // The try's own `replug` line comes first; what it ended in follows.
+    let mut lines = log_lines(&path).split_off(before);
+    lines.retain(|l| !l.contains(" replug "));
+    (rig, rx, lines)
+}
+
+#[test]
+fn os_errors_6_and_19_at_open_keep_waiting_with_one_log_line() {
+    for code in [6, 19] {
+        let e = std::io::Error::from_raw_os_error(code);
+        let error = transport::map_io_error(&e, "linux");
+        let (mut rig, rx, lines) = failed_reconnect(&format!("os-{code}"), error);
+
+        assert_eq!(lines.len(), 1, "{code}: one line for the try: {lines:#?}");
+        let line = lines[0].to_lowercase();
+        assert!(line.contains("meter gone"), "{code}: {line}");
+        assert!(!line.contains(" error "), "{code}: {line}");
+        assert_eq!(rig.m.waiting_for().as_deref(), Some(SERIAL_A), "{code}");
+
+        // The meter is still taken back when it returns.
+        rig.clock.advance(Duration::from_secs(4));
+        assert!(rig.plug(vec![meter(SERIAL_A, "1", 9)]), "{code}");
+        recv_until(&rx, |e| {
+            matches!(e, BackendEvent::Status(Status::Connected(_)))
+        });
+    }
+}
+
+#[test]
+fn an_open_that_finds_no_meter_is_still_logged_as_it_was() {
+    let (rig, _rx, lines) = failed_reconnect("not-found", transport::Error::NotFound);
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert!(
+        !lines[0].to_lowercase().contains("meter gone"),
+        "{lines:#?}"
+    );
+    assert_eq!(rig.m.waiting_for().as_deref(), Some(SERIAL_A));
 }

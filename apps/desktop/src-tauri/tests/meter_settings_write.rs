@@ -104,7 +104,7 @@ fn write_settings_sends_one_write_and_returns_the_rows_read_back() {
         .iter()
         .map(|(_, f)| f[0] & 0x7F)
         .collect();
-    assert_eq!(cdc_types, vec![0x0C, 0x0A, 0x0C]);
+    assert_eq!(cdc_types, vec![0x0C, 0x0C, 0x0A, 0x0C]);
     // A later plain read shows the change too, and the stream goes on.
     let again = serde_json::to_value(worker.read_settings().unwrap()).unwrap();
     assert_eq!(value_of(&again, "brightness"), "80%");
@@ -257,4 +257,42 @@ fn meter_settings_write_command_is_registered() {
         lib.contains("async fn meter_settings_write("),
         "no meter_settings_write command"
     );
+}
+
+// ---- AC-AXHK2J.2: the double read on the desktop path ----
+
+#[test]
+fn two_settings_reads_that_differ_refuse_the_write_with_nothing_sent() {
+    let faults = FaultPlan::parse("flaky-settings-read").expect("a known fault");
+    let (mut worker, clock, log) = start_with(faults);
+    run_for(&mut worker, &clock, 500);
+    let err = worker
+        .write_settings(&changes(&[("brightness", 80)]))
+        .expect_err("the two reads differ");
+    let text = format!("{} {}", err.message, err.hint.unwrap_or_default()).to_lowercase();
+    assert!(
+        text.contains("settings") && text.contains("differ"),
+        "{text}"
+    );
+    assert!(settings_writes(&log).is_empty(), "a write went out");
+    let cdc: Vec<Vec<u8>> = log
+        .cdc
+        .lock()
+        .unwrap()
+        .frames
+        .iter()
+        .map(|(_, f)| f.clone())
+        .collect();
+    assert_eq!(cdc.len(), 2, "two reads and no retry: {cdc:02x?}");
+    for frame in cdc {
+        assert_eq!(frame[0] & 0x7F, 0x0C, "{frame:02x?}");
+        assert_eq!(
+            u16::from_le_bytes([frame[2], frame[3]]) >> 1,
+            0x008,
+            "{frame:02x?}"
+        );
+    }
+    // The session goes on.
+    run_for(&mut worker, &clock, 500);
+    worker.stop();
 }

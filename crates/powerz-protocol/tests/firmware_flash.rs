@@ -1031,6 +1031,52 @@ fn opener_errors_that_clear_inside_the_switch_wait_still_flash() {
     assert!(matches!(r, Ok(FlashOutcome::Verified { .. })), "got {r:?}");
 }
 
+// ---- AC-AXHK2J.6: an Io error, then the meter re-enumerates ----
+
+/// What opening a meter that is half way through re-enumerating can answer.
+fn open_io_error() -> TransportError {
+    TransportError::Io("failed to open device (errno 71)".into())
+}
+
+#[test]
+fn an_io_error_then_re_enumeration_into_the_bootloader_flashes() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app()
+        .open_err_after(0x09, open_io_error(), 3)
+        .script(boot_ok(P));
+    let (r, _) = bench.run(&c);
+    assert!(matches!(r, Ok(FlashOutcome::Verified { .. })), "got {r:?}");
+    assert!(
+        !payload_writes(&bench.boot_ops()).is_empty(),
+        "the payload went out after the re-enumeration"
+    );
+    assert_eq!(bench.mode(), Some(DeviceMode::Application));
+}
+
+#[test]
+fn an_io_error_then_re_enumeration_into_the_application_is_verified() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::boot()
+        .script(boot_ok(P))
+        .open_err_after(0x08, open_io_error(), 3);
+    let (r, _) = bench.run(&c);
+    assert!(matches!(r, Ok(FlashOutcome::Verified { .. })), "got {r:?}");
+    assert_eq!(bench.mode(), Some(DeviceMode::Application));
+}
+
+#[test]
+fn a_disconnect_at_open_then_re_enumeration_flashes() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app()
+        .open_err_after(0x09, TransportError::Disconnected, 3)
+        .script(boot_ok(P));
+    let (r, _) = bench.run(&c);
+    assert!(matches!(r, Ok(FlashOutcome::Verified { .. })), "got {r:?}");
+}
+
 #[test]
 fn an_opener_error_through_the_return_wait_is_named_not_a_plain_power_cycle() {
     let bytes = container_bytes(P, P);

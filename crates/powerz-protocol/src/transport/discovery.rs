@@ -70,6 +70,22 @@ pub struct DeviceEntry {
 }
 
 impl DeviceEntry {
+    /// Whether a device the OS lists with these values is this meter: the
+    /// same product ID, bus and address, and the same serial when this entry
+    /// has one.
+    pub(crate) fn identifies(
+        &self,
+        pid: u16,
+        bus: &str,
+        address: u8,
+        serial: Option<&str>,
+    ) -> bool {
+        self.pid == pid
+            && self.bus == bus
+            && self.address == address
+            && self.serial.as_deref().is_none_or(|s| serial == Some(s))
+    }
+
     /// Application or bootloader mode, from the vendor-interface string.
     pub fn mode(&self) -> DeviceMode {
         DeviceMode::from_interface_string(self.interface_string.as_deref())
@@ -231,15 +247,19 @@ pub fn match_device<'a>(
     devices: &'a [UsbDescriptor],
 ) -> Option<&'a UsbDescriptor> {
     devices.iter().find(|d| {
-        d.vid == crate::VID
-            && d.pid == device.pid
-            && d.bus == device.bus
-            && d.address == device.address
-            && device
-                .serial
-                .as_ref()
-                .is_none_or(|s| d.serial.as_ref() == Some(s))
+        d.vid == crate::VID && device.identifies(d.pid, &d.bus, d.address, d.serial.as_deref())
     })
+}
+
+/// Whether `device` sits in `listed` where it was opened: the same product
+/// ID, bus and address, and the same serial when `device` has one, since
+/// another meter of the same model can land on a freed address. A meter that
+/// came back at a new address does not count: the pipe opened on the old one
+/// is gone.
+pub fn still_listed(device: &DeviceEntry, listed: &[DeviceEntry]) -> bool {
+    listed
+        .iter()
+        .any(|e| device.identifies(e.pid, &e.bus, e.address, e.serial.as_deref()))
 }
 
 /// Two or more POWER-Z devices are attached and no serial was chosen, so

@@ -301,7 +301,7 @@ first 96 bytes; device overrides its "96 bytes" reading.
 | off | type | field | tag |
 |---|---|---|---|
 | 0x00..0x5F | bytes | block A (96 bytes) | [static] [device] (firmware 2.0.6) |
-| 0x10 | u32 | run-time overlay: 0xFFFFFFFF at first, later a Unix time near the last reboot. The stored block-A CRC covers what this word held when the meter last saved the block: 0xFFFFFFFF on a block not saved since, or the boot time of then (firmware 2.0.7: 0x6AE08E30 under the CRC while 0x10 showed 0x6AE59BA6 after a replug). So a decoder cannot check the CRC against the word it reads. It works out the one word that makes the CRC match the other bytes and accepts 0xFFFFFFFF, or a Unix time from 2020 on that is no later than the word at 0x10. Four free bytes can match any CRC, so a corrupt block A gets past this about one time in twenty, and about one in seven while 0x10 still reads 0xFFFFFFFF. A settings write sends every display key at its read value, so a wrong display field that gets past this is written back and the read-back cannot see it; calibration is never sent and values out of range are refused | [device]; meaning and the range [inferred] |
+| 0x10 | u32 | run-time overlay: 0xFFFFFFFF at first, later a Unix time near the last reboot. The stored block-A CRC covers what this word held when the meter last saved the block: 0xFFFFFFFF on a block not saved since, or the boot time of then (firmware 2.0.7: 0x6AE08E30 under the CRC while 0x10 showed 0x6AE59BA6 after a replug). So a decoder cannot check the CRC against the word it reads. It works out the one word that makes the CRC match the other bytes and accepts 0xFFFFFFFF, or a Unix time from 2020 on that is no later than the word at 0x10. Four free bytes can match any CRC, so a corrupt block A gets past this about one time in twenty, and about one in seven while 0x10 still reads 0xFFFFFFFF. A settings write sends every display key at its read value, so it reads the block twice and refuses to write when the 180 bytes differ, with no retry. A wrong display field that gets past the check and repeats in both reads is still written back, and the read-back cannot see it; calibration is never sent and values out of range are refused | [device]; meaning and the range [inferred] |
 | 0x1C | 5 x i32 | an array (5 equal values seen), not a single 1e6-scaled gain as static notes said; device overrides | [device] [inferred] |
 | 0x30 | 10 x i32 | an array of values near 1 000 000 (likely gains, 1e6 = 1.0) | [static] [device] [inferred] |
 | 0x5C | u32 | CRC-32 of bytes 0x00..0x5B | [static] [device] (firmware 2.0.6) |
@@ -393,8 +393,10 @@ Message layout (all words little-endian):
   [static]
 - The vendor dialog always sends every key below, not only the changed
   ones, and ends with key 0x7FFF = 0x1234. That last entry is read as a
-  "save" marker [inferred]. Our writer sends the same full set: changed keys
-  at their new values, the others at the values just read. [static]
+  "save" marker [inferred]. Our writer reads SETTINGS twice first and refuses to write when the
+  two reads differ in any of the 180 bytes; it does not read again until
+  they match. It then sends the same full set: changed keys at their new
+  values, the others at the values just read. [static]
 - The vendor app does not wait for or check a reply. [static] The KM003C
   answers FINISHED with the write's id, at once. [device] We also take
   ACCEPT, and no reply at all.
