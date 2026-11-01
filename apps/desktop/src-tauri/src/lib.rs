@@ -508,6 +508,24 @@ async fn trigger_disarm(state: Shared<'_>, device_id: Option<String>) -> Result<
     .await
 }
 
+/// Whether the session saw VBUS collapse under a contract; false with no
+/// trigger session.
+fn charger_gone_of(state: &AppState, device_id: Option<&str>) -> bool {
+    trigger_control(state, device_id)
+        .and_then(|control| control.charger_gone())
+        .unwrap_or(false)
+}
+
+/// See [`charger_gone_of`].
+#[tauri::command]
+async fn trigger_charger_gone(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<bool, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(charger_gone_of(&state, device_id.as_deref()))).await
+}
+
 /// The library risk class of a built PD message (FR DGSQ6T); GoodCRC and
 /// malformed messages are a usage error with the reason.
 #[tauri::command]
@@ -1443,6 +1461,7 @@ pub fn run() {
             trigger_request,
             trigger_armed,
             trigger_disarm,
+            trigger_charger_gone,
             trigger_back_to_5v,
             trigger_message_risk,
             trigger_message_send,
@@ -1610,6 +1629,39 @@ mod tests {
         let seen = cable_seen_of(&state, None);
         let _ = state.manager().disconnect_for("demo:idle");
         assert_eq!(seen, None);
+    }
+
+    #[test]
+    fn with_no_session_no_charger_is_gone() {
+        let state = no_usb();
+        assert!(!charger_gone_of(&state, None));
+        state
+            .connect_session(
+                "demo:idle",
+                50,
+                |_: BackendEvent| {},
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the demo device connects");
+        let gone = charger_gone_of(&state, Some("demo:idle"));
+        let _ = state.manager().disconnect_for("demo:idle");
+        assert!(!gone);
+    }
+
+    #[test]
+    fn the_charger_gone_command_is_registered() {
+        let source = include_str!("lib.rs");
+        let handlers = source
+            .split("generate_handler![")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the handler list");
+        assert!(
+            handlers
+                .split(',')
+                .any(|h| h.trim() == "trigger_charger_gone"),
+            "trigger_charger_gone is not registered"
+        );
     }
 
     #[test]

@@ -513,6 +513,7 @@
     request: (request, confirmed, remember) => act().triggerRequest(request, confirmed, remember),
     armed: () => act().triggerArmed(),
     disarm: () => act().triggerDisarm(),
+    chargerGone: () => act().triggerChargerGone(),
     backTo5v: () => act().triggerBackTo5v(),
     close: () => act().triggerClose(),
     cableRead: () => act().triggerCableRead(),

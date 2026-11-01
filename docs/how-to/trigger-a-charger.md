@@ -110,6 +110,7 @@ with a **Clear** button. Press **Clear** to end it at once. These end it too:
 - any Console line that is not read-only
 - a change in what the charger offers
 - a request that does not qualify, once you confirm it
+- the charger going away: VBUS below 2 V once a contract was up
 - closing the session: leaving the Trigger tab, disconnecting, losing the meter,
   reloading the page or quitting the app
 
@@ -117,8 +118,16 @@ A reload closes the trigger session and returns the charger to 5 V. A new
 session always starts with it off.
 
 If the offers change, a request that names a changed offer is refused and not
-sent. Press **Detect** to see the new offers. The app can only see a change the
-meter reports, so end it yourself before you swap chargers.
+sent. Press **Detect** to see the new offers.
+
+If the charger goes away, the app ends the option at once, forgets the offers
+and says so. No request goes out, even if you plug the same charger back in, and
+**Back to 5 V** sends a hard reset, since no offers are left to ask for. Press
+**Detect** to go on. The check reads VBUS ten times a second, so a swap faster
+than that could go unseen: end the option yourself before you swap chargers.
+
+Leaving the Trigger tab closes the session, so the offers go too. Press
+**Detect** when you come back.
 
 **The CLI does not change.** `powerz` has no such option. Each command above
 5 V still needs `--allow-high-voltage`, and nothing carries over to the next

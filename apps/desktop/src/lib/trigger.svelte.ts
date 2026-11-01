@@ -30,6 +30,8 @@ export interface TriggerApi {
   request(request: TriggerRequest, confirmed: boolean, remember?: boolean): Promise<TriggerReply>;
   armed(): Promise<boolean>;
   disarm(): Promise<void>;
+  /** The backend saw VBUS collapse under a contract. */
+  chargerGone(): Promise<boolean>;
   backTo5v(): Promise<void>;
   close(): Promise<void>;
   cableRead(): Promise<CableRead>;
@@ -40,6 +42,8 @@ export interface TriggerApi {
 export const DEVIATION_LIMIT = 0.05;
 /** ... measured this long after the reply. */
 export const DEVIATION_DELAY_MS = 2000;
+/** VBUS below this, V, is worth asking the backend about. It decides. */
+export const VBUS_GONE_V = 2;
 
 /** Section headings, by protocol. */
 export const PROTOCOL_TITLES: Record<TriggerProtocol, string> = {
@@ -124,6 +128,16 @@ export interface SectionView {
   /** `pending` until the protocol was listed. */
   state: "pending" | "supported" | "not-supported";
   section: ProtocolSection | null;
+}
+
+/** One section per protocol, none listed yet. */
+function unlistedSections(): SectionView[] {
+  return TRIGGER_PROTOCOLS.map((protocol) => ({
+    protocol,
+    title: PROTOCOL_TITLES[protocol],
+    state: "pending",
+    section: null,
+  }));
 }
 
 /** A request above 5 V waiting for the user's answer. */
@@ -238,6 +252,13 @@ const UNKNOWN_VOLTAGE_TEXT =
   "The charger may raise VBUS above 5 V. " +
   "Confirm that nothing unsafe is connected to the output.";
 
+/** What a request gets with no session. */
+const NO_SESSION: UiError = {
+  kind: "usage",
+  message: "No trigger session. Press Detect.",
+  hint: null,
+};
+
 export class TriggerPanel {
   /** A trigger session is open. */
   sessionOpen = $state(false);
@@ -252,8 +273,12 @@ export class TriggerPanel {
   /** The backend is armed: later requests up to 20 V send with no dialog. The backend
    * decides, this only shows it. */
   armed = $state(false);
+  /** VBUS collapsed under a contract: the backend said so. */
+  chargerGone = $state(false);
   /** The charger's answer to the last request. */
   reply = $state<TriggerReply | null>(null);
+  /** A request is out to the charger; a dialog waiting for the user is not. */
+  requesting = $state(false);
   /** Why the last request failed (error reply, timeout, refusal), null when it did not. */
   requestFailure = $state<UiError | null>(null);
   /** The voltage of the last request, mV. */
@@ -281,6 +306,13 @@ export class TriggerPanel {
   #left = false;
   /** Bumped by each armed read and each session end: only the latest read counts. */
   #armedRead = 0;
+  /** A request or the way back was accepted since the last {@link detect} started. */
+  #contract = false;
+  /** {@link #askChargerGone}'s question is out. */
+  #askingGone = false;
+  /** The press being handled, from the press to its dialog or answer: a second one
+   * is ignored. A session end drops it, so a request that never answers holds nothing. */
+  #press: object | null = null;
 
   /** The view was left or the session closed: late answers are dropped. */
   get #gone(): boolean {
@@ -290,12 +322,7 @@ export class TriggerPanel {
 
   constructor(api: TriggerApi) {
     this.#api = api;
-    this.sections = TRIGGER_PROTOCOLS.map((protocol) => ({
-      protocol,
-      title: PROTOCOL_TITLES[protocol],
-      state: "pending",
-      section: null,
-    }));
+    this.sections = unlistedSections();
   }
 
   /** Back to 5 V is shown while a session is open. */
@@ -307,6 +334,11 @@ export class TriggerPanel {
   async detect(): Promise<void> {
     this.error = null;
     this.#left = false;
+    // Detecting takes VBUS down on purpose.
+    this.#contract = false;
+    this.chargerGone = false;
+    // The backend disarms as it detects: the status goes now, not with the answer.
+    this.#notArmed();
     try {
       // An out-of-step session refuses everything: detecting again reopens it.
       if (this.requestsDisabled && this.sessionOpen) {
@@ -331,7 +363,9 @@ export class TriggerPanel {
         if (this.#gone) return;
       }
       try {
-        this.detection = await this.#api.detect();
+        const detection = await this.#api.detect();
+        // A late answer must not put a charger back on a view that ended.
+        if (!this.#gone) this.detection = detection;
       } finally {
         // The backend disarmed before it wrote anything, so a failed detection counts too.
         if (!this.#gone) await this.refreshArmed();
@@ -339,6 +373,7 @@ export class TriggerPanel {
       for (const protocol of TRIGGER_PROTOCOLS) {
         if (this.#left || !this.sessionOpen) return;
         const section = await this.#api.list(protocol);
+        if (this.#gone) return;
         this.sections = this.sections.map((s) =>
           s.protocol === protocol
             ? { ...s, section, state: section.supported ? "supported" : "not-supported" }
@@ -353,8 +388,15 @@ export class TriggerPanel {
 
   /** Asks for `request`: above 5 V it waits in {@link pending} for {@link confirm}. */
   async ask(request: TriggerRequest): Promise<void> {
+    // Nothing to ask with: the press says so instead of doing nothing.
+    if (this.#gone) {
+      this.error = NO_SESSION;
+      return;
+    }
     // Out of step: nothing goes to the meter, and the power-cycle error stays.
     if (this.requestsDisabled) return;
+    if (this.#press !== null) return;
+    const press = (this.#press = {});
     this.error = null;
     try {
       // The backend's classifier decides, not the UI's own guess.
@@ -362,7 +404,8 @@ export class TriggerPanel {
       if (this.#gone) return;
       // The backend looked at the port for this answer, so it may have just disarmed.
       if (this.armed && risk !== "armed") await this.refreshArmed();
-      if (this.#gone) return;
+      // The charger may have gone meanwhile: no dialog opens on an offer now gone.
+      if (this.#gone || this.chargerGone || this.#press !== press) return;
       // `armed` needs no dialog: it is sent unconfirmed, and the backend checks it again.
       if (risk === "above_5v" || risk === "above_5v_rememberable") {
         const sections = this.sections.flatMap((s) => (s.section ? [s.section] : []));
@@ -378,7 +421,13 @@ export class TriggerPanel {
       }
       await this.#send(request, false);
     } catch (e) {
-      if (!this.#left) this.#fail(e);
+      if (!this.#left) {
+        this.#fail(e);
+        // The refusal may be the first this page hears of a collapse.
+        await this.#askChargerGone();
+      }
+    } finally {
+      this.#release(press);
     }
   }
 
@@ -388,12 +437,22 @@ export class TriggerPanel {
     if (!pending) return;
     this.pending = null;
     if (this.requestsDisabled) return;
+    const press = (this.#press = {});
     this.error = null;
     try {
       await this.#send(pending.request, true, pending.rememberable && this.remember);
     } catch (e) {
       if (!this.#left) this.#fail(e);
+    } finally {
+      this.#release(press);
     }
+  }
+
+  /** `press` is done, unless a session end already dropped it. */
+  #release(press: object): void {
+    if (this.#press !== press) return;
+    this.#press = null;
+    this.requesting = false;
   }
 
   /** Shows `e`; an `out_of_sync` failure also disables requests. */
@@ -411,6 +470,7 @@ export class TriggerPanel {
   /** Sends `request` and keeps the reply. */
   async #send(request: TriggerRequest, confirmed: boolean, remember = false): Promise<void> {
     let reply: TriggerReply;
+    this.requesting = true;
     try {
       reply = remember
         ? await this.#api.request(request, confirmed, true)
@@ -429,6 +489,7 @@ export class TriggerPanel {
     if (this.#gone) return;
     this.requestFailure = null;
     this.reply = reply;
+    this.#contract = true;
     this.requestedMv =
       reply.requested_mv ??
       requestVoltageMv(
@@ -437,6 +498,12 @@ export class TriggerPanel {
       );
     this.#restartSettle();
     await this.refreshArmed();
+  }
+
+  /** The status goes now, and a read still out no longer counts. */
+  #notArmed(): void {
+    this.#armedRead += 1;
+    this.armed = false;
   }
 
   /** Takes the armed state from the backend; one that cannot answer is not armed. */
@@ -539,6 +606,7 @@ export class TriggerPanel {
       };
       this.requestFailure = null;
       this.requestedMv = 5000;
+      this.#contract = true;
       this.#restartSettle();
     } catch (e) {
       if (!this.#left) this.#fail(e);
@@ -569,7 +637,7 @@ export class TriggerPanel {
     this.#ended();
   }
 
-  /** The session is over: the view starts afresh. */
+  /** The session is over: the view starts afresh, with no offers to press. */
   #ended(): void {
     if (this.#settleTimer !== null) clearTimeout(this.#settleTimer);
     this.#settleTimer = null;
@@ -577,15 +645,44 @@ export class TriggerPanel {
     this.sessionOpen = false;
     this.requestsDisabled = false;
     this.pending = null;
-    this.#armedRead += 1;
-    this.armed = false;
+    this.#press = null;
+    this.requesting = false;
+    this.chargerGone = false;
+    this.vbusV = null;
+    this.#forgetCharger();
+  }
+
+  /** Nothing on the panel describes the charger any more, so no offer can be pressed. */
+  #forgetCharger(): void {
+    this.#notArmed();
+    this.#contract = false;
+    this.pending = null;
+    this.detection = null;
+    this.sections = unlistedSections();
     this.reply = null;
     this.requestFailure = null;
     this.requestedMv = null;
-    this.vbusV = null;
     this.deviation = false;
     this.cable = null;
     this.cableNoAnswer = false;
+  }
+
+  /** VBUS read low with a contract standing: asks the backend, which also saw the
+   * reading. A backend that cannot answer changes nothing. */
+  async #askChargerGone(): Promise<void> {
+    if (!this.#contract || this.#askingGone) return;
+    this.#askingGone = true;
+    let gone = false;
+    try {
+      gone = await this.#api.chargerGone();
+    } catch {
+      // Not known to be gone.
+    }
+    this.#askingGone = false;
+    // `#contract` is down again if the session ended or Detect started meanwhile.
+    if (!gone || !this.#contract) return;
+    this.#forgetCharger();
+    this.chargerGone = true;
   }
 
   /** Takes the session channel's events: live VBUS, and a session that ends. */
@@ -600,6 +697,7 @@ export class TriggerPanel {
       if (last === undefined) return;
       this.vbusV = last.vbus_v;
       this.#evaluate();
+      if (last.vbus_v < VBUS_GONE_V) void this.#askChargerGone();
     }
   }
 }

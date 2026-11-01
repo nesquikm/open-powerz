@@ -96,6 +96,9 @@ class FakeApi implements TriggerApi {
     return null;
   }
 
+  async chargerGone(): Promise<boolean> {
+    return false;
+  }
   async armed(): Promise<boolean> {
     return false;
   }

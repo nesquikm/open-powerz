@@ -22,6 +22,7 @@ import {
   triggerArmed,
   triggerBackTo5v,
   triggerCableRead,
+  triggerChargerGone,
   triggerClose,
   triggerDetect,
   triggerDisarm,
@@ -156,6 +157,22 @@ describe('AC-AXHK2N.2, .5: the "don\'t ask again" commands', () => {
     invoke.mockResolvedValue(undefined);
     await triggerDisarm();
     expect(invoke).toHaveBeenLastCalledWith("trigger_disarm");
+  });
+});
+
+describe("AC-AXHK2N.9, .10: the charger gone command", () => {
+  it("reports what the backend says", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(triggerChargerGone()).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("trigger_charger_gone");
+    invoke.mockResolvedValue(false);
+    await expect(triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("a meter's own command names the meter", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(meterBackend("usb:1:7").triggerChargerGone()).resolves.toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_charger_gone", { deviceId: "usb:1:7" });
   });
 });
 

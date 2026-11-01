@@ -31,7 +31,12 @@ The trigger panel offers a session-scoped "don't ask again" option for requests 
 - AC-AXHK2N.5: While armed, the panel shows a visible "Not asking up to 20 V" status with a Clear button that disarms at once.
 - AC-AXHK2N.6: The arming request is refused if the request does not qualify; the backend never trusts a UI flag for the 20 V limit.
 - AC-AXHK2N.7: `powerz` trigger commands and `--allow-high-voltage` behave exactly as before. The mock backend follows the same rules. A README line and the trigger how-to describe the option.
-- AC-AXHK2N.8: A request at or below 5 V, a confirmed request that does not qualify, a request that fails after anything was written, Detect, any built message, any console line that is not read-only, and any change in the charger's offers each disarm too, with a test for each. A request whose offer differs from the one last listed is refused, not sent.
+- AC-AXHK2N.8: A request at or below 5 V, a confirmed request that does not qualify, a request that fails after anything was written, Detect, any built message, any console line that is not read-only, and any change in the charger's offers each disarm too, with a test for each. A request above 5 V whose offer differs from the one last listed is refused, not sent.
+- AC-AXHK2N.9: Once a PD request or the way back to 5 V was accepted, VBUS below 2 V ends the backend's armed state within 200 ms with no press, and the status goes. A dip to 4.5 V during a voltage change does not. VBUS of 0 V before any contract means nothing, so Detect does not trip it.
+- AC-AXHK2N.10: The same collapse forgets the charger's offers in the backend and on the page. A request is refused until the next Detect, no stale offer can be pressed, and the page says the charger went away and to press Detect. A same-charger replug behaves the same, with nothing sent.
+- AC-AXHK2N.11: When the trigger session ends, leaving the tab included, the offers go and the view says to press Detect. No control stays on screen that does nothing when pressed.
+- AC-AXHK2N.12: `app.log` records the offers each time they are listed, and the reason armed ended, one line each, with no serial.
+- AC-AXHK2N.13: A request in flight shows that it is in progress, and the armed status goes as soon as Detect starts.
 
 ## Technical Design
 
@@ -53,4 +58,11 @@ User decision 2026-10-26. Triggering at or below 20 V is approved in the wall-ch
 - While armed, the session reads the port for 20 ms before judging anything, since nothing else reads it between commands. That is how a new charger's offers can arrive in time.
 - A "yes" stands on the offer the page last listed, so a dialog naming 9 V never sends 12 V. Detect refreshes it.
 - A confirmed request that does not qualify disarms, EPR or legacy, so nothing stays armed across a contract the option never covered.
-- Open: whether the meter reports anything when a charger is swapped while the session stays open. The simulator cannot settle it; part E of the runbook does. The how-to tells the user to end the option first.
+- The hardware run answered the swap question only for a charger with different offers. ACs .9 and .10 stop relying on what the meter reports.
+- The hardware run on ec17ae3 found no silent send, but the armed status stayed through a charger swap until the next press, so a same-charger replug was assumed to send. ACs .9 to .13 close that.
+- 2 V: PD holds VBUS at 4.75 V or above across a voltage change, and 0.8 V is its off level. A false end only costs one extra dialog, so one reading is enough. The check runs every 100 ms on the session thread, from the stream's latest sample.
+- This charger reads 0 V until a PD session starts, hence "once a contract was accepted".
+- The check arms after a reading of 3 V or more since the contract, so a stale sample from before it cannot trip. PPS starts at 3.3 V.
+- After Detect's `reset`, closing still sends `pd req=1` because the session keeps its PD flags. That is older than this FR and fails safe, with a Hard Reset fallback on the real meter. The simulator does not answer it.
+- A contract that never reads 3 V counts as a collapse after 1 s, so a charger pulled during the first request is caught. A demo meter reading 0 V trips this too, which is how a test proves the stream wiring.
+- A PD listing that gets no answer also clears the collapse, so a replacement charger with no PD is no dead end. With no offers, no PD request can go out.

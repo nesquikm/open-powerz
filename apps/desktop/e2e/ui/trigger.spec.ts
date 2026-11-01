@@ -970,3 +970,159 @@ test("the Cable card's no-answer text passes axe (AC-AXHK2P.4)", async ({ page }
   await expect(cableCard(page)).toContainText(/no e-marker/i);
   expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
 });
+
+// ---- FR AXHK2N, AC .9 to .13: a charger that goes away ----
+//
+// Page contract: `?mock=trigger-charger-gone` drops the demo VBUS to 0 V a moment after
+// the first accepted request. The view then says "The charger went away. Press Detect."
+// and has no offers. With no session and no offers it says "Press Detect to see what the
+// charger offers." While a request or a confirmed send is out it shows "Requesting…".
+// (.12 is the app log, which only the Rust tests can see.)
+
+const GONE_TEXT = "The charger went away. Press Detect.";
+const NO_OFFERS_TEXT = "Press Detect to see what the charger offers.";
+const REQUESTING = "Requesting…";
+
+function chargerGoneText(page: Page): Locator {
+  return view(page).getByText(GONE_TEXT);
+}
+
+function noOffersText(page: Page): Locator {
+  return view(page).getByText(NO_OFFERS_TEXT);
+}
+
+function requesting(page: Page): Locator {
+  return view(page).getByText(REQUESTING);
+}
+
+/** Every button that would ask the charger for something. */
+function offerControls(page: Page): Locator {
+  return page
+    .locator("#view-trigger section")
+    .getByRole("button", { name: /^(\d+(\.\d+)? V\b|Request\b)/ });
+}
+
+/** Makes the mock answer `method` only after `ms`. */
+async function slowMock(page: Page, method: string, ms: number): Promise<void> {
+  await page.evaluate(
+    ({ key, method, ms }) => {
+      const mock = (window as unknown as Record<string, Record<string, unknown>>)[key]!;
+      const call = (mock[method] as (...args: unknown[]) => Promise<unknown>).bind(mock);
+      mock[method] = async (...args: unknown[]) => {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+        return call(...args);
+      };
+    },
+    { key: MOCK_HOOK, method, ms },
+  );
+}
+
+test("a collapse ends the status with no press and sends nothing (AC-AXHK2N.9)", async ({
+  page,
+}) => {
+  await detected(page, "?mock=trigger-charger-gone");
+  await arm(page);
+  const sent = (await commands(page)).length;
+  await expect(armedStatus(page)).toBeHidden();
+  await expect(chargerGoneText(page)).toBeVisible();
+  expect(await commands(page)).toHaveLength(sent);
+});
+
+test("a normal charger keeps the status and shows no such text (AC-AXHK2N.9)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await page.waitForTimeout(1500);
+  await expect(armedStatus(page)).toBeVisible();
+  await expect(chargerGoneText(page)).toBeHidden();
+});
+
+test("a collapse leaves no offer to press until Detect (AC-AXHK2N.10)", async ({ page }) => {
+  await detected(page, "?mock=trigger-charger-gone");
+  await request9V(page);
+  await expect(chargerGoneText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(result(page).getByText("pd req=2")).toBeHidden();
+
+  await detectButton(page).click();
+  await expect(offerButton(page, 9)).toBeVisible();
+  await expect(chargerGoneText(page)).toBeHidden();
+  // Nothing stayed armed through it: the next request asks.
+  await asks15V(page);
+});
+
+test("leaving the tab leaves no offers and says to press Detect (AC-AXHK2N.11)", async ({
+  page,
+}) => {
+  await detected(page);
+  await expect(noOffersText(page)).toBeHidden();
+  await request9V(page);
+  await page.getByRole("tab", { name: "Meter" }).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pdm close");
+  await showTrigger(page);
+  await expect(noOffersText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(view(page).getByText("Not detected yet.")).toBeVisible();
+
+  await detectButton(page).click();
+  await expect(offerButton(page, 9)).toBeVisible();
+  await expect(noOffersText(page)).toBeHidden();
+});
+
+test("disconnecting leaves no offers either (AC-AXHK2N.11)", async ({ page }) => {
+  await detected(page);
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await expect(backButton(page)).toBeHidden();
+  await expect(noOffersText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+});
+
+test("a view that never detected says to press Detect (AC-AXHK2N.11)", async ({ page }) => {
+  await open(page);
+  await streamDemo(page);
+  await showTrigger(page);
+  await expect(noOffersText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+});
+
+test("a request at 5 V shows it is in flight (AC-AXHK2N.13)", async ({ page }) => {
+  await detected(page);
+  await expect(requesting(page)).toBeHidden();
+  await slowMock(page, "triggerRequest", 1500);
+  await offerButton(page, 5).click();
+  await expect(requesting(page)).toBeVisible();
+  await expect(requesting(page)).toBeHidden();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pd req=1");
+});
+
+test("a confirmed request shows it is in flight (AC-AXHK2N.13)", async ({ page }) => {
+  await detected(page);
+  await slowMock(page, "triggerRequest", 1500);
+  await offerButton(page, 9).click();
+  await expect(requesting(page)).toBeHidden();
+  await dialog(page).getByRole("button", { name: "Confirm" }).click();
+  await expect(requesting(page)).toBeVisible();
+  await expect(requesting(page)).toBeHidden();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pd req=2");
+});
+
+test("the armed status goes as soon as Detect starts (AC-AXHK2N.13)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await slowMock(page, "triggerDetect", 3000);
+  await detectButton(page).click();
+  await expect(view(page).getByText("Detecting…")).toBeVisible();
+  await expect(armedStatus(page)).toBeHidden({ timeout: 1000 });
+});
+
+test("the new texts pass axe (AC-AXHK2N.10, .11, .13)", async ({ page }) => {
+  await detected(page, "?mock=trigger-charger-gone");
+  await request9V(page);
+  await expect(chargerGoneText(page)).toBeVisible();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+  await page.getByRole("tab", { name: "Meter" }).click();
+  await showTrigger(page);
+  await expect(noOffersText(page)).toBeVisible();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});

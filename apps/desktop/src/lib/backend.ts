@@ -971,6 +971,12 @@ export async function triggerDisarm(): Promise<void> {
   await invoke("trigger_disarm");
 }
 
+/** Whether VBUS collapsed under a contract; false with no trigger session. */
+export async function triggerChargerGone(): Promise<boolean> {
+  if (mock) return mock.triggerChargerGone();
+  return invoke<boolean>("trigger_charger_gone");
+}
+
 /** Back to 5 V; the session stays open. */
 export async function triggerBackTo5v(): Promise<void> {
   if (mock) return mock.triggerBackTo5v();
@@ -1119,6 +1125,7 @@ export interface MeterBackend {
   ): Promise<TriggerReply>;
   triggerArmed(): Promise<boolean>;
   triggerDisarm(): Promise<void>;
+  triggerChargerGone(): Promise<boolean>;
   triggerBackTo5v(): Promise<void>;
   triggerClose(): Promise<void>;
   triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>;
@@ -1165,6 +1172,7 @@ export const currentMeterCommands: MeterCommands = {
   triggerRequest,
   triggerArmed,
   triggerDisarm,
+  triggerChargerGone,
   triggerBackTo5v,
   triggerClose,
   triggerMessageRisk,
@@ -1238,6 +1246,7 @@ export function meterBackend(deviceId: string): MeterBackend {
     triggerDisarm: async () => {
       await call("trigger_disarm");
     },
+    triggerChargerGone: () => call("trigger_charger_gone"),
     triggerBackTo5v: async () => {
       await call("trigger_back_to_5v");
     },

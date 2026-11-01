@@ -45,6 +45,9 @@
     if (!panel.sessionOpen) void panel.loadCaptureCable();
   });
 
+  /** No session, and none on its way. */
+  const noSession = $derived(!panel.sessionOpen && !busy);
+
   const reason = $derived(connected ? null : "Connect a meter to detect the charger's protocols.");
 
   async function detect(): Promise<void> {
@@ -178,7 +181,12 @@
     <output for={p.id}>{p.text}</output>
     {#if p.request}
       {@const r = p.request}
-      <button type="button" disabled={panel.requestsDisabled} onclick={r.onclick}>{r.label}</button>
+      <button
+        type="button"
+        disabled={panel.requestsDisabled}
+        aria-disabled={panel.requesting}
+        onclick={r.onclick}>{r.label}</button
+      >
     {/if}
   </div>
 {/snippet}
@@ -205,6 +213,8 @@
     {:else if busy}
       <p class="reason" aria-live="polite">Detecting…</p>
     {/if}
+    <!-- Always there, with its room kept: live regions announce a change, and nothing moves. -->
+    <p class="reason requesting" aria-live="polite">{panel.requesting ? "Requesting…" : ""}</p>
   </div>
 
   <p class="reason">
@@ -212,6 +222,12 @@
     VBUS above 5 V on some chargers.
   </p>
 
+  {#if noSession}
+    <p class="reason">Press Detect to see what the charger offers.</p>
+  {/if}
+  {#if panel.chargerGone}
+    <p class="armed" role="status">The charger went away. Press Detect.</p>
+  {/if}
   {#if panel.armed}
     <p class="armed" role="status">
       Not asking up to 20 V
@@ -272,6 +288,7 @@
                 <button
                   type="button"
                   disabled={panel.requestsDisabled}
+                  aria-disabled={panel.requesting}
                   onclick={() =>
                     void panel.ask({
                       protocol: "pd",
@@ -326,6 +343,7 @@
                 <button
                   type="button"
                   disabled={requestsOff}
+                  aria-disabled={panel.requesting}
                   onclick={() => void panel.ask({ protocol: p, volts: v })}>{v} V</button
                 >
               {/each}
@@ -386,6 +404,7 @@
                 <button
                   type="button"
                   disabled={requestsOff || (p === "ufcs" && l.index === null)}
+                  aria-disabled={panel.requesting}
                   title={p === "ufcs" && l.index === null
                     ? "This UFCS capability has no number, so it cannot be requested."
                     : undefined}
@@ -456,9 +475,13 @@
       <button
         type="button"
         disabled={requestsOff || panel.cableBusy}
+        aria-describedby={noSession ? "trigger-cable-reason" : undefined}
         onclick={() => void panel.readCable()}>Read cable</button
       >
     </div>
+    {#if noSession}
+      <p id="trigger-cable-reason" class="muted">Press Detect to read the cable.</p>
+    {/if}
     {#if panel.cableBusy}
       <p class="muted" aria-live="polite">Reading the cable…</p>
     {/if}
@@ -522,6 +545,16 @@
     margin: 0;
     color: var(--muted);
     font-size: 0.875rem;
+  }
+  .requesting {
+    min-width: 6.5em;
+    min-height: 1lh;
+    white-space: nowrap;
+  }
+  /* Not `disabled`: a keyboard press keeps its focus, and the panel ignores the press. */
+  button[aria-disabled="true"] {
+    opacity: 0.6;
+    cursor: progress;
   }
   .error {
     margin: 0;

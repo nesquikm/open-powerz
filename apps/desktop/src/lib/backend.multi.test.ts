@@ -146,10 +146,12 @@ describe("AC-1HHT03.3: a tile's actions name its meter", () => {
     await a.triggerRequest(pd9v, true, true);
     await a.triggerArmed();
     await a.triggerDisarm();
+    await a.triggerChargerGone();
     expect(invoke.mock.calls).toEqual([
       ["trigger_request", { deviceId: A, request: pd9v, confirmed: true, remember: true }],
       ["trigger_armed", { deviceId: A }],
       ["trigger_disarm", { deviceId: A }],
+      ["trigger_charger_gone", { deviceId: A }],
     ]);
   });
 

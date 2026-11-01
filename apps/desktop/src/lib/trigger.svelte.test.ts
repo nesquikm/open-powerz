@@ -26,6 +26,7 @@ import {
   DEVIATION_LIMIT,
   PROTOCOL_TITLES,
   TriggerPanel,
+  VBUS_GONE_V,
   cableVendorText,
   confirmationText,
   detectionChecks,
@@ -95,6 +96,10 @@ class FakeApi implements TriggerApi {
   cableAnswer: CableRead = { kind: "found", cable: CABLE };
   /** What `cableSeen` answers. */
   cableInCapture: CableView | null = null;
+  /** What `chargerGone` answers. */
+  goneNow = false;
+  /** How many times `chargerGone` was asked. */
+  goneAsked = 0;
 
   async open(): Promise<void> {
     this.calls.push("open");
@@ -147,6 +152,10 @@ class FakeApi implements TriggerApi {
   async disarm(): Promise<void> {
     this.calls.push("disarm");
     this.armedNow = false;
+  }
+  async chargerGone(): Promise<boolean> {
+    this.goneAsked += 1;
+    return this.goneNow;
   }
   async cableRead(): Promise<CableRead> {
     this.calls.push("cable read");
@@ -1471,5 +1480,376 @@ describe("AXHK2P review: the card never outlives what it describes", () => {
     api.cableSeen = async () => null;
     await panel.meterChanged();
     expect(panel.cable).toBeNull();
+  });
+});
+
+// ---- AC-AXHK2N.9 to .13: a charger that goes away, and a view with nothing dead on it ----
+
+const GONE_REFUSAL: UiError = {
+  kind: "usage",
+  message: "The charger went away. Press Detect.",
+  hint: null,
+};
+
+/** Lets the answers of the promises already settled land. */
+async function settled(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve));
+}
+
+/** A promise settled from outside. */
+function held<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+/** The backend after a collapse: it reports it, and refuses what names an offer. */
+function collapse(api: ArmedApi): void {
+  api.goneNow = true;
+  api.armedNow = false;
+  api.risk = async () => {
+    throw GONE_REFUSAL;
+  };
+  api.request = async () => {
+    throw GONE_REFUSAL;
+  };
+}
+
+/** The panel of an armed session, after a batch at 0 V saw the collapse. */
+async function collapsed(): Promise<{ api: ArmedApi; panel: TriggerPanel }> {
+  const { api, panel } = await armedPanel();
+  collapse(api);
+  panel.handleEvent(batch(0));
+  await settled();
+  return { api, panel };
+}
+
+function nothingListed(panel: TriggerPanel): void {
+  expect(panel.sections.map((s) => s.state)).toEqual(TRIGGER_PROTOCOLS.map(() => "pending"));
+  expect(panel.sections.every((s) => s.section === null)).toBe(true);
+  expect(panel.detection).toBeNull();
+}
+
+describe("AC-AXHK2N.9: VBUS collapses", () => {
+  it("the level is 2 V", () => {
+    expect(VBUS_GONE_V).toBe(2);
+  });
+
+  it("a batch below it after a request asks the backend, and its yes ends the status", async () => {
+    const { api, panel } = await armedPanel();
+    collapse(api);
+    panel.handleEvent(batch(1.99));
+    await settled();
+    expect(api.goneAsked).toBeGreaterThan(0);
+    expect(panel.armed).toBe(false);
+    expect(panel.chargerGone).toBe(true);
+  });
+
+  it("the backend's no changes nothing", async () => {
+    const { api, panel } = await armedPanel();
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(api.goneAsked).toBeGreaterThan(0);
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.armed).toBe(true);
+    expect(panel.reply).not.toBeNull();
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+
+  it("a dip to 4.5 V during a voltage change asks nothing", async () => {
+    const { api, panel } = await armedPanel();
+    panel.handleEvent(batch(4.5));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.armed).toBe(true);
+  });
+
+  it("exactly 2 V asks nothing", async () => {
+    const { api, panel } = await armedPanel();
+    panel.handleEvent(batch(VBUS_GONE_V));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+  });
+
+  it("0 V before any request asks nothing", async () => {
+    const { api, panel } = await rememberPanel();
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+
+  it("0 V after Back to 5 V counts, since that request was accepted too", async () => {
+    const { api, panel } = await armedPanel();
+    await panel.backTo5v();
+    collapse(api);
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.chargerGone).toBe(true);
+  });
+
+  it("a backend that cannot answer changes nothing and shows no error", async () => {
+    const { api, panel } = await armedPanel();
+    api.chargerGone = async () => {
+      throw { kind: "internal", message: "gone", hint: null };
+    };
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.armed).toBe(true);
+    expect(panel.error).toBeNull();
+  });
+
+  it("an answer that lands after leaving the view is dropped", async () => {
+    const { api, panel } = await armedPanel();
+    const answer = held<boolean>();
+    api.chargerGone = () => answer.promise;
+    panel.handleEvent(batch(0));
+    await panel.leave();
+    answer.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.10: the collapse forgets the charger", () => {
+  it("drops the offers, the detection and the request's result", async () => {
+    const { panel } = await collapsed();
+    nothingListed(panel);
+    expect(panel.reply).toBeNull();
+    expect(panel.requestedMv).toBeNull();
+  });
+
+  it("drops the cable it read from that charger", async () => {
+    const { api, panel } = await armedPanel();
+    await panel.readCable();
+    expect(panel.cable).not.toBeNull();
+    collapse(api);
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.cable).toBeNull();
+  });
+
+  it("closes a dialog still open on an offer that is gone", async () => {
+    const { api, panel } = await rememberPanel();
+    await at9V(panel);
+    await panel.ask(PD_15V);
+    expect(panel.pending).not.toBeNull();
+    collapse(api);
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.pending).toBeNull();
+  });
+
+  it("leaves the session open and calls nothing else", async () => {
+    const { api, panel } = await armedPanel();
+    collapse(api);
+    const calls = [...api.calls];
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.sessionOpen).toBe(true);
+    expect(api.calls).toEqual(calls);
+  });
+
+  it("a request after it is refused: nothing is sent and the refusal shows", async () => {
+    const { api, panel } = await collapsed();
+    const sent = api.sent.length;
+    await panel.ask(PD_9V);
+    expect(api.sent).toHaveLength(sent);
+    expect(panel.pending).toBeNull();
+    expect(panel.error?.message).toMatch(/Press Detect/);
+  });
+
+  it("does not ask again once it knows", async () => {
+    const { api, panel } = await collapsed();
+    const asked = api.goneAsked;
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(api.goneAsked).toBe(asked);
+  });
+
+  it("Detect clears it as it starts, and lists the charger again", async () => {
+    const { api, panel } = await collapsed();
+    api.goneNow = false;
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(panel.detection).toEqual(DETECTION);
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+});
+
+describe("AC-AXHK2N.11: the end of a session leaves nothing that does nothing", () => {
+  it("leaving the view drops the offers and the detection", async () => {
+    const { panel } = await detected();
+    await panel.leave();
+    nothingListed(panel);
+  });
+
+  it("a disconnect drops them too", async () => {
+    const { panel } = await detected();
+    panel.handleEvent({ type: "status", data: { state: "disconnected" } } as BackendEvent);
+    nothingListed(panel);
+  });
+
+  it("a collapse is forgotten with the session", async () => {
+    const { panel } = await collapsed();
+    await panel.leave();
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("the next Detect lists them again", async () => {
+    const { panel } = await detected();
+    await panel.leave();
+    await panel.detect();
+    expect(panel.detection).toEqual(DETECTION);
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+
+  it("asking with no session says to press Detect and calls nothing", async () => {
+    const { api, panel } = await detected();
+    await panel.leave();
+    api.calls = [];
+    await panel.ask(PD_5V);
+    expect(api.calls).toEqual([]);
+    expect(panel.error?.kind).toBe("usage");
+    expect(panel.error?.message).toMatch(/Press Detect/);
+  });
+
+  it("asking on a page that never detected says so too", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.ask(PD_9V);
+    expect(api.calls).toEqual([]);
+    expect(panel.error?.message).toMatch(/Press Detect/);
+  });
+});
+
+describe("AC-AXHK2N.13: a request in flight, and Detect", () => {
+  /** A backend whose requests wait for `gate`. */
+  function heldRequests(api: ArmedApi): { release(): void } {
+    const gate = held<void>();
+    const send = api.request.bind(api);
+    api.request = async (...args) => {
+      await gate.promise;
+      return send(...args);
+    };
+    return { release: () => gate.resolve() };
+  }
+
+  it("is not requesting before anything was sent", async () => {
+    const { panel } = await rememberPanel();
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("a request sent at once shows until its answer", async () => {
+    const { api, panel } = await rememberPanel();
+    const { release } = heldRequests(api);
+    const asking = panel.ask(PD_5V);
+    await settled();
+    expect(panel.requesting).toBe(true);
+    release();
+    await asking;
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("a dialog waiting for the user is not a request in flight", async () => {
+    const { panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    expect(panel.pending).not.toBeNull();
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("a confirmed send shows until its answer", async () => {
+    const { api, panel } = await rememberPanel();
+    const { release } = heldRequests(api);
+    await panel.ask(PD_9V);
+    const confirming = panel.confirm();
+    await settled();
+    expect(panel.requesting).toBe(true);
+    release();
+    await confirming;
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("a failed request stops showing", async () => {
+    const { api, panel } = await rememberPanel();
+    api.request = async () => {
+      throw { kind: "timeout", message: "No answer.", hint: null };
+    };
+    await panel.ask(PD_5V);
+    expect(panel.requesting).toBe(false);
+    expect(panel.error?.kind).toBe("timeout");
+  });
+
+  it("a request still out when the view is left stops showing once it ends", async () => {
+    const { api, panel } = await rememberPanel();
+    const { release } = heldRequests(api);
+    const asking = panel.ask(PD_5V);
+    await settled();
+    await panel.leave();
+    release();
+    await asking;
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("Detect takes the armed status down as it starts", async () => {
+    const { api, panel } = await armedPanel();
+    const answer = held<Detection>();
+    api.detect = () => {
+      api.armedNow = false;
+      return answer.promise;
+    };
+    const detecting = panel.detect();
+    expect(panel.armed).toBe(false);
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(panel.armed).toBe(false);
+  });
+
+  it("an armed answer from before Detect does not bring the status back", async () => {
+    const { api, panel } = await armedPanel();
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const reading = panel.refreshArmed();
+    const detecting = panel.detect();
+    await reading;
+    expect(panel.armed).toBe(false);
+    answer.resolve(DETECTION);
+    await detecting;
+  });
+});
+
+describe("AC-AXHK2N.13: a second press while the first is out", () => {
+  it("sends one request", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    const send = vi.spyOn(api, "request");
+    await Promise.all([panel.ask(PD_15V), panel.ask(PD_15V)]);
+    await panel.confirm();
+    await panel.confirm();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("AC-AXHK2N.10: a refused press re-reads the backend", () => {
+  it("takes the page down when the backend knows the charger went away", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    await panel.ask(PD_15V);
+    await panel.confirm();
+    api.risk = async () => {
+      throw { kind: "usage", message: "The charger went away. Press Detect.", hint: null };
+    };
+    api.goneNow = true;
+    await panel.ask(PD_15V);
+    await vi.waitFor(() => expect(panel.chargerGone).toBe(true));
   });
 });

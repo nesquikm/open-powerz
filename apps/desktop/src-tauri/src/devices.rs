@@ -2033,6 +2033,7 @@ where
         id: &str,
         mut worker: crate::trigger::TriggerWorker,
     ) -> Result<(), UiError> {
+        let log = self.log.clone();
         let Some(meter) = self.meter_mut(id) else {
             let _ = worker.close();
             return Err(UiError::usage("Connect a meter first."));
@@ -2066,6 +2067,11 @@ where
         {
             meter.rate_before_trigger = Some(before);
         }
+        // A charger that goes away shows in the stream (AC-AXHK2N.9).
+        let stream = control.clone();
+        worker.watch_vbus(move || stream.latest_record().map(|r| r.vbus_v()));
+        let log = SessionLog::new(log, id.to_owned(), meter.device.model.clone());
+        worker.log_to(move |line| log.event(&line));
         // Polling pauses while the automatic list runs (AC-DGSQ6S.11).
         worker.pause_during_list(control);
         worker.hold_until_closed(crate::trigger::PdmHold::new(&meter.pdm_holds));

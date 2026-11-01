@@ -523,6 +523,7 @@ export const MOCK_MODES = [
   "trigger-list-lag",
   "trigger-no-cable",
   "trigger-unlisted-cable",
+  "trigger-charger-gone",
   "bootloader",
   "firmware-fail-switching",
   "firmware-fail-erasing",
@@ -708,10 +709,18 @@ interface MockTrigger {
   rateBefore: number | null;
   /** "Don't ask again" is on (FR AXHK2N). */
   armed: boolean;
+  /** `trigger-charger-gone`: the charger's going away has been scheduled. */
+  goingAway: boolean;
+  /** VBUS collapsed under a contract (FR AXHK2N). */
+  chargerGone: boolean;
 }
 
 /** The queue rate cap while a trigger session is open, SPS. [inferred] */
 const TRIGGER_MAX_SPS = 50;
+/** `trigger-charger-gone`: how long after the first accepted request VBUS falls, ms. */
+const CHARGER_GONE_AFTER_MS = 1000;
+/** The refusal of what names an offer once the charger went away. */
+const CHARGER_GONE_REFUSAL = "The charger went away. Press Detect.";
 
 /** The backend's `OutOfSync` refusal: the meter's replies lag behind the commands. */
 function outOfSyncError(): UiError {
@@ -1114,6 +1123,7 @@ export class MockBackend {
       triggerRequest: on(this.triggerRequest),
       triggerArmed: on(this.triggerArmed),
       triggerDisarm: on(this.triggerDisarm),
+      triggerChargerGone: on(this.triggerChargerGone),
       triggerBackTo5v: on(this.triggerBackTo5v),
       triggerClose: on(this.triggerClose),
       triggerMessageRisk: on(this.triggerMessageRisk),
@@ -1946,7 +1956,7 @@ export class MockBackend {
       rateBefore = s.rateSps;
       await this.setRate(TRIGGER_MAX_SPS);
     }
-    s.trigger = { entered: null, rateBefore, armed: false };
+    s.trigger = { entered: null, rateBefore, armed: false, goingAway: false, chargerGone: false };
     this.#triggerLog.push("pdm open");
   }
 
@@ -1990,6 +2000,10 @@ export class MockBackend {
     if (protocol === "pd") {
       this.#triggerLog.push("pdm parm");
       t.entered = "pd";
+      if (t.chargerGone) {
+        t.chargerGone = false;
+        if (this.#session) this.#session.triggerVbusV = null;
+      }
       return {
         protocol,
         supported: true,
@@ -2027,6 +2041,7 @@ export class MockBackend {
   /** Like the library classifier: above 5 V, or unknown, needs a confirmation. */
   async triggerRisk(request: TriggerRequest): Promise<RiskClass> {
     const t = this.#openTrigger();
+    if (t.chargerGone) throw usage(CHARGER_GONE_REFUSAL);
     const mv = this.#requestMv(request);
     if (mv !== null && mv <= 5000) return "at_most_5v";
     if (!this.#rememberable(request)) return "above_5v";
@@ -2116,6 +2131,11 @@ export class MockBackend {
     if (this.#trigger) this.#trigger.armed = false;
   }
 
+  /** Whether VBUS collapsed under a contract; false with no trigger session. */
+  async triggerChargerGone(): Promise<boolean> {
+    return this.#trigger?.chargerGone ?? false;
+  }
+
   /** Refuses an unconfirmed above-5 V request before anything is sent, and a `remember`
    * the offers do not allow; an armed session covers what is rememberable. */
   async triggerRequest(
@@ -2124,6 +2144,7 @@ export class MockBackend {
     remember = false,
   ): Promise<TriggerReply> {
     const t = this.#openTrigger();
+    if (t.chargerGone) throw usage(CHARGER_GONE_REFUSAL);
     const mv = this.#requestMv(request);
     if (mv === null && request.protocol === "pd") {
       throw usage(`The charger offers nothing at position ${request.position}.`);
@@ -2164,6 +2185,7 @@ export class MockBackend {
       // The demo VBUS follows the request; `trigger-sag` keeps it 12 % below.
       this.#session.triggerVbusV = (mv / 1000) * (this.#mode === "trigger-sag" ? 0.88 : 0.985);
     }
+    this.#scheduleChargerGone(t);
     if (request.protocol !== "pd") {
       return {
         command,
@@ -2184,6 +2206,20 @@ export class MockBackend {
       delivered_ma: 0,
       reply: null,
     };
+  }
+
+  /** `trigger-charger-gone`: VBUS falls to 0 V a moment after the first accepted request,
+   * and the session finds out on its own, with nothing sent. */
+  #scheduleChargerGone(t: MockTrigger): void {
+    const s = this.#session;
+    if (this.#mode !== "trigger-charger-gone" || t.goingAway || !s) return;
+    t.goingAway = true;
+    setTimeout(() => {
+      if (s.trigger !== t) return;
+      s.triggerVbusV = 0;
+      t.armed = false;
+      t.chargerGone = true;
+    }, CHARGER_GONE_AFTER_MS);
   }
 
   /** Back to 5 V: `pd req=1` after PD, `reset` after the others; the session stays. */

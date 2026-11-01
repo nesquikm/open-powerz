@@ -684,3 +684,109 @@ describe("FR AXHK2P: the mock's cable read follows the backend's rules", () => {
     });
   });
 });
+
+describe("AC-AXHK2N.9, .10: a charger that goes away", () => {
+  const GONE: { kind: string; message: unknown } = {
+    kind: "usage",
+    message: expect.stringMatching(/Press Detect/),
+  };
+
+  async function goneReady(): Promise<{ backend: MockBackend; events: BackendEvent[] }> {
+    const c = await opened("trigger-charger-gone");
+    await c.backend.triggerDetect();
+    await c.backend.triggerList("pd");
+    return c;
+  }
+
+  /** Long enough for the mock's "a moment after". */
+  async function aMoment(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(5000);
+  }
+
+  it("is a mode of the page URL", () => {
+    expect(mockModeFromUrl("?mock=trigger-charger-gone")).toBe("trigger-charger-gone");
+  });
+
+  it("with no session no charger is gone", async () => {
+    const backend = new MockBackend(null, { pdSynthetic: null });
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("the usual demo charger never goes", async () => {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    await backend.triggerRequest(PD_9V, true, true);
+    await aMoment();
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+  });
+
+  it("nothing happens before a request", async () => {
+    const { backend } = await goneReady();
+    await aMoment();
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("stays up long enough for the page to show the request", async () => {
+    const { backend, events } = await goneReady();
+    await backend.triggerRequest(PD_9V, true, true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(lastVbus(events)).toBeGreaterThan(8);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("VBUS falls to 0 V a moment after the first request, and armed ends", async () => {
+    const { backend, events } = await goneReady();
+    await backend.triggerRequest(PD_9V, true, true);
+    const sent = backend.triggerCommands().length;
+    await aMoment();
+    expect(lastVbus(events)).toBeLessThan(0.5);
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await expect(backend.triggerChargerGone()).resolves.toBe(true);
+    expect(backend.triggerCommands()).toHaveLength(sent);
+  });
+
+  it("refuses every request until the next PD listing, sending nothing", async () => {
+    const { backend } = await goneReady();
+    await backend.triggerRequest(PD_9V, true);
+    await aMoment();
+    const sent = backend.triggerCommands().length;
+    await expect(backend.triggerRisk(PD_9V)).rejects.toMatchObject(GONE);
+    await expect(backend.triggerRequest(PD_9V, true)).rejects.toMatchObject(GONE);
+    await expect(backend.triggerRequest(PD_5V, false)).rejects.toMatchObject(GONE);
+    expect(backend.triggerCommands()).toHaveLength(sent);
+  });
+
+  it("Detect alone does not clear it; the PD listing does, and arms nothing", async () => {
+    const { backend } = await goneReady();
+    await backend.triggerRequest(PD_9V, true, true);
+    await aMoment();
+    await backend.triggerDetect();
+    await expect(backend.triggerChargerGone()).resolves.toBe(true);
+    await backend.triggerList("pd");
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await expect(backend.triggerRisk(PD_9V)).resolves.toBe("above_5v_rememberable");
+  });
+
+  it("only the first request does it: the next one holds", async () => {
+    const { backend, events } = await goneReady();
+    await backend.triggerRequest(PD_9V, true);
+    await aMoment();
+    await backend.triggerDetect();
+    await backend.triggerList("pd");
+    await backend.triggerRequest(PD_9V, true);
+    await aMoment();
+    expect(lastVbus(events)).toBeGreaterThan(8);
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("closing the session forgets it", async () => {
+    const { backend } = await goneReady();
+    await backend.triggerRequest(PD_9V, true);
+    await aMoment();
+    await backend.triggerClose();
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+});

@@ -107,7 +107,7 @@ Commands:
 | `triggerOpen(): Promise<void>` | Opens the trigger session on the connected meter (a simulated one for a demo device). Fails with `usage` when no meter is connected or a session is already open. |
 | `triggerDetect(): Promise<Detection>` | BC1.2, Apple and the automatic list. Nothing above 5 V is asked. The stream's polling pauses while it runs (see below). |
 | `triggerList(protocol: TriggerProtocol): Promise<ProtocolSection>` | Enters `protocol` and reports its section. A protocol the charger does not answer is `supported: false`, not an error. |
-| `triggerRisk(request: TriggerRequest): Promise<RiskClass>` | The library's risk class of `request`, given what the charger offered. `above_5v` and `above_5v_rememberable` need the user's confirmation; the second one lets the dialog offer "Don't ask again". `armed` is covered by it and needs no dialog. |
+| `triggerRisk(request: TriggerRequest): Promise<RiskClass>` | The library's risk class of `request`, given what the charger offered. It fails with `usage` after the charger went away. `above_5v` and `above_5v_rememberable` need the user's confirmation; the second one lets the dialog offer "Don't ask again". `armed` is covered by it and needs no dialog. |
 | `triggerRequest(request: TriggerRequest, confirmed: boolean, remember?: boolean): Promise<TriggerReply>` | Sends `request`. The backend is the final gate: above 5 V it is refused unless `confirmed` or armed. `remember` with `confirmed` arms "Don't ask again"; a request that does not qualify fails with `usage` and sends nothing. A request above 5 V whose offer differs from the one last listed is refused with `usage` and not sent. A request for another protocol than the one entered enters that protocol again first. |
 | `triggerArmed(): Promise<boolean>` | Whether "Don't ask again" is armed. `false` with no session. |
 | `triggerDisarm(): Promise<void>` | Ends "Don't ask again" and sends nothing. Does nothing with no session. |
@@ -115,6 +115,7 @@ Commands:
 | `triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>` | Sends a built PD message; above 5 V only when `confirmed`. |
 | `triggerCableRead(): Promise<CableRead>` | Sends one SOP' Discover Identity with no dialog and no retry, and ends "Don't ask again". Needs a session with PD entered and never opens, enters or closes one; otherwise it fails with `usage` and sends nothing. |
 | `pdCableSeen(): Promise<CableView \| null>` | The cable identity a PD capture holds (the opened file or the live capture), `null` when it holds none. Sends nothing. |
+| `triggerChargerGone(): Promise<boolean>` | Whether VBUS collapsed after a contract was up. It stays true until the next PD listing, whatever that finds, and until then every request is refused with `usage` and nothing is sent. `false` with no session. |
 | `triggerConsoleRisk(line: string): Promise<RiskClass>` | The risk class of a raw console line. |
 | `triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]>` | Sends a raw console line and answers the transcript lines. Above 5 V (any unparsable line too) only when `confirmed`; GoodCRC is always refused. |
 | `triggerBackTo5v(): Promise<void>` | Back to 5 V: PD sends `pd req=1` (a Hard Reset as the fallback), the other protocols `reset`. The session stays open. |
@@ -225,7 +226,8 @@ a firmware update opens no dialog.
 
 The app also keeps `app.log` in the OS log folder: one UTC line per connect, session
 end, replug, failed rate change, settings write, record delete or recording write, stream
-error that keeps the session, and firmware update start, stage and outcome. Each line names
+error that keeps the session, firmware update start, stage and outcome, the charger's offers
+each time they are listed, and why "Don't ask again" ended. Each line names
 the device id and model, never the serial or UID. A run of the same stream failure logs one
 line. A failed record delete or firmware update logs only the error kind. A log over 5 MB
 moves to `app.log.1` when the app starts, replacing any earlier one.
@@ -353,6 +355,7 @@ it does:
 | `?mock=trigger-all` | The demo charger speaks every protocol, with decoded limits for SCP, VFCP, TFCP and UFCS. |
 | `?mock=trigger-out-of-sync` | Every trigger request fails with an `out_of_sync` error. |
 | `?mock=trigger-req-error` | The charger refuses every request above 5 V (`req error 252`); the session stays usable. |
+| `?mock=trigger-charger-gone` | VBUS falls to 0 V a moment after the first accepted request, so armed ends and the offers go. |
 | `?mock=trigger-no-cable` | Read cable gets no answer. |
 | `?mock=trigger-unlisted-cable` | Read cable finds a cable whose vendor is not in the table (VID 0x1234). |
 | `?mock=trigger-detect-disagree` | BC1.2 says not supported while the automatic list says supported. |

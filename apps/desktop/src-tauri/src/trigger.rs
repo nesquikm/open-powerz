@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use powerz_protocol::pdm::console;
 use powerz_protocol::pdm::detect::{self, ListOptions};
@@ -338,7 +338,7 @@ impl TriggerControl {
             if let Err(e) = &result
                 && matches!(e.kind, ErrorKind::Disconnected | ErrorKind::Internal)
             {
-                engine.disarm();
+                engine.disarm(ArmedEnd::PortFailed);
             }
             let _ = reply_tx.send(result);
         });
@@ -375,7 +375,8 @@ impl TriggerControl {
     /// Send `request`. A request classified above 5 V is refused (a usage
     /// error, nothing written) unless confirmed or covered by an armed "don't
     /// ask again"; [`Confirm::YesRemember`] arms once the request succeeded
-    /// and is refused for a request that may not be remembered.
+    /// and is refused for a request that may not be remembered. After a
+    /// collapse every request is refused until a PD listing.
     pub fn request(
         &self,
         request: TriggerRequest,
@@ -393,9 +394,14 @@ impl TriggerControl {
     /// End "don't ask again"; nothing is written.
     pub fn disarm(&self) -> Result<(), UiError> {
         self.call(|e| {
-            e.disarm();
+            e.disarm(ArmedEnd::Cleared);
             Ok(())
         })
+    }
+
+    /// Whether VBUS collapsed under an accepted contract (FR AXHK2N).
+    pub fn charger_gone(&self) -> Result<bool, UiError> {
+        self.call(|e| Ok(e.charger_gone()))
     }
 
     /// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
@@ -456,7 +462,8 @@ trait Engine {
         confirm: Confirm,
     ) -> Result<TriggerReply, UiError>;
     fn armed(&mut self) -> bool;
-    fn disarm(&mut self);
+    fn disarm(&mut self, why: ArmedEnd);
+    fn charger_gone(&mut self) -> bool;
     fn back_to_5v(&mut self) -> Result<(), UiError>;
     fn message_risk(&mut self, message: PdMessageRequest) -> Result<RiskClass, UiError>;
     fn send_message(
@@ -474,8 +481,69 @@ type Job = Box<dyn FnOnce(&mut dyn Engine) + Send>;
 /// What the session thread is asked to do.
 enum Msg {
     Job(Job),
+    /// Read VBUS from here on.
+    WatchVbus(VbusReader),
+    /// Send the session's log lines here from now on.
+    LogTo(LogSink),
     /// Back to 5 V, `pdm close`, answer, and end the thread.
     Close(mpsc::Sender<Result<(), UiError>>),
+}
+
+/// The latest VBUS reading, V; `None` when there is none.
+type VbusReader = Box<dyn FnMut() -> Option<f64> + Send>;
+/// Where the session's log lines go.
+type LogSink = Box<dyn FnMut(String) + Send>;
+
+/// Why "don't ask again" ended, for the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmedEnd {
+    Cleared,
+    BackTo5V,
+    Detect,
+    BuiltMessage,
+    ConsoleLine,
+    CableRead,
+    OffersChanged,
+    RequestFailed,
+    RequestNotCovered,
+    PortFailed,
+    PortNotQuiet,
+    ChargerGone,
+    SessionClosed,
+}
+
+impl ArmedEnd {
+    fn text(self) -> &'static str {
+        match self {
+            ArmedEnd::Cleared => "cleared",
+            ArmedEnd::BackTo5V => "back to 5 V",
+            ArmedEnd::Detect => "detect",
+            ArmedEnd::BuiltMessage => "built message",
+            ArmedEnd::ConsoleLine => "console line",
+            ArmedEnd::CableRead => "cable read",
+            ArmedEnd::OffersChanged => "offers changed",
+            ArmedEnd::RequestFailed => "request failed",
+            ArmedEnd::RequestNotCovered => "request not covered",
+            ArmedEnd::PortFailed => "port failed",
+            ArmedEnd::PortNotQuiet => "port not quiet",
+            ArmedEnd::ChargerGone => "charger gone",
+            ArmedEnd::SessionClosed => "session closed",
+        }
+    }
+}
+
+/// What the VBUS watch knows of the charger (FR AXHK2N).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Powered {
+    /// No contract stands: this charger reads 0 V until a PD session starts,
+    /// and Detect and resets take VBUS down on purpose, so low means nothing.
+    No,
+    /// A contract was accepted at this time and no reading of [`VBUS_UP_V`]
+    /// came yet. A sample from just before the request must not count as a
+    /// collapse, so low only counts once [`VBUS_RISE_WAIT`] has passed.
+    Rising(Instant),
+    /// VBUS rose under the contract: below [`VBUS_GONE_V`] the charger is gone.
+    Up,
 }
 
 /// What was last entered, i.e. how to get back to 5 V.
@@ -484,6 +552,15 @@ enum Entered {
     None,
     Pd,
     Legacy,
+}
+
+/// A request past the refusals, with what judging it found.
+struct Judged {
+    lib: LibRequest,
+    command: pdm::Command,
+    above: bool,
+    rememberable: bool,
+    covered: bool,
 }
 
 /// The PDM session and what the charger offered, owned by the thread.
@@ -503,35 +580,100 @@ struct Session<P: Read + Write, C: Clock> {
     /// "Don't ask again" (FR AXHK2N): set only by a request that succeeded
     /// and qualified. It covers only what `pd::rememberable` allows.
     armed: bool,
+    /// Whether a low VBUS reading would mean anything.
+    powered: Powered,
+    /// VBUS collapsed under an accepted contract: the offers are forgotten and
+    /// every request is refused until a PD listing.
+    gone: bool,
+    vbus: Option<VbusReader>,
+    log: Option<LogSink>,
 }
 
 impl<P: Read + Write, C: Clock> Session<P, C> {
+    /// End "don't ask again", saying why once if it was on.
+    fn end_armed(&mut self, why: ArmedEnd) {
+        if std::mem::take(&mut self.armed) {
+            self.log_armed_end(why);
+        }
+    }
+
+    fn log_armed_end(&mut self, why: ArmedEnd) {
+        self.log_line(format!("trigger armed ended: {}", why.text()));
+    }
+
+    fn log_line(&mut self, line: String) {
+        if let Some(log) = &mut self.log {
+            log(line);
+        }
+    }
+
+    /// A PD request or the way back was accepted: VBUS is watched again. The
+    /// reading right now tells whether it has already risen.
+    fn contract_accepted(&mut self) {
+        // A new contract on a charger that was up stays watched as up.
+        if self.powered != Powered::Up {
+            self.powered = Powered::Rising(Instant::now());
+        }
+        self.check_vbus();
+    }
+
+    /// One look at VBUS. Nothing is written; a collapse only ends what stood
+    /// on the charger.
+    fn check_vbus(&mut self) {
+        if self.powered == Powered::No {
+            return;
+        }
+        let Some(volts) = self.vbus.as_mut().and_then(|read| read()) else {
+            return;
+        };
+        if volts >= VBUS_UP_V {
+            self.powered = Powered::Up;
+            return;
+        }
+        let collapsed = match self.powered {
+            Powered::Rising(since) => since.elapsed() >= VBUS_RISE_WAIT,
+            _ => true,
+        };
+        if volts < VBUS_GONE_V && collapsed {
+            self.powered = Powered::No;
+            self.gone = true;
+            self.offers.clear();
+            self.shown.clear();
+            self.end_armed(ArmedEnd::ChargerGone);
+        }
+    }
+
     /// Back to 5 V where the protocol allows it: PD `pd req=1` (Hard Reset
     /// as the fallback), the others `reset`. Out of sync, the library's
     /// safety path writes `pd hrst` / `reset` blind and `pdm close` follows.
     /// Disarms before anything is written, so a failed way back ends "don't
     /// ask again" too.
     fn return_to_5v(&mut self) -> Result<(), UiError> {
-        self.disarm();
+        self.end_armed(ArmedEnd::BackTo5V);
+        // Until it is accepted: a Hard Reset takes VBUS down on purpose.
+        self.powered = Powered::No;
         if let Err(e) = self.pdm.check_in_step() {
             return Err(self.blind_return_to_5v(&e));
         }
         let pd = if self.pd_contract || self.entered == Entered::Pd {
             pd::return_to_5v(&mut self.pdm, &self.offers)
-                .map(|_| ())
+                .map(|back| matches!(back, pd::BackTo5V::Requested))
                 .map_err(|e| pd_error(&e.hard_reset))
         } else {
-            Ok(())
+            Ok(false)
         };
         if pd.is_ok() {
             self.pd_contract = false;
+        }
+        if pd == Ok(true) && self.entered != Entered::Legacy {
+            self.contract_accepted();
         }
         let legacy = if self.entered == Entered::Legacy {
             legacy::return_to_5v(&mut self.pdm).map_err(|e| legacy_error(&e))
         } else {
             Ok(())
         };
-        pd.and(legacy)
+        pd.map(|_| ()).and(legacy)
     }
 
     /// The meter is out of step, so no reply can confirm 5 V: send the way
@@ -567,6 +709,7 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
 
     /// Back to 5 V, then `pdm close`; the first error wins.
     fn shutdown(mut self) -> Result<(), UiError> {
+        self.end_armed(ArmedEnd::SessionClosed);
         let back = self.return_to_5v();
         let closed = self.pdm.close().map_err(|e| pdm_error(&e));
         back.and(closed)
@@ -576,6 +719,11 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
         let negotiation = match pd::enter(&mut self.pdm) {
             Ok(n) => n,
             Err(pd::Error::Pdm(pdm::Error::Timeout { .. })) => {
+                // An answer too: this charger has no PD. It is not a dead end,
+                // and with no offers no PD request can go out.
+                self.gone = false;
+                self.offers.clear();
+                self.shown.clear();
                 return Ok(unsupported(TriggerProtocol::Pd));
             }
             Err(e) => return Err(pd_error(&e)),
@@ -583,6 +731,8 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
         self.entered = Entered::Pd;
         self.set_offers(negotiation.offers);
         self.shown = self.offers.clone();
+        self.gone = false;
+        self.log_line(offers_line(&self.offers));
         let settings = pd::read_settings(&mut self.pdm).map_err(|e| pd_error(&e))?;
         Ok(ProtocolSection {
             protocol: TriggerProtocol::Pd,
@@ -604,6 +754,7 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
     ) -> Result<ProtocolSection, UiError> {
         // Any entry attempt may leave the meter in the protocol: `reset` on close.
         self.entered = Entered::Legacy;
+        self.powered = Powered::No;
         match legacy::enter(&mut self.pdm, lp) {
             Ok(entered) => Ok(ProtocolSection {
                 protocol,
@@ -649,7 +800,7 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
     /// stands on the offers it was judged from.
     fn set_offers(&mut self, offers: Vec<pd::Offer>) {
         if offers != self.offers {
-            self.disarm();
+            self.end_armed(ArmedEnd::OffersChanged);
         }
         self.offers = offers;
     }
@@ -657,6 +808,10 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
     /// Take in the meter's latest `pdo:` block, which may have arrived
     /// unasked (another charger plugged in) between two commands.
     fn sync_offers(&mut self) {
+        // The capabilities still hold the block of the charger that went away.
+        if self.gone {
+            return;
+        }
         if self.armed {
             self.read_unasked();
         }
@@ -693,7 +848,7 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
             }
         }
         // A port that fails or never falls quiet proves nothing: ask again.
-        self.disarm();
+        self.end_armed(ArmedEnd::PortNotQuiet);
     }
 
     /// The class of a built message: the library's, except the one cable read.
@@ -734,12 +889,124 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
             }
         }
     }
+
+    /// The refusals of `request`; nothing is written and `armed` stands.
+    fn judge(&mut self, request: TriggerRequest, confirm: Confirm) -> Result<Judged, UiError> {
+        let lib = lib_request(request)?;
+        // A queued request must not outrun the 100 ms check.
+        self.check_vbus();
+        // A meter out of step refuses everything, before any validation.
+        self.pdm.check_in_step().map_err(|e| pdm_error(&e))?;
+        // Whatever it asks for, and whichever protocol: nothing is written.
+        if self.gone {
+            return Err(charger_went_away());
+        }
+        // An unasked `pdo:` block disarms here, before anything is judged.
+        self.sync_offers();
+        // Validation first: an invalid request writes nothing.
+        let command = self.command_of(&lib)?;
+        let above = self.pdm.risk(&command) == pdm::Risk::Above5V;
+        let rememberable = above && self.rememberable(&lib);
+        if confirm == Confirm::YesRemember && !rememberable {
+            return Err(UiError::usage("This request cannot be remembered."));
+        }
+        let covered = confirm == Confirm::No && self.armed && rememberable;
+        // The final gate: above 5 V without the user's confirmation or an
+        // armed "don't ask again" is refused before anything is written.
+        if above && confirm == Confirm::No && !covered {
+            return Err(not_confirmed());
+        }
+        Ok(Judged {
+            lib,
+            command,
+            above,
+            rememberable,
+            covered,
+        })
+    }
+
+    /// Send a judged request. `armed` is already down; `was_armed` says it
+    /// stood before. Only a request that qualifies puts it back.
+    fn send_judged(
+        &mut self,
+        Judged {
+            lib,
+            command,
+            above,
+            rememberable,
+            covered,
+        }: Judged,
+        confirm: Confirm,
+        was_armed: bool,
+    ) -> Result<TriggerReply, UiError> {
+        let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
+        match lib {
+            LibRequest::Pd(r) => {
+                // The dialog named what the page was shown, so a "yes" stands
+                // on that offer: refused, not sent, once it changed.
+                if above && self.offer_moved(&r) {
+                    return Err(offers_changed());
+                }
+                let judged = self.offers.clone();
+                // Another protocol (or none) entered since PD: enter PD
+                // again so the request goes to a PD session, and check it
+                // against what the charger offers now. (AC-DGSQ6S.13)
+                self.enter_pd()?;
+                // Being armed stands on all the offers, not only this one.
+                let same_offers = judged == self.offers;
+                if (above && self.offer_moved(&r)) || (covered && !same_offers) {
+                    return Err(offers_changed());
+                }
+                let outcome =
+                    pd::request(&mut self.pdm, &self.offers, &r, confirmation).map_err(|e| {
+                        // Written, then out of step: the charger may have
+                        // taken it, so Back to 5 V must end it through PD.
+                        if above && matches!(e, pd::Error::Pdm(pdm::Error::OutOfSync { .. })) {
+                            self.pd_contract = true;
+                        }
+                        pd_error(&e)
+                    })?;
+                self.entered = Entered::Pd;
+                self.pd_contract = true;
+                self.armed =
+                    confirm == Confirm::YesRemember || (was_armed && rememberable && same_offers);
+                self.contract_accepted();
+                Ok(TriggerReply {
+                    command: command_text(&outcome.command),
+                    requested_mv: Some(outcome.requested.voltage_mv),
+                    requested_ma: Some(outcome.requested.current_ma),
+                    delivered_mv: Some(outcome.delivered.voltage_mv),
+                    delivered_ma: Some(outcome.delivered.current_ma),
+                    reply: None,
+                })
+            }
+            LibRequest::Legacy(r) => {
+                // The library enters the protocol again first when another
+                // one was entered since; any entry attempt may leave the
+                // meter in it: `reset` on close.
+                self.entered = Entered::Legacy;
+                self.powered = Powered::No;
+                let outcome = legacy::request(&mut self.pdm, &r, confirmation)
+                    .map_err(|e| legacy_error(&e))?;
+                Ok(TriggerReply {
+                    command: command_text(&outcome.command),
+                    requested_mv: None,
+                    requested_ma: None,
+                    delivered_mv: None,
+                    delivered_ma: None,
+                    reply: outcome.reply.map(|l| l.trim().to_owned()),
+                })
+            }
+        }
+    }
 }
 
 impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
     fn detect(&mut self) -> Result<Detection, UiError> {
-        // Before the first write, so a failed detection ends it too.
-        self.disarm();
+        // Before the first write, so a failed detection ends it too. The
+        // automatic list drops VBUS while it probes the charger.
+        self.end_armed(ArmedEnd::Detect);
+        self.powered = Powered::No;
         let bc12 = detect::bc12(&mut self.pdm).map_err(|e| pdm_error(&e))?;
         let apple = detect::apple(&mut self.pdm).map_err(|e| pdm_error(&e))?;
         let list = detect::list(&mut self.pdm, &ListOptions::default(), &mut |_| {})
@@ -771,6 +1038,10 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
 
     fn risk(&mut self, request: TriggerRequest) -> Result<RiskClass, UiError> {
         let lib = lib_request(request)?;
+        self.check_vbus();
+        if self.gone {
+            return Err(charger_went_away());
+        }
         // So an unasked `pdo:` block shows as a dialog, not as a refusal.
         self.sync_offers();
         let command = self.command_of(&lib)?;
@@ -791,84 +1062,24 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         request: TriggerRequest,
         confirm: Confirm,
     ) -> Result<TriggerReply, UiError> {
-        let lib = lib_request(request)?;
-        // A meter out of step refuses everything, before any validation.
-        self.pdm.check_in_step().map_err(|e| pdm_error(&e))?;
-        // An unasked `pdo:` block disarms here, before anything is judged.
-        self.sync_offers();
-        // Validation first: an invalid request writes nothing.
-        let command = self.command_of(&lib)?;
-        let above = self.pdm.risk(&command) == pdm::Risk::Above5V;
-        let rememberable = above && self.rememberable(&lib);
-        if confirm == Confirm::YesRemember && !rememberable {
-            return Err(UiError::usage("This request cannot be remembered."));
-        }
-        let covered = confirm == Confirm::No && self.armed && rememberable;
-        // The final gate: above 5 V without the user's confirmation or an
-        // armed "don't ask again" is refused before anything is written.
-        if above && confirm == Confirm::No && !covered {
-            return Err(not_confirmed());
-        }
-        let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
+        let judged = self.judge(request, confirm)?;
         // Past the refusals: disarmed before the first write, so a failure after
-        // it leaves "don't ask again" ended. Only a request that qualifies keeps it.
+        // it leaves "don't ask again" ended.
         let was_armed = std::mem::take(&mut self.armed);
-        match lib {
-            LibRequest::Pd(r) => {
-                // The dialog named what the page was shown, so a "yes" stands
-                // on that offer: refused, not sent, once it changed.
-                if above && self.offer_moved(&r) {
-                    return Err(offers_changed());
-                }
-                let judged = self.offers.clone();
-                // Another protocol (or none) entered since PD: enter PD
-                // again so the request goes to a PD session, and check it
-                // against what the charger offers now. (AC-DGSQ6S.13)
-                self.enter_pd()?;
-                // Being armed stands on all the offers, not only this one.
-                let same_offers = judged == self.offers;
-                if (above && self.offer_moved(&r)) || (covered && !same_offers) {
-                    return Err(offers_changed());
-                }
-                let outcome =
-                    pd::request(&mut self.pdm, &self.offers, &r, confirmation).map_err(|e| {
-                        // Written, then out of step: the charger may have
-                        // taken it, so Back to 5 V must end it through PD.
-                        if above && matches!(e, pd::Error::Pdm(pdm::Error::OutOfSync { .. })) {
-                            self.pd_contract = true;
-                        }
-                        pd_error(&e)
-                    })?;
-                self.entered = Entered::Pd;
-                self.pd_contract = true;
-                self.armed =
-                    confirm == Confirm::YesRemember || (was_armed && rememberable && same_offers);
-                Ok(TriggerReply {
-                    command: command_text(&outcome.command),
-                    requested_mv: Some(outcome.requested.voltage_mv),
-                    requested_ma: Some(outcome.requested.current_ma),
-                    delivered_mv: Some(outcome.delivered.voltage_mv),
-                    delivered_ma: Some(outcome.delivered.current_ma),
-                    reply: None,
-                })
-            }
-            LibRequest::Legacy(r) => {
-                // The library enters the protocol again first when another
-                // one was entered since; any entry attempt may leave the
-                // meter in it: `reset` on close.
-                self.entered = Entered::Legacy;
-                let outcome = legacy::request(&mut self.pdm, &r, confirmation)
-                    .map_err(|e| legacy_error(&e))?;
-                Ok(TriggerReply {
-                    command: command_text(&outcome.command),
-                    requested_mv: None,
-                    requested_ma: None,
-                    delivered_mv: None,
-                    delivered_ma: None,
-                    reply: outcome.reply.map(|l| l.trim().to_owned()),
-                })
-            }
+        let offers = self.offers.clone();
+        let reply = self.send_judged(judged, confirm, was_armed);
+        // Only now is it known whether a request that held "don't ask again"
+        // kept it, and why not.
+        if was_armed && !self.armed {
+            self.log_armed_end(if self.offers != offers {
+                ArmedEnd::OffersChanged
+            } else if reply.is_err() {
+                ArmedEnd::RequestFailed
+            } else {
+                ArmedEnd::RequestNotCovered
+            });
         }
+        reply
     }
 
     fn armed(&mut self) -> bool {
@@ -876,8 +1087,12 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         self.armed
     }
 
-    fn disarm(&mut self) {
-        self.armed = false;
+    fn disarm(&mut self, why: ArmedEnd) {
+        self.end_armed(why);
+    }
+
+    fn charger_gone(&mut self) -> bool {
+        self.gone
     }
 
     fn back_to_5v(&mut self) -> Result<(), UiError> {
@@ -910,7 +1125,9 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
             ));
         }
         // Every sent message ends "don't ask again", before the first write.
-        self.disarm();
+        // A Soft Reset may well take VBUS down.
+        self.end_armed(ArmedEnd::BuiltMessage);
+        self.powered = Powered::No;
         // Like `powerz pd send`: PD first (again, when another protocol was
         // entered since), so the message has a PD session and the way back
         // to 5 V (`pd req=1`, Hard Reset as the fallback) works.
@@ -952,7 +1169,7 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         }
         self.pdm.check_in_step().map_err(|e| pdm_error(&e))?;
         // Like every sent message, before the first write.
-        self.disarm();
+        self.end_armed(ArmedEnd::CableRead);
         let command = pdm::Command::PdData(CABLE_READ.to_vec());
         self.write_message(&command, false)
             .map_err(|e| pdm_error(&e))?;
@@ -979,7 +1196,8 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         // A line that is not read-only ends "don't ask again"; before the
         // write, so a failed one ends it too.
         if risk != pdm::Risk::ReadOnly {
-            self.disarm();
+            self.end_armed(ArmedEnd::ConsoleLine);
+            self.powered = Powered::No;
         }
         let confirmation = above.then(|| HighVoltageConfirmation::for_command(&command));
         let listen = console::listen_for(&command);
@@ -1003,6 +1221,11 @@ fn not_confirmed() -> UiError {
 /// The refusal of a request held on offers that changed.
 fn offers_changed() -> UiError {
     UiError::usage("The charger's offers changed, so the request was not sent. Press Detect.")
+}
+
+/// The refusal of a request after a collapse, until a PD listing.
+fn charger_went_away() -> UiError {
+    UiError::usage("The charger went away. Press Detect.")
 }
 
 /// A library console entry as the UI's line; a block is described in words.
@@ -1183,6 +1406,24 @@ fn offer_view(o: &pd::Offer) -> OfferView {
     }
 }
 
+/// The log line for a PD listing: position, kind and voltage of each offer.
+fn offers_line(offers: &[pd::Offer]) -> String {
+    let volts = |mv: u32| f64::from(mv) / 1000.0;
+    let list: Vec<String> = offers
+        .iter()
+        .map(|o| {
+            let (min, max) = (volts(o.min_voltage_mv), volts(o.max_voltage_mv));
+            let range = if o.min_voltage_mv == o.max_voltage_mv {
+                format!("{max:.2}")
+            } else {
+                format!("{min:.2}-{max:.2}")
+            };
+            format!("#{} {} {range} V", o.position, o.kind.name())
+        })
+        .collect();
+    format!("trigger offers: {}", list.join(", "))
+}
+
 fn limits_view(l: &legacy::Limits) -> LimitsView {
     LimitsView {
         index: l.index,
@@ -1276,6 +1517,16 @@ const UNASKED_WAIT: Duration = Duration::from_millis(20);
 /// The most items read that way, so a chatty port cannot hold a request.
 const UNASKED_ITEMS: usize = 64;
 
+/// How often VBUS is looked at.
+const VBUS_CHECK: Duration = Duration::from_millis(100);
+/// Below this, V, the charger is gone: PD holds 4.75 V or more across a
+/// voltage change, and 0.8 V is its off level.
+pub const VBUS_GONE_V: f64 = 2.0;
+/// At this, V, VBUS has risen under an accepted contract.
+const VBUS_UP_V: f64 = 3.0;
+/// How long a low reading after a new contract may still be an old sample.
+const VBUS_RISE_WAIT: Duration = Duration::from_secs(1);
+
 /// One count on a meter's open PDM sessions: taken before `pdm open` and let
 /// go once the session has closed, so the stream worker sees the session
 /// through the hand-overs on either side of the manager's slot.
@@ -1312,6 +1563,8 @@ impl std::fmt::Debug for Msg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Msg::Job(_) => "Job",
+            Msg::WatchVbus(_) => "WatchVbus",
+            Msg::LogTo(_) => "LogTo",
             Msg::Close(_) => "Close",
         })
     }
@@ -1347,16 +1600,31 @@ impl TriggerWorker {
                     pd_contract: false,
                     vbus_unconfirmed: false,
                     armed: false,
+                    powered: Powered::No,
+                    gone: false,
+                    vbus: None,
+                    log: None,
                 };
                 // Every handle gone without a close: still back to 5 V and close.
                 let mut reply = None;
-                while let Ok(msg) = rx.recv() {
-                    match msg {
-                        Msg::Job(job) => job(&mut session),
-                        Msg::Close(r) => {
+                // Not restarted by a job, so a busy queue cannot hold the check.
+                let mut next_check = Instant::now() + VBUS_CHECK;
+                loop {
+                    let wait = next_check.saturating_duration_since(Instant::now());
+                    match rx.recv_timeout(wait) {
+                        Ok(Msg::Job(job)) => job(&mut session),
+                        Ok(Msg::WatchVbus(read)) => session.vbus = Some(read),
+                        Ok(Msg::LogTo(log)) => session.log = Some(log),
+                        Ok(Msg::Close(r)) => {
                             reply = Some(r);
                             break;
                         }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                    if Instant::now() >= next_check {
+                        session.check_vbus();
+                        next_check = Instant::now() + VBUS_CHECK;
                     }
                 }
                 let result = session.shutdown();
@@ -1389,6 +1657,17 @@ impl TriggerWorker {
             tx: self.tx.clone(),
             stream: self.stream.clone(),
         }
+    }
+
+    /// Read VBUS with `read`; a collapse under a contract ends what stood on
+    /// the charger with no press.
+    pub fn watch_vbus(&self, read: impl FnMut() -> Option<f64> + Send + 'static) {
+        let _ = self.tx.send(Msg::WatchVbus(Box::new(read)));
+    }
+
+    /// Send the session's log lines to `log`.
+    pub fn log_to(&self, log: impl FnMut(String) + Send + 'static) {
+        let _ = self.tx.send(Msg::LogTo(Box::new(log)));
     }
 
     /// Pause `stream`'s polling while the automatic list runs.
@@ -2780,6 +3059,643 @@ mod tests {
         check(&c);
         w.close().expect("close");
     }
+
+    // ---- AC-AXHK2N.9 to .13: VBUS collapses, what the log records ----
+
+    type Vbus = Arc<Mutex<Option<f64>>>;
+    type Lines = Arc<Mutex<Vec<String>>>;
+
+    /// What the session writes when a collapse ends "don't ask again".
+    const GONE_LINE: &str = "trigger armed ended: charger gone";
+    /// A reading that must change nothing is given this long: three checks.
+    const THREE_CHECKS: Duration = Duration::from_millis(300);
+
+    /// A session whose VBUS watcher reads `Vbus` (9 V to begin with) and whose
+    /// log lines are collected.
+    fn watched(charger: SimCharger) -> (SimPdm, TriggerWorker, Vbus, Lines) {
+        let (sim, w) = worker(charger);
+        let vbus: Vbus = Arc::new(Mutex::new(Some(9.0)));
+        let reading = Arc::clone(&vbus);
+        w.watch_vbus(move || *reading.lock().unwrap());
+        let lines: Lines = Arc::new(Mutex::new(Vec::new()));
+        let keep = Arc::clone(&lines);
+        w.log_to(move |line: String| keep.lock().unwrap().push(line));
+        (sim, w, vbus, lines)
+    }
+
+    /// [`watched`], armed by a remembered 9 V.
+    fn watched_armed(charger: SimCharger) -> (SimPdm, TriggerWorker, Vbus, Lines) {
+        let (sim, w, vbus, lines) = watched(charger);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), Confirm::YesRemember)
+            .expect("9 V, remembered");
+        assert!(c.armed().expect("armed"), "the arming request arms");
+        (sim, w, vbus, lines)
+    }
+
+    /// A session with a plain confirmed 9 V contract: accepted, not armed.
+    fn watched_contract(charger: SimCharger) -> (SimPdm, TriggerWorker, Vbus, Lines) {
+        let (sim, w, vbus, lines) = watched(charger);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), true).expect("9 V");
+        (sim, w, vbus, lines)
+    }
+
+    fn reads(vbus: &Vbus, volts: f64) {
+        *vbus.lock().unwrap() = Some(volts);
+    }
+
+    /// Poll `armed` the way the page does, for up to 1 s of real time.
+    fn disarms_within_a_second(c: &TriggerControl) {
+        let start = Instant::now();
+        while c.armed().expect("armed") {
+            assert!(
+                start.elapsed() < Duration::from_secs(1),
+                "still armed after 1 s"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Wait until the collapse was noticed, for up to 1 s of real time.
+    fn gone_within_a_second(c: &TriggerControl) {
+        let start = Instant::now();
+        while !c.charger_gone().expect("charger gone") {
+            assert!(
+                start.elapsed() < Duration::from_secs(1),
+                "not noticed after 1 s"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn lines_with(lines: &Lines, prefix: &str) -> Vec<String> {
+        let lines = lines.lock().unwrap();
+        lines
+            .iter()
+            .filter(|l| l.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
+
+    fn ended_lines(lines: &Lines) -> Vec<String> {
+        lines_with(lines, "trigger armed ended: ")
+    }
+
+    /// `result` is the refusal after a collapse: a usage error that says to
+    /// press Detect.
+    fn says_press_detect<T: std::fmt::Debug>(result: Result<T, UiError>) {
+        let err = result.expect_err("refused");
+        assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+        assert!(err.message.contains("Detect"), "{err:?}");
+    }
+
+    // AC-AXHK2N.9: the collapse ends armed, with no press.
+
+    #[test]
+    fn the_collapse_level_is_2_v() {
+        assert_eq!(VBUS_GONE_V, 2.0);
+    }
+
+    #[test]
+    fn a_collapse_ends_armed_within_200_ms_with_no_call_into_the_session() {
+        let (sim, w, vbus, lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        let before = sim.writes().len();
+        reads(&vbus, 0.0);
+        let start = Instant::now();
+        // Only the log is watched: nothing here gives the session a turn.
+        while ended_lines(&lines).is_empty() {
+            assert!(
+                start.elapsed() < Duration::from_millis(200),
+                "armed did not end within 200 ms"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!c.armed().expect("armed"), "still armed");
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_collapse_ends_armed_while_the_page_keeps_asking() {
+        // A call every 10 ms keeps the thread's queue busy: the check must
+        // not wait for 100 quiet milliseconds.
+        let (sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        let before = sim.writes().len();
+        reads(&vbus, 0.0);
+        disarms_within_a_second(&c);
+        assert!(c.charger_gone().expect("charger gone"));
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn just_below_2_v_is_a_collapse() {
+        let (_sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 1.99);
+        disarms_within_a_second(&c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn exactly_2_v_is_not_a_collapse() {
+        let (_sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 2.0);
+        std::thread::sleep(THREE_CHECKS);
+        assert!(c.armed().expect("armed"));
+        assert!(!c.charger_gone().expect("charger gone"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_dip_to_4_5v_during_a_voltage_change_does_not_disarm() {
+        let (_sim, w, vbus, lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 4.5);
+        std::thread::sleep(THREE_CHECKS);
+        assert!(c.armed().expect("armed"));
+        assert!(!c.charger_gone().expect("charger gone"));
+        assert_eq!(ended_lines(&lines), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn no_reading_does_nothing() {
+        let (_sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        *vbus.lock().unwrap() = None;
+        std::thread::sleep(THREE_CHECKS);
+        assert!(c.armed().expect("armed"));
+        assert!(!c.charger_gone().expect("charger gone"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn zero_volts_before_any_contract_means_nothing() {
+        let (sim, w, vbus, _lines) = watched(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        reads(&vbus, 0.0);
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        assert_eq!(
+            c.risk(pd(2)).expect("the offers stay"),
+            RiskClass::Above5VRememberable
+        );
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn detect_ends_the_contract_so_zero_volts_after_it_means_nothing() {
+        // The automatic list drops VBUS while the charger is probed.
+        let (_sim, w, vbus, lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        c.detect().expect("detect");
+        reads(&vbus, 0.0);
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        assert!(!c.armed().expect("armed"));
+        assert!(
+            !ended_lines(&lines).iter().any(|l| l == GONE_LINE),
+            "Detect is not a collapse"
+        );
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        assert_eq!(
+            c.risk(pd(2)).expect("the offers stay"),
+            RiskClass::Above5VRememberable
+        );
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_plain_contract_counts_too() {
+        let (_sim, w, vbus, _lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn the_way_back_to_5v_counts_as_a_contract() {
+        let (_sim, w, vbus, _lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        c.back_to_5v().expect("back to 5 V");
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_built_message_ends_the_contract() {
+        // A Soft Reset may well take VBUS down.
+        let (_sim, w, vbus, _lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        c.send_message(soft_reset(), false).expect("sent");
+        reads(&vbus, 0.0);
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_console_line_that_is_not_read_only_ends_the_contract() {
+        let (_sim, w, vbus, _lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        c.console_send("pd hrst".to_owned(), false).expect("sent");
+        reads(&vbus, 0.0);
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_read_only_console_line_leaves_the_contract() {
+        let (_sim, w, vbus, _lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        c.console_send("pdm parm".to_owned(), false).expect("sent");
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_legacy_request_is_no_pd_contract() {
+        let (_sim, w, vbus, _lines) = watched(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.request(TriggerRequest::Qc { volts: 9 }, true)
+            .expect("QC 9 V");
+        reads(&vbus, 0.0);
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        w.close().expect("close");
+    }
+
+    // AC-AXHK2N.10: the collapse forgets the offers.
+
+    #[test]
+    fn every_request_after_a_collapse_is_refused_with_nothing_written() {
+        let (sim, w, vbus, _lines) = watched_armed(SimCharger::Pps65W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        let before = sim.writes().len();
+        says_press_detect(c.request(pd(2), false));
+        says_press_detect(c.request(pd(2), true));
+        says_press_detect(c.request(pd(2), Confirm::YesRemember));
+        says_press_detect(c.request(pd(1), false));
+        says_press_detect(c.request(pps(9000), true));
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        assert!(!c.armed().expect("armed"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_legacy_request_after_a_collapse_is_refused_with_nothing_written() {
+        let (sim, w, vbus, _lines) = watched(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), true).expect("9 V");
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        let before = sim.writes().len();
+        says_press_detect(c.request(TriggerRequest::Qc { volts: 9 }, true));
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn the_risk_of_a_request_after_a_collapse_is_refused_too() {
+        // The page asks the risk first: no dialog opens on an offer now gone.
+        let (sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        let before = sim.writes().len();
+        says_press_detect(c.risk(pd(2)));
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn reading_the_state_does_not_bring_the_offers_back() {
+        // The meter's capabilities still hold the old `pdo:` block.
+        let (_sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        for _ in 0..3 {
+            assert!(!c.armed().expect("armed"));
+        }
+        says_press_detect(c.request(pd(2), true));
+        assert!(c.charger_gone().expect("charger gone"));
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_same_charger_replug_sends_nothing_and_stays_gone() {
+        let (sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        let before = sim.writes().len();
+        reads(&vbus, 5.0);
+        std::thread::sleep(THREE_CHECKS);
+        assert!(
+            c.charger_gone().expect("charger gone"),
+            "VBUS is no listing"
+        );
+        says_press_detect(c.request(pd(2), false));
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_pd_listing_of_the_same_offers_clears_it_and_arms_nothing() {
+        let (sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        reads(&vbus, 5.0);
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        assert!(!c.charger_gone().expect("charger gone"));
+        disarmed(&sim, &c);
+        c.request(pd(2), true).expect("9 V again");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_collapse_just_before_an_armed_request_refuses_it() {
+        let (sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        let before = sim.writes().len();
+        reads(&vbus, 0.0);
+        c.request(pd(2), false).expect_err("the charger went away");
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_contract_that_never_rises_is_a_collapse_after_a_second() {
+        let (_sim, w, vbus, _lines) = watched(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        reads(&vbus, 0.0);
+        c.request(pd(2), Confirm::YesRemember).expect("9 V");
+        std::thread::sleep(THREE_CHECKS);
+        assert!(c.armed().expect("armed"), "a stale sample gets its second");
+        assert!(!c.charger_gone().expect("charger gone"));
+        gone_within_two_seconds(&c);
+        assert!(!c.armed().expect("armed"));
+        let _ = w.close();
+    }
+
+    fn gone_within_two_seconds(c: &TriggerControl) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !c.charger_gone().expect("charger gone") {
+            assert!(Instant::now() < deadline, "still not gone");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn neither_detect_nor_another_protocol_clears_it() {
+        let (_sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        c.detect().expect("detect");
+        assert!(c.charger_gone().expect("charger gone"), "after Detect");
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        assert!(c.charger_gone().expect("charger gone"), "after QC");
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_new_contract_after_a_listing_is_watched_again() {
+        let (_sim, w, vbus, _lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        // Still 0 V, and no contract yet: the listing is not undone.
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        reads(&vbus, 9.0);
+        c.request(pd(2), true).expect("9 V");
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_collapse_with_nothing_armed_says_nothing_of_armed() {
+        let (_sim, w, vbus, lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        gone_within_a_second(&c);
+        w.close().expect("close");
+        assert_eq!(ended_lines(&lines), Vec::<String>::new());
+    }
+
+    // AC-AXHK2N.12: one line for the offers, one for the end of armed.
+
+    #[test]
+    fn the_offers_are_logged_each_time_they_are_listed() {
+        let (_sim, w, _vbus, lines) = watched(SimCharger::Pps65W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let expected = "trigger offers: #1 fixed 5.00 V, #2 fixed 9.00 V, #3 fixed 15.00 V, \
+                        #4 fixed 20.00 V, #5 pps 3.30-21.00 V";
+        assert_eq!(lines_with(&lines, "trigger offers: "), vec![expected]);
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        assert_eq!(
+            lines_with(&lines, "trigger offers: "),
+            vec![expected, expected]
+        );
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn listing_another_protocol_logs_no_offers() {
+        let (_sim, w, _vbus, lines) = watched(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        assert_eq!(lines_with(&lines, "trigger offers: "), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_collapse_logs_why_armed_ended_once() {
+        let (_sim, w, vbus, lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        reads(&vbus, 0.0);
+        disarms_within_a_second(&c);
+        std::thread::sleep(THREE_CHECKS);
+        w.close().expect("close");
+        assert_eq!(ended_lines(&lines), vec![GONE_LINE]);
+    }
+
+    /// The one line `end` leaves when it ends "don't ask again".
+    fn the_reason_of(end: impl FnOnce(&TriggerControl)) -> String {
+        let (_sim, w, _vbus, lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        end(&c);
+        assert!(!c.armed().expect("armed"), "still armed");
+        let ended = ended_lines(&lines);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        // The simulator does not answer `pd req=1` after Detect's `reset`.
+        let _ = w.close();
+        assert_eq!(ended_lines(&lines).len(), 1, "closing logged it again");
+        ended[0].clone()
+    }
+
+    #[test]
+    fn every_way_armed_ends_is_logged_once_with_its_own_reason() {
+        let reasons = [
+            the_reason_of(|c| c.disarm().expect("clear")),
+            the_reason_of(|c| c.back_to_5v().expect("back to 5 V")),
+            the_reason_of(|c| {
+                c.detect().expect("detect");
+            }),
+            the_reason_of(|c| {
+                c.send_message(soft_reset(), false).expect("sent");
+            }),
+            the_reason_of(|c| {
+                c.console_send("pd cmd=13".to_owned(), false).expect("sent");
+            }),
+        ];
+        let mut distinct = reasons.to_vec();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), reasons.len(), "{reasons:?}");
+        assert!(!reasons.iter().any(|r| r == GONE_LINE), "{reasons:?}");
+    }
+
+    #[test]
+    fn a_request_that_ends_armed_is_logged_once() {
+        the_reason_of(|c| {
+            c.request(pd(1), false).expect("5 V");
+        });
+        the_reason_of(|c| {
+            c.request(pd(8), true).expect("28 V, confirmed");
+        });
+    }
+
+    #[test]
+    fn closing_an_armed_session_is_logged_once() {
+        let (_sim, w, _vbus, lines) = watched_armed(SimCharger::Epr140W);
+        w.close().expect("close");
+        assert_eq!(ended_lines(&lines).len(), 1, "{:?}", ended_lines(&lines));
+    }
+
+    #[test]
+    fn a_request_that_stays_armed_logs_no_end() {
+        let (_sim, w, _vbus, lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        c.request(pd(3), false).expect("15 V");
+        assert!(c.armed().expect("armed"));
+        assert_eq!(ended_lines(&lines), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn ending_what_was_never_armed_logs_nothing() {
+        let (_sim, w, _vbus, lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        c.disarm().expect("clear");
+        c.back_to_5v().expect("back to 5 V");
+        c.detect().expect("detect");
+        // The simulator does not answer `pd req=1` after Detect's `reset`.
+        let _ = w.close();
+        assert_eq!(ended_lines(&lines), Vec::<String>::new());
+    }
+
+    // Production wiring: `install_trigger_for` gives the session the meter's
+    // log and the stream's latest reading.
+
+    #[test]
+    fn the_meters_log_gets_the_lines_with_no_serial() {
+        let dir =
+            std::env::temp_dir().join(format!("open-powerz-axhk2n-{}-log", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the log folder");
+        let path = dir.join("app.log");
+
+        let mut m = DeviceManager::new(|| Ok(Vec::new()), AppOpener, SystemClock);
+        m.set_app_log(crate::app_log::AppLog::open(&path).expect("open app.log"));
+        m.connect_with_stop(
+            "demo:load-5v-1a",
+            50,
+            |_: BackendEvent| {},
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("the demo device connects");
+        m.open_trigger().expect("the demo PDM port");
+        let c = m.trigger_control().expect("open");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), Confirm::YesRemember).expect("9 V");
+        c.disarm().expect("clear");
+        m.close_trigger().expect("close");
+        m.disconnect().expect("disconnect");
+
+        let log = std::fs::read_to_string(&path).expect("read app.log");
+        let of = |what: &str| log.lines().filter(|l| l.contains(what)).count();
+        assert_eq!(of("trigger offers: #1 fixed 5.00 V"), 1, "{log}");
+        assert_eq!(of("trigger armed ended: "), 1, "{log}");
+        for line in log.lines().filter(|l| l.contains("trigger ")) {
+            assert!(!line.contains(powerz_sim::SIM_SERIAL), "{line}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A demo meter's session with a PD contract at 5 V.
+    fn demo_contract(id: &str) -> (Manager, TriggerControl) {
+        let mut m = DeviceManager::new(|| Ok(Vec::new()), AppOpener, SystemClock);
+        m.connect_with_stop(
+            id,
+            50,
+            |_: BackendEvent| {},
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("the demo device connects");
+        m.open_trigger().expect("the demo PDM port");
+        let c = m.trigger_control().expect("open");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(1), false).expect("5 V");
+        (m, c)
+    }
+
+    #[test]
+    fn the_watcher_reads_the_meters_stream() {
+        // The idle demo meter reads about 0 V, so the contract never rises.
+        let (mut m, c) = demo_contract("demo:idle");
+        eventually("the stream's 0 V", || {
+            c.charger_gone().expect("charger gone")
+        });
+        m.close_trigger().expect("close");
+        m.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn a_meter_reading_5v_is_no_collapse() {
+        let (mut m, c) = demo_contract("demo:load-5v-1a");
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        m.close_trigger().expect("close");
+        m.disconnect().expect("disconnect");
+    }
 }
 
 /// FR DGSQ6T: the builder and the raw console on the trigger session.
@@ -3090,6 +4006,31 @@ mod custom_message_tests {
         let before = sim.writes().len();
         let _ = w.close();
         returned_to_5v_before_close(&writes_after(&sim, before));
+    }
+
+    // AC-AXHK2N.9: a Hard Reset takes VBUS down on purpose.
+
+    #[test]
+    fn a_hard_reset_fallback_ends_the_contract() {
+        let (sim, w) = Faulty::spawn(SimCharger::Epr140W, Some("pd req=1"), None);
+        let vbus = Arc::new(std::sync::Mutex::new(Some(9.0)));
+        let reading = Arc::clone(&vbus);
+        w.watch_vbus(move || *reading.lock().unwrap());
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let nine = TriggerRequest::Pd {
+            position: 2,
+            voltage_mv: None,
+            current_ma: None,
+        };
+        c.request(nine, true).expect("9 V");
+        // The failed `pd req=1` leaves the meter out of step here.
+        let _ = c.back_to_5v();
+        assert!(sim.writes().iter().any(|w| w.trim() == "pd hrst"));
+        *vbus.lock().unwrap() = Some(0.0);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!c.charger_gone().expect("charger gone"));
+        let _ = w.close();
     }
 
     #[test]
@@ -4655,6 +5596,29 @@ mod sync_tests {
         c.request(pd(2), false).expect_err("the offers changed");
         assert_eq!(port.writes()[before..], [] as [String; 0]);
         assert!(!c.armed().expect("armed"), "{NOT_ARMED}");
+        drop(c);
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_charger_with_no_pd_after_a_collapse_is_no_dead_end() {
+        let (port, w, c) = armed(&[]);
+        let vbus = Arc::new(Mutex::new(Some(0.0)));
+        let reading = Arc::clone(&vbus);
+        // The session has not seen VBUS rise yet, so show it first.
+        *vbus.lock().unwrap() = Some(9.0);
+        w.watch_vbus(move || *reading.lock().unwrap());
+        c.request(pd(2), false).expect("armed, 9 V");
+        *vbus.lock().unwrap() = Some(0.0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !c.charger_gone().expect("charger gone") {
+            assert!(Instant::now() < deadline, "still not gone");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _port = port.on("entry pd", b"");
+        let section = c.list(TriggerProtocol::Pd).expect("no PD is an answer");
+        assert!(!section.supported);
+        assert!(!c.charger_gone().expect("charger gone"));
         drop(c);
         let _ = w.close();
     }
