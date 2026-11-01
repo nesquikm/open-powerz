@@ -3,7 +3,7 @@
  * the English release notes the desktop app shows.
  */
 
-import { toUiError, type FirmwareFileInfo } from "./backend";
+import type { FirmwareFileInfo } from "./backend";
 
 /** One labelled metadata row. */
 export interface FirmwareFileRow {
@@ -44,10 +44,4 @@ export function firmwareNotes(info: FirmwareFileInfo): string[] {
  * a second marker. A version such as "2.0.7 was released." is not a number. */
 export function notesNumbered(notes: string[]): boolean {
   return notes.length > 0 && notes.every((line) => /^\d+[.)、](?:\s+\S|[^\s\d])/.test(line));
-}
-
-/** The text shown when inspecting a file failed: the backend's reason, or the generic
- * text for an unexpected error. */
-export function firmwareFileErrorText(err: unknown): string {
-  return toUiError(err).message;
 }

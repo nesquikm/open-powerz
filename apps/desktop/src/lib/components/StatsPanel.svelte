@@ -92,6 +92,7 @@
     <Notice
       tone="error"
       message={controls.error.message}
+      hint={controls.error.hint}
       onDismiss={() => (controls.error = null)}
     />
   {/if}

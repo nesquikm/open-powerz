@@ -44,16 +44,10 @@ fn what_the_policy_does_not_cover_stays_unparsed() {
 
 #[test]
 fn tolerated_version_strings_get_the_same_warnings_as_plain_ones() {
-    assert_eq!(warnings("v1.6.0", false), vec![FirmwareWarning::TooOld]);
-    assert_eq!(
-        warnings("2.0.6-beta", false),
-        vec![FirmwareWarning::Outdated]
-    );
-    assert_eq!(
-        warnings("v2.0.7-beta", false),
-        vec![FirmwareWarning::Outdated]
-    );
-    assert_eq!(warnings("v2.0.7+build5", false), Vec::new());
+    assert_eq!(warnings("v1.6.0"), vec![FirmwareWarning::TooOld]);
+    assert_eq!(warnings("2.0.6-beta"), vec![FirmwareWarning::Outdated]);
+    assert_eq!(warnings("v2.0.7-beta"), vec![FirmwareWarning::Outdated]);
+    assert_eq!(warnings("v2.0.7+build5"), Vec::new());
 }
 
 #[test]

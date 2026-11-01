@@ -6,6 +6,7 @@
     type EditableSetting,
     type MeterSettingsPanel,
   } from "../meterSettings.svelte";
+  import HintText from "./HintText.svelte";
 
   let {
     panel,
@@ -112,7 +113,10 @@
         <p class="hint">Nothing changed yet.</p>
       {/if}
       {#if panel.error}
-        <p class="error" role="alert">{panel.error.message}</p>
+        <p class="error" role="alert">
+          {panel.error.message}
+          <HintText hint={panel.error.hint} />
+        </p>
       {/if}
       <div class="actions">
         <button type="button" onclick={() => panel.cancelEdit()} disabled={panel.applying}>
@@ -124,7 +128,10 @@
       </div>
     </form>
   {:else if panel.error}
-    <p class="error" role="alert">{panel.error.message}</p>
+    <p class="error" role="alert">
+      {panel.error.message}
+      <HintText hint={panel.error.hint} />
+    </p>
   {:else if rows.length === 0}
     <p class="hint">{panel.loading ? "Reading…" : "No settings read yet."}</p>
   {:else}

@@ -167,7 +167,7 @@ export class Recording {
         : {
             tone: error ? "error" : "info",
             message: error?.message ?? null,
-            text: notice ?? "",
+            text: [notice, error?.hint].filter(Boolean).join(" "),
             path: this.savedPath,
           },
     );

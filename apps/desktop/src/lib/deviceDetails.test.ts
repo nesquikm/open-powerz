@@ -5,14 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { ConnectedInfo, DeviceListing } from "./backend";
-import {
-  KNOWN_LATEST_FIRMWARE,
-  MIN_SUPPORTED_FIRMWARE,
-  canConnectTo,
-  deviceDetailsRows,
-  firmwareWarningText,
-  modeLabel,
-} from "./deviceDetails";
+import { canConnectTo, deviceDetailsRows, firmwareWarningText, modeLabel } from "./deviceDetails";
 
 function info(over: Partial<ConnectedInfo> = {}): ConnectedInfo {
   return {
@@ -45,13 +38,6 @@ function listing(mode: DeviceListing["mode"], demo: string | null = null): Devic
     mode,
   };
 }
-
-describe("firmware constants", () => {
-  it("match the protocol library's floor and newest known version", () => {
-    expect(MIN_SUPPORTED_FIRMWARE).toBe("1.7.0");
-    expect(KNOWN_LATEST_FIRMWARE).toBe("2.0.7");
-  });
-});
 
 describe("modeLabel", () => {
   it("names each mode in plain words", () => {

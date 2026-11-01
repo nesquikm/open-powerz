@@ -174,7 +174,7 @@ fn a_non_zero_head_field_is_never_reported_as_update_required() {
         .expect("firmware status");
     assert_eq!(st.update_required, None, "{st:?}");
     assert!(
-        !st.warnings().contains(&FirmwareWarning::UpdateRequired),
+        st.warnings().iter().all(|w| w.code() != "update_required"),
         "{:?}",
         st.warnings()
     );

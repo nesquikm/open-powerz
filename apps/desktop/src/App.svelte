@@ -1248,6 +1248,7 @@
             <Notice
               tone="error"
               message={pdSaveError.message}
+              hint={pdSaveError.hint}
               onDismiss={() => (pdSaveError = null)}
             />
           {/if}
@@ -1351,6 +1352,31 @@
     margin-bottom: -1px;
     cursor: pointer;
     color: var(--muted);
+  }
+  /* A phone-wide window: the strip keeps its one row and Add meter stays whole at its end;
+     the tabs that do not fit scroll sideways inside their list, never the page. The list
+     fades out at its end, so tabs past the edge are not a secret. */
+  @media (max-width: 640px) {
+    .view-tabs {
+      flex: 1 1 0;
+      min-width: 0;
+      overflow-x: auto;
+      scrollbar-width: none;
+      /* Room for the selected tab to sit on the strip's bottom border, which a scroll
+         container would otherwise clip. */
+      padding-bottom: 1px;
+      margin-bottom: -1px;
+      padding-right: 1.5rem;
+      mask-image: linear-gradient(to left, transparent, #000 1.5rem);
+    }
+    .view-tabs [role="tab"] {
+      flex: none;
+      white-space: nowrap;
+    }
+    .add-meter {
+      flex: none;
+      white-space: nowrap;
+    }
   }
   .view-tabs [role="tab"][aria-disabled="true"] {
     cursor: not-allowed;

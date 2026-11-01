@@ -196,6 +196,12 @@ struct State {
     stop: Rc<AtomicBool>,
     /// Set the stop flag once this many payload writes have been made.
     stop_after_writes: Option<usize>,
+    /// Set the stop flag at this `open` after a jump of this frame type.
+    stop_at_open: Option<(u8, usize)>,
+    /// Opens since the last jump.
+    opens_since_jump: usize,
+    /// Clock time the stop flag was raised by `stop_at_open`.
+    stopped_at: Option<u64>,
     /// The bench clock; each `open` advances it by `open_cost_ms`.
     clock: FakeClock,
     open_cost_ms: u64,
@@ -345,6 +351,7 @@ impl FlashTransport for Pipe {
         if let Some(ty @ (0x08 | 0x09)) = jump {
             let now = s.clock.0.borrow().now_ms;
             s.jump_at.push((ty, now));
+            s.opens_since_jump = 0;
         }
         match (s.mode, jump) {
             (None, _) => Err(TransportError::Disconnected),
@@ -396,6 +403,16 @@ impl MeterOpener for Opener {
         s.opens += 1;
         let cost = s.open_cost_ms;
         s.clock.0.borrow_mut().now_ms += cost;
+        s.opens_since_jump += 1;
+        if let Some((ty, at)) = s.stop_at_open
+            && s.jump_at.last().is_some_and(|(t, _)| *t == ty)
+            && s.opens_since_jump >= at
+            && s.stopped_at.is_none()
+        {
+            s.stop.store(true, Ordering::SeqCst);
+            let now = s.clock.0.borrow().now_ms;
+            s.stopped_at = Some(now);
+        }
         if let Some((e, left)) = s.open_errs.take() {
             if left > 1 {
                 s.open_errs = Some((e.clone(), left - 1));
@@ -445,6 +462,9 @@ impl Bench {
             last_id: 0,
             stop: Rc::new(AtomicBool::new(false)),
             stop_after_writes: None,
+            stop_at_open: None,
+            opens_since_jump: 0,
+            stopped_at: None,
             clock: clock.clone(),
             open_cost_ms: 0,
             jump_at: Vec::new(),
@@ -526,6 +546,18 @@ impl Bench {
     fn stop_after_writes(self, k: usize) -> Bench {
         self.s.borrow_mut().stop_after_writes = Some(k);
         self
+    }
+
+    /// Set the stop flag (Ctrl-C) at open `n` after the jump of type `ty`, so
+    /// from inside the wait for the meter.
+    fn stop_at_open(self, ty: u8, n: usize) -> Bench {
+        self.s.borrow_mut().stop_at_open = Some((ty, n));
+        self
+    }
+
+    /// Clock time the stop of [`stop_at_open`](Self::stop_at_open) came.
+    fn stopped_at(&self) -> u64 {
+        self.s.borrow().stopped_at.expect("the stop never came")
     }
 
     /// Set the stop flag (Ctrl-C) before the flash starts.
@@ -951,6 +983,44 @@ fn jump_dfu_wait_tolerates_the_meter_vanishing_while_it_re_enumerates() {
     assert!(
         bench.opens() >= 5,
         "the opener was polled until bootloader mode"
+    );
+}
+
+// ---- AC-AXHK2M.1: a stop ends the wait for the bootloader, and only that ----
+
+#[test]
+fn a_stop_while_waiting_for_the_bootloader_ends_the_update_within_a_second() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::app().after_dfu(vec![None]).stop_at_open(0x09, 3);
+    let (r, events) = bench.run(&c);
+    let e = r.expect_err("the stop ends the update");
+    assert!(matches!(e, FlashError::Interrupted { .. }), "got {e:?}");
+    // The meter may not have switched: the text claims neither mode.
+    let text = e.to_string();
+    assert!(!text.contains("stays in bootloader mode"), "{text}");
+    assert!(text.contains("nothing was erased"), "{text}");
+    let late = bench.now_ms() - bench.stopped_at();
+    assert!(late < 1_000, "the wait ran {late} ms past the stop");
+    // Nothing was erased: no descriptor and no payload.
+    let ops = bench.ops();
+    assert!(!framed_types(&ops).contains(&0x42));
+    assert!(payload_writes(&ops).is_empty());
+    assert!(!events.contains(&FlashProgress::Erasing), "{events:?}");
+}
+
+#[test]
+fn a_stop_after_the_erase_never_cuts_the_wait_for_the_returning_meter() {
+    let bytes = container_bytes(P, P);
+    let c = parse(&bytes);
+    let bench = Bench::boot()
+        .script(boot_ok(P))
+        .after_aprom(vec![None, None, None, None, Some(DeviceMode::Application)])
+        .stop_at_open(0x08, 2);
+    let (r, _) = bench.run(&c);
+    assert!(
+        matches!(r, Ok(FlashOutcome::Verified { .. })),
+        "the image is written, so the wait runs on: {r:?}"
     );
 }
 

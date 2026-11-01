@@ -102,6 +102,7 @@ function api(overrides: Partial<FirmwareUpdateApi> = {}): FirmwareUpdateApi {
     choose: vi.fn(async () => "/fw/KM003C_V2.0.7.mencrypt"),
     inspect: vi.fn(async () => INFO),
     flash: vi.fn(async () => ({ outcome: "verified", version: "2.0.7" }) as FlashDone),
+    cancelFlash: vi.fn(async () => {}),
     ...overrides,
   };
 }
@@ -181,6 +182,17 @@ describe("choosing the file (AC-V9SK55.2)", () => {
     expect(fw.info).toBeNull();
     expect(fw.fileError).toBe("This is not a firmware file.");
     expect(fw.canUpdate(METER)).toBe(false);
+  });
+
+  it("a file that fails inspection keeps its hint, until the next good file", async () => {
+    const err: UiError = { kind: "usage", message: "Not a firmware file.", hint: "Pick another." };
+    const inspect = vi.fn(async () => Promise.reject(err));
+    const fw = await withFile(api({ inspect }));
+    expect(fw.fileErrorHint).toBe("Pick another.");
+
+    inspect.mockImplementation(async () => Promise.resolve(INFO) as never);
+    await fw.chooseFile();
+    expect(fw.fileErrorHint).toBeNull();
   });
 });
 

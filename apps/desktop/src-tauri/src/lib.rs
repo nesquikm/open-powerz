@@ -909,7 +909,7 @@ async fn firmware_flash(
                 )
             }
         };
-        drop(lease);
+        lease.finish(&done);
         done
     })
     .await
@@ -923,8 +923,8 @@ async fn firmware_cancel(state: Shared<'_>) -> Result<(), UiError> {
     blocking(move || state.manager().cancel_flash()).await
 }
 
-/// The running firmware update, if any, for a reloaded page to pick up
-/// (AC-4PJRVJ.3).
+/// The running firmware update, if any, else the ended one not read yet,
+/// for a reloaded page to pick up (AC-4PJRVJ.3, AC-AXHK2M.2).
 #[tauri::command]
 async fn firmware_flash_status(state: Shared<'_>) -> Result<Option<FlashStatus>, UiError> {
     let state = Arc::clone(&state);

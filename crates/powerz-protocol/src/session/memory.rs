@@ -118,7 +118,7 @@ impl FirmwareStatus {
     /// Firmware warnings for this status.
     pub fn warnings(&self) -> Vec<FirmwareWarning> {
         let app = self.application.as_ref().map_or("", |b| b.version());
-        version::warnings(app, self.update_required == Some(true))
+        version::warnings(app)
     }
 }
 

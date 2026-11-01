@@ -17,6 +17,7 @@ import type {
   FlashStatus,
   UiError,
 } from "./backend";
+import cancelTooLate from "./cancel-too-late.txt?raw";
 
 /** The meter an update would go to: the picked device, with its versions while connected. */
 export interface FirmwareMeter {
@@ -42,8 +43,9 @@ export interface FirmwareUpdateApi {
     agreed?: FlashHold[],
   ) => Promise<FlashDone>;
   /** Asks the running update to stop. */
-  cancelFlash?: () => Promise<void>;
-  /** The update the backend is running, null when none. */
+  cancelFlash: () => Promise<void>;
+  /** The update the backend is running, else the ended one it kept, which this read
+   * takes; null when neither. */
   flashStatus?: () => Promise<FlashStatus | null>;
   /** Ends the recording on meter `deviceId`. Rejects with the reason, or with `null`
    * while a start or stop of that recording is in flight. */
@@ -103,16 +105,17 @@ export const FLASH_STAGES: readonly FlashStage["stage"][] = [
 export const UPDATE_WARNING =
   "Keep the meter connected and the laptop on power until the update finishes, and unplug the meter only when the screen asks you to replug it: an interrupted update leaves the meter in its bootloader.";
 
-/** Why Cancel is off once the erase has begun (AC-4PJRVJ.1). */
-export const CANCEL_TOO_LATE = "The erase has started, so the update can no longer be cancelled.";
+/** Why Cancel is off once the erase has begun (AC-4PJRVJ.1). The backend reads the same
+ * file for `ERASE_BEGAN`, so the two cannot drift (AC-AXHK2M.4). */
+export const CANCEL_TOO_LATE = cancelTooLate.trim();
 
-/** Why Cancel is off once it was asked for: the meter is on its way to the bootloader. */
-export const CANCEL_PENDING = "Stopping: the update ends once the meter has switched.";
+/** Why Cancel is off once it was asked for: the update stops at its next safe point. */
+export const CANCEL_PENDING = "Stopping: the update ends in a moment.";
 
-/** What a reloaded page says when the update it followed has ended: the outcome went to
- * the page that started it. */
+/** What a reloaded page says when the update it followed has ended and the backend kept
+ * no outcome. */
 export const FOLLOWED_UPDATE_ENDED =
-  "The update has ended, but its result went to the page before the reload. Check the firmware version; a meter that stays in its bootloader needs the update run again.";
+  "The update has ended, but the app did not keep its result. Check the firmware version; a meter that stays in its bootloader needs the update run again.";
 
 /** What a reloaded page says when the backend stops answering: the update may still run. */
 export const FOLLOWED_UPDATE_LOST =
@@ -178,6 +181,8 @@ export class FirmwareUpdate {
   info = $state.raw<FirmwareFileInfo | null>(null);
   /** Why the chosen file failed inspection, null when it passed. */
   fileError = $state<string | null>(null);
+  /** The hint that goes with {@link fileError}. */
+  fileErrorHint = $state<string | null>(null);
   phase = $state<FirmwareUpdatePhase>("idle");
   confirmation = $state("");
   stage = $state.raw<FlashStage | null>(null);
@@ -230,18 +235,23 @@ export class FirmwareUpdate {
   /** The latest write progress, kept after the write stage; null before it. */
   writeProgress = $state.raw<{ done: number; total: number } | null>(null);
 
-  /** Opens the dialog and inspects the chosen file; a cancelled dialog changes nothing. */
+  /** Opens the dialog and inspects the chosen file; a cancelled dialog changes nothing
+   * but the note on a followed update, which any next action clears (AC-AXHK2M.7). */
   async chooseFile(): Promise<void> {
     if (this.#locked()) return;
+    this.followedEnded = false;
     const path = await this.#api.choose();
     if (path === null || this.#locked()) return;
     this.path = path;
     try {
       this.info = await this.#api.inspect(path);
       this.fileError = null;
+      this.fileErrorHint = null;
     } catch (e) {
       this.info = null;
-      this.fileError = (e as UiError | null)?.message ?? String(e);
+      const refused = e as UiError | null;
+      this.fileError = refused?.message ?? String(e);
+      this.fileErrorHint = refused?.hint ?? null;
     }
   }
 
@@ -275,6 +285,7 @@ export class FirmwareUpdate {
   /** Opens the typed confirmation (AC .3); a blocked Update does nothing. */
   requestUpdate(meter: FirmwareMeter | null): void {
     if (this.phase !== "idle" || !this.canUpdate(meter)) return;
+    this.followedEnded = false;
     this.confirmation = "";
     this.phase = "confirming";
   }
@@ -343,6 +354,7 @@ export class FirmwareUpdate {
       );
       this.replug = null;
       this.phase = "done";
+      this.#takeKeptOutcome();
     } catch (e) {
       this.replug = null;
       const refused = e as UiError | null;
@@ -351,16 +363,27 @@ export class FirmwareUpdate {
         this.phase = "confirming";
         return;
       }
-      this.error = refused ?? {
-        kind: "internal",
-        message: String(e),
-        hint: null,
-      };
-      // Set by the stage callback, which the narrowing above does not see.
-      const last = this.stage as FlashStage | null;
-      this.failedStage = last?.stage ?? null;
-      this.phase = "failed";
+      this.#fail(
+        refused ?? {
+          kind: "internal",
+          message: String(e),
+          hint: null,
+        },
+      );
+      this.#takeKeptOutcome();
     }
+  }
+
+  /** Ends the update as a failure at its latest stage. */
+  #fail(error: UiError): void {
+    this.error = error;
+    this.failedStage = this.stage?.stage ?? null;
+    this.phase = "failed";
+  }
+
+  /** This page saw the end, so a later reload must not be told again (AC-AXHK2M.2). */
+  #takeKeptOutcome(): void {
+    void this.#flashStatus().catch(() => null);
   }
 
   /** Shows `stage` as the update's latest. */
@@ -372,7 +395,8 @@ export class FirmwareUpdate {
   }
 
   /** Picks up an update that outlived the page (AC-4PJRVJ.3): holds the meter and shows
-   * the backend's stage until its update ends. No answer means no update to pick up. */
+   * the backend's stage and replug prompt until its update ends. No answer means no
+   * update to pick up. */
   async reattach(): Promise<void> {
     const status = await this.#flashStatus().catch(() => null);
     if (status === null || this.phase !== "idle") return;
@@ -385,18 +409,33 @@ export class FirmwareUpdate {
       firmwareVersion: null,
       bootloaderVersion: null,
     };
-    if (status.stage !== null) this.#showStage(status.stage);
-    void this.#followBackend();
+    if (!this.#showStatus(status)) void this.#followBackend();
   }
 
-  /** The update the backend is running, null when none. */
+  /** Shows what the backend reports; true when that is how the update ended (AC-AXHK2M.2). */
+  #showStatus(status: FlashStatus): boolean {
+    if (status.stage !== null) this.#showStage(status.stage);
+    this.replug = status.replug ?? null;
+    const outcome = status.outcome ?? null;
+    if (outcome === null) return false;
+    this.replug = null;
+    if (outcome.result !== null) {
+      this.result = outcome.result;
+      this.phase = "done";
+    } else {
+      this.#fail(outcome.error);
+    }
+    return true;
+  }
+
+  /** The update the backend reports, null when none. */
   async #flashStatus(): Promise<FlashStatus | null> {
     return (await this.#api.flashStatus?.()) ?? null;
   }
 
-  /** Follows the backend's update to its end, then says so: its outcome went to the page
-   * that started it. A failed poll says nothing: the next one decides, up to
-   * {@link STATUS_POLL_TRIES} in a row, and then all it can say is that it lost track. */
+  /** Follows the backend's update to its end and shows the outcome the backend kept, or
+   * says it ended when it kept none. A failed poll says nothing: the next one decides, up
+   * to {@link STATUS_POLL_TRIES} in a row, and then all it can say is that it lost track. */
   async #followBackend(): Promise<void> {
     let failed = 0;
     while (failed < STATUS_POLL_TRIES) {
@@ -405,7 +444,7 @@ export class FirmwareUpdate {
         const status = await this.#flashStatus();
         if (status === null) break;
         failed = 0;
-        if (status.stage !== null) this.#showStage(status.stage);
+        if (this.#showStatus(status)) return;
       } catch {
         failed += 1;
       }
@@ -435,7 +474,7 @@ export class FirmwareUpdate {
   async cancelUpdate(): Promise<void> {
     if (this.phase !== "updating" || this.cancelBlocker !== null) return;
     try {
-      await this.#api.cancelFlash?.();
+      await this.#api.cancelFlash();
       this.cancelling = true;
     } catch {
       // See above.

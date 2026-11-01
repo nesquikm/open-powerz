@@ -1,9 +1,11 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import HintText from "./HintText.svelte";
 
   let {
     tone,
     message = null,
+    hint = null,
     onDismiss,
     children,
   }: {
@@ -11,6 +13,8 @@
     tone: "error" | "info";
     /** Bold first line, when there is one. */
     message?: string | null;
+    /** An error's hint, under the message. */
+    hint?: string | null;
     onDismiss: () => void;
     /** More lines under the message. */
     children?: Snippet;
@@ -24,6 +28,7 @@
 >
   <div class="text">
     {#if message}<p class="message">{message}</p>{/if}
+    {#if hint}<p class="hint"><HintText {hint} /></p>{/if}
     {@render children?.()}
   </div>
   <button type="button" onclick={onDismiss}>Dismiss</button>
@@ -56,5 +61,9 @@
   }
   .message {
     font-weight: 600;
+  }
+  .hint {
+    margin: 0.25rem 0 0;
+    user-select: text;
   }
 </style>

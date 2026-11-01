@@ -519,3 +519,10 @@ fn real_2_0_7_container_from_env_path() {
     assert!(c.payload().len() >= c.size() as usize);
     assert!(!c.release_notes_en().is_empty());
 }
+
+// AC-AXHK2M.5: a number is digits only.
+#[test]
+fn a_size_with_a_leading_plus_is_refused() {
+    let bytes = ContainerBuilder::new().field(SIZE, "+48").build();
+    assert!(FirmwareContainer::parse(&bytes).is_err());
+}

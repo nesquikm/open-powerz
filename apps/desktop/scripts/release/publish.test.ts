@@ -9,6 +9,7 @@ import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createGitHubClient,
+  newerFinalExists,
   publishRelease,
   type GitHubClient,
   type PublishOptions,
@@ -975,6 +976,114 @@ describe("tag name on every release update (AC-4PJRVN.1)", () => {
       retagOnPublish: "v0.5.9",
     });
     await expect(publishRelease(gh, options())).rejects.toThrow(/v0\.5\.9/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-AXHK2M.8: a release on the wrong tag does not stay public
+// ---------------------------------------------------------------------------
+
+describe("a tag mismatch after publishing (AC-AXHK2M.8)", () => {
+  const failure = (gh: FakeGitHub) =>
+    publishRelease(gh, options()).then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    );
+
+  it("turns the release back into a draft", async () => {
+    const gh = new FakeGitHub({ tags: [TAG], retagOnPublish: "untagged-5a1b2c" });
+    await failure(gh);
+
+    expect(gh.releases).toHaveLength(1);
+    expect(gh.releases[0]?.draft, "the wrong release stayed public").toBe(true);
+    const last = updates(gh).at(-1)?.args[1] as { draft?: boolean; tag_name?: string };
+    expect(last.draft).toBe(true);
+    expect(last.tag_name, "an update without tag_name").toBe(TAG);
+  });
+
+  it("does so for an existing release too", async () => {
+    const gh = new FakeGitHub({
+      tags: [TAG],
+      releases: [{ tag_name: TAG, draft: true, assets: [] }],
+      retagOnPublish: "v0.5.9",
+    });
+    await failure(gh);
+    expect(gh.releases[0]?.draft).toBe(true);
+  });
+
+  it("says the release is a draft again and names both tags", async () => {
+    const gh = new FakeGitHub({ tags: [TAG], retagOnPublish: "untagged-5a1b2c" });
+    const err = await failure(gh);
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.message).toContain(TAG);
+    expect(err?.message).toContain("untagged-5a1b2c");
+    expect(err?.message).toMatch(/draft/i);
+    expect(err?.message).not.toMatch(/public now/i);
+  });
+
+  it("says the release is public when the draft call answers it is not a draft", async () => {
+    const gh = new FakeGitHub({ tags: [TAG], retagOnPublish: "untagged-5a1b2c" });
+    const update = gh.updateRelease;
+    gh.updateRelease = async (id, patch) => {
+      const answer = await update(id, patch);
+      return patch.draft === true ? { ...answer, draft: false } : answer;
+    };
+    const err = await failure(gh);
+    expect(err?.message).toMatch(/public now/i);
+    expect(err?.message).not.toMatch(/a draft again/i);
+  });
+
+  it("fails when the publish left the release a draft", async () => {
+    const gh = new FakeGitHub({ tags: [TAG] });
+    const update = gh.updateRelease;
+    gh.updateRelease = async (id, patch) => {
+      const answer = await update(id, patch);
+      return patch.draft === false ? { ...answer, draft: true } : answer;
+    };
+    const err = await failure(gh);
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.message).toMatch(/still a draft/i);
+  });
+
+  it("says the release is still public when the draft call fails", async () => {
+    const gh = new FakeGitHub({ tags: [TAG], retagOnPublish: "untagged-5a1b2c" });
+    const update = gh.updateRelease;
+    gh.updateRelease = async (id, patch) => {
+      if (patch.draft === true) throw new Error("update release: HTTP 500");
+      return update(id, patch);
+    };
+    const err = await failure(gh);
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.message).toContain("untagged-5a1b2c");
+    expect(err?.message).toContain("HTTP 500");
+    expect(err?.message).toMatch(/public/i);
+  });
+
+  it("leaves a release on the right tag published", async () => {
+    const gh = new FakeGitHub({ tags: [TAG] });
+    await publishRelease(gh, options());
+    expect(gh.releases[0]?.draft).toBe(false);
+    expect(updates(gh).some((u) => (u.args[1] as { draft?: boolean }).draft === true)).toBe(false);
+  });
+});
+
+describe("the version compare handles pre-release suffixes (AC-AXHK2M.8)", () => {
+  const release = (tag_name: string) => ({ id: 1, tag_name, draft: false, prerelease: false });
+
+  it("puts a final release above its own release candidates", () => {
+    expect(newerFinalExists([release("v0.9.0")], "v0.9.0-rc.1")).toBe(true);
+    expect(newerFinalExists([release("v0.9.0-rc.1")], "v0.9.0")).toBe(false);
+  });
+
+  it("orders release candidates of one version by number", () => {
+    expect(newerFinalExists([release("v0.9.0-rc.2")], "v0.9.0-rc.1")).toBe(true);
+    expect(newerFinalExists([release("v0.9.0-rc.1")], "v0.9.0-rc.2")).toBe(false);
+    expect(newerFinalExists([release("v0.9.0-rc.10")], "v0.9.0-rc.9")).toBe(true);
+  });
+
+  it("still goes by the numbers first", () => {
+    expect(newerFinalExists([release("v0.10.0-rc.1")], "v0.9.0")).toBe(true);
+    expect(newerFinalExists([release("v0.8.9")], "v0.9.0-rc.1")).toBe(false);
   });
 });
 

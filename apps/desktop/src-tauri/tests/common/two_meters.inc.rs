@@ -91,6 +91,7 @@ impl Opener for TwoMeterOpener {
 /// A manager over two plugs, with the OS device list under the test's control.
 struct Rig {
     m: DeviceManager<TwoMeterOpener, SimClock>,
+    clock: SimClock,
     attached: Arc<Mutex<Vec<DeviceEntry>>>,
     plug_a: Arc<AtomicBool>,
     opened: Arc<Mutex<Vec<DeviceListing>>>,
@@ -115,10 +116,11 @@ impl Rig {
                 plug_b,
                 opened: Arc::clone(&opened),
             },
-            clock,
+            clock.clone(),
         );
         Rig {
             m,
+            clock,
             attached,
             plug_a,
             opened,

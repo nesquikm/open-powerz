@@ -89,6 +89,7 @@
     revealTime,
     type PdMarkerCluster,
   } from "../pdTimeline";
+  import HintText from "./HintText.svelte";
   import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
 
   let {
@@ -261,6 +262,7 @@
   const sessionGate = new RateGate(250);
   /** Why the last history request failed, shown over the plot (the last frame stays). */
   let historyError: string | null = $state(null);
+  let historyHint: string | null = $state(null);
   /** Screen-reader status: the visible range on entering history or returning to live. */
   let announcement = $state("");
   let host: HTMLDivElement | undefined = $state();
@@ -869,8 +871,9 @@
     },
     onError: (e) => {
       if (view.mode !== "history") return;
-      const message = (e as { message?: unknown } | null)?.message;
+      const { message, hint } = (e ?? {}) as { message?: unknown; hint?: unknown };
       historyError = typeof message === "string" ? message : "The history could not be read.";
+      historyHint = typeof hint === "string" ? hint : null;
     },
   });
   $effect(() => () => requester.cancel());
@@ -1506,7 +1509,10 @@
       <p class="empty-state">Connect a meter to start</p>
     {/if}
     {#if historyError !== null && view.mode === "history"}
-      <p class="history-error" role="status">{historyError}</p>
+      <p class="history-error" role="status">
+        {historyError}
+        <HintText hint={historyHint} />
+      </p>
     {/if}
   </div>
   <!-- Overview strip: the whole session, with a window over the range on screen. -->

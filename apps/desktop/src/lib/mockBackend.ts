@@ -59,7 +59,6 @@ import type {
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
 import { lineRefusal, messageRefusal } from "./console.svelte";
-import { CANCEL_TOO_LATE } from "./firmwareUpdate.svelte";
 import { PD_CYCLE_MS, pdContractAt, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
@@ -79,6 +78,8 @@ function usage(message: string): UiError {
 const MOCK_RUNNING_FLASH: FlashStatus = {
   device_id: "demo:idle",
   stage: { stage: "writing", done: 4096, total: 8192 },
+  replug: null,
+  outcome: null,
 };
 
 /** Why the mock refuses a request while a firmware update holds the meter (FR V9SK55). */
@@ -1856,7 +1857,12 @@ export class MockBackend {
   /** Asks the running update to stop, like the backend: until the erase starts. */
   async firmwareCancel(): Promise<void> {
     if (!this.#flashing) throw usage("No firmware update is running.");
-    if (this.#flashErasing) throw usage(CANCEL_TOO_LATE);
+    if (this.#flashErasing) {
+      // Loaded here, not on top: the Playwright helpers import this file outside Vite,
+      // which cannot read the sentence's `.txt?raw` file.
+      const { CANCEL_TOO_LATE } = await import("./firmwareUpdate.svelte");
+      throw usage(CANCEL_TOO_LATE);
+    }
     this.#flashStop = true;
   }
 

@@ -1100,14 +1100,16 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// open PDM session alone: ending the stream would close it, and the
     /// reconnect's bulk CONNECT would silence it [device]. The next polls
     /// try again; once PDM is closed a fault that stays ends the session.
-    /// The log gets the first failure of a run, not one line per poll
-    /// (`repeat`), and is written off this thread: the polls never wait on
-    /// the disk (FR X2SPDW).
+    /// The log and the page get the first failure of a run, not one per poll
+    /// (`repeat`). The log is written off this thread: the polls never wait
+    /// on the disk (FR X2SPDW).
     fn poll_failed(&mut self, e: &session::Error, repeat: bool) -> Step {
         let pdm_open = self.pdm_open.as_ref();
         if !is_device_loss(e) && blocked(self.meter.as_ref(), || pdm_open.is_some_and(|f| f())) {
             if !repeat {
-                self.log_failure(session_error(e));
+                let error = session_error(e);
+                self.log_failure(error.clone());
+                self.emit(BackendEvent::Error(error));
             }
             return Step::Continue;
         }
@@ -2474,7 +2476,8 @@ where
 }
 
 /// Most sample batches waiting for a slow sink (about 10 to 25 s of them);
-/// status, gap and recording events are always queued.
+/// status, gap and recording events are always queued, and so is the newest
+/// dropped batch when the session ends.
 const MAX_QUEUED_BATCHES: usize = 512;
 
 /// The worker thread's body: open, then step until stopped or ended.
@@ -2506,17 +2509,39 @@ fn run_worker<T, C, O>(
         });
     });
     let forward_meter = meter.clone();
+    // The newest samples dropped for a slow sink, newer than any batch queued.
+    let mut newest_dropped = None;
     let forward: Sink = Box::new(move |event| {
-        if let BackendEvent::Batch(_) = event {
+        let mut last_samples = None;
+        match &event {
             // A sink stalled for this long gets no more live batches until it
             // catches up; the history and any recording keep every sample.
-            if depth.load(Ordering::SeqCst) >= MAX_QUEUED_BATCHES {
+            BackendEvent::Batch(_) if depth.load(Ordering::SeqCst) >= MAX_QUEUED_BATCHES => {
+                if let BackendEvent::Batch(batch) = event
+                    && !batch.samples.is_empty()
+                {
+                    newest_dropped = Some(batch);
+                }
                 return;
             }
-            depth.fetch_add(1, Ordering::SeqCst);
+            BackendEvent::Batch(batch) if !batch.samples.is_empty() => newest_dropped = None,
+            BackendEvent::Batch(_) => {}
+            // The samples held go first: no event overtakes samples it
+            // follows, and the session's last samples always arrive, so the
+            // outage gap starts at the last sample the session history holds.
+            _ => last_samples = newest_dropped.take(),
         }
         blocked(forward_meter.as_ref(), || {
-            let _ = sink.send(Forward::Event(Box::new(event)));
+            let send = |event: BackendEvent| {
+                if matches!(event, BackendEvent::Batch(_)) {
+                    depth.fetch_add(1, Ordering::SeqCst);
+                }
+                let _ = sink.send(Forward::Event(Box::new(event)));
+            };
+            if let Some(batch) = last_samples {
+                send(BackendEvent::Batch(batch));
+            }
+            send(event);
         });
     });
     let opened = open()

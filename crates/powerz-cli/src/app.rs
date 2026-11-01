@@ -415,7 +415,8 @@ fn jump_mode(cli: &Cli, to: JumpTo, i_understand: bool) -> Result<(), CliError> 
         JumpTo::Application => JumpTarget::Application,
     };
     let mut out = std::io::stdout().lock();
-    // Ctrl-C before the jump stops it; the jump itself is one write.
+    // Ctrl-C before the jump stops it, and after it ends the wait for the
+    // meter; the jump itself is one write.
     let stop = ctrl_c_flag()?;
     if cli.transport == TransportKind::Sim {
         select_demo(cli)?;

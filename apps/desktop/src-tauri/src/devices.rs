@@ -23,7 +23,7 @@ use powerz_sim::{PdScenario, Persona, Scenario, SimDevice};
 use serde::{Deserialize, Serialize};
 
 use crate::app_log::{AppLog, SessionLog};
-use crate::firmware_flash::{FlashControl, FlashStage};
+use crate::firmware_flash::{FlashControl, FlashDone, FlashEnd, FlashPrompt, FlashStage};
 use crate::history::{HistoryGap, Series, SeriesBuckets};
 use crate::recording::{ExportProgress, RecordingEvent, RecordingSummary};
 use crate::stats::StatsSnapshot;
@@ -544,6 +544,9 @@ pub struct DeviceManager<O, C> {
     flash_targets: Arc<Mutex<Vec<String>>>,
     /// The running update, shared with its [`FlashLease`].
     flash_run: Arc<Mutex<Option<FlashRun>>>,
+    /// The ended update, kept for one read by a reloaded page (AC-AXHK2M.2);
+    /// shared with its [`FlashLease`].
+    flash_ended: Arc<Mutex<Option<FlashStatus>>>,
     /// The simulator serials given to second (third, ...) demo meters, by
     /// serial: the demo device id that got each (FR 1HHT03).
     demo_serials: HashMap<String, String>,
@@ -591,6 +594,9 @@ pub struct FlashLease {
     targets: Arc<Mutex<Vec<String>>>,
     control: Arc<FlashControl>,
     run: Arc<Mutex<Option<FlashRun>>>,
+    ended: Arc<Mutex<Option<FlashStatus>>>,
+    /// The update reported how it ended.
+    finished: bool,
     log: AppLog,
 }
 
@@ -601,13 +607,17 @@ struct FlashRun {
     control: Arc<FlashControl>,
 }
 
-/// A running firmware update as the page sees it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// A firmware update as the page sees it: running, or ended and not read yet.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FlashStatus {
     /// The meter being updated.
     pub device_id: String,
     /// The latest stage, `None` before the first.
     pub stage: Option<FlashStage>,
+    /// The replug prompt the update waits on, if any.
+    pub replug: Option<FlashPrompt>,
+    /// How it ended, once it has.
+    pub outcome: Option<FlashEnd>,
 }
 
 /// A session a firmware update would release, as the prompt names it
@@ -652,10 +662,35 @@ impl FlashLease {
         let device = &self.device;
         SessionLog::new(self.log.clone(), device.id.clone(), device.model.clone())
     }
+
+    /// Release the meter, keeping how the update ended for one
+    /// [`flash_status`](DeviceManager::flash_status) read (AC-AXHK2M.2).
+    pub fn finish(mut self, done: &Result<FlashDone, UiError>) {
+        self.keep_outcome(done);
+    }
+
+    fn keep_outcome(&mut self, done: &Result<FlashDone, UiError>) {
+        self.finished = true;
+        *self.ended.lock().unwrap_or_else(PoisonError::into_inner) = Some(FlashStatus {
+            device_id: self.device.id.clone(),
+            stage: self.control.stage(),
+            replug: None,
+            outcome: Some(done.into()),
+        });
+    }
 }
 
 impl Drop for FlashLease {
     fn drop(&mut self) {
+        // An update that left without finish() may have stopped anywhere.
+        if !self.finished {
+            self.keep_outcome(&Err(UiError {
+                kind: ErrorKind::Internal,
+                message: "The update stopped and did not report how it ended.".to_owned(),
+                hint: Some(crate::firmware_flash::RECOVERY_HINT.to_owned()),
+                sessions: Vec::new(),
+            }));
+        }
         *self.run.lock().unwrap_or_else(PoisonError::into_inner) = None;
         // Targets before the flag: a new flash waits until both are clear.
         self.targets
@@ -1005,6 +1040,7 @@ where
             flashing: Arc::default(),
             flash_targets: Arc::default(),
             flash_run: Arc::default(),
+            flash_ended: Arc::default(),
             demo_serials: HashMap::new(),
             log: AppLog::default(),
         }
@@ -1214,6 +1250,10 @@ where
             device: device.clone(),
             control: Arc::clone(&control),
         });
+        *self
+            .flash_ended
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         self.flashing.store(true, Ordering::SeqCst);
         for i in scope {
             let m = &mut self.meters[i];
@@ -1226,20 +1266,32 @@ where
             targets: Arc::clone(&self.flash_targets),
             control,
             run: Arc::clone(&self.flash_run),
+            ended: Arc::clone(&self.flash_ended),
+            finished: false,
             log: self.log.clone(),
         })
     }
 
-    /// The running firmware update, if any.
+    /// The running firmware update, else the ended one not read yet, which
+    /// this read takes (AC-AXHK2M.2).
     pub fn flash_status(&self) -> Option<FlashStatus> {
         let run = self
             .flash_run
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        run.as_ref().map(|r| FlashStatus {
-            device_id: r.device.id.clone(),
-            stage: r.control.stage(),
-        })
+        match run.as_ref() {
+            Some(r) => Some(FlashStatus {
+                device_id: r.device.id.clone(),
+                stage: r.control.stage(),
+                replug: r.control.replug(),
+                outcome: None,
+            }),
+            None => self
+                .flash_ended
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        }
     }
 
     /// Ask the running firmware update to stop (AC-4PJRVJ.1); refused when
@@ -1298,11 +1350,10 @@ where
     /// reconnected, into its own session; nothing else is ever connected on
     /// its own. A meter whose reconnect failed is tried again only once its
     /// back-off has passed, or at once when it left the list and came back
-    /// (FR 4PJRVK).
+    /// (FR 4PJRVK). A firmware update holds its target only: the meters
+    /// that cannot be told from it keep waiting, the others come back
+    /// (AC-AXHK2M.3).
     pub fn devices_changed(&mut self, devices: &[DeviceListing]) -> bool {
-        if self.flashing() {
-            return false;
-        }
         let waits = self
             .waiting
             .lock()
@@ -1314,20 +1365,26 @@ where
             let Some(index) = self.meters.iter().position(|m| m.id == id) else {
                 continue;
             };
+            let listed = devices
+                .iter()
+                .find(|d| d.demo_scenario.is_none() && d.serial.as_deref() == Some(serial.as_str()))
+                .cloned();
+            // The same checks as a connect by hand, before anything is opened.
+            let held = self.ensure_not_flashing_for(&id).is_err()
+                || listed.as_ref().is_some_and(|d| {
+                    self.ensure_not_flashing_for(&d.id).is_err()
+                        || self.ensure_not_flash_target(d).is_err()
+                });
             let meter = &mut self.meters[index];
             if meter.running_worker().is_some() || meter.stop.load(Ordering::SeqCst) {
                 // Still running, or the page that waited is gone.
                 continue;
             }
-            let Some(device) = devices
-                .iter()
-                .find(|d| d.demo_scenario.is_none() && d.serial.as_deref() == Some(serial.as_str()))
-                .cloned()
-            else {
+            let Some(device) = listed else {
                 meter.back_off.reset();
                 continue;
             };
-            if !meter.back_off.due(now_ms) {
+            if held || !meter.back_off.due(now_ms) {
                 continue;
             }
             // A meter back in bootloader mode is listed but not opened; keep
@@ -2036,6 +2093,8 @@ where
         let Some(meter) = self.meter(id).filter(|m| m.running_worker().is_some()) else {
             return Err(UiError::usage("Connect a meter first."));
         };
+        // The trigger picks a serial port by serial, or the only one without.
+        self.ensure_not_flash_target(&meter.device)?;
         if lock(&meter.trigger).is_some() {
             return Err(UiError::usage("A trigger session is already open."));
         }
@@ -2544,7 +2603,11 @@ mod tests {
         /// The manager holds no trace of an update, for the meters in `ids`.
         fn assert_no_update(&self, ids: &[&str]) {
             assert!(!self.m.flashing(), "the update flag stayed up");
-            assert_eq!(self.m.flash_status(), None, "an update is still reported");
+            let status = self.m.flash_status();
+            assert!(
+                status.is_none_or(|s| s.outcome.is_some()),
+                "an update is still reported"
+            );
             for id in ids {
                 assert!(
                     self.m.ensure_not_flashing_for(id).is_ok(),
@@ -2945,6 +3008,28 @@ mod tests {
         assert_eq!(rig.m.flash_holds(AT_5), Vec::new());
         let _lease = rig.m.begin_flash(AT_5, &[]).expect("another meter");
         assert_eq!(rig.m.running_ids(), vec![AT_4.to_owned()]);
+    }
+
+    /// AC-AXHK2M.3: a trigger opens the meter's serial port, so it needs the
+    /// same check as a connect.
+    #[test]
+    fn a_trigger_is_refused_on_a_meter_that_may_be_the_update_target() {
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-A")), entry(5, Some("SERIAL-B"))]);
+        let _rx = rig.stream(AT_4);
+        let _lease = rig.m.begin_flash(AT_5, &[]).expect("another meter");
+        assert!(
+            rig.m.trigger_opener_for(AT_4).is_ok(),
+            "told from the target"
+        );
+
+        if let Some(run) = rig.m.flash_run.lock().unwrap().as_mut() {
+            run.device.serial = None;
+        }
+        let e = rig
+            .m
+            .trigger_opener_for(AT_4)
+            .expect_err("it may be the target");
+        assert_eq!(e.message, FLASH_REFUSAL);
     }
 
     #[test]

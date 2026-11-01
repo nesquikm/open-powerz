@@ -750,14 +750,21 @@ export async function firmwareCancel(): Promise<void> {
   return invoke<void>("firmware_cancel");
 }
 
-/** A running firmware update as the backend reports it (AC-4PJRVJ.3); `stage` is null
- * before its first stage. */
+/** How an update ended, as the backend keeps it for a reloaded page (AC-AXHK2M.2). */
+export type FlashEnd = { result: FlashDone; error: null } | { result: null; error: UiError };
+
+/** A firmware update as the backend reports it (AC-4PJRVJ.3): running, or ended with an
+ * `outcome` not read yet (AC-AXHK2M.2). `stage` is null before its first stage, `replug`
+ * is the prompt it waits on. */
 export interface FlashStatus {
   device_id: string;
   stage: FlashStage | null;
+  replug?: Omit<FlashReplug, "stage"> | null;
+  outcome?: FlashEnd | null;
 }
 
-/** The update the backend is running, null when none: a reloaded page picks it up. */
+/** The update the backend is running, else the ended one it kept, which this read takes;
+ * null when neither: a reloaded page picks it up. */
 export async function firmwareFlashStatus(): Promise<FlashStatus | null> {
   if (mock) return mock.firmwareFlashStatus();
   return invoke<FlashStatus | null>("firmware_flash_status");

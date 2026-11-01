@@ -130,6 +130,12 @@ describe("AC-DGSQ6T.3: GoodCRC is refused with a reason", () => {
   it("refuses pd cmd=1 and a pd data GoodCRC in the console", () => {
     expect(lineRefusal("pd cmd=1")).toMatch(/GoodCRC/);
     expect(lineRefusal("  pd cmd=1  ")).toMatch(/GoodCRC/);
+    expect(lineRefusal("pd\u200bcmd=1")).toMatch(/GoodCRC/);
+    expect(lineRefusal("p\u2060d cmd=1")).toMatch(/GoodCRC/);
+    expect(lineRefusal("reset\npd cmd=1")).toMatch(/cannot tell/i);
+    expect(lineRefusal("reset\r\npdm close")).toMatch(/cannot tell/i);
+    expect(lineRefusal("x\u0000pd cmd=1")).toMatch(/cannot tell/i);
+    expect(lineRefusal("\nentry pd\r\n")).toBeNull();
     expect(lineRefusal("pd data=014100")).toMatch(/GoodCRC/);
     expect(lineRefusal("pd cmd=13")).toBeNull();
     expect(lineRefusal("pd cmd=10")).toBeNull();

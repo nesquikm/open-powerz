@@ -16,6 +16,30 @@ source; the source code has the rest.
 |---|---|
 | `historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]>` | The breaks between measuring runs that overlap `t0Ms..=t1Ms`, oldest first. A `HistoryGap` is `{ from_ms, to_ms }`. |
 
+### A slow sink
+
+The session channel never holds up the meter polls. The worker queues its
+events and a forwarder thread delivers them, so a slow sink, one that takes too
+long to accept them, only makes the queue grow. At most 512 sample batches wait
+there, about 10 to 25 s of them; what is shown can lag by that much. Past the
+limit the worker drops new batches until the queue has room again. Status, gap
+and recording events are always queued, and the newest dropped batch is still
+sent when the session ends.
+
+The session history, the export and a recording keep every sample of a dropped
+batch. On screen, its samples are lost to the live view in some places and only
+delayed in others:
+
+| where | the dropped samples are |
+|---|---|
+| Live chart: the 10 s, 1 min and 10 min windows, and Whole session while the live buffer reaches back to the session start | Lost to the live view. The chart draws what the channel brought, and nothing fetches a batch it missed. No gap event goes out, because the history has no gap, so the line runs straight from the last sample before the hole to the first one after it, with no break or marker. |
+| Overview strip | The same for the stretch the live buffer holds. Older than that, it draws the history. |
+| Chart zoomed, panned or paused | Only delayed: the view is drawn from the history. Going back to live brings the straight line back. |
+| Whole session once the session is older than the live buffer | Only delayed: drawn from the history, asked again at most 4 times a second. |
+| Chart after a reload, or after picking a meter for the full view | Only delayed for the 10 minutes before the first sample that arrives: the live buffer is refilled from the history, as min and max buckets. |
+| Statistics | Only delayed: the backend counts every sample, and the next batch that arrives carries the totals. |
+| Readout (latest values) | Lost to the live view, and not missed: it shows the newest batch that arrives. |
+
 ## Replug
 
 | item | meaning |
@@ -156,8 +180,8 @@ Update commands:
 | `firmwareInspect(path: string): Promise<FirmwareFileInfo>` | Reads a local firmware container and answers its metadata; needs no meter. The file is never decrypted; files over 8 MiB are refused before they are read. A broken file rejects with `usage`, prefixed with the file name. |
 | `firmwareChoose(): Promise<string \| null>` | Opens the open dialog filtered to `.mencrypt` files; `null` when it was cancelled. |
 | `firmwareFlash(deviceId: string, path: string, confirmation: string, onStage: (event: FlashEvent) => void): Promise<FlashDone>` | Updates the meter with the file at `path`. Before anything is sent the backend checks that `confirmation` is the file's version and reads the file again. Each event goes to `onStage` over a channel, about one write message per percent. Rejects with the error and its recovery hint. |
-| `firmwareCancel(): Promise<void>` | Asks the running update to stop. Accepted until the erase begins, and refused after that. An accepted cancel ends the update as a failure at its next safe point, which is after the meter has switched if it is switching. |
-| `firmwareFlashStatus(): Promise<FlashStatus \| null>` | The running update, for a reloaded page: `device_id` and `stage` (the latest stage, or null before the first). Null when none runs. |
+| `firmwareCancel(): Promise<void>` | Asks the running update to stop. Accepted until the erase begins, and refused after that. An accepted cancel ends the update as a failure at its next safe point: a wait for the meter to switch ends within about a second, and the meter may have switched by then. |
+| `firmwareFlashStatus(): Promise<FlashStatus \| null>` | The running update, else the ended one the backend kept, for a reloaded page: `device_id`, `stage` (the latest stage, or null before the first), `replug` (the pending replug prompt: `to` and `reply`, or null) and `outcome` (how it ended: `result` or `error`, or null while it runs). This read takes a kept outcome, so it answers once; a new update forgets it. Null when neither. |
 
 Types:
 

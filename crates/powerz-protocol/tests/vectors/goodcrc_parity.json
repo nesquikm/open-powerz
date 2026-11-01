@@ -54,7 +54,16 @@
     { "line": "pd req=1", "verdict": "none" },
     { "line": "entry pd", "verdict": "none" },
     { "line": "pdm parm", "verdict": "none" },
-    { "line": "hello meter", "verdict": "none" }
+    { "line": "hello meter", "verdict": "none" },
+    { "line": "reset\npd cmd=1", "verdict": "unsure" },
+    { "line": "reset\r\npdm close", "verdict": "unsure" },
+    { "line": "pd\u0001cmd=1", "verdict": "unsure" },
+    { "line": "x\u0000pd cmd=1", "verdict": "unsure" },
+    { "line": "pdm\u007fclose", "verdict": "unsure" },
+    { "line": "hello\u0085meter", "verdict": "unsure" },
+    { "line": "hello\u009fmeter", "verdict": "unsure" },
+    { "line": "\nhello meter\r\n", "verdict": "none" },
+    { "line": "\u0085hello meter\u0085", "verdict": "none" }
   ],
   "messages": [
     { "sop": "sop", "msg_type": 1, "data_objects": [], "good_crc": true },

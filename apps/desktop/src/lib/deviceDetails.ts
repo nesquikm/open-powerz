@@ -5,11 +5,6 @@
 
 import type { ConnectedInfo, DeviceListing, DeviceMode, FirmwareWarningCode } from "./backend";
 
-/** Oldest application firmware the app supports (mirrors `version::MIN_SUPPORTED`). */
-export const MIN_SUPPORTED_FIRMWARE = "1.7.0";
-/** Newest application firmware the app knows of (mirrors `version::KNOWN_LATEST`). */
-export const KNOWN_LATEST_FIRMWARE = "2.0.7";
-
 /** The mode in plain words. */
 export function modeLabel(mode: DeviceMode): string {
   switch (mode) {

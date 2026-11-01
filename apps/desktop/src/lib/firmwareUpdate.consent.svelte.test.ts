@@ -62,6 +62,7 @@ function backend(refusals: (FlashHold[] | UiError)[], over: Partial<FirmwareUpda
     choose: vi.fn(async () => "/fw/KM003C_V2.0.7.mencrypt"),
     inspect: vi.fn(async () => INFO),
     flash,
+    cancelFlash: vi.fn(async () => {}),
     stopRecording,
     ...over,
   } as FirmwareUpdateApi;

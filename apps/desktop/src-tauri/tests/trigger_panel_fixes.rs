@@ -351,6 +351,35 @@ fn a_decode_error_keeps_the_trigger_session_and_starts_no_reconnect() {
     the_session_outlives(Fault::Decode);
 }
 
+// ---- AC-AXHK2M.6: that error reaches the page, once per run of failures ----
+
+fn the_page_hears_of(fault: Fault) {
+    let mut rig = Rig::streaming();
+    let _pdm = rig.triggering();
+    let events = rig.go_wrong(fault);
+
+    no_disconnect(&events);
+    let errors: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            BackendEvent::Error(error) => Some(error),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "one error per run of failures: {errors:?}");
+    assert!(!errors[0].message.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_protocol_error_with_a_trigger_session_open_reaches_the_page() {
+    the_page_hears_of(Fault::Protocol);
+}
+
+#[test]
+fn a_decode_error_with_a_trigger_session_open_reaches_the_page() {
+    the_page_hears_of(Fault::Decode);
+}
+
 #[test]
 fn without_a_trigger_session_a_stream_error_still_ends_the_session() {
     let mut rig = Rig::streaming();

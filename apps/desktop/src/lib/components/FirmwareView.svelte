@@ -20,6 +20,7 @@
   import FirmwareConfirmDialog from "./FirmwareConfirmDialog.svelte";
   import FirmwareRecordingDialog from "./FirmwareRecordingDialog.svelte";
   import FirmwareFileInfo from "./FirmwareFileInfo.svelte";
+  import HintText from "./HintText.svelte";
 
   let {
     firmware,
@@ -104,7 +105,10 @@
     onclick={() => void firmware.chooseFile()}>Choose file…</button
   >
   {#if firmware.fileError !== null}
-    <p class="error" role="alert">{firmware.fileError}</p>
+    <p class="error" role="alert">
+      {firmware.fileError}
+      <HintText hint={firmware.fileErrorHint} />
+    </p>
   {/if}
   {#if firmware.info !== null}
     <FirmwareFileInfo info={firmware.info} />
@@ -123,12 +127,13 @@
   {/if}
 </div>
 
-{#if firmware.followedEnded}
-  <p role="status">{FOLLOWED_UPDATE_ENDED}</p>
-{/if}
-{#if firmware.followedLost}
-  <p role="status">{FOLLOWED_UPDATE_LOST}</p>
-{/if}
+<!-- Mounted before its text, or a screen reader would not announce it (AC-AXHK2M.7). -->
+<p id="firmware-followed" role="status">
+  {#if firmware.followedEnded}{FOLLOWED_UPDATE_ENDED}{/if}
+</p>
+<p id="firmware-lost" role="status">
+  {#if firmware.followedLost}{FOLLOWED_UPDATE_LOST}{/if}
+</p>
 
 {#if firmware.phase === "updating" || firmware.phase === "done" || firmware.phase === "failed"}
   <section class="progress" aria-label="Update progress" tabindex="-1" bind:this={progressEl}>
@@ -191,6 +196,7 @@
         )}.
       {/if}
       {firmware.error.message}
+      <HintText hint={firmware.error.hint} />
     </p>
     {#if firmware.needsRecovery}
       <p>To recover the meter:</p>
@@ -280,6 +286,10 @@
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+  #firmware-followed:empty,
+  #firmware-lost:empty {
+    margin: 0;
   }
   .file button {
     margin-bottom: 0.75rem;

@@ -42,6 +42,10 @@ The cancel waits up to 120 s, the prompt is lost, and the failure is silent.
 - AC-AXHK2M.6: A poll failure while a PDM session is open shows on the trigger view, and every view shows an error's hint. Trigger hints show no raw backticks. `console_refusal` treats Unicode blanks as blank.
 - AC-AXHK2M.7: Firmware notices have tests, the `followedEnded` note clears on the next action, and its status region is mounted before its text.
 - AC-AXHK2M.8: A tag mismatch after publishing turns the release back to draft, and the release version compare handles `-rc` suffixes.
+- AC-AXHK2M.9: The outage gap a session sends over an unplug equals the history gap over the same unplug, also when live batches were dropped for a slow sink. A test forces the drop, and `the_reconnect_continues_the_timeline_with_an_outage_gap_in_history_and_export` passes 60 of 60 full-target runs with its timings unchanged.
+- AC-AXHK2M.10: A live batch dropped for a slow sink costs no sample in the session history, the export or a recording, and a test pins it. The docs state whether the dropped samples are lost to the live view or only delayed.
+- AC-AXHK2M.11: At 375 px wide, with one meter and with several, the page has no horizontal scroll, and the Add meter control is fully visible and usable. A test pins both.
+- AC-AXHK2M.12: At 375 px wide with one meter, the device select does not cover Disconnect or any other top bar control. A test pins it.
 
 ## Technical Design
 
@@ -57,3 +61,20 @@ Unit tests per item in the owning crate or module, and a Vitest test per UI stat
 ## Notes
 
 Source: M7a Implementation notes marked for M7b. The plan lists items deferred with reasons.
+
+## Implementation notes
+
+- The `pd cmd` / `pd data` guard and the page's check now treat zero-width blanks as blanks too. The AC named only the console refusal; a hidden blank could carry GoodCRC past the guard.
+- A dropped live batch leaves an unmarked straight line in the live chart. Nothing fetches it on its own. History-drawn views show it. AXHK2W measures whether this happens in the real app and fixes it if so.
+- The session's last samples are always delivered, except after a worker panic.
+- AC-AXHK2M.3 relies on a target keeping its serial across the bootloader jump. A listing with no serial, or any real listing not in application mode, stays refused.
+- The tag rollback in the release script has only run against the fake client. It now reads GitHub's answer, on the rollback and on the publish.
+- Any raw console line with a C0 or C1 control character inside is refused, in the library and the page. GoodCRC is judged first, so `pd\tcmd=1` keeps its own reason. Whether the firmware splits on such characters is unknown, so this fails closed.
+- A lease dropped without `finish` keeps a generic failure, never a success. A kept outcome nobody read still shows at the next page load.
+- A trigger gets the same target check as a connect. A running meter that cannot be told from the target needs consent first, so the check is a second line; only a unit test reaches it.
+- A dropped batch held back goes out before the next non-batch event, so no event overtakes samples it follows.
+- A stop during the wait after JUMP_DFU no longer claims the bootloader: the meter may not have switched.
+- `firmwareFileErrorText` had no production caller and is gone; the store keeps `fileErrorHint` beside `fileError`.
+- Waiters held during an update with a serial-less target are not retried when the lease drops, since no hotplug fires. It predates this FR, and the runbook covers it.
+- `FlashEnd` stays a struct with two options, the wire shape.
+- The phone-width check found the firmware warning card sitting over the bottom of the settings panel on a desktop window. It predates this FR and is not fixed here. AXHK2V's layout pass picks it up.

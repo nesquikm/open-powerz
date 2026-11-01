@@ -90,8 +90,9 @@ impl FlashStage {
     }
 }
 
-/// Why Cancel is refused once the erase has begun (AC-4PJRVJ.1).
-pub const ERASE_BEGAN: &str = "The erase has started, so the update can no longer be cancelled.";
+/// Why Cancel is refused once the erase has begun (AC-4PJRVJ.1). The UI reads the same
+/// file for `CANCEL_TOO_LATE`, so the two cannot drift (AC-AXHK2M.4).
+pub const ERASE_BEGAN: &str = include_str!("../../src/lib/cancel-too-late.txt").trim_ascii();
 
 /// The stop request of one running update, and the stage it has reached.
 /// Cancel is accepted only until the erase starts (AC-4PJRVJ.1).
@@ -105,7 +106,17 @@ pub struct FlashControl {
 #[derive(Debug, Default)]
 struct FlashGate {
     stage: Option<FlashStage>,
+    replug: Option<FlashPrompt>,
     erase_began: bool,
+}
+
+/// A replug prompt the update waits on, for a reloaded page (AC-AXHK2M.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlashPrompt {
+    /// The mode the meter should come back in.
+    pub to: &'static str,
+    /// The meter's reply to the jump frame.
+    pub reply: String,
 }
 
 impl FlashControl {
@@ -115,14 +126,21 @@ impl FlashControl {
     }
 
     /// Note a stage the engine reported. A replug prompt is not a stage of
-    /// its own and changes nothing.
+    /// its own: it stands until the next stage.
     pub fn observe(&self, stage: &FlashStage) {
         let mut gate = self.gate();
         match stage {
-            FlashStage::Replug { .. } => return,
+            FlashStage::Replug { to, reply } => {
+                gate.replug = Some(FlashPrompt {
+                    to,
+                    reply: reply.clone(),
+                });
+                return;
+            }
             FlashStage::Switching => {}
             _ => gate.erase_began = true,
         }
+        gate.replug = None;
         gate.stage = Some(stage.clone());
     }
 
@@ -141,6 +159,11 @@ impl FlashControl {
         self.gate().stage.clone()
     }
 
+    /// The replug prompt the update waits on, if any.
+    pub fn replug(&self) -> Option<FlashPrompt> {
+        self.gate().replug.clone()
+    }
+
     fn gate(&self) -> std::sync::MutexGuard<'_, FlashGate> {
         self.gate.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -157,6 +180,25 @@ pub enum FlashDone {
     },
     /// The image was accepted but the meter stayed in its bootloader.
     PowerCycleNeeded,
+}
+
+/// How an update ended, as a reloaded page reads it (AC-AXHK2M.2): one of
+/// the two is set.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FlashEnd {
+    /// The outcome of an update that succeeded.
+    pub result: Option<FlashDone>,
+    /// Why it failed.
+    pub error: Option<UiError>,
+}
+
+impl From<&Result<FlashDone, UiError>> for FlashEnd {
+    fn from(done: &Result<FlashDone, UiError>) -> FlashEnd {
+        FlashEnd {
+            result: done.as_ref().ok().cloned(),
+            error: done.as_ref().err().cloned(),
+        }
+    }
 }
 
 /// The recovery steps shown with every failed update (AC-V9SK55.5).

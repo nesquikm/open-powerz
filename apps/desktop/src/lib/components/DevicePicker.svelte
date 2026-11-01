@@ -57,7 +57,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.375rem;
-    min-width: 0;
+    min-width: 7rem;
   }
   /* As wide as its longest entry where the bar has room; when the top bar runs out of
      room it may shrink, cut with an ellipsis (the full label stays in the tooltip). */

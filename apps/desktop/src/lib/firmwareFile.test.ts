@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { FirmwareFileInfo } from "./backend";
-import { firmwareFileRows, firmwareNotes, firmwareFileErrorText } from "./firmwareFile";
+import { firmwareFileRows, firmwareNotes } from "./firmwareFile";
 
 const info: FirmwareFileInfo = {
   vendor: "ChargerLab",
@@ -44,21 +44,5 @@ describe("firmwareNotes", () => {
 
   it("is empty when the file carries no English notes", () => {
     expect(firmwareNotes({ ...info, release_notes_en: " \n " })).toEqual([]);
-  });
-});
-
-describe("firmwareFileErrorText", () => {
-  it("shows the backend's reason for a refused file", () => {
-    expect(
-      firmwareFileErrorText({
-        kind: "usage",
-        message: "This firmware file is for the KM002C, but the meter is a KM003C.",
-        hint: null,
-      }),
-    ).toBe("This firmware file is for the KM002C, but the meter is a KM003C.");
-  });
-
-  it("falls back to the generic text for an unexpected error", () => {
-    expect(firmwareFileErrorText(new Error("boom"))).toBe("Something went wrong inside the app.");
   });
 });

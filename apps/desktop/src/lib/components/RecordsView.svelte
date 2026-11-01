@@ -6,6 +6,7 @@
     type RecordsPanel,
   } from "../records.svelte";
   import type { ResolvedTheme } from "../theme";
+  import HintText from "./HintText.svelte";
   import RecordChart from "./RecordChart.svelte";
   import RecordDeleteDialog from "./RecordDeleteDialog.svelte";
 
@@ -122,7 +123,10 @@
       </div>
     </div>
     {#if panel.error}
-      <p class="error" role="alert">{panel.error.message}</p>
+      <p class="error" role="alert">
+        {panel.error.message}
+        <HintText hint={panel.error.hint} />
+      </p>
     {/if}
     {#if panel.deleting !== null}
       <p class="progress" role="status">Backing up and deleting…</p>
@@ -250,6 +254,9 @@
   }
   .table-wrap {
     overflow-x: auto;
+    /* Holds the absolute `.sr-only` headers: without it they escape the scroll box and
+       widen the page. */
+    position: relative;
   }
   table {
     border-collapse: collapse;

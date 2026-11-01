@@ -11,6 +11,7 @@
     type TriggerPanel,
   } from "../trigger.svelte";
   import type { PdConsole } from "../console.svelte";
+  import HintText from "./HintText.svelte";
   import PdConsoleView from "./PdConsoleView.svelte";
   import TriggerConfirmDialog from "./TriggerConfirmDialog.svelte";
 
@@ -196,7 +197,8 @@
 
   {#if panel.error}
     <p class="error" role="alert">
-      {panel.error.hint ? `${panel.error.message} ${panel.error.hint}` : panel.error.message}
+      {panel.error.message}
+      <HintText hint={panel.error.hint} />
     </p>
   {/if}
 
@@ -407,9 +409,8 @@
       </dl>
     {:else if panel.requestFailure}
       <p class="error">
-        Request failed: {panel.requestFailure.message}{panel.requestFailure.hint
-          ? ` ${panel.requestFailure.hint}`
-          : ""}
+        Request failed: {panel.requestFailure.message}
+        <HintText hint={panel.requestFailure.hint} />
       </p>
     {:else}
       <p class="muted">No request yet.</p>

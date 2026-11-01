@@ -173,7 +173,9 @@ that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) 
   plugged in and run the command again; if the meter does not reach its
   bootloader on its own, hold the Back button while plugging it in.
 - **Ctrl-C** stops the flash at its next safe point: before the switch to
-  the bootloader, before the descriptor, or between two payload writes.
+  the bootloader, during the wait for the bootloader, before the descriptor,
+  or between two payload writes. Once the image is written, the wait for
+  the meter to return runs on.
   The command then exits 5 saying the flash was interrupted, with the same
   recovery text as a failure; once the meter is in its bootloader nothing
   more is sent and it stays there until you flash again.
@@ -193,9 +195,9 @@ that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) 
   frame through the flash guard, only from the opposite mode; from
   application mode that frame follows CONNECT, the UID read and a level-1
   authentication, and nothing is jumped if the authentication fails.
-  Ctrl-C applies only before the jump frame is sent: it then sends
-  nothing and exits as interrupted; once the frame is written the jump
-  cannot be undone, and the command waits for the meter as usual. The
+  Ctrl-C before the jump frame is sent sends nothing and exits as
+  interrupted; once the frame is written the jump cannot be undone, and
+  Ctrl-C only ends the wait for the meter, within a second. The
   `Was in:` line, the meter's reply and the replug prompt are printed as
   soon as the jump frame is written, before the wait; the `Was in:` line
   shows even when that write fails. In its bootloader the meter

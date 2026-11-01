@@ -31,6 +31,8 @@ Long sessions at 1000 SPS and long PD captures stay within a known memory bound,
 - AC-AXHK2W.5: The overview strip and axis redraws reuse buffers. A test shows no new typed array per frame on a steady stream.
 - AC-AXHK2W.6: Parked meters' buffers obey the same caps.
 - AC-AXHK2W.7: `e2e/ui/memory.spec.ts` still passes on WebKit in CI with no timing loosened.
+- AC-AXHK2W.8: A measurement answers two questions, each with its numbers in this FR: do live batches drop at the worker's queue limit in the real app, and does a stalled page pile up without limit in the webview? Tauri's channel send may return before the page processes it; that was read in its source, not tested. If the simulator cannot settle a question, the check moves to the tester's runbook on a .app build, and the FR says so.
+- AC-AXHK2W.9: If either answer is yes, it is fixed in this milestone: the live chart never draws a straight line across missing data with no marker, and live data held for a stalled page has a limit that keeps the 400 MB target.
 
 ## Technical Design
 

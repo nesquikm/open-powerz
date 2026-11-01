@@ -89,6 +89,12 @@
       grid-template-columns: repeat(4, minmax(0, 1fr));
     }
   }
+  /* Too narrow for two values side by side: one tile per row, at the full type size. */
+  @container (max-width: 30rem) {
+    .primary {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
   .cell {
     display: grid;
     min-width: 0;

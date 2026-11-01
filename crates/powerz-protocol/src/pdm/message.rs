@@ -472,17 +472,31 @@ fn pd_data_refusal(bytes: &[u8]) -> Option<String> {
     good_crc.then(|| MessageError::GoodCrc.to_string())
 }
 
-/// A raw line the parser did not recognise: normalised (lowercase, no
-/// whitespace, no U+FEFF, which JavaScript's `\s` counts as whitespace and
-/// Rust does not), a `pd cmd` / `pd data` line is judged by its value read
-/// leniently; one whose value cannot be read with confidence is refused,
-/// since the firmware's own parsing of it is unknown. \[inferred\]
-fn raw_refusal(text: &str) -> Option<String> {
-    let norm: String = text
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '\u{FEFF}')
+/// Blanks that `char::is_whitespace` does not count: zero-width space,
+/// non-joiner and joiner, word joiner, and the byte order mark.
+const ZERO_WIDTH: [char; 5] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
+
+/// `text` lowercase, with every blank out, the zero-width ones included.
+pub(super) fn without_blanks(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace() && !ZERO_WIDTH.contains(c))
         .collect::<String>()
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+}
+
+/// A raw line the parser did not recognise. GoodCRC first, so a blank that is
+/// also a control character still gets its own reason; then any control
+/// character left in the line, which could end it early on the meter and
+/// start a second command past these checks. \[inferred\]
+fn raw_refusal(text: &str) -> Option<String> {
+    good_crc_refusal(text).or_else(|| control_refusal(text))
+}
+
+/// Normalised by [`without_blanks`], a `pd cmd` / `pd data` line is judged
+/// by its value read leniently; one whose value cannot be read with
+/// confidence is refused, since the firmware's own parsing of it is unknown.
+fn good_crc_refusal(text: &str) -> Option<String> {
+    let norm = without_blanks(text);
     if let Some(rest) = norm.strip_prefix("pdcmd") {
         return match rest.strip_prefix('=').and_then(lenient_number) {
             Some(n) => pd_cmd_refusal(n),
@@ -496,6 +510,19 @@ fn raw_refusal(text: &str) -> Option<String> {
         };
     }
     None
+}
+
+/// The reason for refusing a line with a control character inside. A line
+/// break around it is not one: the line is trimmed first.
+fn control_refusal(text: &str) -> Option<String> {
+    let text = text.trim();
+    text.chars().any(char::is_control).then(|| {
+        format!(
+            "cannot tell what `{}` sends: a console line is one command, with no \
+             control characters",
+            text.escape_debug()
+        )
+    })
 }
 
 /// A non-negative number: decimal (leading zeros and a `+` allowed) or

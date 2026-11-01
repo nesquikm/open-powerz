@@ -7,6 +7,7 @@
     parseDataObjects,
     type PdConsole,
   } from "../console.svelte";
+  import HintText from "./HintText.svelte";
   import TriggerConfirmDialog from "./TriggerConfirmDialog.svelte";
 
   /**
@@ -162,9 +163,8 @@
     </form>
     {#if pdConsole.error}
       <p class="error" role="alert" {@attach reveal}>
-        {pdConsole.error.hint
-          ? `${pdConsole.error.message} ${pdConsole.error.hint}`
-          : pdConsole.error.message}
+        {pdConsole.error.message}
+        <HintText hint={pdConsole.error.hint} />
       </p>
     {/if}
     <div class="transcript" role="log" aria-label="Console transcript">
