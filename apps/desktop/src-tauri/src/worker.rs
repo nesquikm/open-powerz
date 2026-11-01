@@ -30,6 +30,7 @@ use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
 use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
 use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, temp_at};
+use crate::trigger::CableView;
 use crate::ui_error::{self, ErrorKind, UiError};
 
 /// Where the live measurements come from (FR 1HHT02), named on the wire
@@ -1563,6 +1564,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::PdDetails(index, reply) => {
                 let _ = reply.send(self.pd_details(index));
             }
+            Command::PdCable(reply) => {
+                let _ = reply.send(self.pd.latest_cable());
+            }
             Command::ClearPd(reply) => {
                 let _ = reply.send(self.clear_pd());
             }
@@ -1626,6 +1630,7 @@ enum Command {
     StartPd(mpsc::Sender<Result<(), UiError>>),
     StopPd(mpsc::Sender<Result<(), UiError>>),
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
+    PdCable(mpsc::Sender<Option<CableView>>),
     ClearPd(mpsc::Sender<Result<PdCleared, UiError>>),
     PdSave(mpsc::Sender<PdSave>),
     ReadSettings(mpsc::Sender<Result<MeterSettingsView, UiError>>),
@@ -1665,6 +1670,7 @@ impl std::fmt::Debug for Command {
             Command::StartPd(_) => f.write_str("StartPd"),
             Command::StopPd(_) => f.write_str("StopPd"),
             Command::PdDetails(index, _) => f.debug_tuple("PdDetails").field(index).finish(),
+            Command::PdCable(_) => f.write_str("PdCable"),
             Command::ClearPd(_) => f.write_str("ClearPd"),
             Command::PdSave(_) => f.write_str("PdSave"),
             Command::ReadSettings(_) => f.write_str("ReadSettings"),
@@ -2029,6 +2035,12 @@ impl WorkerControl {
     pub fn pd_details(&self, index: u64) -> Result<PdDetails, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::PdDetails(index, reply), &answer)?
+    }
+
+    /// The newest cable identity in the PD capture, if any.
+    pub fn pd_cable_seen(&self) -> Result<Option<CableView>, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PdCable(reply), &answer)
     }
 
     /// Drop every captured PD record; returns the index the next one gets.

@@ -894,7 +894,8 @@ impl TriggerOpener {
     pub fn open(&self) -> Result<crate::trigger::TriggerWorker, UiError> {
         if self.demo {
             let clock = powerz_sim::SimClock::new(self.now_ms);
-            let sim = powerz_sim::SimPdm::new(powerz_sim::SimCharger::MultiProtocol, clock.clone());
+            let sim = powerz_sim::SimPdm::new(powerz_sim::SimCharger::MultiProtocol, clock.clone())
+                .with_cable(powerz_sim::SimCable::Epr240W);
             return crate::trigger::TriggerWorker::spawn(sim.open_port(), clock);
         }
         let port = powerz_protocol::pdm::open_port(self.serial.as_deref())

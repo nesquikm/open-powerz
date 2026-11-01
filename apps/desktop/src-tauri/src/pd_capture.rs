@@ -5,9 +5,12 @@
 use powerz_protocol::decode::pd_packet::{PdEvent, PdRecord, PdRecordKind, PdStatus};
 use powerz_protocol::pd::{self, Decoded, Field, PowerRole, Sop, SpecRevision};
 use powerz_protocol::pdcap;
+use powerz_protocol::pdm::message::cable_identity_from_message;
 use powerz_protocol::session::CapturedRecord;
 use serde::Serialize;
 use std::collections::VecDeque;
+
+use crate::trigger::{CableView, cable_view};
 
 /// Least time between two `pd_rows` batches, ms (at most 60 a second).
 pub const ROW_BATCH_MS: u64 = 17;
@@ -548,6 +551,19 @@ impl PdCapture {
         })
     }
 
+    /// The newest cable Discover Identity ACK the capture keeps (FR AXHK2P).
+    pub fn latest_cable(&self) -> Option<CableView> {
+        self.log.iter().rev().find_map(|entry| {
+            let pdcap::Entry::Record { record, .. } = entry else {
+                return None;
+            };
+            let (PdRecordKind::Message(m) | PdRecordKind::BigMessage(m)) = &record.kind else {
+                return None;
+            };
+            cable_identity_from_message(m.sop, m.header, &m.body).map(|c| cable_view(&c))
+        })
+    }
+
     /// Every status block and record kept so far, in capture order, on
     /// session time: what a pdcap file saves. Rows already sent to the UI
     /// are included; nothing waiting to go out is taken.
@@ -736,5 +752,139 @@ mod tests {
         c.clear();
         assert_eq!(c.take_all_status(), None);
         assert_eq!(c.take_all(), None);
+    }
+
+    // ---- AC-AXHK2P.6: the identity a capture already holds ----
+
+    /// Session 2: the 240 W cable's Discover Identity ACK on SOP'. [device]
+    const CABLE_ACK: [u32; 5] = [
+        0xFF00_A841,
+        0x1860_050D,
+        0x0000_404D,
+        0x8254_0000,
+        0x000A_2640,
+    ];
+    const ACK_HEADER: u16 = 0x518F;
+
+    /// A message record of `objects` on `sop`.
+    fn record(sop: u8, header: u16, objects: &[u32]) -> CapturedRecord {
+        CapturedRecord {
+            elapsed_ms: 0,
+            record: PdRecord {
+                time_ms: 0,
+                from_meter: false,
+                raw: Vec::new(),
+                kind: PdRecordKind::Message(PdMessage {
+                    sop,
+                    header,
+                    body: objects.iter().flat_map(|o| o.to_le_bytes()).collect(),
+                }),
+            },
+        }
+    }
+
+    fn ack_of(vid: u16) -> [u32; 5] {
+        let mut ack = CABLE_ACK;
+        ack[1] = 0x1860_0000 | u32::from(vid);
+        ack
+    }
+
+    #[test]
+    fn a_capture_with_no_cable_ack_has_no_cable() {
+        let mut pd = PdCapture::new();
+        assert_eq!(pd.latest_cable(), None);
+        pd.push(&[source_caps(0), request(1)], None);
+        assert_eq!(pd.latest_cable(), None);
+    }
+
+    #[test]
+    fn a_cable_ack_in_the_live_capture_is_found() {
+        let mut pd = PdCapture::new();
+        pd.push(
+            &[
+                source_caps(0),
+                record(1, ACK_HEADER, &CABLE_ACK),
+                request(1),
+            ],
+            None,
+        );
+        let cable = pd.latest_cable().expect("the ACK");
+        assert_eq!(cable.vid, 0x050D);
+        assert_eq!(cable.pid, Some(0x8254));
+        assert_eq!(cable.max_voltage_v, Some(50));
+    }
+
+    #[test]
+    fn the_newest_cable_ack_wins() {
+        let mut pd = PdCapture::new();
+        pd.push(&[record(1, ACK_HEADER, &ack_of(0x05AC))], None);
+        pd.push(&[record(1, ACK_HEADER, &ack_of(0x18D1))], None);
+        assert_eq!(pd.latest_cable().map(|c| c.vid), Some(0x18D1));
+    }
+
+    #[test]
+    fn a_later_record_that_does_not_decode_leaves_the_newest_ack() {
+        let mut pd = PdCapture::new();
+        pd.push(
+            &[
+                record(1, ACK_HEADER, &ack_of(0x05AC)),
+                // A REQ, the same ACK on SOP, and an ACK that is no cable.
+                record(1, 0x108F, &[0xFF00_A801]),
+                record(0, ACK_HEADER, &ack_of(0x18D1)),
+                record(1, ACK_HEADER, &[CABLE_ACK[0], 0x1060_1234, 0, 0, 0]),
+            ],
+            None,
+        );
+        assert_eq!(pd.latest_cable().map(|c| c.vid), Some(0x05AC));
+    }
+
+    #[test]
+    fn a_far_plugs_ack_counts_too() {
+        let mut pd = PdCapture::new();
+        pd.push(&[record(2, ACK_HEADER, &CABLE_ACK)], None);
+        assert_eq!(pd.latest_cable().map(|c| c.vid), Some(0x050D));
+    }
+
+    #[test]
+    fn a_nak_or_a_request_is_no_identity() {
+        let mut pd = PdCapture::new();
+        pd.push(
+            &[
+                record(1, 0x108F, &[0xFF00_A801]),
+                record(1, 0x108F, &[0xFF00_A881]),
+            ],
+            None,
+        );
+        assert_eq!(pd.latest_cable(), None);
+    }
+
+    #[test]
+    fn the_capture_opened_from_a_file_counts_as_well() {
+        let mut live = PdCapture::new();
+        live.push(&[source_caps(0), record(1, ACK_HEADER, &CABLE_ACK)], None);
+        let opened = PdCapture::from_pdcap(&live.to_pdcap());
+        assert_eq!(opened.latest_cable().map(|c| c.vid), Some(0x050D));
+    }
+
+    #[test]
+    fn a_cleared_capture_has_no_cable() {
+        let mut pd = PdCapture::new();
+        pd.push(&[record(1, ACK_HEADER, &CABLE_ACK)], None);
+        pd.clear();
+        assert_eq!(pd.latest_cable(), None);
+    }
+
+    #[test]
+    fn an_ack_dropped_past_the_limit_is_gone() {
+        let mut pd = PdCapture::with_limit(2);
+        pd.push(
+            &[
+                record(1, ACK_HEADER, &CABLE_ACK),
+                source_caps(1),
+                request(2),
+            ],
+            None,
+        );
+        assert_eq!(pd.latest_cable(), None);
     }
 }

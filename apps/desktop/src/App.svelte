@@ -169,8 +169,8 @@
    * its own store as a tile (unless `keepShown` is false, when it ended), and the chart,
    * statistics, recording and PD views follow the meter shown. */
   function showInFullView(entry: MeterEntry, keepShown: boolean): void {
-    // Armed is per meter: the status follows the meter on screen.
-    void trigger.refreshArmed();
+    // Armed and the cable are per meter: the panel follows the meter on screen.
+    void trigger.meterChanged();
     if (entry.session === session) return;
     const shownId = meters.fullViewId;
     if (keepShown && shownId !== null) {
@@ -515,6 +515,8 @@
     disarm: () => act().triggerDisarm(),
     backTo5v: () => act().triggerBackTo5v(),
     close: () => act().triggerClose(),
+    cableRead: () => act().triggerCableRead(),
+    cableSeen: () => act().pdCableSeen(),
   });
   /** What the console sends can end "don't ask again": the panel's status follows it. */
   const refreshingArmed = <T,>(sent: Promise<T>): Promise<T> =>

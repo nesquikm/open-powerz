@@ -9,6 +9,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BackendEvent,
+  CableRead,
+  CableView,
   Detection,
   ProtocolSection,
   RiskClass,
@@ -24,6 +26,7 @@ import {
   DEVIATION_LIMIT,
   PROTOCOL_TITLES,
   TriggerPanel,
+  cableVendorText,
   confirmationText,
   detectionChecks,
   deviates,
@@ -67,6 +70,17 @@ const DETECTION: Detection = {
   complete: false,
 };
 
+const CABLE: CableView = {
+  vid: 0x050d,
+  pid: 0x8254,
+  active: false,
+  max_voltage_v: 50,
+  max_current_ma: 5000,
+  epr_capable: true,
+  speed: "USB 2.0",
+  vendor: null,
+};
+
 const PD_9V: TriggerRequest = { protocol: "pd", position: 2, voltage_mv: null, current_ma: null };
 const PD_5V: TriggerRequest = { protocol: "pd", position: 1, voltage_mv: null, current_ma: null };
 
@@ -77,6 +91,10 @@ class FakeApi implements TriggerApi {
   supported: TriggerProtocol[] = ["pd", "qc"];
   /** What `armed` answers. */
   armedNow = false;
+  /** What `cableRead` answers. */
+  cableAnswer: CableRead = { kind: "found", cable: CABLE };
+  /** What `cableSeen` answers. */
+  cableInCapture: CableView | null = null;
 
   async open(): Promise<void> {
     this.calls.push("open");
@@ -129,6 +147,14 @@ class FakeApi implements TriggerApi {
   async disarm(): Promise<void> {
     this.calls.push("disarm");
     this.armedNow = false;
+  }
+  async cableRead(): Promise<CableRead> {
+    this.calls.push("cable read");
+    return this.cableAnswer;
+  }
+  async cableSeen(): Promise<CableView | null> {
+    this.calls.push("cable seen");
+    return this.cableInCapture;
   }
 }
 
@@ -1153,5 +1179,297 @@ describe("AC-AXHK2N.8: the status follows every other way it ends", () => {
     await panel.refreshArmed();
     expect(panel.armed).toBe(false);
     expect(panel.error).toBeNull();
+  });
+});
+
+describe("FR AXHK2P: the Cable card", () => {
+  /** An open session; the calls of the detection are forgotten. */
+  async function inSession(): Promise<{ api: FakeApi; panel: TriggerPanel }> {
+    const { api, panel } = await detected();
+    api.calls = [];
+    return { api, panel };
+  }
+
+  /** A `cableRead` that answers only when `release` is called. */
+  function heldRead(api: FakeApi): (answer: CableRead) => void {
+    let release: (answer: CableRead) => void = () => {};
+    api.cableRead = () => {
+      api.calls.push("cable read");
+      return new Promise((resolve) => (release = resolve));
+    };
+    return (answer) => release(answer);
+  }
+
+  describe("AC-AXHK2P.1: one read", () => {
+    it("starts with nothing on the card", () => {
+      const panel = new TriggerPanel(new FakeApi());
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+      expect(panel.cableBusy).toBe(false);
+    });
+
+    it("shows what the cable answered, as read", async () => {
+      const { panel } = await inSession();
+      await panel.readCable();
+      expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+      expect(panel.cableNoAnswer).toBe(false);
+      expect(panel.error).toBeNull();
+    });
+
+    it("is busy while the read runs", async () => {
+      const { api, panel } = await inSession();
+      const release = heldRead(api);
+      const read = panel.readCable();
+      expect(panel.cableBusy).toBe(true);
+      release({ kind: "found", cable: CABLE });
+      await read;
+      expect(panel.cableBusy).toBe(false);
+    });
+  });
+
+  describe("AC-AXHK2P.2: the read and nothing else", () => {
+    it("never opens, enters, lists, detects or closes", async () => {
+      const { api, panel } = await inSession();
+      await panel.readCable();
+      expect(api.calls).toEqual(["cable read"]);
+    });
+
+    it("with no session it calls nothing", async () => {
+      const api = new FakeApi();
+      const panel = new TriggerPanel(api);
+      await panel.readCable();
+      expect(api.calls).toEqual([]);
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+    });
+
+    it("out of step it calls nothing and the power-cycle error stays", async () => {
+      const { api, panel } = await inSession();
+      const outOfSync = { kind: "out_of_sync", message: "Power-cycle it.", hint: null };
+      api.cableRead = async () => {
+        api.calls.push("cable read");
+        throw outOfSync;
+      };
+      await panel.readCable();
+      expect(panel.requestsDisabled).toBe(true);
+      expect(panel.error).toEqual(outOfSync);
+      await panel.readCable();
+      expect(api.calls).toEqual(["cable read"]);
+      expect(panel.error).toEqual(outOfSync);
+    });
+
+    it("a second press while one runs does nothing", async () => {
+      const { api, panel } = await inSession();
+      const release = heldRead(api);
+      const first = panel.readCable();
+      await panel.readCable();
+      await panel.readCable();
+      expect(api.calls).toEqual(["cable read"]);
+      release({ kind: "found", cable: CABLE });
+      await first;
+      expect(api.calls).toEqual(["cable read"]);
+    });
+
+    it("a refusal shows as the error, with no retry and nothing on the card", async () => {
+      const { api, panel } = await inSession();
+      const refusal = { kind: "usage", message: "Enter PD first.", hint: null };
+      api.cableRead = async () => {
+        api.calls.push("cable read");
+        throw refusal;
+      };
+      await panel.readCable();
+      expect(api.calls).toEqual(["cable read"]);
+      expect(panel.error).toEqual(refusal);
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+      expect(panel.cableBusy).toBe(false);
+    });
+
+    it("a late answer from a session that ended is dropped", async () => {
+      const { api, panel } = await inSession();
+      const release = heldRead(api);
+      const read = panel.readCable();
+      await panel.leave();
+      release({ kind: "found", cable: CABLE });
+      await read;
+      expect(panel.cable).toBeNull();
+      expect(panel.cableBusy).toBe(false);
+    });
+  });
+
+  describe("AC-AXHK2P.4: no answer", () => {
+    it("says so once and asks again only on the next press", async () => {
+      const { api, panel } = await inSession();
+      api.cableAnswer = { kind: "no_answer" };
+      await panel.readCable();
+      expect(panel.cableNoAnswer).toBe(true);
+      expect(panel.cable).toBeNull();
+      expect(api.calls).toEqual(["cable read"]);
+    });
+
+    it("an old answer does not stay next to it", async () => {
+      const { api, panel } = await inSession();
+      await panel.readCable();
+      api.cableAnswer = { kind: "no_answer" };
+      await panel.readCable();
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(true);
+    });
+
+    it("a later answer clears it", async () => {
+      const { api, panel } = await inSession();
+      api.cableAnswer = { kind: "no_answer" };
+      await panel.readCable();
+      api.cableAnswer = { kind: "found", cable: CABLE };
+      await panel.readCable();
+      expect(panel.cableNoAnswer).toBe(false);
+      expect(panel.cable?.source).toBe("read");
+    });
+  });
+
+  describe('a read ends "don\'t ask again"', () => {
+    it("takes the status down from the backend", async () => {
+      const api = new FakeApi();
+      const panel = new TriggerPanel(api);
+      await panel.detect();
+      api.armedNow = true;
+      await panel.refreshArmed();
+      expect(panel.armed).toBe(true);
+      api.cableRead = async () => {
+        api.armedNow = false;
+        return { kind: "no_answer" };
+      };
+      await panel.readCable();
+      expect(panel.armed).toBe(false);
+    });
+  });
+
+  describe("AC-AXHK2P.5: the vendor", () => {
+    it("shows a listed vendor by name", () => {
+      expect(cableVendorText({ ...CABLE, vendor: "Apple", vid: 0x05ac })).toBe("Apple");
+    });
+
+    it("shows an unlisted vendor as its hex VID", () => {
+      expect(cableVendorText({ ...CABLE, vendor: null, vid: 0x1234 })).toBe("0x1234");
+      expect(cableVendorText({ ...CABLE, vendor: null, vid: 0x00ab })).toBe("0x00AB");
+    });
+  });
+
+  describe("AC-AXHK2P.6: the identity a capture holds", () => {
+    it("with no session it shows the capture's identity and sends nothing", async () => {
+      const api = new FakeApi();
+      api.cableInCapture = CABLE;
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      expect(panel.cable).toEqual({ cable: CABLE, source: "capture" });
+      expect(api.calls).toEqual(["cable seen"]);
+    });
+
+    it("a capture with no identity leaves the card empty", async () => {
+      const api = new FakeApi();
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+    });
+
+    it("a capture cleared since then takes it away", async () => {
+      const api = new FakeApi();
+      api.cableInCapture = CABLE;
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      api.cableInCapture = null;
+      await panel.loadCaptureCable();
+      expect(panel.cable).toBeNull();
+    });
+
+    it("with a session open it does not cover what the cable answers", async () => {
+      const { api, panel } = await inSession();
+      api.cableInCapture = { ...CABLE, vid: 0x18d1 };
+      await panel.readCable();
+      await panel.loadCaptureCable();
+      expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+      expect(api.calls).not.toContain("cable seen");
+    });
+
+    it("a read replaces the capture's identity", async () => {
+      const api = new FakeApi();
+      api.cableInCapture = { ...CABLE, vid: 0x18d1 };
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      await panel.detect();
+      await panel.readCable();
+      expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+    });
+
+    it("no answer replaces the capture's identity", async () => {
+      const api = new FakeApi();
+      api.cableInCapture = CABLE;
+      api.cableAnswer = { kind: "no_answer" };
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      await panel.detect();
+      await panel.readCable();
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(true);
+    });
+
+    it("the end of a session empties the card", async () => {
+      const { api, panel } = await inSession();
+      await panel.readCable();
+      await panel.leave();
+      expect(panel.cable).toBeNull();
+      api.cableAnswer = { kind: "no_answer" };
+      await panel.detect();
+      await panel.readCable();
+      await panel.leave();
+      expect(panel.cableNoAnswer).toBe(false);
+    });
+
+    it("a disconnected meter empties the card", async () => {
+      const { panel } = await inSession();
+      await panel.readCable();
+      panel.handleEvent({ type: "status", data: { state: "disconnected", error: null } });
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+    });
+  });
+});
+
+describe("AXHK2P review: the card never outlives what it describes", () => {
+  it("a read that fails leaves no older reading on the card", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    api.cableRead = async () => ({ kind: "no_answer" });
+    await panel.readCable();
+    expect(panel.cableNoAnswer).toBe(true);
+    api.cableRead = async () => {
+      throw { kind: "usage", message: "no", hint: null };
+    };
+    await panel.readCable();
+    expect(panel.cableNoAnswer).toBe(false);
+    expect(panel.cable).toBeNull();
+  });
+
+  it("another meter on screen drops the card and reads the capture again", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    const shown = {
+      vid: 1,
+      pid: null,
+      active: false,
+      max_voltage_v: 20,
+      max_current_ma: 3000,
+      epr_capable: false,
+      speed: null,
+      vendor: null,
+    };
+    api.cableSeen = async () => shown;
+    await panel.loadCaptureCable();
+    expect(panel.cable?.source).toBe("capture");
+    api.cableSeen = async () => null;
+    await panel.meterChanged();
+    expect(panel.cable).toBeNull();
   });
 });

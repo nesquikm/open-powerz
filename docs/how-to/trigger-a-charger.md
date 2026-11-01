@@ -106,7 +106,7 @@ with a **Clear** button. Press **Clear** to end it at once. These end it too:
 - a hard reset
 - a request that fails after something was sent
 - **Detect**
-- any built PD message
+- any built PD message, or a **Read cable** press
 - any Console line that is not read-only
 - a change in what the charger offers
 - a request that does not qualify, once you confirm it
@@ -148,7 +148,31 @@ powerz pd send 0700                    # Get_Source_Cap: PD header, little-endia
 printf 'pdm parm\n' | powerz console   # one command line per stdin line
 ```
 
-## Read the cable's e-marker
+## Read a cable
+
+The **Cable** card shows what a cable's e-marker says: vendor, VID, PID, maximum
+current and voltage, USB speed, active or passive, and EPR.
+
+1. Press a PD offer first. **Read cable** never enters a session, so it needs
+   one that is already open. **Detect** alone is not enough. The 5 V offer will
+   do, and it needs no dialog.
+2. Press **Read cable**. One press sends one message. It never retries.
+
+**No dialog.** That one message cannot raise VBUS, so the button does not ask.
+Every other data message to a cable still asks, and so do the same bytes typed in the
+Console.
+
+**No answer.** The cable may have no e-marker, or the meter may not be the VCONN
+source. Nothing is retried on its own. Press the button again to try once more.
+
+**Unknown vendor.** A vendor missing from our table shows as its hex VID.
+
+**No session.** With no session open, the card shows an identity held in a PD
+capture, marked "Seen in the capture." It sends nothing.
+
+The demo device answers with a sample cable.
+
+## Read the cable's e-marker from the builder
 
 Press **Discover cable identity** in the builder, or run:
 
@@ -158,8 +182,8 @@ powerz pd send --preset discover-identity-cable --allow-high-voltage
 
 It sends a Discover Identity request to the cable (SOP'). When the cable
 answers, the **Cable identity** card shows its VID, PID, type, maximum voltage
-and current, and whether it supports EPR. The preset asks for confirmation
-because the risk check does not yet rate cable messages as 5 V.
+and current, and whether it supports EPR. The app sends these exact bytes with
+no dialog. The CLI still needs `--allow-high-voltage`.
 
 A cable answers only the side that powers it (the VCONN source). Behind some
 chargers it stays silent, and the card keeps saying "No cable has answered

@@ -18,6 +18,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  CableRead,
+  CableView,
   BackendEvent,
   Detection,
   ProtocolSection,
@@ -85,6 +87,14 @@ function mvOf(r: TriggerRequest): number {
 class FakeApi implements TriggerApi {
   calls: string[] = [];
   sent: { request: TriggerRequest; confirmed: boolean }[] = [];
+
+  async cableRead(): Promise<CableRead> {
+    return { kind: "no_answer" };
+  }
+
+  async cableSeen(): Promise<CableView | null> {
+    return null;
+  }
 
   async armed(): Promise<boolean> {
     return false;

@@ -36,7 +36,7 @@ The trigger view has a Cable card that reads the e-marker with one click during 
 
 ## Technical Design
 
-`CableView` gains `speed` and `vendor`. A `cable_read` command wraps the existing `send_message` path with the preset and `await_cable_identity`. The classifier's narrow exception reuses `is_cable_discover_identity` plus an exact-byte match. The passive path reads the latest matching record from the capture store.
+`CableView` gains `speed` and `vendor`. A `cable_read` command builds the message from one constant and waits once with `await_cable_identity`; it does not go through `send_message`, which would enter PD. The exemption is an exact-byte match in one function, so a cable read needs no dialog. The passive path reads the latest matching record from the capture store.
 
 ## Testing
 
@@ -45,3 +45,14 @@ Rust unit tests with the simulator cable, including no-answer; Vitest and Playwr
 ## Notes
 
 The classifier exception is deliberately narrow: it covers one message to the cable, which cannot raise VBUS. The first real send runs through the tester's runbook, with nothing on the meter's output and the user's OK.
+
+## Implementation notes
+
+- An open PD session means the session has entered PD. With another protocol entered, or none, the read is refused and sends nothing, since the button never enters anything.
+- The exemption lives in one backend function, used by the read and by the built-message risk and send, so the same bytes from the console builder need no dialog either. The raw console keeps asking. The library classifier does not change, so `powerz` keeps asking too.
+- A read ends "don't ask again", like any built message.
+- The vendor table is ours and small. An unlisted vendor shows as hex, which is the normal case.
+- The builder's send enters PD first, as before, so the same bytes from the builder can write `entry pd`. The button never does.
+- AC.9's variants found a hole in the library classifier, older than this FR: a body that did not match the header's object count could class as a control message, so a Request's RDO behind a count of zero went out with no dialog. Any such body is now above 5 V, in the CLI too.
+- `pdm.entered()` sees parsed `entry` lines only. An unparsed confirmed console line that changed protocol would leave it saying PD. The read still cannot raise VBUS, so this stays.
+- A variant that drops the object and clears the count (`01 8F 00`) is a different, complete control message, so it keeps its own class.

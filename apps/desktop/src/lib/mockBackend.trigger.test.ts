@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BackendEvent, TriggerRequest } from "./backend";
+import type { BackendEvent, PdMessageRequest, TriggerRequest } from "./backend";
 import { MockBackend, mockModeFromUrl } from "./mockBackend";
 
 const PD_9V: TriggerRequest = { protocol: "pd", position: 2, voltage_mv: null, current_ma: null };
@@ -515,5 +515,172 @@ describe("AC-AXHK2N.7: the mock's \"don't ask again\"", () => {
     const backend = new MockBackend(null, { pdSynthetic: null });
     await expect(backend.triggerArmed()).resolves.toBe(false);
     await expect(backend.triggerDisarm()).resolves.toBeUndefined();
+  });
+});
+
+describe("FR AXHK2P: the mock's cable read follows the backend's rules", () => {
+  const READ_LINE = "pd data=018F1001A800FF";
+  const READ: PdMessageRequest = {
+    sop: "sop_prime",
+    msg_type: 15,
+    data_objects: [0xff00a801],
+  };
+
+  /** A session with PD entered. */
+  async function inPd(mode: ConstructorParameters<typeof MockBackend>[0] = null) {
+    const { backend } = await opened(mode);
+    await backend.triggerList("pd");
+    return backend;
+  }
+
+  /** `read` adds exactly `expected` to what the charger received. */
+  async function sends(
+    backend: MockBackend,
+    read: () => Promise<unknown>,
+    expected: string[],
+  ): Promise<void> {
+    const before = backend.triggerCommands().length;
+    await read().catch(() => {});
+    expect(backend.triggerCommands().slice(before)).toEqual(expected);
+  }
+
+  it("AC-AXHK2P.8: the demo device answers with a sample cable", async () => {
+    const backend = await inPd();
+    await expect(backend.triggerCableRead()).resolves.toMatchObject({
+      kind: "found",
+      cable: {
+        vid: 0x050d,
+        pid: 0x8254,
+        active: false,
+        max_voltage_v: 50,
+        max_current_ma: 5000,
+        epr_capable: true,
+        speed: "USB 2.0",
+      },
+    });
+  });
+
+  it("AC-AXHK2P.2: one read sends exactly one line", async () => {
+    const backend = await inPd();
+    await sends(backend, () => backend.triggerCableRead(), [READ_LINE]);
+  });
+
+  it("AC-AXHK2P.2: with no session it is refused", async () => {
+    const backend = new MockBackend(null, { pdSynthetic: null });
+    await expect(backend.triggerCableRead()).rejects.toMatchObject({ kind: "usage" });
+  });
+
+  it("AC-AXHK2P.2: with nothing entered it is refused and sends nothing", async () => {
+    const { backend } = await opened();
+    await expect(backend.triggerCableRead()).rejects.toMatchObject({ kind: "usage" });
+    await sends(backend, () => backend.triggerCableRead(), []);
+  });
+
+  it("AC-AXHK2P.2: with a legacy protocol entered last it is refused and sends nothing", async () => {
+    const backend = await inPd();
+    await backend.triggerList("qc");
+    await expect(backend.triggerCableRead()).rejects.toMatchObject({ kind: "usage" });
+    await sends(backend, () => backend.triggerCableRead(), []);
+  });
+
+  it("AC-AXHK2P.2: after a detection it is refused; a PD offer opens it again", async () => {
+    const backend = await inPd();
+    await backend.triggerDetect();
+    await sends(backend, () => backend.triggerCableRead(), []);
+    await backend.triggerList("ufcs");
+    await sends(backend, () => backend.triggerCableRead(), []);
+    await backend.triggerRequest(PD_5V, false);
+    await sends(backend, () => backend.triggerCableRead(), [READ_LINE]);
+  });
+
+  it("AC-AXHK2P.2: out of step it is refused and sends nothing", async () => {
+    const backend = await inPd("trigger-out-of-sync");
+    await expect(backend.triggerCableRead()).rejects.toMatchObject({ kind: "out_of_sync" });
+    await sends(backend, () => backend.triggerCableRead(), []);
+  });
+
+  it("AC-AXHK2P.4: `trigger-no-cable` answers no_answer after one send", async () => {
+    expect(mockModeFromUrl("?mock=trigger-no-cable")).toBe("trigger-no-cable");
+    const backend = await inPd("trigger-no-cable");
+    await expect(backend.triggerCableRead()).resolves.toEqual({ kind: "no_answer" });
+    await sends(backend, () => backend.triggerCableRead(), [READ_LINE]);
+  });
+
+  it("AC-AXHK2P.5: `trigger-unlisted-cable` answers a vendor outside the table", async () => {
+    expect(mockModeFromUrl("?mock=trigger-unlisted-cable")).toBe("trigger-unlisted-cable");
+    const backend = await inPd("trigger-unlisted-cable");
+    await expect(backend.triggerCableRead()).resolves.toMatchObject({
+      kind: "found",
+      cable: { vid: 0x1234, vendor: null },
+    });
+  });
+
+  it("a read ends the armed state, like any built message", async () => {
+    const backend = await inPd();
+    await backend.triggerRequest(PD_9V, true, true);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+    await backend.triggerCableRead();
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+  });
+
+  it("AC-AXHK2P.3: the built message needs no dialog", async () => {
+    const backend = await inPd();
+    await expect(backend.triggerMessageRisk(READ)).resolves.toBe("at_most_5v");
+    await expect(backend.triggerMessageSend(READ, false)).resolves.toMatchObject({
+      command: READ_LINE,
+    });
+  });
+
+  it("AC-AXHK2P.3, .9: any other message to a cable keeps asking", async () => {
+    const backend = await inPd();
+    const others: PdMessageRequest[] = [
+      { ...READ, sop: "sop_double_prime" },
+      { ...READ, sop: "sop" },
+      { ...READ, data_objects: [0xff00a802] },
+      { ...READ, data_objects: [0xff00a841] },
+      { ...READ, data_objects: [0xff008001] },
+      { ...READ, data_objects: [0xff01a801] },
+      { ...READ, data_objects: [0xff00a801, 0] },
+    ];
+    for (const message of others) {
+      await expect(backend.triggerMessageRisk(message)).resolves.toBe("above_5v");
+      await sends(backend, () => backend.triggerMessageSend(message, false), []);
+    }
+  });
+
+  it("AC-AXHK2P.3: the raw console keeps asking for the same bytes", async () => {
+    const backend = await inPd();
+    await expect(backend.triggerConsoleRisk(READ_LINE)).resolves.toBe("above_5v");
+    await sends(backend, () => backend.triggerConsoleSend(READ_LINE, false), []);
+  });
+
+  describe("AC-AXHK2P.6: the cable a capture holds", () => {
+    it("with no capture there is none", async () => {
+      const { backend } = await connected();
+      await expect(backend.pdCableSeen()).resolves.toBeNull();
+    });
+
+    it("with no meter there is none, and no error", async () => {
+      const backend = new MockBackend(null, { pdSynthetic: null });
+      await expect(backend.pdCableSeen()).resolves.toBeNull();
+    });
+
+    it("a capture of the demo negotiation holds the sample cable, and nothing is sent", async () => {
+      const { backend } = await connected();
+      await backend.pdStart();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await backend.pdStop();
+      await expect(backend.pdCableSeen()).resolves.toMatchObject({ vid: 0x050d, pid: 0x8254 });
+      expect(backend.triggerCommands()).toEqual([]);
+    });
+
+    it("a cleared capture holds none", async () => {
+      const { backend } = await connected();
+      await backend.pdStart();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await backend.pdStop();
+      await backend.pdClear();
+      await expect(backend.pdCableSeen()).resolves.toBeNull();
+    });
   });
 });

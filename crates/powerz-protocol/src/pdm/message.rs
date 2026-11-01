@@ -22,8 +22,8 @@ use super::command::Command;
 use super::reply::ReplyItem;
 use super::session::PdmSession;
 use crate::pd::{
-    Capture, CommandType, DiscoverIdentity, Input, Message as PdBody, ProductTypeVdo, Vdm, VdmBody,
-    VdmCommand, VdmHeader,
+    Capture, CommandType, DiscoverIdentity, Input, Message as PdBody, ProductTypeVdo, UsbSpeed,
+    Vdm, VdmBody, VdmCommand, VdmHeader,
 };
 use crate::session::Clock;
 
@@ -289,6 +289,8 @@ pub struct CableIdentity {
     pub max_current_ma: Option<u32>,
     /// EPR capable (passive cable VDO).
     pub epr_capable: bool,
+    /// USB Highest Speed (cable VDO), when known.
+    pub speed: Option<UsbSpeed>,
     /// The decoded identity, for the field tree.
     pub identity: DiscoverIdentity,
 }
@@ -339,21 +341,24 @@ pub fn cable_identity_from_message(sop: u8, header: u16, body: &[u8]) -> Option<
     if !matches!(product_type, PRODUCT_PASSIVE_CABLE | PRODUCT_ACTIVE_CABLE) {
         return None;
     }
-    let (max_voltage_v, max_current_ma, epr_capable) = match identity.product_type_vdos.first() {
-        Some(ProductTypeVdo::PassiveCable(c)) => (
-            Some(cable_max_voltage_v(c.raw)),
-            cable_current_ma(c.vbus_current),
-            c.epr_capable,
-        ),
-        // Active Cable VDO 1 keeps Maximum VBUS Voltage in bits 10..9 and
-        // EPR Capable in bit 17 like the passive one. [doc]
-        Some(ProductTypeVdo::ActiveCable(c)) => (
-            Some(cable_max_voltage_v(c.raw)),
-            cable_current_ma(c.vbus_current),
-            c.raw & (1 << 17) != 0,
-        ),
-        _ => (None, None, false),
-    };
+    let (max_voltage_v, max_current_ma, epr_capable, speed) =
+        match identity.product_type_vdos.first() {
+            Some(ProductTypeVdo::PassiveCable(c)) => (
+                Some(cable_max_voltage_v(c.raw)),
+                cable_current_ma(c.vbus_current),
+                c.epr_capable,
+                Some(c.speed()),
+            ),
+            // Active Cable VDO 1 keeps Maximum VBUS Voltage in bits 10..9 and
+            // EPR Capable in bit 17 like the passive one. [doc]
+            Some(ProductTypeVdo::ActiveCable(c)) => (
+                Some(cable_max_voltage_v(c.raw)),
+                cable_current_ma(c.vbus_current),
+                c.raw & (1 << 17) != 0,
+                Some(c.speed()),
+            ),
+            _ => (None, None, false, None),
+        };
     Some(CableIdentity {
         sop: target,
         vid: identity.id_header.vid,
@@ -362,6 +367,7 @@ pub fn cable_identity_from_message(sop: u8, header: u16, body: &[u8]) -> Option<
         max_voltage_v,
         max_current_ma,
         epr_capable,
+        speed,
         identity,
     })
 }
@@ -880,5 +886,57 @@ mod tests {
         );
         // A control message.
         assert_eq!(cable_identity_from_message(1, 0x008D, &[]), None);
+    }
+
+    // ---- AC-AXHK2P.1, .7: the cable's speed reaches the identity ----
+
+    /// [`CABLE_ACK`] with `id_header` and `vdo` in place of its own.
+    fn ack_with(id_header: u32, vdo: u32) -> Vec<u8> {
+        let mut objects = CABLE_ACK;
+        objects[1] = id_header;
+        objects[4] = vdo;
+        le(&objects)
+    }
+
+    #[test]
+    fn a_passive_cable_identity_carries_its_speed() {
+        let id = cable_identity_from_message(1, 0x518F, &le(&CABLE_ACK)).expect("cable ACK");
+        assert_eq!(id.speed, Some(crate::pd::UsbSpeed::Usb2));
+    }
+
+    #[test]
+    fn an_active_cable_identity_carries_its_speed() {
+        let body = ack_with(0x2060_050D, 0x000A_2643);
+        let id = cable_identity_from_message(1, 0x518F, &body).expect("cable ACK");
+        assert!(id.active);
+        assert_eq!(id.speed, Some(crate::pd::UsbSpeed::Usb4Gen3));
+    }
+
+    #[test]
+    fn a_reserved_speed_code_stays_visible() {
+        let body = ack_with(0x1860_050D, 0x000A_2645);
+        let id = cable_identity_from_message(1, 0x518F, &body).expect("cable ACK");
+        assert_eq!(id.speed, Some(crate::pd::UsbSpeed::Reserved(5)));
+    }
+
+    #[test]
+    fn an_identity_with_no_cable_vdo_has_no_speed() {
+        let id = cable_identity_from_message(1, 0x418F, &le(&CABLE_ACK[..4])).expect("cable ACK");
+        assert_eq!(id.speed, None);
+        assert_eq!(id.vid, 0x050D);
+    }
+
+    // ---- AC-AXHK2P.5: our own vendor table ----
+
+    #[test]
+    fn a_listed_vendor_has_its_name() {
+        assert_eq!(super::super::vendors::vendor_name(0x05AC), Some("Apple"));
+        assert_eq!(super::super::vendors::vendor_name(0x18D1), Some("Google"));
+    }
+
+    #[test]
+    fn an_unlisted_vendor_has_no_name() {
+        assert_eq!(super::super::vendors::vendor_name(0x1234), None);
+        assert_eq!(super::super::vendors::vendor_name(0x0000), None);
     }
 }

@@ -105,7 +105,8 @@ fn pd_request(caps: &Capabilities, position: u8, voltage_mv: Option<u32>) -> Ris
 
 /// `pd data=`: SOP byte, header u16 LE, data objects u32 LE. \[doc\]
 /// Control messages are at most 5 V (except the role swaps); Request /
-/// EPR_Request go by the RDO; every other message is above 5 V.
+/// EPR_Request go by the RDO; every other message is above 5 V, and so is
+/// a body that is not the size the header says: what it would send is unknown.
 fn pd_data(caps: &Capabilities, bytes: &[u8]) -> Risk {
     const REQUEST: u8 = 0x02;
     const EPR_REQUEST: u8 = 0x09;
@@ -113,6 +114,9 @@ fn pd_data(caps: &Capabilities, bytes: &[u8]) -> Risk {
         return Risk::Above5V;
     };
     let header = Header::decode(u16::from_le_bytes([*lo, *hi]), Sop::Sop);
+    if rest.len() != usize::from(header.num_data_objects) * 4 {
+        return Risk::Above5V;
+    }
     match header.message_type.kind() {
         MessageKind::Control if SWAP_CONTROL_TYPES.contains(&header.message_type.code()) => {
             Risk::Above5V
@@ -202,6 +206,17 @@ mod tests {
         for c in cmds {
             assert_eq!(classify(&c, &none), Risk::AtMost5V, "{c:?}");
         }
+    }
+
+    // ---- AC-AXHK2P.3: the library keeps asking, so `powerz` does too ----
+
+    #[test]
+    fn the_cable_discover_identity_stays_above_5v_in_the_library() {
+        let none = Capabilities::default();
+        let bytes = vec![0x01, 0x8F, 0x10, 0x01, 0xA8, 0x00, 0xFF];
+        assert_eq!(classify(&Command::PdData(bytes), &none), Risk::Above5V);
+        let line = Command::parse("pd data=018F1001A800FF");
+        assert_eq!(classify(&line, &none), Risk::Above5V);
     }
 
     // ---- AC-PR41FT.4: PD requests use the last known pdo block ----
@@ -412,6 +427,26 @@ mod tests {
         // Soft_Reset carries no request.
         let soft_reset = Command::PdData(vec![0x00, 0x8D, 0x00]);
         assert_eq!(classify(&soft_reset, &spr), Risk::AtMost5V);
+    }
+
+    #[test]
+    fn a_body_that_does_not_match_the_header_is_above_5v() {
+        let spr = caps_with(spr_block());
+        for bytes in [
+            // Count 0 with a Request's RDO behind it (a 9 V slot).
+            vec![0x00, 0x02, 0x00, 0x2C, 0xB1, 0x04, 0x23],
+            // Soft_Reset with a stray byte, and with a stray object.
+            vec![0x00, 0x8D, 0x00, 0x00],
+            vec![0x00, 0x8D, 0x00, 0x00, 0x00, 0x00, 0x00],
+            // Count 1 with no object.
+            vec![0x00, 0x8D, 0x10],
+        ] {
+            assert_eq!(
+                classify(&Command::PdData(bytes.clone()), &spr),
+                Risk::Above5V,
+                "{bytes:02X?}"
+            );
+        }
     }
 
     // ---- AC-PR41FT.4: unknown or unparsable is above 5 V ----

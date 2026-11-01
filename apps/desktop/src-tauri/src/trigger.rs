@@ -250,6 +250,10 @@ pub struct CableView {
     pub max_voltage_v: Option<u32>,
     pub max_current_ma: Option<u32>,
     pub epr_capable: bool,
+    /// USB speed in words; `None` when the cable sent no cable VDO.
+    pub speed: Option<String>,
+    /// The name from our own vendor table; `None` for a VID it does not list.
+    pub vendor: Option<String>,
 }
 
 /// What sending a built message did.
@@ -261,6 +265,16 @@ pub struct PdSendReply {
     pub lines: Vec<ConsoleLine>,
     /// The cable's identity, when a cable answered a Discover Identity.
     pub cable: Option<CableView>,
+}
+
+/// What one Read cable press found (FR AXHK2P).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "cable", rename_all = "snake_case")]
+pub enum CableRead {
+    /// The cable's Discover Identity ACK came.
+    Found(CableView),
+    /// The wait ended with no ACK.
+    NoAnswer,
 }
 
 /// How the user answered the above-5 V question (FR AXHK2N).
@@ -408,6 +422,13 @@ impl TriggerControl {
         self.call(move |e| e.send_message(message, confirmed))
     }
 
+    /// One press of Read cable: one SOP' Discover Identity inside the open PD
+    /// session, no dialog, no retry. Refused with PD not entered; it never
+    /// enters anything. An unanswered read is [`CableRead::NoAnswer`].
+    pub fn cable_read(&self) -> Result<CableRead, UiError> {
+        self.call(|e| e.cable_read())
+    }
+
     /// The library risk class of a raw console line.
     pub fn console_risk(&self, line: String) -> Result<RiskClass, UiError> {
         self.call(move |e| e.console_risk(line))
@@ -443,6 +464,7 @@ trait Engine {
         message: PdMessageRequest,
         confirmed: bool,
     ) -> Result<PdSendReply, UiError>;
+    fn cable_read(&mut self) -> Result<CableRead, UiError>;
     fn console_risk(&mut self, line: String) -> Result<RiskClass, UiError>;
     fn console_send(&mut self, line: String, confirmed: bool) -> Result<Vec<ConsoleLine>, UiError>;
 }
@@ -674,6 +696,34 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
         self.disarm();
     }
 
+    /// The class of a built message: the library's, except the one cable read.
+    fn message_class(&self, command: &pdm::Command) -> pdm::Risk {
+        if is_cable_read(command) {
+            pdm::Risk::AtMost5V
+        } else {
+            self.pdm.risk(command)
+        }
+    }
+
+    /// Write a built message. The library keeps the cable read above 5 V, so
+    /// `powerz` keeps asking; this confirmation is made here, for those exact
+    /// bytes only, and no answer from the UI can reach it.
+    fn write_message(&mut self, command: &pdm::Command, above: bool) -> Result<(), pdm::Error> {
+        if above || is_cable_read(command) {
+            let confirmation = HighVoltageConfirmation::for_command(command);
+            self.pdm.send_confirmed(command, confirmation)
+        } else {
+            self.pdm.send(command)
+        }
+    }
+
+    /// Read a cable's Discover Identity ACK, if one comes within the wait.
+    fn await_cable(&mut self) -> Result<Option<CableView>, UiError> {
+        let cable = message::await_cable_identity(&mut self.pdm, message::CABLE_WAIT)
+            .map_err(|e| pdm_error(&e))?;
+        Ok(cable.map(|c| cable_view(&c)))
+    }
+
     /// Validate `request` against what the charger offered and render its
     /// command; pure, nothing is written.
     fn command_of(&self, request: &LibRequest) -> Result<pdm::Command, UiError> {
@@ -838,7 +888,7 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         let command = lib_message(&message)
             .to_command()
             .map_err(|e| UiError::usage(e.to_string()))?;
-        Ok(risk_class(self.pdm.risk(&command)))
+        Ok(risk_class(self.message_class(&command)))
     }
 
     fn send_message(
@@ -851,7 +901,7 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         let command = lib
             .to_command()
             .map_err(|e| UiError::usage(e.to_string()))?;
-        let above = self.pdm.risk(&command) == pdm::Risk::Above5V;
+        let above = self.message_class(&command) == pdm::Risk::Above5V;
         // The final gate: above 5 V without the user's confirmation is
         // refused before anything is written.
         if above && !confirmed {
@@ -871,16 +921,11 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
             self.pd_contract = true;
         }
         let at_ms = self.pdm.now_ms();
-        let sent = match above.then(|| HighVoltageConfirmation::for_command(&command)) {
-            Some(c) => self.pdm.send_confirmed(&command, c),
-            None => self.pdm.send(&command),
-        };
-        sent.map_err(|e| pdm_error(&e))?;
+        self.write_message(&command, above)
+            .map_err(|e| pdm_error(&e))?;
         // A Discover Identity to a cable plug: read its ACK, if any.
         let cable = if lib.is_cable_discover_identity() {
-            message::await_cable_identity(&mut self.pdm, message::CABLE_WAIT)
-                .map_err(|e| pdm_error(&e))?
-                .map(|c| cable_view(&c))
+            self.await_cable()?
         } else {
             None
         };
@@ -895,6 +940,25 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
             }],
             cable,
         })
+    }
+
+    fn cable_read(&mut self) -> Result<CableRead, UiError> {
+        // What the meter entered last, not what this session last listed: the
+        // read goes out only on a PD session already open.
+        if self.pdm.entered() != Some(pdm::Protocol::Pd) {
+            return Err(UiError::usage(
+                "Reading the cable needs an open PD session. Press a PD offer first.",
+            ));
+        }
+        self.pdm.check_in_step().map_err(|e| pdm_error(&e))?;
+        // Like every sent message, before the first write.
+        self.disarm();
+        let command = pdm::Command::PdData(CABLE_READ.to_vec());
+        self.write_message(&command, false)
+            .map_err(|e| pdm_error(&e))?;
+        Ok(self
+            .await_cable()?
+            .map_or(CableRead::NoAnswer, CableRead::Found))
     }
 
     fn console_risk(&mut self, line: String) -> Result<RiskClass, UiError> {
@@ -954,8 +1018,18 @@ fn console_line(e: &console::ConsoleEntry) -> ConsoleLine {
     }
 }
 
+/// The one message the app may send a cable with no dialog: SOP', header
+/// 0x108F, object 0xFF00A801 (both little endian). It cannot raise VBUS.
+const CABLE_READ: [u8; 7] = [0x01, 0x8F, 0x10, 0x01, 0xA8, 0x00, 0xFF];
+
+/// Exactly that message, parsed. Raw console text never matches, so the
+/// console keeps asking for the same bytes.
+fn is_cable_read(command: &pdm::Command) -> bool {
+    matches!(command, pdm::Command::PdData(bytes) if bytes.as_slice() == CABLE_READ)
+}
+
 /// The library's cable identity as the UI's.
-fn cable_view(c: &CableIdentity) -> CableView {
+pub(crate) fn cable_view(c: &CableIdentity) -> CableView {
     CableView {
         vid: c.vid,
         pid: c.pid,
@@ -963,6 +1037,8 @@ fn cable_view(c: &CableIdentity) -> CableView {
         max_voltage_v: c.max_voltage_v,
         max_current_ma: c.max_current_ma,
         epr_capable: c.epr_capable,
+        speed: c.speed.map(|s| s.name()),
+        vendor: pdm::vendors::vendor_name(c.vid).map(str::to_owned),
     }
 }
 
@@ -2079,6 +2155,17 @@ mod tests {
     }
 
     #[test]
+    fn the_demo_device_answers_a_cable_read() {
+        let (mut m, _events) = connected(50);
+        m.open_trigger().expect("the demo PDM port");
+        let c = m.trigger_control().expect("open");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        assert!(matches!(c.cable_read().expect("read"), CableRead::Found(_)));
+        m.close_trigger().expect("close");
+        m.disconnect().expect("disconnect");
+    }
+
+    #[test]
     fn a_demo_session_opens_a_simulated_trigger_session() {
         let (mut m, _events) = connected(50);
         m.open_trigger()
@@ -2648,6 +2735,31 @@ mod tests {
         w.close().expect("close");
     }
 
+    // ---- FR AXHK2P: a read ends "don't ask again", like any built message ----
+
+    #[test]
+    fn a_cable_read_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        assert!(matches!(c.cable_read(), Ok(CableRead::NoAnswer)));
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn the_same_message_from_the_builder_disarms() {
+        let (sim, w) = armed_session(SimCharger::Epr140W);
+        let c = w.control();
+        let read = PdMessageRequest {
+            sop: MessageSop::SopPrime,
+            msg_type: 15,
+            data_objects: vec![0xFF00_A801],
+        };
+        c.send_message(read, false).expect("no dialog");
+        disarmed(&sim, &c);
+        w.close().expect("close");
+    }
+
     #[test]
     fn message_and_console_risk_never_report_the_new_classes() {
         let (_sim, w) = worker(SimCharger::Epr140W);
@@ -3054,6 +3166,552 @@ mod custom_message_tests {
     }
 }
 
+/// FR AXHK2P: the one-click cable read and its narrow exemption.
+#[cfg(test)]
+mod cable_read_tests {
+    use powerz_protocol::pdm::{Capabilities, Command, Risk};
+    use powerz_sim::{SimCable, SimCharger, SimClock, SimPdm};
+
+    use super::*;
+    use crate::ui_error::ErrorKind;
+
+    /// SOP', header 0x108F, object 0xFF00A801, both little endian.
+    const READ_BYTES: [u8; 7] = [0x01, 0x8F, 0x10, 0x01, 0xA8, 0x00, 0xFF];
+    const READ_LINE: &str = "pd data=018F1001A800FF";
+
+    fn worker_with(cable: Option<SimCable>) -> (SimPdm, TriggerWorker) {
+        let clock = SimClock::new(1_760_000_000_000);
+        let mut sim = SimPdm::new(SimCharger::Epr140W, clock.clone());
+        if let Some(c) = cable {
+            sim = sim.with_cable(c);
+        }
+        let w = TriggerWorker::spawn(sim.open_port(), clock).expect("the session opens");
+        (sim, w)
+    }
+
+    /// A session with PD entered, and the cable if any.
+    fn in_pd(cable: Option<SimCable>) -> (SimPdm, TriggerWorker) {
+        let (sim, w) = worker_with(cable);
+        w.control().list(TriggerProtocol::Pd).expect("list pd");
+        (sim, w)
+    }
+
+    fn writes_after(sim: &SimPdm, skip: usize) -> Vec<String> {
+        sim.writes()
+            .into_iter()
+            .skip(skip)
+            .map(|w| w.trim().to_owned())
+            .collect()
+    }
+
+    fn read_message() -> PdMessageRequest {
+        PdMessageRequest {
+            sop: MessageSop::SopPrime,
+            msg_type: 15,
+            data_objects: vec![0xFF00_A801],
+        }
+    }
+
+    fn found(read: Result<CableRead, UiError>) -> CableView {
+        match read.expect("the read ran") {
+            CableRead::Found(view) => view,
+            CableRead::NoAnswer => panic!("no answer"),
+        }
+    }
+
+    fn refused(sim: &SimPdm, c: &TriggerControl, kind: ErrorKind) {
+        let before = sim.writes().len();
+        let Err(err) = c.cable_read() else {
+            panic!("the read was not refused");
+        };
+        assert_eq!(err.kind, kind, "{err:?}");
+        assert_eq!(writes_after(sim, before), Vec::<String>::new());
+    }
+
+    // ---- AC-AXHK2P.1: one read shows the whole e-marker ----
+
+    #[test]
+    fn the_exempt_bytes_are_what_the_preset_builds() {
+        let built = message::Preset::DiscoverIdentityCable
+            .message()
+            .to_command()
+            .expect("it builds");
+        assert_eq!(built, Command::PdData(READ_BYTES.to_vec()));
+        assert_eq!(command_text(&built), READ_LINE);
+        assert!(is_cable_read(&built));
+    }
+
+    #[test]
+    fn a_read_returns_every_field_of_the_card() {
+        let (_sim, w) = in_pd(Some(SimCable::Epr240W));
+        let view = found(w.control().cable_read());
+        assert_eq!(view.vid, 0x050D);
+        assert_eq!(view.pid, Some(0x8254));
+        assert_eq!(view.max_current_ma, Some(5000));
+        assert_eq!(view.max_voltage_v, Some(50));
+        assert_eq!(view.speed.as_deref(), Some("USB 2.0"));
+        assert!(!view.active);
+        assert!(view.epr_capable);
+        assert_eq!(
+            view.vendor.as_deref(),
+            pdm::vendors::vendor_name(0x050D),
+            "the name comes from our table"
+        );
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_read_serializes_for_the_ui() {
+        let (_sim, w) = in_pd(Some(SimCable::Epr240W));
+        let view = found(w.control().cable_read());
+        let json = serde_json::to_value(CableRead::Found(view)).expect("json");
+        assert_eq!(json["kind"], "found");
+        assert_eq!(json["cable"]["vid"], 0x050D);
+        assert_eq!(json["cable"]["speed"], "USB 2.0");
+        assert!(json["cable"].get("vendor").is_some(), "{json}");
+        let json = serde_json::to_value(CableRead::NoAnswer).expect("json");
+        assert_eq!(json, serde_json::json!({ "kind": "no_answer" }));
+        w.close().expect("close");
+    }
+
+    // ---- AC-AXHK2P.5: the vendor comes from our table, else stays out ----
+
+    /// A passive cable's identity from `vid`.
+    fn identity_of(vid: u16) -> CableIdentity {
+        let objects = [
+            0xFF00_A841,
+            0x1860_0000 | u32::from(vid),
+            0x0000_404D,
+            0x8254_0000,
+            0x000A_2641,
+        ];
+        let body: Vec<u8> = objects.iter().flat_map(|o: &u32| o.to_le_bytes()).collect();
+        message::cable_identity_from_message(1, 0x518F, &body).expect("a cable ACK")
+    }
+
+    #[test]
+    fn a_listed_vendor_gets_its_name_and_the_speed_its_text() {
+        let view = cable_view(&identity_of(0x05AC));
+        assert_eq!(view.vendor.as_deref(), Some("Apple"));
+        assert_eq!(view.speed.as_deref(), Some("USB 3.2 Gen 1"));
+    }
+
+    #[test]
+    fn an_unlisted_vendor_has_no_name_and_keeps_its_vid() {
+        let view = cable_view(&identity_of(0x1234));
+        assert_eq!(view.vendor, None);
+        assert_eq!(view.vid, 0x1234);
+    }
+
+    // ---- AC-AXHK2P.2: only inside an open PD session, one message, no retry ----
+
+    #[test]
+    fn with_nothing_entered_the_read_is_refused_and_writes_nothing() {
+        let (sim, w) = worker_with(Some(SimCable::Epr240W));
+        refused(&sim, &w.control(), ErrorKind::Usage);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn with_a_legacy_protocol_entered_last_the_read_is_refused_and_writes_nothing() {
+        let clock = SimClock::new(1_760_000_000_000);
+        let sim = SimPdm::new(SimCharger::MultiProtocol, clock.clone());
+        let w = TriggerWorker::spawn(sim.open_port(), clock).expect("the session opens");
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let section = c.list(TriggerProtocol::Qc).expect("list qc");
+        assert!(section.supported);
+        refused(&sim, &c, ErrorKind::Usage);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn with_a_protocol_the_charger_lacks_entered_last_the_read_is_refused() {
+        let (sim, w) = in_pd(Some(SimCable::Epr240W));
+        let c = w.control();
+        let section = c.list(TriggerProtocol::Qc).expect("list qc");
+        assert!(!section.supported);
+        refused(&sim, &c, ErrorKind::Usage);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn after_detection_the_read_is_refused_and_writes_nothing() {
+        let (sim, w) = in_pd(Some(SimCable::Epr240W));
+        let c = w.control();
+        c.detect().expect("detect");
+        refused(&sim, &c, ErrorKind::Usage);
+        // PD is gone, so the way back times out: not what this test is about.
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_legacy_protocol_entered_from_the_console_refuses_the_read() {
+        let (sim, w) = in_pd(Some(SimCable::Epr240W));
+        let c = w.control();
+        c.console_send("entry qc".to_owned(), false).expect("entry");
+        refused(&sim, &c, ErrorKind::Usage);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_reset_from_the_console_refuses_the_read() {
+        let (sim, w) = in_pd(Some(SimCable::Epr240W));
+        let c = w.control();
+        c.console_send("reset".to_owned(), false).expect("reset");
+        refused(&sim, &c, ErrorKind::Usage);
+        // PD is gone, so the way back times out: not what this test is about.
+        let _ = w.close();
+    }
+
+    #[test]
+    fn pd_entered_from_the_console_is_an_open_pd_session() {
+        let (sim, w) = worker_with(Some(SimCable::Epr240W));
+        let c = w.control();
+        c.console_send("entry pd".to_owned(), false).expect("entry");
+        let before = sim.writes().len();
+        assert_eq!(found(c.cable_read()).vid, 0x050D);
+        assert_eq!(writes_after(&sim, before), [READ_LINE]);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn pd_entered_by_a_pd_request_is_an_open_pd_session() {
+        // Detect ends on the last protocol it listed; a PD offer enters PD again.
+        let (sim, w) = in_pd(Some(SimCable::Epr240W));
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.request(
+            TriggerRequest::Pd {
+                position: 1,
+                voltage_mv: None,
+                current_ma: None,
+            },
+            false,
+        )
+        .expect("5 V");
+        let before = sim.writes().len();
+        assert_eq!(found(c.cable_read()).vid, 0x050D);
+        assert_eq!(writes_after(&sim, before), [READ_LINE]);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn one_press_writes_exactly_one_line() {
+        let (sim, w) = in_pd(Some(SimCable::Epr240W));
+        let before = sim.writes().len();
+        found(w.control().cable_read());
+        assert_eq!(writes_after(&sim, before), [READ_LINE]);
+        w.close().expect("close");
+    }
+
+    // ---- AC-AXHK2P.4: no answer, nothing retried ----
+
+    #[test]
+    fn no_answer_after_one_send_and_no_second_one() {
+        let (sim, w) = in_pd(None);
+        let c = w.control();
+        let before = sim.writes().len();
+        assert!(matches!(c.cable_read(), Ok(CableRead::NoAnswer)));
+        assert_eq!(writes_after(&sim, before), [READ_LINE]);
+        // The session goes on: a press is what sends the next one.
+        c.armed().expect("the session is alive");
+        assert_eq!(writes_after(&sim, before), [READ_LINE]);
+        w.close().expect("close");
+    }
+
+    // ---- AC-AXHK2P.3: exactly that message needs no dialog ----
+
+    #[test]
+    fn the_built_message_is_at_most_5v_and_goes_out_unconfirmed() {
+        let (sim, w) = in_pd(Some(SimCable::Epr240W));
+        let c = w.control();
+        assert_eq!(
+            c.message_risk(read_message()).expect("risk"),
+            RiskClass::AtMost5V
+        );
+        let before = sim.writes().len();
+        let reply = c.send_message(read_message(), false).expect("no dialog");
+        assert_eq!(reply.command, READ_LINE);
+        assert_eq!(reply.cable.map(|v| v.vid), Some(0x050D));
+        assert_eq!(writes_after(&sim, before), [READ_LINE]);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn the_raw_console_keeps_asking_for_the_same_bytes() {
+        let (sim, w) = in_pd(Some(SimCable::Epr240W));
+        let c = w.control();
+        for line in [
+            READ_LINE,
+            "pd data=018f1001a800ff",
+            " pd data=018F1001A800FF ",
+        ] {
+            assert_eq!(
+                c.console_risk(line.to_owned()).expect("risk"),
+                RiskClass::Above5V,
+                "{line:?}"
+            );
+            let before = sim.writes().len();
+            let err = c
+                .console_send(line.to_owned(), false)
+                .expect_err("needs a confirmation");
+            assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+            assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        }
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn only_the_parsed_pd_data_command_can_match() {
+        assert!(is_cable_read(&Command::PdData(READ_BYTES.to_vec())));
+        for other in [
+            Command::Raw(READ_LINE.to_owned()),
+            Command::Raw("pd data=018f1001a800ff".to_owned()),
+            Command::PdCmd(15),
+            Command::PdPdo,
+        ] {
+            assert!(!is_cable_read(&other), "{other:?}");
+        }
+    }
+
+    // ---- AC-AXHK2P.9: every variant still needs the confirmation ----
+
+    /// The read with its object replaced by `object`, as bytes.
+    fn with_object(object: u32) -> Vec<u8> {
+        let mut bytes = READ_BYTES[..3].to_vec();
+        bytes.extend(object.to_le_bytes());
+        bytes
+    }
+
+    /// The read with its header flipped by `mask`.
+    fn with_header_flip(mask: u16) -> Vec<u8> {
+        let header = u16::from_le_bytes([READ_BYTES[1], READ_BYTES[2]]) ^ mask;
+        let mut bytes = vec![READ_BYTES[0]];
+        bytes.extend(header.to_le_bytes());
+        bytes.extend(&READ_BYTES[3..]);
+        bytes
+    }
+
+    /// Every byte in turn, SOP targets, every header bit, every VDM command,
+    /// and added or removed bytes.
+    fn variants() -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        for i in 0..READ_BYTES.len() {
+            for mask in [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF] {
+                let mut v = READ_BYTES.to_vec();
+                v[i] ^= mask;
+                out.push(v);
+            }
+            // A byte removed.
+            let mut v = READ_BYTES.to_vec();
+            v.remove(i);
+            out.push(v);
+            // A byte added before it.
+            for added in [0x00, 0xFF] {
+                let mut v = READ_BYTES.to_vec();
+                v.insert(i, added);
+                out.push(v);
+            }
+        }
+        // A byte added at the end, and a whole object added or removed.
+        for added in [0x00, 0xFF] {
+            let mut v = READ_BYTES.to_vec();
+            v.push(added);
+            out.push(v);
+        }
+        let mut two_objects = with_header_flip(0x1000 | 0x2000);
+        two_objects.extend([0; 4]);
+        out.push(two_objects);
+        out.push(vec![0x01, 0x8F, 0x00]);
+        // SOP targets: SOP, SOP'', and the debug and unknown codes.
+        for sop in [0x00, 0x02, 0x03, 0x04, 0xFF] {
+            let mut v = READ_BYTES.to_vec();
+            v[0] = sop;
+            out.push(v);
+        }
+        for bit in 0..16 {
+            out.push(with_header_flip(1 << bit));
+        }
+        for command in (0..32u32).filter(|c| *c != 1) {
+            out.push(with_object((0xFF00_A801 & !0x1F) | command));
+        }
+        out
+    }
+
+    /// `bytes` as the builder's request, when the builder renders exactly them.
+    fn typed(bytes: &[u8]) -> Option<PdMessageRequest> {
+        let [sop, lo, hi, rest @ ..] = bytes else {
+            return None;
+        };
+        let sop = match sop {
+            0 => MessageSop::Sop,
+            1 => MessageSop::SopPrime,
+            2 => MessageSop::SopDoublePrime,
+            _ => return None,
+        };
+        if !rest.len().is_multiple_of(4) {
+            return None;
+        }
+        let request = PdMessageRequest {
+            sop,
+            msg_type: lo & 0x1F,
+            data_objects: rest
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
+                .collect(),
+        };
+        let header = u16::from_le_bytes([*lo, *hi]);
+        let rendered = lib_message(&request).to_command().ok()?;
+        (lib_message(&request).header() == header && rendered == Command::PdData(bytes.to_vec()))
+            .then_some(request)
+    }
+
+    /// What a session with no offers asks for `request`: the library's own
+    /// class, and above 5 V an unconfirmed send writes nothing. True when it
+    /// was above 5 V.
+    fn keeps_its_class(sim: &SimPdm, c: &TriggerControl, request: PdMessageRequest) -> bool {
+        let Ok(command) = lib_message(&request).to_command() else {
+            return false;
+        };
+        assert!(!is_cable_read(&command), "{command:?}");
+        let library = pdm::risk::classify(&command, &Capabilities::default());
+        assert_eq!(
+            c.message_risk(request.clone()).expect("risk"),
+            risk_class(library),
+            "{request:?}"
+        );
+        if library != Risk::Above5V {
+            return false;
+        }
+        let before = sim.writes().len();
+        let err = c
+            .send_message(request.clone(), false)
+            .expect_err("needs a confirmation");
+        assert_eq!(err.kind, ErrorKind::Usage, "{request:?}: {err:?}");
+        assert_eq!(
+            writes_after(sim, before),
+            Vec::<String>::new(),
+            "{request:?}"
+        );
+        true
+    }
+
+    #[test]
+    fn no_variant_of_the_bytes_is_the_read() {
+        let variants = variants();
+        assert!(variants.len() > 100, "{}", variants.len());
+        for v in variants {
+            assert_ne!(v, READ_BYTES, "not a variant");
+            assert!(!is_cable_read(&Command::PdData(v.clone())), "{v:02X?}");
+        }
+        assert!(!is_cable_read(&Command::PdData(Vec::new())));
+    }
+
+    #[test]
+    fn every_variant_of_the_bytes_needs_the_confirmation() {
+        // The object removed and the count cleared: a whole control message
+        // of its own, which keeps its own class. The only one.
+        let control = [0x01, 0x8F, 0x00];
+        for v in variants().into_iter().filter(|v| v != &control) {
+            let class = pdm::risk::classify(&Command::PdData(v.clone()), &Capabilities::default());
+            assert_eq!(class, Risk::Above5V, "{v:02X?}");
+        }
+    }
+
+    #[test]
+    fn every_variant_the_builder_can_make_keeps_the_librarys_class() {
+        let (sim, w) = worker_with(Some(SimCable::Epr240W));
+        let c = w.control();
+        let asked = variants()
+            .iter()
+            .filter_map(|v| typed(v))
+            .filter(|r| keeps_its_class(&sim, &c, r.clone()))
+            .count();
+        assert!(asked >= 32, "only {asked} variants were above 5 V");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn every_object_bit_and_message_type_keeps_the_librarys_class() {
+        let (sim, w) = worker_with(Some(SimCable::Epr240W));
+        let c = w.control();
+        let mut asked = 0;
+        for bit in 0..32 {
+            let mut request = read_message();
+            request.data_objects[0] ^= 1 << bit;
+            assert!(keeps_its_class(&sim, &c, request), "bit {bit}");
+            asked += 1;
+        }
+        for msg_type in (0..32).filter(|t| *t != 15) {
+            let mut request = read_message();
+            request.msg_type = msg_type;
+            asked += usize::from(keeps_its_class(&sim, &c, request));
+        }
+        for sop in [MessageSop::Sop, MessageSop::SopDoublePrime] {
+            let mut request = read_message();
+            request.sop = sop;
+            assert!(keeps_its_class(&sim, &c, request), "{sop:?}");
+            asked += 1;
+        }
+        let mut two = read_message();
+        two.data_objects.push(0);
+        assert!(keeps_its_class(&sim, &c, two), "an added object");
+        let mut none = read_message();
+        none.data_objects.clear();
+        keeps_its_class(&sim, &c, none);
+        assert!(asked >= 34, "only {asked} variants were above 5 V");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_session_with_offers_asks_the_same_as_the_console() {
+        let (sim, w) = in_pd(Some(SimCable::Epr240W));
+        let c = w.control();
+        for request in variants().iter().filter_map(|v| typed(v)) {
+            let line = command_text(&lib_message(&request).to_command().expect("it builds"));
+            let library = c.console_risk(line.clone()).expect("risk");
+            assert_eq!(
+                c.message_risk(request.clone()).expect("risk"),
+                library,
+                "{line}"
+            );
+            if library == RiskClass::Above5V {
+                let before = sim.writes().len();
+                c.send_message(request, false)
+                    .expect_err("needs a confirmation");
+                assert_eq!(writes_after(&sim, before), Vec::<String>::new(), "{line}");
+            }
+        }
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn every_variant_on_the_raw_console_keeps_the_librarys_class() {
+        let (sim, w) = worker_with(Some(SimCable::Epr240W));
+        let c = w.control();
+        for v in variants() {
+            let hex: String = v.iter().map(|b| format!("{b:02X}")).collect();
+            let line = format!("pd data={hex}");
+            let library = pdm::risk::classify(&Command::parse(&line), &Capabilities::default());
+            assert_eq!(
+                c.console_risk(line.clone()).expect("risk"),
+                risk_class(library),
+                "{line}"
+            );
+            if library == Risk::Above5V {
+                let before = sim.writes().len();
+                c.console_send(line.clone(), false)
+                    .expect_err("needs a confirmation");
+                assert_eq!(writes_after(&sim, before), Vec::<String>::new(), "{line}");
+            }
+        }
+        w.close().expect("close");
+    }
+}
+
 /// FR DGSQ6S (AC .9, .10, .11): failed requests, a meter whose replies lag
 /// one command behind, and the stream pausing while the automatic list runs.
 #[cfg(test)]
@@ -3244,6 +3902,71 @@ mod sync_tests {
             "written after out-of-sync: {:?}",
             &port.writes()[before..]
         );
+    }
+
+    // ---- AC-AXHK2P.2, .4: the cable read on a meter that misbehaves ----
+
+    const READ_LINE: &str = "pd data=018F1001A800FF";
+
+    #[test]
+    fn out_of_sync_a_cable_read_is_refused_and_writes_nothing() {
+        let port = charger(&[("pd req=2", b"type=0,em=2,sink=0\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), true).expect_err("not a req: reply");
+        let before = port.writes().len();
+        let Err(err) = c.cable_read() else {
+            panic!("the read was not refused");
+        };
+        assert_eq!(err.kind, ErrorKind::OutOfSync, "{err:?}");
+        assert!(says_power_cycle(&err), "{err:?}");
+        assert_eq!(port.writes()[before..], [] as [String; 0]);
+    }
+
+    #[test]
+    fn a_cable_read_nobody_answers_sends_one_line() {
+        let port = charger(&[]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let before = port.writes().len();
+        assert!(matches!(c.cable_read(), Ok(CableRead::NoAnswer)));
+        assert_eq!(port.writes()[before..], [READ_LINE]);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn unrelated_lines_during_the_wait_are_no_answer_and_no_second_send() {
+        let port = charger(&[(READ_LINE, b"ok\nready:5180mV,0mA\n")]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        port.arrive(b"ready:5180mV,0mA\n");
+        let before = port.writes().len();
+        assert!(matches!(c.cable_read(), Ok(CableRead::NoAnswer)));
+        assert_eq!(port.writes()[before..], [READ_LINE]);
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn the_cables_ack_on_the_port_answers_the_read() {
+        // Header 0x518F, then the session-2 cable's objects. [device]
+        let port = charger(&[(
+            READ_LINE,
+            b"pd data=018F5141A800FF0D0560184D4000000000548240260A00\n",
+        )]);
+        let w = spawn(&port);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let before = port.writes().len();
+        let Ok(CableRead::Found(view)) = c.cable_read() else {
+            panic!("the cable answered");
+        };
+        assert_eq!(view.vid, 0x050D);
+        assert_eq!(view.speed.as_deref(), Some("USB 2.0"));
+        assert_eq!(port.writes()[before..], [READ_LINE]);
+        w.close().expect("close");
     }
 
     #[test]

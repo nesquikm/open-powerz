@@ -7,6 +7,8 @@
 
 import type {
   BackendEvent,
+  CableRead,
+  CableView,
   Detection,
   ProtocolSection,
   RiskClass,
@@ -30,6 +32,8 @@ export interface TriggerApi {
   disarm(): Promise<void>;
   backTo5v(): Promise<void>;
   close(): Promise<void>;
+  cableRead(): Promise<CableRead>;
+  cableSeen(): Promise<CableView | null>;
 }
 
 /** VBUS is flagged when it differs from the request by more than this fraction. */
@@ -163,6 +167,22 @@ export function requestVoltageMv(
   }
 }
 
+/** A USB id as `0x1234`. */
+export function hexId(id: number): string {
+  return `0x${id.toString(16).toUpperCase().padStart(4, "0")}`;
+}
+
+/** A cable's vendor: the name from our own table, else its VID as `0x1234`. */
+export function cableVendorText(cable: CableView): string {
+  return cable.vendor ?? hexId(cable.vid);
+}
+
+/** What the Cable card shows, and where it came from. */
+export interface CableCard {
+  cable: CableView;
+  source: "read" | "capture";
+}
+
 /** The confirmation dialog's text for a request of `voltageMv`. */
 export function confirmationText(voltageMv: number): string {
   const volts = `${Number((voltageMv / 1000).toFixed(2))} V`;
@@ -247,6 +267,12 @@ export class TriggerPanel {
   /** The meter's replies fell out of step with the commands (`out_of_sync`): no
    * request is sent until the session is reopened. */
   requestsDisabled = $state(false);
+  /** What the Cable card shows, null when it has nothing. */
+  cable = $state<CableCard | null>(null);
+  /** The last read ended with no answer. */
+  cableNoAnswer = $state(false);
+  /** A read is running. */
+  cableBusy = $state(false);
 
   #api: TriggerApi;
   /** The 2 s after the reply have passed: VBUS is compared with the request. */
@@ -436,6 +462,44 @@ export class TriggerPanel {
     await this.refreshArmed();
   }
 
+  /** One press of Read cable: one message inside the open session, no dialog, no retry. */
+  async readCable(): Promise<void> {
+    if (!this.sessionOpen || this.requestsDisabled || this.cableBusy) return;
+    this.error = null;
+    this.cableBusy = true;
+    // The card shows this press's answer or nothing: the cable may have changed.
+    this.cable = null;
+    this.cableNoAnswer = false;
+    try {
+      const read = await this.#api.cableRead();
+      if (this.#gone) return;
+      this.cable = read.kind === "found" ? { cable: read.cable, source: "read" } : null;
+      this.cableNoAnswer = read.kind === "no_answer";
+    } catch (e) {
+      if (!this.#left) this.#fail(e);
+    } finally {
+      this.cableBusy = false;
+      // The backend disarmed before it wrote anything, so a failed read counts too.
+      if (!this.#gone) await this.refreshArmed();
+    }
+  }
+
+  /** Another meter is on screen: nothing on the panel describes it yet. */
+  async meterChanged(): Promise<void> {
+    this.cable = null;
+    this.cableNoAnswer = false;
+    await this.refreshArmed();
+    await this.loadCaptureCable();
+  }
+
+  /** With no session, shows the identity a PD capture holds; sends nothing. */
+  async loadCaptureCable(): Promise<void> {
+    if (this.sessionOpen) return;
+    const seen = await this.#api.cableSeen().catch(() => null);
+    if (this.sessionOpen) return;
+    this.cable = seen === null ? null : { cable: seen, source: "capture" };
+  }
+
   /** Clears the flag and compares VBUS again only {@link DEVIATION_DELAY_MS} from now. */
   #restartSettle(): void {
     if (this.#settleTimer !== null) clearTimeout(this.#settleTimer);
@@ -520,6 +584,8 @@ export class TriggerPanel {
     this.requestedMv = null;
     this.vbusV = null;
     this.deviation = false;
+    this.cable = null;
+    this.cableNoAnswer = false;
   }
 
   /** Takes the session channel's events: live VBUS, and a session that ends. */

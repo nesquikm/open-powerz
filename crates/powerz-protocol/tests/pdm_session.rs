@@ -632,12 +632,14 @@ mod pdm_session {
             s.send_confirmed(&cmd, conf),
             Err(Error::Forbidden { ty: 0x48 })
         );
-        let cmd = Command::Raw("\u{2}x".into()); // 0x02 starts ADCNEW on CDC
+        // 0x02 starts ADCNEW on CDC. A control character is refused before
+        // the guard sees it (AC-AXHK2M), and the guard stays behind it.
+        let cmd = Command::Raw("\u{2}x".into());
         let conf = HighVoltageConfirmation::for_command(&cmd);
-        assert_eq!(
+        assert!(matches!(
             s.send_confirmed(&cmd, conf),
-            Err(Error::UnsupportedOnCdc { ty: 0x02 })
-        );
+            Err(Error::Refused { .. })
+        ));
         assert_eq!(port.writes(), vec!["pdm open"]);
     }
 

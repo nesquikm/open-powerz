@@ -1016,7 +1016,14 @@ export interface CableView {
   max_voltage_v: number | null;
   max_current_ma: number | null;
   epr_capable: boolean;
+  /** USB speed in words (`USB 3.2 Gen 1`); null when the cable sent no cable VDO. */
+  speed: string | null;
+  /** The name from our own vendor table; null for a VID it does not list. */
+  vendor: string | null;
 }
+
+/** What one Read cable press found. */
+export type CableRead = { kind: "found"; cable: CableView } | { kind: "no_answer" };
 
 /** What sending a built message did. */
 export interface PdSendReply {
@@ -1038,6 +1045,19 @@ export async function triggerMessageSend(
 ): Promise<PdSendReply> {
   if (mock) return mock.triggerMessageSend(message, confirmed);
   return invoke<PdSendReply>("trigger_message_send", { message, confirmed });
+}
+
+/** One SOP' Discover Identity inside the open PD session, no dialog (FR AXHK2P). Takes
+ * no argument: nothing from the page selects the exemption. */
+export async function triggerCableRead(): Promise<CableRead> {
+  if (mock) return mock.triggerCableRead();
+  return invoke<CableRead>("trigger_cable_read");
+}
+
+/** The cable identity a PD capture holds, null when it holds none; sends nothing. */
+export async function pdCableSeen(): Promise<CableView | null> {
+  if (mock) return mock.pdCableSeen();
+  return invoke<CableView | null>("pd_cable_seen");
 }
 
 /** The library risk class of a raw console line. */
@@ -1103,6 +1123,8 @@ export interface MeterBackend {
   triggerClose(): Promise<void>;
   triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>;
   triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>;
+  triggerCableRead(): Promise<CableRead>;
+  pdCableSeen(): Promise<CableView | null>;
   triggerConsoleRisk(line: string): Promise<RiskClass>;
   triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]>;
 }
@@ -1147,6 +1169,8 @@ export const currentMeterCommands: MeterCommands = {
   triggerClose,
   triggerMessageRisk,
   triggerMessageSend,
+  triggerCableRead,
+  pdCableSeen,
   triggerConsoleRisk,
   triggerConsoleSend,
 };
@@ -1223,6 +1247,8 @@ export function meterBackend(deviceId: string): MeterBackend {
     triggerMessageRisk: (message) => call("trigger_message_risk", { message }),
     triggerMessageSend: (message, confirmed) =>
       call("trigger_message_send", { message, confirmed }),
+    triggerCableRead: () => call("trigger_cable_read"),
+    pdCableSeen: () => call("pd_cable_seen"),
     triggerConsoleRisk: (line) => call("trigger_console_risk", { line }),
     triggerConsoleSend: (line, confirmed) => call("trigger_console_send", { line, confirmed }),
   };

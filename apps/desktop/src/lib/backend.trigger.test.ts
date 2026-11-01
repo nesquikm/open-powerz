@@ -17,8 +17,11 @@ vi.mock("@tauri-apps/api/core", () => {
 
 import {
   TRIGGER_PROTOCOLS,
+  meterBackend,
+  pdCableSeen,
   triggerArmed,
   triggerBackTo5v,
+  triggerCableRead,
   triggerClose,
   triggerDetect,
   triggerDisarm,
@@ -26,6 +29,8 @@ import {
   triggerOpen,
   triggerRequest,
   triggerRisk,
+  type CableRead,
+  type CableView,
   type ProtocolSection,
   type TriggerReply,
   type TriggerRequest,
@@ -151,5 +156,49 @@ describe('AC-AXHK2N.2, .5: the "don\'t ask again" commands', () => {
     invoke.mockResolvedValue(undefined);
     await triggerDisarm();
     expect(invoke).toHaveBeenLastCalledWith("trigger_disarm");
+  });
+});
+
+describe("AC-AXHK2P.1, .6: the Cable card's commands", () => {
+  const CABLE: CableView = {
+    vid: 0x05ac,
+    pid: 0x8254,
+    active: true,
+    max_voltage_v: 50,
+    max_current_ma: 5000,
+    epr_capable: true,
+    speed: "USB4 Gen 3",
+    vendor: "Apple",
+  };
+
+  it("reads the cable with no argument: nothing from the page selects the exemption", async () => {
+    const found: CableRead = { kind: "found", cable: CABLE };
+    invoke.mockResolvedValue(found);
+    await expect(triggerCableRead()).resolves.toEqual(found);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("trigger_cable_read");
+  });
+
+  it("passes the backend's no-answer through", async () => {
+    const none: CableRead = { kind: "no_answer" };
+    invoke.mockResolvedValue(none);
+    await expect(triggerCableRead()).resolves.toEqual(none);
+  });
+
+  it("asks for the cable a capture holds", async () => {
+    invoke.mockResolvedValue(CABLE);
+    await expect(pdCableSeen()).resolves.toEqual(CABLE);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("pd_cable_seen");
+    invoke.mockResolvedValue(null);
+    await expect(pdCableSeen()).resolves.toBeNull();
+  });
+
+  it("a meter's own commands name the meter", async () => {
+    invoke.mockResolvedValue({ kind: "no_answer" });
+    const meter = meterBackend("usb:1:7");
+    await meter.triggerCableRead();
+    expect(invoke).toHaveBeenLastCalledWith("trigger_cable_read", { deviceId: "usb:1:7" });
+    invoke.mockResolvedValue(null);
+    await meter.pdCableSeen();
+    expect(invoke).toHaveBeenLastCalledWith("pd_cable_seen", { deviceId: "usb:1:7" });
   });
 });

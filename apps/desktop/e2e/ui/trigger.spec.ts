@@ -39,7 +39,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { open, streamDemo, useTheme, type Theme } from "./helpers";
-import { backgroundLuminance } from "./pd";
+import { backgroundLuminance, capture, openPd, stopCapture } from "./pd";
 
 test.use({ viewport: { width: 1600, height: 900 } });
 
@@ -849,5 +849,124 @@ test("the dialog with the checkbox and the status pass axe (AC-AXHK2N.1, .5)", a
   await remember(page).check();
   await dialog(page).getByRole("button", { name: "Confirm" }).click();
   await expect(armedStatus(page)).toBeVisible();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+// ---- FR AXHK2P: the Cable card ----
+//
+// Page contract: a region "Cable" in the view with a button "Read cable", disabled with
+// no open session. Its fields are labelled "Vendor", "VID", "PID", "Maximum current",
+// "Maximum voltage", "USB speed", "Type" (Passive or Active) and "EPR". With no answer it
+// says the cable may have no e-marker or the meter may not be the VCONN source; an
+// identity from a capture is marked "Seen in the capture". `?mock=trigger-no-cable`
+// answers nothing, `?mock=trigger-unlisted-cable` answers VID 0x1234, outside the table.
+// Detect ends on the last protocol it listed, so a PD offer comes first.
+
+const READ_LINE = "pd data=018F1001A800FF";
+
+function cableCard(page: Page): Locator {
+  return view(page).getByRole("region", { name: "Cable", exact: true });
+}
+
+function readCableButton(page: Page): Locator {
+  return cableCard(page).getByRole("button", { name: "Read cable", exact: true });
+}
+
+function cableField(page: Page, name: string): Locator {
+  return cableCard(page).getByLabel(name, { exact: true });
+}
+
+/** A session with PD entered, at 5 V. */
+async function inPd(page: Page, query = ""): Promise<void> {
+  await detected(page, query);
+  await offerButton(page, 5).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pd req=1");
+}
+
+test("Read cable sends one message and shows the whole e-marker (AC-AXHK2P.1, .2)", async ({
+  page,
+}) => {
+  await inPd(page);
+  const before = (await commands(page)).length;
+  await readCableButton(page).click();
+  await expect(cableField(page, "VID")).toHaveText("0x050D");
+  await expect(cableField(page, "PID")).toHaveText("0x8254");
+  await expect(cableField(page, "Maximum current")).toHaveText("5 A");
+  await expect(cableField(page, "Maximum voltage")).toHaveText("50 V");
+  await expect(cableField(page, "USB speed")).toHaveText("USB 2.0");
+  await expect(cableField(page, "Type")).toHaveText("Passive");
+  await expect(cableField(page, "EPR")).toHaveText(/yes/i);
+  await expect(cableField(page, "Vendor")).toBeVisible();
+  await expect(dialog(page)).toBeHidden();
+  expect((await commands(page)).slice(before)).toEqual([READ_LINE]);
+});
+
+test("Read cable is off with no session (AC-AXHK2P.2)", async ({ page }) => {
+  await open(page);
+  await streamDemo(page);
+  await showTrigger(page);
+  await expect(readCableButton(page)).toBeDisabled();
+  expect(await commands(page)).toEqual([]);
+});
+
+test("no answer says why and sends nothing more (AC-AXHK2P.4)", async ({ page }) => {
+  await inPd(page, "?mock=trigger-no-cable");
+  const before = (await commands(page)).length;
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/no e-marker/i);
+  await expect(cableCard(page)).toContainText(/VCONN source/);
+  await expect(cableField(page, "VID")).toBeHidden();
+  await page.waitForTimeout(300);
+  expect((await commands(page)).slice(before)).toEqual([READ_LINE]);
+});
+
+test("an unlisted vendor shows as its hex VID (AC-AXHK2P.5)", async ({ page }) => {
+  await inPd(page, "?mock=trigger-unlisted-cable");
+  await readCableButton(page).click();
+  await expect(cableField(page, "Vendor")).toHaveText("0x1234");
+});
+
+test("a capture's identity shows with no session and sends nothing (AC-AXHK2P.6)", async ({
+  page,
+}) => {
+  await openPd(page);
+  await capture(page);
+  await stopCapture(page);
+  await showTrigger(page);
+  await expect(cableCard(page)).toContainText("Seen in the capture");
+  await expect(cableField(page, "VID")).toHaveText("0x050D");
+  await expect(readCableButton(page)).toBeDisabled();
+  expect(await commands(page)).toEqual([]);
+});
+
+test("a read is not marked as seen in the capture (AC-AXHK2P.6)", async ({ page }) => {
+  await inPd(page);
+  await readCableButton(page).click();
+  await expect(cableField(page, "VID")).toBeVisible();
+  await expect(cableCard(page)).not.toContainText("Seen in the capture");
+});
+
+test('a read ends "don\'t ask again" and asks no question (AC-AXHK2P.3)', async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await readCableButton(page).click();
+  await expect(cableField(page, "VID")).toBeVisible();
+  await expect(dialog(page)).toBeHidden();
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("the Cable card passes axe with a cable and with no answer (AC-AXHK2P.1, .4)", async ({
+  page,
+}) => {
+  await inPd(page);
+  await readCableButton(page).click();
+  await expect(cableField(page, "VID")).toBeVisible();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+test("the Cable card's no-answer text passes axe (AC-AXHK2P.4)", async ({ page }) => {
+  await inPd(page, "?mock=trigger-no-cable");
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/no e-marker/i);
   expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
 });

@@ -44,6 +44,7 @@ import type {
   SeriesBuckets,
   StatsSnapshot,
   Detection,
+  CableRead,
   CableView,
   ConsoleLine,
   PdMessageRequest,
@@ -59,7 +60,14 @@ import type {
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
 import { lineRefusal, messageRefusal } from "./console.svelte";
-import { PD_CYCLE_MS, pdContractAt, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
+import {
+  PD_CYCLE_MS,
+  pdContractAt,
+  pdDetailsOf,
+  pdIsCableDiscover,
+  pdRecordTime,
+  pdRow,
+} from "./mockPd";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
@@ -513,6 +521,8 @@ export const MOCK_MODES = [
   "trigger-req-error",
   "trigger-detect-disagree",
   "trigger-list-lag",
+  "trigger-no-cable",
+  "trigger-unlisted-cable",
   "bootloader",
   "firmware-fail-switching",
   "firmware-fail-erasing",
@@ -823,7 +833,12 @@ const MOCK_CABLE: CableView = {
   max_voltage_v: 50,
   max_current_ma: 5000,
   epr_capable: true,
+  speed: "USB 2.0",
+  vendor: "Belkin",
 };
+
+/** The one message the backend sends a cable with no dialog. */
+const CABLE_READ_LINE = "pd data=018F1001A800FF";
 
 /** The demo meter's settings rows, as the backend decodes the captured FW 2.0.6
  * block (FR 1HHT01): the screen-checked fields confirmed, rotation and the
@@ -1103,6 +1118,8 @@ export class MockBackend {
       triggerClose: on(this.triggerClose),
       triggerMessageRisk: on(this.triggerMessageRisk),
       triggerMessageSend: on(this.triggerMessageSend),
+      triggerCableRead: on(this.triggerCableRead),
+      pdCableSeen: on(this.pdCableSeen),
       triggerConsoleRisk: on(this.triggerConsoleRisk),
       triggerConsoleSend: on(this.triggerConsoleSend),
     };
@@ -2209,7 +2226,8 @@ export class MockBackend {
    * refused with a reason. */
   async triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass> {
     this.#openTrigger();
-    renderMockMessage(message);
+    // Like the backend: exactly this message, never the raw console's same bytes.
+    if (renderMockMessage(message) === CABLE_READ_LINE) return "at_most_5v";
     if (message.data_objects.length === 0) {
       return SWAP_CONTROL_TYPES.includes(message.msg_type) ? "above_5v" : "at_most_5v";
     }
@@ -2243,8 +2261,36 @@ export class MockBackend {
     return {
       command,
       lines: [{ at_ms: Date.now(), direction: "tx", text: command, block: null }],
-      cable: discover ? { ...MOCK_CABLE } : null,
+      cable: discover ? this.#cableAnswer() : null,
     };
+  }
+
+  /** What the cable answers a Discover Identity, by mode. */
+  #cableAnswer(): CableView | null {
+    if (this.#mode === "trigger-no-cable") return null;
+    if (this.#mode === "trigger-unlisted-cable") {
+      return { ...MOCK_CABLE, vid: 0x1234, vendor: null };
+    }
+    return { ...MOCK_CABLE };
+  }
+
+  /** One SOP' Discover Identity, only with PD entered last; no retry. */
+  async triggerCableRead(): Promise<CableRead> {
+    const t = this.#openTrigger();
+    if (t.entered !== "pd") {
+      throw usage("Reading the cable needs an open PD session. Press a PD offer first.");
+    }
+    if (this.#mode === "trigger-out-of-sync") throw outOfSyncError();
+    t.armed = false;
+    this.#triggerLog.push(CABLE_READ_LINE);
+    const cable = this.#cableAnswer();
+    return cable ? { kind: "found", cable } : { kind: "no_answer" };
+  }
+
+  /** The cable identity a capture holds; needs no meter and sends nothing. */
+  async pdCableSeen(): Promise<CableView | null> {
+    const held = [this.#openedPd?.records, this.#session?.pd.records];
+    return held.some((records) => records?.some(pdIsCableDiscover)) ? { ...MOCK_CABLE } : null;
   }
 
   /** The library risk class of a raw console line. */

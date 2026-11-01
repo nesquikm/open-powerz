@@ -51,6 +51,7 @@ check the download and open the app past the macOS and Windows warnings.
 - Skip the dialog for PD requests up to 20 V with "Don't ask again" in the desktop trigger panel, until you go back to 5 V or disconnect ([trigger a charger](docs/how-to/trigger-a-charger.md#dont-ask-again))
 - Trigger QC 2.0/3.0, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS chargers ([CLI triggering](docs/reference/cli.md#protocol-triggering))
 - Send custom PD messages, read a cable's e-marker, or type raw commands in a console ([custom PD messages](docs/reference/cli.md#custom-pd-messages))
+- Press Read cable in an open PD session to see a cable's vendor, limits, speed and type from its e-marker ([read a cable](docs/how-to/trigger-a-charger.md#read-a-cable))
 
 ### Firmware update
 

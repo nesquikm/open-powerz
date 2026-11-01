@@ -17,6 +17,7 @@
 //! - [`legacy`]: QC, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS triggering.
 //! - [`message`]: custom PD messages (`pd cmd=` / `pd data=`) and cable identity.
 //! - [`console`]: the raw text console.
+//! - [`vendors`]: our own USB vendor name table for cable identities.
 
 pub mod caps;
 pub mod command;
@@ -29,6 +30,7 @@ pub mod port;
 pub mod reply;
 pub mod risk;
 pub mod session;
+pub mod vendors;
 
 pub use caps::{CapBlock, Capabilities, PdoBlock, ScpCaps, TfcpCaps, UfcsCap, UfcsCaps, VfcpCaps};
 pub use command::{Command, FixedProtocol, Protocol};

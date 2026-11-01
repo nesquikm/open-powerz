@@ -5,7 +5,9 @@
     LEGACY_FIXED_VOLTS,
     QC3_RANGE,
     clampToLimits,
+    cableVendorText,
     detectionChecks,
+    hexId,
     isFixedVoltProtocol,
     isLimitsProtocol,
     limitsRequest,
@@ -36,6 +38,12 @@
 
   // A reloaded page starts unarmed; an armed backend says so here.
   onMount(() => void panel.refreshArmed());
+
+  // With no session the Cable card shows what a PD capture holds, if anything.
+  $effect(() => {
+    void connected;
+    if (!panel.sessionOpen) void panel.loadCaptureCable();
+  });
 
   const reason = $derived(connected ? null : "Connect a meter to detect the charger's protocols.");
 
@@ -173,6 +181,11 @@
       <button type="button" disabled={panel.requestsDisabled} onclick={r.onclick}>{r.label}</button>
     {/if}
   </div>
+{/snippet}
+
+{#snippet cableFact(id: string, label: string, value: string)}
+  <dt id="trigger-cable-{id}">{label}</dt>
+  <dd aria-labelledby="trigger-cable-{id}">{value}</dd>
 {/snippet}
 
 <div class="trigger">
@@ -434,6 +447,44 @@
     </p>
     {#if panel.deviation}
       <p class="warning" role="status">VBUS differs from the request by more than 5 %.</p>
+    {/if}
+  </section>
+
+  <section class="card" aria-labelledby="trigger-cable-title">
+    <h2 id="trigger-cable-title">Cable</h2>
+    <div class="offers">
+      <button
+        type="button"
+        disabled={requestsOff || panel.cableBusy}
+        onclick={() => void panel.readCable()}>Read cable</button
+      >
+    </div>
+    {#if panel.cableBusy}
+      <p class="muted" aria-live="polite">Reading the cable…</p>
+    {/if}
+    {#if panel.cable}
+      {@const c = panel.cable.cable}
+      <dl class="facts">
+        {@render cableFact("vendor", "Vendor", cableVendorText(c))}
+        {@render cableFact("vid", "VID", hexId(c.vid))}
+        {@render cableFact("pid", "PID", c.pid === null ? "—" : hexId(c.pid))}
+        {@render cableFact("current", "Maximum current", amps(c.max_current_ma) ?? "—")}
+        {@render cableFact(
+          "voltage",
+          "Maximum voltage",
+          c.max_voltage_v === null ? "—" : `${c.max_voltage_v} V`,
+        )}
+        {@render cableFact("speed", "USB speed", c.speed ?? "—")}
+        {@render cableFact("type", "Type", c.active ? "Active" : "Passive")}
+        {@render cableFact("epr", "EPR", c.epr_capable ? "Yes" : "No")}
+      </dl>
+      {#if panel.cable.source === "capture"}
+        <p class="muted">Seen in the capture.</p>
+      {/if}
+    {:else if panel.cableNoAnswer}
+      <p>No answer: the cable may have no e-marker, or the meter may not be the VCONN source.</p>
+    {:else}
+      <p class="muted">Not read yet.</p>
     {/if}
   </section>
 

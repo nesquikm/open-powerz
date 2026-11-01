@@ -540,6 +540,41 @@ async fn trigger_message_send(
     .await
 }
 
+/// One press of Read cable on meter `device_id` (FR AXHK2P).
+fn cable_read_of(state: &AppState, device_id: Option<&str>) -> Result<trigger::CableRead, UiError> {
+    trigger_control(state, device_id)?.cable_read()
+}
+
+/// One SOP' Discover Identity inside the open PD session: nothing from the
+/// page selects it, and nothing else is ever sent.
+#[tauri::command]
+async fn trigger_cable_read(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<trigger::CableRead, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || cable_read_of(&state, device_id.as_deref())).await
+}
+
+/// The newest cable identity in the capture the PD view shows: the one opened
+/// from a file, else the meter's own. Nothing is sent.
+fn cable_seen_of(state: &AppState, device_id: Option<&str>) -> Option<trigger::CableView> {
+    if let Some(cable) = state.opened_pd().as_ref().and_then(|pd| pd.latest_cable()) {
+        return Some(cable);
+    }
+    control(state, device_id).ok()?.pd_cable_seen().ok()?
+}
+
+/// The cable identity a PD capture holds; none, not an error, with no capture.
+#[tauri::command]
+async fn pd_cable_seen(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<Option<trigger::CableView>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(cable_seen_of(&state, device_id.as_deref()))).await
+}
+
 /// The library risk class of a raw console line (FR DGSQ6T).
 #[tauri::command]
 async fn trigger_console_risk(
@@ -1387,6 +1422,7 @@ pub fn run() {
             pd_details,
             pd_clear,
             pd_release_opened,
+            pd_cable_seen,
             meter_settings,
             meter_settings_write,
             records_list,
@@ -1410,6 +1446,7 @@ pub fn run() {
             trigger_back_to_5v,
             trigger_message_risk,
             trigger_message_send,
+            trigger_cable_read,
             trigger_console_risk,
             trigger_console_send,
             trigger_close
@@ -1473,6 +1510,122 @@ mod tests {
     fn the_save_dialog_offers_the_file_type_of_the_proposed_name() {
         assert_eq!(save_filter("powerz-pd-20261022-101500.pdcap").1, ["pdcap"]);
         assert_eq!(save_filter("powerz-20261022-101500.csv").1, ["csv"]);
+    }
+
+    // ---- AC-AXHK2P.2, .6: the card's two commands ----
+
+    /// The Discover Identity ACK of the session-2 240 W cable, as a record.
+    /// [device]
+    fn cable_ack_record() -> powerz_protocol::session::CapturedRecord {
+        use powerz_protocol::decode::pd_packet::{PdMessage, PdRecord, PdRecordKind};
+        let objects: [u32; 5] = [
+            0xFF00_A841,
+            0x1860_050D,
+            0x0000_404D,
+            0x8254_0000,
+            0x000A_2640,
+        ];
+        powerz_protocol::session::CapturedRecord {
+            elapsed_ms: 0,
+            record: PdRecord {
+                time_ms: 0,
+                from_meter: false,
+                raw: Vec::new(),
+                kind: PdRecordKind::Message(PdMessage {
+                    sop: 1,
+                    header: 0x518F,
+                    body: objects.iter().flat_map(|o| o.to_le_bytes()).collect(),
+                }),
+            },
+        }
+    }
+
+    fn no_usb() -> AppState {
+        AppState::with_manager(DeviceManager::new(
+            || Ok(Vec::new()),
+            AppOpener,
+            SystemClock,
+        ))
+    }
+
+    #[test]
+    fn a_cable_read_with_no_session_is_a_usage_error() {
+        let state = no_usb();
+        let Err(err) = cable_read_of(&state, None) else {
+            panic!("the read was not refused");
+        };
+        assert_eq!(err.kind, ui_error::ErrorKind::Usage, "{err:?}");
+    }
+
+    #[test]
+    fn a_cable_read_with_a_connected_meter_but_no_trigger_session_is_a_usage_error() {
+        let state = no_usb();
+        state
+            .connect_session(
+                "demo:idle",
+                50,
+                |_: BackendEvent| {},
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the demo device connects");
+        let read = cable_read_of(&state, None);
+        let _ = state.manager().disconnect_for("demo:idle");
+        let Err(err) = read else {
+            panic!("the read was not refused");
+        };
+        assert_eq!(err.kind, ui_error::ErrorKind::Usage, "{err:?}");
+    }
+
+    #[test]
+    fn no_capture_has_no_cable_and_no_error() {
+        let state = no_usb();
+        assert_eq!(cable_seen_of(&state, None), None);
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        assert_eq!(cable_seen_of(&state, None), None);
+    }
+
+    #[test]
+    fn the_opened_capture_answers_the_cable_it_holds() {
+        let state = no_usb();
+        let mut pd = pd_capture::PdCapture::new();
+        pd.push(&[cable_ack_record()], None);
+        *state.opened_pd() = Some(pd);
+        let cable = cable_seen_of(&state, None).expect("the ACK");
+        assert_eq!(cable.vid, 0x050D);
+        assert_eq!(cable.pid, Some(0x8254));
+        assert_eq!(cable.speed.as_deref(), Some("USB 2.0"));
+    }
+
+    #[test]
+    fn a_connected_meter_with_no_capture_has_no_cable() {
+        let state = no_usb();
+        state
+            .connect_session(
+                "demo:idle",
+                50,
+                |_: BackendEvent| {},
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the demo device connects");
+        let seen = cable_seen_of(&state, None);
+        let _ = state.manager().disconnect_for("demo:idle");
+        assert_eq!(seen, None);
+    }
+
+    #[test]
+    fn the_cards_commands_are_registered() {
+        let source = include_str!("lib.rs");
+        let handlers = source
+            .split("generate_handler![")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the handler list");
+        for name in ["trigger_cable_read", "pd_cable_seen"] {
+            assert!(
+                handlers.split(',').any(|h| h.trim() == name),
+                "{name} is not registered"
+            );
+        }
     }
 
     #[test]

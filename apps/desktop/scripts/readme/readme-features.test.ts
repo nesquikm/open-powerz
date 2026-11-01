@@ -443,6 +443,16 @@ describe("repository gate", () => {
     expect(howTo).toMatch(/20 V/);
   });
 
+  it("AC-AXHK2P.8: the README and the trigger how-to describe the Cable card", () => {
+    const triggers = parseFeatureAreas(readme).get("protocol-triggers") ?? [];
+    expect(triggers.join("\n")).toMatch(/e-marker/i);
+    expect(triggers.join("\n")).toMatch(/read cable|one click/i);
+    const howTo = readFileSync(join(repoRoot, "docs/how-to/trigger-a-charger.md"), "utf8");
+    expect(howTo).toMatch(/\bRead cable\b/);
+    expect(howTo).toMatch(/seen in the capture/i);
+    expect(howTo).toMatch(/VCONN source/);
+  });
+
   it("CLI exits 0 on the repository", () => {
     const r = spawnSync("bun", [scriptPath, repoRoot], { encoding: "utf8", timeout: 30_000 });
     expect(r.error).toBeUndefined();

@@ -111,8 +111,10 @@ Commands:
 | `triggerRequest(request: TriggerRequest, confirmed: boolean, remember?: boolean): Promise<TriggerReply>` | Sends `request`. The backend is the final gate: above 5 V it is refused unless `confirmed` or armed. `remember` with `confirmed` arms "Don't ask again"; a request that does not qualify fails with `usage` and sends nothing. A request above 5 V whose offer differs from the one last listed is refused with `usage` and not sent. A request for another protocol than the one entered enters that protocol again first. |
 | `triggerArmed(): Promise<boolean>` | Whether "Don't ask again" is armed. `false` with no session. |
 | `triggerDisarm(): Promise<void>` | Ends "Don't ask again" and sends nothing. Does nothing with no session. |
-| `triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>` | The risk class of a built PD message. GoodCRC and malformed messages fail with `usage` and the reason. |
+| `triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>` | The risk class of a built PD message. The SOP' Discover Identity is `at_most_5v`. Every other message keeps the library's class, so a data message to a cable asks. GoodCRC and malformed messages fail with `usage` and the reason. |
 | `triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>` | Sends a built PD message; above 5 V only when `confirmed`. |
+| `triggerCableRead(): Promise<CableRead>` | Sends one SOP' Discover Identity with no dialog and no retry, and ends "Don't ask again". Needs a session with PD entered and never opens, enters or closes one; otherwise it fails with `usage` and sends nothing. |
+| `pdCableSeen(): Promise<CableView \| null>` | The cable identity a PD capture holds (the opened file or the live capture), `null` when it holds none. Sends nothing. |
 | `triggerConsoleRisk(line: string): Promise<RiskClass>` | The risk class of a raw console line. |
 | `triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]>` | Sends a raw console line and answers the transcript lines. Above 5 V (any unparsable line too) only when `confirmed`; GoodCRC is always refused. |
 | `triggerBackTo5v(): Promise<void>` | Back to 5 V: PD sends `pd req=1` (a Hard Reset as the fallback), the other protocols `reset`. The session stays open. |
@@ -133,7 +135,8 @@ Types (they mirror `src-tauri/src/trigger.rs`):
 | `PdMessageRequest` | `sop` (`"sop"`, `"sop_prime"` or `"sop_double_prime"`), `msg_type` (the 5-bit Message Type), `data_objects` (32-bit numbers; none means a control message) |
 | `ConsoleLine` | `at_ms` (clock time, ms since the Unix epoch), `direction` (`"tx"` or `"rx"`), `text`, `block` (a parsed binary block in words, or `null`) |
 | `PdSendReply` | `command`, `lines` (`ConsoleLine[]`), `cable` (`CableView` or `null`) |
-| `CableView` | `vid`, `pid`, `active`, `max_voltage_v`, `max_current_ma`, `epr_capable` |
+| `CableView` | `vid`, `pid`, `active`, `max_voltage_v`, `max_current_ma`, `epr_capable`, `speed` (USB speed in words, `null` with no cable VDO), `vendor` (from our table, `null` for an unlisted VID) |
+| `CableRead` | `{ kind: "found"; cable: CableView }` or `{ kind: "no_answer" }` |
 
 Behaviour:
 
@@ -350,6 +353,8 @@ it does:
 | `?mock=trigger-all` | The demo charger speaks every protocol, with decoded limits for SCP, VFCP, TFCP and UFCS. |
 | `?mock=trigger-out-of-sync` | Every trigger request fails with an `out_of_sync` error. |
 | `?mock=trigger-req-error` | The charger refuses every request above 5 V (`req error 252`); the session stays usable. |
+| `?mock=trigger-no-cable` | Read cable gets no answer. |
+| `?mock=trigger-unlisted-cable` | Read cable finds a cable whose vendor is not in the table (VID 0x1234). |
 | `?mock=trigger-detect-disagree` | BC1.2 says not supported while the automatic list says supported. |
 | `?mock=trigger-list-lag` | Detection fails with an `out_of_sync` error after the list, as when the meter answers one command late. |
 | `?mock=bootloader` | One meter in bootloader mode is listed before the demo devices. |

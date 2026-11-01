@@ -63,7 +63,7 @@ describe("AC-DGSQ6T.2: the cable answers Discover Identity", () => {
     const backend = await opened();
     const r = await backend.triggerMessageSend(DISCOVER_CABLE, true);
     expect(r.command.startsWith("pd data=01")).toBe(true);
-    expect(r.cable).toEqual({
+    expect(r.cable).toMatchObject({
       vid: 0x050d,
       pid: 0x8254,
       active: false,
