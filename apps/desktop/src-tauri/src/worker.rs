@@ -1586,6 +1586,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 self.hold_polling(hold);
                 let _ = reply.send(());
             }
+            Command::PdCapturing(reply) => {
+                let _ = reply.send(self.pd_run.is_some());
+            }
             Command::Handover(swap, reply) => {
                 // Read here and swapped behind the events already sent, so
                 // the new sink gets exactly the events after this answer.
@@ -1639,6 +1642,8 @@ enum Command {
     /// Hold or release the queue polling; answered between steps, so no
     /// poll is in flight once a hold is answered.
     HoldPolling(bool, mpsc::Sender<()>),
+    /// Whether the PD capture runs now (AC-AXHK2K.7).
+    PdCapturing(mpsc::Sender<bool>),
     /// Run the sink swap of an attach, then answer the open recording's
     /// progress: both on the worker thread, which sends every recording
     /// event, so none can fall between them (FR VEDDFD).
@@ -1674,6 +1679,7 @@ impl std::fmt::Debug for Command {
                 .field(dir)
                 .finish(),
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
+            Command::PdCapturing(_) => f.write_str("PdCapturing"),
             Command::Handover(..) => f.write_str("Handover"),
         }
     }
@@ -1942,6 +1948,12 @@ impl WorkerControl {
     pub fn stop_recording(&self) -> Result<RecordingSummary, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::StopRecording(reply), &answer)?
+    }
+
+    /// Whether the PD capture runs now (AC-AXHK2K.7).
+    pub fn pd_capturing(&self) -> Result<bool, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PdCapturing(reply), &answer)
     }
 
     /// Run `swap` on the worker thread between its steps and answer the

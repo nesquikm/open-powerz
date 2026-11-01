@@ -365,6 +365,8 @@ export interface AttachedSession {
   rate_locked: boolean;
   session_id: number;
   recording: RecordingSnapshot | null;
+  /** The PD capture runs (AC-AXHK2K.7). */
+  pd_capturing?: boolean | undefined;
 }
 
 /** Asks the backend for the running session (after a reload); its later events go to
@@ -650,6 +652,13 @@ export interface PdOpened {
 export async function pdOpen(): Promise<PdOpened | null> {
   if (mock) return mock.pdOpen();
   return invoke<PdOpened | null>("pd_open");
+}
+
+/** Releases the capture opened from a file, which the page no longer shows
+ * (AC-AXHK2K.5). The slot is the app's, not a meter's: it needs no meter. */
+export async function pdReleaseOpened(): Promise<void> {
+  if (mock) return mock.pdReleaseOpened();
+  await invoke("pd_release_opened");
 }
 
 /** Opens the open dialog and imports the chosen vendor PD log database (`.sqlite`)

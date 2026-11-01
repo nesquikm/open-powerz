@@ -8,6 +8,7 @@ import {
   type UiError,
 } from "./backend";
 import type { ConnectionState } from "./format";
+import type { MeterNotice } from "./meterNotices.svelte";
 
 /** Sample rates the picker offers, in SPS. */
 export const RATE_OPTIONS = [2, 10, 50, 1000] as const;
@@ -150,6 +151,27 @@ export class Recording {
   /** File the last recording was saved to, while its notice shows. */
   savedPath = $state<string | null>(null);
   error = $state<UiError | null>(null);
+  /** Told what the recording has to say each time that changes, null for nothing. */
+  #onNotice: ((notice: MeterNotice | null) => void) | undefined;
+
+  constructor(onNotice?: (notice: MeterNotice | null) => void) {
+    this.#onNotice = onNotice;
+  }
+
+  /** Passes on the notice and the error as they stand now. */
+  #publish(): void {
+    const { notice, error } = this;
+    this.#onNotice?.(
+      notice === null && error === null
+        ? null
+        : {
+            tone: error ? "error" : "info",
+            message: error?.message ?? null,
+            text: notice ?? "",
+            path: this.savedPath,
+          },
+    );
+  }
 
   /** Elapsed time and rows while recording, `null` otherwise. */
   get indicator(): string | null {
@@ -167,6 +189,7 @@ export class Recording {
     this.notice = null;
     this.savedPath = null;
     this.error = null;
+    this.#publish();
     try {
       const path = await deps.startRecording(defaultRecordingName(deps.now()));
       // The session may have ended while the start was on its way.
@@ -183,6 +206,7 @@ export class Recording {
       if (this.phase !== "starting") return;
       this.error = toUiError(err);
       this.phase = "idle";
+      this.#publish();
     }
   }
 
@@ -196,6 +220,7 @@ export class Recording {
     if (this.phase !== "recording") return true;
     this.phase = "stopping";
     this.error = null;
+    this.#publish();
     let stopped = true;
     try {
       const summary = await deps.stopRecording();
@@ -212,6 +237,7 @@ export class Recording {
         this.error = toUiError(err);
         this.phase = "recording";
         stopped = false;
+        this.#publish();
       } else if (this.error !== null) {
         // ...unless what ended it was a failure, whose event outran this rejection.
         stopped = false;
@@ -249,9 +275,15 @@ export class Recording {
         this.notice = `Recording stopped; ${rowsText(event.rows)} kept.`;
         // The rows before the failure are in the file: keep its reveal and copy actions.
         if (event.rows > 0) this.savedPath = this.path;
+        this.#publish();
         this.#end();
         break;
       case "started":
+        // A start that timed out can still be applied (AC-AXHK2K.9).
+        if (this.phase === "idle") {
+          this.adopt({ rows: 0, elapsed_ms: 0 });
+          this.#publish();
+        }
         break;
     }
   }
@@ -262,6 +294,7 @@ export class Recording {
     if (this.phase === "idle") return;
     this.notice = "Recording ended with the session.";
     if (this.rows > 0) this.savedPath = this.path;
+    this.#publish();
     this.#end();
   }
 
@@ -284,6 +317,7 @@ export class Recording {
     this.notice = null;
     this.savedPath = null;
     this.error = null;
+    this.#publish();
   }
 
   /** Where the finished file ends up: the place asked for, or the default path
@@ -295,6 +329,7 @@ export class Recording {
       return (await deps.saveRecordingAs(path)) ?? path;
     } catch (err) {
       this.error = toUiError(err);
+      this.#publish();
       return path;
     }
   }
@@ -303,6 +338,7 @@ export class Recording {
   #saved(summary: RecordingSummary, path = this.path): void {
     this.savedPath = path;
     this.notice = recordingSummaryText(summary, path);
+    this.#publish();
   }
 
   #end(): void {

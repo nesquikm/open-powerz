@@ -13,6 +13,7 @@
     firmwareInspect,
     pdImport,
     pdOpen,
+    pdReleaseOpened,
     revealPath,
     toUiError,
     type AttachedSession,
@@ -62,15 +63,19 @@
   import { onMount, setContext, untrack } from "svelte";
   import {
     ExportJob,
+    type ExportDeps,
     exportNoticeText,
     rateChange,
     Recording,
+    type RecordingDeps,
     revealActionLabel,
   } from "./lib/recording.svelte";
   import { Session } from "./lib/session.svelte";
   import { copyLive, Meters, type MeterEntry } from "./lib/meters.svelte";
   import MeterGrid from "./lib/components/MeterGrid.svelte";
   import { controlsLabel, tileTitle } from "./lib/meterGrid";
+  import MeterNoticeList from "./lib/components/MeterNoticeList.svelte";
+  import type { MeterNotice } from "./lib/meterNotices.svelte";
   import AddMeterDialog from "./lib/components/AddMeterDialog.svelte";
   import { canConnectTo } from "./lib/deviceDetails";
   import { StatsControls } from "./lib/stats.svelte";
@@ -139,6 +144,8 @@
   function routeEvent(id: string, event: BackendEvent): void {
     if (!meters.inFullView(id)) {
       meters.handleTileEvent(id, event);
+      // A tile that left has no place to speak: the meter shown takes what it still has to say.
+      if (meters.get(id) === undefined && noticesId !== null) meters.notices.move(id, noticesId);
       return;
     }
     onBackendEvent(event);
@@ -150,7 +157,11 @@
     // user disconnected gives it to any other meter, which may be waiting itself.
     const next = others.find((e) => e.session.active) ?? (unplugged ? undefined : others[0]);
     if (!next) return;
-    if (!unplugged) meters.remove(id);
+    if (!unplugged) {
+      // It leaves no tile behind: what it still has to say goes to the meter shown next.
+      meters.notices.move(id, next.listing.id);
+      meters.remove(id);
+    }
     showInFullView(next, unplugged);
   }
 
@@ -213,15 +224,31 @@
     return entry.session === session ? exportJob : entry.exportJob;
   }
 
+  /** Shows `err` with meter `id`'s notices. */
+  function raiseError(id: string, err: unknown): void {
+    const { message, hint } = toUiError(err);
+    meters.notices.raise(id, { tone: "error", message, text: hint ?? "", path: null });
+  }
+
   /** The rate picker of a tile: acts on that meter only. */
   function selectMeterRate(entry: MeterEntry, sps: number): void {
+    const refused = (err: unknown): void => raiseError(entry.listing.id, err);
     if (entry.session === session) {
-      void selectRate(sps);
+      void selectRate(sps, refused);
       return;
     }
-    void commandsOf(entry.listing.id)
-      .setRate(sps)
-      .catch((err: unknown) => session.reportError(toUiError(err)));
+    void commandsOf(entry.listing.id).setRate(sps).catch(refused);
+  }
+
+  /** What the recording of a meter outside the full view needs from the app. */
+  function meterRecordingDeps(entry: MeterEntry): RecordingDeps {
+    const commands = commandsOf(entry.listing.id);
+    return {
+      canRecord: entry.session.meterConnected,
+      startRecording: (name) => commands.startRecording(name),
+      stopRecording: () => commands.stopRecording(),
+      now: () => new Date(),
+    };
   }
 
   /** Record on a tile: starts or stops that meter's recording only. */
@@ -232,12 +259,24 @@
     }
     const commands = commandsOf(entry.listing.id);
     void entry.recording.toggle({
-      canRecord: entry.session.meterConnected,
-      startRecording: (name) => commands.startRecording(name),
-      stopRecording: () => commands.stopRecording(),
+      ...meterRecordingDeps(entry),
       saveRecordingAs: (path) => commands.saveRecordingAs(path),
-      now: () => new Date(),
     });
+  }
+
+  /** Runs an export; how it ended goes to meter `id`'s notices, wherever that meter is by
+   * then. */
+  async function runExport(id: string, job: ExportJob, deps: ExportDeps): Promise<void> {
+    await job.run(deps);
+    const { path, rows, error } = job;
+    if (path !== null && rows !== null) {
+      meters.notices.raise(id, { tone: "info", text: exportNoticeText({ rows, path }), path });
+      job.dismissNotice();
+    }
+    if (error !== null) {
+      raiseError(id, error);
+      job.error = null;
+    }
   }
 
   /** Export on a tile: that meter's session so far. */
@@ -247,7 +286,7 @@
       return;
     }
     const commands = commandsOf(entry.listing.id);
-    void entry.exportJob.run({
+    void runExport(entry.listing.id, entry.exportJob, {
       exportSession: (name, onProgress) => commands.exportSession(name, onProgress),
       now: () => new Date(),
     });
@@ -279,7 +318,10 @@
     }
     void commandsOf(id)
       .disconnect()
-      .catch((err: unknown) => session.reportError(toUiError(err)));
+      .catch((err: unknown) => {
+        if (entry && !meters.inFullView(id)) raiseError(id, err);
+        else session.reportError(toUiError(err));
+      });
   }
 
   let addMeterOpen = $state(false);
@@ -313,7 +355,33 @@
       session.reportError(toUiError(err));
     }
   }
-  const recording = new Recording();
+  /** The meter whose notices the full view shows: it stays named once its session ended. */
+  const noticesId = $derived(meters.fullViewId ?? session.selectedId);
+  const noticesShown = $derived(noticesId === null ? [] : meters.notices.of(noticesId));
+  function dismissShownNotice(notice: MeterNotice): void {
+    if (noticesId !== null) meters.notices.dismiss(noticesId, notice);
+  }
+  /** Dismisses every information notice the full view shows; errors stay. */
+  function dismissInfoNotices(): void {
+    noticesShown.filter((n) => n.tone === "info").forEach(dismissShownNotice);
+  }
+  /** The meter a start or stop of the full view's recording began on. */
+  let recordingActionId: string | null = null;
+  const recording = new Recording((notice) => {
+    const id = recordingActionId ?? noticesId;
+    if (id !== null) meters.notices.setRecording(id, notice);
+  });
+  /** Runs a start or stop of the full view's recording: what it goes on to say stays with
+   * the meter it began on, whichever one the view shows by then. */
+  async function onShownMeter<T>(action: () => Promise<T>): Promise<T> {
+    if (recordingActionId !== null) return action();
+    recordingActionId = noticesId;
+    try {
+      return await action();
+    } finally {
+      recordingActionId = null;
+    }
+  }
   /** A stream is running that can be recorded. */
   const canRecord = $derived(session.state === "streaming" || session.state === "rate_locked");
   const exportJob = new ExportJob();
@@ -392,11 +460,15 @@
     flashStatus: firmwareFlashStatus,
     stopRecording: async (id) => {
       if (meters.inFullView(id)) {
-        if (!(await recording.stop(recordingDeps()))) throw recording.error;
+        if (!(await onShownMeter(() => recording.stop(recordingDeps())))) throw recording.error;
         return;
       }
-      await commandsOf(id).stopRecording();
-      meters.unpark(id);
+      const entry = meters.get(id);
+      if (entry === undefined || entry.recording.phase === "idle") {
+        await commandsOf(id).stopRecording();
+        return;
+      }
+      if (!(await entry.recording.stop(meterRecordingDeps(entry)))) throw entry.recording.error;
     },
   });
   /** Another meter can be added while one streams or a firmware update holds one
@@ -507,6 +579,9 @@
   }
 
   function clearPdNow(): Promise<void> {
+    // `pd_clear` lets go of an opened file itself; a release beside it could win the
+    // race and leave the clear, with no meter, nothing to do but fail.
+    pdFileShown = false;
     const ticket = pd.beginClear();
     return act()
       .pdClear()
@@ -591,6 +666,17 @@
     }
   }
 
+  /** The backend keeps an opened file until told (AC-AXHK2K.5): whatever takes it out of
+   * the view (a new session, a clear, another meter's capture), the backend lets go too. */
+  let pdFileShown = false;
+  $effect(() => {
+    const shown = pd.opened;
+    if (pdFileShown && !shown) {
+      void pdReleaseOpened().catch((err: unknown) => session.reportError(toUiError(err)));
+    }
+    pdFileShown = shown;
+  });
+
   function loadPdDetails(index: number): Promise<PdDetails | null> {
     return act()
       .pdDetails(index, pd.opened)
@@ -600,8 +686,7 @@
       });
   }
   // Information notices leave by themselves; errors stay until dismissed (AC-AKNVND.8).
-  const recordingNoticeTimer = new AutoDismiss(() => recording.dismiss());
-  const exportNoticeTimer = new AutoDismiss(() => exportJob.dismissNotice());
+  const meterNoticeTimer = new AutoDismiss(dismissInfoNotices);
   const pdSaveNoticeTimer = new AutoDismiss(() => (pdSaved = null));
   const pdImportNoticeTimer = new AutoDismiss(() => (pdImported = null));
   $effect(() => {
@@ -615,23 +700,17 @@
     return () => pdImportNoticeTimer.stop();
   });
   $effect(() => {
-    if (recording.notice !== null && recording.error === null) recordingNoticeTimer.start();
-    else recordingNoticeTimer.stop();
-    return () => recordingNoticeTimer.stop();
+    // Only while it can be read: one raised behind another tab waits for the Meter tab.
+    if (view === "meter" && noticesShown.some((n) => n.tone === "info")) {
+      meterNoticeTimer.start();
+    } else {
+      meterNoticeTimer.stop();
+    }
+    return () => meterNoticeTimer.stop();
   });
-  $effect(() => {
-    if (exportJob.path !== null && exportJob.rows !== null) exportNoticeTimer.start();
-    else exportNoticeTimer.stop();
-    return () => exportNoticeTimer.stop();
-  });
-  /** The pointer over the notices, or focus in them, holds both countdowns. */
+  /** The pointer over the notices, or focus in them, holds the countdowns. */
   function holdNotices(reason: HoldReason, held: boolean): void {
-    for (const t of [
-      recordingNoticeTimer,
-      exportNoticeTimer,
-      pdSaveNoticeTimer,
-      pdImportNoticeTimer,
-    ]) {
+    for (const t of [meterNoticeTimer, pdSaveNoticeTimer, pdImportNoticeTimer]) {
       if (held) t.hold(reason);
       else t.release(reason);
     }
@@ -758,6 +837,12 @@
               tile.adopt(snapshot);
               meters.add(listingOf(snapshot), tile);
               if (snapshot.recording) meters.park(id, snapshot.recording);
+              // The capture runs on without this page (AC-AXHK2K.7).
+              if (snapshot.pd_capturing) {
+                const parked = new PdCapture();
+                parked.capturing = true;
+                meters.parkPd(id, parked);
+              }
             },
           ),
         ),
@@ -782,6 +867,7 @@
         // The new page's buffer is empty: fill the live windows from the history.
         chart?.backfillFromHistory();
         if (snapshot.recording) recording.adopt(snapshot.recording);
+        pd.capturing = snapshot.pd_capturing === true;
         if (!snapshot.rate_locked && snapshot.rate_sps !== null) {
           requestedRateSps = snapshot.rate_sps;
         }
@@ -820,7 +906,10 @@
     }
   }
 
-  async function selectRate(sps: number): Promise<void> {
+  async function selectRate(
+    sps: number,
+    onFailed: (err: unknown) => void = (err) => session.reportError(toUiError(err)),
+  ): Promise<void> {
     // The picker is disabled while recording; the keys 1–4 follow the same lock.
     // A meter that set its own rate stays locked after the recording too: the backend's
     // own refusal says so instead.
@@ -828,21 +917,21 @@
       recording: recording.phase !== "idle" && session.state !== "rate_locked",
     });
     if (change.kind === "refused") {
-      recording.notice = change.notice;
+      if (noticesId !== null) {
+        meters.notices.setRecording(noticesId, { tone: "info", text: change.notice, path: null });
+      }
       return;
     }
     requestedRateSps = sps;
     if (session.state !== "streaming" && session.state !== "rate_locked") return;
     // A failed rate change leaves the stream running; just surface the error.
-    await act()
-      .setRate(sps)
-      .catch((err: unknown) => session.reportError(toUiError(err)));
+    await act().setRate(sps).catch(onFailed);
   }
 
   /** Export button: save dialog, then the session history so far, off the UI thread. */
   function exportHistory(): void {
-    if (!canExport) return;
-    void exportJob.run({
+    if (!canExport || noticesId === null) return;
+    void runExport(noticesId, exportJob, {
       exportSession: (name, onProgress) => act().exportSession(name, onProgress),
       now: () => new Date(),
     });
@@ -875,10 +964,12 @@
 
   /** Record button / Space: start at once, or stop and ask where to save the CSV file. */
   function toggleRecording(): void {
-    void recording.toggle({
-      ...recordingDeps(),
-      saveRecordingAs: (path) => act().saveRecordingAs(path),
-    });
+    void onShownMeter(() =>
+      recording.toggle({
+        ...recordingDeps(),
+        saveRecordingAs: (path) => act().saveRecordingAs(path),
+      }),
+    );
   }
 
   /** R shortcut: zero the session statistics. */
@@ -1081,32 +1172,7 @@
         }}
       >
         <FirmwareNotice warnings={firmwareWarnings} />
-        {#if recording.notice !== null || recording.error !== null}
-          <Notice
-            tone={recording.error ? "error" : "info"}
-            message={recording.error?.message ?? null}
-            onDismiss={() => recording.dismiss()}
-          >
-            {#if recording.notice}<p>{recording.notice}</p>{/if}
-            {#if recording.savedPath !== null}
-              {@render fileActions(recording.savedPath)}
-            {/if}
-          </Notice>
-        {/if}
-        {#if exportJob.path !== null && exportJob.rows !== null}
-          {@const path = exportJob.path}
-          <Notice tone="info" onDismiss={() => exportJob.dismissNotice()}>
-            <p>{exportNoticeText({ rows: exportJob.rows, path })}</p>
-            {@render fileActions(path)}
-          </Notice>
-        {/if}
-        {#if exportJob.error !== null}
-          <Notice
-            tone="error"
-            message={exportJob.error.message}
-            onDismiss={() => (exportJob.error = null)}
-          />
-        {/if}
+        <MeterNoticeList notices={noticesShown} onDismiss={dismissShownNotice} {fileActions} />
       </div>
       <div class="side-panel">
         <StatsPanel

@@ -1318,6 +1318,7 @@ export class MockBackend {
       rate_locked: s.rateLocked,
       session_id: s.sessionId,
       recording: rec ? { rows: rec.rows, elapsed_ms: rec.elapsedMs, path: rec.path } : null,
+      pd_capturing: s.pd.timer !== null,
     };
   }
 
@@ -1688,6 +1689,11 @@ export class MockBackend {
     pd.records = [];
     pd.rows = [];
     return { next_index: pd.base, status_floor_ms: pd.statusMs };
+  }
+
+  /** The page no longer shows the opened capture. Needs no meter, like the backend. */
+  async pdReleaseOpened(): Promise<void> {
+    this.#openedPd = null;
   }
 
   /** There is no save dialog: the proposed name is the path. Resolves to the number of

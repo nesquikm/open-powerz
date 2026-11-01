@@ -38,6 +38,7 @@ Commands:
 | `pdDetails(index: number, opened = false): Promise<PdDetails>` | The raw bytes and field tree of record `index`: of the capture opened from a file when `opened`, of the live capture otherwise. |
 | `pdSave(suggestedName: string): Promise<ExportResult \| null>` | Opens the save dialog and saves the capture so far as a [pdcap file](pdcap.md). Answers `{ path, rows }`, or `null` when the dialog was cancelled. |
 | `pdOpen(): Promise<PdOpened \| null>` | Opens the open dialog and loads a pdcap file. Needs no meter. `null` when cancelled. |
+| `pdReleaseOpened(): Promise<void>` | Lets go of the opened file (Tauri command `pd_release_opened`). The page sends it when the file leaves the view; connecting a meter, reconnects included, never releases one. |
 | `pdImport(): Promise<PdOpened \| null>` | Opens the open dialog and imports a vendor PD log database (`.sqlite`) read-only. Needs no meter. `null` when cancelled. |
 
 Session channel events (`BackendEvent`):
@@ -293,7 +294,7 @@ when none runs.
 | `meterBackend(deviceId): MeterBackend` | The commands of one meter: each invokes its Tauri command with `deviceId`, so an action never reaches another meter. `MeterBackend` holds `deviceId` and the per-meter commands (disconnect, rate, recording, export, stats, history, PD, meter settings, records, trigger). |
 | `currentMeterCommands: MeterCommands` | The same commands without a device id; they act on the backend's current meter, as with one meter. |
 | `connectedMeters(): Promise<string[]>` | The device ids of the running sessions, in connect order (Tauri command `running_meters`). |
-| `attach(onEvent, deviceId?)` | With `deviceId`, picks up that meter's running session after a reload; without it, the current meter's. |
+| `attach(onEvent, deviceId?)` | With `deviceId`, picks up that meter's running session after a reload; without it, the current meter's. The snapshot's `pd_capturing` says whether its PD capture is running. |
 
 Every Tauri command that acts on a meter takes an optional `deviceId`.
 Without it the backend uses its current meter: the most recently connected

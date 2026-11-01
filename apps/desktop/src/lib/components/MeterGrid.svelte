@@ -61,6 +61,8 @@
         session={entry.session}
         recording={recordingOf(entry)}
         exportJob={exportJobOf(entry)}
+        notices={meters.notices.of(entry.listing.id)}
+        onDismissNotice={(notice) => meters.notices.dismiss(entry.listing.id, notice)}
         rateSps={entry.session.rateSps ?? defaultRateSps}
         onSelectRate={(sps) => onSelectRate(entry, sps)}
         onToggleRecording={() => onToggleRecording(entry)}

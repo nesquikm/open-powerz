@@ -171,6 +171,8 @@ pub struct AttachedSession {
     pub session_id: u64,
     /// The open recording, if any.
     pub recording: Option<RecordingSnapshot>,
+    /// The PD capture runs (AC-AXHK2K.7).
+    pub pd_capturing: bool,
 }
 
 /// Opens the pipe for a picked device.
@@ -545,9 +547,6 @@ pub struct DeviceManager<O, C> {
     /// The simulator serials given to second (third, ...) demo meters, by
     /// serial: the demo device id that got each (FR 1HHT03).
     demo_serials: HashMap<String, String>,
-    /// Called each time a session reports `connected`, just before the page
-    /// is told: the moment the page drops a capture opened from a file.
-    on_connected: Arc<dyn Fn() + Send + Sync>,
     /// Where the session events go (AC-4PJRVM.5).
     log: AppLog,
 }
@@ -773,6 +772,9 @@ impl Attacher {
             .unwrap_or_else(PoisonError::into_inner)
             .take()?;
         let info = info?;
+        // Read after the swap: a capture that starts or stops meanwhile also
+        // reaches the new page as an event, which it applies after this answer.
+        let pd_capturing = self.control.pd_capturing().unwrap_or(false);
         Some(AttachedSession {
             device_id,
             model: info.model,
@@ -786,6 +788,7 @@ impl Attacher {
                 elapsed_ms,
                 path,
             }),
+            pd_capturing,
         })
     }
 }
@@ -878,17 +881,6 @@ fn take(
     slot: &Mutex<Option<crate::trigger::TriggerWorker>>,
 ) -> Option<crate::trigger::TriggerWorker> {
     lock(slot).take()
-}
-
-/// Wrap `sink` so `hook` runs when the session reports `connected`, before
-/// the event goes on.
-fn connected_sink(hook: Arc<dyn Fn() + Send + Sync>, mut sink: impl EventSink) -> impl EventSink {
-    move |event: BackendEvent| {
-        if matches!(event, BackendEvent::Status(Status::Connected(_))) {
-            hook();
-        }
-        sink(event);
-    }
 }
 
 /// Wrap `sink` so the session's connect and end, and a recording that fails
@@ -1014,15 +1006,8 @@ where
             flash_targets: Arc::default(),
             flash_run: Arc::default(),
             demo_serials: HashMap::new(),
-            on_connected: Arc::new(|| {}),
             log: AppLog::default(),
         }
-    }
-
-    /// Call `hook` whenever a session (a user connect or an automatic
-    /// reconnect) reports `connected`, before the page is told.
-    pub fn set_on_connected(&mut self, hook: impl Fn() + Send + Sync + 'static) {
-        self.on_connected = Arc::new(hook);
     }
 
     /// Log the events of the sessions opened from now on to `log`.
@@ -1630,14 +1615,11 @@ where
             self.log.clone(),
             device.id.clone(),
             device.model.clone(),
-            connected_sink(
-                Arc::clone(&self.on_connected),
-                trigger_sink(
-                    Arc::clone(&m.trigger),
-                    history_sink(
-                        Arc::clone(&history),
-                        listing_sink(device.clone(), live_sink(Arc::clone(&m.live))),
-                    ),
+            trigger_sink(
+                Arc::clone(&m.trigger),
+                history_sink(
+                    Arc::clone(&history),
+                    listing_sink(device.clone(), live_sink(Arc::clone(&m.live))),
                 ),
             ),
         );

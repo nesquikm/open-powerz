@@ -727,37 +727,6 @@ fn the_back_off_starts_at_2_s_and_doubles() {
 }
 
 #[test]
-fn the_connected_hook_runs_for_a_reconnect_that_connects_only() {
-    let mut rig = Rig::new();
-    let (rx, _) = stream_meter_a(&mut rig, 50);
-    unplug_and_wait(&mut rig, &rx);
-    let connected = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = Arc::clone(&connected);
-    rig.m.set_on_connected(move || {
-        counter.fetch_add(1, Ordering::SeqCst);
-    });
-    list_but_fail_every_open(&mut rig);
-    assert_eq!(tries_while_open_fails(&mut rig, &rx, 1).len(), 1);
-    assert_eq!(
-        connected.load(Ordering::SeqCst),
-        0,
-        "a failed open fired it"
-    );
-
-    rig.plugged.store(true, Ordering::SeqCst);
-    let mut started = false;
-    let back = rig.clock.now_ms();
-    while !started && rig.clock.now_ms() - back <= MOST_BACK_OFF_MS {
-        started = rig.relist();
-        rig.clock.advance(Duration::from_millis(HOTPLUG_PERIOD_MS));
-    }
-    assert!(started);
-    recv_until(&rx, is_samples);
-    assert_eq!(connected.load(Ordering::SeqCst), 1);
-    rig.m.disconnect().unwrap();
-}
-
-#[test]
 fn a_meter_that_opens_again_reconnects_within_the_cap_after_failed_tries() {
     let mut rig = Rig::new();
     let (rx, _) = stream_meter_a(&mut rig, 50);

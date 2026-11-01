@@ -4,6 +4,7 @@
 import { SvelteMap } from "svelte/reactivity";
 import type { BackendEvent, DeviceListing, RecordingSnapshot } from "./backend";
 import type { PdCapture } from "./pdCapture.svelte";
+import { MeterNotices } from "./meterNotices.svelte";
 import { ExportJob, Recording } from "./recording.svelte";
 import { Session } from "./session.svelte";
 
@@ -26,6 +27,9 @@ export interface MeterEntry {
 export class Meters {
   /** Every meter, in the order they were added (or {@link arrange}d). */
   #entries = $state.raw<MeterEntry[]>([]);
+  /** Each meter's notices. They outlive its entry: a meter's last recording still speaks
+   * of its file once the meter has gone. */
+  readonly notices = new MeterNotices();
   /** The PD capture of each meter that left the full view with one running (AC-4PJRVM.4). */
   #parkedPd = new SvelteMap<string, PdCapture>();
   /** The order a reload found the meters in, for the ones still to join (AC-4PJRVM.3). */
@@ -56,7 +60,8 @@ export class Meters {
   add(listing: DeviceListing, session: Session = new Session()): MeterEntry {
     const held = this.get(listing.id);
     if (held) return held;
-    const entry = { listing, session, recording: new Recording(), exportJob: new ExportJob() };
+    const recording = new Recording((n) => this.notices.setRecording(listing.id, n));
+    const entry = { listing, session, recording, exportJob: new ExportJob() };
     this.#entries = this.#arranged([...this.#entries, entry]);
     return entry;
   }

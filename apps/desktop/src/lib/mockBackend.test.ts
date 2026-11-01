@@ -493,6 +493,7 @@ describe("MockBackend attach (AC-VEDDFD.1–AC-VEDDFD.5)", () => {
       rate_locked: false,
       session_id: 1,
       recording: null,
+      pd_capturing: false,
     });
     vi.advanceTimersByTime(500);
     await backend.disconnect();

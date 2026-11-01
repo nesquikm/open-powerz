@@ -132,7 +132,8 @@ export class PdCapture {
           this.#held = null;
           this.#from = 0;
           this.#statusFloor = 0;
-          this.opened = false;
+          // An opened file stays until the page closes it (AC-AXHK2K.5).
+          if (this.opened) break;
           this.store.clear();
           this.emptied++;
           this.version++;

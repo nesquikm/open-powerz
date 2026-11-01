@@ -4,20 +4,22 @@
   import type { Snippet } from "svelte";
   import {
     RATE_OPTIONS,
-    exportNoticeText,
     ratePicker,
     recordButton,
     type ExportJob,
     type Recording,
   } from "../recording.svelte";
   import type { Session } from "../session.svelte";
-  import Notice from "./Notice.svelte";
+  import type { MeterNotice } from "../meterNotices.svelte";
+  import MeterNoticeList from "./MeterNoticeList.svelte";
 
   let {
     label,
     session,
     recording,
     exportJob,
+    notices,
+    onDismissNotice,
     rateSps,
     onSelectRate,
     onToggleRecording,
@@ -29,6 +31,9 @@
     session: Session;
     recording: Recording;
     exportJob: ExportJob;
+    /** This meter's notices. */
+    notices: readonly MeterNotice[];
+    onDismissNotice: (notice: MeterNotice) => void;
     rateSps: number;
     onSelectRate: (sps: number) => void;
     onToggleRecording: () => void;
@@ -87,32 +92,7 @@
   </button>
 </div>
 <!-- The full view's notice stack is hidden with the grid: a tile says it itself. -->
-{#if recording.notice !== null || recording.error !== null}
-  <Notice
-    tone={recording.error ? "error" : "info"}
-    message={recording.error?.message ?? null}
-    onDismiss={() => recording.dismiss()}
-  >
-    {#if recording.notice}<p>{recording.notice}</p>{/if}
-    {#if recording.savedPath !== null}
-      {@render fileActions(recording.savedPath)}
-    {/if}
-  </Notice>
-{/if}
-{#if exportJob.path !== null && exportJob.rows !== null}
-  {@const path = exportJob.path}
-  <Notice tone="info" onDismiss={() => exportJob.dismissNotice()}>
-    <p>{exportNoticeText({ rows: exportJob.rows, path })}</p>
-    {@render fileActions(path)}
-  </Notice>
-{/if}
-{#if exportJob.error !== null}
-  <Notice
-    tone="error"
-    message={exportJob.error.message}
-    onDismiss={() => (exportJob.error = null)}
-  />
-{/if}
+<MeterNoticeList {notices} onDismiss={onDismissNotice} {fileActions} />
 
 <style>
   .controls {

@@ -93,8 +93,8 @@ Defined per FR. Core types: `Frame`/`MainHeader`/`SectionHeader`,
   `meter_settings_write` (the two meter writes, each confirmed in the UI first), and
   for the PD analyzer `pd_start`, `pd_stop`, `pd_details` (a record's raw bytes and field tree,
   on demand, from the live capture or, with `opened`, from an opened file), `pd_save` / `pd_open`
-  (`.pdcap` files) and `pd_import` (read-only vendor PD log) and `pd_clear` (answers the next record index; indices never restart, so rows sent
-  before a clear are recognised and dropped); backend events `Batch`, `Gap`, `Status`
+  (`.pdcap` files) and `pd_import` (read-only vendor PD log), `pd_clear` (answers the next record index; indices never restart, so rows sent
+  before a clear are recognised and dropped) and `pd_release_opened` (lets go of an opened file; only the page releases one, never a connect); backend events `Batch`, `Gap`, `Status`
   (including `waiting`), `Error`, `Recording` (started / progress / stopped / failed),
   `PdState`, `PdRows` (batched, at most 60 a second, decoded in the backend; each row carries
   `session_ms` on the measurement samples' time base) and `PdStatus` (the PD status blocks'

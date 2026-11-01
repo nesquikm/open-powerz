@@ -59,8 +59,8 @@ struct AppState {
     watch: Mutex<Option<WatchHandle>>,
     /// The PD capture opened from a file (FR TGE83E): outside the
     /// per-connection worker, so it opens without a meter and never mixes
-    /// with a live capture.
-    opened_pd: Arc<Mutex<Option<pd_capture::PdCapture>>>,
+    /// with a live capture. Only the page lets it go (AC-AXHK2K.5).
+    opened_pd: Mutex<Option<pd_capture::PdCapture>>,
 }
 
 impl AppState {
@@ -72,25 +72,15 @@ impl AppState {
         ))
     }
 
-    fn with_manager(mut manager: AppManager) -> AppState {
-        // The page drops a capture opened from a file when a session
-        // reports `connected` (a user Connect or an automatic reconnect);
-        // the backend releases its copy at that same moment. A session that
-        // fails to open keeps the file on both sides.
-        let opened_pd: Arc<Mutex<Option<pd_capture::PdCapture>>> = Arc::default();
-        let slot = Arc::clone(&opened_pd);
-        manager.set_on_connected(move || {
-            *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        });
+    fn with_manager(manager: AppManager) -> AppState {
         AppState {
             manager: Mutex::new(manager),
             watch: Mutex::new(None),
-            opened_pd,
+            opened_pd: Mutex::new(None),
         }
     }
 
-    /// Connect to `device_id` at `rate_sps`; events go to `sink`. The
-    /// opened capture is released once the session reports `connected`.
+    /// Connect to `device_id` at `rate_sps`; events go to `sink`.
     #[cfg(test)]
     fn connect_session(
         &self,
@@ -122,8 +112,7 @@ impl AppState {
     }
 
     /// The hotplug watcher's device list; returns whether it started a
-    /// reconnect. The opened capture is released once that session reports
-    /// `connected`, as with Connect.
+    /// reconnect.
     fn devices_changed(&self, devices: &[DeviceListing]) -> bool {
         self.manager().devices_changed(devices)
     }
@@ -132,6 +121,12 @@ impl AppState {
         self.opened_pd
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Let go of the opened capture, if there is one: the page no longer
+    /// shows it (AC-AXHK2K.5).
+    fn release_opened_pd(&self) {
+        *self.opened_pd() = None;
     }
 
     /// Put `pd`, opened from the file at `path`, in the opened-capture slot
@@ -715,6 +710,18 @@ async fn pd_clear(
     .await
 }
 
+/// The page no longer shows the capture opened from a file: release it
+/// (AC-AXHK2K.5). Needs no meter, and with no opened capture changes nothing.
+#[tauri::command]
+async fn pd_release_opened(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        state.release_opened_pd();
+        Ok(())
+    })
+    .await
+}
+
 /// A PD capture opened from a pdcap file (FR TGE83E): its rows and status
 /// samples, numbered from 0.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -1053,10 +1060,7 @@ async fn start_recording(
             manager.recording_start_for(&manager.target(device_id.as_deref()))?
         };
         let path = recording::default_recording_path(&recordings_dir(&app)?, &suggested_name)?;
-        if let Err(refused) = start.record_to(&path) {
-            let _ = std::fs::remove_file(&path);
-            return Err(refused);
-        }
+        recording::start_at(&path, |path| start.record_to(path))?;
         Ok(path.to_string_lossy().into_owned())
     })
     .await
@@ -1350,6 +1354,7 @@ pub fn run() {
             pd_stop,
             pd_details,
             pd_clear,
+            pd_release_opened,
             meter_settings,
             meter_settings_write,
             records_list,
@@ -1528,29 +1533,100 @@ mod tests {
         }
     }
 
+    /// A sink that counts the sessions that reported `connected`.
+    fn counting_connects(
+        connects: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl worker::EventSink + use<> {
+        let connects = Arc::clone(connects);
+        move |event: BackendEvent| {
+            if matches!(event, BackendEvent::Status(worker::Status::Connected(_))) {
+                connects.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
     #[test]
-    fn connecting_a_meter_releases_the_opened_capture_once_it_reports_connected() {
-        // No USB discovery: only the demo device is listed.
+    fn connecting_a_meter_keeps_the_opened_capture() {
+        // AC-AXHK2K.5: only the page's command lets it go. No USB discovery:
+        // only the demo devices are listed.
         let state = AppState::with_manager(DeviceManager::new(
             || Ok(Vec::new()),
             AppOpener,
             SystemClock,
         ));
         *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         state
             .connect_session(
                 "demo:idle",
                 1000,
-                |_: BackendEvent| {},
+                counting_connects(&connects),
                 Arc::new(AtomicBool::new(false)),
             )
             .expect("the demo device connects");
-        wait_for("the opened capture was released", || {
-            state.opened_pd().is_none()
+        wait_for("the session reported connected", || {
+            connects.load(Ordering::SeqCst) == 1
         });
+        assert!(
+            state.opened_pd().is_some(),
+            "connecting a meter released the opened capture"
+        );
         if let Ok(session) = state.manager().take_session() {
             session.disconnect();
         }
+    }
+
+    #[test]
+    fn connecting_a_second_meter_keeps_the_opened_capture() {
+        let state = AppState::with_manager(DeviceManager::new(
+            || Ok(Vec::new()),
+            AppOpener,
+            SystemClock,
+        ));
+        let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .connect_session(
+                "demo:idle",
+                1000,
+                counting_connects(&connects),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the first demo device connects");
+        wait_for("the first session reported connected", || {
+            connects.load(Ordering::SeqCst) == 1
+        });
+        // The file opens while the first meter runs; the second one joins.
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        state
+            .connect_session(
+                "demo:load-5v-1a",
+                1000,
+                counting_connects(&connects),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the second demo device connects");
+        wait_for("the second session reported connected", || {
+            connects.load(Ordering::SeqCst) == 2
+        });
+        assert!(
+            state.opened_pd().is_some(),
+            "a second meter released the opened capture"
+        );
+        let ids = state.manager().connected_ids();
+        for id in ids {
+            let _ = state.manager().disconnect_for(&id);
+        }
+    }
+
+    #[test]
+    fn the_page_releases_the_opened_capture() {
+        let state = AppState::new();
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        state.release_opened_pd();
+        assert!(state.opened_pd().is_none(), "it stayed opened");
+        // Nothing opened: nothing to do, no error.
+        state.release_opened_pd();
+        assert!(state.opened_pd().is_none());
     }
 
     #[test]
@@ -1571,7 +1647,7 @@ mod tests {
         assert!(state.opened_pd().is_some(), "a refused Connect dropped it");
     }
 
-    // ---- AC-4PJRVK.7: an automatic reconnect releases the opened capture ----
+    // ---- AC-AXHK2K.5: an automatic reconnect keeps the opened capture ----
 
     const SERIAL: &str = "SERIAL-RECONNECT";
 

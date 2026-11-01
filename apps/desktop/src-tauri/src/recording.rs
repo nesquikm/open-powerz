@@ -84,6 +84,23 @@ pub fn default_recording_path(dir: &Path, name: &str) -> Result<PathBuf, UiError
     }
 }
 
+/// Run `start` on the file claimed at `path`, and clear up after a refusal. A
+/// timed-out answer says nothing about the start: the worker may still apply
+/// it and write to the file, so that file stays. Any other error is a definite
+/// refusal, which leaves an empty placeholder nobody will use.
+pub fn start_at(
+    path: &Path,
+    start: impl FnOnce(&Path) -> Result<(), UiError>,
+) -> Result<(), UiError> {
+    let answer = start(path);
+    if let Err(refused) = &answer
+        && refused.kind != ErrorKind::Timeout
+    {
+        let _ = fs::remove_file(path);
+    }
+    answer
+}
+
 /// Move the finished recording `from` to `to`, replacing a file there. On a
 /// failure the recording stays at `from`.
 pub fn save_recording_as(from: &Path, to: &Path) -> Result<(), UiError> {

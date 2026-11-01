@@ -41,6 +41,7 @@ No saved-file notice appears, and the backend releases the opened file while the
 - AC-AXHK2K.6: The mock backend matches: `#openedPd` follows the same rule, and a test pins it.
 - AC-AXHK2K.7: After a page reload, a tile meter's PD capture state is read from the backend, not assumed idle.
 - AC-AXHK2K.8: A recording start that times out keeps its file, because the worker may still apply the start and write to it. A definite refusal still removes the empty placeholder.
+- AC-AXHK2K.9: A recording that starts after its start timed out shows as recording and can be stopped, and the timeout's error goes away.
 
 ## Technical Design
 
@@ -56,3 +57,10 @@ Vitest for the notice store and mock rule, Rust unit tests for the command, Play
 ## Notes
 
 Source: `m7-extra-followups.md` and the M7a notes on parked meters.
+
+## Implementation notes
+
+- A page reload leaves an opened file held in the backend until the next open or clear. The page never reads it.
+- A start that times out and is later refused leaves an empty file behind.
+- A meter's notices stay in the page until dismissed or the app closes, and only a tile with the full view auto-dismisses info notices. A removed tile's last notice moves to the meter shown, which it does not name.
+- `pd_capturing` reads as false if the worker does not answer right after the handover.

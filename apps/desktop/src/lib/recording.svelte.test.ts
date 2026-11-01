@@ -217,6 +217,38 @@ describe("Recording.stop (AC-4PJRVJ.2)", () => {
   });
 });
 
+describe("A start that timed out and started anyway (AC-AXHK2K.9)", () => {
+  it("shows as recording, with the error gone, and can be stopped", async () => {
+    const r = new Recording();
+    const timeout = { kind: "timeout", message: "The meter is busy. Try again.", hint: null };
+    const d = deps({ startRecording: vi.fn(() => Promise.reject(timeout)) });
+    await r.toggle(d);
+    expect(r.phase).toBe("idle");
+    expect(r.error?.kind).toBe("timeout");
+
+    r.handleEvent({ state: "started" });
+
+    expect(r.phase).toBe("recording");
+    expect(r.error).toBeNull();
+    await r.stop(d);
+    expect(d.stopRecording).toHaveBeenCalledTimes(1);
+  });
+
+  it("changes nothing for the usual start, whose answer is on its way", async () => {
+    const r = new Recording();
+    let started: (path: string | null) => void = () => {};
+    const d = deps({
+      startRecording: vi.fn(() => new Promise<string | null>((res) => (started = res))),
+    });
+    const starting = r.toggle(d);
+    r.handleEvent({ state: "started" });
+    expect(r.phase).toBe("starting");
+    started("/tmp/rec.csv");
+    await starting;
+    expect(r.path).toBe("/tmp/rec.csv");
+  });
+});
+
 describe("Recording.stop while it cannot stop yet (AC-AXHK2F.7)", () => {
   it("answers false while a start is in flight, and the start goes on", async () => {
     const r = new Recording();
