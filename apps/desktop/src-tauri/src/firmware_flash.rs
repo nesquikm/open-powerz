@@ -19,6 +19,7 @@ use powerz_protocol::transport::bulk::{BulkFlashOpener, BulkTransport};
 use powerz_sim::SimMeter;
 use serde::Serialize;
 
+use crate::app_log::SessionLog;
 use crate::ui_error::{ErrorKind, UiError};
 
 /// One stage of the update, as the UI receives it.
@@ -70,6 +71,21 @@ impl From<FlashProgress> for FlashStage {
                 to: to.name(),
                 reply: reply.to_string(),
             },
+        }
+    }
+}
+
+impl FlashStage {
+    /// The stage's name in the log; a replug prompt is not a stage.
+    fn log_name(&self) -> Option<&'static str> {
+        match self {
+            FlashStage::Switching => Some("switching"),
+            FlashStage::Erasing => Some("erasing"),
+            FlashStage::Writing { .. } => Some("writing"),
+            FlashStage::Verifying => Some("verifying"),
+            FlashStage::Finished => Some("finished"),
+            FlashStage::Returning => Some("returning"),
+            FlashStage::Replug { .. } => None,
         }
     }
 }
@@ -237,22 +253,61 @@ pub fn flash_file<O: FlashOpener, C: Clock>(
     stop: &AtomicBool,
     progress: &mut dyn FnMut(FlashStage),
 ) -> Result<FlashDone, UiError> {
-    let bytes = read_container_file(path).map_err(|e| UiError::usage(e.to_string()))?;
-    let container = confirmed_container(path, &bytes, confirmation)?;
+    let log = SessionLog::default();
+    flash_file_logged(path, confirmation, opener, clock, stop, &log, progress)
+}
+
+/// [`flash_file`] with the update in `log` (AC-AXHK2G.3): a line at the
+/// start, one per stage entered, and one for how it ended.
+pub fn flash_file_logged<O: FlashOpener, C: Clock>(
+    path: &Path,
+    confirmation: &str,
+    opener: &mut O,
+    clock: C,
+    stop: &AtomicBool,
+    log: &SessionLog,
+    progress: &mut dyn FnMut(FlashStage),
+) -> Result<FlashDone, UiError> {
+    log.firmware("start");
+    let refused = |error: UiError| {
+        log.firmware_failed(&error);
+        error
+    };
+    let bytes = read_container_file(path).map_err(|e| refused(UiError::usage(e.to_string())))?;
+    let container = confirmed_container(path, &bytes, confirmation).map_err(refused)?;
     opener.arm(FlashAck::acknowledge());
+    let mut entered = None;
     let outcome = flash(
         FlashAck::acknowledge(),
         &container,
         opener,
         clock,
         stop,
-        &mut |p| progress(p.into()),
-    )
-    .map_err(|e| flash_error(&e))?;
-    Ok(match outcome {
-        FlashOutcome::Verified { version } => FlashDone::Verified { version },
-        FlashOutcome::PowerCycleNeeded => FlashDone::PowerCycleNeeded,
-    })
+        &mut |p| {
+            let stage = FlashStage::from(p);
+            if let Some(name) = stage.log_name()
+                && entered != Some(name)
+            {
+                entered = Some(name);
+                log.firmware(&format!("stage {name}"));
+            }
+            progress(stage);
+        },
+    );
+    match outcome {
+        Ok(outcome) => {
+            log.firmware("finished");
+            Ok(match outcome {
+                FlashOutcome::Verified { version } => FlashDone::Verified { version },
+                FlashOutcome::PowerCycleNeeded => FlashDone::PowerCycleNeeded,
+            })
+        }
+        Err(e @ FlashError::Interrupted { .. }) => {
+            log.firmware("cancelled");
+            Err(flash_error(&e))
+        }
+        Err(e) => Err(refused(flash_error(&e))),
+    }
 }
 
 /// A failed update for the UI: what failed, and how to recover.

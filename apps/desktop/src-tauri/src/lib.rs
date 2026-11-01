@@ -629,7 +629,7 @@ async fn meter_settings_write(
     changes: std::collections::BTreeMap<String, i32>,
 ) -> Result<worker::MeterSettingsView, UiError> {
     let state = Arc::clone(&state);
-    blocking(move || control(&state, device_id.as_deref())?.write_settings(&changes)).await
+    blocking(move || logged_control(&state, device_id.as_deref())?.write_settings(&changes)).await
 }
 
 /// List the connected meter's offline records (GET_DATA 0x200 only) for
@@ -669,8 +669,9 @@ async fn records_delete(
 ) -> Result<worker::RecordDeleteView, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let dir = backup_dir(&app)?;
-        control(&state, device_id.as_deref())?.delete_records(index, &confirm, &dir)
+        let device = device_id.as_deref();
+        let dir = backup_dir(&app).inspect_err(|error| log_failure(&state, device, error))?;
+        logged_control(&state, device)?.delete_records(index, &confirm, &dir)
     })
     .await
 }
@@ -852,6 +853,7 @@ async fn firmware_flash(
         firmware_flash::check_confirmation(Path::new(&path), &confirmation)?;
         let lease = state.manager().begin_flash(&device_id, &agreed)?;
         let device = lease.device().clone();
+        let log = lease.session_log();
         let control = Arc::clone(lease.control());
         let stop = control.stop();
         let observer = Arc::clone(&control);
@@ -877,23 +879,25 @@ async fn firmware_flash(
                     powerz_sim::Persona::Bulk,
                     scenario,
                 ));
-                firmware_flash::flash_file(
+                firmware_flash::flash_file_logged(
                     path,
                     &confirmation,
                     &mut meter,
                     SystemClock,
                     stop,
+                    &log,
                     &mut progress,
                 )
             }
             None => {
                 let mut opener = firmware_flash::UsbFlashOpener::new(device.serial.clone());
-                firmware_flash::flash_file(
+                firmware_flash::flash_file_logged(
                     path,
                     &confirmation,
                     &mut opener,
                     SystemClock,
                     stop,
+                    &log,
                     &mut progress,
                 )
             }
@@ -1112,6 +1116,25 @@ fn session_store(
 fn control(state: &AppState, device_id: Option<&str>) -> Result<worker::WorkerControl, UiError> {
     let manager = state.manager();
     manager.control_for(&manager.target(device_id))
+}
+
+/// Add the line for `error` of a command on meter `device_id` (the current
+/// session's without one) that failed before reaching the worker (FR AXHK2G).
+fn log_failure(state: &AppState, device_id: Option<&str>, error: &UiError) {
+    let log = {
+        let manager = state.manager();
+        manager.session_log_for(&manager.target(device_id))
+    };
+    log.failure(error);
+}
+
+/// [`control`] for a command whose failures the log records; a refusal adds
+/// its line here, the worker never hears of it.
+fn logged_control(
+    state: &AppState,
+    device_id: Option<&str>,
+) -> Result<worker::WorkerControl, UiError> {
+    control(state, device_id).inspect_err(|error| log_failure(state, device_id, error))
 }
 
 /// The trigger handle of meter `device_id` (the current session's without

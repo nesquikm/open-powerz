@@ -22,10 +22,10 @@ use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{PdScenario, Persona, Scenario, SimDevice};
 use serde::{Deserialize, Serialize};
 
-use crate::app_log::AppLog;
+use crate::app_log::{AppLog, SessionLog};
 use crate::firmware_flash::{FlashControl, FlashStage};
 use crate::history::{HistoryGap, Series, SeriesBuckets};
-use crate::recording::{ExportProgress, RecordingSummary};
+use crate::recording::{ExportProgress, RecordingEvent, RecordingSummary};
 use crate::stats::StatsSnapshot;
 use crate::store::SessionStore;
 use crate::ui_error::{ErrorKind, UiError};
@@ -584,6 +584,7 @@ pub struct FlashLease {
     targets: Arc<Mutex<Vec<String>>>,
     control: Arc<FlashControl>,
     run: Arc<Mutex<Option<FlashRun>>>,
+    log: AppLog,
 }
 
 /// The running update: its meter and its control.
@@ -637,6 +638,12 @@ impl FlashLease {
     /// The update's stop request and stage.
     pub fn control(&self) -> &Arc<FlashControl> {
         &self.control
+    }
+
+    /// Where the update is logged, naming the meter it was given.
+    pub fn session_log(&self) -> SessionLog {
+        let device = &self.device;
+        SessionLog::new(self.log.clone(), device.id.clone(), device.model.clone())
     }
 }
 
@@ -876,23 +883,28 @@ fn connected_sink(hook: Arc<dyn Fn() + Send + Sync>, mut sink: impl EventSink) -
     }
 }
 
-/// Wrap `sink` so the session's connect and end reach `log` (AC-4PJRVM.5).
-/// `id` and `model` come from the listing; the serial stays out of the log.
+/// Wrap `sink` so the session's connect and end, and a recording that fails
+/// (FR AXHK2G), reach `log` (AC-4PJRVM.5). `id` and `model` come from the
+/// listing; the serial stays out of the log.
 fn log_sink(log: AppLog, id: String, model: String, mut sink: impl EventSink) -> impl EventSink {
+    let session = SessionLog::new(log, id, model);
     let mut connected = false;
     move |event: BackendEvent| {
         match &event {
             BackendEvent::Status(Status::Connected(_)) => {
                 connected = true;
-                log.line(&format!("connected {id} ({model})"));
+                session.event("connected");
             }
-            BackendEvent::Status(Status::Disconnected { error }) => log.line(&match error {
-                None => format!("disconnected {id}"),
+            BackendEvent::Status(Status::Disconnected { error }) => match error {
+                None => session.event("disconnected"),
                 Some(e) if connected && matches!(e.kind, ErrorKind::Disconnected) => {
-                    format!("unplugged {id}")
+                    session.event("unplugged");
                 }
-                Some(e) => format!("error {id}: {}", e.message),
-            }),
+                Some(e) => session.failure(e),
+            },
+            BackendEvent::Recording(RecordingEvent::Failed { error, .. }) => {
+                session.failure(error);
+            }
             _ => {}
         }
         sink(event);
@@ -1218,6 +1230,7 @@ where
             targets: Arc::clone(&self.flash_targets),
             control,
             run: Arc::clone(&self.flash_run),
+            log: self.log.clone(),
         })
     }
 
@@ -1349,7 +1362,15 @@ where
                 meter.watch_closing(&old);
                 old.retire();
             }
-            self.log.line(&format!("replug {id} at {}", device.id));
+            // The id the meter last had, which is not `id` after an earlier
+            // replug moved it.
+            let old_id = &meter.device.id;
+            let moved = if *old_id == device.id {
+                old_id.clone()
+            } else {
+                format!("{old_id} to {}", device.id)
+            };
+            self.log.line(&format!("replug {moved} ({})", device.model));
             meter.device = device;
             meter.back_off.tried(now_ms);
             self.open_session(index, rate);
@@ -1591,9 +1612,12 @@ where
             source,
             ..WorkerConfig::new(rate, session_id)
         };
+        // The id the meter has now: a replug can move it off `m.id`.
+        let session_log =
+            SessionLog::new(self.log.clone(), device.id.clone(), device.model.clone());
         let sink = log_sink(
             self.log.clone(),
-            m.id.clone(),
+            device.id.clone(),
             device.model.clone(),
             connected_sink(
                 Arc::clone(&self.on_connected),
@@ -1626,6 +1650,7 @@ where
             sink,
             Arc::clone(&m.stop),
             Arc::new(move || pdm_holds.load(Ordering::SeqCst) > 0),
+            session_log,
         ));
     }
 
@@ -1668,8 +1693,19 @@ where
         self.rate_control_for(&self.current_id(), rate_sps)
     }
 
-    /// [`DeviceManager::rate_control`] of meter `id`.
+    /// [`DeviceManager::rate_control`] of meter `id`. A refusal adds its line
+    /// to the log (FR AXHK2G): the worker never hears of it.
     pub fn rate_control_for(
+        &self,
+        id: &str,
+        rate_sps: u32,
+    ) -> Result<(worker::WorkerControl, Rate), UiError> {
+        self.checked_rate_control(id, rate_sps)
+            .inspect_err(|error| self.session_log_for(id).failure(error))
+    }
+
+    /// The control and rate of a change meter `id` may make now.
+    fn checked_rate_control(
         &self,
         id: &str,
         rate_sps: u32,
@@ -1697,6 +1733,16 @@ where
             .and_then(Meter::running_worker)
             .map(WorkerHandle::control)
             .ok_or_else(|| UiError::usage(NOT_CONNECTED))
+    }
+
+    /// The log as meter `id`'s session writes to it, for what fails before a
+    /// request reaches its worker (FR AXHK2G). It names the meter by the id
+    /// it has now; one the manager never saw goes by the id it was asked for.
+    pub fn session_log_for(&self, id: &str) -> SessionLog {
+        let (id, model) = self.meter(id).map_or((id, "unknown model"), |m| {
+            (m.device.id.as_str(), m.device.model.as_str())
+        });
+        SessionLog::new(self.log.clone(), id.to_owned(), model.to_owned())
     }
 
     /// Register a recording start on meter `id`, so a caller can wait for the
@@ -2285,6 +2331,9 @@ mod tests {
         pulled: Arc<Mutex<Vec<String>>>,
         sent: Arc<Mutex<Vec<u8>>>,
         stall: Arc<Stall>,
+        /// How many of the next queue polls the meter refuses, still on the
+        /// line.
+        refused_polls: Arc<AtomicUsize>,
     }
 
     impl FakeMeter {
@@ -2319,6 +2368,17 @@ mod tests {
             if let Some(first) = request.first() {
                 self.sent.lock().unwrap().push(first & 0x7F);
             }
+            let queue_poll = powerz_protocol::frame::get_data_mask(request).is_some_and(|m| {
+                m.bits() & powerz_protocol::frame::Attribute::ADC_QUEUE.bits() != 0
+            });
+            if queue_poll
+                && self
+                    .refused_polls
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+            {
+                return Ok(vec![0x06, request[1], 0x00, 0x00]);
+            }
             self.sim.transact(request, timeout)
         }
 
@@ -2333,6 +2393,7 @@ mod tests {
         pulled: Arc<Mutex<Vec<String>>>,
         sent: Arc<Mutex<Vec<u8>>>,
         stall: Arc<Stall>,
+        refused_polls: Arc<AtomicUsize>,
     }
 
     impl Opener for FakeOpener {
@@ -2344,6 +2405,7 @@ mod tests {
                 pulled: Arc::clone(&self.pulled),
                 sent: Arc::clone(&self.sent),
                 stall: Arc::clone(&self.stall),
+                refused_polls: Arc::clone(&self.refused_polls),
             })
         }
     }
@@ -2354,6 +2416,7 @@ mod tests {
         pulled: Arc<Mutex<Vec<String>>>,
         sent: Arc<Mutex<Vec<u8>>>,
         stall: Arc<Stall>,
+        refused_polls: Arc<AtomicUsize>,
         files: Vec<std::path::PathBuf>,
     }
 
@@ -2363,6 +2426,7 @@ mod tests {
             let pulled: Arc<Mutex<Vec<String>>> = Arc::default();
             let sent: Arc<Mutex<Vec<u8>>> = Arc::default();
             let stall: Arc<Stall> = Arc::default();
+            let refused_polls: Arc<AtomicUsize> = Arc::default();
             let m = DeviceManager::new(
                 move || Ok(entries.clone()),
                 FakeOpener {
@@ -2370,6 +2434,7 @@ mod tests {
                     pulled: Arc::clone(&pulled),
                     sent: Arc::clone(&sent),
                     stall: Arc::clone(&stall),
+                    refused_polls: Arc::clone(&refused_polls),
                 },
                 clock,
             );
@@ -2378,6 +2443,7 @@ mod tests {
                 pulled,
                 sent,
                 stall,
+                refused_polls,
                 files: Vec::new(),
             }
         }
@@ -2561,6 +2627,101 @@ mod tests {
                 return;
             }
         }
+    }
+
+    // ---- FR AXHK2G: the app log records errors and firmware updates ----
+
+    /// A fresh `app.log` path of its own for test `tag`.
+    fn fresh_log(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("open-powerz-axhk2g-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the log folder");
+        dir.join("app.log")
+    }
+
+    fn log_lines(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    /// Regression (AC-AXHK2G.1): a meter still on the line refuses a poll
+    /// while PDM is open. The session goes on, and until this fix the error
+    /// was dropped without a trace.
+    #[test]
+    fn a_stream_error_that_keeps_the_session_reaches_the_log() {
+        let path = fresh_log("stream-error");
+        let mut rig = Rig::new(vec![entry(4, Some("SERIAL-AXHK2G"))]);
+        rig.m
+            .set_app_log(AppLog::open(&path).expect("open app.log"));
+        let rx = rig.stream(AT_4);
+        rig.open_trigger(AT_4);
+
+        rig.refused_polls.store(1, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let is_error = |l: &String| l.contains("protocol");
+        while !log_lines(&path).iter().any(is_error) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stream error never reached the log ({} polls still to refuse): {:#?}",
+                rig.refused_polls.load(Ordering::SeqCst),
+                log_lines(&path)
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            rig.refused_polls.load(Ordering::SeqCst),
+            0,
+            "the meter refused the poll"
+        );
+        let found: Vec<String> = log_lines(&path).into_iter().filter(is_error).collect();
+        assert_eq!(found.len(), 1, "one line for one error: {found:#?}");
+        assert!(found[0].contains(AT_4), "names the meter: {}", found[0]);
+        assert!(found[0].contains("KM003C"), "names the model: {}", found[0]);
+
+        // The session is still there, and still streaming.
+        assert!(rig.m.connected_ids().iter().any(|id| id == AT_4));
+        while rx.try_recv().is_ok() {}
+        wait_for(&rx, |e| {
+            assert!(
+                !matches!(e, BackendEvent::Status(Status::Disconnected { .. })),
+                "the error ended the session"
+            );
+            matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty())
+        });
+    }
+
+    /// AC-AXHK2G.2: a recording that fails ends through the sink, however it
+    /// failed (a write, the last flush, the end of the session).
+    #[test]
+    fn a_failed_recording_write_adds_one_line_naming_the_meter_and_the_kind() {
+        let path = fresh_log("recording");
+        let log = AppLog::open(&path).expect("open app.log");
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let keep = Arc::clone(&got);
+        let mut sink = log_sink(log, AT_4.to_owned(), "KM003C".to_owned(), move |e| {
+            keep.lock().unwrap().push(e);
+        });
+        sink(BackendEvent::Recording(
+            crate::recording::RecordingEvent::Failed {
+                rows: 7,
+                error: crate::recording::io_error(&std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                )),
+            },
+        ));
+        let lines = log_lines(&path);
+        assert_eq!(lines.len(), 1, "one line for one failure: {lines:#?}");
+        assert!(lines[0].contains(AT_4), "names the meter: {}", lines[0]);
+        assert!(lines[0].contains("KM003C"), "names the model: {}", lines[0]);
+        assert!(
+            lines[0].contains("permission_denied"),
+            "names the kind: {}",
+            lines[0]
+        );
+        assert_eq!(got.lock().unwrap().len(), 1, "the page still hears of it");
     }
 
     /// The error of an update start that must be refused.

@@ -194,7 +194,11 @@ A page that attaches to a running meter gets the open file's path in
 a firmware update opens no dialog.
 
 The app also keeps `app.log` in the OS log folder: one UTC line per connect, session
-end and replug, naming the device id and model, never the serial or UID.
+end, replug, failed rate change, settings write, record delete or recording write, stream
+error that keeps the session, and firmware update start, stage and outcome. Each line names
+the device id and model, never the serial or UID. A run of the same stream failure logs one
+line. A failed record delete or firmware update logs only the error kind. A log over 5 MB
+moves to `app.log.1` when the app starts, replacing any earlier one.
 
 ## Meter settings
 

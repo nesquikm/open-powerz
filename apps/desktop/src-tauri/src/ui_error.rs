@@ -310,7 +310,7 @@ mod tests {
     use powerz_protocol::session;
     use powerz_protocol::transport::{self, permission_error};
 
-    /// No raw Rust error text: no debug output, paths or OS error codes.
+    /// No raw Rust error text: no debug output or OS error codes.
     fn assert_plain(e: &UiError) {
         assert!(!e.message.trim().is_empty(), "empty message");
         for raw in [

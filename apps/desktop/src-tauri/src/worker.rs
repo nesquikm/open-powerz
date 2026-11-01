@@ -23,6 +23,7 @@ use powerz_protocol::session::{
 use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
 use serde::{Deserialize, Serialize};
 
+use crate::app_log::SessionLog;
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Series, SeriesBuckets};
 use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
@@ -584,6 +585,14 @@ pub struct Worker<T: Transport, C: Clock> {
     poll_holds: u32,
     /// Whether a PDM session is open on this meter, when the owner tells.
     pdm_open: Option<PdmOpen>,
+    /// Where errors that leave the session running are logged (FR AXHK2G).
+    log: SessionLog,
+    /// The last queue poll failed, and its error is already in the log.
+    queue_faulted: bool,
+    /// The last PD poll failed, and its error is already in the log.
+    pd_faulted: bool,
+    /// The last snapshot failed, and its error is already in the log.
+    snapshot_faulted: bool,
 }
 
 /// A running PD sniffer.
@@ -676,6 +685,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             pd_meter: (info.model.clone(), info.firmware_version.clone()),
             poll_holds: 0,
             pdm_open: None,
+            log: SessionLog::default(),
+            queue_faulted: false,
+            pd_faulted: false,
+            snapshot_faulted: false,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -706,6 +719,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             return Ok(());
         }
         let adc = blocked(self.meter.as_ref(), || session.read_adc())?;
+        self.snapshot_faulted = false;
         self.temp_c = adc.temp_c();
         if let Some(temp) = self.temp_c {
             let now = self.clock.now_ms();
@@ -1072,9 +1086,13 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 let offset = blocked(self.meter.as_ref(), || store.offset_ms());
                 self.pd.set_session_offset(offset);
                 self.pd.push(&poll.records, poll.status);
+                self.pd_faulted = false;
                 Step::Continue
             }
-            Err(e) => self.poll_failed(&e),
+            Err(e) => {
+                let repeat = std::mem::replace(&mut self.pd_faulted, true);
+                self.poll_failed(&e, repeat)
+            }
         }
     }
 
@@ -1082,9 +1100,15 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// open PDM session alone: ending the stream would close it, and the
     /// reconnect's bulk CONNECT would silence it [device]. The next polls
     /// try again; once PDM is closed a fault that stays ends the session.
-    fn poll_failed(&mut self, e: &session::Error) -> Step {
+    /// The log gets the first failure of a run, not one line per poll
+    /// (`repeat`), and is written off this thread: the polls never wait on
+    /// the disk (FR X2SPDW).
+    fn poll_failed(&mut self, e: &session::Error, repeat: bool) -> Step {
         let pdm_open = self.pdm_open.as_ref();
         if !is_device_loss(e) && blocked(self.meter.as_ref(), || pdm_open.is_some_and(|f| f())) {
+            if !repeat {
+                self.log_failure(session_error(e));
+            }
             return Step::Continue;
         }
         self.lose_session(e)
@@ -1428,12 +1452,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 self.queue_records(&poll);
                 // A failed snapshot only costs the temperature reading; a
                 // dead pipe fails the next queue poll and ends the session.
-                if self.snapshot_if_due().is_err() {
+                if let Err(e) = self.snapshot_if_due() {
                     self.temp_c = None;
+                    let repeat = std::mem::replace(&mut self.snapshot_faulted, true);
+                    if !repeat && !is_device_loss(&e) {
+                        self.log_failure(session_error(&e));
+                    }
                 }
+                self.queue_faulted = false;
                 Step::Continue
             }
-            Err(e) => self.poll_failed(&e),
+            Err(e) => {
+                let repeat = std::mem::replace(&mut self.queue_faulted, true);
+                self.poll_failed(&e, repeat)
+            }
         }
     }
 
@@ -1468,6 +1500,21 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Ok(())
     }
 
+    /// Add the line for an error that leaves the session running, off this
+    /// thread: the polls never wait on the disk (FR X2SPDW). The line queues
+    /// behind the sample batches, and its timestamp is when it is written.
+    fn log_failure(&mut self, error: UiError) {
+        let log = self.log.clone();
+        (self.in_order)(Box::new(move || log.failure(&error)));
+    }
+
+    /// [`log_failure`](Self::log_failure) for a request's answer, if it failed.
+    fn log_if_failed<R>(&mut self, answer: &Result<R, UiError>) {
+        if let Err(error) = answer {
+            self.log_failure(error.clone());
+        }
+    }
+
     /// Stop the queue and close the pipe.
     pub fn stop(&mut self) {
         // The sniffer stops before the queue and the pipe close.
@@ -1494,6 +1541,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             }
             Command::RecordTo(path, hold, reply) => {
                 let started = self.record_to(&path);
+                self.log_if_failed(&started);
                 // Before the answer: whoever hears it finds the start settled.
                 drop(hold);
                 let _ = reply.send(started);
@@ -1828,6 +1876,7 @@ const RECORD_DELETE_TIMEOUT: Duration = Duration::from_secs(300);
 pub struct WorkerControl {
     commands: mpsc::Sender<Command>,
     store: SessionStore,
+    log: SessionLog,
 }
 
 /// The answer when the worker is gone.
@@ -1866,10 +1915,17 @@ impl WorkerControl {
         })
     }
 
+    /// Add the line for `answer`, if it failed (FR AXHK2G). Here and not on
+    /// the worker: only the caller knows every way a request fails, and one
+    /// request reads as one error, the one its caller got.
+    fn logged<R>(&self, answer: Result<R, UiError>) -> Result<R, UiError> {
+        answer.inspect_err(|error| self.log.failure(error))
+    }
+
     /// Restart the running queue at `rate` and wait for the worker's answer.
     pub fn set_rate(&self, rate: Rate) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(Command::SetRate(rate, reply), &answer)?
+        self.logged(self.ask(Command::SetRate(rate, reply), &answer).flatten())
     }
 
     /// Record to a new file at `path`. The worker checks first and creates
@@ -1980,7 +2036,8 @@ impl WorkerControl {
         changes: &BTreeMap<String, i32>,
     ) -> Result<MeterSettingsView, UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(Command::WriteSettings(changes.clone(), reply), &answer)?
+        let command = Command::WriteSettings(changes.clone(), reply);
+        self.logged(self.ask(command, &answer).flatten())
     }
 
     /// List the meter's offline records.
@@ -2011,11 +2068,14 @@ impl WorkerControl {
         backup_dir: &Path,
     ) -> Result<RecordDeleteView, UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask_within(
-            Command::DeleteRecords(target, confirm.to_owned(), backup_dir.to_owned(), reply),
-            &answer,
-            RECORD_DELETE_TIMEOUT,
-        )?
+        let command =
+            Command::DeleteRecords(target, confirm.to_owned(), backup_dir.to_owned(), reply);
+        let answer = self.ask_within(command, &answer, RECORD_DELETE_TIMEOUT);
+        // The caller gets the full message, backup folder included; the log
+        // gets the kind.
+        answer
+            .flatten()
+            .inspect_err(|error| self.log.failure_kind(error))
     }
 
     /// Save the PD capture to `path` as a pdcap file; returns the number of
@@ -2102,6 +2162,8 @@ pub struct WorkerHandle {
     thread: Option<JoinHandle<()>>,
     /// Gone once the worker thread has let go of the meter.
     thread_alive: Weak<()>,
+    /// Where the session's controls log the requests that fail.
+    log: SessionLog,
 }
 
 impl WorkerHandle {
@@ -2141,6 +2203,7 @@ impl WorkerHandle {
         WorkerControl {
             commands: self.commands.clone(),
             store: self.store.clone(),
+            log: self.log.clone(),
         }
     }
 
@@ -2241,12 +2304,14 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, None, None)
+    let log = SessionLog::default();
+    spawn_inner(open, clock, config, store, sink, stop, None, None, log)
 }
 
 /// [`spawn_with_store`] for a meter that can hold a PDM session: while
 /// `pdm_open` says one is open, a stream error that is not a device loss
-/// does not end the session.
+/// does not end the session; `log` records the error instead.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_watching_pdm<T, C, O>(
     open: O,
     clock: C,
@@ -2255,13 +2320,15 @@ pub fn spawn_watching_pdm<T, C, O>(
     sink: impl EventSink,
     stop: Arc<AtomicBool>,
     pdm_open: PdmOpen,
+    log: SessionLog,
 ) -> WorkerHandle
 where
     T: Transport,
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, None, Some(pdm_open))
+    let pdm_open = Some(pdm_open);
+    spawn_inner(open, clock, config, store, sink, stop, None, pdm_open, log)
 }
 
 /// [`spawn_with_store`] adding the wall time the worker spends blocked in
@@ -2280,7 +2347,8 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, Some(meter), None)
+    let (meter, log) = (Some(meter), SessionLog::default());
+    spawn_inner(open, clock, config, store, sink, stop, meter, None, log)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2293,6 +2361,7 @@ fn spawn_inner<T, C, O>(
     stop: Arc<AtomicBool>,
     meter: Option<BlockedMeter>,
     pdm_open: Option<PdmOpen>,
+    log: SessionLog,
 ) -> WorkerHandle
 where
     T: Transport,
@@ -2300,6 +2369,7 @@ where
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
     let flag = Arc::clone(&stop);
+    let control_log = log.clone();
     let (commands, inbox) = mpsc::channel();
     let ended = Arc::new(AtomicBool::new(false));
     let ended_by_sink = Arc::clone(&ended);
@@ -2365,6 +2435,7 @@ where
                 depth,
                 meter,
                 pdm_open,
+                log,
                 worker_recording_id,
             )
         }));
@@ -2386,6 +2457,7 @@ where
         store,
         thread: Some(thread),
         thread_alive,
+        log: control_log,
     }
 }
 
@@ -2406,6 +2478,7 @@ fn run_worker<T, C, O>(
     depth: Arc<AtomicUsize>,
     meter: Option<BlockedMeter>,
     pdm_open: Option<PdmOpen>,
+    log: SessionLog,
     recording_id: Arc<AtomicU64>,
 ) where
     T: Transport,
@@ -2452,6 +2525,7 @@ fn run_worker<T, C, O>(
         }
     };
     worker.pdm_open = pdm_open;
+    worker.log = log;
     worker.recording_id = recording_id;
     'run: while !stop.load(Ordering::SeqCst) {
         loop {
@@ -2496,6 +2570,7 @@ pub(crate) fn late_hold_control() -> (WorkerControl, Arc<Mutex<Vec<bool>>>) {
     let control = WorkerControl {
         commands,
         store: SessionStore::new(),
+        log: SessionLog::default(),
     };
     (control, seen)
 }
@@ -2509,6 +2584,7 @@ mod tests {
         let control = WorkerControl {
             commands,
             store: SessionStore::new(),
+            log: SessionLog::default(),
         };
         (control, inbox)
     }
