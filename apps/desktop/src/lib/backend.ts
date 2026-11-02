@@ -153,7 +153,7 @@ export type Status =
   | { state: "waiting"; serial: string };
 
 export interface Gap {
-  kind: "stream" | "outage";
+  kind: "stream" | "outage" | "pause";
   from_ms: number;
   to_ms: number;
 }
@@ -166,18 +166,22 @@ export interface HistoryGap {
   to_ms: number;
 }
 
+/** Why a recording ended (mirrors `EndReason`). */
+export type RecordingEnd = "stopped" | "disconnected" | "low_current" | "row_limit";
+
 /** What a finished recording wrote. */
 export interface RecordingSummary {
   rows: number;
   gaps: Gap[];
   /** The recording ended because the meter went away. */
   disconnected: boolean;
+  ended: RecordingEnd;
 }
 
 /** Recording state changes (mirrors `src-tauri/src/recording.rs`). */
 export type RecordingEvent =
   | { state: "started" }
-  | { state: "progress"; rows: number; elapsed_ms: number }
+  | { state: "progress"; rows: number; elapsed_ms: number; paused: boolean }
   | ({ state: "stopped" } & RecordingSummary)
   | { state: "failed"; rows: number; error: UiError };
 
@@ -353,6 +357,8 @@ export interface RecordingSnapshot {
   elapsed_ms: number;
   /** Its file. */
   path?: string | null | undefined;
+  /** A pause holds its rows back. */
+  paused?: boolean | undefined;
 }
 
 /** The running session as a new page picks it up after a reload (mirrors `devices.rs`). */
@@ -409,17 +415,46 @@ export async function setRate(rateSps: number): Promise<void> {
   await invoke("set_rate", { rateSps });
 }
 
+/** What a recording starts with (FR AXHK2R); the backend checks them too. */
+export interface RecordingOptions {
+  folder?: string | null | undefined;
+  below_a?: number | null | undefined;
+  for_ms?: number | null | undefined;
+  max_rows?: number | null | undefined;
+}
+
 /** Starts recording at once to a default file named after `suggestedName`. Resolves to
  * its path; {@link saveRecordingAs} moves the finished file. */
-export async function startRecording(suggestedName: string): Promise<string | null> {
-  if (mock) return mock.startRecording(suggestedName);
-  return invoke<string | null>("start_recording", { suggestedName });
+export async function startRecording(
+  suggestedName: string,
+  options?: RecordingOptions,
+): Promise<string | null> {
+  if (mock) return mock.startRecording(suggestedName, options);
+  return invoke<string | null>("start_recording", { suggestedName, options });
+}
+
+/** Asks which folder recordings go to; `null` when the dialog was cancelled. */
+export async function chooseRecordingFolder(): Promise<string | null> {
+  if (mock) return mock.chooseRecordingFolder();
+  return invoke<string | null>("choose_recording_folder");
 }
 
 /** Stops the recording; resolves to its row count and gaps. */
 export async function stopRecording(): Promise<RecordingSummary> {
   if (mock) return mock.stopRecording();
   return invoke<RecordingSummary>("stop_recording");
+}
+
+/** Holds the recording's rows back while the stream goes on. */
+export async function pauseRecording(): Promise<void> {
+  if (mock) return mock.pauseRecording();
+  await invoke("recording_pause");
+}
+
+/** Writes the recording's rows again, in the same file. */
+export async function resumeRecording(): Promise<void> {
+  if (mock) return mock.resumeRecording();
+  await invoke("recording_resume");
 }
 
 /** Opens the save dialog for the finished recording at `path` and moves it to the chosen
@@ -1087,8 +1122,10 @@ export interface MeterBackend {
   disconnect(): Promise<void>;
   cancelWait(): Promise<void>;
   setRate(rateSps: number): Promise<void>;
-  startRecording(suggestedName: string): Promise<string | null>;
+  startRecording(suggestedName: string, options?: RecordingOptions): Promise<string | null>;
   stopRecording(): Promise<RecordingSummary>;
+  pauseRecording(): Promise<void>;
+  resumeRecording(): Promise<void>;
   saveRecordingAs(path: string): Promise<string | null>;
   exportSession(
     suggestedName: string,
@@ -1148,6 +1185,8 @@ export const currentMeterCommands: MeterCommands = {
   setRate,
   startRecording,
   stopRecording,
+  pauseRecording,
+  resumeRecording,
   saveRecordingAs,
   exportSession,
   stats,
@@ -1200,8 +1239,10 @@ export function meterBackend(deviceId: string): MeterBackend {
     setRate: async (rateSps) => {
       await call("set_rate", { rateSps });
     },
-    startRecording: (suggestedName) => call("start_recording", { suggestedName }),
+    startRecording: (suggestedName, options) => call("start_recording", { suggestedName, options }),
     stopRecording: () => call("stop_recording"),
+    pauseRecording: () => call("recording_pause"),
+    resumeRecording: () => call("recording_resume"),
     saveRecordingAs: (path) => call("save_recording_as", { path }),
     exportSession: (suggestedName, onProgress) => {
       const channel = new Channel<ExportProgress>();

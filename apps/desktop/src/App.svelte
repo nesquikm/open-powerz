@@ -26,6 +26,7 @@
     type PdDetails,
     type PdOpened,
     type UiError,
+    type RecordingOptions,
   } from "./lib/backend";
   import {
     defaultPdCaptureName,
@@ -42,8 +43,11 @@
   import {
     loadAdvancedFirmware,
     loadHideSerial,
+    loadRecorderSettings,
     saveAdvancedFirmware,
     saveHideSerial,
+    saveRecorderSettings,
+    type RecorderSettings,
   } from "./lib/settings";
   import Chart from "./lib/components/Chart.svelte";
   import ErrorBanner from "./lib/components/ErrorBanner.svelte";
@@ -73,6 +77,7 @@
     rateChange,
     Recording,
     type RecordingDeps,
+    recordingOptions,
     revealActionLabel,
   } from "./lib/recording.svelte";
   import { Session } from "./lib/session.svelte";
@@ -82,6 +87,7 @@
   import MeterNoticeList from "./lib/components/MeterNoticeList.svelte";
   import type { MeterNotice } from "./lib/meterNotices.svelte";
   import AddMeterDialog from "./lib/components/AddMeterDialog.svelte";
+  import RecorderOptions from "./lib/components/RecorderOptions.svelte";
   import { canConnectTo } from "./lib/deviceDetails";
   import { StatsControls } from "./lib/stats.svelte";
   import { shortcutFor, type ShortcutAction } from "./lib/shortcuts";
@@ -254,7 +260,8 @@
     const commands = commandsOf(entry.listing.id);
     return {
       canRecord: entry.session.meterConnected,
-      startRecording: (name) => commands.startRecording(name),
+      startRecording: (name) => commands.startRecording(name, startOptions()),
+      prefix: recorderSettings.prefix,
       stopRecording: () => commands.stopRecording(),
       now: () => new Date(),
     };
@@ -266,11 +273,19 @@
       toggleRecording();
       return;
     }
-    const commands = commandsOf(entry.listing.id);
     void entry.recording.toggle({
       ...meterRecordingDeps(entry),
-      saveRecordingAs: (path) => commands.saveRecordingAs(path),
+      ...saveAskedAtStop(commandsOf(entry.listing.id)),
     });
+  }
+
+  /** Pause on a tile: pauses or resumes that meter's recording only. */
+  function toggleMeterPause(entry: MeterEntry): void {
+    if (entry.session === session) {
+      togglePause();
+      return;
+    }
+    void entry.recording.togglePause(commandsOf(entry.listing.id));
   }
 
   /** Runs an export; how it ended goes to meter `id`'s notices, wherever that meter is by
@@ -460,6 +475,41 @@
     saveAdvancedFirmware(on, browserStorage());
     if (!on && view === "firmware") view = "meter";
   }
+  /** The recorder's options dialog (FR AXHK2R). */
+  let recorderSettings = $state(loadRecorderSettings(browserStorage()));
+  let recorderOptionsOpen = $state(false);
+  /** The tile whose Options opened the dialog; null for the top bar's. */
+  let recorderOptionsEntry = $state<MeterEntry | null>(null);
+  function openRecorderOptions(entry: MeterEntry | null): void {
+    recorderOptionsEntry = entry;
+    recorderOptionsOpen = true;
+  }
+  /** The options hold for the recording they started with: they lock while any meter
+   * records. */
+  const recorderLocked = $derived(
+    recording.phase !== "idle" || meters.entries.some((e) => e.recording.phase !== "idle"),
+  );
+
+  /** With a folder set the file is already in place, so Stop asks nothing. The options
+   * lock while any meter records: this folder is the one the recording started with. */
+  function saveAskedAtStop(commands: MeterCommands): Pick<RecordingDeps, "saveRecordingAs"> {
+    return recorderSettings.folder
+      ? {}
+      : { saveRecordingAs: (path) => commands.saveRecordingAs(path) };
+  }
+
+  /** What a recording starts with; nothing while the settings ask for nothing. */
+  function startOptions(): RecordingOptions | undefined {
+    const options = recordingOptions(recorderSettings);
+    return Object.keys(options).length > 0 ? options : undefined;
+  }
+
+  function saveRecorderOptions(settings: RecorderSettings): void {
+    recorderSettings = settings;
+    saveRecorderSettings(settings, browserStorage());
+    recorderOptionsOpen = false;
+  }
+
   /** The Hide serial numbers switch (FR AXHK2Q, AC .1). */
   let hideSerial = $state(loadHideSerial(browserStorage()));
   function setHideSerial(on: boolean): void {
@@ -980,7 +1030,8 @@
   function recordingDeps() {
     return {
       canRecord,
-      startRecording: (name: string) => act().startRecording(name),
+      startRecording: (name: string) => act().startRecording(name, startOptions()),
+      prefix: recorderSettings.prefix,
       stopRecording: () => act().stopRecording(),
       now: () => new Date(),
     };
@@ -991,9 +1042,14 @@
     void onShownMeter(() =>
       recording.toggle({
         ...recordingDeps(),
-        saveRecordingAs: (path) => act().saveRecordingAs(path),
+        ...saveAskedAtStop(act()),
       }),
     );
+  }
+
+  /** Pause button: holds the rows back, or writes them again. */
+  function togglePause(): void {
+    void onShownMeter(() => recording.togglePause(act()));
   }
 
   /** R shortcut: zero the session statistics. */
@@ -1103,6 +1159,8 @@
     {recording}
     {canRecord}
     onToggleRecording={toggleRecording}
+    onTogglePause={togglePause}
+    onRecorderOptions={() => openRecorderOptions(null)}
     {exportJob}
     {canExport}
     onExport={exportHistory}
@@ -1221,6 +1279,8 @@
         defaultRateSps={requestedRateSps}
         onSelectRate={selectMeterRate}
         onToggleRecording={toggleMeterRecording}
+        onTogglePause={toggleMeterPause}
+        onRecorderOptions={openRecorderOptions}
         onExport={exportMeter}
         {fileActions}
       />
@@ -1302,6 +1362,15 @@
       {hideSerial}
       onCancel={() => (addMeterOpen = false)}
       onConnect={(id) => void addMeter(id)}
+    />
+  {/if}
+  {#if recorderOptionsOpen}
+    <RecorderOptions
+      settings={recorderSettings}
+      locked={recorderLocked}
+      rateSps={(recorderOptionsEntry?.session ?? session).rateSps}
+      onCancel={() => (recorderOptionsOpen = false)}
+      onSave={saveRecorderOptions}
     />
   {/if}
   {#if helpOpen}

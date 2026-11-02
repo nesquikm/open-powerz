@@ -195,7 +195,7 @@ describe("recording commands (AC-0P7HSJ.3, AC-0P7HSJ.5)", () => {
     await connect("demo:idle", 50, (ev) => events.push(ev));
     const ev: BackendEvent = {
       type: "recording",
-      data: { state: "progress", rows: 4, elapsed_ms: 1000 },
+      data: { state: "progress", rows: 4, elapsed_ms: 1000, paused: false },
     };
     channels.at(-1)?.onmessage(ev);
     expect(events).toEqual([ev]);

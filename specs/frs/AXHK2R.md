@@ -44,3 +44,18 @@ Rust unit tests with hand-fed records for each stop rule, Vitest for the state, 
 ## Notes
 
 The vendor's "system vs zero time" already exists as the CSV's two time columns.
+
+## Implementation notes
+
+- Auto-stop reads the current's magnitude, since a meter wired in reverse still carries current. Only records that went into the file count. A resume, a new measuring run or a stream gap restarts the low-current wait, because nothing shows the current stayed low across it.
+- The row limit stops at exactly that many rows; the records after it in the same poll are not written.
+- `RecordingSummary.ended` is `stopped`, `disconnected`, `low_current` or `row_limit`; `disconnected` stays for the page. A rule that ends a recording sends `Stopped`, like an unplug, so no save dialog opens and the file stays where it is.
+- A pause adds one gap of kind `pause`, closed by the first row after a resume. A pause and resume with no row between stay one gap; one before the first row, or still open at the stop, adds none. The summary's gap count includes it.
+- The options travel with `start_recording`, and the backend checks them too. They hold for that recording, and the recorder's fields lock while any meter records, so a recording cannot change its place under itself.
+- With a folder set, the file is written there and Stop opens no save dialog. A folder that does not exist is refused, not created, since it may be a drive that is gone. With none, recordings keep the app's folder and the dialog.
+- The prefix replaces `powerz` in the name and also refuses the characters Windows forbids in a file name. Empty means `powerz`. Session exports keep their name.
+- The memory depth is text in the recorder's options dialog: chart memory divided by the rate, and "measuring" until the rate is known.
+- Pause sits beside Record, in the top bar and on tiles. The options open from a button beside it.
+- A tile's options show that meter's rate.
+- Saved settings that fail the checks fall back to the defaults as a whole, folder included.
+- After a page reload a running recording can show as idle for a moment, so the options may change under it. Clearing the folder then makes Stop's save dialog refuse with the file left where it is. No file is lost, and a release build has no reload.

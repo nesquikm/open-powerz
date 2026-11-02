@@ -27,7 +27,9 @@ use crate::app_log::SessionLog;
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Series, SeriesBuckets};
 use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
-use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
+use crate::recording::{
+    self, EndReason, ExportProgress, Limits, Recorder, RecordingEvent, RecordingSummary,
+};
 use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, temp_at};
 use crate::trigger::CableView;
@@ -139,6 +141,8 @@ pub enum GapKind {
     Stream,
     /// The meter was unplugged between two connections.
     Outage,
+    /// The recording was paused (FR AXHK2R).
+    Pause,
 }
 
 /// A span of session time without samples.
@@ -808,6 +812,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         if let Some(e) = write_err {
             self.fail_recording(recording::io_error(&e));
         }
+        if let Some(ended) = self.recording.as_ref().and_then(Recorder::limit_reached) {
+            self.close_recording(ended);
+        }
     }
 
     /// Take the open recording, which is over from here on.
@@ -843,11 +850,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         }
     }
 
-    /// Close the open recording because the session ended; `unplugged` when
-    /// the meter went away rather than being disconnected on request.
-    fn end_recording(&mut self, unplugged: bool) {
+    /// Close the open recording for `ended` and tell the page.
+    fn close_recording(&mut self, ended: EndReason) {
         if let Some(rec) = self.take_recording() {
-            let event = match rec.finish(unplugged) {
+            let event = match blocked(self.meter.as_ref(), || rec.finish(ended)) {
                 Ok(summary) => RecordingEvent::Stopped(summary),
                 Err((rows, error)) => RecordingEvent::Failed { rows, error },
             };
@@ -866,22 +872,37 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         self.recording.is_some()
     }
 
-    /// Start recording every following record to `out`: the header is
-    /// written and flushed now, rows as they arrive.
-    pub fn start_recording(&mut self, out: Box<dyn Write + Send>) -> Result<(), UiError> {
+    /// Refuse a recording that cannot start now.
+    fn check_recording_start(&self, limits: &Limits) -> Result<(), UiError> {
         if self.session.is_none() {
             return Err(not_connected());
         }
         if self.recording.is_some() {
             return Err(UiError::usage("A recording is already running."));
         }
+        limits.check()
+    }
+
+    /// Start recording every following record to `out`: the header is
+    /// written and flushed now, rows as they arrive.
+    pub fn start_recording(&mut self, out: Box<dyn Write + Send>) -> Result<(), UiError> {
+        self.start_recording_with(out, Limits::default())
+    }
+
+    /// [`start_recording`](Self::start_recording), ended by `limits` as well.
+    pub fn start_recording_with(
+        &mut self,
+        out: Box<dyn Write + Send>,
+        limits: Limits,
+    ) -> Result<(), UiError> {
+        self.check_recording_start(&limits)?;
         let now = self.clock.now_ms();
         // Out before the header, the first sign of the recording outside this
         // thread, so a reader never finds a recording with no id
         // (AC-AXHK2F.5).
         let id = NEXT_RECORDING_ID.fetch_add(1, Ordering::SeqCst);
         self.recording_id.store(id, Ordering::SeqCst);
-        let rec = Recorder::start(out, now).map_err(|e| {
+        let rec = Recorder::start(out, now, limits).map_err(|e| {
             self.recording_id.store(0, Ordering::SeqCst);
             recording::io_error(&e)
         })?;
@@ -890,19 +911,14 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Ok(())
     }
 
-    /// Create the file at `path` and record to it. The checks run first, so a
-    /// refused start never touches the path; a file this call created is
-    /// removed again if the header cannot be written.
-    pub fn record_to(&mut self, path: &Path) -> Result<(), UiError> {
-        if self.session.is_none() {
-            return Err(not_connected());
-        }
-        if self.recording.is_some() {
-            return Err(UiError::usage("A recording is already running."));
-        }
+    /// Create the file at `path` and record to it until `limits` end it. The
+    /// checks run first, so a refused start never touches the path; a file
+    /// this call created is removed again if the header cannot be written.
+    pub fn record_to(&mut self, path: &Path, limits: Limits) -> Result<(), UiError> {
+        self.check_recording_start(&limits)?;
         let existed = path.exists();
         let file = recording::create_file(path)?;
-        match self.start_recording(Box::new(file)) {
+        match self.start_recording_with(Box::new(file), limits) {
             Ok(()) => {
                 // Canonical, so the export guard sees through symlinks.
                 self.recording_path =
@@ -934,16 +950,32 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// Stop the recording: flush and close the file. When the last flush fails
     /// the recording is over all the same, so the page hears that it ended.
     pub fn stop_recording(&mut self) -> Result<RecordingSummary, UiError> {
-        let rec = self
-            .take_recording()
-            .ok_or_else(|| UiError::usage("Nothing is being recorded."))?;
-        rec.finish(false).map_err(|(rows, error)| {
+        let rec = self.take_recording().ok_or_else(nothing_recorded)?;
+        rec.finish(EndReason::Stopped).map_err(|(rows, error)| {
             self.emit(BackendEvent::Recording(RecordingEvent::Failed {
                 rows,
                 error: error.clone(),
             }));
             error
         })
+    }
+
+    /// Hold the rows back while the stream goes on: the file stays open.
+    pub fn pause_recording(&mut self) -> Result<(), UiError> {
+        self.recording
+            .as_mut()
+            .ok_or_else(nothing_recorded)?
+            .pause();
+        Ok(())
+    }
+
+    /// Write rows again after a pause, in the same file.
+    pub fn resume_recording(&mut self) -> Result<(), UiError> {
+        self.recording
+            .as_mut()
+            .ok_or_else(nothing_recorded)?
+            .resume();
+        Ok(())
     }
 
     /// Export every record of this session to `out` on a thread of its own,
@@ -1121,7 +1153,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// PD capture, then report the disconnect.
     fn lose_session(&mut self, e: &session::Error) -> Step {
         self.session = None;
-        self.end_recording(true);
+        self.close_recording(EndReason::Disconnected);
         self.flush_batch();
         if self.pd_run.take().is_some() {
             self.emit_pd_stopped();
@@ -1529,7 +1561,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 MeasurementSource::Cdc => session.stop_adcnew(),
             };
             drop(session);
-            self.end_recording(false);
+            self.close_recording(EndReason::Stopped);
             self.flush_batch();
             self.emit(disconnected(None));
         }
@@ -1542,8 +1574,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::SetRate(rate, reply) => {
                 let _ = reply.send(self.set_rate(rate));
             }
-            Command::RecordTo(path, hold, reply) => {
-                let started = self.record_to(&path);
+            Command::RecordTo(path, limits, hold, reply) => {
+                let started = self.record_to(&path, limits);
                 self.log_if_failed(&started);
                 // Before the answer: whoever hears it finds the start settled.
                 drop(hold);
@@ -1554,6 +1586,12 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             }
             Command::StopRecording(reply) => {
                 let _ = reply.send(self.stop_recording());
+            }
+            Command::PauseRecording(reply) => {
+                let _ = reply.send(self.pause_recording());
+            }
+            Command::ResumeRecording(reply) => {
+                let _ = reply.send(self.resume_recording());
             }
             Command::StartPd(reply) => {
                 let _ = reply.send(self.start_pd());
@@ -1601,7 +1639,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 let path = self.recording_path.as_ref();
                 let path = path.map(|p| p.to_string_lossy().into_owned());
                 let progress = self.recording_progress();
-                let held = progress.map(|(rows, elapsed_ms)| (rows, elapsed_ms, path));
+                let paused = self.recording.as_ref().is_some_and(Recorder::is_paused);
+                let held = progress.map(|(rows, elapsed_ms)| (rows, elapsed_ms, path, paused));
                 (self.in_order)(Box::new(move || {
                     swap();
                     let _ = reply.send(held);
@@ -1618,7 +1657,8 @@ enum Command {
     SetRate(Rate, mpsc::Sender<Result<(), UiError>>),
     RecordTo(
         PathBuf,
-        RecordingStartHold,
+        Limits,
+        Option<RecordingStartHold>,
         mpsc::Sender<Result<(), UiError>>,
     ),
     ExportTo(
@@ -1627,6 +1667,8 @@ enum Command {
         mpsc::Sender<Result<ExportJob, UiError>>,
     ),
     StopRecording(mpsc::Sender<Result<RecordingSummary, UiError>>),
+    PauseRecording(mpsc::Sender<Result<(), UiError>>),
+    ResumeRecording(mpsc::Sender<Result<(), UiError>>),
     StartPd(mpsc::Sender<Result<(), UiError>>),
     StopPd(mpsc::Sender<Result<(), UiError>>),
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
@@ -1667,6 +1709,8 @@ impl std::fmt::Debug for Command {
             Command::RecordTo(path, ..) => f.debug_tuple("RecordTo").field(path).finish(),
             Command::ExportTo(path, ..) => f.debug_tuple("ExportTo").field(path).finish(),
             Command::StopRecording(_) => f.write_str("StopRecording"),
+            Command::PauseRecording(_) => f.write_str("PauseRecording"),
+            Command::ResumeRecording(_) => f.write_str("ResumeRecording"),
             Command::StartPd(_) => f.write_str("StartPd"),
             Command::StopPd(_) => f.write_str("StopPd"),
             Command::PdDetails(index, _) => f.debug_tuple("PdDetails").field(index).finish(),
@@ -1695,8 +1739,9 @@ impl std::fmt::Debug for Command {
 
 type ProgressFn = Box<dyn FnMut(ExportProgress) + Send>;
 
-/// A running recording at a handover: rows, elapsed ms and its file.
-pub type HeldRecording = (u64, u64, Option<String>);
+/// A running recording at a handover: rows, elapsed ms, its file and whether
+/// it is paused.
+pub type HeldRecording = (u64, u64, Option<String>, bool);
 
 /// Export every record of `store` to `out` on a thread of its own; the
 /// export works on a snapshot that shares the stored samples. `now_ms` is
@@ -1898,6 +1943,11 @@ fn not_connected() -> UiError {
     UiError::usage("The meter is not connected.")
 }
 
+/// The answer when a recording is asked for and none is open.
+fn nothing_recorded() -> UiError {
+    UiError::usage("Nothing is being recorded.")
+}
+
 /// The answer when the worker does not reply in time; the request may still
 /// be carried out.
 fn busy() -> UiError {
@@ -1942,20 +1992,43 @@ impl WorkerControl {
         self.logged(self.ask(Command::SetRate(rate, reply), &answer).flatten())
     }
 
+    /// Record to a new file at `path`, ended by `limits` as well.
+    pub fn start_recording_with(&self, path: &Path, limits: Limits) -> Result<(), UiError> {
+        self.record(path, limits, None)
+    }
+
     /// Record to a new file at `path`. The worker checks first and creates
     /// the file only when it is going to record, so a refused start (or a
     /// timed-out answer) never truncates or deletes anything. `hold` travels
     /// with the request, so it outlasts a timed-out answer: it goes once the
     /// worker has applied the request, or when the worker can no longer do so.
-    pub fn record_to(&self, path: &Path, hold: RecordingStartHold) -> Result<(), UiError> {
+    pub(crate) fn record(
+        &self,
+        path: &Path,
+        limits: Limits,
+        hold: Option<RecordingStartHold>,
+    ) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(Command::RecordTo(path.to_owned(), hold, reply), &answer)?
+        let command = Command::RecordTo(path.to_owned(), limits, hold, reply);
+        self.ask(command, &answer)?
     }
 
     /// Stop the recording and return what it wrote.
     pub fn stop_recording(&self) -> Result<RecordingSummary, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::StopRecording(reply), &answer)?
+    }
+
+    /// Hold the recording's rows back while the stream goes on.
+    pub fn pause_recording(&self) -> Result<(), UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PauseRecording(reply), &answer)?
+    }
+
+    /// Write the recording's rows again after a pause.
+    pub fn resume_recording(&self) -> Result<(), UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::ResumeRecording(reply), &answer)?
     }
 
     /// Whether the PD capture runs now (AC-AXHK2K.7).

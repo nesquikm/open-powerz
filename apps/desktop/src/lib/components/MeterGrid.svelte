@@ -19,6 +19,8 @@
     defaultRateSps,
     onSelectRate,
     onToggleRecording,
+    onTogglePause,
+    onRecorderOptions,
     onExport,
     fileActions,
   }: {
@@ -36,6 +38,8 @@
     defaultRateSps: number;
     onSelectRate: (entry: MeterEntry, sps: number) => void;
     onToggleRecording: (entry: MeterEntry) => void;
+    onTogglePause: (entry: MeterEntry) => void;
+    onRecorderOptions: (entry: MeterEntry) => void;
     onExport: (entry: MeterEntry) => void;
     /** What can be done with a saved file. */
     fileActions: Snippet<[string]>;
@@ -72,6 +76,8 @@
         rateSps={entry.session.rateSps ?? defaultRateSps}
         onSelectRate={(sps) => onSelectRate(entry, sps)}
         onToggleRecording={() => onToggleRecording(entry)}
+        onTogglePause={() => onTogglePause(entry)}
+        onRecorderOptions={() => onRecorderOptions(entry)}
         onExport={() => onExport(entry)}
         onDisconnect={() => onDisconnect(entry.listing.id)}
         {fileActions}

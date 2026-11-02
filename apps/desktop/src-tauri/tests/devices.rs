@@ -694,9 +694,9 @@ fn attach_snapshot_carries_the_open_recording() {
         .iter()
         .rev()
         .find_map(|e| match e {
-            BackendEvent::Recording(RecordingEvent::Progress { rows, elapsed_ms }) => {
-                Some((*rows, *elapsed_ms))
-            }
+            BackendEvent::Recording(RecordingEvent::Progress {
+                rows, elapsed_ms, ..
+            }) => Some((*rows, *elapsed_ms)),
             _ => None,
         })
         .unwrap();

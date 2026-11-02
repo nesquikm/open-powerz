@@ -37,6 +37,8 @@ import type {
   PdRow,
   PdStatusSample,
   ProtocolSection,
+  RecordingEnd,
+  RecordingOptions,
   RecordingSummary,
   RiskClass,
   Sample,
@@ -68,6 +70,7 @@ import {
   pdRecordTime,
   pdRow,
 } from "./mockPd";
+import { DEFAULT_MAX_ROWS } from "./settings";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
@@ -504,6 +507,63 @@ interface MockRecording {
   rows: number;
   elapsedMs: number;
   sinceProgressMs: number;
+  /** A pause holds the rows back. */
+  paused: boolean;
+  /** Where the pause gap the next rows close began. */
+  pauseFromMs: number | null;
+  gaps: Gap[];
+  /** End once the current's magnitude stays below this, A. */
+  belowA: number | null;
+  /** How long it must stay below, ms. */
+  forMs: number;
+  /** Where the current low-current stretch began. */
+  lowSinceMs: number | null;
+  /** End at this many rows. */
+  maxRows: number;
+}
+
+/** The auto-stop rule over the samples just recorded: whether the wait is over. */
+function currentStayedLow(rec: MockRecording, samples: readonly Sample[]): boolean {
+  if (rec.belowA === null) return false;
+  for (const sample of samples) {
+    if (Math.abs(sample.ibus_a) >= rec.belowA) {
+      rec.lowSinceMs = null;
+    } else {
+      rec.lowSinceMs ??= sample.t_ms;
+      if (sample.t_ms - rec.lowSinceMs >= rec.forMs) return true;
+    }
+  }
+  return false;
+}
+
+/** Writes one tick's samples, like the backend's `Recorder`: a pause holds them back, and the
+ * first row after one closes its gap at `nowMs`. Answers the rule that ended the recording. */
+function writeRows(
+  rec: MockRecording,
+  samples: readonly Sample[],
+  nowMs: number,
+): RecordingEnd | null {
+  if (rec.paused) return null;
+  if (rec.pauseFromMs !== null) {
+    rec.gaps.push({ kind: "pause", from_ms: rec.pauseFromMs, to_ms: nowMs });
+    rec.pauseFromMs = null;
+  }
+  // Like the backend: the records after the row limit are not written.
+  const written = samples.slice(0, rec.maxRows - rec.rows);
+  rec.rows += written.length;
+  if (currentStayedLow(rec, written)) return "low_current";
+  return rec.rows >= rec.maxRows ? "row_limit" : null;
+}
+
+/** What a recording that ended for `ended` wrote. */
+function summaryOf(rec: MockRecording, ended: RecordingEnd): RecordingSummary {
+  return { rows: rec.rows, gaps: rec.gaps, disconnected: false, ended };
+}
+
+/** The open recording of `s`; refused when there is none. */
+function recordingOf(s: Running): MockRecording {
+  if (!s.recording) throw usage("Nothing is being recorded.");
+  return s.recording;
 }
 
 /** Scripted backend behaviours chosen with `?mock=<name>` in the page URL; the device
@@ -1099,6 +1159,8 @@ export class MockBackend {
       setRate: on(this.setRate),
       startRecording: on(this.startRecording),
       stopRecording: on(this.stopRecording),
+      pauseRecording: on(this.pauseRecording),
+      resumeRecording: on(this.resumeRecording),
       saveRecordingAs: on(this.saveRecordingAs),
       exportSession: on(this.exportSession),
       stats: on(this.stats),
@@ -1308,6 +1370,7 @@ export class MockBackend {
     if (s.pendingGap !== null && n > 0) {
       s.onEvent({ type: "gap", data: s.pendingGap });
       s.pendingGap = null;
+      if (s.recording) s.recording.lowSinceMs = null;
     }
     // Like the backend: the CDC stream carries no temperature.
     const tempC = s.source === "cdc" ? null : 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
@@ -1315,14 +1378,23 @@ export class MockBackend {
     s.streamed += n;
     const rec = s.recording;
     if (rec) {
-      rec.rows += n;
+      const ended = writeRows(rec, samples, s.nextMs);
+      if (ended !== null) {
+        this.#endRecording(s, ended);
+        return;
+      }
       rec.elapsedMs += BATCH_MS;
       rec.sinceProgressMs += BATCH_MS;
       if (rec.sinceProgressMs >= PROGRESS_MS) {
         rec.sinceProgressMs = 0;
         s.onEvent({
           type: "recording",
-          data: { state: "progress", rows: rec.rows, elapsed_ms: rec.elapsedMs },
+          data: {
+            state: "progress",
+            rows: rec.rows,
+            elapsed_ms: rec.elapsedMs,
+            paused: rec.paused,
+          },
         });
       }
     }
@@ -1349,7 +1421,9 @@ export class MockBackend {
       rate_sps: s.rateSps,
       rate_locked: s.rateLocked,
       session_id: s.sessionId,
-      recording: rec ? { rows: rec.rows, elapsed_ms: rec.elapsedMs, path: rec.path } : null,
+      recording: rec
+        ? { rows: rec.rows, elapsed_ms: rec.elapsedMs, path: rec.path, paused: rec.paused }
+        : null,
       pd_capturing: s.pd.timer !== null,
     };
   }
@@ -1391,7 +1465,7 @@ export class MockBackend {
       s.recording = null;
       s.onEvent({
         type: "recording",
-        data: { state: "stopped", rows, gaps: [], disconnected: true },
+        data: { state: "stopped", rows, gaps: [], disconnected: true, ended: "disconnected" },
       });
     }
     s.onEvent({ type: "status", data: { state: "disconnected", error } });
@@ -1409,27 +1483,62 @@ export class MockBackend {
     s.onEvent({ type: "status", data: { state: "rate", rate_sps: rateSps, rate_locked: false } });
   }
 
-  /** There is no folder in the browser: the proposed name is the "path". */
-  async startRecording(suggestedName: string): Promise<string | null> {
+  /** A rule ended the recording: the page hears it, as from the backend. */
+  #endRecording(s: Running, ended: RecordingEnd): void {
+    const rec = s.recording;
+    if (!rec) return;
+    s.recording = null;
+    s.onEvent({ type: "recording", data: { state: "stopped", ...summaryOf(rec, ended) } });
+  }
+
+  /** There is no folder dialog in the browser: the choice is fixed. */
+  async chooseRecordingFolder(): Promise<string | null> {
+    return "/demo/recordings";
+  }
+
+  /** There is no folder in the browser: the proposed name, in the folder set, is the
+   * "path". */
+  async startRecording(suggestedName: string, options?: RecordingOptions): Promise<string | null> {
     const s = this.#open();
     if (s.recording) throw usage("A recording is already running.");
+    const path = options?.folder ? `${options.folder}/${suggestedName}` : suggestedName;
     s.recording = {
       id: ++this.#lastRecordingId,
-      path: suggestedName,
+      path,
       rows: 0,
       elapsedMs: 0,
       sinceProgressMs: 0,
+      paused: false,
+      pauseFromMs: null,
+      gaps: [],
+      belowA: options?.below_a ?? null,
+      forMs: options?.for_ms ?? 0,
+      lowSinceMs: null,
+      maxRows: options?.max_rows ?? DEFAULT_MAX_ROWS,
     };
     s.onEvent({ type: "recording", data: { state: "started" } });
-    return suggestedName;
+    return path;
   }
 
   async stopRecording(): Promise<RecordingSummary> {
     const s = this.#open();
-    const rec = s.recording;
-    if (!rec) throw usage("Nothing is being recorded.");
+    const rec = recordingOf(s);
     s.recording = null;
-    return { rows: rec.rows, gaps: [], disconnected: false };
+    return summaryOf(rec, "stopped");
+  }
+
+  /** Like the backend: the stream goes on, and a pause adds one gap if rows came before it. */
+  async pauseRecording(): Promise<void> {
+    const s = this.#open();
+    const rec = recordingOf(s);
+    if (rec.paused) return;
+    rec.paused = true;
+    rec.lowSinceMs = null;
+    if (rec.rows > 0) rec.pauseFromMs ??= s.nextMs;
+  }
+
+  async resumeRecording(): Promise<void> {
+    recordingOf(this.#open()).paused = false;
   }
 
   /** There is no save dialog in the browser: the file stays where it is. */

@@ -12,6 +12,7 @@
   import type { Session } from "../session.svelte";
   import type { MeterNotice } from "../meterNotices.svelte";
   import MeterNoticeList from "./MeterNoticeList.svelte";
+  import RecorderButtons from "./RecorderButtons.svelte";
 
   let {
     label,
@@ -23,6 +24,8 @@
     rateSps,
     onSelectRate,
     onToggleRecording,
+    onTogglePause,
+    onRecorderOptions,
     onExport,
     onDisconnect,
     fileActions,
@@ -37,6 +40,8 @@
     rateSps: number;
     onSelectRate: (sps: number) => void;
     onToggleRecording: () => void;
+    onTogglePause: () => void;
+    onRecorderOptions: () => void;
     onExport: () => void;
     onDisconnect: () => void;
     /** What can be done with a saved file. */
@@ -69,6 +74,7 @@
   >
     {record.label}
   </button>
+  <RecorderButtons {recording} {onTogglePause} {onRecorderOptions} />
   <button
     type="button"
     title="Export the session so far to CSV"
@@ -78,7 +84,8 @@
     Export
   </button>
   {#if recording.indicator !== null}
-    <span class="indicator" role="timer">{recording.indicator}</span>
+    <span class="indicator" class:paused={recording.paused} role="timer">{recording.indicator}</span
+    >
   {/if}
   {#if exportJob.running}
     <progress
@@ -101,6 +108,9 @@
     align-items: center;
     gap: 0.5rem;
     min-width: 0;
+  }
+  .indicator.paused {
+    color: var(--muted);
   }
   .indicator {
     color: var(--danger);

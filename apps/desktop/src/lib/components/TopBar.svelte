@@ -9,6 +9,7 @@
     ratePicker,
     recordButton,
     recordingRowsSuffix,
+    recordingWord,
     type ExportJob,
     type Recording,
   } from "../recording.svelte";
@@ -27,6 +28,7 @@
     type Fit,
   } from "../topBarFit";
   import DevicePicker from "./DevicePicker.svelte";
+  import RecorderButtons from "./RecorderButtons.svelte";
   import ThemeControl from "./ThemeControl.svelte";
 
   let {
@@ -43,6 +45,8 @@
     recording,
     canRecord,
     onToggleRecording,
+    onTogglePause,
+    onRecorderOptions,
     exportJob,
     canExport,
     onExport,
@@ -68,6 +72,8 @@
     /** A stream is running that can be recorded. */
     canRecord: boolean;
     onToggleRecording: () => void;
+    onTogglePause: () => void;
+    onRecorderOptions: () => void;
     exportJob: ExportJob;
     /** The session holds samples that can be exported. */
     canExport: boolean;
@@ -302,11 +308,13 @@
           <!-- Narrow windows show just the time; the row count stays for screen readers. -->
           <span
             class="rec-indicator"
+            class:paused={recording.paused}
             role="timer"
             title={`Recording to CSV: ${recording.indicator}`}
             ><span class="rec-dot" aria-hidden="true"></span><span class="visually-hidden"
               >Recording:
-            </span>REC {formatRecordingElapsed(recording.elapsedMs)}<span class="narrow-hidden"
+            </span>{recordingWord(recording.paused)}
+            {formatRecordingElapsed(recording.elapsedMs)}<span class="narrow-hidden"
               >{recordingRowsSuffix(recording.rows)}</span
             ></span
           >
@@ -320,6 +328,7 @@
         >
           {record.label}
         </button>
+        <RecorderButtons {recording} {onTogglePause} {onRecorderOptions} />
         <!-- The progress fills the disabled Export button's own box, so starting an export
          moves no item and adds nothing to the row's width (lib/topBarFit.ts). -->
         <span class="export-slot" class:exporting={exportJob.running}>
@@ -524,6 +533,12 @@
     height: 0.5rem;
     border-radius: 50%;
     background: var(--danger);
+  }
+  .rec-indicator.paused {
+    color: var(--muted);
+  }
+  .rec-indicator.paused .rec-dot {
+    background: var(--muted);
   }
   .export-slot {
     position: relative;

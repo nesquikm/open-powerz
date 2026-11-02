@@ -25,7 +25,8 @@ function listing(id: string): DeviceListing {
 }
 
 function stopped(rows: number, disconnected: boolean): BackendEvent {
-  return { type: "recording", data: { state: "stopped", rows, gaps: [], disconnected } };
+  const ended = disconnected ? "disconnected" : "stopped";
+  return { type: "recording", data: { state: "stopped", rows, gaps: [], disconnected, ended } };
 }
 
 describe("MeterNotices (FR AXHK2K)", () => {
@@ -73,7 +74,7 @@ describe("A notice raised on a parked meter (AC-AXHK2K.4)", () => {
   it("is kept for that meter, with its file", () => {
     const meters = parked();
     meters.handleTileEvent(B, stopped(3, true));
-    const summary = { rows: 3, gaps: [], disconnected: true };
+    const summary = { rows: 3, gaps: [], disconnected: true, ended: "disconnected" as const };
     expect(meters.notices.of(B)).toEqual([
       expect.objectContaining({ text: recordingSummaryText(summary, "b.csv"), path: "b.csv" }),
     ]);

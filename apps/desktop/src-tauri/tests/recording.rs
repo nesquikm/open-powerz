@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use open_powerz_desktop_lib::devices::{DeviceListing, DeviceManager, Opener};
-use open_powerz_desktop_lib::recording::{self, ExportProgress, RecordingEvent, RecordingSummary};
+use open_powerz_desktop_lib::recording::{
+    self, EndReason, ExportProgress, RecordingEvent, RecordingSummary,
+};
 use open_powerz_desktop_lib::ui_error::UiError;
 use open_powerz_desktop_lib::worker::{BackendEvent, GapKind, Status, Step, Worker, WorkerConfig};
 use powerz_cli::StreamOptions;
@@ -829,7 +831,9 @@ fn progress_events_carry_elapsed_time_and_rows_at_least_once_per_second() {
     let progress: Vec<(u64, u64, u64)> = evs
         .iter()
         .filter_map(|(t, e)| match e {
-            RecordingEvent::Progress { rows, elapsed_ms } => Some((*t, *rows, *elapsed_ms)),
+            RecordingEvent::Progress {
+                rows, elapsed_ms, ..
+            } => Some((*t, *rows, *elapsed_ms)),
             _ => None,
         })
         .collect();
@@ -865,18 +869,20 @@ fn recording_events_serialize_for_the_ui() {
     assert_eq!(
         json(RecordingEvent::Progress {
             rows: 3,
-            elapsed_ms: 1_500
+            elapsed_ms: 1_500,
+            paused: false,
         }),
-        serde_json::json!({"type": "recording", "data": {"state": "progress", "rows": 3, "elapsed_ms": 1500}})
+        serde_json::json!({"type": "recording", "data": {"state": "progress", "rows": 3, "elapsed_ms": 1500, "paused": false}})
     );
     let v = json(RecordingEvent::Stopped(RecordingSummary {
         rows: 7,
         gaps: vec![],
         disconnected: true,
+        ended: EndReason::Disconnected,
     }));
     assert_eq!(
         v,
-        serde_json::json!({"type": "recording", "data": {"state": "stopped", "rows": 7, "gaps": [], "disconnected": true}})
+        serde_json::json!({"type": "recording", "data": {"state": "stopped", "rows": 7, "gaps": [], "disconnected": true, "ended": "disconnected"}})
     );
     let v = json(RecordingEvent::Failed {
         rows: 2,

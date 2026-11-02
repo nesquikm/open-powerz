@@ -63,7 +63,7 @@ Build order: the table's order. AXHK2W goes last so it measures the finished cha
   verify: simulator cable tests, Playwright, then a tester runbook
 - [x] Hide serial numbers — AXHK2Q
   verify: Playwright DOM scan and CLI tests
-- [ ] Recorder pause, auto-stop and limits — AXHK2R
+- [x] Recorder pause, auto-stop and limits — AXHK2R
   verify: hand-fed record tests and Playwright
 - [ ] Import recordings and vendor database files — AXHK2S
   verify: generated-file tests and a round trip

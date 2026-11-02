@@ -274,7 +274,7 @@ describe("Meters keep an unplugged tile (review major 1, minor 4)", () => {
     m.park(B, { rows: 10, elapsed_ms: 1000 });
     m.handleTileEvent(B, {
       type: "recording",
-      data: { state: "stopped", rows: 12, gaps: [], disconnected: true },
+      data: { state: "stopped", rows: 12, gaps: [], disconnected: true, ended: "disconnected" },
     });
     expect(m.unpark(B)).toBeUndefined();
 

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::app_log::{AppLog, SessionLog};
 use crate::firmware_flash::{FlashControl, FlashDone, FlashEnd, FlashPrompt, FlashStage};
 use crate::history::{HistoryGap, Series, SeriesBuckets};
-use crate::recording::{ExportProgress, RecordingEvent, RecordingSummary};
+use crate::recording::{ExportProgress, Limits, RecordingEvent, RecordingSummary};
 use crate::stats::StatsSnapshot;
 use crate::store::SessionStore;
 use crate::ui_error::{ErrorKind, UiError};
@@ -150,6 +150,8 @@ pub struct RecordingSnapshot {
     pub elapsed_ms: u64,
     /// Its file: Stop asks where to keep it (AC-4PJRVM.2).
     pub path: Option<String>,
+    /// A pause holds its rows back (AC-AXHK2R.1).
+    pub paused: bool,
 }
 
 /// The running session as a new page (after a reload) picks it up (FR VEDDFD).
@@ -573,13 +575,20 @@ const FLASH_WHILE_RECORDING_STARTS: &str =
 pub struct RecordingStart {
     control: worker::WorkerControl,
     hold: worker::RecordingStartHold,
+    limits: Limits,
 }
 
 impl RecordingStart {
+    /// End the recording by `limits` as well.
+    #[must_use]
+    pub fn with_limits(self, limits: Limits) -> Self {
+        Self { limits, ..self }
+    }
+
     /// Record to a new file at `path`. The start stays registered past a
     /// timed-out answer, until the worker has applied the request.
     pub fn record_to(self, path: &Path) -> Result<(), UiError> {
-        self.control.record_to(path, self.hold)
+        self.control.record(path, self.limits, Some(self.hold))
     }
 }
 
@@ -818,10 +827,11 @@ impl Attacher {
             rate_sps: info.rate_sps,
             rate_locked: info.rate_locked,
             session_id: info.session_id,
-            recording: recording.map(|(rows, elapsed_ms, path)| RecordingSnapshot {
+            recording: recording.map(|(rows, elapsed_ms, path, paused)| RecordingSnapshot {
                 rows,
                 elapsed_ms,
                 path,
+                paused,
             }),
             pd_capturing,
         })
@@ -1806,7 +1816,11 @@ where
             .meter(id)
             .map(|m| worker::RecordingStartHold::new(&m.recording_starts))
             .ok_or_else(|| UiError::usage(NOT_CONNECTED))?;
-        Ok(RecordingStart { control, hold })
+        Ok(RecordingStart {
+            control,
+            hold,
+            limits: Limits::default(),
+        })
     }
 
     /// Record the open session's stream to a new file at `path`.
@@ -1827,6 +1841,16 @@ where
     /// Stop meter `id`'s recording and return what it wrote.
     pub fn stop_recording_for(&self, id: &str) -> Result<RecordingSummary, UiError> {
         self.control_for(id)?.stop_recording()
+    }
+
+    /// Hold back the rows of meter `id`'s recording.
+    pub fn pause_recording_for(&self, id: &str) -> Result<(), UiError> {
+        self.control_for(id)?.pause_recording()
+    }
+
+    /// Write the rows of meter `id`'s recording again.
+    pub fn resume_recording_for(&self, id: &str) -> Result<(), UiError> {
+        self.control_for(id)?.resume_recording()
     }
 
     /// The data of the open session, or of the last one once the meter is

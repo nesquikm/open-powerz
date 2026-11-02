@@ -1130,21 +1130,37 @@ fn recordings_dir(app: &tauri::AppHandle) -> Result<PathBuf, UiError> {
 
 /// Record the stream at once to a new default file named after
 /// `suggested_name`, and resolve to its path. Where the file ends up is asked
-/// at Stop: see [`save_recording_as`].
+/// at Stop: see [`save_recording_as`]. With `options.folder` the file goes
+/// there instead, and nothing is asked.
 #[tauri::command]
 async fn start_recording(
     app: tauri::AppHandle,
     state: Shared<'_>,
     device_id: Option<String>,
     suggested_name: String,
+    options: Option<recording::RecordingOptions>,
 ) -> Result<String, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
+        if !recording::recording_name_ok(&suggested_name) {
+            return Err(recording::bad_recording_name());
+        }
+        let options = options.unwrap_or_default();
+        let limits = options.limits();
+        limits.check()?;
+        if options.folder.as_ref().is_some_and(|dir| dir.is_relative()) {
+            return Err(UiError::usage("Pick the recording folder again."));
+        }
         let start = {
             let manager = state.manager();
-            manager.recording_start_for(&manager.target(device_id.as_deref()))?
+            manager
+                .recording_start_for(&manager.target(device_id.as_deref()))?
+                .with_limits(limits)
         };
-        let path = recording::default_recording_path(&recordings_dir(&app)?, &suggested_name)?;
+        let path = match &options.folder {
+            Some(dir) => recording::folder_recording_path(dir, &suggested_name)?,
+            None => recording::default_recording_path(&recordings_dir(&app)?, &suggested_name)?,
+        };
         recording::start_at(&path, |path| start.record_to(path))?;
         Ok(path.to_string_lossy().into_owned())
     })
@@ -1176,6 +1192,23 @@ async fn save_recording_as(app: tauri::AppHandle, path: String) -> Result<Option
     .await
 }
 
+/// Ask which folder recordings go to; `null` when the dialog was cancelled.
+#[tauri::command]
+async fn choose_recording_folder(app: tauri::AppHandle) -> Result<Option<String>, UiError> {
+    blocking(move || {
+        let Some(choice) = app.dialog().file().blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let path = choice.into_path().map_err(|_| {
+            UiError::usage(
+                "The folder dialog did not return a folder on disk; pick one on this computer.",
+            )
+        })?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
 /// Stop the recording and return its row count and gaps.
 #[tauri::command]
 async fn stop_recording(
@@ -1186,6 +1219,28 @@ async fn stop_recording(
     blocking(move || {
         let control = control(&state, device_id.as_deref())?;
         control.stop_recording()
+    })
+    .await
+}
+
+/// Hold the recording's rows back while the stream goes on.
+#[tauri::command]
+async fn recording_pause(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = control(&state, device_id.as_deref())?;
+        control.pause_recording()
+    })
+    .await
+}
+
+/// Write the recording's rows again, in the same file.
+#[tauri::command]
+async fn recording_resume(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = control(&state, device_id.as_deref())?;
+        control.resume_recording()
     })
     .await
 }
@@ -1428,7 +1483,10 @@ pub fn run() {
             set_rate,
             start_recording,
             stop_recording,
+            recording_pause,
+            recording_resume,
             save_recording_as,
+            choose_recording_folder,
             export_session,
             history_range,
             history_gaps,

@@ -61,6 +61,40 @@ not contain.
 A sample carries the same Unix time in a recording and in an export of the same
 session, also after the chart history was cleared.
 
+### Pause a recording
+
+While a recording runs, **Pause** stops writing rows. The meter and the chart go
+on, and the indicator reads PAUSED. **Resume** continues in the same file. The
+time in between counts as one gap in the stop notice, and charge and energy in
+the file do not count it. Each meter tile has its own Pause button.
+
+### Recorder options
+
+**Options**, next to Record, opens the recorder options. They are saved, hold
+for the next recording, and apply to the main meter and to every tile. They lock
+while any meter records.
+
+- **File name prefix** replaces `powerz` in the file name, so `bench` gives
+  `bench-20261102-143000.csv`. It cannot hold a path separator or any of
+  `: * ? " < > |`.
+- **Folder** sets where new files go. With a folder set, Stop asks nothing and
+  the file stays there. A folder that is missing or cannot be written to is
+  refused when you press Record, and no recording starts. With no folder, files
+  go where **Record** says above and Stop asks.
+- **Auto-stop** ends a recording when the current stays below a set value for a
+  set time (the defaults are 0.05 A for 60 s). Both must be above 0. It keeps
+  the file, and the notice opens with "Recording ended on low current". Paused
+  time does not count toward it, and a slow window cannot delay it.
+- **Row limit** ends a recording at that many rows (default 10,000,000). It
+  keeps the file, and the notice opens with "Recording ended at the row limit".
+
+The dialog also shows how long the chart's memory lasts at the current rate:
+about 10 minutes at 1000 SPS, longer at lower rates. This limits the chart, not
+a recording.
+
+`powerz stream` has none of these options: it has no pause, auto-stop or row
+limit, and it writes to the file you name.
+
 ### Temperature
 
 The TEMP column carries the meter's latest valid temperature reading at or
