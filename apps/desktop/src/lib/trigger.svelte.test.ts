@@ -1689,6 +1689,40 @@ describe("AC-AXHK2N.10: the collapse forgets the charger", () => {
   });
 });
 
+describe("AC-AXHK2P.10: Read cable is off while the charger is gone", () => {
+  it("a press after the charger went away sends nothing and shows nothing", async () => {
+    const { api, panel } = await collapsed();
+    expect(panel.chargerGone).toBe(true);
+    expect(panel.sessionOpen).toBe(true);
+    const from = api.calls.length;
+    await panel.readCable();
+    expect(api.calls.slice(from)).not.toContain("cable read");
+    expect(panel.cable).toBeNull();
+    expect(panel.cableNoAnswer).toBe(false);
+    expect(panel.cableBusy).toBe(false);
+  });
+
+  it("a second press while the charger is gone sends nothing either", async () => {
+    const { api, panel } = await collapsed();
+    const from = api.calls.length;
+    await panel.readCable();
+    await panel.readCable();
+    expect(api.calls.slice(from).filter((c) => c === "cable read")).toEqual([]);
+  });
+
+  it("reads again once Detect found the charger", async () => {
+    const { api, panel } = await collapsed();
+    // The charger is back and Detect saw it.
+    api.goneNow = false;
+    await panel.detect();
+    expect(panel.chargerGone).toBe(false);
+    const from = api.calls.length;
+    await panel.readCable();
+    expect(api.calls.slice(from)).toEqual(["cable read"]);
+    expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+  });
+});
+
 describe("AC-AXHK2N.11: the end of a session leaves nothing that does nothing", () => {
   it("leaving the view drops the offers and the detection", async () => {
     const { panel } = await detected();

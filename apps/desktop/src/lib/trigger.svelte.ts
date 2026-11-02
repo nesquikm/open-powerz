@@ -577,6 +577,8 @@ export class TriggerPanel {
   /** One press of Read cable: one message inside the open session, no dialog, no retry. */
   async readCable(): Promise<void> {
     if (!this.sessionOpen || this.requestsDisabled || this.cableBusy || this.detecting) return;
+    // The charger went away: nothing answers until Detect finds it again.
+    if (this.chargerGone) return;
     this.error = null;
     this.cableBusy = true;
     // The card shows this press's answer or nothing: the cable may have changed.

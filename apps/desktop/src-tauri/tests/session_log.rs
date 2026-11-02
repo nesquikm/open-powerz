@@ -874,6 +874,33 @@ fn a_refused_pd_capture_start_is_logged_as_refused() {
     );
 }
 
+/// AC-AXHK2P.11: the refusal the user sees names the capture and gives no
+/// firmware advice; the log has the start and the meter's answer.
+#[test]
+fn a_refused_pd_capture_start_says_the_capture_was_refused() {
+    let path = log_path("pd-capture-start-refused-text");
+    let (m, line, _rx) = faulty_session(&path, FaultPlan::new());
+    line.refuse_pd.store(true, Ordering::SeqCst);
+    let control = m.control_for(METER_A).expect("connected");
+    let err = control.start_pd().expect_err("the meter refused the start");
+    assert_eq!(err.kind, ErrorKind::Protocol, "{err:?}");
+    assert!(
+        err.message.to_lowercase().contains("pd capture"),
+        "the capture is not named: {err:?}"
+    );
+    let hint = err.hint.clone().unwrap_or_default().to_lowercase();
+    assert!(
+        !err.message.to_lowercase().contains("firmware") && !hint.contains("firmware"),
+        "firmware advice: {err:?}"
+    );
+    let found = pd_capture_lines(&path, 1);
+    assert!(
+        found[0].contains("pd capture start") && found[0].contains("refused"),
+        "{}",
+        found[0]
+    );
+}
+
 #[test]
 fn a_refused_pd_capture_stop_is_logged_as_refused() {
     let path = log_path("pd-capture-stop-refused");

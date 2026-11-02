@@ -33,6 +33,8 @@ The trigger view has a Cable card that reads the e-marker with one click during 
 - AC-AXHK2P.6: With no session open and a PD capture holding a SOP' Discover Identity ACK, the card shows that identity, labelled as seen in the capture, and sends nothing.
 - AC-AXHK2P.7: `powerz-pd` decodes the speed and the active or passive fields from the cable VDOs, with byte-vector tests.
 - AC-AXHK2P.8: The demo device answers with a sample cable. A README line and the trigger how-to describe the card.
+- AC-AXHK2P.10: Read cable is disabled, with the reason shown, while the charger is gone and while Detect runs.
+- AC-AXHK2P.11: A PD capture start the meter refuses says so, naming the capture, with no advice to update the firmware. `app.log` records the start and the meter's answer.
 
 ## Technical Design
 
@@ -56,3 +58,6 @@ The classifier exception is deliberately narrow: it covers one message to the ca
 - AC.9's variants found a hole in the library classifier, older than this FR: a body that did not match the header's object count could class as a control message, so a Request's RDO behind a count of zero went out with no dialog. Any such body is now above 5 V, in the CLI too.
 - `pdm.entered()` sees parsed `entry` lines only. An unparsed confirmed console line that changed protocol would leave it saying PD. The read still cannot raise VBUS, so this stays.
 - A variant that drops the object and clears the count (`01 8F 00`) is a different, complete control message, so it keeps its own class.
+- ACs .10 and .11 come from the a5442bc hardware run. B2 never got a fair try: one low VBUS reading ended the PD session at a steady 5.18 V, so the card never came (AC-AXHK2N.9 and .17 now need 300 ms of low readings). AC.1 stays unproven on the meter.
+- In that run the meter refused the capture start (0x10) after a trigger session, with the cable under test in its female port and nothing beyond it. M3's captures were read by polling without 0x10. Whether the trigger session's state or this wiring causes the refusal is not known. The next runbook starts a capture on a fresh connect before any trigger, then again after one, and the log of .11 shows the answers.
+- AC.11's hint says to replug the meter and try again: the refusal's cause is not known, and a replug clears the trigger session. Only the capture start (0x10) gets the new text; every other refused request keeps its hint. The app.log line `pd capture start refused` holds the start and the answer in one line.

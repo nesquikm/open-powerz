@@ -104,6 +104,32 @@ test("every control that sends is disabled while Detect runs (AC-AXHK2N.14)", as
   await expect(page.getByRole("button", { name: "Back to 5 V" })).toBeEnabled();
 });
 
+// AC-AXHK2P.10: while Detect runs Read cable is off and its card says why. Page
+// contract: the button's accessible description is the reason shown in the card.
+const DETECT_REASON = /detecting|detect (is )?run/i;
+
+function readCable(page: Page): Locator {
+  return view(page).getByRole("button", { name: "Read cable", exact: true });
+}
+
+function cableCard(page: Page): Locator {
+  return view(page).getByRole("region", { name: "Cable", exact: true });
+}
+
+test("Read cable says it is off because Detect runs, and only then (AC-AXHK2P.10)", async ({
+  page,
+}) => {
+  await detectingAgain(page);
+  await expect(readCable(page)).toBeDisabled();
+  await expect(readCable(page)).toHaveAccessibleDescription(DETECT_REASON);
+  await expect(cableCard(page).getByText(DETECT_REASON)).toBeVisible();
+
+  await detectEnded(page);
+  await expect(readCable(page)).toBeEnabled();
+  await expect(readCable(page)).not.toHaveAccessibleDescription(DETECT_REASON);
+  await expect(cableCard(page).getByText(DETECT_REASON)).toBeHidden();
+});
+
 test("a 9 V press during Detect opens no dialog once Detect ends (AC-AXHK2N.14)", async ({
   page,
 }) => {

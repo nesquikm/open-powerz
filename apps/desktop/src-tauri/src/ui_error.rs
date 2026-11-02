@@ -238,6 +238,18 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
     match err {
         S::Transport(t) => from_transport(t, target_os),
         S::Protocol(_) | S::Decode(_) | S::Frame(_) => protocol(),
+        // The capture start (START_ANALYZER) is refused by meters that cannot
+        // capture right now; a firmware update is not the fix there.
+        S::Rejected { request_type }
+            if request_type & 0x7F == powerz_protocol::frame::start_pd_sniffer(0)[0] & 0x7F =>
+        {
+            UiError {
+                kind: ErrorKind::Protocol,
+                message: "The meter refused to start the PD capture.".to_owned(),
+                hint: Some("Replug the meter and try again.".to_owned()),
+                sessions: Vec::new(),
+            }
+        }
         S::Rejected { .. } => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter refused the request.".to_owned(),
@@ -447,6 +459,64 @@ mod tests {
         let err = session::Error::Transport(transport::Error::Disconnected);
         let e = from_session(&err, "macos");
         assert_eq!(e.kind, ErrorKind::Disconnected);
+        assert_plain(&e);
+    }
+
+    // ---- AC-AXHK2P.11: a refused PD capture start says so ----
+
+    /// The type byte a REJECT of the PD capture start (0x10) carries, as the
+    /// session builds it: `request[0]` of the start frame.
+    fn capture_start_type() -> u8 {
+        powerz_protocol::frame::start_pd_sniffer(1)[0]
+    }
+
+    #[test]
+    fn a_refused_pd_capture_start_names_the_capture() {
+        let err = session::Error::Rejected {
+            request_type: capture_start_type(),
+        };
+        let e = from_session(&err, "macos");
+        assert_eq!(e.kind, ErrorKind::Protocol);
+        let message = e.message.to_lowercase();
+        assert!(message.contains("pd capture"), "{}", e.message);
+        assert!(message.contains("refused"), "{}", e.message);
+        assert_plain(&e);
+    }
+
+    #[test]
+    fn a_refused_pd_capture_start_gives_no_firmware_advice() {
+        let err = session::Error::Rejected {
+            request_type: capture_start_type(),
+        };
+        for os in ["macos", "linux", "windows"] {
+            let e = from_session(&err, os);
+            assert!(
+                !e.message.to_lowercase().contains("firmware"),
+                "{os}: {}",
+                e.message
+            );
+            let hint = e.hint.clone().unwrap_or_default();
+            assert!(!hint.to_lowercase().contains("firmware"), "{os}: {hint}");
+        }
+    }
+
+    #[test]
+    fn another_refused_request_is_not_called_a_capture() {
+        // GET_DATA (0x0C), as the session builds it: the change stays on the capture start.
+        let get_data =
+            powerz_protocol::frame::get_data(1, powerz_protocol::frame::Attribute::ADC)[0];
+        let e = from_session(
+            &session::Error::Rejected {
+                request_type: get_data,
+            },
+            "macos",
+        );
+        assert_eq!(e.kind, ErrorKind::Protocol);
+        assert!(
+            !e.message.to_lowercase().contains("capture"),
+            "{}",
+            e.message
+        );
         assert_plain(&e);
     }
 

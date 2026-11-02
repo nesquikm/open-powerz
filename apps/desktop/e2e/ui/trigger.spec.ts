@@ -1116,6 +1116,33 @@ test("the armed status goes as soon as Detect starts (AC-AXHK2N.13)", async ({ p
   await expect(armedStatus(page)).toBeHidden({ timeout: 1000 });
 });
 
+// AC-AXHK2P.10: the charger went away, so Read cable is off and its card says why.
+// Page contract: the button's accessible description is the reason shown in the card.
+test("Read cable is off with its reason once the charger went away (AC-AXHK2P.10)", async ({
+  page,
+}) => {
+  await inPd(page, "?mock=trigger-charger-gone");
+  await expect(chargerGoneText(page)).toBeVisible();
+  const before = (await commands(page)).length;
+  await expect(readCableButton(page)).toBeDisabled();
+  await expect(readCableButton(page)).toHaveAccessibleDescription(/charger/i);
+  await expect(cableCard(page).getByText(/charger/i)).toBeVisible();
+  expect((await commands(page)).slice(before)).toEqual([]);
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+test("the gone charger's reason goes once Detect finds it again (AC-AXHK2P.10)", async ({
+  page,
+}) => {
+  await inPd(page, "?mock=trigger-charger-gone");
+  await expect(chargerGoneText(page)).toBeVisible();
+  await expect(readCableButton(page)).toBeDisabled();
+  await detectButton(page).click();
+  await expect(chargerGoneText(page)).toBeHidden();
+  await expect(readCableButton(page)).toBeEnabled();
+  await expect(readCableButton(page)).not.toHaveAccessibleDescription(/charger/i);
+});
+
 test("the new texts pass axe (AC-AXHK2N.10, .11, .13)", async ({ page }) => {
   await detected(page, "?mock=trigger-charger-gone");
   await request9V(page);

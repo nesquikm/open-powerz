@@ -124,6 +124,17 @@
    *  the session is reopened). */
   const requestsOff = $derived(!panel.sessionOpen || panel.pending !== null || pressesOff);
 
+  /** Why Read cable is off, shown in the Cable card and as the button's description. */
+  const cableReason = $derived(
+    noSession
+      ? "Press Detect to read the cable."
+      : panel.detecting
+        ? "Detect is running; read the cable once it ends."
+        : panel.chargerGone
+          ? "No charger to ask: press Detect to read the cable."
+          : null,
+  );
+
   /** `SCP` or `UFCS #2`: the name of a limits block. */
   function limitsName(title: string, l: TriggerLimits): string {
     return l.index === null ? title : `${title} #${l.index}`;
@@ -467,13 +478,13 @@
     <div class="offers">
       <button
         type="button"
-        disabled={requestsOff || panel.cableBusy}
-        aria-describedby={noSession ? "trigger-cable-reason" : undefined}
+        disabled={requestsOff || panel.cableBusy || panel.chargerGone}
+        aria-describedby={cableReason ? "trigger-cable-reason" : undefined}
         onclick={() => void panel.readCable()}>Read cable</button
       >
     </div>
-    {#if noSession}
-      <p id="trigger-cable-reason" class="muted">Press Detect to read the cable.</p>
+    {#if cableReason}
+      <p id="trigger-cable-reason" class="muted">{cableReason}</p>
     {/if}
     {#if panel.cableBusy}
       <p class="muted" aria-live="polite">Reading the cable…</p>
