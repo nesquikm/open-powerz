@@ -18,6 +18,7 @@
   "AXHK2P": "protocol-triggers: press read cable",
   "AXHK2Q": "live-meter: hide serial numbers",
   "AXHK2R": "recorder-and-charts: auto-stop on low current",
+  "AXHK2S": "recorder-and-charts: open a csv recording",
   "DGSQ6P": "protocol-triggers: trigger 9 v from a pd charger",
   "DGSQ6Q": "protocol-triggers: qc 2.0/3.0, fcp, afc",
   "DGSQ6R": "protocol-triggers: detect which fast-charge protocols",

@@ -38,6 +38,7 @@ check the download and open the app past the macOS and Windows warnings.
 - See min, max, average, charge and energy for the session ([statistics](docs/how-to/record-a-csv.md#reset-the-statistics-or-clear-the-chart-history))
 - Record to CSV at up to 1000 samples/s in the vendor's layout, from the app or `powerz stream`, and reveal the file in one click ([record a CSV](docs/how-to/record-a-csv.md))
 - Pause and resume a recording, end it with auto-stop on low current or a row limit, and set its file prefix and folder ([recorder options](docs/how-to/record-a-csv.md#recorder-options))
+- Open a CSV recording or a vendor `.db` file in a read-only tab with no meter needed, and export a session to a `.db` in the vendor's layout ([open a recording](docs/how-to/record-a-csv.md#open-a-recording))
 
 ### PD analyzer
 

@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 powerz-protocol.workspace = true
+thiserror = "2"
 
 [lints]
 workspace = true

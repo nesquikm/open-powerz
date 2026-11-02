@@ -27,7 +27,7 @@ A Rust cargo workspace with six crates and one web UI:
   events (20–60 Hz) to the UI over `tauri::ipc::Channel`.
 - `powerz-record` (library): the vendor-compatible CSV recorder shared by the CLI and the
   desktop app (header, plain-decimal formatting, time origin, signed charge/energy
-  integration).
+  integration), and the streaming reader that reads those recordings back.
 - `powerz-pd` (library): the USB PD r3.2 message decoder (headers, PDOs/RDOs, VDMs,
   extended messages and chunk reassembly, a one-line summary and a field tree per
   message). It has no dependencies and does no I/O, so it also builds for wasm32 (checked
@@ -49,11 +49,11 @@ Cargo.toml                       # workspace: resolver 3, edition 2024, MSRV 1.9
 package.json / bun.lock          # Bun workspace root (apps/desktop)
 crates/powerz-protocol/src/      # transport/, frame, decode/, session/, crypto/, pdm/, adcnew, firmware/, pdcap
 crates/powerz-cli/src/main.rs    # `powerz` binary
-crates/powerz-record/src/        # shared CSV recorder + charge/energy integrator
+crates/powerz-record/src/        # shared CSV recorder + reader + charge/energy integrator
 crates/powerz-pd/src/            # USB PD message decoder (no deps, no I/O, wasm32-clean)
 crates/powerz-sim/src/           # simulated KM003C (demo device, e2e double)
 apps/desktop/src/                # App.svelte, main.ts, lib/*.ts (+ co-located *.test.ts)
-apps/desktop/src-tauri/          # Tauri crate: commands, devices, worker, batch, history, stats, recording
+apps/desktop/src-tauri/          # Tauri crate: commands, devices, worker, batch, history, stats, recording, recording_file
 apps/desktop/e2e/app/            # WebdriverIO + tauri-driver suite (real app, Linux + Windows)
 apps/desktop/e2e/ui/             # Playwright + axe suite (web build, mocked backend, all OSes)
 docs/                            # user docs + protocol.md
@@ -87,7 +87,7 @@ Defined per FR. Core types: `Frame`/`MainHeader`/`SectionHeader`,
 - Tauri commands: `app_info`, `list_devices`, `watch_devices`, `connect`, `attach` (a reloaded page
   takes over the running session), `disconnect`, `set_rate`,
   `history_range`, `history_gaps`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
-  `stop_recording`, `save_recording_as`, `recording_pause`, `recording_resume`, `choose_recording_folder`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter),
+  `stop_recording`, `save_recording_as`, `recording_pause`, `recording_resume`, `choose_recording_folder`, `export_session`, `export_session_db`, `recording_file_open`, `recording_file_cancel`, `recording_file_close`, `recording_file_range`, `cancel_wait` (stop waiting for an unplugged meter),
   `running_meters` (the running sessions' device ids, for a reload), `meter_settings`,
   `records_list` and `record_download` (read-only meter data), `records_delete` and
   `meter_settings_write` (the two meter writes, each confirmed in the UI first), and

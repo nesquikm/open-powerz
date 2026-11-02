@@ -185,7 +185,10 @@ test("with Export in the menu, a running export is a thin line along the bar's b
   const before = await settled(page, () => topBarItems(page));
 
   await page.getByRole("button", { name: /^More:/ }).click();
-  await page.locator("#top-bar-menu").getByRole("menuitem", { name: "Export" }).click();
+  await page
+    .locator("#top-bar-menu")
+    .getByRole("menuitem", { name: "Export", exact: true })
+    .click();
   const progress = page.getByLabel("Export progress");
   await expect(progress).toBeVisible();
   await expect(page.locator("#top-bar-menu")).toHaveCount(0);

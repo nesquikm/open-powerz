@@ -65,7 +65,7 @@ Build order: the table's order. AXHK2W goes last so it measures the finished cha
   verify: Playwright DOM scan and CLI tests
 - [x] Recorder pause, auto-stop and limits — AXHK2R
   verify: hand-fed record tests and Playwright
-- [ ] Import recordings and vendor database files — AXHK2S
+- [x] Import recordings and vendor database files — AXHK2S
   verify: generated-file tests and a round trip
 - [ ] Chart ruler, segment marks and energy share — AXHK2T
   verify: pure-module tests, `range_stats` tests, visual check

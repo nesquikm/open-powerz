@@ -10,6 +10,7 @@ import {
   ExportJob,
   RATE_OPTIONS,
   Recording,
+  dbFileName,
   defaultRecordingName,
   exportNoticeText,
   formatRecordingElapsed,
@@ -77,6 +78,12 @@ describe("recording file name (AC-0P7HSJ.3)", () => {
     expect(defaultRecordingName(new Date(2027, 0, 2, 23, 59, 58))).toBe(
       "powerz-20270102-235958.csv",
     );
+  });
+
+  it("turns a proposed CSV name into a .db name (AC-AXHK2S.6)", () => {
+    expect(dbFileName("powerz-20261021-090507.csv")).toBe("powerz-20261021-090507.db");
+    expect(dbFileName("bench.csv.csv")).toBe("bench.csv.db");
+    expect(dbFileName("no-extension")).toBe("no-extension");
   });
 });
 

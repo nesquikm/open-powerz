@@ -7,6 +7,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use powerz_protocol::decode::QueueRecord;
 use powerz_record::CsvRecorder;
@@ -549,6 +550,39 @@ impl Recorder {
                 ended,
             }),
             Err(e) => Err((kept, io_error(&e))),
+        }
+    }
+}
+
+/// A new, empty hidden file in `path`'s folder (the rename into place must
+/// not cross file systems), named after `path`.
+pub(crate) fn create_temp_beside(path: &Path) -> io::Result<(PathBuf, fs::File)> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidFilename, "no file name"))?;
+    loop {
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(name);
+        tmp_name.push(format!(
+            ".{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let tmp = dir.join(tmp_name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            // Left over from a crashed run with the same pid: next number.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
         }
     }
 }

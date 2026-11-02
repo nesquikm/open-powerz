@@ -4,7 +4,7 @@
 //! device adds one entry per simulator scenario.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::JoinHandle;
@@ -1880,7 +1880,14 @@ where
             control,
             store,
             self.clock.clone().now_ms(),
+            self.recording_paths(),
         ))
+    }
+
+    /// The files the meters are recording to now.
+    fn recording_paths(&self) -> Vec<PathBuf> {
+        let workers = self.meters.iter().filter_map(|m| m.worker.as_ref());
+        workers.filter_map(WorkerHandle::recording_path).collect()
     }
 
     /// Export the session so far (the open one, or the last one) to a new

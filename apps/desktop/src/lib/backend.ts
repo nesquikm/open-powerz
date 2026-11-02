@@ -476,6 +476,18 @@ export async function exportSession(
   return invoke<ExportResult | null>("export_session", { suggestedName, onProgress: channel });
 }
 
+/** Opens the save dialog proposing `suggestedName` and exports the session so far to a
+ * vendor-layout `.db` file (FR AXHK2S). Resolves like {@link exportSession}. */
+export async function exportSessionDb(
+  suggestedName: string,
+  onProgress: (progress: ExportProgress) => void,
+): Promise<ExportResult | null> {
+  if (mock) return mock.exportSessionDb(suggestedName, onProgress);
+  const channel = new Channel<ExportProgress>();
+  channel.onmessage = onProgress;
+  return invoke<ExportResult | null>("export_session_db", { suggestedName, onProgress: channel });
+}
+
 /** Statistics of the open session since its start or the last reset. */
 export async function stats(): Promise<StatsSnapshot> {
   if (mock) return mock.stats();
@@ -487,6 +499,65 @@ export async function stats(): Promise<StatsSnapshot> {
  * failing to parse. */
 function wholeMs(t0Ms: number, t1Ms: number): { t0Ms: number; t1Ms: number } {
   return { t0Ms: Math.max(0, Math.floor(t0Ms)), t1Ms: Math.max(0, Math.ceil(t1Ms)) };
+}
+
+/** What the view shows of an opened recording file (mirrors `src-tauri/src/recording_file.rs`). */
+export interface FileSummary {
+  /** The file's name, without its folder. */
+  name: string;
+  rows: number;
+  /** Damaged rows skipped. */
+  skipped: number;
+  /** Readable rows past the row limit, or past the time a record holds. */
+  left_out: number;
+  stats: StatsSnapshot;
+}
+
+/** How far an open has got, in a unit of the reader's own. */
+export interface OpenProgress {
+  done: number;
+  /** 0 when the end is not known. */
+  total: number;
+}
+
+/** Opens the open dialog and reads the chosen CSV or vendor `.db` recording (FR AXHK2S),
+ * off the UI thread; needs no meter and sends nothing to one. Resolves to its summary, or
+ * `null` when the dialog was dismissed or Cancel ended the open. */
+export async function openRecordingFile(
+  onProgress: (progress: OpenProgress) => void,
+): Promise<FileSummary | null> {
+  if (mock) return mock.openRecordingFile(onProgress);
+  const channel = new Channel<OpenProgress>();
+  channel.onmessage = onProgress;
+  return invoke<FileSummary | null>("recording_file_open", { onProgress: channel });
+}
+
+/** Ends the open under way: it resolves to `null`. */
+export async function cancelRecordingFile(): Promise<void> {
+  if (mock) return mock.cancelRecordingFile();
+  await invoke("recording_file_cancel");
+}
+
+/** Closes the open recording file. */
+export async function closeRecordingFile(): Promise<void> {
+  if (mock) return mock.closeRecordingFile();
+  await invoke("recording_file_close");
+}
+
+/** Min / max buckets of the open recording file over `t0Ms..=t1Ms`, at most `buckets` per
+ * series. */
+export async function recordingFileRange<const S extends readonly HistorySeries[]>(
+  series: S,
+  t0Ms: number,
+  t1Ms: number,
+  buckets: number,
+): Promise<BucketsFor<S>> {
+  if (mock) return mock.recordingFileRange(series, t0Ms, t1Ms, buckets);
+  return invoke<BucketsFor<S>>("recording_file_range", {
+    series,
+    ...wholeMs(t0Ms, t1Ms),
+    buckets,
+  });
 }
 
 /** Min / max buckets of the open session's history over `t0Ms..=t1Ms`, at most
@@ -1131,6 +1202,10 @@ export interface MeterBackend {
     suggestedName: string,
     onProgress: (progress: ExportProgress) => void,
   ): Promise<ExportResult | null>;
+  exportSessionDb(
+    suggestedName: string,
+    onProgress: (progress: ExportProgress) => void,
+  ): Promise<ExportResult | null>;
   stats(): Promise<StatsSnapshot>;
   historyRange<const S extends readonly HistorySeries[]>(
     series: S,
@@ -1189,6 +1264,7 @@ export const currentMeterCommands: MeterCommands = {
   resumeRecording,
   saveRecordingAs,
   exportSession,
+  exportSessionDb,
   stats,
   historyRange,
   historyGaps,
@@ -1248,6 +1324,11 @@ export function meterBackend(deviceId: string): MeterBackend {
       const channel = new Channel<ExportProgress>();
       channel.onmessage = onProgress;
       return call("export_session", { suggestedName, onProgress: channel });
+    },
+    exportSessionDb: (suggestedName, onProgress) => {
+      const channel = new Channel<ExportProgress>();
+      channel.onmessage = onProgress;
+      return call("export_session_db", { suggestedName, onProgress: channel });
     },
     stats: () => call("stats"),
     historyRange: (series, t0Ms, t1Ms, buckets) =>

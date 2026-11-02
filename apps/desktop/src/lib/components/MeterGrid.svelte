@@ -22,6 +22,7 @@
     onTogglePause,
     onRecorderOptions,
     onExport,
+    onExportDb,
     fileActions,
   }: {
     meters: Meters;
@@ -41,6 +42,7 @@
     onTogglePause: (entry: MeterEntry) => void;
     onRecorderOptions: (entry: MeterEntry) => void;
     onExport: (entry: MeterEntry) => void;
+    onExportDb: (entry: MeterEntry) => void;
     /** What can be done with a saved file. */
     fileActions: Snippet<[string]>;
   } = $props();
@@ -79,6 +81,7 @@
         onTogglePause={() => onTogglePause(entry)}
         onRecorderOptions={() => onRecorderOptions(entry)}
         onExport={() => onExport(entry)}
+        onExportDb={() => onExportDb(entry)}
         onDisconnect={() => onDisconnect(entry.listing.id)}
         {fileActions}
       />

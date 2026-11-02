@@ -8,6 +8,8 @@ use std::io::{self, Write};
 use powerz_protocol::decode::QueueRecord;
 use powerz_protocol::decode::records::{RecordEntry, RecordSample};
 
+pub mod reader;
+
 /// Header of the recorder CSV, matching the vendor recorder.
 pub const CSV_HEADER: &str = "ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR";
 

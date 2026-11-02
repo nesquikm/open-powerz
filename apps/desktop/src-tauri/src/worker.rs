@@ -25,13 +25,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::app_log::SessionLog;
 use crate::batch::{Batch, Batcher, Sample};
-use crate::history::{Series, SeriesBuckets};
+use crate::history::{Records, Series, SeriesBuckets};
 use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
 use crate::recording::{
     self, EndReason, ExportProgress, Limits, Recorder, RecordingEvent, RecordingSummary,
 };
+use crate::recording_file;
 use crate::stats::StatsSnapshot;
-use crate::store::{SessionStore, temp_at};
+use crate::store::{SessionStore, TempLog, temp_at};
 use crate::trigger::CableView;
 use crate::ui_error::{self, ErrorKind, UiError};
 
@@ -572,8 +573,9 @@ pub struct Worker<T: Transport, C: Clock> {
     /// outside the worker thread: asking the thread would wait on it
     /// (FR AXHK2F).
     recording_id: Arc<AtomicU64>,
-    /// The file the open recording writes, when it was opened by path.
-    recording_path: Option<PathBuf>,
+    /// The file the open recording writes, when it was opened by path, for
+    /// the manager too: an export of another meter must not replace it.
+    recording_path: RecordingPath,
     sink: Sink,
     in_order: InOrder,
     /// Adds up the time blocked in the worker's own calls, when given.
@@ -681,7 +683,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             store,
             recording: None,
             recording_id: Arc::default(),
-            recording_path: None,
+            recording_path: RecordingPath::default(),
             sink,
             in_order,
             meter,
@@ -820,6 +822,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// Take the open recording, which is over from here on.
     fn take_recording(&mut self) -> Option<Recorder> {
         self.recording_id.store(0, Ordering::SeqCst);
+        self.recording_path.set(None);
         self.recording.take()
     }
 
@@ -918,14 +921,12 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         self.check_recording_start(&limits)?;
         let existed = path.exists();
         let file = recording::create_file(path)?;
+        // Before the first row, so no export slips in behind the start.
+        self.recording_path.set(Some(same_file_path(path)));
         match self.start_recording_with(Box::new(file), limits) {
-            Ok(()) => {
-                // Canonical, so the export guard sees through symlinks.
-                self.recording_path =
-                    Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(e) => {
+                self.recording_path.set(None);
                 if !existed {
                     let _ = std::fs::remove_file(path);
                 }
@@ -937,14 +938,29 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// Create the file at `path` and export the session to it, unless it is
     /// the file being recorded to.
     pub fn export_to(&mut self, path: &Path, progress: ProgressFn) -> Result<ExportJob, UiError> {
-        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-        if self.recording.is_some() && self.recording_path.as_deref() == Some(target.as_path()) {
-            return Err(UiError::usage(
-                "That file is being recorded to; pick another name for the export.",
-            ));
-        }
+        self.refuse_recording_file(path)?;
         let file = recording::create_file(path)?;
         Ok(self.export(Box::new(file), progress))
+    }
+
+    /// Export the session to a vendor-layout `.db` file at `path` on a thread
+    /// of its own, unless it is the file being recorded to.
+    pub fn export_db_to(
+        &mut self,
+        path: &Path,
+        progress: ProgressFn,
+    ) -> Result<ExportJob, UiError> {
+        self.refuse_recording_file(path)?;
+        Ok(export_store_db(
+            &self.store,
+            path,
+            self.clock.now_ms(),
+            progress,
+        ))
+    }
+
+    fn refuse_recording_file(&self, path: &Path) -> Result<(), UiError> {
+        refuse_recorded(path, self.recording_path.get().as_slice())
     }
 
     /// Stop the recording: flush and close the file. When the last flush fails
@@ -1584,6 +1600,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::ExportTo(path, progress, reply) => {
                 let _ = reply.send(self.export_to(&path, progress));
             }
+            Command::ExportDbTo(path, progress, reply) => {
+                let _ = reply.send(self.export_db_to(&path, progress));
+            }
             Command::StopRecording(reply) => {
                 let _ = reply.send(self.stop_recording());
             }
@@ -1636,7 +1655,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::Handover(swap, reply) => {
                 // Read here and swapped behind the events already sent, so
                 // the new sink gets exactly the events after this answer.
-                let path = self.recording_path.as_ref();
+                let path = self.recording_path.get();
                 let path = path.map(|p| p.to_string_lossy().into_owned());
                 let progress = self.recording_progress();
                 let paused = self.recording.as_ref().is_some_and(Recorder::is_paused);
@@ -1661,11 +1680,8 @@ enum Command {
         Option<RecordingStartHold>,
         mpsc::Sender<Result<(), UiError>>,
     ),
-    ExportTo(
-        PathBuf,
-        ProgressFn,
-        mpsc::Sender<Result<ExportJob, UiError>>,
-    ),
+    ExportTo(PathBuf, ProgressFn, ExportReply),
+    ExportDbTo(PathBuf, ProgressFn, ExportReply),
     StopRecording(mpsc::Sender<Result<RecordingSummary, UiError>>),
     PauseRecording(mpsc::Sender<Result<(), UiError>>),
     ResumeRecording(mpsc::Sender<Result<(), UiError>>),
@@ -1708,6 +1724,7 @@ impl std::fmt::Debug for Command {
             Command::SetRate(rate, _) => f.debug_tuple("SetRate").field(rate).finish(),
             Command::RecordTo(path, ..) => f.debug_tuple("RecordTo").field(path).finish(),
             Command::ExportTo(path, ..) => f.debug_tuple("ExportTo").field(path).finish(),
+            Command::ExportDbTo(path, ..) => f.debug_tuple("ExportDbTo").field(path).finish(),
             Command::StopRecording(_) => f.write_str("StopRecording"),
             Command::PauseRecording(_) => f.write_str("PauseRecording"),
             Command::ResumeRecording(_) => f.write_str("ResumeRecording"),
@@ -1739,6 +1756,9 @@ impl std::fmt::Debug for Command {
 
 type ProgressFn = Box<dyn FnMut(ExportProgress) + Send>;
 
+/// Where a command that starts an export answers.
+type ExportReply = mpsc::Sender<Result<ExportJob, UiError>>;
+
 /// A running recording at a handover: rows, elapsed ms, its file and whether
 /// it is paused.
 pub type HeldRecording = (u64, u64, Option<String>, bool);
@@ -1754,17 +1774,82 @@ fn export_store(
 ) -> ExportJob {
     let (history, start_unix_ms, temps) = store.export_source(now_ms);
     std::thread::spawn(move || {
-        let mut cursor = 0;
         recording::export_iter(
             history.len() as u64,
-            history.iter_runs().enumerate().map(|(i, (r, new_run))| {
-                (r, new_run, temp_at(&temps, &mut cursor, i, r.time_ms()))
-            }),
+            export_rows(&history, &temps),
             out,
             start_unix_ms,
             progress,
         )
     })
+}
+
+/// [`export_store`] to the vendor-layout `.db` file at `path`. The rate is
+/// the first record's, as the param row describes the start of the session.
+fn export_store_db(
+    store: &SessionStore,
+    path: &Path,
+    now_ms: u64,
+    progress: impl FnMut(ExportProgress) + Send + 'static,
+) -> ExportJob {
+    let (history, start_unix_ms, temps) = store.export_source(now_ms);
+    let path = path.to_owned();
+    std::thread::spawn(move || {
+        let rate_sps = history.iter().next().map_or(0, |r| r.rate().sps());
+        recording_file::export_db_iter(
+            history.len() as u64,
+            export_rows(&history, &temps),
+            &path,
+            start_unix_ms,
+            rate_sps,
+            progress,
+        )
+    })
+}
+
+/// The records of `history` as an export takes them.
+fn export_rows<'a>(
+    history: &'a Records,
+    temps: &'a TempLog,
+) -> impl Iterator<Item = recording_file::ExportRow> + 'a {
+    let mut cursor = 0;
+    history
+        .iter_runs()
+        .enumerate()
+        .map(move |(i, (r, new_run))| (r, new_run, temp_at(temps, &mut cursor, i, r.time_ms())))
+}
+
+/// The file a worker's open recording writes, shared with those outside the
+/// worker thread as [`Worker::recording_id`] is.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecordingPath(Arc<Mutex<Option<PathBuf>>>);
+
+impl RecordingPath {
+    fn set(&self, path: Option<PathBuf>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = path;
+    }
+
+    fn get(&self) -> Option<PathBuf> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// `path` as the guard compares it: canonical, so it sees through symlinks.
+fn same_file_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// Refuse an export to `path` when it is one of the files in `recorded`.
+fn refuse_recorded(path: &Path, recorded: &[PathBuf]) -> Result<(), UiError> {
+    if recorded.contains(&same_file_path(path)) {
+        return Err(UiError::usage(
+            "That file is being recorded to; pick another name for the export.",
+        ));
+    }
+    Ok(())
 }
 
 /// Exports a session: through its worker while one runs, so the file being
@@ -1774,6 +1859,8 @@ pub struct Exporter {
     control: Option<WorkerControl>,
     store: SessionStore,
     now_ms: u64,
+    /// The files every meter records to: an export replaces none of them.
+    recorded: Vec<PathBuf>,
 }
 
 impl Exporter {
@@ -1783,11 +1870,13 @@ impl Exporter {
         control: Option<WorkerControl>,
         store: SessionStore,
         now_ms: u64,
+        recorded: Vec<PathBuf>,
     ) -> Exporter {
         Exporter {
             control,
             store,
             now_ms,
+            recorded,
         }
     }
 
@@ -1797,6 +1886,7 @@ impl Exporter {
         path: &Path,
         progress: impl FnMut(ExportProgress) + Send + 'static,
     ) -> Result<ExportJob, UiError> {
+        refuse_recorded(path, &self.recorded)?;
         match &self.control {
             Some(control) => control.export_to(path, progress),
             None => {
@@ -1810,6 +1900,19 @@ impl Exporter {
             }
         }
     }
+
+    /// Export the session to a vendor-layout `.db` file at `path`.
+    pub fn export_db_to(
+        &self,
+        path: &Path,
+        progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> Result<ExportJob, UiError> {
+        refuse_recorded(path, &self.recorded)?;
+        match &self.control {
+            Some(control) => control.export_db_to(path, progress),
+            None => Ok(export_store_db(&self.store, path, self.now_ms, progress)),
+        }
+    }
 }
 
 /// Write the file at `path` through `write`, atomically: into a new temp
@@ -1819,7 +1922,7 @@ pub(crate) fn write_file_atomically(
     path: &Path,
     write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let (tmp, file) = create_temp_beside(path)?;
+    let (tmp, file) = recording::create_temp_beside(path)?;
     let attempt = || -> std::io::Result<()> {
         let mut out = std::io::BufWriter::new(file);
         write(&mut out)?;
@@ -1831,39 +1934,6 @@ pub(crate) fn write_file_atomically(
     })?;
     sync_parent(path);
     Ok(())
-}
-
-/// A new, empty hidden file in `path`'s folder (the rename into place must
-/// not cross file systems), named after `path`.
-fn create_temp_beside(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = match path.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => Path::new("."),
-    };
-    let name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidFilename, "no file name"))?;
-    loop {
-        let mut tmp_name = std::ffi::OsString::from(".");
-        tmp_name.push(name);
-        tmp_name.push(format!(
-            ".{}-{}.tmp",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let tmp = dir.join(tmp_name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-        {
-            Ok(file) => return Ok((tmp, file)),
-            // Left over from a crashed run with the same pid: next number.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-    }
 }
 
 /// Best effort: sync `path`'s folder so the rename itself is on disk.
@@ -2219,11 +2289,26 @@ impl WorkerControl {
         path: &Path,
         progress: impl FnMut(ExportProgress) + Send + 'static,
     ) -> Result<ExportJob, UiError> {
+        self.ask_export(Command::ExportTo, path, Box::new(progress))
+    }
+
+    /// Export the session to a vendor-layout `.db` file at `path`.
+    pub fn export_db_to(
+        &self,
+        path: &Path,
+        progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> Result<ExportJob, UiError> {
+        self.ask_export(Command::ExportDbTo, path, Box::new(progress))
+    }
+
+    fn ask_export(
+        &self,
+        command: fn(PathBuf, ProgressFn, ExportReply) -> Command,
+        path: &Path,
+        progress: ProgressFn,
+    ) -> Result<ExportJob, UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(
-            Command::ExportTo(path.to_owned(), Box::new(progress), reply),
-            &answer,
-        )?
+        self.ask(command(path.to_owned(), progress, reply), &answer)?
     }
 }
 
@@ -2256,6 +2341,8 @@ pub struct WorkerHandle {
     ended: Arc<AtomicBool>,
     /// The recording the worker has open, 0 for none.
     recording_id: Arc<AtomicU64>,
+    /// The file that recording writes.
+    recording_path: RecordingPath,
     commands: mpsc::Sender<Command>,
     store: SessionStore,
     thread: Option<JoinHandle<()>>,
@@ -2290,6 +2377,12 @@ impl WorkerHandle {
     /// one the user was told of (AC-AXHK2F.5).
     pub fn recording_id(&self) -> Option<u64> {
         Some(self.recording_id.load(Ordering::SeqCst)).filter(|&id| id != 0)
+    }
+
+    /// The file the open recording writes, like
+    /// [`is_recording`](Self::is_recording).
+    pub fn recording_path(&self) -> Option<PathBuf> {
+        self.recording_path.get()
     }
 
     /// Restart the running queue at `rate`.
@@ -2517,6 +2610,8 @@ where
     let worker_store = store.clone();
     let recording_id: Arc<AtomicU64> = Arc::default();
     let worker_recording_id = Arc::clone(&recording_id);
+    let recording_path = RecordingPath::default();
+    let worker_recording_path = recording_path.clone();
     let alive = Arc::new(());
     let thread_alive = Arc::downgrade(&alive);
     let thread = std::thread::spawn(move || {
@@ -2536,6 +2631,7 @@ where
                 pdm_open,
                 log,
                 worker_recording_id,
+                worker_recording_path,
             )
         }));
         if let Err(payload) = ran {
@@ -2552,6 +2648,7 @@ where
         stop,
         ended,
         recording_id,
+        recording_path,
         commands,
         store,
         thread: Some(thread),
@@ -2580,6 +2677,7 @@ fn run_worker<T, C, O>(
     pdm_open: Option<PdmOpen>,
     log: SessionLog,
     recording_id: Arc<AtomicU64>,
+    recording_path: RecordingPath,
 ) where
     T: Transport,
     C: Clock + Clone,
@@ -2649,6 +2747,7 @@ fn run_worker<T, C, O>(
     worker.pdm_open = pdm_open;
     worker.log = log;
     worker.recording_id = recording_id;
+    worker.recording_path = recording_path;
     'run: while !stop.load(Ordering::SeqCst) {
         loop {
             match inbox.try_recv() {

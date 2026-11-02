@@ -825,3 +825,56 @@ fn rate_record_and_export_work_after_attach() {
     });
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ---- AC-AXHK2S.6: the `.db` export on the real path ----
+
+#[test]
+fn a_streamed_session_exports_to_a_db_that_opens_with_the_same_rows() {
+    use open_powerz_desktop_lib::recording_file::{self, OpenControl};
+
+    let (dir, recorded) = temp_csv("db-export");
+    let path = dir.join("session.db");
+    let (mut m, _opens, _) = manager(vec![]);
+    let (rx, sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink).unwrap();
+    recv_until(
+        &rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    m.disconnect().unwrap();
+    recv_until(&rx, |e| {
+        matches!(e, BackendEvent::Status(Status::Disconnected { .. }))
+    });
+    let samples = m.stats().unwrap().samples;
+    assert!(samples > 0);
+
+    let rows = m
+        .exporter()
+        .unwrap()
+        .export_db_to(&path, |_| {})
+        .expect("the export starts")
+        .join()
+        .unwrap()
+        .expect("written");
+    assert_eq!(rows, samples);
+
+    let file = match recording_file::open(&path, &mut OpenControl::silent()) {
+        Ok(file) => file.summary(),
+        Err(_) => panic!("the export does not open"),
+    };
+    assert_eq!((file.rows, file.skipped, file.left_out), (rows, 0, 0));
+
+    // The same call on a live session, aimed at the file it records to.
+    let (rx, sink) = channel_sink();
+    m.connect("demo:load-5v-1a", 50, sink).unwrap();
+    recv_until(
+        &rx,
+        |e| matches!(e, BackendEvent::Batch(b) if !b.samples.is_empty()),
+    );
+    m.start_recording(&recorded).expect("record");
+    let refused = m.exporter().unwrap().export_db_to(&recorded, |_| {});
+    assert!(refused.is_err(), "the export replaced the recording");
+    m.stop_recording().expect("stop");
+    m.disconnect().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}

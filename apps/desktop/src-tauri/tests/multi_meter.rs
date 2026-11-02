@@ -810,3 +810,71 @@ fn a_demo_meter_comes_back_with_its_own_serial_once_the_first_one_ended() {
     assert_eq!(session_again, session_pd, "it lost its own session");
     m.disconnect_for("demo:pd-9v-2a").unwrap();
 }
+
+// ---- FR AXHK2S: an export never replaces another meter's recording ----
+
+#[test]
+fn an_export_cannot_replace_the_file_another_meter_records_to() {
+    let mut rig = Rig::new();
+    let (_rx_a, _rx_b) = stream_both(&mut rig);
+    let dir = std::env::temp_dir().join(format!("powerz-export-guard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("meter-b.csv");
+    rig.m.start_recording_for(METER_B, &path).expect("record");
+    let header = std::fs::read(&path).unwrap();
+    let exporter = |rig: &Rig, id: &str| rig.m.exporter_for(id).expect("an exporter");
+
+    let csv = exporter(&rig, METER_A).export_to(&path, |_| {}).err();
+    let db = exporter(&rig, METER_A).export_db_to(&path, |_| {}).err();
+
+    for refused in [csv, db] {
+        let error = refused.expect("meter A's export must be refused");
+        assert!(error.message.contains("recorded to"), "{}", error.message);
+    }
+    assert!(std::fs::read(&path).unwrap().starts_with(&header[..16]));
+
+    // A symlink to the file is the same file.
+    #[cfg(unix)]
+    {
+        let link = dir.join("link.csv");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let by_link = exporter(&rig, METER_A).export_db_to(&link, |_| {});
+        assert!(by_link.is_err(), "the link went past the guard");
+    }
+
+    // Once the recording is over the file is free again.
+    rig.m.stop_recording_for(METER_B).expect("stop");
+    let rows = exporter(&rig, METER_A)
+        .export_db_to(&path, |_| {})
+        .expect("the export runs")
+        .join()
+        .unwrap()
+        .expect("written");
+    assert!(rows > 0);
+    rig.m.disconnect_for(METER_A).expect("disconnect A");
+    rig.m.disconnect_for(METER_B).expect("disconnect B");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_finished_session_cannot_export_over_a_running_recording_either() {
+    let mut rig = Rig::new();
+    let (_rx_a, _rx_b) = stream_both(&mut rig);
+    let dir = std::env::temp_dir().join(format!("powerz-export-ended-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("meter-b.csv");
+    rig.m.start_recording_for(METER_B, &path).expect("record");
+
+    rig.m.disconnect_for(METER_A).expect("disconnect A");
+    let store_export = rig
+        .m
+        .exporter_for(METER_A)
+        .expect("kept")
+        .export_to(&path, |_| {});
+
+    assert!(store_export.is_err(), "a kept session wrote over the file");
+    rig.m.disconnect_for(METER_B).expect("disconnect B");
+    let _ = std::fs::remove_dir_all(dir);
+}

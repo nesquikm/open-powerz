@@ -18,6 +18,7 @@
   import {
     ALL_FIT_CLASSES,
     chooseFit,
+    COMPACT_LEVEL,
     EXPORT_IN_MENU_LEVEL,
     fitClasses,
     moreMenuLabel,
@@ -50,6 +51,7 @@
     exportJob,
     canExport,
     onExport,
+    onExportDb,
     controlsLabel,
     controlsInTiles,
     views,
@@ -78,6 +80,7 @@
     /** The session holds samples that can be exported. */
     canExport: boolean;
     onExport: () => void;
+    onExportDb: () => void;
     /** Names the meter these controls act on; null with no meter to name. */
     controlsLabel: string | null;
     /** The meter grid shows: each tile carries its meter's controls, so none stay here. */
@@ -271,6 +274,20 @@
   </button>
 {/snippet}
 
+{#snippet exportDbButton(inMenu: boolean)}
+  <button
+    type="button"
+    class={inMenu ? undefined : "export-db"}
+    role={inMenu ? "menuitem" : undefined}
+    tabindex={inMenu ? -1 : undefined}
+    title="Export the session so far to a vendor-layout .db file"
+    disabled={exportJob.running || !canExport}
+    onclick={() => (inMenu ? pick(onExportDb) : onExportDb())}
+  >
+    Export .db
+  </button>
+{/snippet}
+
 <header class="top-bar" aria-label="Device controls" bind:this={bar}>
   <div
     class="named-meter"
@@ -345,6 +362,7 @@
             </span>
           {/if}
         </span>
+        {@render exportDbButton(false)}
       {/if}
       <!-- Room to spare: theme and About inline. Short of room: behind the "⋯" menu. -->
       <span class="settings-inline">
@@ -415,6 +433,9 @@
               >
                 {#if level >= EXPORT_IN_MENU_LEVEL && !controlsInTiles}
                   {@render exportButton(true)}
+                {/if}
+                {#if level >= COMPACT_LEVEL && !controlsInTiles}
+                  {@render exportDbButton(true)}
                 {/if}
                 <ThemeControl
                   choice={themeChoice}
@@ -678,6 +699,10 @@
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+  /* Level 4: Export .db leaves the row first, so Export stays in it longer. */
+  .top-bar:global(.compact) .export-db {
+    display: none;
   }
   /* Levels 5 and 6: the sample rate, then Export, move into the menu. */
   .top-bar:global(.rate-in-menu) .rate-inline,

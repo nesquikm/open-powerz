@@ -14,6 +14,7 @@ import type {
   DeviceListing,
   ExportProgress,
   ExportResult,
+  FileSummary,
   FirmwareFileInfo,
   FlashDone,
   FlashEvent,
@@ -27,6 +28,7 @@ import type {
   OfflineRecord,
   OfflineRecordEntry,
   OfflineRecordSample,
+  OpenProgress,
   RecordDeleteResult,
   SettingChanges,
   RecordList,
@@ -404,6 +406,36 @@ export function settingsFaultFromUrl(search: string | undefined): SettingsFault 
   return urlParam(search, "settingsfault") === "mismatch" ? "mismatch" : null;
 }
 
+/** A scripted recording-file open (FR AXHK2S): `refused` refuses the file, `slow` holds the
+ * open until Cancel, `truncated` opens a file past the row limit, `dialog` stays in the open
+ * dialog until Cancel, `unknown-total` holds an open that knows no total until Cancel. */
+export type RecordingFileFault = "refused" | "slow" | "truncated" | "dialog" | "unknown-total";
+
+const RECORDING_FILE_FAULTS: readonly RecordingFileFault[] = [
+  "refused",
+  "slow",
+  "truncated",
+  "dialog",
+  "unknown-total",
+];
+
+/** `?recordingfile=<a RecordingFileFault>` in the page URL scripts the open (FR AXHK2S);
+ * anything else is ignored. */
+export function recordingFileFaultFromUrl(search: string | undefined): RecordingFileFault | null {
+  const raw = urlParam(search, "recordingfile");
+  return RECORDING_FILE_FAULTS.find((fault) => fault === raw) ?? null;
+}
+
+/** The recording file the mock opens (FR AXHK2S). */
+export const MOCK_RECORDING_FILE = {
+  name: "demo-recording.csv",
+  rows: 12_345,
+  skipped: 3,
+} as const;
+
+/** Readable rows past the limit in a `truncated` file. */
+const MOCK_LEFT_OUT = 2_500_000;
+
 /** Options of a {@link MockBackend}. */
 export interface MockOptions {
   /** PD records to seed when the capture first starts. */
@@ -412,6 +444,8 @@ export interface MockOptions {
   recordsFault?: RecordsFault | null;
   /** A scripted settings-write failure (FR JKWT3W). */
   settingsFault?: SettingsFault | null;
+  /** A scripted recording-file open (FR AXHK2S). */
+  recordingFileFault?: RecordingFileFault | null;
 }
 
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
@@ -1034,6 +1068,10 @@ export class MockBackend {
   #flashStop = false;
   #flashErasing = false;
   #options: MockOptions;
+  /** The open recording file, which no meter takes part in (FR AXHK2S). */
+  #recordingFile: HistoryColumns | null = null;
+  /** Ends a `slow` open that is under way. */
+  #endRecordingOpen: (() => void) | null = null;
   #revealed: string[] = [];
   /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
   #meterAddress: number | null = 7;
@@ -1073,6 +1111,7 @@ export class MockBackend {
       pdSynthetic: pdSyntheticFromUrl(pageSearch()),
       recordsFault: recordsFaultFromUrl(pageSearch()),
       settingsFault: settingsFaultFromUrl(pageSearch()),
+      recordingFileFault: recordingFileFaultFromUrl(pageSearch()),
     },
   ) {
     this.#mode = mode;
@@ -1163,6 +1202,7 @@ export class MockBackend {
       resumeRecording: on(this.resumeRecording),
       saveRecordingAs: on(this.saveRecordingAs),
       exportSession: on(this.exportSession),
+      exportSessionDb: on(this.exportSessionDb),
       stats: on(this.stats),
       historyRange: on(this.historyRange) as MockBackend["historyRange"],
       historyGaps: on(this.historyGaps),
@@ -1565,6 +1605,68 @@ export class MockBackend {
         slow ? SLOW_EXPORT_MS : 0,
       ),
     );
+  }
+
+  /** The session's rows as a `.db` file: like {@link exportSession}, which it shares. */
+  async exportSessionDb(
+    suggestedName: string,
+    onProgress: (progress: ExportProgress) => void,
+  ): Promise<ExportResult | null> {
+    return this.exportSession(suggestedName, onProgress);
+  }
+
+  /** Opens {@link MOCK_RECORDING_FILE}, or what `recordingFileFault` scripts. */
+  async openRecordingFile(
+    onProgress: (progress: OpenProgress) => void,
+  ): Promise<FileSummary | null> {
+    const { rows, name, skipped } = MOCK_RECORDING_FILE;
+    const fault = this.#options.recordingFileFault ?? null;
+    const untilCancel = async (): Promise<null> => {
+      await new Promise<void>((resolve) => (this.#endRecordingOpen = resolve));
+      return null;
+    };
+    if (fault === "dialog") return untilCancel();
+    onProgress({ done: 0, total: 0 });
+    if (fault === "refused") throw usage("This file's header is not a recorder header.");
+    if (fault === "unknown-total") return untilCancel();
+    onProgress({ done: Math.floor(rows / 2), total: rows });
+    if (fault === "slow") return untilCancel();
+    onProgress({ done: rows, total: rows });
+    const stats = new MockStats();
+    const history = new HistoryColumns(rows);
+    for (let t = 0; t < rows; t++) {
+      const sample = sampleAt("load-5v-1a", t);
+      stats.push(sample);
+      history.push(sample);
+    }
+    this.#recordingFile = history;
+    return {
+      name,
+      rows,
+      skipped,
+      left_out: fault === "truncated" ? MOCK_LEFT_OUT : 0,
+      stats: stats.snapshot(),
+    };
+  }
+
+  async cancelRecordingFile(): Promise<void> {
+    this.#endRecordingOpen?.();
+    this.#endRecordingOpen = null;
+  }
+
+  async closeRecordingFile(): Promise<void> {
+    this.#recordingFile = null;
+  }
+
+  async recordingFileRange<const S extends readonly HistorySeries[]>(
+    series: S,
+    t0Ms: number,
+    t1Ms: number,
+    buckets: number,
+  ): Promise<BucketsFor<S>> {
+    const file = this.#recordingFile;
+    if (!file) throw usage("No recording file is open.");
+    return file.buckets(series, t0Ms, t1Ms, buckets) as BucketsFor<S>;
   }
 
   async stats(): Promise<StatsSnapshot> {

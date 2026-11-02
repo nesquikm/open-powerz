@@ -19,6 +19,7 @@
     type AttachedSession,
     type BackendEvent,
     type DeviceListing,
+    type ExportProgress,
     type ExportResult,
     type HistorySeries,
     type MeterCommands,
@@ -63,6 +64,8 @@
   import StatsPanel from "./lib/components/StatsPanel.svelte";
   import MeterSettingsView from "./lib/components/MeterSettingsView.svelte";
   import { MeterSettingsPanel } from "./lib/meterSettings.svelte";
+  import RecordingFileView from "./lib/components/RecordingFileView.svelte";
+  import { RecordingFile } from "./lib/recordingFile.svelte";
   import RecordsView from "./lib/components/RecordsView.svelte";
   import { RecordsPanel } from "./lib/records.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
@@ -73,6 +76,7 @@
   import {
     ExportJob,
     type ExportDeps,
+    dbFileName,
     exportNoticeText,
     rateChange,
     Recording,
@@ -303,15 +307,27 @@
     }
   }
 
+  /** What an export writes: `name` is the CSV name proposed for it. */
+  type ExportFormat = (
+    commands: MeterCommands,
+    name: string,
+    onProgress: (progress: ExportProgress) => void,
+  ) => Promise<ExportResult | null>;
+  const toCsv: ExportFormat = (commands, name, onProgress) =>
+    commands.exportSession(name, onProgress);
+  /** A vendor-layout database file. */
+  const toDb: ExportFormat = (commands, name, onProgress) =>
+    commands.exportSessionDb(dbFileName(name), onProgress);
+
   /** Export on a tile: that meter's session so far. */
-  function exportMeter(entry: MeterEntry): void {
+  function exportMeter(entry: MeterEntry, format: ExportFormat): void {
     if (entry.session === session) {
-      exportHistory();
+      exportHistory(format);
       return;
     }
     const commands = commandsOf(entry.listing.id);
     void runExport(entry.listing.id, entry.exportJob, {
-      exportSession: (name, onProgress) => commands.exportSession(name, onProgress),
+      exportSession: (name, onProgress) => format(commands, name, onProgress),
       now: () => new Date(),
     });
   }
@@ -350,13 +366,13 @@
 
   let addMeterOpen = $state(false);
 
-  /** Enter and Space press the "Add meter" control, as on a button. */
-  function onAddMeterKeydown(e: KeyboardEvent): void {
+  /** Enter and Space press a control of the tab strip, as on a button. */
+  function pressOnKey(e: KeyboardEvent, press: () => void): void {
     if (e.key !== "Enter" && e.key !== " ") return;
     // Space must not also start a recording.
     e.preventDefault();
     e.stopPropagation();
-    addMeterOpen = true;
+    press();
   }
 
   /** Connects one more meter beside those connected, with a session store of its own. */
@@ -452,22 +468,30 @@
       if (Number.isFinite(ms)) chart?.revealPlayheadAt(ms);
     });
   });
+  /** The recording file in the File tab (FR AXHK2S). */
+  const recordingFile = new RecordingFile();
   /** The view the tabs show. */
-  let view: "meter" | "pd" | "trigger" | "records" | "firmware" = $state("meter");
+  let view: "meter" | "pd" | "trigger" | "records" | "firmware" | "file" = $state("meter");
   /** The grid shows, so each tile carries its meter's controls (AC-4PJRVM.1). */
   const controlsInTiles = $derived(view === "meter" && meters.showGrid);
-  const ALL_VIEWS = ["meter", "pd", "records", "trigger", "firmware"] as const;
+  const ALL_VIEWS = ["meter", "pd", "records", "trigger", "firmware", "file"] as const;
   const ALL_VIEW_TABS = [
     { id: "meter", label: "Meter" },
     { id: "pd", label: "PD analyzer" },
     { id: "records", label: "Records" },
     { id: "trigger", label: "Trigger" },
     { id: "firmware", label: "Firmware" },
+    { id: "file", label: "File" },
   ] as const;
   /** The Advanced firmware switch shows the Firmware tab (FR V9SK55, AC .1). */
   let advancedFirmware = $state(loadAdvancedFirmware(browserStorage()));
-  const VIEWS = $derived(ALL_VIEWS.filter((v) => advancedFirmware || v !== "firmware"));
-  const VIEW_TABS = $derived(ALL_VIEW_TABS.filter((t) => advancedFirmware || t.id !== "firmware"));
+  /** The File tab exists only while a file is open (FR AXHK2S). */
+  function tabShown(id: string): boolean {
+    if (id === "firmware") return advancedFirmware;
+    return id !== "file" || recordingFile.summary !== null;
+  }
+  const VIEWS = $derived(ALL_VIEWS.filter(tabShown));
+  const VIEW_TABS = $derived(ALL_VIEW_TABS.filter((t) => tabShown(t.id)));
   function setAdvancedFirmware(on: boolean): void {
     // Progress is never hidden: the switch stays on while an update runs.
     if (!on && firmware.busy) return;
@@ -629,6 +653,19 @@
     if (tabDisabled(VIEWS[next] ?? "meter")) return;
     view = VIEWS[next] ?? "meter";
     document.getElementById(`tab-${view}`)?.focus();
+  }
+
+  /** Open recording: open dialog, then the chosen file in the File tab (FR AXHK2S). The
+   * Trigger tab stays on screen: leaving it returns the meter to 5 V, and opening a file
+   * never touches a meter. A running firmware update stays too: its progress is never
+   * hidden. */
+  async function openRecording(): Promise<void> {
+    const opened = await recordingFile.open();
+    if (opened && view !== "trigger" && !firmware.busy) view = "file";
+  }
+
+  async function closeRecording(): Promise<void> {
+    if ((await recordingFile.close()) && view === "file") view = "meter";
   }
 
   /** A capture opened from a file leaves the view first: the live one starts empty. */
@@ -927,6 +964,8 @@
   // with none, the app starts disconnected as on a first launch (FR VEDDFD).
   onMount(() => {
     if (!backendAvailable()) return;
+    // A reloaded page has no view of a file the last page left open.
+    void recordingFile.close();
     void firmware.reattach().then(() => {
       if (firmware.busy) view = "firmware";
     });
@@ -1003,10 +1042,10 @@
   }
 
   /** Export button: save dialog, then the session history so far, off the UI thread. */
-  function exportHistory(): void {
+  function exportHistory(format: ExportFormat): void {
     if (!canExport || noticesId === null) return;
     void runExport(noticesId, exportJob, {
-      exportSession: (name, onProgress) => act().exportSession(name, onProgress),
+      exportSession: (name, onProgress) => format(act(), name, onProgress),
       now: () => new Date(),
     });
   }
@@ -1163,7 +1202,8 @@
     onRecorderOptions={() => openRecorderOptions(null)}
     {exportJob}
     {canExport}
-    onExport={exportHistory}
+    onExport={() => exportHistory(toCsv)}
+    onExportDb={() => exportHistory(toDb)}
     controlsLabel={topBarControlsLabel}
     {controlsInTiles}
     rateSps={session.rateSps ?? requestedRateSps}
@@ -1188,14 +1228,23 @@
           </div>
         {/each}
       </div>
+      <!-- Not <button>, like the tabs: the top bar's one-row layout counts its buttons. -->
+      <div
+        role="button"
+        class="strip-action open-recording"
+        tabindex="0"
+        onclick={() => void openRecording()}
+        onkeydown={(e) => pressOnKey(e, () => void openRecording())}
+      >
+        Open recording
+      </div>
       {#if canAddMeter}
-        <!-- Not <button>, like the tabs: the top bar's one-row layout counts its buttons. -->
         <div
           role="button"
-          class="add-meter"
+          class="strip-action"
           tabindex="0"
           onclick={() => (addMeterOpen = true)}
-          onkeydown={onAddMeterKeydown}
+          onkeydown={(e) => pressOnKey(e, () => (addMeterOpen = true))}
         >
           Add meter
         </div>
@@ -1205,6 +1254,27 @@
   <main class="views">
     <!-- Inside the views, under the room kept for the tabs that hang below the top bar. -->
     <ErrorBanner {session} />
+    {#if recordingFile.error !== null}
+      <Notice
+        tone="error"
+        message={recordingFile.error}
+        onDismiss={() => (recordingFile.error = null)}
+      />
+    {/if}
+    {#if recordingFile.working}
+      {@const progress = recordingFile.progress}
+      <div class="file-opening" role="status">
+        <span>Opening recording</span>
+        {#if progress !== null && progress.total > 0}
+          <progress aria-label="Opening progress" max={progress.total} value={progress.done}
+          ></progress>
+        {:else}
+          <!-- No value: a plain moving bar, for a total not known. -->
+          <progress aria-label="Opening progress"></progress>
+        {/if}
+        <button type="button" onclick={() => void recordingFile.cancel()}>Cancel</button>
+      </div>
+    {/if}
     <div
       class="content"
       role="tabpanel"
@@ -1281,7 +1351,8 @@
         onToggleRecording={toggleMeterRecording}
         onTogglePause={toggleMeterPause}
         onRecorderOptions={openRecorderOptions}
-        onExport={exportMeter}
+        onExport={(entry) => exportMeter(entry, toCsv)}
+        onExportDb={(entry) => exportMeter(entry, toDb)}
         {fileActions}
       />
     {/if}
@@ -1347,6 +1418,16 @@
     {#if view === "records"}
       <div class="records-view" role="tabpanel" id="view-records" aria-labelledby="tab-records">
         <RecordsView panel={recordsPanel} connected={meterConnected} theme={resolvedTheme} />
+      </div>
+    {/if}
+    {#if view === "file" && recordingFile.summary !== null}
+      <div class="file-view" role="tabpanel" id="view-file" aria-labelledby="tab-file">
+        <RecordingFileView
+          summary={recordingFile.summary}
+          theme={resolvedTheme}
+          onClose={() => void closeRecording()}
+          onError={(err) => session.reportError(toUiError(err))}
+        />
       </div>
     {/if}
     {#if view === "firmware" && advancedFirmware}
@@ -1431,8 +1512,10 @@
     gap: 0.25rem;
   }
   /* At the right end of the view tabs' strip. */
-  .add-meter {
+  .open-recording {
     margin-left: auto;
+  }
+  .strip-action {
     margin-bottom: 0.25rem;
     font-size: 0.875rem;
     padding: 0.2rem 0.7rem;
@@ -1471,7 +1554,7 @@
       flex: none;
       white-space: nowrap;
     }
-    .add-meter {
+    .strip-action {
       flex: none;
       white-space: nowrap;
     }
@@ -1490,8 +1573,21 @@
     display: none;
   }
   .firmware-view,
-  .records-view {
+  .records-view,
+  .file-view {
     padding: 1rem;
+  }
+  .file-opening {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.75rem 1rem 0;
+    font-size: 0.875rem;
+  }
+  .file-opening progress {
+    flex: 1;
+    min-width: 0;
+    max-width: 20rem;
   }
   .pd-view {
     /* A definite height, so the packet grid scrolls itself instead of the page. */

@@ -3181,6 +3181,7 @@ name = "powerz-record"
 version = "0.8.1"
 dependencies = [
  "powerz-protocol",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

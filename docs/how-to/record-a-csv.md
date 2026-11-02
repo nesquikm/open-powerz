@@ -124,3 +124,46 @@ recording in progress keeps every row.
 If the app was closed while streaming, the meter can be left mid-transfer. The
 app clears the stuck USB pipe and retries the connection by itself; you only
 need to replug when it asks you to.
+
+## Open a recording
+
+**Open recording**, in the desktop app's tab bar, reads a CSV or a vendor `.db`
+file back into the app. It needs no meter. The file opens in a **File** tab,
+marked as a file and read-only. The tab exists only while a file is open, and
+**Close file** ends it. One file opens at a time; opening another replaces it.
+
+Opening a file sends nothing to any meter. A running stream or recording keeps
+going behind the tab.
+
+A CSV the app recorded opens with the same values and statistics. A CSV from
+`powerz records get` opens too, with D+, D−, CC1 and CC2 at 0, because that file
+leaves them empty.
+
+- **Damaged rows** are skipped, and the view says how many. A row is damaged
+  when it starts `invalid,,`, is short or is not text, or has a required field
+  empty or unreadable. A time that goes backwards or a value out of range counts
+  too. TEMP, CHARGE, ENERGY and PWR may be empty.
+- **Refused files** do not open, and the app says why. That means a wrong
+  header, a binary file, an empty file, a file with no readable row, or a
+  database of another shape.
+- **Large files** open with progress, and **Cancel** stops them. The row limit
+  is 10,000,000: a longer file opens with its first 10,000,000 rows, and the
+  view says how many were left out.
+
+Min, max and average come from the rows. The view takes charge and energy from
+the CHARGE and ENERGY columns, at their last values, because a recording with a
+pause does not count that time and the rows alone cannot show it. A file without
+those columns has them integrated from its rows.
+
+Drag across the chart to zoom in, and press **Whole file** to go back.
+
+### Export a vendor database
+
+**Export .db** saves everything the session history holds so far to a `.db` file
+in the vendor's table layout. It holds no serial number. The app writes to a
+temporary name and renames at the end, so a failed export leaves an older file
+alone. Open the file here and it reads back with equal values.
+
+Both directions follow the vendor's table layout as far as we know it. This is
+unproven against the vendor app: no real vendor `.db` file was tested, neither
+one opened here nor one of ours opened there.

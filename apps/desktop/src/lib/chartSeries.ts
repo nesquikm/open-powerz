@@ -188,6 +188,33 @@ export function toggleSeries(v: SeriesVisibility, key: ChartSeriesKey): SeriesVi
   return { ...v, [key]: !v[key] };
 }
 
+/** VBUS, IBUS and power: what a chart of a saved recording starts on. */
+export const RECORDING_VISIBILITY = Object.fromEntries(
+  CHART_SERIES.map((s) => [s.key, s.key === "vbus" || s.key === "ibus" || s.key === "power"]),
+) as SeriesVisibility;
+
+/** The size a plot of a saved recording takes in `host`. */
+export function recordingPlotSize(host: HTMLElement): { width: number; height: number } {
+  return { width: Math.max(host.clientWidth, 100), height: Math.max(host.clientHeight, 100) };
+}
+
+/** Keeps `plot` the size of `host`, at most once a frame; returns what stops it. */
+export function followRecordingPlotSize(plot: uPlot, host: HTMLElement): () => void {
+  let frame = 0;
+  const observer = new ResizeObserver(() => {
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      plot.setSize(recordingPlotSize(host));
+    });
+  });
+  observer.observe(host);
+  return () => {
+    observer.disconnect();
+    if (frame) cancelAnimationFrame(frame);
+  };
+}
+
 /** Store `value` as JSON under `key`; storage failures are ignored (the in-memory choice
  * stays, it just won't survive a reload). */
 function saveJson(key: string, value: unknown, storage: ThemeStorage | undefined): void {

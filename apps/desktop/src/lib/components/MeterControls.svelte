@@ -27,6 +27,7 @@
     onTogglePause,
     onRecorderOptions,
     onExport,
+    onExportDb,
     onDisconnect,
     fileActions,
   }: {
@@ -43,6 +44,7 @@
     onTogglePause: () => void;
     onRecorderOptions: () => void;
     onExport: () => void;
+    onExportDb: () => void;
     onDisconnect: () => void;
     /** What can be done with a saved file. */
     fileActions: Snippet<[string]>;
@@ -82,6 +84,14 @@
     onclick={onExport}
   >
     Export
+  </button>
+  <button
+    type="button"
+    title="Export the session so far to a vendor-layout .db file"
+    disabled={exportJob.running || !canRecord || session.latest === null}
+    onclick={onExportDb}
+  >
+    Export .db
   </button>
   {#if recording.indicator !== null}
     <span class="indicator" class:paused={recording.paused} role="timer">{recording.indicator}</span

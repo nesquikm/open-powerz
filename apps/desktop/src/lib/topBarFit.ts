@@ -18,7 +18,8 @@ export const FIT_LEVELS = [
   "source-in-menu",
   /** 3: theme, About and the rate-locked note move into the menu. */
   "settings-in-menu",
-  /** 4: tighter spacing; the recording indicator shows just its time. */
+  /** 4: tighter spacing; the recording indicator shows just its time; Export .db moves
+   * into the menu. */
   "compact",
   /** 5: the sample-rate picker moves into the menu. */
   "rate-in-menu",

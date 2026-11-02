@@ -68,6 +68,11 @@ export function defaultRecordingName(now: Date, prefix = ""): string {
   return `${prefix || "powerz"}-${date}-${time}.csv`;
 }
 
+/** A proposed CSV name as the name of a `.db` export. */
+export function dbFileName(csvName: string): string {
+  return csvName.replace(/\.csv$/, ".db");
+}
+
 /** Elapsed recording time as `h:mm:ss` (hours unpadded). */
 export function formatRecordingElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));

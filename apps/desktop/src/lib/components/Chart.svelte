@@ -23,7 +23,6 @@
     type LiveWindowId,
   } from "../chartData";
   import {
-    CHART_SERIES,
     type ChartSeriesKey,
     type SeriesVisibility,
     chartOptions,
@@ -91,6 +90,7 @@
   } from "../pdTimeline";
   import HintText from "./HintText.svelte";
   import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
+  import SeriesLegend from "./SeriesLegend.svelte";
 
   let {
     theme,
@@ -1439,30 +1439,7 @@
       onclick={() => gesture(liveToggle(view))}>{liveBtn.label}</button
     >
   </div>
-  <div class="legend" role="group" aria-label="Series">
-    {#each CHART_SERIES as s, i (s.key)}
-      <button
-        type="button"
-        class="series"
-        aria-pressed={visibility[s.key]}
-        title={`Show or hide ${s.label}`}
-        onclick={() => toggle(s.key)}
-      >
-        <svg class="swatch" width="24" height="8" aria-hidden="true">
-          <line
-            x1="0"
-            y1="4"
-            x2="24"
-            y2="4"
-            stroke={styles[i]?.stroke}
-            stroke-width="2"
-            stroke-dasharray={styles[i]?.dash.join(" ") || undefined}
-          />
-        </svg>
-        {s.label} <span class="unit">({s.unit})</span>
-      </button>
-    {/each}
-  </div>
+  <SeriesLegend {theme} {visibility} onToggle={toggle} />
   {#if hasPd}
     <ul class="pd-legend" aria-label="PD markers">
       {#each PD_MARKER_KINDS as k (k.kind)}
@@ -1573,28 +1550,6 @@
     border-color: var(--accent);
     color: var(--accent);
     box-shadow: inset 0 0 0 1px var(--accent);
-  }
-  .legend {
-    display: flex;
-    gap: 0.25rem;
-    flex-wrap: wrap;
-  }
-  .series {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.375rem;
-  }
-  /* Off state: muted text (still ≥ 4.5:1), struck through, faded swatch. */
-  .series[aria-pressed="false"] {
-    color: var(--muted);
-    border-style: dashed;
-    text-decoration: line-through;
-  }
-  .series[aria-pressed="false"] .swatch {
-    opacity: 0.35;
-  }
-  .unit {
-    color: var(--muted);
   }
   .pd-legend {
     display: flex;

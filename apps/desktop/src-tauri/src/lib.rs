@@ -10,6 +10,7 @@ pub mod history;
 pub mod pd_capture;
 pub mod pd_import;
 pub mod recording;
+pub mod recording_file;
 pub mod stats;
 pub mod store;
 pub mod trigger;
@@ -29,8 +30,9 @@ use crate::devices::{
     AppOpener, AttachedSession, DeviceListing, DeviceManager, FlashStatus, WatchHandle,
 };
 use crate::recording::{ExportProgress, RecordingSummary};
+use crate::recording_file::{FileError, FileSummary, OpenControl, OpenProgress, OpenedFile};
 use crate::ui_error::UiError;
-use crate::worker::BackendEvent;
+use crate::worker::{BackendEvent, ExportJob};
 
 /// The app and protocol-library versions shown in the About dialog.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -61,6 +63,11 @@ struct AppState {
     /// per-connection worker, so it opens without a meter and never mixes
     /// with a live capture. Only the page lets it go (AC-AXHK2K.5).
     opened_pd: Mutex<Option<pd_capture::PdCapture>>,
+    /// The recording file in the File tab (FR AXHK2S): outside every
+    /// connection too, so it opens without a meter and touches none.
+    opened_file: Mutex<Option<OpenedFile>>,
+    /// Raised by Cancel: the flag of the open that started last.
+    file_cancel: Mutex<Arc<AtomicBool>>,
 }
 
 impl AppState {
@@ -77,6 +84,8 @@ impl AppState {
             manager: Mutex::new(manager),
             watch: Mutex::new(None),
             opened_pd: Mutex::new(None),
+            opened_file: Mutex::new(None),
+            file_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
         }
     }
 
@@ -172,6 +181,18 @@ impl AppState {
         let pd = pd_capture::PdCapture::from_pdcap(&loaded.entries);
         let damaged_line = loaded.error.as_ref().map(|e| e.line());
         Ok(self.show_opened(path, pd, damaged_line, LeftOut::default()))
+    }
+
+    fn opened_file(&self) -> MutexGuard<'_, Option<OpenedFile>> {
+        self.opened_file
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn file_cancel(&self) -> MutexGuard<'_, Arc<AtomicBool>> {
+        self.file_cancel
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn manager(&self) -> MutexGuard<'_, AppManager> {
@@ -905,6 +926,82 @@ async fn pd_import(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<Pd
     .await
 }
 
+/// Ask for a recording file and open it for the File tab (FR AXHK2S); needs
+/// no meter and sends nothing to one. Resolves to its summary, or `null` when
+/// the dialog was dismissed or Cancel ended the open. A file is built whole
+/// before it replaces the one open, so whatever fails keeps that one.
+#[tauri::command]
+async fn recording_file_open(
+    app: tauri::AppHandle,
+    state: Shared<'_>,
+    on_progress: Channel<OpenProgress>,
+) -> Result<Option<FileSummary>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let cancel = Arc::new(AtomicBool::new(false));
+        *state.file_cancel() = Arc::clone(&cancel);
+        let Some(path) = choose_open_path(&app, "Recording", &["csv", "db"])? else {
+            return Ok(None);
+        };
+        let mut control = OpenControl {
+            cancel,
+            progress: Box::new(move |p| {
+                let _ = on_progress.send(p);
+            }),
+        };
+        match recording_file::open(&path, &mut control) {
+            Ok(file) => {
+                let summary = file.summary();
+                // The old file is freed outside the lock.
+                let _old = state.opened_file().replace(file);
+                Ok(Some(summary))
+            }
+            Err(FileError::Cancelled) => Ok(None),
+            Err(FileError::Refused(why)) => Err(UiError::usage(why)),
+        }
+    })
+    .await
+}
+
+/// Cancel: the open under way ends as `null`.
+#[tauri::command]
+async fn recording_file_cancel(state: Shared<'_>) -> Result<(), UiError> {
+    state.file_cancel().store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Close the open recording file.
+#[tauri::command]
+async fn recording_file_close(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        // A large file is freed off the async runtime, outside the lock.
+        let _old = state.opened_file().take();
+        Ok(())
+    })
+    .await
+}
+
+/// Min / max buckets of the open recording file over `t0_ms..=t1_ms`.
+#[tauri::command]
+async fn recording_file_range(
+    state: Shared<'_>,
+    series: Vec<history::Series>,
+    t0_ms: u64,
+    t1_ms: u64,
+    buckets: usize,
+) -> Result<Vec<history::SeriesBuckets>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        state
+            .opened_file()
+            .as_ref()
+            .map(|file| file.range_to_edges(&series, t0_ms, t1_ms, buckets))
+            .ok_or_else(|| UiError::usage("No recording file is open."))
+    })
+    .await
+}
+
 /// Inspect the firmware container at `path` (FR V9SK53, AC .3); needs no
 /// meter. Resolves to its metadata with the English release notes.
 #[tauri::command]
@@ -1017,10 +1114,12 @@ async fn firmware_flash_status(state: Shared<'_>) -> Result<Option<FlashStatus>,
 }
 
 /// The save dialog's file type for a proposed file name: a PD capture for
-/// `.pdcap`, CSV otherwise.
+/// `.pdcap`, a database for `.db`, CSV otherwise.
 fn save_filter(suggested_name: &str) -> (&'static str, &'static [&'static str]) {
     if suggested_name.ends_with(".pdcap") {
         ("PD capture", &["pdcap"])
+    } else if suggested_name.ends_with(".db") {
+        ("SQLite database", &["db"])
     } else {
         ("CSV", &["csv"])
     }
@@ -1365,6 +1464,15 @@ pub struct ExportResult {
     pub rows: u64,
 }
 
+/// What the export `job` to `path` came to, once it has run to its end.
+fn finished_export(job: ExportJob, path: &Path) -> Result<ExportResult, UiError> {
+    let rows = job.join().map_err(|_| UiError::internal())??;
+    Ok(ExportResult {
+        path: path.to_string_lossy().into_owned(),
+        rows,
+    })
+}
+
 /// Open the save dialog with `suggested_name` and export the session so far
 /// to the chosen file, with progress over `on_progress`. Resolves to `null`
 /// when the dialog was cancelled.
@@ -1388,18 +1496,39 @@ async fn export_session(
                 let job = exporter.export_to(path, move |p| {
                     let _ = on_progress.send(p);
                 })?;
-                let rows = job
-                    .join()
-                    .map_err(|_| UiError::internal())
-                    .and_then(|done| done)
-                    .inspect_err(|_| {
-                        // A half-written export is worse than none.
-                        let _ = std::fs::remove_file(path);
-                    })?;
-                Ok(ExportResult {
-                    path: path.to_string_lossy().into_owned(),
-                    rows,
+                finished_export(job, path).inspect_err(|_| {
+                    // A half-written export is worse than none.
+                    let _ = std::fs::remove_file(path);
                 })
+            },
+        )
+    })
+    .await
+}
+
+/// Open the save dialog with `suggested_name` and export the session so far
+/// to a vendor-layout `.db` file (FR AXHK2S). Resolves like `export_session`.
+#[tauri::command]
+async fn export_session_db(
+    app: tauri::AppHandle,
+    state: Shared<'_>,
+    device_id: Option<String>,
+    suggested_name: String,
+    on_progress: Channel<ExportProgress>,
+) -> Result<Option<ExportResult>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        with_save_path(
+            &state,
+            &app,
+            device_id.as_deref(),
+            &suggested_name,
+            |m: &AppManager, id| m.exporter_for(id),
+            |exporter, path| {
+                let job = exporter.export_db_to(path, move |p| {
+                    let _ = on_progress.send(p);
+                })?;
+                finished_export(job, path)
             },
         )
     })
@@ -1488,6 +1617,11 @@ pub fn run() {
             save_recording_as,
             choose_recording_folder,
             export_session,
+            export_session_db,
+            recording_file_open,
+            recording_file_cancel,
+            recording_file_close,
+            recording_file_range,
             history_range,
             history_gaps,
             stats,
