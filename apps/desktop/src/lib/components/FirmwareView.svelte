@@ -11,6 +11,7 @@
     FOLLOWED_UPDATE_LOST,
     FLASH_STAGES,
     RECOVERY_STEPS,
+    STOPPED_STEPS,
     firmwareMeterRows,
     replugPrompt,
     stageNameLabel,
@@ -53,7 +54,9 @@
           : i === stageIndex
             ? firmware.phase === "failed"
               ? "failed"
-              : "current"
+              : firmware.phase === "stopped"
+                ? "stopped"
+                : "current"
             : "pending",
     })),
   );
@@ -77,12 +80,14 @@
     const changed = lastPhase !== undefined && phase !== lastPhase;
     lastPhase = phase;
     if (phase === "updating") progressEl?.focus();
-    else if (changed && (phase === "done" || phase === "failed")) closeEl?.focus();
+    else if (changed && (phase === "done" || phase === "failed" || phase === "stopped"))
+      closeEl?.focus();
   });
   const STATE_TEXT: Record<string, string> = {
     done: "done",
     current: "in progress",
     failed: "failed",
+    stopped: "stopped",
     pending: "to do",
   };
 </script>
@@ -138,7 +143,7 @@
   {#if firmware.followedLost}{FOLLOWED_UPDATE_LOST}{/if}
 </p>
 
-{#if firmware.phase === "updating" || firmware.phase === "done" || firmware.phase === "failed"}
+{#if firmware.phase === "updating" || firmware.phase === "done" || firmware.phase === "failed" || firmware.phase === "stopped"}
   <section class="progress" aria-label="Update progress" tabindex="-1" bind:this={progressEl}>
     <h3>Update progress</h3>
     {#if firmware.replug}
@@ -187,6 +192,25 @@
       The image was accepted, but the meter stayed in its bootloader. Unplug it and plug it back in.
     {/if}
   </p>
+  <button type="button" bind:this={closeEl} onclick={() => firmware.dismiss()}>Close</button>
+{/if}
+
+{#if firmware.phase === "stopped" && firmware.error !== null}
+  <!-- A stop the user asked for is not a failure (AC-AXHK2M.13): no alert, no error
+       colour, no retry; the backend's message says what state the meter may be in. -->
+  <div class="outcome" role="status">
+    <p>
+      {firmware.error.message}
+      <HintText hint={firmware.error.hint} />
+    </p>
+    <p>Nothing was erased: the meter keeps the firmware it had.</p>
+    <p>Next:</p>
+    <ol>
+      {#each STOPPED_STEPS as step (step)}
+        <li>{step}</li>
+      {/each}
+    </ol>
+  </div>
   <button type="button" bind:this={closeEl} onclick={() => firmware.dismiss()}>Close</button>
 {/if}
 
@@ -275,6 +299,9 @@
   }
   li[data-state="current"] {
     font-weight: 600;
+  }
+  li[data-state="stopped"] {
+    color: var(--muted);
   }
   li[data-state="failed"] {
     color: var(--danger);

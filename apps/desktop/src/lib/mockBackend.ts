@@ -102,6 +102,10 @@ const FLASH_REFUSAL = "A firmware update is running. Wait for it to finish befor
 const FLASH_RECOVERY_HINT =
   "Hold the Back button while plugging the meter in to start it in bootloader mode, then run the update again.";
 
+/** What a stop the user asked for says, as the backend gives it (AC-AXHK2M.13). */
+const FLASH_STOPPED =
+  "The update was stopped before anything was erased. The meter may be waiting in its bootloader.";
+
 /** How long each stage of a mock update takes, ms: slow enough for the UI suite to see
  * every stage and the blocked controls. The write stage takes `MOCK_FLASH_WRITES` steps. */
 const MOCK_FLASH_MS = {
@@ -679,13 +683,18 @@ function replugMeter(address: number): DeviceListing {
 }
 
 /** The status event of a mock session that just connected; a null rate is a locked one. */
-function connectedStatus(serial: string, rateSps: number | null, sessionId = 1): BackendEvent {
+function connectedStatus(
+  serial: string,
+  rateSps: number | null,
+  sessionId = 1,
+  firmwareVersion = "2.0.6",
+): BackendEvent {
   return {
     type: "status",
     data: {
       state: "connected",
       model: "KM003C",
-      firmware_version: "2.0.6",
+      firmware_version: firmwareVersion,
       bootloader_version: "2.5",
       mode: "application",
       warnings: ["outdated"],
@@ -1060,6 +1069,9 @@ export class MockBackend {
   #mode: MockMode | null;
   /** The updates run so far (FR V9SK55). */
   #firmwareFlashes: { deviceId: string; path: string; confirmation: string }[] = [];
+  /** The demo meter's firmware: the flashed file's version after a done update
+   * (AC-AXHK2M.16). */
+  #firmwareVersion = "2.0.6";
   /** A firmware update holds the meter (FR V9SK55, AC .4). */
   #flashing = false;
   /** The meter the running update holds; another one can connect (AC-4PJRVM.4). */
@@ -1278,7 +1290,7 @@ export class MockBackend {
     const serial = isMeter ? MOCK_REPLUG.serial : this.#freeDemoSerial();
     const sessionId = this.#nextSessionId++;
     // Like the worker: a locked session's rate is unknown until measured.
-    onEvent(connectedStatus(serial, locked ? null : rateSps, sessionId));
+    onEvent(connectedStatus(serial, locked ? null : rateSps, sessionId, this.#firmwareVersion));
     if (locked) {
       onEvent({
         type: "status",
@@ -1369,7 +1381,7 @@ export class MockBackend {
     const gap = { from_ms: from, to_ms: Math.round(s.nextMs) };
     s.gaps.push(gap);
     s.pendingGap = { kind: "outage", ...gap };
-    s.onEvent(connectedStatus(MOCK_REPLUG.serial, s.rateSps));
+    s.onEvent(connectedStatus(MOCK_REPLUG.serial, s.rateSps, 1, this.#firmwareVersion));
     s.timer = setInterval(() => this.#tick(s), BATCH_MS);
     this.#sessions.push(s);
     // Like the backend: the commands without a device id stay on a meter still running.
@@ -1456,7 +1468,7 @@ export class MockBackend {
     return {
       device_id: s.deviceId,
       model: "KM003C",
-      firmware_version: "2.0.6",
+      firmware_version: this.#firmwareVersion,
       serial: s.serial,
       rate_sps: s.rateSps,
       rate_locked: s.rateLocked,
@@ -2061,11 +2073,7 @@ export class MockBackend {
       for (const stage of ["switching", "erasing"] as const) {
         if (stage === "switching" && fromBootloader) continue;
         if (this.#flashStop) {
-          throw {
-            kind: "protocol",
-            message: `The firmware update failed: interrupted: stopped by the user before the ${stage === "erasing" ? "descriptor" : "update started"}.`,
-            hint: FLASH_RECOVERY_HINT,
-          } satisfies UiError;
+          throw { kind: "cancelled", message: FLASH_STOPPED, hint: null } satisfies UiError;
         }
         if (stage === "erasing") this.#flashErasing = true;
         onStage({ stage });
@@ -2090,6 +2098,7 @@ export class MockBackend {
       }
       onStage({ stage: "replug", to: "application", reply: "none" });
       await sleep(MOCK_FLASH_MS.replug);
+      this.#firmwareVersion = info.version;
       return { outcome: "verified", version: info.version };
     } finally {
       this.#flashing = false;

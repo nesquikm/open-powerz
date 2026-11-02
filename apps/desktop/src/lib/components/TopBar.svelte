@@ -330,9 +330,8 @@
             title={`Recording to CSV: ${recording.indicator}`}
             ><span class="rec-dot" aria-hidden="true"></span><span class="visually-hidden"
               >Recording:
-            </span>{recordingWord(recording.paused)}
-            {formatRecordingElapsed(recording.elapsedMs)}<span class="narrow-hidden"
-              >{recordingRowsSuffix(recording.rows)}</span
+            </span>{`${recordingWord(recording.paused)} ${formatRecordingElapsed(recording.elapsedMs)}`}<span
+              class="narrow-hidden">{recordingRowsSuffix(recording.rows)}</span
             ></span
           >
         {/if}

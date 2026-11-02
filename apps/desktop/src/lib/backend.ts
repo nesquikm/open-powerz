@@ -45,6 +45,8 @@ export type ErrorKind =
   | "usage"
   | "out_of_sync"
   | "flash_needs_consent"
+  /** The user stopped the firmware update; not a failure (AC-AXHK2M.13). */
+  | "cancelled"
   | "internal";
 
 /** A session a firmware update would release, as the prompt names it (FR AXHK2F); the
@@ -76,6 +78,7 @@ const ERROR_KINDS: readonly ErrorKind[] = [
   "usage",
   "out_of_sync",
   "flash_needs_consent",
+  "cancelled",
   "internal",
 ];
 

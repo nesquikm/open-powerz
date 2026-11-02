@@ -22,7 +22,7 @@
 
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { open, streamDemo } from "./helpers";
+import { badge, open, streamDemo } from "./helpers";
 
 /** localStorage key of the Advanced firmware switch (`src/lib/settings.ts`). */
 const ADVANCED_KEY = "open-powerz.advanced-firmware";
@@ -351,7 +351,11 @@ test.describe("firmware update (FR V9SK55)", () => {
     await expect(done).toContainText(/updated/i);
     await expectAxeClean(page, "success");
 
-    // Released afterwards.
+    // Released afterwards. The app connects the updated meter again on its own
+    // (AC-AXHK2M.15 supersedes a picker left idle here), and a connected session locks
+    // the picker, so the picker is checked once that session is ended.
+    await expect(badge(page)).toHaveText("Streaming", { timeout: 10_000 });
+    await page.getByRole("button", { name: "Disconnect", exact: true }).click();
     await expect(page.getByLabel("Device", { exact: true })).toBeEnabled();
     await expect(page.getByRole("tab", { name: "PD analyzer" })).not.toHaveAttribute(
       "aria-disabled",

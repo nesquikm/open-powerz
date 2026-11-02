@@ -55,7 +55,7 @@ Build order: the table's order. AXHK2W goes last so it measures the finished cha
   verify: session and transport unit tests, then a tester runbook
 - [x] Notices and opened captures survive other meters' actions — AXHK2K
   verify: Vitest and Playwright tile flows
-- [ ] Firmware, trigger and release review leftovers — AXHK2M
+- [x] Firmware, trigger and release review leftovers — AXHK2M
   verify: per-item unit tests
 - [x] Trigger panel "don't ask again" — AXHK2N
   verify: disarm-path unit tests, Playwright, then a tester runbook

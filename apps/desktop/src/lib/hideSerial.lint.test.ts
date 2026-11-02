@@ -59,6 +59,7 @@ describe("components read serials through the helper (AC-AXHK2Q.2)", () => {
     // These hold the serial, match on it or mask it; a new one must argue its way in here.
     const known = new Set([
       "deviceDetails.ts",
+      "firmwareUpdate.svelte.ts", // matches the updated meter by serial (AC-AXHK2M.15), never shows it
       "format.ts",
       "meterGrid.ts",
       "mockBackend.ts",

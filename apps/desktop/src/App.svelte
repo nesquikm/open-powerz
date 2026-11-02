@@ -549,6 +549,19 @@
     flash: firmwareFlash,
     cancelFlash: firmwareCancel,
     flashStatus: firmwareFlashStatus,
+    // A plain connect of the meter's listing, back in application mode (AC-AXHK2M.15).
+    // Run after the effect that asked for it, never inside it.
+    reconnect: (id) =>
+      Promise.resolve().then(async () => {
+        const shown = meters.fullViewId;
+        if (session.active && shown !== null && shown !== id) {
+          if (meters.get(id) === undefined) await addMeter(id);
+          return;
+        }
+        if (session.active) return;
+        session.selectedId = id;
+        await connectSelected();
+      }),
     stopRecording: async (id) => {
       if (meters.inFullView(id)) {
         if (!(await onShownMeter(() => recording.stop(recordingDeps())))) throw recording.error;
@@ -593,6 +606,20 @@
       session.details,
     ),
   );
+  /** Once an update has ended the updated meter stays picked as the OS lists it again,
+   * and it is connected again once back in application mode (AC-AXHK2M.14, .15). The
+   * pick moves only when the listing changes and no session runs: a meter the user
+   * connected meanwhile keeps the picker. */
+  let followedId: string | null = null;
+  $effect(() => {
+    const target = firmware.followTarget(session.devices);
+    untrack(() => {
+      if (target !== null && target !== followedId && !session.active) {
+        session.selectedId = target;
+      }
+      followedId = target;
+    });
+  });
   /** The trigger view's state (FR DGSQ6S). */
   const trigger = new TriggerPanel(
     {

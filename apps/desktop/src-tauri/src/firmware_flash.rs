@@ -344,11 +344,27 @@ pub fn flash_file_logged<O: FlashOpener, C: Clock>(
                 FlashOutcome::PowerCycleNeeded => FlashDone::PowerCycleNeeded,
             })
         }
-        Err(e @ FlashError::Interrupted { .. }) => {
+        Err(FlashError::Interrupted { .. }) => {
             log.firmware("cancelled");
-            Err(flash_error(&e))
+            Err(stopped_by_user())
         }
         Err(e) => Err(refused(flash_error(&e))),
+    }
+}
+
+/// What a stop the user asked for says (AC-AXHK2M.13): it stopped, nothing was
+/// erased (Cancel is refused once the erase begins), and the meter may be
+/// waiting in its bootloader. Not a failure, so no retry and no recovery hint.
+pub const STOPPED_MESSAGE: &str = "The update was stopped before anything was erased. \
+     The meter may be waiting in its bootloader.";
+
+/// The UI error for a stop the user asked for.
+fn stopped_by_user() -> UiError {
+    UiError {
+        kind: ErrorKind::Cancelled,
+        message: STOPPED_MESSAGE.to_owned(),
+        hint: None,
+        sessions: Vec::new(),
     }
 }
 

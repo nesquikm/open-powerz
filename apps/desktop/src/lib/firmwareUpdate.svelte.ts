@@ -27,6 +27,9 @@ export interface FirmwareMeter {
   /** Null while the meter is not connected (its versions are not known). */
   firmwareVersion: string | null;
   bootloaderVersion: string | null;
+  /** The meter's serial, which finds it again under a new id after an update; null or
+   * absent when not known. */
+  serial?: string | null;
 }
 
 /** What the view needs from the backend. */
@@ -50,6 +53,8 @@ export interface FirmwareUpdateApi {
   /** Ends the recording on meter `deviceId`. Rejects with the reason, or with `null`
    * while a start or stop of that recording is in flight. */
   stopRecording?: (deviceId: string) => Promise<void>;
+  /** Connects meter `deviceId` again, as a plain connect of its listing (AC-AXHK2M.15). */
+  reconnect?: (deviceId: string) => Promise<void>;
 }
 
 /** Why a recording could not be stopped for the update: one is on its way in or out. */
@@ -70,9 +75,26 @@ export function flashMeter(
     id: listing.id,
     model: listing.model,
     mode: listing.mode,
+    serial: listing.serial,
     firmwareVersion: details ? details.firmware_version || null : null,
     bootloaderVersion: details ? details.bootloader_version || null : null,
   };
+}
+
+/** The listing of the updated meter `updated` (see {@link FirmwareUpdate.followTarget}). */
+function updatedListing(
+  updated: FirmwareMeter,
+  listings: readonly DeviceListing[],
+): DeviceListing | undefined {
+  const demo = listings.find((l) => l.demo_scenario !== null && l.id === updated.id);
+  if (demo !== undefined) return demo;
+  const real = listings.filter((l) => l.demo_scenario === null);
+  const serial = updated.serial ?? null;
+  if (serial !== null) return real.find((l) => l.serial === serial);
+  const same = real.find((l) => l.id === updated.id);
+  if (same !== undefined) return same;
+  const waiting = real.filter((l) => l.mode === "bootloader" && l.model === updated.model);
+  return waiting.length === 1 ? waiting[0] : undefined;
 }
 
 const MODE_LABELS: Record<DeviceMode, string> = {
@@ -130,6 +152,13 @@ export const RECOVERY_STEPS: readonly string[] = [
   "Retry the update with the same file.",
 ];
 
+/** What to do after a stop (AC-AXHK2M.14): a plain replug first, which brings most
+ * meters back; the button only when that does not. */
+export const STOPPED_STEPS: readonly string[] = [
+  "Unplug the meter and plug it back in.",
+  "If that does not bring it back, unplug it again and hold Back while plugging it in.",
+];
+
 /** Byte counts with thousands separators, whatever the page's locale. */
 const BYTES = new Intl.NumberFormat("en-US");
 
@@ -171,7 +200,9 @@ const STATUS_POLL_MS = 500;
 /** Failed polls in a row after which a reloaded page stops following the update. */
 const STATUS_POLL_TRIES = 20;
 
-export type FirmwareUpdatePhase = "idle" | "confirming" | "updating" | "done" | "failed";
+/** `stopped`: the user's stop ended the update; not a failure (AC-AXHK2M.13). */
+export type FirmwareUpdatePhase =
+  "idle" | "confirming" | "updating" | "done" | "failed" | "stopped";
 
 export class FirmwareUpdate {
   #api: FirmwareUpdateApi;
@@ -198,6 +229,8 @@ export class FirmwareUpdate {
   #releasing = false;
   /** The meter as it was when the update started; the update disconnects it. */
   #updating = $state.raw<FirmwareMeter | null>(null);
+  /** The ended update's meter was connected again: once per update (AC-AXHK2M.15). */
+  #reconnected = false;
   /** Cancel was accepted: the update stops at its next safe point. */
   cancelling = $state(false);
   /** The update a reloaded page followed has ended (AC-4PJRVJ.3). */
@@ -220,11 +253,51 @@ export class FirmwareUpdate {
   }
 
   /** The meter to show: as it was at the start while the update runs, since the update
-   * disconnects it and its versions are no longer read; else `meter` as it is now. */
+   * disconnects it and its versions are no longer read; once it ended (stopped or done),
+   * the updated meter with the versions it reads, else the one read back by the update,
+   * else those kept from the start (AC-AXHK2M.16); else `meter` as it is now. */
   meterShown(meter: FirmwareMeter | null): FirmwareMeter | null {
-    if (!this.busy || this.#updating === null) return meter;
+    if (!this.busy || this.#updating === null) return this.#withKeptVersions(meter);
     const followed = this.#updating.model === FOLLOWED_METER_MODEL;
     return followed && meter?.id === this.#updating.id ? meter : this.#updating;
+  }
+
+  /** The update ran to its end, done or stopped by the user (AC-AXHK2M.14-.16). */
+  get #ended(): boolean {
+    return this.phase === "done" || this.phase === "stopped";
+  }
+
+  /** `meter` with the versions an ended update knows filled in where it reads none; only
+   * for the updated meter (same id, or same serial when known). */
+  #withKeptVersions(meter: FirmwareMeter | null): FirmwareMeter | null {
+    const updated = this.#updating;
+    if (meter === null || updated === null) return meter;
+    if (!this.#ended) return meter;
+    const serial = updated.serial ?? null;
+    const same = meter.id === updated.id || (serial !== null && meter.serial === serial);
+    if (!same) return meter;
+    const readBack = this.result?.outcome === "verified" ? this.result.version : null;
+    return {
+      ...meter,
+      firmwareVersion: meter.firmwareVersion ?? readBack ?? updated.firmwareVersion,
+      bootloaderVersion: meter.bootloaderVersion ?? updated.bootloaderVersion,
+    };
+  }
+
+  /** The listing to keep picked once the update has ended (stopped or done): the updated
+   * meter, a demo device by its id, a real one by its serial when known, else by its id,
+   * else the one real meter of its model listed in bootloader mode, where a stopped update
+   * leaves it (AC-AXHK2M.14); null when no update ended or the meter is not listed. Once
+   * that meter is listed in application mode it is connected again, once (AC-AXHK2M.15). */
+  followTarget(listings: readonly DeviceListing[]): string | null {
+    const updated = this.#updating;
+    if (updated === null || !this.#ended) return null;
+    const target = updatedListing(updated, listings);
+    if (target !== undefined && target.mode === "application" && !this.#reconnected) {
+      this.#reconnected = true;
+      void this.#api.reconnect?.(target.id).catch(() => {});
+    }
+    return target?.id ?? null;
   }
 
   /** The typed text is exactly the chosen file's version. */
@@ -335,6 +408,7 @@ export class FirmwareUpdate {
     const path = this.path;
     if (path === null) return;
     this.#updating = meter;
+    this.#reconnected = false;
     this.phase = "updating";
     this.#clearOutcome();
     try {
@@ -374,9 +448,15 @@ export class FirmwareUpdate {
     }
   }
 
-  /** Ends the update as a failure at its latest stage. */
+  /** Ends the update as a failure at its latest stage, or as stopped when the user's stop
+   * ended it (AC-AXHK2M.13): no failed stage, so no recovery steps. */
   #fail(error: UiError): void {
     this.error = error;
+    if (error.kind === "cancelled") {
+      this.failedStage = null;
+      this.phase = "stopped";
+      return;
+    }
     this.failedStage = this.stage?.stage ?? null;
     this.phase = "failed";
   }
@@ -469,7 +549,7 @@ export class FirmwareUpdate {
     return this.cancelling ? CANCEL_PENDING : null;
   }
 
-  /** Asks the running update to stop; it then ends as a failure. A refusal is dropped:
+  /** Asks the running update to stop; it then ends as stopped. A refusal is dropped:
    * it means the erase has just begun, and that stage's report turns Cancel off. */
   async cancelUpdate(): Promise<void> {
     if (this.phase !== "updating" || this.cancelBlocker !== null) return;
@@ -481,9 +561,9 @@ export class FirmwareUpdate {
     }
   }
 
-  /** Clears a finished or failed update's outcome; the chosen file stays for a retry. */
+  /** Clears a finished, failed or stopped update's outcome; the chosen file stays. */
   dismiss(): void {
-    if (this.phase !== "done" && this.phase !== "failed") return;
+    if (this.phase !== "done" && this.phase !== "failed" && this.phase !== "stopped") return;
     this.phase = "idle";
     this.confirmation = "";
     this.#clearOutcome();

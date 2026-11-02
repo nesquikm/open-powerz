@@ -43,6 +43,7 @@ const INFO: FirmwareFileInfo = {
 const METER: FirmwareMeter = {
   id: "usb:1:4",
   model: "KM003C",
+  serial: "SERIAL-0004",
   mode: "application",
   firmwareVersion: "2.0.6",
   bootloaderVersion: "2.5",
@@ -475,8 +476,9 @@ describe("review fixes (AC-V9SK55.4, .5)", () => {
     expect(fw.meterShown(disconnected)).toEqual(METER);
     d.resolve({ outcome: "verified", version: "2.0.7" });
     await running;
-    // Done: the old versions are stale now, so show the meter as it is.
-    expect(fw.meterShown(disconnected)).toEqual(disconnected);
+    // Done: the version read back replaces the stale one until the meter is read
+    // again; never a dash (AC-AXHK2M.16 supersedes the dashes here).
+    expect(fw.meterShown(disconnected)).toEqual({ ...METER, firmwareVersion: "2.0.7" });
     expect(fw.meterShown(null)).toBeNull();
   });
 

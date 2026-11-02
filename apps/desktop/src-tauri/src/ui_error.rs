@@ -30,6 +30,8 @@ pub enum ErrorKind {
     /// A firmware update would release sessions the user has not agreed to
     /// release; [`UiError::sessions`] lists all of them (FR AXHK2F).
     FlashNeedsConsent,
+    /// The user stopped the firmware update; not a failure (AC-AXHK2M.13).
+    Cancelled,
     /// Anything else.
     Internal,
 }

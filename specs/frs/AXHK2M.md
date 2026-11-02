@@ -46,6 +46,10 @@ The cancel waits up to 120 s, the prompt is lost, and the failure is silent.
 - AC-AXHK2M.10: A live batch dropped for a slow sink costs no sample in the session history, the export or a recording, and a test pins it. The docs state whether the dropped samples are lost to the live view or only delayed.
 - AC-AXHK2M.11: At 375 px wide, with one meter and with several, the page has no horizontal scroll, and the Add meter control is fully visible and usable. A test pins both.
 - AC-AXHK2M.12: At 375 px wide with one meter, the device select does not cover Disconnect or any other top bar control. A test pins it.
+- AC-AXHK2M.13: A stop the user asked for shows as stopped, not as a failure: no error colour, no "Retry the update" step, and plain words on the state the meter may be in.
+- AC-AXHK2M.14: After a stop, the next step says to replug the meter first, and to hold its button while replugging only if that does not bring it back. A meter the app sees in bootloader mode is shown as such in the device list.
+- AC-AXHK2M.15: After an update ends, stopped or done, the app connects again to the same meter by its serial once it is back in application mode.
+- AC-AXHK2M.16: After an update, the Firmware tab shows the meter's firmware and bootloader versions read anew, never a dash until a reconnect.
 
 ## Technical Design
 
@@ -79,3 +83,9 @@ Source: M7a Implementation notes marked for M7b. The plan lists items deferred w
 - Waiters held during an update with a serial-less target are not retried when the lease drops, since no hotplug fires. It predates this FR, and the runbook covers it.
 - `FlashEnd` stays a struct with two options, the wire shape.
 - The phone-width check found the firmware warning card sitting over the bottom of the settings panel on a desktop window. It predates this FR and is not fixed here. AXHK2V's layout pass picks it up.
+- AC-AXHK2M.3 is simulator-only: the a5442bc run had no second meter. The serial stayed the same across the jump and across the full update, as .3 assumes.
+- ACs .13 to .16 come from the a5442bc run. The user read the red stop as a failed update. The meter stayed in its bootloader over 2 minutes after the stop, came back with a plain replug, and was not listed meanwhile. Both runs left the selector on the demo device, and the versions read a dash until a reconnect.
+- After a page reload during an update, the followed meter carries no serial, so .15 and .16 find it again only under the same id. A real meter changes address across the jump, so a reloaded page may need a manual connect. Not covered by a test; the runbook watches it.
+- Every stop point lies before the descriptor, so the stop message's "before anything was erased" holds. A stop before the first stage still shows the replug steps, which is harmless.
+- AC.16 reads the versions anew at the .15 reconnect; until then the page shows the read-back version, or the kept ones after a stop. The V9SK55 test that expected dashes after a done update now follows .16.
+- Fixing the firmware specs found the recording timer's text split in two by the AXHK2R commit, so `REC 0:00:04` read as two lines to tests. TopBar renders it as one text again.
