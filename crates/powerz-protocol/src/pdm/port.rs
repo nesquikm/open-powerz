@@ -4,6 +4,7 @@ use super::{Error, map_io};
 use crate::transport::cdc::{
     PortCandidate, match_port, open_listed_serial, port_gone, port_held, usb_ports,
 };
+use crate::transport::without_port_names;
 
 /// Pick the meter's serial port among `ports`: only VID 0x5FC9 ports count.
 /// With `serial`, the port with that serial number (or, as on Windows, the
@@ -43,9 +44,9 @@ pub fn open_found<P>(
     open: impl FnOnce(String) -> Result<P, serialport::Error>,
 ) -> Result<P, Error> {
     let name = find_port(ports, serial)?.name.clone();
-    open(name.clone()).map_err(|e| {
+    open(name).map_err(|e| {
         if port_held(&e) {
-            Error::PortHeld { port: name }
+            Error::PortHeld
         } else {
             serial_error(e)
         }
@@ -60,7 +61,7 @@ fn serial_error(e: serialport::Error) -> Error {
     match e.kind {
         serialport::ErrorKind::NoDevice => Error::NotFound,
         serialport::ErrorKind::Io(kind) => map_io(&std::io::Error::new(kind, e.description)),
-        _ => Error::Io(e.description),
+        _ => Error::Io(without_port_names(&e.description)),
     }
 }
 

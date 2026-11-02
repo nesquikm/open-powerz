@@ -5,7 +5,7 @@ use std::io::Write;
 use powerz_protocol::transport::discovery::{DeviceEntry, Model};
 
 use crate::error::CliError;
-use crate::output::write_json;
+use crate::output::{HIDDEN, write_json};
 
 /// Pick the device to use: the one whose serial is `serial`, or the only
 /// attached one. Several attached without `serial` is a usage error naming
@@ -14,15 +14,35 @@ pub fn select_device<'a>(
     devices: &'a [DeviceEntry],
     serial: Option<&str>,
 ) -> Result<&'a DeviceEntry, CliError> {
+    select_device_with(devices, serial, false)
+}
+
+/// [`select_device`] for a command that may run with `--hide-serial`: its
+/// errors then count meters and repeat no serial.
+pub fn select_device_with<'a>(
+    devices: &'a [DeviceEntry],
+    serial: Option<&str>,
+    hide_serial: bool,
+) -> Result<&'a DeviceEntry, CliError> {
     if let Some(serial) = serial {
         return devices
             .iter()
             .find(|d| d.serial.as_deref() == Some(serial))
-            .ok_or_else(|| CliError::NoDevice(format!("no POWER-Z device with serial {serial}")));
+            .ok_or_else(|| {
+                CliError::NoDevice(if hide_serial {
+                    "no POWER-Z device with that serial".to_owned()
+                } else {
+                    format!("no POWER-Z device with serial {serial}")
+                })
+            });
     }
     match devices {
         [] => Err(CliError::NoDevice("no POWER-Z devices found".to_string())),
         [only] => Ok(only),
+        several if hide_serial => Err(CliError::Usage(format!(
+            "{} POWER-Z devices attached; choose one with --device SERIAL",
+            several.len()
+        ))),
         several => {
             let serials: Vec<&str> = several
                 .iter()
@@ -45,6 +65,17 @@ pub fn list(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), CliError> {
+    list_with(devices, json, false, out, err)
+}
+
+/// [`list`], printing `hidden` for every serial when `hide_serial` is set.
+pub fn list_with(
+    devices: &[DeviceEntry],
+    json: bool,
+    hide_serial: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), CliError> {
     if devices.is_empty() {
         writeln!(err, "no POWER-Z devices found")?;
     }
@@ -54,7 +85,7 @@ pub fn list(
             .map(|d| {
                 serde_json::json!({
                     "model": model_name(d.model),
-                    "serial": d.serial,
+                    "serial": shown_serial(d, hide_serial),
                     "bus": d.bus,
                     "address": d.address,
                 })
@@ -67,12 +98,21 @@ pub fn list(
             out,
             "{}  serial {}  bus {} address {}",
             model_name(d.model),
-            d.serial.as_deref().unwrap_or("-"),
+            shown_serial(d, hide_serial).unwrap_or("-"),
             d.bus,
             d.address
         )?;
     }
     Ok(())
+}
+
+/// The serial `list` prints for `d`.
+fn shown_serial(d: &DeviceEntry, hide_serial: bool) -> Option<&str> {
+    if hide_serial {
+        Some(HIDDEN)
+    } else {
+        d.serial.as_deref()
+    }
 }
 
 /// Display name of a model (`KM003C`, `KM002C`, or `unknown (PID 0x....)`).

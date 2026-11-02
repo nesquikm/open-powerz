@@ -5,14 +5,18 @@
    * button focused, keeps Tab inside, and treats Escape as Keep.
    */
   import type { FlashHold } from "../backend";
+  import { displayMeterLabel } from "../format";
 
   let {
     sessions,
+    hideSerial,
     onKeep,
     onEnd,
   }: {
     /** The sessions the update would end. */
     sessions: FlashHold[];
+    /** The Hide serial numbers switch (FR AXHK2Q): a hold's label can hold the serial. */
+    hideSerial: boolean;
     onKeep: () => void;
     onEnd: () => void;
   } = $props();
@@ -70,7 +74,9 @@
     </p>
     <ul>
       {#each sessions as session (session.id)}
-        <li>{session.label}{session.recording ? " (recording)" : ""}</li>
+        <li>
+          {displayMeterLabel(session.label, hideSerial)}{session.recording ? " (recording)" : ""}
+        </li>
       {/each}
     </ul>
     <div class="actions">

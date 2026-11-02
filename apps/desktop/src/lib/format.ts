@@ -87,11 +87,29 @@ export function readoutView(
   };
 }
 
+/** What the page shows for `serial`: every place that shows one comes through here, so
+ * the Hide serial numbers switch covers them all (FR AXHK2Q, AC .2, .3). */
+export function displaySerial(serial: string, hidden: boolean): string {
+  return hidden ? "Hidden" : serial;
+}
+
+/** A backend-made "<model> — <serial>" label as the page shows it: the backend sends it
+ * whole, so with the option on only the name before the dash stays (AC-AXHK2Q.2). */
+export function displayMeterLabel(label: string, hidden: boolean): string {
+  if (!hidden) return label;
+  const dash = label.indexOf(" — ");
+  const masked = displaySerial(label, hidden);
+  return dash < 0 ? masked : `${label.slice(0, dash)} — ${masked}`;
+}
+
 /** Picker label: "Demo device — <scenario>" for demo entries, "<model> — <serial>" for
- * meters, with "(bootloader mode)" after a meter in bootloader mode. */
-export function deviceOptionLabel(device: DeviceListing): string {
+ * meters, with "(bootloader mode)" after a meter in bootloader mode. With `hidden`,
+ * "Hidden" stands for the serial. */
+export function deviceOptionLabel(device: DeviceListing, hidden: boolean): string {
   if (device.demo_scenario !== null) return `Demo device — ${device.demo_scenario}`;
-  const name = device.serial ? `${device.model} — ${device.serial}` : device.model;
+  const name = device.serial
+    ? `${device.model} — ${displaySerial(device.serial, hidden)}`
+    : device.model;
   // A meter in bootloader mode is listed as such (FR V9SK52, AC .5).
   return device.mode === "bootloader" ? `${name} (bootloader mode)` : name;
 }

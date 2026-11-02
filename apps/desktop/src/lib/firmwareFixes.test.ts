@@ -93,7 +93,7 @@ describe("numbered release notes (AC-4PJRVJ.8)", () => {
 
 describe("the update check (AC-4PJRVJ.8, AC-V9SK52.3)", () => {
   const updateCheck = (i: ConnectedInfo) =>
-    deviceDetailsRows(i).find((r) => r.label === "Update check")?.value;
+    deviceDetailsRows(i, false).find((r) => r.label === "Update check")?.value;
 
   it("never says update required", () => {
     expect(updateCheck(info({ update_required: true }))).not.toMatch(/update required/i);

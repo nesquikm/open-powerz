@@ -31,6 +31,7 @@
 
   let {
     session,
+    hideSerial,
     themeChoice,
     onSetTheme,
     onToggleConnect,
@@ -50,6 +51,8 @@
     views,
   }: {
     session: Session;
+    /** The Hide serial numbers switch (FR AXHK2Q). */
+    hideSerial: boolean;
     themeChoice: ThemeChoice;
     onSetTheme: (choice: ThemeChoice) => void;
     onToggleConnect: () => void;
@@ -270,7 +273,7 @@
   >
     <div class="group start">
       <span class="brand">open-powerz</span>
-      <DevicePicker {session} />
+      <DevicePicker {session} {hideSerial} />
       <span class="source-inline">{@render sourceSelect()}</span>
       {#if !controlsInTiles}
         <button

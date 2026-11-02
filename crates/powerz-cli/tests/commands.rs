@@ -13,7 +13,7 @@ use powerz_cli::record::CSV_HEADER;
 use powerz_cli::trace::TraceTransport;
 use powerz_cli::{
     Cli, CliError, Command, StreamOptions, TransportKind, WatchOptions, info, list, read,
-    select_device, stream, validate, watch,
+    select_device, select_device_with, stream, validate, watch,
 };
 use powerz_protocol::decode::Rate;
 use powerz_protocol::firmware::DeviceMode;
@@ -1016,6 +1016,25 @@ fn several_meters_without_device_is_usage_error_naming_serials() {
         msg.contains(SYNTH_SERIAL) && msg.contains("654321"),
         "{msg}"
     );
+}
+
+#[test]
+fn several_meters_with_hide_serial_count_and_name_no_serial() {
+    let devices = two_devices();
+    let e = select_device_with(&devices, None, true).unwrap_err();
+    assert_eq!(e.exit_code(), 2, "{e:?}");
+    let msg = e.to_string();
+    assert!(
+        !msg.contains(SYNTH_SERIAL) && !msg.contains("654321"),
+        "{msg}"
+    );
+    assert!(msg.contains('2'), "{msg}");
+}
+
+#[test]
+fn a_typed_serial_is_not_echoed_with_hide_serial() {
+    let e = select_device_with(&two_devices(), Some("999999"), true).unwrap_err();
+    assert!(!e.to_string().contains("999999"), "{e}");
 }
 
 #[test]

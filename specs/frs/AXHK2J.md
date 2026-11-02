@@ -42,6 +42,7 @@ The wrong field is saved on the meter, and the unplug reads as a timeout.
 - AC-AXHK2J.6: A flash path test covers an Io error followed by re-enumeration.
 - AC-AXHK2J.7: On a port held by another program, the trigger and PDM paths say so in plain words, as the settings path does. A vanished port is not reported as held.
 - AC-AXHK2J.8: The AC-AXHK2J.3 check never runs for a transfer whose wait is under 100 ms. The firmware erase path's expected 10 ms and 20 ms timeouts neither list USB devices nor pause, so its wire timing does not change.
+- AC-AXHK2J.9: After a successful settings write the desktop app says the meter saved the change and that its screen shows it after that setting is opened in the meter's menu. A Playwright test pins it.
 
 ## Technical Design
 
@@ -65,3 +66,5 @@ Source: the M7a settings CRC follow-ups. Timer-sensitive test timings stay as th
 - Left as they are: the two `serial_error` functions (different error enums), and the held-port branches of `settings_port_error`, which a test pins.
 - A listing that loses a known serial reads as gone. Not seen on a stable listing.
 - `gone_at_open` does not fire on the macOS nusb path, where `os_error` is an IOReturn value. macOS relies on the kind mapping.
+- Hardware run on ec17ae3: AC.2, .3, .4 and .7 passed, on the CLI for the write. AC.5 is simulator-only: errors 6 and 19 at open never occurred on the real meter, and they are not to be forced there.
+- The double read lives in the library, so the app and the CLI share it. No app write has run on a real meter.

@@ -5,6 +5,8 @@ import {
   DASH,
   badgeLabel,
   deviceOptionLabel,
+  displayMeterLabel,
+  displaySerial,
   formatCurrent,
   formatFixed,
   readoutView,
@@ -148,15 +150,30 @@ describe("device picker labels (AC-AH2AEK.3)", () => {
   };
 
   it("names real meters by model and serial", () => {
-    expect(deviceOptionLabel(real)).toBe("KM003C — 12345678");
+    expect(deviceOptionLabel(real, false)).toBe("KM003C — 12345678");
   });
 
   it("names a real meter without a serial by model", () => {
-    expect(deviceOptionLabel({ ...real, serial: null })).toBe("KM003C");
+    expect(deviceOptionLabel({ ...real, serial: null }, false)).toBe("KM003C");
   });
 
   it("names demo entries by scenario", () => {
-    expect(deviceOptionLabel(demo)).toBe("Demo device — pd-negotiation");
+    expect(deviceOptionLabel(demo, false)).toBe("Demo device — pd-negotiation");
+  });
+
+  it("reads Hidden in place of the serial with the option on (AC-AXHK2Q.2, .3)", () => {
+    expect(deviceOptionLabel(real, true)).toBe("KM003C — Hidden");
+    expect(deviceOptionLabel({ ...real, mode: "bootloader" }, true)).toBe(
+      "KM003C — Hidden (bootloader mode)",
+    );
+  });
+
+  it("names real meters by their serial again with the option off (AC-AXHK2Q.3)", () => {
+    expect(deviceOptionLabel(real, false)).toBe("KM003C — 12345678");
+  });
+
+  it("keeps a demo entry's name, which holds no serial, with the option on", () => {
+    expect(deviceOptionLabel(demo, true)).toBe("Demo device — pd-negotiation");
   });
 
   it("lists real meters before demo devices", () => {
@@ -180,5 +197,29 @@ describe("current direction text (orchestrator visual review)", () => {
     expect(currentDirectionText(-0.2)).toBe("Current flows sink → source (reversed)");
     expect(currentDirectionText(0)).toBeNull();
     expect(currentDirectionText(null)).toBeNull();
+  });
+});
+
+describe("displaySerial (AC-AXHK2Q.2, .3)", () => {
+  it("reads Hidden with the option on", () => {
+    expect(displaySerial("FAKE-SERIAL-0001", true)).toBe("Hidden");
+  });
+
+  it("gives the serial back with the option off", () => {
+    expect(displaySerial("FAKE-SERIAL-0001", false)).toBe("FAKE-SERIAL-0001");
+  });
+});
+
+describe("displayMeterLabel", () => {
+  it("keeps the model and hides what follows it (AC-AXHK2Q.2)", () => {
+    expect(displayMeterLabel("KM003C — FAKE-SERIAL", true)).toBe("KM003C — Hidden");
+  });
+
+  it("hides a whole label it cannot read, not shows it", () => {
+    expect(displayMeterLabel("FAKE-SERIAL", true)).toBe("Hidden");
+  });
+
+  it("leaves the label alone with the option off", () => {
+    expect(displayMeterLabel("KM003C — FAKE-SERIAL", false)).toBe("KM003C — FAKE-SERIAL");
   });
 });

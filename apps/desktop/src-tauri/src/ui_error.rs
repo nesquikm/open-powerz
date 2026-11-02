@@ -177,7 +177,7 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
         },
         T::Permission(_) => permission_denied(target_os),
         T::Io(detail) if is_busy(detail) => device_busy(target_os),
-        T::PortHeld { .. } => port_held(),
+        T::PortHeld => port_held(),
         T::NotFound => UiError {
             kind: ErrorKind::Disconnected,
             message: "No meter was found.".to_owned(),

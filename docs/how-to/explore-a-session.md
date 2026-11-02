@@ -115,6 +115,24 @@ The chart's status announces every view change for screen readers, for example
 visible span needs: one from 1 s up, two from 100 ms, three below that, so a
 40 ms view reads "Paused: 11.200 s to 11.240 s".
 
+## Hide serial numbers
+
+Turn this on before a screenshot or a screen share. Open **About** and turn on
+**Hide serial numbers**. It is off by default and stays set after a restart.
+
+With it on, the app shows no serial number or UID anywhere. Those fields read
+"Hidden". Meter tiles are titled by model and position, for example
+"KM003C 2", so two meters stay easy to tell apart. Turn it off and the values
+come back with no reconnect.
+
+The CLI has a matching flag: see
+[Hide serial numbers](../reference/cli.md#hide-serial-numbers) in the CLI
+reference.
+
+Error messages never name the serial port, with the option on or off, because
+on macOS that name contains the meter's serial. They say "the meter's serial
+port" instead.
+
 ## A window that stays put
 
 Starting an export moves nothing in the top bar, at any window width: the

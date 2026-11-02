@@ -16,6 +16,7 @@
   "PR41FT": "protocol-triggers: confirmation above 5 v",
   "AXHK2N": "protocol-triggers: don't ask again",
   "AXHK2P": "protocol-triggers: press read cable",
+  "AXHK2Q": "live-meter: hide serial numbers",
   "DGSQ6P": "protocol-triggers: trigger 9 v from a pd charger",
   "DGSQ6Q": "protocol-triggers: qc 2.0/3.0, fcp, afc",
   "DGSQ6R": "protocol-triggers: detect which fast-charge protocols",

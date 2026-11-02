@@ -137,11 +137,8 @@ pub enum Error {
     },
     /// The listing named the meter's serial port, but opening it failed the
     /// way a port someone else holds does.
-    #[error("the meter's serial port {port} is in use by another program")]
-    PortHeld {
-        /// Port name or path.
-        port: String,
-    },
+    #[error("the meter's serial port is in use by another program")]
+    PortHeld,
     /// The port went away.
     #[error("meter disconnected")]
     Disconnected,
@@ -155,6 +152,6 @@ pub enum Error {
 fn map_io(err: &std::io::Error) -> Error {
     match crate::transport::map_io_error(err, std::env::consts::OS) {
         crate::transport::Error::Disconnected => Error::Disconnected,
-        _ => Error::Io(err.to_string()),
+        _ => Error::Io(crate::transport::without_port_names(&err.to_string())),
     }
 }

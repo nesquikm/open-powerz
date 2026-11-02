@@ -33,8 +33,8 @@ pub use firmware::{
     FLASH_RISK, JUMP_RISK, find_flashed_meter, firmware_flash, firmware_info, firmware_jump,
     firmware_probe, firmware_probe_unavailable, inspect_flash_file,
 };
-pub use info::{info, info_in_mode};
-pub use list::{list, select_device};
+pub use info::{info, info_in_mode, info_with};
+pub use list::{list, list_with, select_device, select_device_with};
 pub use pd::{pd, pd_decode, pd_save};
 pub use pd_send::{PdSendOptions, pd_send};
 pub use read::read;

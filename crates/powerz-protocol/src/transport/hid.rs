@@ -151,7 +151,7 @@ pub(crate) fn hid_message_error(message: &str, target_os: &str) -> Error {
     } else if m.contains("disconnected") || m.contains("no such device") {
         Error::Disconnected
     } else {
-        Error::Io(message.to_string())
+        Error::Io(super::without_port_names(message))
     }
 }
 

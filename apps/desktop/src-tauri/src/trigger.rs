@@ -1456,7 +1456,7 @@ pub fn pdm_error(err: &pdm::Error) -> UiError {
             hint: Some("Plug the meter back in.".to_owned()),
             sessions: Vec::new(),
         },
-        E::PortHeld { .. } => crate::ui_error::port_held(),
+        E::PortHeld => crate::ui_error::port_held(),
         E::HighVoltageNotConfirmed { .. } => {
             UiError::usage("A request above 5 V needs your confirmation.")
         }

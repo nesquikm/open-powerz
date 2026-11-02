@@ -67,6 +67,7 @@ Source: M7a Implementation notes marked for M7b. The plan lists items deferred w
 - The `pd cmd` / `pd data` guard and the page's check now treat zero-width blanks as blanks too. The AC named only the console refusal; a hidden blank could carry GoodCRC past the guard.
 - A dropped live batch leaves an unmarked straight line in the live chart. Nothing fetches it on its own. History-drawn views show it. AXHK2W measures whether this happens in the real app and fixes it if so.
 - The session's last samples are always delivered, except after a worker panic.
+- AC-AXHK2M.2 is simulator-only: a release build has no way to reload the page, and none is added for this. `firmware_flash_control` and the page's own reload tests cover it.
 - AC-AXHK2M.3 relies on a target keeping its serial across the bootloader jump. A listing with no serial, or any real listing not in application mode, stays refused.
 - The tag rollback in the release script has only run against the fake client. It now reads GitHub's answer, on the rollback and on the publish.
 - Any raw console line with a C0 or C1 control character inside is refused, in the library and the page. GoodCRC is judged first, so `pd\tcmd=1` keeps its own reason. Whether the firmware splits on such characters is unknown, so this fails closed.

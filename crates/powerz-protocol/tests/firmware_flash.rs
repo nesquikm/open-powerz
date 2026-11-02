@@ -3197,13 +3197,18 @@ fn without_a_serial_the_single_attached_meter_is_found() {
 }
 
 #[test]
-fn without_a_serial_several_meters_are_ambiguous_naming_them() {
+fn without_a_serial_several_meters_are_ambiguous_carrying_them() {
     let devices = vec![entry(Some("333333"), 3), entry(Some("444444"), 4)];
     let e = find_flashed_meter(&devices, None).expect_err("two meters cannot be told apart");
+    assert_eq!(
+        e.serials,
+        ["333333", "444444"],
+        "the CLI names them from here"
+    );
     let msg = e.to_string();
     assert!(
-        msg.contains("333333") && msg.contains("444444"),
-        "names them: {msg}"
+        !msg.contains("333333") && !msg.contains("444444"),
+        "the text reaches the desktop page: {msg}"
     );
 }
 

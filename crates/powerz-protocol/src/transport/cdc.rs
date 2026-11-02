@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
-use super::{Error, GuardedTransport, Transport, map_io_error};
+use super::{Error, GuardedTransport, Transport, map_io_error, without_port_names};
 use crate::adcnew::{AdcnewCounters, CdcDemux, CdcItem, Frame, Request};
 use crate::frame::{DeclaredEnd, HEADER_LEN, MainHeader, declared_end, frame_type, msg};
 
@@ -417,9 +417,9 @@ pub fn open_listed<P>(
         .ok_or(Error::NotFound)?
         .name
         .clone();
-    open(name.clone()).map_err(|e| {
+    open(name).map_err(|e| {
         if port_held(&e) {
-            Error::PortHeld { port: name }
+            Error::PortHeld
         } else {
             serial_error(e)
         }
@@ -449,7 +449,7 @@ fn serial_error(e: serialport::Error) -> Error {
         serialport::ErrorKind::Io(kind) => {
             map_io_error(&io::Error::new(kind, e.description), std::env::consts::OS)
         }
-        _ => Error::Io(e.description),
+        _ => Error::Io(without_port_names(&e.description)),
     }
 }
 
@@ -1153,7 +1153,7 @@ mod tests {
             Err::<(), _>(held())
         });
         assert_eq!(opened.as_deref(), Some("/dev/cu.usbmodem1101"));
-        assert!(matches!(result, Err(Error::PortHeld { .. })), "{result:?}");
+        assert!(matches!(result, Err(Error::PortHeld)), "{result:?}");
     }
 
     // ---- AC-AXHK2J.7: a vanished port is not a held one ----
@@ -1175,10 +1175,7 @@ mod tests {
             "Access is denied.",
         ] {
             let result = open_failing(serialport::ErrorKind::NoDevice, text);
-            assert!(
-                matches!(result, Err(Error::PortHeld { .. })),
-                "{text}: {result:?}"
-            );
+            assert!(matches!(result, Err(Error::PortHeld)), "{text}: {result:?}");
         }
     }
 
@@ -1274,6 +1271,6 @@ mod tests {
 
         let ports = [meter_port(&path, "KM1")];
         let result = open_listed(&ports, "KM1", open_serial).map(|_| ());
-        assert!(matches!(result, Err(Error::PortHeld { .. })), "{result:?}");
+        assert!(matches!(result, Err(Error::PortHeld)), "{result:?}");
     }
 }

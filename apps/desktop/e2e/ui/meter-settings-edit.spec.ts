@@ -87,6 +87,19 @@ test.describe("meter settings edit (FR JKWT3W)", () => {
     await expect(p.getByRole("button", { name: "Edit" })).toBeVisible();
   });
 
+  test("after a write the app says the meter saved it and where to see it (AC-AXHK2J.9)", async ({
+    page,
+  }) => {
+    const p = await startEdit(page);
+    await expect(p.getByRole("status")).toHaveCount(0);
+    await p.getByLabel("Brightness", { exact: true }).fill("80");
+    await p.getByRole("button", { name: "Apply" }).click();
+    await expect.poll(() => writes(page)).toBe(1);
+    await expect(p.getByRole("status")).toHaveText(
+      "The meter has saved the change; its screen shows it after you open that setting in the meter's menu.",
+    );
+  });
+
   test("Cancel leaves the meter untouched (AC-JKWT3W.5)", async ({ page }) => {
     const p = await startEdit(page);
     await p.getByLabel("Brightness", { exact: true }).fill("80");

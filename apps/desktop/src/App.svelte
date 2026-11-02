@@ -39,7 +39,12 @@
   import { firmwareWarningText } from "./lib/deviceDetails";
   import { AutoDismiss, type HoldReason } from "./lib/autoDismiss";
   import About from "./lib/components/About.svelte";
-  import { loadAdvancedFirmware, saveAdvancedFirmware } from "./lib/settings";
+  import {
+    loadAdvancedFirmware,
+    loadHideSerial,
+    saveAdvancedFirmware,
+    saveHideSerial,
+  } from "./lib/settings";
   import Chart from "./lib/components/Chart.svelte";
   import ErrorBanner from "./lib/components/ErrorBanner.svelte";
   import FirmwareNotice from "./lib/components/FirmwareNotice.svelte";
@@ -215,7 +220,9 @@
     const id = meters.fullViewId ?? session.selectedId;
     if (id === null) return null;
     const listing = meters.get(id)?.listing ?? session.devices.find((d) => d.id === id);
-    return listing ? controlsLabel(tileTitle(listing, session.details?.serial ?? null)) : null;
+    if (!listing) return null;
+    const masked = { hidden: hideSerial, position: meters.position(id) };
+    return controlsLabel(tileTitle(listing, session.details?.serial ?? null, masked));
   });
 
   /** A tile's recording and export: the full view's meter keeps the app's. */
@@ -452,6 +459,12 @@
     advancedFirmware = on;
     saveAdvancedFirmware(on, browserStorage());
     if (!on && view === "firmware") view = "meter";
+  }
+  /** The Hide serial numbers switch (FR AXHK2Q, AC .1). */
+  let hideSerial = $state(loadHideSerial(browserStorage()));
+  function setHideSerial(on: boolean): void {
+    hideSerial = on;
+    saveHideSerial(on, browserStorage());
   }
   /** The firmware view's state (FR V9SK55), kept across tab switches. */
   const firmware = new FirmwareUpdate({
@@ -813,7 +826,7 @@
     const demo = id.startsWith("demo:") ? id.slice("demo:".length) : null;
     return {
       id,
-      label: demo ? `Demo device — ${demo}` : `${snapshot.model} — ${snapshot.serial ?? id}`,
+      label: demo ? `Demo device — ${demo}` : snapshot.model,
       model: snapshot.model,
       serial: snapshot.serial,
       bus: null,
@@ -1078,6 +1091,7 @@
 <div class="shell">
   <TopBar
     {session}
+    {hideSerial}
     {themeChoice}
     onSetTheme={setTheme}
     onToggleConnect={() => void toggleConnection()}
@@ -1199,6 +1213,7 @@
     {#if view === "meter" && meters.showGrid}
       <MeterGrid
         {meters}
+        {hideSerial}
         onExpand={expandMeter}
         onDisconnect={disconnectMeter}
         {recordingOf}
@@ -1277,13 +1292,14 @@
     {#if view === "firmware" && advancedFirmware}
       <div class="firmware-view" role="tabpanel" id="view-firmware" aria-labelledby="tab-firmware">
         <h2>Firmware</h2>
-        <FirmwareView {firmware} meter={firmwareMeter} />
+        <FirmwareView {firmware} meter={firmwareMeter} {hideSerial} />
       </div>
     {/if}
   </main>
   {#if addMeterOpen}
     <AddMeterDialog
       devices={addableDevices}
+      {hideSerial}
       onCancel={() => (addMeterOpen = false)}
       onConnect={(id) => void addMeter(id)}
     />
@@ -1298,6 +1314,8 @@
       {advancedFirmware}
       advancedFirmwareLocked={firmware.busy}
       onAdvancedFirmware={setAdvancedFirmware}
+      {hideSerial}
+      onHideSerial={setHideSerial}
       onClose={() => (aboutOpen = false)}
     />
   {/if}

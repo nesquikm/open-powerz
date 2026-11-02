@@ -6,8 +6,11 @@
 import { describe, expect, it } from "vitest";
 import {
   ADVANCED_FIRMWARE_STORAGE_KEY,
+  HIDE_SERIAL_STORAGE_KEY,
   loadAdvancedFirmware,
+  loadHideSerial,
   saveAdvancedFirmware,
+  saveHideSerial,
 } from "./settings";
 
 function memoryStorage(initial: Record<string, string> = {}) {
@@ -59,5 +62,35 @@ describe("Advanced firmware setting", () => {
   it("ignores a storage that refuses the write", () => {
     expect(() => saveAdvancedFirmware(true, throwing)).not.toThrow();
     expect(loadAdvancedFirmware(throwing)).toBe(false);
+  });
+});
+
+describe("Hide serial numbers setting (AC-AXHK2Q.1)", () => {
+  it("uses its own open-powerz storage key", () => {
+    expect(HIDE_SERIAL_STORAGE_KEY).toBe("open-powerz.hide-serial");
+  });
+
+  it("is off by default, for a corrupt value and for unreadable storage", () => {
+    expect(loadHideSerial(memoryStorage())).toBe(false);
+    expect(loadHideSerial(undefined)).toBe(false);
+    expect(loadHideSerial(throwing)).toBe(false);
+    for (const v of ["", "1", "yes", "TRUE", "on"]) {
+      expect(loadHideSerial(memoryStorage({ [HIDE_SERIAL_STORAGE_KEY]: v }))).toBe(false);
+    }
+  });
+
+  it("round-trips on and off, across a new load of the same storage", () => {
+    const s = memoryStorage();
+    saveHideSerial(true, s);
+    expect(s.data.get(HIDE_SERIAL_STORAGE_KEY)).toBe("true");
+    expect(loadHideSerial(s)).toBe(true);
+    saveHideSerial(false, s);
+    expect(s.data.get(HIDE_SERIAL_STORAGE_KEY)).toBe("false");
+    expect(loadHideSerial(s)).toBe(false);
+  });
+
+  it("keeps working when storage refuses the write", () => {
+    saveHideSerial(true, throwing);
+    expect(loadHideSerial(throwing)).toBe(false);
   });
 });

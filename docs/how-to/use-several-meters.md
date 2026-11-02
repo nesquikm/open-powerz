@@ -13,7 +13,9 @@ readout, chart, recording and replug handling.
 
 With two or more meters the Meter tab shows a grid: one tile per meter with
 its name, the last digits of its serial number, its state and a live readout.
-A wide window shows two columns; a narrow one stacks the tiles.
+A wide window shows two columns; a narrow one stacks the tiles. With
+[Hide serial numbers](explore-a-session.md#hide-serial-numbers) on, tiles are
+titled by model and position instead, for example "KM003C 2".
 
 Each tile has its own **Record**, **Export**, rate and **Disconnect** controls,
 named after its meter, so they act on that meter only. The tiles keep their

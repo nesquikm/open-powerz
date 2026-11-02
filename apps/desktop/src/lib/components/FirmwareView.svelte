@@ -25,11 +25,14 @@
   let {
     firmware,
     meter,
+    hideSerial,
   }: {
     /** The view's state, kept by the app across tab switches. */
     firmware: FirmwareUpdate;
     /** The meter the update would go to, null when none is picked. */
     meter: FirmwareMeter | null;
+    /** The Hide serial numbers switch (FR AXHK2Q). */
+    hideSerial: boolean;
   } = $props();
 
   const shownMeter = $derived(firmware.meterShown(meter));
@@ -215,6 +218,7 @@
 {#if firmware.releasePrompt !== null}
   <FirmwareRecordingDialog
     sessions={firmware.releasePrompt}
+    {hideSerial}
     onKeep={() => firmware.declineRelease()}
     onEnd={() => void firmware.confirmRelease(meter)}
   />

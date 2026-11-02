@@ -11,6 +11,7 @@
 
   let {
     meters,
+    hideSerial,
     onExpand,
     onDisconnect,
     recordingOf,
@@ -22,6 +23,8 @@
     fileActions,
   }: {
     meters: Meters;
+    /** The Hide serial numbers switch (FR AXHK2Q). */
+    hideSerial: boolean;
     /** "Expand": meter `id` in the full single-meter view. */
     onExpand: (id: string) => void;
     /** "Disconnect": ends meter `id`'s session only (AC-1HHT03.3). */
@@ -43,7 +46,10 @@
      the window narrows, never after a late resize event. -->
 <section class="meter-grid" class:paired={meters.entries.length >= 2} aria-label="Meters">
   {#each meters.entries as entry (entry.listing.id)}
-    {@const title = tileTitle(entry.listing, entry.session.details?.serial ?? null)}
+    {@const title = tileTitle(entry.listing, entry.session.details?.serial ?? null, {
+      hidden: hideSerial,
+      position: meters.position(entry.listing.id),
+    })}
     <article class="tile" aria-label={title.name}>
       <header>
         <h2>{title.name}</h2>

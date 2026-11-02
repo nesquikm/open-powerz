@@ -61,7 +61,7 @@ Build order: the table's order. AXHK2W goes last so it measures the finished cha
   verify: disarm-path unit tests, Playwright, then a tester runbook
 - [x] One-click cable e-marker panel — AXHK2P
   verify: simulator cable tests, Playwright, then a tester runbook
-- [ ] Hide serial numbers — AXHK2Q
+- [x] Hide serial numbers — AXHK2Q
   verify: Playwright DOM scan and CLI tests
 - [ ] Recorder pause, auto-stop and limits — AXHK2R
   verify: hand-fed record tests and Playwright

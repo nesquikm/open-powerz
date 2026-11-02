@@ -33,6 +33,7 @@ The chart gains axis presets, per-series style, a title and image export.
 - AC-AXHK2V.7: SVG output is valid XML with series as paths. PDF output opens as one page. A test parses both.
 - AC-AXHK2V.8: Settings persist per app, not per meter. A README line and the how-to describe them.
 - AC-AXHK2V.9: On a 1280 × 800 window the firmware warning card covers no chart or settings control. A test pins it.
+- AC-AXHK2V.10: Saved chart images, their default file names and default chart titles carry no serial or UID, with "Hide serial numbers" on or off (AC-AXHK2Q.5). A test pins it.
 
 ## Technical Design
 

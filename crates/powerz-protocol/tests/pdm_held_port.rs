@@ -42,17 +42,25 @@ fn a_listed_port_that_answers_held_is_named_held() {
                 serialport::ErrorKind::NoDevice,
                 text,
             );
-            assert_eq!(result, Err(Error::PortHeld { port: PORT.into() }), "{text}");
+            assert!(matches!(result, Err(Error::PortHeld)), "{text}");
         }
     }
 }
 
 #[test]
 fn the_held_error_says_so_in_plain_words() {
-    let text = Error::PortHeld { port: PORT.into() }.to_string();
+    let error = open_failing(
+        &[meter_port()],
+        Some("KM1"),
+        serialport::ErrorKind::NoDevice,
+        "Resource busy",
+    )
+    .expect_err("the open fails");
+    let text = error.to_string();
     assert!(text.contains("serial port"), "{text}");
     assert!(text.contains("another program"), "{text}");
-    assert!(text.contains(PORT), "{text}");
+    // AC-AXHK2Q.8: on macOS the port name holds the meter's serial.
+    assert!(!text.contains(PORT), "{text}");
 }
 
 #[test]

@@ -55,6 +55,11 @@ export class Meters {
     return this.#entries.find((e) => e.listing.id === id);
   }
 
+  /** Meter `id`'s 1-based place in tile order; 1 for a meter with no tile, the only one shown. */
+  position(id: string): number {
+    return Math.max(this.ids.indexOf(id), 0) + 1;
+  }
+
   /** Adds a meter with a store of its own (or `session`); a meter already held keeps its
    * store. */
   add(listing: DeviceListing, session: Session = new Session()): MeterEntry {

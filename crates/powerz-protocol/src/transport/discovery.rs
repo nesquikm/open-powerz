@@ -263,11 +263,12 @@ pub fn still_listed(device: &DeviceEntry, listed: &[DeviceEntry]) -> bool {
 }
 
 /// Two or more POWER-Z devices are attached and no serial was chosen, so
-/// the flash cannot tell which one to talk to.
+/// the flash cannot tell which one to talk to. Its text counts them and names
+/// no serial, since it reaches the desktop page and `app.log` as it is.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "several POWER-Z devices attached and no serial chosen; pick one with its serial or unplug the others: {}",
-    .serials.join(", ")
+    "{} POWER-Z devices attached and no serial chosen; pick one with its serial or unplug the others",
+    .serials.len()
 )]
 pub struct AmbiguousMeter {
     /// Each candidate's serial, `-` for one without.
@@ -344,6 +345,23 @@ pub fn usb_identity(device: &DeviceEntry) -> Result<Option<UsbIdentity>, Error> 
         })
         .collect();
     Ok(match_device(device, &descriptors).map(UsbIdentity::from_descriptor))
+}
+
+#[cfg(test)]
+mod ambiguous_tests {
+    use super::AmbiguousMeter;
+
+    /// The text reaches the desktop's firmware error, where the switch that
+    /// hides serials has no say (AC-AXHK2Q.2).
+    #[test]
+    fn the_ambiguous_meter_text_counts_and_names_no_serial() {
+        let error = AmbiguousMeter {
+            serials: vec!["FAKE-SERIAL-A".to_owned(), "FAKE-SERIAL-B".to_owned()],
+        };
+        let text = error.to_string();
+        assert!(!text.contains("FAKE-SERIAL"), "{text}");
+        assert!(text.contains('2'), "{text}");
+    }
 }
 
 #[cfg(test)]

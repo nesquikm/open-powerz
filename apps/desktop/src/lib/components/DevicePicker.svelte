@@ -4,12 +4,12 @@
   import { deviceOptionLabel } from "../format";
   import type { Session } from "../session.svelte";
 
-  let { session }: { session: Session } = $props();
+  let { session, hideSerial }: { session: Session; hideSerial: boolean } = $props();
 
   /** The selected entry's full label, as a tooltip in case the select is cut short. */
   const selectedLabel = $derived.by(() => {
     const device = session.devices.find((d) => d.id === session.selectedId);
-    return device ? deviceOptionLabel(device) : undefined;
+    return device ? deviceOptionLabel(device, hideSerial) : undefined;
   });
 
   onMount(() => {
@@ -45,7 +45,7 @@
     }}
   >
     {#each session.devices as device (device.id)}
-      <option value={device.id}>{deviceOptionLabel(device)}</option>
+      <option value={device.id}>{deviceOptionLabel(device, hideSerial)}</option>
     {:else}
       <option value="">No device</option>
     {/each}
