@@ -14,7 +14,14 @@
    * The PD message builder, the cable's e-marker details and the raw console (FR
    * DGSQ6T), on the open trigger session.
    */
-  let { pdConsole }: { pdConsole: PdConsole } = $props();
+  let {
+    pdConsole,
+    held = false,
+  }: {
+    pdConsole: PdConsole;
+    /** Detect is running: nothing is sent, and a send made meanwhile is dropped. */
+    held?: boolean;
+  } = $props();
 
   const TARGETS: readonly { value: MessageSop; label: string }[] = [
     { value: "sop", label: "SOP" },
@@ -28,8 +35,8 @@
   let objectsError = $state<string | null>(null);
   let typeError = $state<string | null>(null);
   let command = $state("");
-  /** No send while one is in flight or waits for its confirmation. */
-  const controlsOff = $derived(pdConsole.busy || pdConsole.pending !== null);
+  /** No send while one is in flight, waits for its confirmation, or Detect runs. */
+  const controlsOff = $derived(held || pdConsole.busy || pdConsole.pending !== null);
 
   /** Hex with `0x`, at least four digits. */
   function hex(n: number): string {
@@ -37,6 +44,7 @@
   }
 
   async function sendBuilt(): Promise<void> {
+    if (held) return;
     typeError = messageTypeError(msgType);
     if (typeError !== null) return;
     const dataObjects = parseDataObjects(objects);
@@ -55,6 +63,7 @@
 
   async function sendLine(e: SubmitEvent): Promise<void> {
     e.preventDefault();
+    if (held) return;
     await clearAfter(() => pdConsole.sendLine(command));
   }
 
@@ -112,8 +121,9 @@
         <button
           type="button"
           disabled={controlsOff}
-          onclick={() => void pdConsole.sendMessage(DISCOVER_IDENTITY_CABLE)}
-          >Discover cable identity</button
+          onclick={() => {
+            if (!held) void pdConsole.sendMessage(DISCOVER_IDENTITY_CABLE);
+          }}>Discover cable identity</button
         >
       </div>
     </form>

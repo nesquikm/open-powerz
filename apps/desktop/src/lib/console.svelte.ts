@@ -182,9 +182,12 @@ export class PdConsole {
   busy = $state(false);
 
   #api: ConsoleApi;
+  /** Detect is running: nothing is sent and no dialog opens. */
+  #held: () => boolean;
 
-  constructor(api: ConsoleApi) {
+  constructor(api: ConsoleApi, held: () => boolean = () => false) {
     this.#api = api;
+    this.#held = held;
   }
 
   /** Runs `job` as the one send in flight; ignored while another runs. */
@@ -205,7 +208,7 @@ export class PdConsole {
    * True when the line went out.
    */
   async sendLine(line: string): Promise<boolean> {
-    if (this.busy) return false;
+    if (this.busy || this.#held()) return false;
     this.error = null;
     const text = line.trim();
     if (text === "") return false;
@@ -217,7 +220,10 @@ export class PdConsole {
     let sent = false;
     await this.#exclusive(async () => {
       // The backend's classifier decides (unknown text is above 5 V).
-      if ((await this.#api.consoleRisk(text)) === "above_5v") {
+      const risk = await this.#api.consoleRisk(text);
+      // Detect started meanwhile: the line is dropped, never answered with a dialog.
+      if (this.#held()) return;
+      if (risk === "above_5v") {
         this.pending = { kind: "line", line: text, message: null, text: CONFIRM_TEXT };
         return;
       }
@@ -229,7 +235,7 @@ export class PdConsole {
 
   /** Sends a built message: GoodCRC is refused, above 5 V waits for {@link confirm}. */
   async sendMessage(message: PdMessageRequest): Promise<void> {
-    if (this.busy) return;
+    if (this.busy || this.#held()) return;
     this.error = null;
     const refusal = messageRefusal(message);
     if (refusal !== null) {
@@ -238,7 +244,9 @@ export class PdConsole {
     }
     await this.#exclusive(async () => {
       // The backend's classifier decides, not the UI's own guess.
-      if ((await this.#api.messageRisk(message)) === "above_5v") {
+      const risk = await this.#api.messageRisk(message);
+      if (this.#held()) return;
+      if (risk === "above_5v") {
         this.pending = { kind: "message", line: null, message, text: CONFIRM_TEXT };
         return;
       }
@@ -251,6 +259,7 @@ export class PdConsole {
     const pending = this.pending;
     if (!pending || this.busy) return false;
     this.pending = null;
+    if (this.#held()) return false;
     this.error = null;
     let lineSent = false;
     await this.#exclusive(async () => {

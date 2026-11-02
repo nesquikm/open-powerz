@@ -1209,8 +1209,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         if self.pd_run.is_some() {
             return Ok(());
         }
-        blocked(self.meter.as_ref(), || session.start_pd_sniffer())
-            .map_err(|e| session_error(&e))?;
+        let started = blocked(self.meter.as_ref(), || session.start_pd_sniffer())
+            .map_err(|e| session_error(&e));
+        self.log_pd_capture("start", started.is_ok());
+        started?;
         self.pd.start_run();
         let now = self.clock.now_ms();
         self.pd_run = Some(PdRun {
@@ -1231,8 +1233,19 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 .map_err(|e| session_error(&e)),
             None => Err(not_connected()),
         };
+        self.log_pd_capture("stop", result.is_ok());
         self.emit_pd_stopped();
         result
+    }
+
+    /// The PD capture's start or stop with the meter's answer (AC-AXHK2N.16),
+    /// off this thread like [`log_failure`](Self::log_failure).
+    fn log_pd_capture(&mut self, what: &'static str, accepted: bool) {
+        let answer = if accepted { "accepted" } else { "refused" };
+        let log = self.log.clone();
+        (self.in_order)(Box::new(move || {
+            log.event(&format!("pd capture {what} {answer}"));
+        }));
     }
 
     /// The raw bytes and field tree of captured record `index`.

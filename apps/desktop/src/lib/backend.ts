@@ -1083,10 +1083,12 @@ export async function triggerChargerGone(): Promise<boolean> {
   return invoke<boolean>("trigger_charger_gone");
 }
 
-/** Back to 5 V; the session stays open. */
-export async function triggerBackTo5v(): Promise<void> {
+/** Back to 5 V; the session stays open. `leaving`: the trigger view was left, which
+ * the log names as the reason "don't ask again" ended (FR AXHK2N). */
+export async function triggerBackTo5v(leaving = false): Promise<void> {
   if (mock) return mock.triggerBackTo5v();
-  await invoke("trigger_back_to_5v");
+  if (leaving) await invoke("trigger_back_to_5v", { leaving: true });
+  else await invoke("trigger_back_to_5v");
 }
 
 /** Back to 5 V where the protocol allows it, then closes the session. */
@@ -1238,7 +1240,7 @@ export interface MeterBackend {
   triggerArmed(): Promise<boolean>;
   triggerDisarm(): Promise<void>;
   triggerChargerGone(): Promise<boolean>;
-  triggerBackTo5v(): Promise<void>;
+  triggerBackTo5v(leaving?: boolean): Promise<void>;
   triggerClose(): Promise<void>;
   triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>;
   triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>;
@@ -1369,8 +1371,9 @@ export function meterBackend(deviceId: string): MeterBackend {
       await call("trigger_disarm");
     },
     triggerChargerGone: () => call("trigger_charger_gone"),
-    triggerBackTo5v: async () => {
-      await call("trigger_back_to_5v");
+    triggerBackTo5v: async (leaving = false) => {
+      if (leaving) await call("trigger_back_to_5v", { leaving: true });
+      else await call("trigger_back_to_5v");
     },
     triggerClose: async () => {
       await call("trigger_close");

@@ -2100,7 +2100,12 @@ where
         }
         // A charger that goes away shows in the stream (AC-AXHK2N.9).
         let stream = control.clone();
-        worker.watch_vbus(move || stream.latest_record().map(|r| r.vbus_v()));
+        // With the record's device time, so one record read twice counts once.
+        worker.watch_vbus(move || {
+            stream
+                .latest_record()
+                .map(|r| crate::trigger::VbusReading::of(&r))
+        });
         let log = SessionLog::new(log, id.to_owned(), meter.device.model.clone());
         worker.log_to(move |line| log.event(&line));
         // Polling pauses while the automatic list runs (AC-DGSQ6S.11).

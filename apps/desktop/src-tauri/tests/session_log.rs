@@ -144,6 +144,8 @@ struct Line {
     stall: Arc<AtomicBool>,
     /// The worker is held.
     stalled: Arc<AtomicBool>,
+    /// Refuse the PD sniffer's start (0x10) and stop (0x11) (AC-AXHK2N.16).
+    refuse_pd: Arc<AtomicBool>,
 }
 
 impl Line {
@@ -193,6 +195,10 @@ impl Transport for RefusingPipe {
         let refused = Ok(vec![0x06, request.get(1).copied().unwrap_or(0), 0x00, 0x00]);
         let stop = request.first().map(|b| b & 0x7F) == Some(0x0F);
         if stop && self.line.refuse_stop.load(Ordering::SeqCst) {
+            return refused;
+        }
+        let analyzer = matches!(request.first().map(|b| b & 0x7F), Some(0x10 | 0x11));
+        if analyzer && self.line.refuse_pd.load(Ordering::SeqCst) {
             return refused;
         }
         let snapshot =
@@ -803,4 +809,83 @@ fn a_log_under_5_mb_stays_where_it_is() {
     AppLog::open(&path).expect("open app.log");
     assert!(!rotated.exists(), "the log moved");
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 4_900_000);
+}
+
+// ---- AC-AXHK2N.16: the PD capture's start and stop, with the meter's answer ----
+
+/// The `pd capture` lines of meter A, after waiting for `count` of them.
+fn pd_capture_lines(path: &Path, count: usize) -> Vec<String> {
+    let of_a = |path: &Path| -> Vec<String> {
+        lines(path)
+            .into_iter()
+            .filter(|l| l.contains("pd capture") && l.contains(METER_A))
+            .collect()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while of_a(path).len() < count {
+        assert!(
+            Instant::now() < deadline,
+            "fewer than {count} pd capture lines: {:#?}",
+            lines(path)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let found = of_a(path);
+    for line in &found {
+        assert!(!line.contains(SERIAL_A), "a serial in the log: {line}");
+    }
+    found
+}
+
+#[test]
+fn an_accepted_pd_capture_start_and_stop_are_logged() {
+    let path = log_path("pd-capture-accepted");
+    let (m, _line, _rx) = faulty_session(&path, FaultPlan::new());
+    let control = m.control_for(METER_A).expect("connected");
+    control.start_pd().expect("the capture starts");
+    control.stop_pd().expect("the capture stops");
+    let found = pd_capture_lines(&path, 2);
+    assert_eq!(found.len(), 2, "one line each: {found:#?}");
+    assert!(
+        found[0].contains("pd capture start") && found[0].contains("accepted"),
+        "{}",
+        found[0]
+    );
+    assert!(
+        found[1].contains("pd capture stop") && found[1].contains("accepted"),
+        "{}",
+        found[1]
+    );
+}
+
+#[test]
+fn a_refused_pd_capture_start_is_logged_as_refused() {
+    let path = log_path("pd-capture-start-refused");
+    let (m, line, _rx) = faulty_session(&path, FaultPlan::new());
+    line.refuse_pd.store(true, Ordering::SeqCst);
+    let control = m.control_for(METER_A).expect("connected");
+    assert!(control.start_pd().is_err(), "the meter refused the start");
+    let found = pd_capture_lines(&path, 1);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0].contains("pd capture start") && found[0].contains("refused"),
+        "{}",
+        found[0]
+    );
+}
+
+#[test]
+fn a_refused_pd_capture_stop_is_logged_as_refused() {
+    let path = log_path("pd-capture-stop-refused");
+    let (m, line, _rx) = faulty_session(&path, FaultPlan::new());
+    let control = m.control_for(METER_A).expect("connected");
+    control.start_pd().expect("the capture starts");
+    line.refuse_pd.store(true, Ordering::SeqCst);
+    let _ = control.stop_pd();
+    let found = pd_capture_lines(&path, 2);
+    assert!(
+        found[1].contains("pd capture stop") && found[1].contains("refused"),
+        "{}",
+        found[1]
+    );
 }

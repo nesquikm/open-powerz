@@ -219,3 +219,28 @@ describe("AC-AXHK2P.1, .6: the Cable card's commands", () => {
     expect(invoke).toHaveBeenLastCalledWith("pd_cable_seen", { deviceId: "usb:1:7" });
   });
 });
+
+describe("AC-AXHK2N.15: leaving the tab names itself", () => {
+  it("a leave goes to the backend as one", async () => {
+    invoke.mockResolvedValue(undefined);
+    await triggerBackTo5v(true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_back_to_5v", { leaving: true });
+  });
+
+  it("a press of Back to 5 V sends no leave", async () => {
+    invoke.mockResolvedValue(undefined);
+    await triggerBackTo5v();
+    expect(invoke).toHaveBeenLastCalledWith("trigger_back_to_5v");
+    await triggerBackTo5v(false);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_back_to_5v");
+  });
+
+  it("a meter's own leave names the meter", async () => {
+    invoke.mockResolvedValue(undefined);
+    await meterBackend("usb:1:7").triggerBackTo5v(true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_back_to_5v", {
+      leaving: true,
+      deviceId: "usb:1:7",
+    });
+  });
+});

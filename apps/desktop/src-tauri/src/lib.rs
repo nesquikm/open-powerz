@@ -647,13 +647,22 @@ async fn trigger_console_send(
 }
 
 /// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
-/// protocols `reset`. The session stays open.
+/// protocols `reset`. The session stays open. `leaving`: the trigger view
+/// was left, logged as its own armed-end reason (FR AXHK2N).
 #[tauri::command]
-async fn trigger_back_to_5v(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
+async fn trigger_back_to_5v(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    leaving: Option<bool>,
+) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let control = trigger_control(&state, device_id.as_deref())?;
-        control.back_to_5v()
+        if leaving.unwrap_or(false) {
+            control.leave_view()
+        } else {
+            control.back_to_5v()
+        }
     })
     .await
 }

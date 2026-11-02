@@ -184,7 +184,9 @@
    * its own store as a tile (unless `keepShown` is false, when it ended), and the chart,
    * statistics, recording and PD views follow the meter shown. */
   function showInFullView(entry: MeterEntry, keepShown: boolean): void {
-    // Armed and the cable are per meter: the panel follows the meter on screen.
+    // Armed and the cable are per meter: the panel follows the meter on screen. It also
+    // drops its pending dialog and stops a running Detect, so nothing later goes to the
+    // other meter.
     void trigger.meterChanged();
     if (entry.session === session) return;
     const shownId = meters.fullViewId;
@@ -592,31 +594,38 @@
     ),
   );
   /** The trigger view's state (FR DGSQ6S). */
-  const trigger = new TriggerPanel({
-    open: () => act().triggerOpen(),
-    detect: () => act().triggerDetect(),
-    list: (protocol) => act().triggerList(protocol),
-    risk: (request) => act().triggerRisk(request),
-    request: (request, confirmed, remember) => act().triggerRequest(request, confirmed, remember),
-    armed: () => act().triggerArmed(),
-    disarm: () => act().triggerDisarm(),
-    chargerGone: () => act().triggerChargerGone(),
-    backTo5v: () => act().triggerBackTo5v(),
-    close: () => act().triggerClose(),
-    cableRead: () => act().triggerCableRead(),
-    cableSeen: () => act().pdCableSeen(),
-  });
+  const trigger = new TriggerPanel(
+    {
+      open: () => act().triggerOpen(),
+      detect: () => act().triggerDetect(),
+      list: (protocol) => act().triggerList(protocol),
+      risk: (request) => act().triggerRisk(request),
+      request: (request, confirmed, remember) => act().triggerRequest(request, confirmed, remember),
+      armed: () => act().triggerArmed(),
+      disarm: () => act().triggerDisarm(),
+      chargerGone: () => act().triggerChargerGone(),
+      backTo5v: (leaving) => act().triggerBackTo5v(leaving),
+      close: () => act().triggerClose(),
+      cableRead: () => act().triggerCableRead(),
+      cableSeen: () => act().pdCableSeen(),
+    },
+    // Detect starts afresh: the console's dialog goes too.
+    { onDetect: () => pdConsole.cancel() },
+  );
   /** What the console sends can end "don't ask again": the panel's status follows it. */
   const refreshingArmed = <T,>(sent: Promise<T>): Promise<T> =>
     sent.finally(() => trigger.refreshArmed());
   /** The PD message builder and raw console on the trigger session (FR DGSQ6T). */
-  const pdConsole = new PdConsole({
-    messageRisk: (message) => act().triggerMessageRisk(message),
-    messageSend: (message, confirmed) =>
-      refreshingArmed(act().triggerMessageSend(message, confirmed)),
-    consoleRisk: (line) => act().triggerConsoleRisk(line),
-    consoleSend: (line, confirmed) => refreshingArmed(act().triggerConsoleSend(line, confirmed)),
-  });
+  const pdConsole = new PdConsole(
+    {
+      messageRisk: (message) => act().triggerMessageRisk(message),
+      messageSend: (message, confirmed) =>
+        refreshingArmed(act().triggerMessageSend(message, confirmed)),
+      consoleRisk: (line) => act().triggerConsoleRisk(line),
+      consoleSend: (line, confirmed) => refreshingArmed(act().triggerConsoleSend(line, confirmed)),
+    },
+    () => trigger.detecting,
+  );
   // A closed trigger session takes the console's transcript, cable and error with it.
   $effect(() => {
     if (!trigger.sessionOpen) untrack(() => pdConsole.reset());

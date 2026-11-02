@@ -11,6 +11,8 @@ import type {
   BackendEvent,
   CableRead,
   CableView,
+  ConsoleLine,
+  PdSendReply,
   Detection,
   ProtocolSection,
   RiskClass,
@@ -34,6 +36,7 @@ import {
   requestVoltageMv,
   type TriggerApi,
 } from "./trigger.svelte";
+import { PdConsole, type ConsoleApi } from "./console.svelte";
 
 function offer(position: number, mv: number, kind: TriggerOffer["kind"] = "fixed"): TriggerOffer {
   return {
@@ -140,7 +143,9 @@ class FakeApi implements TriggerApi {
       reply: null,
     };
   }
-  async backTo5v(): Promise<void> {
+  async backTo5v(leaving?: boolean): Promise<void> {
+    // Leaving the view and the Back button read alike here; the flag is checked on its own.
+    void leaving;
     this.calls.push("back");
   }
   async close(): Promise<void> {
@@ -1851,5 +1856,377 @@ describe("AC-AXHK2N.10: a refused press re-reads the backend", () => {
     api.goneNow = true;
     await panel.ask(PD_15V);
     await vi.waitFor(() => expect(panel.chargerGone).toBe(true));
+  });
+});
+
+describe("AC-AXHK2N.14: Detect holds every control that sends", () => {
+  /** A panel whose next Detect waits until `finish`. */
+  async function detectingPanel(): Promise<{
+    api: ArmedApi;
+    panel: TriggerPanel;
+    finish(): Promise<void>;
+  }> {
+    const { api, panel } = await rememberPanel();
+    const answer = held<Detection>();
+    api.detect = () => {
+      api.calls.push("detect");
+      return answer.promise;
+    };
+    const detecting = panel.detect();
+    await settled();
+    return {
+      api,
+      panel,
+      finish: async () => {
+        answer.resolve(DETECTION);
+        await detecting;
+        await settled();
+      },
+    };
+  }
+
+  /** What went to the backend that could reach the meter, after the first `from` calls. */
+  function sends(api: FakeApi, from: number): string[] {
+    return api.calls
+      .slice(from)
+      .filter((c) => c === "risk" || c.startsWith("request") || c === "back" || c === "cable read");
+  }
+
+  it("says Detect is running from its start to its end, and only then", async () => {
+    const { panel } = await rememberPanel();
+    expect(panel.detecting).toBe(false);
+    const api = new ArmedApi();
+    const fresh = new TriggerPanel(api);
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = fresh.detect();
+    expect(fresh.detecting).toBe(true);
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(fresh.detecting).toBe(false);
+  });
+
+  it("a Detect that fails stops saying so", async () => {
+    const { api, panel } = await rememberPanel();
+    api.detect = async () => {
+      throw { kind: "timeout", message: "No answer.", hint: null };
+    };
+    const detecting = panel.detect();
+    expect(panel.detecting).toBe(true);
+    await detecting;
+    expect(panel.detecting).toBe(false);
+  });
+
+  it("an offer pressed during Detect asks nothing and opens no dialog after it", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    const from = api.calls.length;
+    await panel.ask(PD_9V);
+    expect(panel.pending).toBeNull();
+    await finish();
+    expect(panel.pending).toBeNull();
+    expect(sends(api, from)).toEqual([]);
+    expect(api.sent).toEqual([]);
+  });
+
+  it("a press the backend answers only after Detect ended opens no dialog", async () => {
+    // The meter's session answers in turn: the risk of a press waits behind Detect.
+    const { api, panel, finish } = await detectingPanel();
+    const risk = held<RiskClass>();
+    api.risk = () => {
+      api.calls.push("risk");
+      return risk.promise;
+    };
+    const asking = panel.ask(PD_9V);
+    await finish();
+    risk.resolve("above_5v_rememberable");
+    await asking;
+    await settled();
+    expect(panel.pending).toBeNull();
+    expect(api.sent).toEqual([]);
+  });
+
+  it("a 5 V offer pressed during Detect sends nothing", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    const from = api.calls.length;
+    await panel.ask(PD_5V);
+    await finish();
+    expect(sends(api, from)).toEqual([]);
+    expect(api.sent).toEqual([]);
+    expect(panel.reply).toBeNull();
+  });
+
+  it("Back to 5 V pressed during Detect sends nothing", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    const from = api.calls.length;
+    await panel.backTo5v();
+    await finish();
+    expect(sends(api, from)).toEqual([]);
+  });
+
+  it("Read cable pressed during Detect sends nothing", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    const from = api.calls.length;
+    await panel.readCable();
+    await finish();
+    expect(sends(api, from)).toEqual([]);
+    expect(panel.cable).toBeNull();
+  });
+
+  it("a press after Detect ended is answered as before", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    await finish();
+    await panel.ask(PD_9V);
+    expect(panel.pending).not.toBeNull();
+    await panel.confirm();
+    expect(api.sent.map((s) => s.request)).toEqual([PD_9V]);
+  });
+});
+
+describe("AC-AXHK2N.15: leaving the tab names itself to the backend", () => {
+  it("leaving returns to 5 V as a leave", async () => {
+    const { api, panel } = await detected();
+    const back = vi.spyOn(api, "backTo5v");
+    await panel.leave();
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(back.mock.calls[0]).toEqual([true]);
+  });
+
+  it("a press of Back to 5 V is no leave", async () => {
+    const { api, panel } = await detected();
+    const back = vi.spyOn(api, "backTo5v");
+    await panel.backTo5v();
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(back.mock.calls[0]?.[0]).not.toBe(true);
+  });
+});
+
+describe("AC-AXHK2N.14 review: one Detect at a time", () => {
+  /** `api.detect` answers only when the returned function is called. */
+  function heldDetect(api: FakeApi): (answer: Detection) => void {
+    const answer = held<Detection>();
+    api.detect = () => {
+      api.calls.push("detect");
+      return answer.promise;
+    };
+    return (d) => answer.resolve(d);
+  }
+
+  it("a second Detect while one runs returns at once and sends nothing", async () => {
+    const { api, panel } = await rememberPanel();
+    const finish = heldDetect(api);
+    const first = panel.detect();
+    await settled();
+    const from = api.calls.length;
+    await panel.detect();
+    expect(api.calls.slice(from)).toEqual([]);
+    expect(panel.detecting).toBe(true);
+    finish(DETECTION);
+    await first;
+    expect(panel.detecting).toBe(false);
+  });
+
+  it("leave during Detect, come back, a second Detect: the first one's end does not re-enable presses", async () => {
+    const { api, panel } = await rememberPanel();
+    const finishFirst = heldDetect(api);
+    const first = panel.detect();
+    await settled();
+    await panel.leave();
+    expect(panel.detecting).toBe(false);
+    const finishSecond = heldDetect(api);
+    const second = panel.detect();
+    await settled();
+    expect(panel.detecting).toBe(true);
+    const from = api.calls.length;
+    finishFirst(DETECTION);
+    await first;
+    await settled();
+    // The first one stopped: no listing, and Detect still holds the presses.
+    expect(api.calls.slice(from)).toEqual([]);
+    expect(panel.detecting).toBe(true);
+    await panel.ask(PD_9V);
+    expect(panel.pending).toBeNull();
+    expect(api.calls.slice(from)).toEqual([]);
+    finishSecond(DETECTION);
+    await second;
+    expect(panel.detecting).toBe(false);
+    expect(api.calls.filter((c) => c === "list pd")).toHaveLength(2);
+  });
+
+  it("a session end during Detect stops it and clears detecting", async () => {
+    const { api, panel } = await rememberPanel();
+    const finish = heldDetect(api);
+    const running = panel.detect();
+    await settled();
+    panel.handleEvent({
+      type: "status",
+      data: { state: "disconnected", error: null },
+    } as BackendEvent);
+    expect(panel.detecting).toBe(false);
+    const from = api.calls.length;
+    finish(DETECTION);
+    await running;
+    expect(api.calls.slice(from).filter((c) => c.startsWith("list"))).toEqual([]);
+    expect(panel.detecting).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.14 review: the console during Detect", () => {
+  class ConsoleFake implements ConsoleApi {
+    sent: string[] = [];
+    risk = held<RiskClass>();
+    async messageRisk(): Promise<RiskClass> {
+      return this.risk.promise;
+    }
+    async messageSend(): Promise<PdSendReply> {
+      this.sent.push("message");
+      return { command: "pd cmd=13", lines: [], cable: null };
+    }
+    async consoleRisk(): Promise<RiskClass> {
+      return this.risk.promise;
+    }
+    async consoleSend(line: string): Promise<ConsoleLine[]> {
+      this.sent.push(line);
+      return [];
+    }
+  }
+
+  /** A detected panel and its console, wired as the page wires them. */
+  async function wired(): Promise<{
+    api: ArmedApi;
+    panel: TriggerPanel;
+    con: PdConsole;
+    capi: ConsoleFake;
+  }> {
+    const api = new ArmedApi();
+    const capi = new ConsoleFake();
+    // eslint-disable-next-line prefer-const
+    let con: PdConsole;
+    const panel = new TriggerPanel(api, { onDetect: () => con.cancel() });
+    con = new PdConsole(capi, () => panel.detecting);
+    await panel.detect();
+    return { api, panel, con, capi };
+  }
+
+  it("a console risk answer that lands during Detect opens no dialog", async () => {
+    const { api, panel, con, capi } = await wired();
+    const sending = con.sendLine("pd req=2");
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    await settled();
+    capi.risk.resolve("above_5v");
+    await sending;
+    expect(con.pending).toBeNull();
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(con.pending).toBeNull();
+    expect(capi.sent).toEqual([]);
+  });
+
+  it("a built message's risk answer during Detect opens no dialog either", async () => {
+    const { api, panel, con, capi } = await wired();
+    const sending = con.sendMessage({ sop: "sop", msg_type: 13, data_objects: [] });
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    await settled();
+    capi.risk.resolve("above_5v");
+    await sending;
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(con.pending).toBeNull();
+    expect(capi.sent).toEqual([]);
+  });
+
+  it("Detect clears a pending dialog of the panel and of the console", async () => {
+    const { panel, con, capi } = await wired();
+    capi.risk.resolve("above_5v");
+    await con.sendLine("pd req=2");
+    expect(con.pending).not.toBeNull();
+    await panel.ask(PD_9V);
+    expect(panel.pending).not.toBeNull();
+    const detecting = panel.detect();
+    expect(panel.pending).toBeNull();
+    expect(con.pending).toBeNull();
+    await detecting;
+    expect(capi.sent).toEqual([]);
+  });
+
+  it("panel.confirm() sends nothing while Detect runs", async () => {
+    const { api, panel } = await wired();
+    await panel.ask(PD_9V);
+    const pending = panel.pending;
+    expect(pending).not.toBeNull();
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    // A dialog that stayed on screen is pressed anyway.
+    panel.pending = pending;
+    await panel.confirm();
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(api.sent).toEqual([]);
+  });
+
+  it("a console confirm during Detect sends nothing", async () => {
+    const { api, panel, con, capi } = await wired();
+    capi.risk.resolve("above_5v");
+    await con.sendLine("pd req=2");
+    const pending = con.pending;
+    expect(pending).not.toBeNull();
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    con.pending = pending;
+    await con.confirm();
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(capi.sent).toEqual([]);
+  });
+});
+
+describe("AC-AXHK2N.14 review: another meter on screen", () => {
+  it("drops the pending dialog", async () => {
+    const { api, panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    expect(panel.pending).not.toBeNull();
+    await panel.meterChanged();
+    expect(panel.pending).toBeNull();
+    await panel.confirm();
+    expect(api.sent).toEqual([]);
+  });
+
+  it("stops a running Detect, so nothing later goes to the other meter", async () => {
+    const { api, panel } = await rememberPanel();
+    const answer = held<Detection>();
+    api.detect = () => {
+      api.calls.push("detect");
+      return answer.promise;
+    };
+    const running = panel.detect();
+    await settled();
+    await panel.meterChanged();
+    expect(panel.detecting).toBe(false);
+    const from = api.calls.length;
+    answer.resolve(DETECTION);
+    await running;
+    await settled();
+    expect(api.calls.slice(from).filter((c) => c.startsWith("list"))).toEqual([]);
+  });
+
+  it("a press whose answer lands after the switch opens no dialog", async () => {
+    const { api, panel } = await rememberPanel();
+    const risk = held<RiskClass>();
+    api.risk = () => {
+      api.calls.push("risk");
+      return risk.promise;
+    };
+    const asking = panel.ask(PD_9V);
+    await settled();
+    await panel.meterChanged();
+    risk.resolve("above_5v_rememberable");
+    await asking;
+    expect(panel.pending).toBeNull();
+    expect(api.sent).toEqual([]);
   });
 });

@@ -34,8 +34,6 @@
     pdConsole?: PdConsole;
   } = $props();
 
-  let busy = $state(false);
-
   // A reloaded page starts unarmed; an armed backend says so here.
   onMount(() => void panel.refreshArmed());
 
@@ -46,18 +44,9 @@
   });
 
   /** No session, and none on its way. */
-  const noSession = $derived(!panel.sessionOpen && !busy);
+  const noSession = $derived(!panel.sessionOpen && !panel.detecting);
 
   const reason = $derived(connected ? null : "Connect a meter to detect the charger's protocols.");
-
-  async function detect(): Promise<void> {
-    busy = true;
-    try {
-      await panel.detect();
-    } finally {
-      busy = false;
-    }
-  }
 
   /** `9 V` or `3.3 V`, from millivolts. */
   function volts(mv: number): string {
@@ -127,11 +116,13 @@
     limitsMa = {};
   });
 
+  /** Offer and protocol presses: off while Detect runs or once the meter fell out of step. */
+  const pressesOff = $derived(panel.requestsDisabled || panel.detecting);
+
   /** Request controls work only in an open session, not while a confirmation is
-   *  waiting, and not once the meter fell out of step (until the session is reopened). */
-  const requestsOff = $derived(
-    !panel.sessionOpen || panel.pending !== null || panel.requestsDisabled,
-  );
+   *  waiting, not while Detect runs, and not once the meter fell out of step (until
+   *  the session is reopened). */
+  const requestsOff = $derived(!panel.sessionOpen || panel.pending !== null || pressesOff);
 
   /** `SCP` or `UFCS #2`: the name of a limits block. */
   function limitsName(title: string, l: TriggerLimits): string {
@@ -183,7 +174,7 @@
       {@const r = p.request}
       <button
         type="button"
-        disabled={panel.requestsDisabled}
+        disabled={pressesOff}
         aria-disabled={panel.requesting}
         onclick={r.onclick}>{r.label}</button
       >
@@ -201,16 +192,18 @@
     <button
       type="button"
       class="primary"
-      disabled={!connected || busy}
+      disabled={!connected || panel.detecting}
       aria-describedby={reason ? "trigger-reason" : undefined}
-      onclick={() => void detect()}>Detect</button
+      onclick={() => void panel.detect()}>Detect</button
     >
     {#if panel.showBackTo5v}
-      <button type="button" onclick={() => void panel.backTo5v()}>Back to 5 V</button>
+      <button type="button" disabled={panel.detecting} onclick={() => void panel.backTo5v()}
+        >Back to 5 V</button
+      >
     {/if}
     {#if reason}
       <p id="trigger-reason" class="reason">{reason}</p>
-    {:else if busy}
+    {:else if panel.detecting}
       <p class="reason" aria-live="polite">Detecting…</p>
     {/if}
     <!-- Always there, with its room kept: live regions announce a change, and nothing moves. -->
@@ -287,7 +280,7 @@
               {#each s.section.offers.filter((o) => o.kind === "fixed") as o (o.position)}
                 <button
                   type="button"
-                  disabled={panel.requestsDisabled}
+                  disabled={pressesOff}
                   aria-disabled={panel.requesting}
                   onclick={() =>
                     void panel.ask({
@@ -512,7 +505,7 @@
   </section>
 
   {#if pdConsole && panel.sessionOpen}
-    <PdConsoleView {pdConsole} />
+    <PdConsoleView {pdConsole} held={panel.detecting} />
   {/if}
 
   {#if panel.pending}

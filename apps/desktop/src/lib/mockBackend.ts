@@ -2433,7 +2433,8 @@ export class MockBackend {
     }, CHARGER_GONE_AFTER_MS);
   }
 
-  /** Back to 5 V: `pd req=1` after PD, `reset` after the others; the session stays. */
+  /** Back to 5 V: `pd req=1` after PD, `reset` after the others; the session stays.
+   * A leave of the view (FR AXHK2N) does the same: the mock keeps no armed-end log. */
   async triggerBackTo5v(): Promise<void> {
     this.#returnTo5v(this.#openTrigger());
   }

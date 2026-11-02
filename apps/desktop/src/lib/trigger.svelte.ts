@@ -32,7 +32,8 @@ export interface TriggerApi {
   disarm(): Promise<void>;
   /** The backend saw VBUS collapse under a contract. */
   chargerGone(): Promise<boolean>;
-  backTo5v(): Promise<void>;
+  /** `leaving`: the view was left, not a press of Back to 5 V. */
+  backTo5v(leaving?: boolean): Promise<void>;
   close(): Promise<void>;
   cableRead(): Promise<CableRead>;
   cableSeen(): Promise<CableView | null>;
@@ -298,6 +299,9 @@ export class TriggerPanel {
   cableNoAnswer = $state(false);
   /** A read is running. */
   cableBusy = $state(false);
+  /** Detect is running: nothing else is sent to the meter, and a press made meanwhile
+   * is dropped. */
+  detecting = $state(false);
 
   #api: TriggerApi;
   /** The 2 s after the reply have passed: VBUS is compared with the request. */
@@ -313,6 +317,13 @@ export class TriggerPanel {
   /** The press being handled, from the press to its dialog or answer: a second one
    * is ignored. A session end drops it, so a request that never answers holds nothing. */
   #press: object | null = null;
+  /** Bumped by each {@link detect}: a press whose answer comes back after one started
+   * is dropped. */
+  #detects = 0;
+  /** The running Detect's number, null when none runs: a run that is no longer this
+   * one stops at its next step and leaves {@link detecting} alone. */
+  #detectRun: number | null = null;
+  #onDetect: () => void;
 
   /** The view was left or the session closed: late answers are dropped. */
   get #gone(): boolean {
@@ -320,8 +331,10 @@ export class TriggerPanel {
   }
   #settleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(api: TriggerApi) {
+  /** `onDetect` runs as each Detect starts: the page drops the console's dialog there. */
+  constructor(api: TriggerApi, hooks: { onDetect?: () => void } = {}) {
     this.#api = api;
+    this.#onDetect = hooks.onDetect ?? (() => {});
     this.sections = unlistedSections();
   }
 
@@ -330,8 +343,32 @@ export class TriggerPanel {
     return this.sessionOpen;
   }
 
-  /** Opens the session if needed, detects, then lists every protocol. */
+  /** Opens the session if needed, detects, then lists every protocol. One at a time. */
   async detect(): Promise<void> {
+    if (this.#detectRun !== null) return;
+    const run = ++this.#detects;
+    this.#detectRun = run;
+    this.detecting = true;
+    // No dialog from before Detect is answered after it.
+    this.pending = null;
+    this.#onDetect();
+    try {
+      await this.#detect(run);
+    } finally {
+      // A newer run, or none after a leave or a session end: not this run's to clear.
+      if (this.#detectRun === run) this.#stopDetect();
+    }
+  }
+
+  /** The running Detect, if any, stops at its next step. */
+  #stopDetect(): void {
+    this.#detectRun = null;
+    this.detecting = false;
+  }
+
+  async #detect(run: number): Promise<void> {
+    /** This run was stopped, or the view ended. */
+    const stale = () => this.#gone || this.#detectRun !== run;
     this.error = null;
     this.#left = false;
     // Detecting takes VBUS down on purpose.
@@ -347,7 +384,8 @@ export class TriggerPanel {
         } catch {
           // The session is dropped either way.
         }
-        this.#ended();
+        if (this.#detectRun !== run) return;
+        this.#ended(false);
       }
       if (!this.sessionOpen) {
         await this.#api.open();
@@ -358,22 +396,23 @@ export class TriggerPanel {
           await this.leave();
           return;
         }
+        if (stale()) return;
         // What the backend says, not what this page last saw.
         await this.refreshArmed();
-        if (this.#gone) return;
+        if (stale()) return;
       }
       try {
         const detection = await this.#api.detect();
         // A late answer must not put a charger back on a view that ended.
-        if (!this.#gone) this.detection = detection;
+        if (!stale()) this.detection = detection;
       } finally {
         // The backend disarmed before it wrote anything, so a failed detection counts too.
-        if (!this.#gone) await this.refreshArmed();
+        if (!stale()) await this.refreshArmed();
       }
       for (const protocol of TRIGGER_PROTOCOLS) {
-        if (this.#left || !this.sessionOpen) return;
+        if (stale()) return;
         const section = await this.#api.list(protocol);
-        if (this.#gone) return;
+        if (stale()) return;
         this.sections = this.sections.map((s) =>
           s.protocol === protocol
             ? { ...s, section, state: section.supported ? "supported" : "not-supported" }
@@ -382,7 +421,7 @@ export class TriggerPanel {
       }
     } catch (e) {
       // An error from a session the view already left is not news.
-      if (!this.#left) this.#fail(e);
+      if (!this.#left && this.#detectRun === run) this.#fail(e);
     }
   }
 
@@ -395,17 +434,22 @@ export class TriggerPanel {
     }
     // Out of step: nothing goes to the meter, and the power-cycle error stays.
     if (this.requestsDisabled) return;
+    // Detect holds the meter: the press is dropped, never answered later.
+    if (this.detecting) return;
     if (this.#press !== null) return;
     const press = (this.#press = {});
+    const detects = this.#detects;
+    /** A Detect runs or ran since the press: its answer is stale. */
+    const detected = () => this.detecting || this.#detects !== detects;
     this.error = null;
     try {
       // The backend's classifier decides, not the UI's own guess.
       const risk = await this.#api.risk(request);
-      if (this.#gone) return;
+      if (this.#gone || detected()) return;
       // The backend looked at the port for this answer, so it may have just disarmed.
       if (this.armed && risk !== "armed") await this.refreshArmed();
       // The charger may have gone meanwhile: no dialog opens on an offer now gone.
-      if (this.#gone || this.chargerGone || this.#press !== press) return;
+      if (this.#gone || this.chargerGone || this.#press !== press || detected()) return;
       // `armed` needs no dialog: it is sent unconfirmed, and the backend checks it again.
       if (risk === "above_5v" || risk === "above_5v_rememberable") {
         const sections = this.sections.flatMap((s) => (s.section ? [s.section] : []));
@@ -436,7 +480,8 @@ export class TriggerPanel {
     const pending = this.pending;
     if (!pending) return;
     this.pending = null;
-    if (this.requestsDisabled) return;
+    // Detect holds the meter: a dialog pressed meanwhile sends nothing.
+    if (this.requestsDisabled || this.detecting) return;
     const press = (this.#press = {});
     this.error = null;
     try {
@@ -531,7 +576,7 @@ export class TriggerPanel {
 
   /** One press of Read cable: one message inside the open session, no dialog, no retry. */
   async readCable(): Promise<void> {
-    if (!this.sessionOpen || this.requestsDisabled || this.cableBusy) return;
+    if (!this.sessionOpen || this.requestsDisabled || this.cableBusy || this.detecting) return;
     this.error = null;
     this.cableBusy = true;
     // The card shows this press's answer or nothing: the cable may have changed.
@@ -553,6 +598,11 @@ export class TriggerPanel {
 
   /** Another meter is on screen: nothing on the panel describes it yet. */
   async meterChanged(): Promise<void> {
+    // Nothing asked or detected on the other meter goes on here.
+    this.pending = null;
+    this.#press = null;
+    this.requesting = false;
+    this.#stopDetect();
     this.cable = null;
     this.cableNoAnswer = false;
     await this.refreshArmed();
@@ -590,6 +640,7 @@ export class TriggerPanel {
 
   /** Back to 5 V; the session stays open. */
   async backTo5v(): Promise<void> {
+    if (this.detecting) return;
     this.error = null;
     try {
       await this.#api.backTo5v();
@@ -618,12 +669,13 @@ export class TriggerPanel {
   /** The view is left: back to 5 V where the protocol allows it, then close. */
   async leave(): Promise<void> {
     this.pending = null;
+    this.#stopDetect();
     // Seen by a detect() still in flight: it closes a session that opens
     // after this and stops listing.
     this.#left = true;
     if (!this.sessionOpen) return;
     try {
-      await this.#api.backTo5v();
+      await this.#api.backTo5v(true);
     } catch {
       // Closing still returns to 5 V where it can; the session must not stay open.
     }
@@ -637,8 +689,10 @@ export class TriggerPanel {
     this.#ended();
   }
 
-  /** The session is over: the view starts afresh, with no offers to press. */
-  #ended(): void {
+  /** The session is over: the view starts afresh, with no offers to press. A running
+   * Detect stops too, unless it is the one ending the session (`stopDetect` false). */
+  #ended(stopDetect = true): void {
+    if (stopDetect) this.#stopDetect();
     if (this.#settleTimer !== null) clearTimeout(this.#settleTimer);
     this.#settleTimer = null;
     this.#settled = false;
