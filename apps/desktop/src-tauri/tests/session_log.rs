@@ -901,6 +901,172 @@ fn a_refused_pd_capture_start_says_the_capture_was_refused() {
     );
 }
 
+// ---- AC-AXHK2P.12: a capture start refused at any step ----
+
+/// Meter A's simulator, made beside its PDM twin so a trigger session on
+/// the twin drops the bulk side's sign-in (`SimDevice::pdm_twin`).
+struct TwinOpener {
+    clock: SimClock,
+    dev: Arc<Mutex<Option<SimDevice>>>,
+}
+
+impl Opener for TwinOpener {
+    type Transport = Pipe;
+    fn open(&self, _device: &DeviceListing) -> Result<Pipe, transport::Error> {
+        let dev = self.dev.lock().unwrap().take().unwrap_or_else(|| {
+            SimDevice::with_clock(Persona::Bulk, Scenario::Load5v1a, self.clock.clone())
+        });
+        Ok(Pipe::new(dev, &self.clock, PipeOpts::default()))
+    }
+}
+
+/// Meter A streaming, signed in, logging to `path`, with its PDM twin.
+fn twin_session(
+    path: &Path,
+) -> (
+    DeviceManager<TwinOpener, SimClock>,
+    SimPdm,
+    mpsc::Receiver<BackendEvent>,
+) {
+    let clock = clock();
+    let dev = SimDevice::with_clock(Persona::Bulk, Scenario::Load5v1a, clock.clone());
+    let pdm = dev.pdm_twin(SimCharger::Epr140W, SimClock::new(T0));
+    let mut m = DeviceManager::new(
+        || Ok(vec![meter(SERIAL_A, "1", 7)]),
+        TwinOpener {
+            clock: clock.clone(),
+            dev: Arc::new(Mutex::new(Some(dev))),
+        },
+        clock,
+    );
+    m.set_app_log(AppLog::open(path).expect("open app.log"));
+    let (rx, sink) = channel_sink();
+    m.connect(METER_A, 50, sink).expect("connect");
+    recv_until(&rx, is_samples);
+    wait_line(path, "connect", Some(METER_A));
+    (m, pdm, rx)
+}
+
+/// A whole trigger session on meter A, as the Trigger tab runs it: open,
+/// list PD, the 5 V offer, leave the tab, close. Then one more stream batch,
+/// so the worker has seen a PUT_DATA from after it.
+fn run_trigger_session(
+    m: &mut DeviceManager<TwinOpener, SimClock>,
+    pdm: &SimPdm,
+    rx: &mpsc::Receiver<BackendEvent>,
+) {
+    let trigger = TriggerWorker::spawn(pdm.open_port(), SimClock::new(T0)).expect("trigger opens");
+    m.install_trigger_for(METER_A, trigger).expect("install");
+    let c = m.trigger_control_for(METER_A).expect("control");
+    c.list(open_powerz_desktop_lib::trigger::TriggerProtocol::Pd)
+        .expect("list pd");
+    c.request(
+        open_powerz_desktop_lib::trigger::TriggerRequest::Pd {
+            position: 1,
+            voltage_mv: None,
+            current_ma: None,
+        },
+        false,
+    )
+    .expect("5 V");
+    c.leave_view().expect("leave");
+    m.take_trigger_for(METER_A)
+        .expect("the session is open")
+        .close()
+        .expect("close");
+    let _ = drain(rx);
+    recv_until(rx, is_samples);
+    recv_until(rx, is_samples);
+}
+
+/// The text of AC.11: the capture named, no firmware advice.
+fn assert_capture_refusal_text(err: &UiError) {
+    assert_eq!(err.kind, ErrorKind::Protocol, "{err:?}");
+    let message = err.message.to_lowercase();
+    assert!(
+        message.contains("pd capture"),
+        "the capture is not named: {err:?}"
+    );
+    assert!(message.contains("refused"), "{err:?}");
+    let hint = err.hint.clone().unwrap_or_default().to_lowercase();
+    assert!(
+        !message.contains("firmware") && !hint.contains("firmware"),
+        "firmware advice: {err:?}"
+    );
+    assert!(hint.contains("replug"), "the hint says to replug: {err:?}");
+}
+
+#[test]
+fn a_capture_start_after_a_trigger_session_refused_at_the_sign_in_read_names_the_capture() {
+    let path = log_path("pd-capture-after-trigger");
+    let (mut m, pdm, rx) = twin_session(&path);
+    run_trigger_session(&mut m, &pdm, &rx);
+    let control = m.control_for(METER_A).expect("connected");
+    let err = control
+        .start_pd()
+        .expect_err("the meter refuses the sign-in read");
+    assert_capture_refusal_text(&err);
+}
+
+#[test]
+fn a_capture_start_refused_at_the_sign_in_read_logs_0x44() {
+    let path = log_path("pd-capture-after-trigger-log");
+    let (mut m, pdm, rx) = twin_session(&path);
+    run_trigger_session(&mut m, &pdm, &rx);
+    let control = m.control_for(METER_A).expect("connected");
+    assert!(control.start_pd().is_err(), "the meter refused");
+    let found = pd_capture_lines(&path, 1);
+    assert_eq!(found.len(), 1, "one line: {found:#?}");
+    assert!(
+        found[0].contains("pd capture start") && found[0].contains("refused"),
+        "{}",
+        found[0]
+    );
+    assert!(
+        found[0].to_lowercase().contains("0x44"),
+        "the refused request type is not named: {}",
+        found[0]
+    );
+}
+
+#[test]
+fn a_capture_start_after_a_trigger_session_sends_no_connect() {
+    let path = log_path("pd-capture-after-trigger-no-connect");
+    let (mut m, pdm, rx) = twin_session(&path);
+    run_trigger_session(&mut m, &pdm, &rx);
+    let control = m.control_for(METER_A).expect("connected");
+    assert!(control.start_pd().is_err(), "the meter refused");
+    // Refused again: nothing signed the meter back in behind the user's back.
+    let again = control.start_pd().expect_err("still refused, no CONNECT");
+    assert_capture_refusal_text(&again);
+}
+
+#[test]
+fn a_capture_start_refused_at_the_start_itself_logs_0x10() {
+    let path = log_path("pd-capture-start-refused-0x10");
+    let (m, line, _rx) = faulty_session(&path, FaultPlan::new());
+    line.refuse_pd.store(true, Ordering::SeqCst);
+    let control = m.control_for(METER_A).expect("connected");
+    let err = control.start_pd().expect_err("the meter refused the start");
+    assert_capture_refusal_text(&err);
+    let found = pd_capture_lines(&path, 1);
+    assert!(
+        found[0].contains("pd capture start") && found[0].contains("refused"),
+        "{}",
+        found[0]
+    );
+    assert!(
+        found[0].to_lowercase().contains("0x10"),
+        "the refused request type is not named: {}",
+        found[0]
+    );
+    assert!(
+        !found[0].to_lowercase().contains("0x44"),
+        "another request named: {}",
+        found[0]
+    );
+}
+
 #[test]
 fn a_refused_pd_capture_stop_is_logged_as_refused() {
     let path = log_path("pd-capture-stop-refused");

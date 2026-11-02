@@ -19,7 +19,7 @@ mod queue;
 mod records;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -477,6 +477,12 @@ pub struct SimDevice {
     /// What the meter keeps across its pipes: the SETTINGS block and rate
     /// code, shared with a [`cdc_twin`](SimDevice::cdc_twin).
     stored: Arc<Mutex<Stored>>,
+    /// Set by a [`pdm_twin`](SimDevice::pdm_twin) session: the next request
+    /// finds the sign-in dropped.
+    sign_in_drop: Arc<AtomicBool>,
+    /// A PDM session dropped the sign-in: auth level 0, memory read
+    /// (0x44) REJECTed until a CONNECT. [device] f4abf09
+    sign_in_lost: bool,
 }
 
 /// The settings a meter keeps, whichever pipe changes them.
@@ -516,6 +522,15 @@ impl SimDevice {
         twin.mode = self.mode;
         twin.serial = self.serial.clone();
         twin
+    }
+
+    /// This meter's PDM persona (its serial port text session), with
+    /// `charger` on the input. A trigger session there (`pdm open` …) drops
+    /// this meter's bulk sign-in `[device]`: PUT_DATA then reports auth
+    /// level 0, and memory read (0x44) and the PD sniffer start (0x10) are
+    /// REJECTed until a CONNECT (on the meter, a replug).
+    pub fn pdm_twin(&self, charger: pdm::SimCharger, clock: SimClock) -> SimPdm {
+        SimPdm::new(charger, clock).with_sign_in_drop(Arc::clone(&self.sign_in_drop))
     }
 
     /// A freshly opened meter: on bulk one stale DISCONNECT waits on the IN
@@ -559,6 +574,8 @@ impl SimDevice {
                 rate_code: 2,
                 settings_reads: 0,
             })),
+            sign_in_drop: Arc::new(AtomicBool::new(false)),
+            sign_in_lost: false,
         }
     }
 

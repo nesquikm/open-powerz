@@ -234,6 +234,18 @@ pub(crate) fn port_held() -> UiError {
     }
 }
 
+/// The meter refused the PD capture start, at its sign-in read (0x44) or
+/// the start itself (0x10): the capture named, no firmware advice
+/// (AC-AXHK2P.11/.12).
+pub fn capture_start_refused() -> UiError {
+    UiError {
+        kind: ErrorKind::Protocol,
+        message: "The meter refused to start the PD capture.".to_owned(),
+        hint: Some("Replug the meter and try again.".to_owned()),
+        sessions: Vec::new(),
+    }
+}
+
 /// Map a session error to a plain-language UI error.
 pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
     use session::Error as S;
@@ -245,12 +257,7 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
         S::Rejected { request_type }
             if request_type & 0x7F == powerz_protocol::frame::start_pd_sniffer(0)[0] & 0x7F =>
         {
-            UiError {
-                kind: ErrorKind::Protocol,
-                message: "The meter refused to start the PD capture.".to_owned(),
-                hint: Some("Replug the meter and try again.".to_owned()),
-                sessions: Vec::new(),
-            }
+            capture_start_refused()
         }
         S::Rejected { .. } => UiError {
             kind: ErrorKind::Protocol,

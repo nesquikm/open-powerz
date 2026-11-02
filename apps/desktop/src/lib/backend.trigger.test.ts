@@ -28,6 +28,7 @@ import {
   triggerDisarm,
   triggerList,
   triggerOpen,
+  triggerPdEntered,
   triggerRequest,
   triggerRisk,
   type CableRead,
@@ -217,6 +218,22 @@ describe("AC-AXHK2P.1, .6: the Cable card's commands", () => {
     invoke.mockResolvedValue(null);
     await meter.pdCableSeen();
     expect(invoke).toHaveBeenLastCalledWith("pd_cable_seen", { deviceId: "usb:1:7" });
+  });
+});
+
+describe("AC-AXHK2P.13: whether PD is entered comes from the backend", () => {
+  it("asks the backend with no argument", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(triggerPdEntered()).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("trigger_pd_entered");
+    invoke.mockResolvedValue(false);
+    await expect(triggerPdEntered()).resolves.toBe(false);
+  });
+
+  it("a meter's own question names the meter", async () => {
+    invoke.mockResolvedValue(false);
+    await meterBackend("usb:1:7").triggerPdEntered();
+    expect(invoke).toHaveBeenLastCalledWith("trigger_pd_entered", { deviceId: "usb:1:7" });
   });
 });
 

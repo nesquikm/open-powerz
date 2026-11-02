@@ -1026,6 +1026,9 @@ interface MockTrigger {
   goingAway: boolean;
   /** VBUS collapsed under a contract (FR AXHK2N). */
   chargerGone: boolean;
+  /** The command log's length right after a way back to 5 V; while it is unchanged
+   * nothing went out since, so the close skips another (AC-AXHK2P.15). */
+  backAt?: number;
 }
 
 /** The queue rate cap while a trigger session is open, SPS. [inferred] */
@@ -1452,6 +1455,7 @@ export class MockBackend {
       triggerArmed: on(this.triggerArmed),
       triggerDisarm: on(this.triggerDisarm),
       triggerChargerGone: on(this.triggerChargerGone),
+      triggerPdEntered: on(this.triggerPdEntered),
       triggerBackTo5v: on(this.triggerBackTo5v),
       triggerClose: on(this.triggerClose),
       triggerMessageRisk: on(this.triggerMessageRisk),
@@ -2509,7 +2513,12 @@ export class MockBackend {
 
   /** Like the library classifier: above 5 V, or unknown, needs a confirmation. */
   async triggerRisk(request: TriggerRequest): Promise<RiskClass> {
-    const t = this.#openTrigger();
+    return this.#risk(this.#openTrigger(), request);
+  }
+
+  /** {@link triggerRisk}'s answer, for the request's own check: a test that slows the
+   * question does not slow the request too. */
+  #risk(t: MockTrigger, request: TriggerRequest): RiskClass {
     if (t.chargerGone) throw usage(CHARGER_GONE_REFUSAL);
     const mv = this.#requestMv(request);
     if (mv !== null && mv <= 5000) return "at_most_5v";
@@ -2605,6 +2614,11 @@ export class MockBackend {
     return this.#trigger?.chargerGone ?? false;
   }
 
+  /** Whether PD was entered last, like the backend; false with no trigger session. */
+  async triggerPdEntered(): Promise<boolean> {
+    return this.#trigger?.entered === "pd";
+  }
+
   /** Refuses an unconfirmed above-5 V request before anything is sent, and a `remember`
    * the offers do not allow; an armed session covers what is rememberable. */
   async triggerRequest(
@@ -2620,7 +2634,7 @@ export class MockBackend {
     }
     const refusal = this.#refusal(request);
     if (refusal !== null) throw usage(refusal);
-    const risk = await this.triggerRisk(request);
+    const risk = this.#risk(t, request);
     const arming = confirmed && remember;
     if (arming && risk !== "above_5v_rememberable" && risk !== "armed") {
       throw usage("This request cannot be remembered.");
@@ -2707,12 +2721,13 @@ export class MockBackend {
     if (t.entered === "pd") this.#triggerLog.push("pd req=1");
     else if (t.entered === "legacy") this.#triggerLog.push("reset");
     if (this.#session) this.#session.triggerVbusV = null;
+    t.backAt = this.#triggerLog.length;
   }
 
   #closeTrigger(): void {
     const t = this.#trigger;
     if (!t) return;
-    this.#returnTo5v(t);
+    if (t.backAt !== this.#triggerLog.length) this.#returnTo5v(t);
     this.#triggerLog.push("pdm close");
     const s = this.#session;
     if (s) s.trigger = null;

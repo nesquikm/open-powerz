@@ -404,6 +404,13 @@ impl TriggerControl {
         self.call(|e| Ok(e.charger_gone()))
     }
 
+    /// Whether PD is the protocol the meter entered last in this session,
+    /// i.e. whether [`Self::cable_read`] goes out (AC-AXHK2P.13). Nothing is
+    /// written.
+    pub fn pd_entered(&self) -> Result<bool, UiError> {
+        self.call(|e| Ok(e.pd_entered()))
+    }
+
     /// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
     /// protocols `reset`. The session stays open. Out of sync it still
     /// works: `pd hrst` / `reset` go out blind, `pdm close` follows, and the
@@ -474,6 +481,7 @@ trait Engine {
     fn armed(&mut self) -> bool;
     fn disarm(&mut self, why: ArmedEnd);
     fn charger_gone(&mut self) -> bool;
+    fn pd_entered(&mut self) -> bool;
     fn back_to_5v(&mut self) -> Result<(), UiError>;
     fn message_risk(&mut self, message: PdMessageRequest) -> Result<RiskClass, UiError>;
     fn send_message(
@@ -622,6 +630,9 @@ struct LoggedPort<P> {
     /// What the port took of the command being written. Commands carry no
     /// terminator: the flush after each one ends it.
     pending: Vec<u8>,
+    /// Commands ended so far (one per flush that carried one), shared with
+    /// the session so it can tell whether anything went out since.
+    sent: Arc<AtomicUsize>,
 }
 
 impl<P> LoggedPort<P> {
@@ -630,12 +641,19 @@ impl<P> LoggedPort<P> {
             port,
             log,
             pending: Vec::new(),
+            sent: Arc::default(),
         }
+    }
+
+    /// The count of commands ended so far, shared.
+    fn sent(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.sent)
     }
 
     /// The command written so far, as one line.
     fn log_pending(&mut self) {
         if !self.pending.is_empty() {
+            self.sent.fetch_add(1, Ordering::Relaxed);
             let text = log_text(std::mem::take(&mut self.pending).trim_ascii());
             log_shared(&self.log, format!("trigger sent: {text}"));
         }
@@ -766,6 +784,11 @@ struct Session<P: Read + Write, C: Clock> {
     /// The way back to 5 V went out blind while the meter was out of sync
     /// with a contract above 5 V possibly active: VBUS is not confirmed.
     vbus_unconfirmed: bool,
+    /// The port's command count right after a way back to 5 V succeeded:
+    /// while it is unchanged nothing went out since, so the close need not
+    /// send another (AC-AXHK2P.15).
+    sent: Arc<AtomicUsize>,
+    back_at: Option<usize>,
     /// "Don't ask again" (FR AXHK2N): set only by a request that succeeded
     /// and qualified. It covers only what `pd::rememberable` allows.
     armed: bool,
@@ -939,7 +962,16 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
         } else {
             Ok(())
         };
-        pd.map(|_| ()).and(legacy)
+        let back = pd.map(|_| ()).and(legacy);
+        if back.is_ok() {
+            self.back_at = Some(self.sent.load(Ordering::Relaxed));
+        }
+        back
+    }
+
+    /// A way back to 5 V succeeded and nothing was written since.
+    fn at_5v(&self) -> bool {
+        self.back_at == Some(self.sent.load(Ordering::Relaxed))
     }
 
     /// The meter is out of step, so no reply can confirm 5 V: send the way
@@ -973,10 +1005,16 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
         ui
     }
 
-    /// Back to 5 V, then `pdm close`; the first error wins.
+    /// Back to 5 V, then `pdm close`; the first error wins. The way back is
+    /// skipped when one already went out and nothing was written since
+    /// (leaving the tab sends it just before the close).
     fn shutdown(mut self) -> Result<(), UiError> {
         self.end_armed(ArmedEnd::SessionClosed);
-        let back = self.return_to_5v();
+        let back = if self.at_5v() {
+            Ok(())
+        } else {
+            self.return_to_5v()
+        };
         let closed = self.pdm.close().map_err(|e| pdm_error(&e));
         back.and(closed)
     }
@@ -1359,6 +1397,11 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
 
     fn charger_gone(&mut self) -> bool {
         self.gone
+    }
+
+    fn pd_entered(&mut self) -> bool {
+        // The same test as the cable read's.
+        self.pdm.entered() == Some(pdm::Protocol::Pd)
     }
 
     fn back_to_5v(&mut self) -> Result<(), UiError> {
@@ -1859,6 +1902,7 @@ impl TriggerWorker {
             .spawn(move || {
                 let log = thread_log;
                 let port = LoggedPort::new(port, Arc::clone(&log));
+                let sent = port.sent();
                 let pdm = match PdmSession::open_with_clock(port, clock) {
                     Ok(pdm) => {
                         let _ = open_tx.send(Ok(()));
@@ -1876,6 +1920,8 @@ impl TriggerWorker {
                     entered: Entered::None,
                     pd_contract: false,
                     vbus_unconfirmed: false,
+                    sent,
+                    back_at: None,
                     armed: false,
                     powered: Powered::No,
                     low_first_ms: None,

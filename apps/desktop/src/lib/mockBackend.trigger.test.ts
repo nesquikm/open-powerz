@@ -685,6 +685,53 @@ describe("FR AXHK2P: the mock's cable read follows the backend's rules", () => {
   });
 });
 
+describe("AC-AXHK2P.13: the mock says whether PD is entered, like the backend", () => {
+  it("is false with no session", async () => {
+    const backend = new MockBackend(null, { pdSynthetic: null });
+    await expect(backend.triggerPdEntered()).resolves.toBe(false);
+  });
+
+  it("is false in a fresh session and after Detect", async () => {
+    const { backend } = await opened();
+    await expect(backend.triggerPdEntered()).resolves.toBe(false);
+    await backend.triggerList("pd");
+    await backend.triggerDetect();
+    await expect(backend.triggerPdEntered()).resolves.toBe(false);
+  });
+
+  it("follows the protocol entered last", async () => {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    await expect(backend.triggerPdEntered()).resolves.toBe(true);
+    await backend.triggerList("qc");
+    await expect(backend.triggerPdEntered()).resolves.toBe(false);
+    await backend.triggerRequest(PD_5V, false);
+    await expect(backend.triggerPdEntered()).resolves.toBe(true);
+  });
+
+  it("asking sends nothing", async () => {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    const before = backend.triggerCommands().length;
+    await backend.triggerPdEntered();
+    expect(backend.triggerCommands().length).toBe(before);
+  });
+});
+
+describe("AC-AXHK2P.15: the mock's leave sends one way back, then pdm close", () => {
+  it("Back to 5 V on leaving and the close write one pd req=1 between them", async () => {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    await backend.triggerRequest(PD_9V, true);
+    const before = backend.triggerCommands().length;
+    await backend.triggerBackTo5v();
+    await backend.triggerClose();
+    const written = backend.triggerCommands().slice(before);
+    expect(written.filter((c) => c === "pd req=1")).toHaveLength(1);
+    expect(written.at(-1)).toBe("pdm close");
+  });
+});
+
 describe("AC-AXHK2N.9, .10: a charger that goes away", () => {
   const GONE: { kind: string; message: unknown } = {
     kind: "usage",

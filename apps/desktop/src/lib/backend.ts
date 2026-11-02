@@ -1199,6 +1199,13 @@ export async function triggerChargerGone(): Promise<boolean> {
   return invoke<boolean>("trigger_charger_gone");
 }
 
+/** Whether PD is entered in the trigger session, so Read cable goes out (AC-AXHK2P.13);
+ * false with no trigger session. Nothing is sent to the meter. */
+export async function triggerPdEntered(): Promise<boolean> {
+  if (mock) return mock.triggerPdEntered();
+  return invoke<boolean>("trigger_pd_entered");
+}
+
 /** Back to 5 V; the session stays open. `leaving`: the trigger view was left, which
  * the log names as the reason "don't ask again" ended (FR AXHK2N). */
 export async function triggerBackTo5v(leaving = false): Promise<void> {
@@ -1358,6 +1365,7 @@ export interface MeterBackend {
   triggerArmed(): Promise<boolean>;
   triggerDisarm(): Promise<void>;
   triggerChargerGone(): Promise<boolean>;
+  triggerPdEntered(): Promise<boolean>;
   triggerBackTo5v(leaving?: boolean): Promise<void>;
   triggerClose(): Promise<void>;
   triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>;
@@ -1410,6 +1418,7 @@ export const currentMeterCommands: MeterCommands = {
   triggerArmed,
   triggerDisarm,
   triggerChargerGone,
+  triggerPdEntered,
   triggerBackTo5v,
   triggerClose,
   triggerMessageRisk,
@@ -1493,6 +1502,7 @@ export function meterBackend(deviceId: string): MeterBackend {
       await call("trigger_disarm");
     },
     triggerChargerGone: () => call("trigger_charger_gone"),
+    triggerPdEntered: () => call("trigger_pd_entered"),
     triggerBackTo5v: async (leaving = false) => {
       if (leaving) await call("trigger_back_to_5v", { leaving: true });
       else await call("trigger_back_to_5v");

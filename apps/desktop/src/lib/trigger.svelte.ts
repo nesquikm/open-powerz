@@ -32,6 +32,9 @@ export interface TriggerApi {
   disarm(): Promise<void>;
   /** The backend saw VBUS collapse under a contract. */
   chargerGone(): Promise<boolean>;
+  /** PD is the protocol entered last in the session, so Read cable goes out. Sends
+   * nothing. A backend without it reads as PD not entered. */
+  pdEntered?(): Promise<boolean>;
   /** `leaving`: the view was left, not a press of Back to 5 V. */
   backTo5v(leaving?: boolean): Promise<void>;
   close(): Promise<void>;
@@ -299,6 +302,11 @@ export class TriggerPanel {
   cableNoAnswer = $state(false);
   /** A read is running. */
   cableBusy = $state(false);
+  /** Why the last read was refused, shown in the Cable card; null when it was not. */
+  cableError = $state<UiError | null>(null);
+  /** PD is entered in this trigger session, as the backend says: Read cable is off
+   * until it is (AC-AXHK2P.13). */
+  pdEntered = $state(false);
   /** Detect is running: nothing else is sent to the meter, and a press made meanwhile
    * is dropped. */
   detecting = $state(false);
@@ -310,6 +318,8 @@ export class TriggerPanel {
   #left = false;
   /** Bumped by each armed read and each session end: only the latest read counts. */
   #armedRead = 0;
+  /** The same for {@link pdEntered}'s reads. */
+  #pdRead = 0;
   /** A request or the way back was accepted since the last {@link detect} started. */
   #contract = false;
   /** {@link #askChargerGone}'s question is out. */
@@ -376,6 +386,8 @@ export class TriggerPanel {
     this.chargerGone = false;
     // The backend disarms as it detects: the status goes now, not with the answer.
     this.#notArmed();
+    // Detecting enters other protocols: no read until the backend says PD again.
+    this.#notPdEntered();
     try {
       // An out-of-step session refuses everything: detecting again reopens it.
       if (this.requestsDisabled && this.sessionOpen) {
@@ -422,6 +434,9 @@ export class TriggerPanel {
     } catch (e) {
       // An error from a session the view already left is not news.
       if (!this.#left && this.#detectRun === run) this.#fail(e);
+    } finally {
+      // Detect ends on the last protocol it listed, which may not be PD.
+      if (!stale()) await this.refreshPdEntered();
     }
   }
 
@@ -525,8 +540,8 @@ export class TriggerPanel {
       if (!this.#gone) {
         this.reply = null;
         this.requestFailure = e as UiError;
-        // A failure may have ended "don't ask again"; the backend knows.
-        await this.refreshArmed();
+        // A failure may have ended "don't ask again" or left PD; the backend knows.
+        await this.#refreshStatus();
       }
       throw e;
     }
@@ -542,7 +557,7 @@ export class TriggerPanel {
         this.sections.flatMap((s) => (s.section ? [s.section] : [])),
       );
     this.#restartSettle();
-    await this.refreshArmed();
+    await this.#refreshStatus();
   }
 
   /** The status goes now, and a read still out no longer counts. */
@@ -563,6 +578,31 @@ export class TriggerPanel {
     if (read === this.#armedRead) this.armed = armed;
   }
 
+  /** Takes "don't ask again" and whether PD is entered from the backend, in turn. */
+  async #refreshStatus(): Promise<void> {
+    await this.refreshArmed();
+    await this.refreshPdEntered();
+  }
+
+  /** PD reads as not entered now, and a read still out no longer counts. */
+  #notPdEntered(): void {
+    this.#pdRead += 1;
+    this.pdEntered = false;
+  }
+
+  /** Takes from the backend whether PD is entered; one that cannot answer has not.
+   * Nothing is sent to the meter. */
+  async refreshPdEntered(): Promise<void> {
+    const read = ++this.#pdRead;
+    let entered = false;
+    try {
+      entered = (await this.#api.pdEntered?.()) ?? false;
+    } catch {
+      // Reads as not entered.
+    }
+    if (read === this.#pdRead) this.pdEntered = entered;
+  }
+
   /** Ends "don't ask again" at once. */
   async clearArmed(): Promise<void> {
     this.error = null;
@@ -579,18 +619,25 @@ export class TriggerPanel {
     if (!this.sessionOpen || this.requestsDisabled || this.cableBusy || this.detecting) return;
     // The charger went away: nothing answers until Detect finds it again.
     if (this.chargerGone) return;
+    // The backend would refuse it: nothing goes out until PD is entered.
+    if (!this.pdEntered) return;
     this.error = null;
     this.cableBusy = true;
     // The card shows this press's answer or nothing: the cable may have changed.
     this.cable = null;
     this.cableNoAnswer = false;
+    this.cableError = null;
     try {
       const read = await this.#api.cableRead();
       if (this.#gone) return;
       this.cable = read.kind === "found" ? { cable: read.cable, source: "read" } : null;
       this.cableNoAnswer = read.kind === "no_answer";
     } catch (e) {
-      if (!this.#left) this.#fail(e);
+      if (!this.#left) {
+        this.#fail(e);
+        // The card says why too, not only the top of the view.
+        this.cableError = e as UiError;
+      }
     } finally {
       this.cableBusy = false;
       // The backend disarmed before it wrote anything, so a failed read counts too.
@@ -607,7 +654,8 @@ export class TriggerPanel {
     this.#stopDetect();
     this.cable = null;
     this.cableNoAnswer = false;
-    await this.refreshArmed();
+    this.cableError = null;
+    await this.#refreshStatus();
     await this.loadCaptureCable();
   }
 
@@ -666,6 +714,7 @@ export class TriggerPanel {
     }
     // The backend disarmed before it wrote anything, so a failed way back counts too.
     if (!this.#gone) await this.refreshArmed();
+    if (!this.#gone) await this.refreshPdEntered();
   }
 
   /** The view is left: back to 5 V where the protocol allows it, then close. */
@@ -705,6 +754,7 @@ export class TriggerPanel {
     this.requesting = false;
     this.chargerGone = false;
     this.vbusV = null;
+    this.#notPdEntered();
     this.#forgetCharger();
   }
 
@@ -721,6 +771,7 @@ export class TriggerPanel {
     this.deviation = false;
     this.cable = null;
     this.cableNoAnswer = false;
+    this.cableError = null;
   }
 
   /** VBUS read low with a contract standing: asks the backend, which also saw the

@@ -11,6 +11,7 @@
 //! older port handles fail.
 
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use powerz_protocol::frame::{Attribute, DataHeader, SectionHeader};
@@ -288,6 +289,11 @@ struct State {
     lag_after_list: bool,
     /// Lagging: the reply held back for the next command. \[device\] 2026-10-23
     held: Option<Vec<u8>>,
+    /// The bulk meter this is the PDM persona of ([`SimDevice::pdm_twin`]):
+    /// a PDM session drops its sign-in. [device] f4abf09
+    ///
+    /// [`SimDevice::pdm_twin`]: crate::SimDevice::pdm_twin
+    sign_in_drop: Option<Arc<AtomicBool>>,
 }
 
 impl State {
@@ -394,6 +400,9 @@ impl State {
 
     fn pdm_open(&mut self) -> Vec<u8> {
         self.pdm_active = true;
+        if let Some(drop) = &self.sign_in_drop {
+            drop.store(true, Ordering::SeqCst);
+        }
         if self.vbus_mv < VBUS_5V_MV {
             self.vbus_mv = VBUS_5V_MV;
         }
@@ -613,8 +622,16 @@ impl SimPdm {
                 entry_bc_fail: false,
                 lag_after_list: false,
                 held: None,
+                sign_in_drop: None,
             })),
         }
+    }
+
+    /// The PDM persona of a bulk meter: a session opened here drops that
+    /// meter's sign-in (see [`SimDevice::pdm_twin`](crate::SimDevice::pdm_twin)).
+    pub(crate) fn with_sign_in_drop(self, flag: Arc<AtomicBool>) -> SimPdm {
+        lock(&self.shared).sign_in_drop = Some(flag);
+        self
     }
 
     /// `entry bc` answers `fail` (device trace 2026-10-23) instead of

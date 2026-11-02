@@ -1,6 +1,8 @@
 //! Request handling of [`SimDevice`]: one request in, zero or more reply
 //! transfers queued.
 
+use std::sync::atomic::Ordering;
+
 use powerz_protocol::crypto::{self, KEYS};
 use powerz_protocol::decode::records::MEMORY_READ_MAX_LEN;
 use powerz_protocol::decode::settings::apply_settings_write;
@@ -186,6 +188,11 @@ impl SimDevice {
         if self.mode == powerz_protocol::firmware::DeviceMode::Bootloader {
             return self.bootloader_request(req, id);
         }
+        if self.sign_in_drop.swap(false, Ordering::SeqCst) {
+            // A PDM session on the serial port dropped the sign-in. [device]
+            self.auth_level = 0;
+            self.sign_in_lost = true;
+        }
         if self.persona == Persona::Cdc && matches!(b0 & 0x7F, 0x01..=0x03) {
             // ADCNEW framing on CDC: out of scope, no reply.
             return Vec::new();
@@ -193,6 +200,7 @@ impl SimDevice {
         match b0 & 0x7F {
             msg::CONNECT => {
                 self.connected = true;
+                self.sign_in_lost = false;
                 vec![self.control(msg::ACCEPT, id)]
             }
             msg::DISCONNECT => {
@@ -206,6 +214,7 @@ impl SimDevice {
                 vec![self.queue_control(ty, id, code)]
             }
             msg::HEAD => vec![self.head(id)],
+            msg::MEM_READ if self.sign_in_lost => vec![self.control(msg::REJECT, id)],
             msg::MEM_READ => self.memory_read(req, id),
             msg::AUTH => vec![self.auth(req, id)],
             msg::SET_DATA => vec![self.set_data(req, id)],

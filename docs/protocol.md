@@ -881,7 +881,7 @@ as a sink and ask a charger for a voltage. [doc] [static] [device]
   - macOS lists the port twice (`/dev/cu.*` and `/dev/tty.*`); the `cu.`
     one is used.
   - `pd data=` with a SOP' Discover Identity (`018F1001A800FF`, and the
-    SVDM 1.0 form `018F1001A000FF`) goes out on the wire. A 240 W passive
+    SVDM 2.0 form `018F1001A000FF`) goes out on the wire. A 240 W passive
     e-marked cable behind an Apple 140 W charger answered it with GoodCRC
     only, and the text channel printed no reply line. In the same bulk PD
     capture the charger's own SOP' query got the full ACK (VID 0x050D, PID

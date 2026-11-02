@@ -132,7 +132,9 @@
         ? "Detect is running; read the cable once it ends."
         : panel.chargerGone
           ? "No charger to ask: press Detect to read the cable."
-          : null,
+          : !panel.pdEntered
+            ? "Reading the cable needs PD entered: press a USB PD offer first."
+            : null,
   );
 
   /** `SCP` or `UFCS #2`: the name of a limits block. */
@@ -478,7 +480,7 @@
     <div class="offers">
       <button
         type="button"
-        disabled={requestsOff || panel.cableBusy || panel.chargerGone}
+        disabled={requestsOff || panel.cableBusy || panel.chargerGone || !panel.pdEntered}
         aria-describedby={cableReason ? "trigger-cable-reason" : undefined}
         onclick={() => void panel.readCable()}>Read cable</button
       >
@@ -508,8 +510,16 @@
       {#if panel.cable.source === "capture"}
         <p class="muted">Seen in the capture.</p>
       {/if}
+    {:else if panel.cableError}
+      <p class="error">
+        {panel.cableError.message}
+        <HintText hint={panel.cableError.hint} />
+      </p>
     {:else if panel.cableNoAnswer}
-      <p>No answer: the cable may have no e-marker, or the meter may not be the VCONN source.</p>
+      <p>
+        No answer. The cable may have no e-marker. A cable answers only the port that powers it
+        (VCONN). In this wiring the meter may not be the VCONN source.
+      </p>
     {:else}
       <p class="muted">Not read yet.</p>
     {/if}

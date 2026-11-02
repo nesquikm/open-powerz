@@ -547,6 +547,19 @@ async fn trigger_charger_gone(
     blocking(move || Ok(charger_gone_of(&state, device_id.as_deref()))).await
 }
 
+/// Whether PD is entered in the trigger session, so Read cable goes out
+/// (AC-AXHK2P.13); false with no trigger session. Nothing is written.
+#[tauri::command]
+async fn trigger_pd_entered(state: Shared<'_>, device_id: Option<String>) -> Result<bool, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        Ok(trigger_control(&state, device_id.as_deref())
+            .and_then(|control| control.pd_entered())
+            .unwrap_or(false))
+    })
+    .await
+}
+
 /// The library risk class of a built PD message (FR DGSQ6T); GoodCRC and
 /// malformed messages are a usage error with the reason.
 #[tauri::command]
@@ -1731,6 +1744,7 @@ pub fn run() {
             trigger_armed,
             trigger_disarm,
             trigger_charger_gone,
+            trigger_pd_entered,
             trigger_back_to_5v,
             trigger_message_risk,
             trigger_message_send,

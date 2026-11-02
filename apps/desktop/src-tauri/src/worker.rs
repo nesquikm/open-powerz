@@ -1209,10 +1209,18 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         if self.pd_run.is_some() {
             return Ok(());
         }
-        let started = blocked(self.meter.as_ref(), || session.start_pd_sniffer())
-            .map_err(|e| session_error(&e));
-        self.log_pd_capture("start", started.is_ok());
-        started?;
+        let started = blocked(self.meter.as_ref(), || session.start_pd_sniffer());
+        // Any refusal during the start (the sign-in read 0x44 or the start
+        // 0x10) is the capture refused; the log names which (AC-AXHK2P.12).
+        let refused = match &started {
+            Err(session::Error::Rejected { request_type }) => Some(request_type & 0x7F),
+            _ => None,
+        };
+        self.log_pd_capture("start", started.is_ok(), refused);
+        started.map_err(|e| match refused {
+            Some(_) => ui_error::capture_start_refused(),
+            None => session_error(&e),
+        })?;
         self.pd.start_run();
         let now = self.clock.now_ms();
         self.pd_run = Some(PdRun {
@@ -1233,15 +1241,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 .map_err(|e| session_error(&e)),
             None => Err(not_connected()),
         };
-        self.log_pd_capture("stop", result.is_ok());
+        self.log_pd_capture("stop", result.is_ok(), None);
         self.emit_pd_stopped();
         result
     }
 
     /// The PD capture's start or stop with the meter's answer (AC-AXHK2N.16),
     /// off this thread like [`log_failure`](Self::log_failure).
-    fn log_pd_capture(&mut self, what: &'static str, accepted: bool) {
-        let answer = if accepted { "accepted" } else { "refused" };
+    /// `refused_type` is the request type the meter REJECTed, if one was.
+    fn log_pd_capture(&mut self, what: &'static str, accepted: bool, refused_type: Option<u8>) {
+        let answer = match (accepted, refused_type) {
+            (true, _) => "accepted".to_owned(),
+            (false, Some(ty)) => format!("refused (request {ty:#04x})"),
+            (false, None) => "refused".to_owned(),
+        };
         let log = self.log.clone();
         (self.in_order)(Box::new(move || {
             log.event(&format!("pd capture {what} {answer}"));

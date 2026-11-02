@@ -103,6 +103,10 @@ class FakeApi implements TriggerApi {
   goneNow = false;
   /** How many times `chargerGone` was asked. */
   goneAsked = 0;
+  /** What `pdEntered` answers (AC-AXHK2P.13); true so the older tests read as before. */
+  pdEnteredNow = true;
+  /** How many times `pdEntered` was asked. */
+  pdEnteredAsked = 0;
 
   async open(): Promise<void> {
     this.calls.push("open");
@@ -169,6 +173,11 @@ class FakeApi implements TriggerApi {
   async cableSeen(): Promise<CableView | null> {
     this.calls.push("cable seen");
     return this.cableInCapture;
+  }
+  async pdEntered(): Promise<boolean> {
+    // Not in `calls`: asking sends nothing to the meter.
+    this.pdEnteredAsked += 1;
+    return this.pdEnteredNow;
   }
 }
 
@@ -1485,6 +1494,154 @@ describe("AXHK2P review: the card never outlives what it describes", () => {
     api.cableSeen = async () => null;
     await panel.meterChanged();
     expect(panel.cable).toBeNull();
+  });
+});
+
+// ---- AC-AXHK2P.13: Read cable waits for PD; a refusal shows in the Cable card ----
+
+describe("AC-AXHK2P.13: Read cable is off until PD is entered", () => {
+  /** A detected session whose backend says PD is not entered (Detect ends on the last
+   * protocol it listed); the calls of the detection are forgotten. */
+  async function detectedOutsidePd(): Promise<{ api: FakeApi; panel: TriggerPanel }> {
+    const api = new FakeApi();
+    api.pdEnteredNow = false;
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    api.calls = [];
+    return { api, panel };
+  }
+
+  /** The fake's PD request enters PD, as the backend's does. */
+  function requestEntersPd(api: FakeApi): void {
+    const request = api.request.bind(api);
+    api.request = async (r, confirmed) => {
+      const reply = await request(r, confirmed);
+      api.pdEnteredNow = r.protocol === "pd";
+      return reply;
+    };
+  }
+
+  it("starts with PD not entered", () => {
+    const panel = new TriggerPanel(new FakeApi());
+    expect(panel.pdEntered).toBe(false);
+  });
+
+  it("takes the state from the backend after Detect", async () => {
+    const { api, panel } = await detectedOutsidePd();
+    expect(api.pdEnteredAsked).toBeGreaterThan(0);
+    expect(panel.pdEntered).toBe(false);
+  });
+
+  it("a press with PD not entered sends nothing", async () => {
+    const { api, panel } = await detectedOutsidePd();
+    await panel.readCable();
+    expect(api.calls).toEqual([]);
+    expect(panel.cable).toBeNull();
+    expect(panel.cableNoAnswer).toBe(false);
+  });
+
+  it("a PD offer press enters PD and the read goes out", async () => {
+    const { api, panel } = await detectedOutsidePd();
+    requestEntersPd(api);
+    await panel.ask(PD_5V);
+    expect(panel.pdEntered).toBe(true);
+    api.calls = [];
+    await panel.readCable();
+    expect(api.calls).toEqual(["cable read"]);
+  });
+
+  it("a request of another protocol leaves PD", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    requestEntersPd(api);
+    await panel.ask(PD_5V);
+    expect(panel.pdEntered).toBe(true);
+    await panel.ask({ protocol: "qc", volts: 5 });
+    expect(panel.pdEntered).toBe(false);
+  });
+
+  it("the end of the session takes it down", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    expect(panel.pdEntered).toBe(true);
+    await panel.leave();
+    expect(panel.pdEntered).toBe(false);
+  });
+
+  it("a disconnected meter takes it down", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    panel.handleEvent({ type: "status", data: { state: "disconnected", error: null } });
+    expect(panel.pdEntered).toBe(false);
+  });
+});
+
+describe("AC-AXHK2P.13: a refusal from a press shows in the Cable card", () => {
+  const REFUSAL: UiError = {
+    kind: "usage",
+    message: "Reading the cable needs an open PD session.",
+    hint: "Press a PD offer first.",
+  };
+
+  async function refusedRead(): Promise<{ api: FakeApi; panel: TriggerPanel }> {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    api.cableRead = async () => {
+      api.calls.push("cable read");
+      throw REFUSAL;
+    };
+    await panel.readCable();
+    return { api, panel };
+  }
+
+  it("starts with no failure on the card", () => {
+    expect(new TriggerPanel(new FakeApi()).cableError).toBeNull();
+  });
+
+  it("keeps the refusal for the card", async () => {
+    const { panel } = await refusedRead();
+    expect(panel.cableError).toEqual(REFUSAL);
+    expect(panel.cable).toBeNull();
+    expect(panel.cableNoAnswer).toBe(false);
+  });
+
+  it("the next answer clears it", async () => {
+    const { api, panel } = await refusedRead();
+    api.cableRead = async () => ({ kind: "found", cable: CABLE });
+    await panel.readCable();
+    expect(panel.cableError).toBeNull();
+    expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+  });
+
+  it("a no answer clears it too", async () => {
+    const { api, panel } = await refusedRead();
+    api.cableRead = async () => ({ kind: "no_answer" });
+    await panel.readCable();
+    expect(panel.cableError).toBeNull();
+    expect(panel.cableNoAnswer).toBe(true);
+  });
+
+  it("the end of the session clears it", async () => {
+    const { panel } = await refusedRead();
+    await panel.leave();
+    expect(panel.cableError).toBeNull();
+  });
+
+  it("an out-of-step refusal shows on the card as well", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    const outOfSync: UiError = { kind: "out_of_sync", message: "Power-cycle it.", hint: null };
+    api.cableRead = async () => {
+      throw outOfSync;
+    };
+    await panel.readCable();
+    expect(panel.cableError).toEqual(outOfSync);
+    expect(panel.requestsDisabled).toBe(true);
   });
 });
 

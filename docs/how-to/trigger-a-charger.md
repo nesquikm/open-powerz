@@ -171,8 +171,9 @@ current and voltage, USB speed, active or passive, and EPR.
 Every other data message to a cable still asks, and so do the same bytes typed in the
 Console.
 
-**No answer.** The cable may have no e-marker, or the meter may not be the VCONN
-source. Nothing is retried on its own. Press the button again to try once more.
+**No answer.** The cable may have no e-marker. A cable answers only the port that
+powers it (VCONN). In this wiring the meter may not be the VCONN source. Nothing is
+retried on its own. Press the button again to try once more.
 
 **Unknown vendor.** A vendor missing from our table shows as its hex VID.
 

@@ -1139,8 +1139,108 @@ test("the gone charger's reason goes once Detect finds it again (AC-AXHK2P.10)",
   await expect(readCableButton(page)).toBeDisabled();
   await detectButton(page).click();
   await expect(chargerGoneText(page)).toBeHidden();
-  await expect(readCableButton(page)).toBeEnabled();
   await expect(readCableButton(page)).not.toHaveAccessibleDescription(/charger/i);
+  // AC-AXHK2P.13: Detect ends on the last protocol it listed; a PD offer enters PD.
+  await offerButton(page, 5).click();
+  await expect(readCableButton(page)).toBeEnabled();
+});
+
+// ---- AC-AXHK2P.13, .14: Read cable waits for PD; refusals and no answer in the card ----
+//
+// Page contract: until PD is entered in this trigger session (a PD offer pressed; Detect
+// ends on the last protocol it listed) Read cable is disabled, and its accessible
+// description is the reason shown in the Cable card, naming PD. A refusal of a press
+// shows in the Cable card. With no answer the card says that a cable answers only the
+// port that powers it (VCONN), which the meter may not be in this wiring.
+
+const PD_REASON = /\bPD\b/;
+
+/** Makes the mock refuse the next reads of the cable with `error`. */
+async function refuseCableRead(
+  page: Page,
+  error: { kind: string; message: string; hint: string | null },
+): Promise<void> {
+  await page.evaluate(
+    ({ key, error }) => {
+      const mock = (window as unknown as Record<string, Record<string, unknown>>)[key]!;
+      mock.triggerCableRead = async () => {
+        throw error;
+      };
+    },
+    { key: MOCK_HOOK, error },
+  );
+}
+
+test("Read cable is off with its reason in the card until PD is entered (AC-AXHK2P.13)", async ({
+  page,
+}) => {
+  await detected(page);
+  const before = (await commands(page)).length;
+  await expect(readCableButton(page)).toBeDisabled();
+  await expect(readCableButton(page)).toHaveAccessibleDescription(PD_REASON);
+  const reason = await readCableButton(page).getAttribute("aria-describedby");
+  expect(reason).not.toBeNull();
+  await expect(cableCard(page).locator(`#${reason}`)).toBeVisible();
+  await expect(cableCard(page).locator(`#${reason}`)).toHaveText(PD_REASON);
+  await readCableButton(page).click({ force: true });
+  await page.waitForTimeout(300);
+  expect((await commands(page)).slice(before)).toEqual([]);
+
+  await offerButton(page, 5).click();
+  await expect(readCableButton(page)).toBeEnabled();
+  await expect(readCableButton(page)).not.toHaveAccessibleDescription(PD_REASON);
+});
+
+test("a QC request after PD turns Read cable off again (AC-AXHK2P.13)", async ({ page }) => {
+  await inPd(page);
+  await expect(readCableButton(page)).toBeEnabled();
+  await legacyButton(page, "QC", 5).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toMatch(/^qc/i);
+  await expect(readCableButton(page)).toBeDisabled();
+  await expect(readCableButton(page)).toHaveAccessibleDescription(PD_REASON);
+});
+
+test("a refusal of a press shows in the Cable card (AC-AXHK2P.13)", async ({ page }) => {
+  await inPd(page);
+  const refusal = {
+    kind: "usage",
+    message: "The meter refused to read the cable.",
+    hint: "Press a PD offer, then try again.",
+  };
+  await refuseCableRead(page, refusal);
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(refusal.message);
+  await expect(cableCard(page)).toContainText(refusal.hint);
+  await expect(cableField(page, "VID")).toBeHidden();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+test("no answer says a cable answers only the port that powers it (AC-AXHK2P.14)", async ({
+  page,
+}) => {
+  await inPd(page, "?mock=trigger-no-cable");
+  const before = (await commands(page)).length;
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/answers only the port that powers it/i);
+  await expect(cableCard(page)).toContainText(/\(VCONN\)/);
+  await expect(cableCard(page)).toContainText(/meter may not be/i);
+  await expect(cableCard(page)).toContainText(/wiring/i);
+  await page.waitForTimeout(300);
+  expect((await commands(page)).slice(before)).toEqual([READ_LINE]);
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+test("each press with no answer sends the one message again, nothing else (AC-AXHK2P.14)", async ({
+  page,
+}) => {
+  await inPd(page, "?mock=trigger-no-cable");
+  const before = (await commands(page)).length;
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/VCONN/);
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/VCONN/);
+  await page.waitForTimeout(300);
+  expect((await commands(page)).slice(before)).toEqual([READ_LINE, READ_LINE]);
 });
 
 test("the new texts pass axe (AC-AXHK2N.10, .11, .13)", async ({ page }) => {

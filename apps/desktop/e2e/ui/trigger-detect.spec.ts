@@ -125,9 +125,11 @@ test("Read cable says it is off because Detect runs, and only then (AC-AXHK2P.10
   await expect(cableCard(page).getByText(DETECT_REASON)).toBeVisible();
 
   await detectEnded(page);
-  await expect(readCable(page)).toBeEnabled();
   await expect(readCable(page)).not.toHaveAccessibleDescription(DETECT_REASON);
   await expect(cableCard(page).getByText(DETECT_REASON)).toBeHidden();
+  // AC-AXHK2P.13: Detect ends on the last protocol it listed; a PD offer enters PD.
+  await offerButton(page, 5).click();
+  await expect(readCable(page)).toBeEnabled();
 });
 
 test("a 9 V press during Detect opens no dialog once Detect ends (AC-AXHK2N.14)", async ({

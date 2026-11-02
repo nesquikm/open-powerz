@@ -634,6 +634,7 @@
       armed: () => act().triggerArmed(),
       disarm: () => act().triggerDisarm(),
       chargerGone: () => act().triggerChargerGone(),
+      pdEntered: () => act().triggerPdEntered(),
       backTo5v: (leaving) => act().triggerBackTo5v(leaving),
       close: () => act().triggerClose(),
       cableRead: () => act().triggerCableRead(),
@@ -642,9 +643,10 @@
     // Detect starts afresh: the console's dialog goes too.
     { onDetect: () => pdConsole.cancel() },
   );
-  /** What the console sends can end "don't ask again": the panel's status follows it. */
+  /** What the console sends can end "don't ask again" and enter or leave PD: the
+   * panel's status follows it. */
   const refreshingArmed = <T,>(sent: Promise<T>): Promise<T> =>
-    sent.finally(() => trigger.refreshArmed());
+    sent.finally(() => Promise.all([trigger.refreshArmed(), trigger.refreshPdEntered()]));
   /** The PD message builder and raw console on the trigger session (FR DGSQ6T). */
   const pdConsole = new PdConsole(
     {
