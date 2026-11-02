@@ -6,8 +6,11 @@
 
 import {
   HOOK,
+  RECORDING_HOOK,
+  type RecordingExtrasState,
   type ChartBreak,
   type ChartDraw,
+  type ChartExtrasState,
   type ChartGapBand,
   type ChartPdMarker,
   type ChartPdStatusLengths,
@@ -37,6 +40,36 @@ export class ChartProbe {
   #overviewBreaks: StripBreak[] = [];
   #pdMarkers: ChartPdMarker[] = [];
   #pdStatus: ChartPdStatusLengths = { vbus: 0, ibus: 0, cc1: 0, cc2: 0 };
+  #segmentMarks: ChartExtrasState["segmentMarks"] = [];
+  #edPoints = 0;
+  #ampsDir: 1 | -1 = 1;
+  #sub: ChartExtrasState["sub"] = null;
+  #playheadX: number | null = null;
+
+  /** The main plot's playhead x in the viewport, CSS px, or null (AC-AXHK2T.6). */
+  playheadX(x: number | null): void {
+    this.#playheadX = x;
+  }
+
+  /** The sub-chart's x range and playhead of the last draw, or null (AC-AXHK2T.6). */
+  sub(drawn: ChartExtrasState["sub"]): void {
+    this.#sub = drawn === null ? null : { ...drawn };
+  }
+
+  /** The current axis direction of the last draw: -1 with Reverse current (AC-AXHK2T.7). */
+  ampsDir(dir: 1 | -1): void {
+    this.#ampsDir = dir;
+  }
+
+  /** The E.D. points of the last draw (AC-AXHK2T.5). */
+  edPoints(n: number): void {
+    this.#edPoints = n;
+  }
+
+  /** The segment marks of the last draw (AC-AXHK2T.4). */
+  segmentMarks(marks: ChartExtrasState["segmentMarks"]): void {
+    this.#segmentMarks = marks.map((m) => ({ ...m }));
+  }
 
   /** The PD markers and badges of the last draw (FR TGE83D). */
   pdMarkers(markers: readonly ChartPdMarker[]): void {
@@ -108,6 +141,13 @@ export class ChartProbe {
       overviewBreaks: () => this.#overviewBreaks.map((b) => ({ ...b })),
       chartPdMarkers: () => this.#pdMarkers.map((m) => ({ ...m, indices: [...m.indices] })),
       chartPdStatusLengths: () => ({ ...this.#pdStatus }),
+      chartExtras: () => ({
+        segmentMarks: this.#segmentMarks.map((m) => ({ ...m })),
+        ampsDir: this.#ampsDir,
+        edPoints: this.#edPoints,
+        sub: this.#sub === null ? null : { ...this.#sub },
+        playheadX: this.#playheadX,
+      }),
     };
   }
 }
@@ -119,5 +159,14 @@ export function installChartProbe(probe: ChartProbe): () => void {
   w[HOOK] = hook;
   return () => {
     if (w[HOOK] === hook) delete w[HOOK];
+  };
+}
+
+/** Installs the opened recording's probe (FR AXHK2T); returns the uninstall. */
+export function installRecordingProbe(read: () => RecordingExtrasState): () => void {
+  const w = window as unknown as Record<string, unknown>;
+  w[RECORDING_HOOK] = read;
+  return () => {
+    if (w[RECORDING_HOOK] === read) delete w[RECORDING_HOOK];
   };
 }

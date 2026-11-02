@@ -582,6 +582,119 @@ export async function historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGa
   return invoke<HistoryGap[]>("history_gaps", wholeMs(t0Ms, t1Ms));
 }
 
+/** What the ruler shows between its cursors, from the raw samples with
+ * `t0 <= t <= t1` (FR AXHK2T). */
+export interface RangeStats {
+  samples: number;
+  charge_ah: number;
+  energy_wh: number;
+  vbus_avg_v: number;
+  ibus_avg_a: number;
+  power_avg_w: number;
+}
+
+/** The ruler's stats over the open session's history between `t0Ms` and `t1Ms`; `null`
+ * when no sample is in range (AC-AXHK2T.2). */
+export async function rangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null> {
+  if (mock) return mock.rangeStats(t0Ms, t1Ms);
+  return invoke<RangeStats | null>("range_stats", wholeMs(t0Ms, t1Ms));
+}
+
+/** The ruler's stats over the open recording file between `t0Ms` and `t1Ms`. */
+export async function recordingFileRangeStats(
+  t0Ms: number,
+  t1Ms: number,
+): Promise<RangeStats | null> {
+  if (mock) return mock.recordingFileRangeStats(t0Ms, t1Ms);
+  return invoke<RangeStats | null>("recording_file_range_stats", wholeMs(t0Ms, t1Ms));
+}
+
+/** What segment marks follow (FR AXHK2T). */
+export type RunMarkKind = "charge" | "energy";
+
+/** What E.D. is a share of: the whole session's energy (summed over its runs, never
+ * across a run break) or the current run's (AC-AXHK2T.5). */
+export type EdScope = "session" | "run";
+
+/** What `run_progress` is asked for (mirrors `RunProgressQuery` in
+ * `src-tauri/src/history.rs`). */
+export interface RunProgressQuery {
+  /** The running total the marks follow. */
+  kind: RunMarkKind;
+  /** Mark every `step_pct` percent; 0% and 100% are never marked, and a step outside
+   * `0 < step < 100` marks nothing. */
+  step_pct: number;
+  /** Evenly spaced E.D. points to sample, about the plot width (at most 8192); 0 for none. */
+  ed_points: number;
+  /** The E.D. window, ms, clamped to the scope's samples (either order); all of them when
+   * left out. */
+  ed_t0_ms?: number | null;
+  ed_t1_ms?: number | null;
+  /** What E.D. is a share of; `"session"` when left out. Marks always follow the run. */
+  ed_scope?: EdScope;
+}
+
+/** One segment mark: where the run's running total first reached `percent` of its final
+ * value, ms (between records, so not whole). */
+export interface RunMark {
+  t_ms: number;
+  percent: number;
+}
+
+/** Segment marks of the current run (since the last run break) and E.D. of the session
+ * (or the run, per `ed_scope`), integrated over the raw samples (AC-AXHK2T.4, .5). */
+export interface RunProgress {
+  /** The first sample's time of the session (or file), ms. */
+  session_t0_ms: number;
+  run_t0_ms: number;
+  run_t1_ms: number;
+  samples: number;
+  charge_ah: number;
+  energy_wh: number;
+  /** The followed total is above zero; when not (idle, discharging, one sample) `marks`
+   * is empty and the UI can say why. */
+  marks_total_positive: boolean;
+  marks: RunMark[];
+  /** The E.D. total: the session's (or the run's) energy, Wh. */
+  ed_total_wh: number;
+  /** `ed_total_wh` is above zero; when not, `ed_t_ms` and `ed_pct` are empty. */
+  energy_total_positive: boolean;
+  ed_t_ms: number[];
+  /** Running energy at each `ed_t_ms` as a percentage of `ed_total_wh`. */
+  ed_pct: number[];
+}
+
+/** `q` as the backend takes it: whole, non-negative counts and milliseconds. */
+function wireQuery(q: RunProgressQuery): Required<RunProgressQuery> {
+  const ms = (t: number | null | undefined, round: (x: number) => number): number | null =>
+    t === null || t === undefined || !Number.isFinite(t) ? null : Math.max(0, round(t));
+  const lo = ms(q.ed_t0_ms, Math.floor);
+  const hi = ms(q.ed_t1_ms, Math.ceil);
+  return {
+    kind: q.kind,
+    step_pct: q.step_pct,
+    ed_points: Number.isFinite(q.ed_points) ? Math.max(0, Math.floor(q.ed_points)) : 0,
+    ed_t0_ms: lo,
+    ed_t1_ms: hi,
+    ed_scope: q.ed_scope === "run" ? "run" : "session",
+  };
+}
+
+/** Segment marks and E.D. of the open session's current run; `null` with an empty
+ * history (AC-AXHK2T.4, .5). */
+export async function runProgress(query: RunProgressQuery): Promise<RunProgress | null> {
+  if (mock) return mock.runProgress(query);
+  return invoke<RunProgress | null>("run_progress", { query: wireQuery(query) });
+}
+
+/** Segment marks and E.D. of the open recording file's rows. */
+export async function recordingFileRunProgress(
+  query: RunProgressQuery,
+): Promise<RunProgress | null> {
+  if (mock) return mock.recordingFileRunProgress(query);
+  return invoke<RunProgress | null>("recording_file_run_progress", { query: wireQuery(query) });
+}
+
 /** Zeroes the session statistics; they count again from the next sample. */
 export async function resetStats(): Promise<void> {
   if (mock) return mock.resetStats();
@@ -1219,6 +1332,8 @@ export interface MeterBackend {
     buckets: number,
   ): Promise<BucketsFor<S>>;
   historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]>;
+  rangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null>;
+  runProgress(query: RunProgressQuery): Promise<RunProgress | null>;
   resetStats(): Promise<void>;
   clearHistory(): Promise<void>;
   pdStart(): Promise<void>;
@@ -1273,6 +1388,8 @@ export const currentMeterCommands: MeterCommands = {
   stats,
   historyRange,
   historyGaps,
+  rangeStats,
+  runProgress,
   resetStats,
   clearHistory,
   pdStart,
@@ -1339,6 +1456,8 @@ export function meterBackend(deviceId: string): MeterBackend {
     historyRange: (series, t0Ms, t1Ms, buckets) =>
       call("history_range", { series, ...wholeMs(t0Ms, t1Ms), buckets }),
     historyGaps: (t0Ms, t1Ms) => call("history_gaps", wholeMs(t0Ms, t1Ms)),
+    rangeStats: (t0Ms, t1Ms) => call("range_stats", wholeMs(t0Ms, t1Ms)),
+    runProgress: (query) => call("run_progress", { query: wireQuery(query) }),
     resetStats: async () => {
       await call("reset_stats");
     },

@@ -68,6 +68,21 @@ export interface ChartPdStatusLengths {
   cc2: number;
 }
 
+/** The chart options' state of the live chart's last draw (FR AXHK2T). */
+export interface ChartExtrasState {
+  /** The segment marks drawn. */
+  segmentMarks: { percent: number; tMs: number; label: string }[];
+  /** The amps scale's direction. */
+  ampsDir: 1 | -1;
+  /** E.D. points drawn. */
+  edPoints: number;
+  /** The sub-chart's x range and playhead (its x in the viewport, CSS px), or null
+   * without one. */
+  sub: { t0Ms: number; t1Ms: number; playheadMs: number | null; playheadX: number | null } | null;
+  /** The main plot's playhead x in the viewport, CSS px, or null. */
+  playheadX: number | null;
+}
+
 export interface OpenPowerzE2E {
   /** Points the chart currently has drawn (non-null y values) per series. */
   chartSeriesLengths(): { vbus: number; ibus: number };
@@ -91,9 +106,26 @@ export interface OpenPowerzE2E {
   chartPdMarkers(): ChartPdMarker[];
   /** The points drawn from the PD status blocks per series (FR TGE83D). */
   chartPdStatusLengths(): ChartPdStatusLengths;
+  /** The chart options' state of the last draw (FR AXHK2T). */
+  chartExtras(): ChartExtrasState;
 }
 
 export const HOOK = "__OPEN_POWERZ_E2E__";
+
+/** The opened recording's chart options state of its last draw (FR AXHK2T), as
+ * `window.__OPEN_POWERZ_E2E_RECORDING__()` while a recording is open in a test build. */
+export interface RecordingExtrasState {
+  segmentMarks: { percent: number; tMs: number; label: string }[];
+  ampsDir: 1 | -1;
+  edPoints: number;
+  /** The sub-chart's x range, or null without one. */
+  sub: { t0Ms: number; t1Ms: number } | null;
+  /** The main plot's x range. */
+  t0Ms: number;
+  t1Ms: number;
+}
+
+export const RECORDING_HOOK = "__OPEN_POWERZ_E2E_RECORDING__";
 
 /**
  * A simulated page reload for the Playwright UI suite (FR VEDDFD), as

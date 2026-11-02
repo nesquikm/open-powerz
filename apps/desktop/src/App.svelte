@@ -28,6 +28,7 @@
     type PdOpened,
     type UiError,
     type RecordingOptions,
+    type RunProgressQuery,
   } from "./lib/backend";
   import {
     defaultPdCaptureName,
@@ -150,6 +151,8 @@
       buckets: number,
     ) => act().historyRange(series, t0Ms, t1Ms, buckets),
     historyGaps: (t0Ms: number, t1Ms: number) => act().historyGaps(t0Ms, t1Ms),
+    rangeStats: (t0Ms: number, t1Ms: number) => act().rangeStats(t0Ms, t1Ms),
+    runProgress: (query: RunProgressQuery) => act().runProgress(query),
   };
 
   /** Every event of meter `id`: to the full view's pipeline when it shows that meter

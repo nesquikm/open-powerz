@@ -490,6 +490,8 @@ export interface ChartOptionsInput {
   originMs?: () => number;
   /** Device pixel ratio the plot is drawn at; line widths and dashes snap to it. */
   pxRatio?: number;
+  /** Draws the current axis upside down; the values stay as measured (AC-AXHK2T.7). */
+  reverseCurrent?: boolean;
 }
 
 /** uPlot options: x = ms since the session start (labelled in seconds), then one series per CHART_SERIES entry on its axis scale. */
@@ -501,6 +503,7 @@ export function chartOptions({
   zeroBased = false,
   originMs = () => 0,
   pxRatio = globalThis.devicePixelRatio || 1,
+  reverseCurrent = false,
 }: ChartOptionsInput): uPlot.Options {
   const p = THEME_COLORS[theme];
   const styles = seriesStyles(theme);
@@ -569,6 +572,7 @@ export function chartOptions({
             range: zeroBased
               ? (_u, min, max) => zeroBasedRange(min, max)
               : (_u, min, max) => minSpanRange(min, max, MIN_AXIS_SPAN[a.id]),
+            ...(reverseCurrent && a.id === "amps" ? { dir: -1 as const } : {}),
           },
         ]),
       ),

@@ -61,6 +61,10 @@ import type {
   UiError,
   MeasurementSource,
   MeterCommands,
+  RangeStats,
+  RunMark,
+  RunProgress,
+  RunProgressQuery,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
 import { lineRefusal, messageRefusal } from "./console.svelte";
@@ -251,8 +255,58 @@ const SERIES_FIELD: Record<Series, keyof Sample> = {
 
 const FIELDS = Object.keys(SERIES_FIELD) as Series[];
 
+/** Rows of each export the demo keeps as text, for a test to compare. */
+const EXPORT_CSV_HEAD_ROWS = 2_000;
+
 /** Spare room left after a synthetic seed, so live samples append without a copy. */
 const SEED_HEADROOM = 1 << 20;
+
+/** A sample's time (ms), current (A) and power (W), for integrating. */
+interface RunPoint {
+  t: number;
+  i: number;
+  p: number;
+}
+
+const MS_PER_HOUR = 3_600_000;
+
+/** The point at time `t` on the line through `a` and `b`, as the trapezoid rule assumes. */
+function toward(a: RunPoint, b: RunPoint, t: number): RunPoint {
+  const w = b.t !== a.t ? (t - a.t) / (b.t - a.t) : 0;
+  return { t, i: a.i + (b.i - a.i) * w, p: a.p + (b.p - a.p) * w };
+}
+
+/** Charge (Ah) and energy (Wh) from `a` to `b` by the trapezoid rule. */
+function trapezoid(a: RunPoint, b: RunPoint): [number, number] {
+  const h = Math.max(0, b.t - a.t) / MS_PER_HOUR;
+  return [((a.i + b.i) / 2) * h, ((a.p + b.p) / 2) * h];
+}
+
+/** The most E.D. points and marks one answer holds, as in the Rust backend. */
+const MAX_ED_POINTS = 8192;
+const MAX_MARKS = 1000;
+
+/** The percentages to mark at every `stepPct`, 0% and 100% left out. */
+function markPercents(stepPct: number): number[] {
+  if (!(stepPct > 0 && stepPct < 100)) return [];
+  const out: number[] = [];
+  for (let k = 1; k <= MAX_MARKS && k * stepPct < 100 - 1e-9; k++) out.push(k * stepPct);
+  return out;
+}
+
+/** `q.ed_points` evenly spaced times over the E.D. window clamped to `runT0..runT1` (the
+ * scope's samples). */
+function edTimes(q: RunProgressQuery, runT0: number, runT1: number): number[] {
+  const n = Math.min(MAX_ED_POINTS, Math.max(0, Math.floor(q.ed_points)));
+  const x = q.ed_t0_ms ?? runT0;
+  const y = q.ed_t1_ms ?? runT1;
+  const a = Math.max(Math.min(x, y), runT0);
+  const b = Math.min(Math.max(x, y), runT1);
+  if (!(n > 0) || a > b) return [];
+  if (n === 1) return [b];
+  const step = (b - a) / (n - 1);
+  return Array.from({ length: n }, (_, k) => (k === n - 1 ? b : a + step * k));
+}
 
 /** The session history as columns (sample times plus one column per series), so a
  * range is found by binary search and bucketed without building sample objects:
@@ -317,6 +371,162 @@ class HistoryColumns {
   #value(name: HistorySeries, j: number): number {
     if (name !== "power") return this.#cols[name][j] as number;
     return (this.#cols.vbus[j] as number) * (this.#cols.ibus[j] as number);
+  }
+
+  /** Sample `j`'s time, current and power. */
+  #pt(j: number): RunPoint {
+    const v = this.#cols.vbus[j] as number;
+    const i = this.#cols.ibus[j] as number;
+    return { t: this.#t[j] as number, i, p: v * i };
+  }
+
+  /** Sample `j` starts a new run: the interval before it is (most of) one of `gaps`. */
+  #startsRun(j: number, gaps: readonly HistoryGap[]): boolean {
+    if (j <= 0 || j >= this.length || gaps.length === 0) return false;
+    const a = this.#t[j - 1] as number;
+    const b = this.#t[j] as number;
+    return gaps.some(
+      (g) => Math.min(b, g.to_ms) - Math.max(a, g.from_ms) >= (g.to_ms - g.from_ms) / 2,
+    );
+  }
+
+  /** The ruler's stats over the samples with `t0 <= t <= t1` (either order), as the Rust
+   * `range_stats` counts them: charge and energy by the trapezoid rule over `t0..t1`
+   * itself (the parts from each end to its nearest sample follow the line to the sample
+   * just outside), nothing across one of `gaps`; plain averages of the samples in range;
+   * `null` with no sample in range (FR AXHK2T). */
+  rangeStats(a: number, b: number, gaps: readonly HistoryGap[] = []): RangeStats | null {
+    const t0 = Math.min(a, b);
+    const t1 = Math.max(a, b);
+    const lo = this.#search(t0, false);
+    const hi = this.#search(t1, true);
+    if (hi <= lo) return null;
+    let chargeAh = 0;
+    let energyWh = 0;
+    let sv = 0;
+    let si = 0;
+    let sp = 0;
+    let prev: RunPoint | null = null;
+    for (let j = lo; j < hi; j++) {
+      const cur = this.#pt(j);
+      if (prev !== null && !this.#startsRun(j, gaps)) {
+        const [dq, de] = trapezoid(prev, cur);
+        chargeAh += dq;
+        energyWh += de;
+      }
+      prev = cur;
+      sv += this.#cols.vbus[j] as number;
+      si += cur.i;
+      sp += cur.p;
+    }
+    if (lo > 0 && !this.#startsRun(lo, gaps)) {
+      const inner = this.#pt(lo);
+      const [dq, de] = trapezoid(toward(this.#pt(lo - 1), inner, t0), inner);
+      chargeAh += dq;
+      energyWh += de;
+    }
+    if (hi < this.length && !this.#startsRun(hi, gaps)) {
+      const inner = this.#pt(hi - 1);
+      const [dq, de] = trapezoid(inner, toward(inner, this.#pt(hi), t1));
+      chargeAh += dq;
+      energyWh += de;
+    }
+    const n = hi - lo;
+    return {
+      samples: n,
+      charge_ah: chargeAh,
+      energy_wh: energyWh,
+      vbus_avg_v: sv / n,
+      ibus_avg_a: si / n,
+      power_avg_w: sp / n,
+    };
+  }
+
+  /** Segment marks of the current run (the samples after the last of `gaps`) and E.D. of
+   * the session (or the run, per `ed_scope`), from the raw samples, as the Rust
+   * `run_progress` does; `null` with no sample. */
+  runProgress(q: RunProgressQuery, gaps: readonly HistoryGap[] = []): RunProgress | null {
+    if (this.length === 0) return null;
+    let start = 0;
+    for (const g of gaps) {
+      const j = this.#search((g.from_ms + g.to_ms) / 2, false);
+      if (j > start && j < this.length) start = j;
+    }
+    const from = q.ed_scope === "run" ? start : 0;
+    const runT0 = this.#t[start] as number;
+    const runT1 = this.#t[this.length - 1] as number;
+    const edT = edTimes(q, this.#t[from] as number, runT1);
+    const edWh: number[] = [];
+    let ah = 0;
+    let wh = 0;
+    let beforeRun: [number, number] = [0, 0];
+    let prev: RunPoint | null = null;
+    for (let j = from; j < this.length; j++) {
+      if (j === start) beforeRun = [ah, wh];
+      if (j > from && this.#startsRun(j, gaps)) prev = null;
+      const b = this.#pt(j);
+      while (edWh.length < edT.length && (edT[edWh.length] as number) <= b.t) {
+        const t = edT[edWh.length] as number;
+        edWh.push(wh + (prev === null ? 0 : trapezoid(prev, toward(prev, b, t))[1]));
+      }
+      if (prev !== null) {
+        const [dq, de] = trapezoid(prev, b);
+        ah += dq;
+        wh += de;
+      }
+      prev = b;
+    }
+    while (edWh.length < edT.length) edWh.push(wh);
+    const edTotalWh = wh;
+    const chargeAh = ah - beforeRun[0];
+    const energyWh = wh - beforeRun[1];
+    const followed = q.kind === "charge" ? chargeAh : energyWh;
+    const marksTotalPositive = followed > 0 && Number.isFinite(followed);
+    const marks: RunMark[] = [];
+    const percents = marksTotalPositive ? markPercents(q.step_pct) : [];
+    let last: { t: number; c: number } | null = null;
+    let c = 0;
+    let before: RunPoint | null = null;
+    for (let j = start; j < this.length && marks.length < percents.length; j++) {
+      const b = this.#pt(j);
+      if (before !== null) c += trapezoid(before, b)[q.kind === "charge" ? 0 : 1];
+      before = b;
+      while (marks.length < percents.length) {
+        const percent = percents[marks.length] as number;
+        const target = (followed * percent) / 100;
+        if (c < target) break;
+        const tMs: number =
+          last !== null && last.c < target
+            ? last.t + ((target - last.c) / (c - last.c)) * (b.t - last.t)
+            : b.t;
+        marks.push({ t_ms: tMs, percent });
+      }
+      last = { t: b.t, c };
+    }
+    const energyTotalPositive = edTotalWh > 0 && Number.isFinite(edTotalWh);
+    return {
+      session_t0_ms: this.#t[0] as number,
+      run_t0_ms: runT0,
+      run_t1_ms: runT1,
+      samples: this.length - start,
+      charge_ah: chargeAh,
+      energy_wh: energyWh,
+      marks_total_positive: marksTotalPositive,
+      marks,
+      ed_total_wh: edTotalWh,
+      energy_total_positive: energyTotalPositive,
+      ed_t_ms: energyTotalPositive ? edT : [],
+      ed_pct: energyTotalPositive ? edWh.map((e) => (100 * e) / edTotalWh) : [],
+    };
+  }
+
+  /** The first `n` samples as CSV text: time, VBUS and IBUS. */
+  csvHead(n: number): string {
+    const lines = ["time_ms,vbus_v,ibus_a"];
+    for (let j = 0; j < Math.min(n, this.length); j++) {
+      lines.push(`${this.#t[j]},${this.#cols.vbus[j]},${this.#cols.ibus[j]}`);
+    }
+    return lines.join("\n");
   }
 
   /** Min / max buckets over `t0..=t1`, at most `buckets` per series, plus the sample
@@ -1085,6 +1295,8 @@ export class MockBackend {
   /** Ends a `slow` open that is under way. */
   #endRecordingOpen: (() => void) | null = null;
   #revealed: string[] = [];
+  /** The head of each export's rows as CSV text, oldest first. */
+  #exports: string[] = [];
   /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
   #meterAddress: number | null = 7;
   /** `replug`: the session whose meter is away, which the backend waits for. */
@@ -1218,6 +1430,8 @@ export class MockBackend {
       stats: on(this.stats),
       historyRange: on(this.historyRange) as MockBackend["historyRange"],
       historyGaps: on(this.historyGaps),
+      rangeStats: on(this.rangeStats),
+      runProgress: on(this.runProgress),
       resetStats: on(this.resetStats),
       clearHistory: on(this.clearHistory),
       pdStart: on(this.pdStart),
@@ -1606,6 +1820,7 @@ export class MockBackend {
   ): Promise<ExportResult | null> {
     const s = this.#open();
     const rows = s.streamed;
+    this.#exports.push(s.history.csvHead(EXPORT_CSV_HEAD_ROWS));
     const slow = this.#mode === "slow-export";
     if (slow) onProgress({ done: Math.floor(rows / 2), total: rows });
     return new Promise((resolve) =>
@@ -1679,6 +1894,34 @@ export class MockBackend {
     const file = this.#recordingFile;
     if (!file) throw usage("No recording file is open.");
     return file.buckets(series, t0Ms, t1Ms, buckets) as BucketsFor<S>;
+  }
+
+  /** The ruler's stats over the open recording file's rows (FR AXHK2T). */
+  async recordingFileRangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null> {
+    const file = this.#recordingFile;
+    if (!file) throw usage("No recording file is open.");
+    return file.rangeStats(t0Ms, t1Ms);
+  }
+
+  /** The ruler's stats over the session's history (FR AXHK2T); nothing counts across an
+   * outage. */
+  async rangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null> {
+    const s = this.#open();
+    return s.history.rangeStats(t0Ms, t1Ms, s.gaps);
+  }
+
+  /** Segment marks and E.D. of the open recording file's rows (FR AXHK2T). */
+  async recordingFileRunProgress(query: RunProgressQuery): Promise<RunProgress | null> {
+    const file = this.#recordingFile;
+    if (!file) throw usage("No recording file is open.");
+    return file.runProgress(query);
+  }
+
+  /** Segment marks and E.D. of the session's current run, since its last outage
+   * (FR AXHK2T). */
+  async runProgress(query: RunProgressQuery): Promise<RunProgress | null> {
+    const s = this.#open();
+    return s.history.runProgress(query, s.gaps);
   }
 
   async stats(): Promise<StatsSnapshot> {
@@ -2159,6 +2402,12 @@ export class MockBackend {
   /** Every path `revealPath` was asked to show, oldest first. */
   revealedPaths(): string[] {
     return [...this.#revealed];
+  }
+
+  /** The first rows of each export as CSV text, oldest first: what the export wrote
+   * comes from the samples, never from how the chart draws them (AC-AXHK2T.7). */
+  exportedCsv(): string[] {
+    return [...this.#exports];
   }
 
   // ---- Trigger panel (FR DGSQ6S): a scripted charger behind the demo meter ----

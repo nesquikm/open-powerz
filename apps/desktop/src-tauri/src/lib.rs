@@ -1011,6 +1011,39 @@ async fn recording_file_range(
     .await
 }
 
+/// The chart ruler's stats over the open recording file's rows with
+/// `t0_ms <= time <= t1_ms` (FR AXHK2T, AC-AXHK2T.2); `None` when no row is in range.
+#[tauri::command]
+async fn recording_file_range_stats(
+    state: Shared<'_>,
+    t0_ms: u64,
+    t1_ms: u64,
+) -> Result<Option<history::RangeStats>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(opened_records(&state)?.range_stats(t0_ms, t1_ms))).await
+}
+
+/// The open recording file's rows, sharing its stored samples: taken under
+/// the file lock, scanned after it is released.
+fn opened_records(state: &AppState) -> Result<history::Records, UiError> {
+    state
+        .opened_file()
+        .as_ref()
+        .map(recording_file::OpenedFile::records)
+        .ok_or_else(|| UiError::usage("No recording file is open."))
+}
+
+/// Segment marks and E.D. of the open recording file's current run, from its
+/// raw rows (FR AXHK2T, AC-AXHK2T.4, .5); `None` when it has no row.
+#[tauri::command]
+async fn recording_file_run_progress(
+    state: Shared<'_>,
+    query: history::RunProgressQuery,
+) -> Result<Option<history::RunProgress>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(opened_records(&state)?.run_progress(&query))).await
+}
+
 /// Inspect the firmware container at `path` (FR V9SK53, AC .3); needs no
 /// meter. Resolves to its metadata with the English release notes.
 #[tauri::command]
@@ -1466,6 +1499,37 @@ async fn history_gaps(
         .await
 }
 
+/// The chart ruler's stats over the session history's raw samples with
+/// `t0_ms <= time <= t1_ms` (FR AXHK2T, AC-AXHK2T.2); `None` when no sample is
+/// in range. Reads the history only; sends nothing to the meter.
+#[tauri::command]
+async fn range_stats(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    t0_ms: u64,
+    t1_ms: u64,
+) -> Result<Option<history::RangeStats>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        Ok(session_store(&state, device_id.as_deref())?.history_range_stats(t0_ms, t1_ms))
+    })
+    .await
+}
+
+/// Segment marks and E.D. of the session history's current run, from its raw
+/// samples (FR AXHK2T, AC-AXHK2T.4, .5); `None` when the history is empty.
+/// Reads the history only; sends nothing to the meter.
+#[tauri::command]
+async fn run_progress(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    query: history::RunProgressQuery,
+) -> Result<Option<history::RunProgress>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(session_store(&state, device_id.as_deref())?.history_run_progress(&query)))
+        .await
+}
+
 /// Where an export went and how many rows it wrote.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExportResult {
@@ -1631,8 +1695,12 @@ pub fn run() {
             recording_file_cancel,
             recording_file_close,
             recording_file_range,
+            recording_file_range_stats,
+            recording_file_run_progress,
             history_range,
             history_gaps,
+            range_stats,
+            run_progress,
             stats,
             reset_stats,
             clear_history,

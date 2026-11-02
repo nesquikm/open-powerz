@@ -2,7 +2,12 @@
   import { untrack } from "svelte";
   import uPlot from "uplot";
   import "uplot/dist/uPlot.min.css";
-  import { recordingFileRange, type FileSummary } from "../backend";
+  import {
+    recordingFileRange,
+    recordingFileRangeStats,
+    recordingFileRunProgress,
+    type FileSummary,
+  } from "../backend";
   import { bucketsToFrame, toAlignedData, type ChartFrame } from "../chartData";
   import {
     CHART_SERIES,
@@ -11,6 +16,7 @@
     followRecordingPlotSize,
     formatSessionTime,
     recordingPlotSize,
+    timeSplits,
     toggleSeries,
     type ChartSeriesKey,
     type SeriesVisibility,
@@ -24,8 +30,28 @@
   } from "../chartView";
   import { rowsText } from "../recording.svelte";
   import { statsView } from "../stats";
-  import type { ResolvedTheme } from "../theme";
+  import { THEME_COLORS, type ResolvedTheme } from "../theme";
+  import {
+    ED_DEFINITION,
+    energySharePointCount,
+    extrasNotes,
+    marksInRange,
+    paintEnergyShare,
+    paintSegmentMarks,
+    type MarkKind,
+  } from "../chartExtras";
+  import { RulerState } from "../rulerState.svelte";
+  import { chartExtras } from "../chartExtrasStore.svelte";
+  import type { RecordingExtrasState } from "../../../e2e/hook";
+  import { E2E_BUILD, installRecordingProbe } from "../e2eHook";
+  import { SharedInsets } from "../plotInsets";
+  import { RunProgressFeed } from "../runProgressFeed";
+  import { buildWarp } from "../timeline";
+  import ChartOptions from "./ChartOptions.svelte";
+  import ChartRuler from "./ChartRuler.svelte";
+  import RulerReadout from "./RulerReadout.svelte";
   import SeriesLegend from "./SeriesLegend.svelte";
+  import SubChart from "./SubChart.svelte";
 
   /** A recording opened from a file (FR AXHK2S): its chart and statistics, read-only. A
    * plot of its own, so the live chart and its history are never touched. */
@@ -58,6 +84,140 @@
     { name: "IBUS", values: view.ibus },
     { name: "Power", values: view.power },
   ]);
+
+  /** The chart options (FR AXHK2T), the same ones the live chart reads and saves
+   * (AC-AXHK2T.8); each read on its own, so only Reverse current rebuilds the plot. */
+  let optionsOpen = $state(false);
+  const rulerOn = $derived(chartExtras.value.ruler);
+  /** Reverse current: the current axis drawn upside down, the values unchanged (AC-AXHK2T.7). */
+  const reverseCurrent = $derived(chartExtras.value.reverseCurrent);
+  const marks: MarkKind = $derived(chartExtras.value.marks);
+  const markStep = $derived(chartExtras.value.markStep);
+  const edOn = $derived(chartExtras.value.ed);
+  const subChartOn = $derived(chartExtras.value.subChart);
+  /** The ruler over the file's raw rows (AC-AXHK2T.1). */
+  const ruler = new RulerState(recordingFileRangeStats);
+  let rulerLayer: ChartRuler | undefined = $state();
+  /** The file's first and last record times (not bucket times, so the last records stay
+   * in reach); empty until the backend says. */
+  let fileExtent: TimeRange = $state.raw({ t0Ms: 0, t1Ms: 0 });
+  /** Bumped when another file replaces this one: answers for the old one are dropped. */
+  let fileGeneration = 0;
+
+  /** Segment marks and E.D. over the file's raw rows (AC-AXHK2T.4, .5); an answer redraws. */
+  const progress = new RunProgressFeed(recordingFileRunProgress, () => {
+    progressTotals = { marks: progress.marksTotalPositive, energy: progress.energyTotalPositive };
+    plot?.redraw(false);
+    probeDraw();
+  });
+  $effect(() => () => progress.dispose());
+  let progressTotals: { marks: boolean | null; energy: boolean | null } = $state({
+    marks: null,
+    energy: null,
+  });
+  const extrasNoteText = $derived(extrasNotes({ marks, ed: edOn }, progressTotals).join(" "));
+
+  /** Asks for the marks and E.D. of the range on screen, if anything changed. */
+  function wantProgress(): void {
+    const u = plot;
+    const min = u?.scales.x?.min;
+    const max = u?.scales.x?.max;
+    if (u == null || min == null || max == null || (marks === "off" && !edOn)) {
+      progress.want(null);
+      return;
+    }
+    progress.want({
+      marks,
+      step: markStep,
+      ed: edOn,
+      edPoints: Math.max(2, Math.round(u.over.clientWidth)),
+      edT0Ms: min,
+      edT1Ms: max,
+      stamp: fileGeneration,
+    });
+  }
+
+  function setMarks(kind: MarkKind, step: number): void {
+    chartExtras.update({ marks: kind, markStep: step });
+  }
+
+  // New options, from this view or the live chart: asked for and redrawn.
+  $effect(() => {
+    void [marks, markStep, edOn];
+    untrack(() => {
+      wantProgress();
+      plot?.redraw(false);
+    });
+  });
+
+  // The ruler turned off, here or on the live chart: this view's goes too.
+  $effect(() => {
+    if (!rulerOn) untrack(() => ruler.clear());
+    else untrack(placeRulerOnScreen);
+  });
+
+  function toggleRuler(): void {
+    chartExtras.update({ ruler: !rulerOn });
+  }
+
+  /** With the ruler on and none placed, places it in the range on screen. */
+  function placeRulerOnScreen(): void {
+    const min = plot?.scales.x?.min;
+    const max = plot?.scales.x?.max;
+    if (rulerOn && min != null && max != null) ruler.placeIn(min, max);
+  }
+
+  /** "Reset ruler": both cursors back in the range on screen. */
+  function resetRuler(): void {
+    const min = plot?.scales.x?.min;
+    const max = plot?.scales.x?.max;
+    if (min != null && max != null) ruler.reset(min, max);
+  }
+
+  /** The sub-chart (AC-AXHK2T.6) and the shared plot-area insets that line it up. */
+  let subChart: SubChart | undefined = $state();
+  const insets = new SharedInsets();
+  /** A recording has no collapsed gaps: one ms is one ms of display. */
+  const noWarp = buildWarp([], { t0Ms: 0, t1Ms: 0 }, 0);
+  const pxRatio = globalThis.devicePixelRatio || 1;
+  let subDrawn: { t0Ms: number; t1Ms: number } | null = null;
+
+  /** Test builds only: what the e2e tests read of the last draw. */
+  function probeDraw(): void {
+    if (!E2E_BUILD) return;
+    const u = plot;
+    probeState = {
+      segmentMarks: marksInRange(progress.marks, u?.scales.x?.min, u?.scales.x?.max).map((m) => ({
+        ...m,
+      })),
+      ampsDir: u?.scales.amps?.dir === -1 ? -1 : 1,
+      edPoints: energySharePointCount(progress.ed),
+      sub: subChartOn && subDrawn !== null ? { ...subDrawn } : null,
+      t0Ms: u?.scales.x?.min ?? 0,
+      t1Ms: u?.scales.x?.max ?? 0,
+    };
+  }
+  let probeState: RecordingExtrasState | null = null;
+  // The sub-chart turned off: the probe says so without waiting for a draw.
+  $effect(() => {
+    void subChartOn;
+    untrack(probeDraw);
+  });
+  if (E2E_BUILD) {
+    $effect(() =>
+      installRecordingProbe(
+        () =>
+          probeState ?? {
+            segmentMarks: [],
+            ampsDir: 1,
+            edPoints: 0,
+            sub: null,
+            t0Ms: 0,
+            t1Ms: 0,
+          },
+      ),
+    );
+  }
 
   /** The range on screen, null for the whole file; moves with the answer that draws it. */
   let shown: TimeRange | null = $state(null);
@@ -98,6 +258,19 @@
       u.setData(data, range === null);
       if (range !== null) u.setScale("x", { min: range.t0Ms, max: range.t1Ms });
     });
+    const min = u.scales.x?.min;
+    const max = u.scales.x?.max;
+    // The sub-chart on the same x range as drawn here.
+    subDrawn =
+      subChartOn && min != null && max != null
+        ? (subChart?.draw(frame, [min, max], null) ?? null)
+        : null;
+    // Both plot areas on the same x span (AC-AXHK2T.6).
+    insets.align();
+    wantProgress();
+    placeRulerOnScreen();
+    rulerLayer?.layout();
+    probeDraw();
   }
 
   /** Asks for the wanted range, one bucket per pixel. */
@@ -139,19 +312,37 @@
   $effect(() => {
     const node = el;
     if (!node) return;
-    const opts = chartOptions({ theme, visibility, ...recordingPlotSize(node) });
+    const opts = chartOptions({ theme, visibility, reverseCurrent, ...recordingPlotSize(node) });
+    const palette = THEME_COLORS[theme];
     opts.hooks = {
       ...opts.hooks,
+      draw: [
+        ...(opts.hooks?.draw ?? []),
+        // Segment marks (AC-AXHK2T.4).
+        (self: uPlot) => paintSegmentMarks(self, progress.marks, palette.muted),
+        // E.D., the energy share (AC-AXHK2T.5).
+        (self: uPlot) => paintEnergyShare(self, progress.ed, palette.accent),
+      ],
       // The plot area has its real width here: a resize asks again at that width.
       setSize: [
         ...(opts.hooks?.setSize ?? []),
         (self: uPlot) => {
           if (self === plot && self.over.clientWidth !== askedWidth) ask();
+          rulerLayer?.layout();
         },
       ],
     };
+    // The same plot-area left and right as the sub-chart (AC-AXHK2T.6).
+    const shared = insets.attach("main", () => {
+      if (plot === u) {
+        u.redraw(false, true);
+        rulerLayer?.layout();
+      }
+    });
+    opts.padding = shared.padding;
     const u = new uPlot(opts, emptyData(), node);
     plot = u;
+    shared.bind(u);
     untrack(draw);
     const over = u.over;
     over.addEventListener("dblclick", showWholeFile);
@@ -212,6 +403,7 @@
       onDragCancel();
       over.removeEventListener("dblclick", showWholeFile);
       plot = null;
+      shared.detach();
       u.destroy();
     };
   });
@@ -224,6 +416,21 @@
     wanted = null;
     shown = null;
     frame = null;
+    const generation = ++fileGeneration;
+    fileExtent = { t0Ms: 0, t1Ms: 0 };
+    untrack(() => {
+      ruler.clear();
+      progress.clear();
+      progressTotals = { marks: null, energy: null };
+    });
+    // The file's first and last record: where the ruler's cursors may go.
+    recordingFileRunProgress({ kind: "charge", step_pct: 0, ed_points: 0 })
+      .then((p) => {
+        if (generation === fileGeneration && p !== null) {
+          fileExtent = { t0Ms: p.session_t0_ms, t1Ms: p.run_t1_ms };
+        }
+      })
+      .catch((e: unknown) => console.warn("open-powerz: file extent failed", e));
     ask();
     return () => requester.cancel();
   });
@@ -248,12 +455,59 @@
   <div class="controls">
     <SeriesLegend {theme} {visibility} onToggle={toggle} />
     <div class="zoom">
+      <button type="button" aria-expanded={optionsOpen} onclick={() => (optionsOpen = !optionsOpen)}
+        >Chart options</button
+      >
       <span class="range" role="status">{rangeText}</span>
       <button type="button" disabled={shown === null} onclick={showWholeFile}>Whole file</button>
     </div>
   </div>
 
-  <div class="chart" bind:this={el} aria-label="Recording chart" role="img"></div>
+  {#if optionsOpen}
+    <ChartOptions
+      extras={chartExtras.value}
+      onRuler={toggleRuler}
+      onMarks={setMarks}
+      onEd={() => chartExtras.update({ ed: !edOn })}
+      onSubChart={() => chartExtras.update({ subChart: !subChartOn })}
+      onReverseCurrent={() => chartExtras.update({ reverseCurrent: !reverseCurrent })}
+    />
+  {/if}
+  {#if extrasNoteText !== ""}
+    <p class="extras-note" role="status">{extrasNoteText}</p>
+  {/if}
+  {#if edOn}
+    <p class="ed-note">
+      <span class="ed-swatch" style:border-color={THEME_COLORS[theme].accent}></span>
+      {ED_DEFINITION}
+    </p>
+  {/if}
+  {#if rulerOn && ruler.ruler !== null}
+    <RulerReadout items={ruler.readout} announcement={ruler.announcement} onReset={resetRuler} />
+  {/if}
+
+  <!-- The ruler's cursors ride over the chart, outside its image role. -->
+  <div class="chart-area">
+    <div class="chart" bind:this={el} aria-label="Recording chart" role="img"></div>
+    {#if rulerOn}
+      <ChartRuler bind:this={rulerLayer} {ruler} plot={() => plot} bounds={() => fileExtent} />
+    {/if}
+  </div>
+  {#if subChartOn}
+    <!-- Drawn on a microtask: on its first build the sub-chart is not bound here yet. -->
+    <SubChart
+      bind:this={subChart}
+      {theme}
+      zeroBased={false}
+      {pxRatio}
+      {reverseCurrent}
+      {insets}
+      originMs={() => 0}
+      warp={() => noWarp}
+      splits={(_u, min, max, incr) => timeSplits(min, max, incr, 0)}
+      onresize={() => queueMicrotask(draw)}
+    />
+  {/if}
 
   <dl class="totals">
     <div>
@@ -345,6 +599,22 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+  }
+  .chart-area {
+    position: relative;
+    min-width: 0;
+  }
+  .extras-note,
+  .ed-note {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--muted, GrayText);
+  }
+  .ed-swatch {
+    display: inline-block;
+    width: 1.2rem;
+    border-top: 2px dashed;
+    vertical-align: middle;
   }
   .chart {
     min-width: 0;

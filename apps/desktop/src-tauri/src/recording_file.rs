@@ -19,7 +19,9 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, Row, params};
 use serde::Serialize;
 
-use crate::history::{History, Records, Series, SeriesBuckets};
+use crate::history::{
+    History, RangeStats, Records, RunProgress, RunProgressQuery, Series, SeriesBuckets,
+};
 use crate::pd_import;
 use crate::recording::{ExportProgress, create_temp_beside, io_error};
 use crate::stats::{Stats, StatsSnapshot};
@@ -154,6 +156,16 @@ impl OpenedFile {
     /// Min / max buckets of `series` over `t0..=t1`, at most `buckets` each.
     pub fn range(&self, series: &[Series], t0: u64, t1: u64, buckets: usize) -> Vec<SeriesBuckets> {
         self.history.range(series, t0, t1, buckets)
+    }
+
+    /// The ruler's stats over the rows with `t0 <= time <= t1` (FR AXHK2T).
+    pub fn range_stats(&self, t0: u64, t1: u64) -> Option<RangeStats> {
+        self.history.range_stats(t0, t1)
+    }
+
+    /// Segment marks and E.D. of the file's current run (FR AXHK2T).
+    pub fn run_progress(&self, q: &RunProgressQuery) -> Option<RunProgress> {
+        self.history.run_progress(q)
     }
 
     /// [`range`](Self::range) widened to the rows just outside each end, so a

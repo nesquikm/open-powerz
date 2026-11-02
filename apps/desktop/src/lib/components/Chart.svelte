@@ -2,7 +2,14 @@
   import uPlot from "uplot";
   import "uplot/dist/uPlot.min.css";
   import { getContext, untrack } from "svelte";
-  import { historyGaps, historyRange, type Gap, type Sample } from "../backend";
+  import {
+    historyGaps,
+    historyRange,
+    rangeStats,
+    runProgress,
+    type Gap,
+    type Sample,
+  } from "../backend";
   import { backfillRange, fetchBackfill } from "../backfill";
   import {
     GapList,
@@ -88,9 +95,26 @@
     revealTime,
     type PdMarkerCluster,
   } from "../pdTimeline";
+  import {
+    ED_DEFINITION,
+    energySharePointCount,
+    extrasNotes,
+    marksInRange,
+    paintEnergyShare,
+    paintSegmentMarks,
+    type MarkKind,
+  } from "../chartExtras";
+  import { chartExtras } from "../chartExtrasStore.svelte";
+  import { SharedInsets } from "../plotInsets";
+  import { RunProgressFeed } from "../runProgressFeed";
+  import { RulerState } from "../rulerState.svelte";
+  import ChartOptions from "./ChartOptions.svelte";
+  import ChartRuler from "./ChartRuler.svelte";
   import HintText from "./HintText.svelte";
+  import RulerReadout from "./RulerReadout.svelte";
   import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
   import SeriesLegend from "./SeriesLegend.svelte";
+  import SubChart from "./SubChart.svelte";
 
   let {
     theme,
@@ -98,7 +122,7 @@
     active = true,
     pd = null,
     onPdMarker,
-    history = { historyRange, historyGaps },
+    history = { historyRange, historyGaps, rangeStats, runProgress },
   }: {
     theme: ResolvedTheme;
     rateSps?: number | null;
@@ -113,6 +137,10 @@
     history?: {
       historyRange: typeof historyRange;
       historyGaps: typeof historyGaps;
+      /** The ruler's values from the raw samples (FR AXHK2T). */
+      rangeStats: typeof rangeStats;
+      /** Segment marks and E.D. from the raw samples (FR AXHK2T). */
+      runProgress: typeof runProgress;
     };
   } = $props();
 
@@ -319,6 +347,118 @@
   /** Shows exactly `r`, paused. */
   function showRange(r: TimeRange): void {
     gesture({ kind: "range", t0Ms: r.t0Ms, t1Ms: r.t1Ms });
+  }
+
+  /** The chart options (FR AXHK2T), all off by default, shared with an opened recording
+   * and kept across restarts (AC-AXHK2T.8). Each is read on its own, so a toggle rebuilds
+   * the plot only when it changes how the plot is built (Reverse current). */
+  const rulerOn = $derived(chartExtras.value.ruler);
+  const marksKind: MarkKind = $derived(chartExtras.value.marks);
+  const markStep = $derived(chartExtras.value.markStep);
+  const edOn = $derived(chartExtras.value.ed);
+  const subChartOn = $derived(chartExtras.value.subChart);
+  const reverseCurrent = $derived(chartExtras.value.reverseCurrent);
+  let optionsOpen = $state(false);
+  /** The ruler's cursors and values (AC-AXHK2T.1). */
+  const ruler = new RulerState((t0Ms, t1Ms) => history.rangeStats(t0Ms, t1Ms));
+  let rulerLayer: ChartRuler | undefined = $state();
+
+  // Any option change, here or on an opened recording, redraws (a paused chart too).
+  $effect(() => {
+    void [rulerOn, marksKind, markStep, edOn, subChartOn];
+    untrack(() => scheduler.invalidate());
+  });
+  // The ruler turned off, here or on an opened recording: this chart's goes too.
+  $effect(() => {
+    if (!rulerOn) untrack(() => ruler.clear());
+  });
+
+  function toggleRuler(): void {
+    chartExtras.update({ ruler: !rulerOn });
+  }
+
+  /** New segment marks or step (AC-AXHK2T.4). */
+  function setMarks(marks: MarkKind, step: number): void {
+    chartExtras.update({ marks, markStep: step });
+  }
+
+  /** Reverse current on or off: only the current axis flips (AC-AXHK2T.7). */
+  function toggleReverseCurrent(): void {
+    chartExtras.update({ reverseCurrent: !reverseCurrent });
+  }
+
+  /** E.D. on or off (AC-AXHK2T.5). */
+  function toggleEd(): void {
+    chartExtras.update({ ed: !edOn });
+  }
+
+  /** The sub-chart under the plot (AC-AXHK2T.6), while it is on. */
+  let subChart: SubChart | undefined = $state();
+  /** The main plot and the sub-chart pad to the same plot-area left and right, so one ms
+   * lands at one x in both (AC-AXHK2T.6). */
+  const insets = new SharedInsets();
+
+  /** The sub-chart on or off (AC-AXHK2T.6). */
+  function toggleSubChart(): void {
+    chartExtras.update({ subChart: !subChartOn });
+  }
+
+  /** Segment marks and E.D. from the raw samples, asked for at most 4 times a second
+   * while live (AC-AXHK2T.4, .5); an answer redraws. */
+  const progress = new RunProgressFeed(
+    (q) => history.runProgress(q),
+    () => {
+      progressTotals = {
+        marks: progress.marksTotalPositive,
+        energy: progress.energyTotalPositive,
+      };
+      scheduler.invalidate();
+    },
+  );
+  $effect(() => () => progress.dispose());
+  /** The last answer's totals, for the notes on why nothing is drawn. */
+  let progressTotals: { marks: boolean | null; energy: boolean | null } = $state({
+    marks: null,
+    energy: null,
+  });
+  const extrasNoteText = $derived(
+    extrasNotes({ marks: marksKind, ed: edOn }, progressTotals).join(" "),
+  );
+
+  /** Asks for the marks and E.D. of the range on screen, if anything changed. */
+  function wantProgress(range: [number, number] | null): void {
+    if (range === null || (marksKind === "off" && !edOn)) {
+      progress.want(null);
+      return;
+    }
+    progress.want({
+      marks: marksKind,
+      step: markStep,
+      ed: edOn,
+      edPoints: Math.max(2, Math.round(plotWidthPx())),
+      edT0Ms: range[0],
+      edT1Ms: range[1],
+      // New samples (live or paused) may move the marks and E.D.; a clear resets the feed.
+      stamp: buffer.lastMs ?? -1,
+    });
+  }
+
+  /** With the ruler on and none placed, places it in the range on screen. */
+  function placeRulerIn(range: [number, number] | null): void {
+    if (rulerOn && hasData && range !== null) ruler.placeIn(range[0], range[1]);
+  }
+
+  /** "Reset ruler": both cursors back in the range on screen. */
+  function resetRuler(): void {
+    const range = currentRange();
+    if (range !== null) ruler.reset(range[0], range[1]);
+  }
+
+  /** Where a ruler cursor may go: the session's extent. */
+  function rulerBounds(): TimeRange {
+    const range = currentRange() ?? [0, 0];
+    const s = sessionExtent(range[0], range[1]);
+    return { t0Ms: s.firstMs, t1Ms: s.lastMs };
   }
 
   /** Zoom slider steps (AC-FENCD9.9). */
@@ -671,6 +811,7 @@
     shownFrame = frame;
     updateZoomSlider(range);
     warp = range === null ? warpFor(0, 1, 0) : warpFor(range[0], range[1], plotWidthPx());
+    wantProgress(range);
     u.batch(() => {
       // With no range yet, let uPlot fit the x scale to the (empty) data.
       u.setData(toAlignedData(frame), range === null);
@@ -684,6 +825,12 @@
       historyFrameRange[1] === view.t1Ms;
     drawnFromHistory = fromHistory;
     drawPdMarkers(u);
+    // The sub-chart: the same frame on the same range, with the same playhead.
+    const subDrawn = subChartOn ? (subChart?.draw(frame, range, playheadMs) ?? null) : null;
+    // Both plot areas on the same x span; a change lays them out again (AC-AXHK2T.6).
+    insets.align();
+    placeRulerIn(range);
+    rulerLayer?.layout();
     if (E2E_BUILD && probe !== null) {
       probe.record(frame, {
         mode: view.mode,
@@ -692,6 +839,15 @@
         fromHistory,
       });
       probe.overlay(drawnTicks, drawnBands);
+      probe.segmentMarks(marksInRange(progress.marks, u.scales.x?.min, u.scales.x?.max));
+      probe.edPoints(energySharePointCount(progress.ed));
+      probe.ampsDir(u.scales.amps?.dir === -1 ? -1 : 1);
+      probe.sub(subDrawn);
+      probe.playheadX(
+        playheadMs === null
+          ? null
+          : u.over.getBoundingClientRect().left + u.valToPos(playheadMs, "x"),
+      );
       const min = u.scales.x?.min;
       const max = u.scales.x?.max;
       probe.breaks(
@@ -804,6 +960,9 @@
     hoverLeftPx = null;
     hoverAtMs = null;
     setPlayhead(null);
+    ruler.clear();
+    progress.clear();
+    progressTotals = { marks: null, energy: null };
     buffer.clear();
     backfillArmed = false;
     backfillGeneration++;
@@ -1019,6 +1178,7 @@
       zeroBased,
       originMs,
       pxRatio,
+      reverseCurrent,
       ...sizeOf(el),
     });
     const timeAxis = opts.axes?.[0];
@@ -1151,6 +1311,10 @@
         },
         // The PD status blocks (AC-TGE83D.4).
         (self: uPlot) => drawPdStatus(self),
+        // Segment marks (AC-AXHK2T.4).
+        (self: uPlot) => paintSegmentMarks(self, progress.marks, palette.muted),
+        // E.D., the energy share (AC-AXHK2T.5).
+        (self: uPlot) => paintEnergyShare(self, progress.ed, palette.accent),
         // The playhead: a vertical line across the plot (AC-FENCD9.5).
         (self: uPlot) => {
           if (playheadMs === null) return;
@@ -1191,8 +1355,18 @@
           }),
       ],
     };
+    // The same plot-area left and right as the sub-chart (AC-AXHK2T.6); alone, the
+    // margins uPlot would give it anyway.
+    const shared = insets.attach("main", () => {
+      if (plot === u) {
+        u.redraw(false, true);
+        scheduler.invalidate();
+      }
+    });
+    opts.padding = shared.padding;
     const u = new uPlot(opts, toAlignedData(emptyFrame()), el);
     plot = u;
+    shared.bind(u);
     const over = u.over;
     // The PD marker lane rides on the plot area, so its x matches the plot's.
     const layer = document.createElement("canvas");
@@ -1363,6 +1537,7 @@
       onDragEnd();
       observer.disconnect();
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      shared.detach();
       u.destroy();
       if (plot === u) plot = null;
       if (pdLayer === layer) pdLayer = null;
@@ -1428,6 +1603,9 @@
     <span class="zoom-span" title="Zoom: visible span" aria-hidden="true"
       >{active ? zoomText : ""}</span
     >
+    <button type="button" aria-expanded={optionsOpen} onclick={() => (optionsOpen = !optionsOpen)}
+      >Chart options</button
+    >
     <button
       type="button"
       class="live"
@@ -1439,6 +1617,25 @@
       onclick={() => gesture(liveToggle(view))}>{liveBtn.label}</button
     >
   </div>
+  {#if optionsOpen}
+    <ChartOptions
+      extras={chartExtras.value}
+      onRuler={toggleRuler}
+      onMarks={setMarks}
+      onEd={toggleEd}
+      onSubChart={toggleSubChart}
+      onReverseCurrent={toggleReverseCurrent}
+    />
+  {/if}
+  {#if extrasNoteText !== ""}
+    <p class="extras-note" role="status">{extrasNoteText}</p>
+  {/if}
+  {#if edOn}
+    <p class="ed-note">
+      <span class="ed-swatch" style:border-color={THEME_COLORS[theme].accent}></span>
+      {ED_DEFINITION}
+    </p>
+  {/if}
   <SeriesLegend {theme} {visibility} onToggle={toggle} />
   {#if hasPd}
     <ul class="pd-legend" aria-label="PD markers">
@@ -1451,6 +1648,9 @@
     </ul>
   {/if}
   <p class="visually-hidden" role="status" aria-live="polite">{announcement}</p>
+  {#if rulerOn && ruler.ruler !== null}
+    <RulerReadout items={ruler.readout} announcement={ruler.announcement} onReset={resetRuler} />
+  {/if}
   <!-- Hover readout: a strip above the plot so it never covers the cursor point. -->
   <div class="hover" aria-live="off">
     {#if hover !== null}
@@ -1482,6 +1682,16 @@
     onkeydown={onKeydown}
     onblur={() => (pointerFocus = false)}
   >
+    {#if rulerOn}
+      <ChartRuler
+        bind:this={rulerLayer}
+        {ruler}
+        plot={() => plot}
+        bounds={rulerBounds}
+        {originMs}
+        laneTopPx={PD_LANE_PX}
+      />
+    {/if}
     {#if !active && !hasData}
       <p class="empty-state">Connect a meter to start</p>
     {/if}
@@ -1492,6 +1702,20 @@
       </p>
     {/if}
   </div>
+  {#if subChartOn}
+    <SubChart
+      bind:this={subChart}
+      {theme}
+      {zeroBased}
+      {pxRatio}
+      {reverseCurrent}
+      {insets}
+      {originMs}
+      warp={() => warp}
+      splits={warpedSplits}
+      onresize={() => scheduler.invalidate()}
+    />
+  {/if}
   <!-- Overview strip: the whole session, with a window over the range on screen. -->
   <OverviewStrip
     bind:this={overview}
@@ -1532,6 +1756,18 @@
   }
   .zero-based {
     margin-left: auto;
+  }
+  .extras-note,
+  .ed-note {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--muted, GrayText);
+  }
+  .ed-swatch {
+    display: inline-block;
+    width: 1.2rem;
+    border-top: 2px dashed;
+    vertical-align: middle;
   }
   .zoom-slider {
     width: 8rem;

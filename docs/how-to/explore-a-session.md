@@ -94,6 +94,71 @@ With zero-based axes off, each value axis spans at least 0.1 V, 0.02 A or
 0.1 W. Noise around an idle output no longer fills the whole axis; real swings
 still autoscale. The overview strip uses the same minimum span.
 
+## Chart tools
+
+**Chart options** above the chart opens the chart's extra tools. Each one is
+off until you turn it on. The app remembers your choices, so they are kept
+after a restart. An opened recording has every tool too: the ruler, segment
+marks, E.D., the sub-chart and Reverse current. It shares the choices with the
+live chart, so turning a tool on or off in one turns it on or off in the other.
+
+### Ruler
+
+**Ruler** puts two cursors, T1 and T2, on the chart. Drag either one with the
+mouse by its line, or focus it with Tab and use the keys:
+
+- the arrow keys move it one pixel's worth; hold Shift to move a tenth of the
+  view;
+- Page Up and Page Down move it a tenth of the view;
+- Home and End take it to the start and the end of the session (or the file).
+
+An arrow key keeps a cursor inside the range on screen. When a cursor is
+outside it (the live chart scrolls on, or you zoomed or panned), it shows at
+the edge of the plot with its name and time, and you can still focus it.
+**Reset ruler** puts both cursors back in the range on screen.
+
+Between the cursors the ruler shows the delta time, the delta charge in Ah and
+the delta energy in Wh, plus the averages:
+average voltage in V, current in A and power in W. It reads the raw samples, not the points drawn on screen, so a
+zoomed-out view gives the same numbers. While a new answer is on its way the
+values show "…". A screen reader announces the values once they stop changing.
+
+### Segment marks
+
+**Segment marks** draws a dashed line each time the current run reaches the
+next step of its total charge or energy, labelled with the percentage. Pick
+charge or energy, then the **Mark step**: 5%, 10% (the default), 20% or 25%.
+The marks follow the current run only, that is the samples since the last
+break in the stream. While the run goes on its total grows, so the marks move.
+When the run has no charge (or energy) yet, the chart says so instead of
+drawing marks.
+
+### E.D.
+
+**E.D.** draws a dashed line over the chart: the energy share, from 0% at the
+bottom of the plot to 100% at the top. Unlike the marks it is a share of the
+whole session's energy, summed over its runs; nothing counts across a break.
+The text under the options says what it is, in the same words as here:
+
+E.D. is our own definition, not the vendor's number: the energy measured from
+the start of the session up to each moment, as a percentage of the whole
+session's energy.
+
+While a session is still running, "the whole session" means everything
+measured so far, so the line ends at 100% at the newest sample.
+
+### Sub-chart
+
+**Sub-chart** adds a second, smaller plot under the main one.
+It has its own series and its own legend.
+It shares the main plot's time range, cursor and zoom,
+so both always show the same moment at the same place across the window.
+
+### Reverse current
+
+**Reverse current** draws the current axis upside down.
+Reverse current changes no data: the readings, the statistics and every export keep their sign.
+
 ## Sample rate during a recording
 
 While a recording runs, the sample rate is fixed: the rate picker is locked,

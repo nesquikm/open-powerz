@@ -13,16 +13,19 @@
     theme,
     visibility,
     onToggle,
+    label = "Series",
   }: {
     theme: ResolvedTheme;
     visibility: SeriesVisibility;
     onToggle: (key: ChartSeriesKey) => void;
+    /** The group's accessible name. */
+    label?: string;
   } = $props();
 
   const styles = $derived(seriesStyles(theme));
 </script>
 
-<div class="legend" role="group" aria-label="Series">
+<div class="legend" role="group" aria-label={label}>
   {#each CHART_SERIES as s, i (s.key)}
     <button
       type="button"

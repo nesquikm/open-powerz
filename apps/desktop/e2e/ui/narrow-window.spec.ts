@@ -113,6 +113,40 @@ test.describe("at 375 px wide (AC-AXHK2M.11)", () => {
     expect(overlapping).toEqual([]);
   });
 
+  test("the chart options, ruler readout, E.D. note and sub-chart fit (AC-AXHK2T.8)", async ({
+    page,
+  }) => {
+    const chart = page.getByRole("region", { name: "Chart", exact: true });
+    const toggle = chart.getByRole("button", { name: "Chart options", exact: true });
+    await toggle.scrollIntoViewIfNeeded();
+    await toggle.click();
+    const group = chart.getByRole("group", { name: "Chart options", exact: true });
+    for (const name of ["Ruler", "E.D.", "Sub-chart"]) {
+      await group.getByRole("button", { name, exact: true }).click();
+    }
+    await group.getByLabel("Segment marks", { exact: true }).selectOption("charge");
+    const parts = [
+      group,
+      chart.getByRole("group", { name: "Ruler readout", exact: true }),
+      chart.getByRole("button", { name: "Reset ruler", exact: true }),
+      chart.locator(".ed-note"),
+      chart.getByRole("region", { name: "Sub-chart" }),
+    ];
+    for (const part of parts) {
+      await expect(part).toBeVisible();
+      const box = await part.boundingBox();
+      expect(box, "laid out").toBeTruthy();
+      expect(box!.x, "cut off on the left").toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width, "cut off on the right").toBeLessThanOrEqual(NARROW.width);
+    }
+    // Every option button whole, inside the window.
+    for (const b of await group.getByRole("button").all()) {
+      const box = await b.boundingBox();
+      expect(box!.x + box!.width).toBeLessThanOrEqual(NARROW.width);
+    }
+    await expectNoSidewaysScroll(page);
+  });
+
   for (const view of ["PD analyzer", "Records", "Trigger"]) {
     test(`the ${view} view does not scroll sideways either`, async ({ page }) => {
       await page.getByRole("tab", { name: view, exact: true }).click();

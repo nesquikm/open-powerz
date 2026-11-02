@@ -67,7 +67,7 @@ Build order: the table's order. AXHK2W goes last so it measures the finished cha
   verify: hand-fed record tests and Playwright
 - [x] Import recordings and vendor database files — AXHK2S
   verify: generated-file tests and a round trip
-- [ ] Chart ruler, segment marks and energy share — AXHK2T
+- [x] Chart ruler, segment marks and energy share — AXHK2T
   verify: pure-module tests, `range_stats` tests, visual check
 - [ ] Chart appearance and image export — AXHK2V
   verify: SVG and PDF parse tests, visual check
