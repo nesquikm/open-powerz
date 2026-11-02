@@ -87,6 +87,9 @@ export interface ChartExtrasState {
   /** Every axis tick label drawn, viewport CSS px (AC-AXHK2V.12); absent while no
    * segment mark is drawn. */
   tickLabels?: { left: number; top: number; right: number; bottom: number }[];
+  /** The "E.D. %" label's box, viewport CSS px, in the frame of `markLabels` /
+   * `tickLabels` (AC-AXHK2V.15); absent while the label is not drawn. */
+  edLabel?: { left: number; top: number; right: number; bottom: number };
 }
 
 export interface OpenPowerzE2E {

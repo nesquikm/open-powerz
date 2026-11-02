@@ -8,6 +8,7 @@
     rulerCursorSide,
     rulerKey,
     rulerTag,
+    rulerTagOffsets,
     type RulerCursorId,
   } from "../ruler";
   import type { RulerState } from "../rulerState.svelte";
@@ -80,6 +81,30 @@
       at = { t1, t2 };
     }
   }
+
+  /** Each cursor tag's element, and how far it is moved down so no two tags touch. */
+  const tagEls: Partial<Record<RulerCursorId, HTMLSpanElement>> = $state({});
+  let tagDy: Record<RulerCursorId, number> = $state({ t1: 0, t2: 0 });
+
+  // Once the tags are drawn where the cursors now are, move apart any that touch
+  // (AC-AXHK2V.14). Measured as if unmoved: a tag's own offset is taken off its box.
+  $effect(() => {
+    void cursors;
+    void area;
+    const ids: RulerCursorId[] = ["t1", "t2"];
+    untrack(() => {
+      const boxes = [];
+      for (const id of ids) {
+        const el = tagEls[id];
+        if (el === undefined) return;
+        const b = el.getBoundingClientRect();
+        const dy = tagDy[id];
+        boxes.push({ left: b.left, top: b.top - dy, right: b.right, bottom: b.bottom - dy });
+      }
+      const [d1 = 0, d2 = 0] = rulerTagOffsets(boxes);
+      if (d1 !== tagDy.t1 || d2 !== tagDy.t2) tagDy = { t1: d1, t2: d2 };
+    });
+  });
 
   // A moved cursor goes where it now is at once, not on the next draw.
   $effect(() => {
@@ -195,8 +220,11 @@
       onkeyup={() => ruler.settle()}
     >
       <span class="grip" style:top="{laneTopPx}px"></span>
-      <span class="tag" aria-hidden="true" style:top="{laneTopPx}px"
-        >{rulerTag(c.name, c.side, c.text)}</span
+      <span
+        class="tag"
+        aria-hidden="true"
+        bind:this={tagEls[c.id]}
+        style:top="{laneTopPx + tagDy[c.id]}px">{rulerTag(c.name, c.side, c.text)}</span
       >
     </div>
   {/each}

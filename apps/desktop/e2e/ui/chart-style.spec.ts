@@ -22,10 +22,16 @@
  *   (for a PDF, the PNG the backend wraps);
  * - the test hook's `chartExtras()` gains `markLabels` (the segment-mark labels drawn:
  *   `{ label, left, top, right, bottom }`) and `tickLabels` (every axis tick label drawn:
- *   `{ left, top, right, bottom }`), both in CSS px in one frame.
+ *   `{ left, top, right, bottom }`), both in CSS px in one frame;
+ * - it also gains `edLabel` (the "E.D. %" label's box, same frame) while that label is
+ *   drawn (AC-AXHK2V.15);
+ * - each ruler cursor's tag is its `.tag` inside the cursor's slider, in the chart's
+ *   `.ruler-layer`; the E.D. note is `.ed-note` with its swatch `.ed-swatch`, a dashed
+ *   top border in the line's colour (AC-AXHK2V.14, .16).
  */
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { ED_DEFINITION, edColor } from "../../src/lib/chartExtras";
 import { THEME_COLORS } from "../../src/lib/theme";
 import { HOOK } from "../hook";
 import { chartSeriesLengths, expectHook, lastDraw, open, streamDemo, useTheme } from "./helpers";
@@ -48,6 +54,7 @@ interface StyleProbe {
   segmentMarks: { percent: number; tMs: number; label: string }[];
   markLabels?: (Box & { label: string })[];
   tickLabels?: Box[];
+  edLabel?: Box;
 }
 
 interface SavedImage {
@@ -686,5 +693,115 @@ for (const width of [1280, 375]) {
     } else {
       expect(marks.length).toBeGreaterThan(0);
     }
+  });
+}
+
+/** The box of `el` in viewport CSS px. */
+async function boxOf(el: Locator): Promise<Box> {
+  const b = await el.boundingBox();
+  if (b === null) throw new Error("not laid out");
+  return { left: b.x, top: b.y, right: b.x + b.width, bottom: b.y + b.height };
+}
+
+/** True when `a` and `b` overlap or share an edge. */
+function touches(a: Box, b: Box): boolean {
+  return a.left <= b.right && b.left <= a.right && a.top <= b.bottom && b.top <= a.bottom;
+}
+
+test("AC-AXHK2V.14: an in-view cursor's tag never covers an edge cursor's tag", async ({
+  page,
+}) => {
+  await streaming(page);
+  const c = chart(page);
+  await button(c, "10 s").click();
+  const group = await options(page);
+  const ruler = button(group, "Ruler");
+  if ((await ruler.getAttribute("aria-pressed")) !== "true") await ruler.click();
+  const t1 = c.getByRole("slider", { name: "Ruler cursor T1", exact: true });
+  const t2 = c.getByRole("slider", { name: "Ruler cursor T2", exact: true });
+  // The live view scrolls on until T1 is just behind it; then pause there.
+  await expect(t1).toHaveAttribute("aria-valuetext", /before the view/, { timeout: 15_000 });
+  await button(c, "Live").click();
+  await expect(button(c, "Paused · Go live")).toBeVisible();
+  // T2 to the view's left edge (an in-view cursor stays in view), then just inside it.
+  await t2.focus();
+  for (let k = 0; k < 12; k++) await page.keyboard.press("PageDown");
+  for (let k = 0; k < 3; k++) await page.keyboard.press("ArrowRight");
+  await expect(t2).not.toHaveAttribute("aria-valuetext", /the view/);
+  await expect(t1).toHaveAttribute("aria-valuetext", /before the view/);
+
+  const tag1 = t1.locator(".tag");
+  const tag2 = t2.locator(".tag");
+  await expect
+    .poll(async () => (await tag1.innerText()).replace(/\s+/g, " ").trim())
+    .toMatch(/^◀ T1 · (\d+\.\d{3} s|\d+:\d{2}\.\d{3})$/);
+  await expect(tag2).toHaveText("T2");
+  await expect
+    .poll(async () => touches(await boxOf(tag1), await boxOf(tag2)), {
+      message: "T2's tag touches T1's edge tag",
+    })
+    .toBe(false);
+  // Both stay inside the chart's ruler layer, so neither is clipped away.
+  const layer = await boxOf(c.locator(".ruler-layer"));
+  for (const t of [await boxOf(tag1), await boxOf(tag2)]) {
+    expect(t.left).toBeGreaterThanOrEqual(layer.left);
+    expect(t.right).toBeLessThanOrEqual(layer.right);
+    expect(t.top).toBeGreaterThanOrEqual(layer.top);
+    expect(t.bottom).toBeLessThanOrEqual(layer.bottom);
+  }
+});
+
+test.describe("on a 1280 × 800 window, with marks and E.D.", () => {
+  test.use({ viewport: { width: 1280, height: 800 } });
+
+  test('AC-AXHK2V.15: "E.D. %" never overlaps a segment-mark label or a tick label', async ({
+    page,
+  }) => {
+    await streaming(page);
+    const c = chart(page);
+    await button(c, "Whole session").click();
+    const group = await options(page);
+    await group.getByLabel("Segment marks", { exact: true }).selectOption("charge");
+    await group.getByLabel("Mark step", { exact: true }).selectOption("5");
+    const ed = button(group, "E.D.");
+    if ((await ed.getAttribute("aria-pressed")) !== "true") await ed.click();
+    await expect(ed).toHaveAttribute("aria-pressed", "true");
+    await expect.poll(async () => (await extras(page)).segmentMarks.length).toBe(19);
+    await expect
+      .poll(async () => (await extras(page)).edLabel !== undefined, {
+        message: "the hook reports the E.D. label drawn",
+      })
+      .toBe(true);
+    const probe = await extras(page);
+    const edLabel = probe.edLabel!;
+    expect(edLabel.right - edLabel.left).toBeGreaterThan(0);
+    const marks = probe.markLabels ?? [];
+    const ticks = probe.tickLabels ?? [];
+    expect(ticks.length).toBeGreaterThan(0);
+    for (const m of marks) expect(overlaps(edLabel, m), `E.D. % over ${m.label}`).toBe(false);
+    for (const t of ticks) expect(overlaps(edLabel, t), "E.D. % over a tick label").toBe(false);
+  });
+});
+
+for (const theme of ["light", "dark"] as const) {
+  test(`AC-AXHK2V.16: the E.D. note's swatch is the E.D. line's colour and dash (${theme})`, async ({
+    page,
+  }) => {
+    await useTheme(page, theme);
+    await streaming(page);
+    const c = chart(page);
+    const group = await options(page);
+    const ed = button(group, "E.D.");
+    if ((await ed.getAttribute("aria-pressed")) !== "true") await ed.click();
+    await expect(ed).toHaveAttribute("aria-pressed", "true");
+    const note = c.locator(".ed-note");
+    await expect(note).toContainText(ED_DEFINITION);
+    const look = await note.locator(".ed-swatch").evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { color: s.borderTopColor, style: s.borderTopStyle, width: s.borderTopWidth };
+    });
+    expect(hex(look.color)).toBe(edColor(theme).toLowerCase());
+    expect(look.style).toBe("dashed");
+    expect(Number.parseFloat(look.width)).toBeGreaterThan(0);
   });
 }

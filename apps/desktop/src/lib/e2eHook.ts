@@ -46,6 +46,13 @@ export class ChartProbe {
   #sub: ChartExtrasState["sub"] = null;
   #playheadX: number | null = null;
   #labels: Required<Pick<ChartExtrasState, "markLabels" | "tickLabels">> | null = null;
+  #edLabel: NonNullable<ChartExtrasState["edLabel"]> | null = null;
+
+  /** The "E.D. %" label's box of the last draw, viewport CSS px, or null while it is not
+   * drawn (AC-AXHK2V.15). */
+  edLabel(box: ChartExtrasState["edLabel"] | null): void {
+    this.#edLabel = box ? { ...box } : null;
+  }
 
   /** The segment-mark labels and tick labels of the last draw, viewport CSS px
    * (AC-AXHK2V.12); none while no segment mark is drawn. */
@@ -166,6 +173,7 @@ export class ChartProbe {
               markLabels: this.#labels.markLabels.map((m) => ({ ...m })),
               tickLabels: this.#labels.tickLabels.map((t) => ({ ...t })),
             }),
+        ...(this.#edLabel === null ? {} : { edLabel: { ...this.#edLabel } }),
       }),
     };
   }

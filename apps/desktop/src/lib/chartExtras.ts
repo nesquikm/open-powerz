@@ -209,11 +209,13 @@ export interface PaintedMarkLabels {
 
 /** Draws `marks` on `u` as dashed vertical lines, each labelled with its percentage at
  * the top of the plot (AC-AXHK2T.4). Labels that would cover an axis tick label or each
- * other thin out or are left out; the lines always stay (AC-AXHK2V.12). */
+ * other thin out or are left out; the lines always stay (AC-AXHK2V.12). A label over an
+ * `avoid` box (the "E.D. %" label's) is left out too (AC-AXHK2V.15). */
 export function paintSegmentMarks(
   u: uPlot,
   marks: readonly SegmentMark[],
   color: string,
+  avoid: readonly LabelBox[] = [],
 ): PaintedMarkLabels {
   const painted: PaintedMarkLabels = { markLabels: [], tickLabels: [] };
   const min = u.scales.x?.min;
@@ -252,7 +254,7 @@ export function paintSegmentMarks(
       bottom: y + fontPx,
     });
   }
-  const keep = markLabelsShown(shown, ticks);
+  const keep = markLabelsShown(shown, [...ticks, ...avoid]);
   for (let k = 0; k < shown.length; k++) {
     if (!keep[k]) continue;
     const l = shown[k]!;
@@ -288,9 +290,71 @@ export function edColor(theme: ResolvedTheme): string {
 /** The label written at the E.D. line's right end. */
 const ED_LABEL = "E.D. %";
 
+/** The last E.D. point with a value, canvas px, or null without one. */
+function energyShareEnd(u: uPlot, points: EnergySharePoints): { x: number; y: number } | null {
+  const { top, height } = u.bbox;
+  for (let k = Math.min(points.tMs.length, points.pct.length) - 1; k >= 0; k--) {
+    const pct = points.pct[k];
+    if (pct === null || pct === undefined) continue;
+    const x = u.valToPos(points.tMs[k]!, "x", true);
+    const y = top + height - (Math.min(100, Math.max(0, pct)) / 100) * height;
+    return { x, y };
+  }
+  return null;
+}
+
+/** The box of the "E.D. %" label {@link paintEnergyShare} writes, canvas px, or null
+ * without a line: by the line's right end, inside the plot and clear of every axis tick
+ * label (AC-AXHK2V.15). */
+export function edLabelBox(u: uPlot, points: EnergySharePoints): LabelBox | null {
+  const last = energyShareEnd(u, points);
+  if (last === null) return null;
+  const ratio = globalThis.devicePixelRatio || 1;
+  const { left, top, width, height } = u.bbox;
+  const ctx = u.ctx;
+  const fontPx = Math.round(10 * ratio);
+  const before = ctx.font;
+  ctx.font = `${fontPx}px system-ui, sans-serif`;
+  const w = ctx.measureText(ED_LABEL).width;
+  ctx.font = before;
+  const pad = 4 * ratio;
+  const bottom0 = Math.max(top + 12 * ratio, last.y - pad);
+  const ticks = tickLabelBoxes(u);
+  const right = last.x + pad;
+  const leftOf = last.x - pad - w;
+  // Right of the end point when it fits, else left of it; the other side next.
+  const fitsRight = right + w <= left + width;
+  const sides = (fitsRight ? [right, leftOf] : [leftOf, right]).filter(
+    (x) => x >= left && x + w <= left + width,
+  );
+  const at = (x: number, bottom: number): LabelBox => ({
+    left: x,
+    top: bottom - fontPx,
+    right: x + w,
+    bottom,
+  });
+  for (const x of sides) {
+    let box = at(x, bottom0);
+    // Step below any tick label it would cover, while it stays in the plot.
+    for (let n = 0; n <= ticks.length && box.bottom <= top + height; n++) {
+      const hit = ticks.filter((t) => boxesOverlap(box, t));
+      if (hit.length === 0) return box;
+      box = at(x, Math.max(...hit.map((t) => t.bottom)) + fontPx);
+    }
+  }
+  return at(sides[0] ?? Math.max(left, Math.min(right, left + width - w)), bottom0);
+}
+
 /** Draws the E.D. points on `u` as a dashed line, 0% at the bottom of the plot and 100%
- * at the top (AC-AXHK2T.5), with a small "E.D. %" label at its right end (AC-AXHK2V.13). */
-export function paintEnergyShare(u: uPlot, points: EnergySharePoints, color: string): void {
+ * at the top (AC-AXHK2T.5), with a small "E.D. %" label at its right end (AC-AXHK2V.13),
+ * in {@link edLabelBox} (AC-AXHK2V.15). A caller that already has this draw's box passes
+ * it as `box` so it is computed once. */
+export function paintEnergyShare(
+  u: uPlot,
+  points: EnergySharePoints,
+  color: string,
+  box: LabelBox | null = edLabelBox(u, points),
+): void {
   if (points.tMs.length === 0) return;
   const ratio = globalThis.devicePixelRatio || 1;
   const { left, top, width, height } = u.bbox;
@@ -304,7 +368,6 @@ export function paintEnergyShare(u: uPlot, points: EnergySharePoints, color: str
   ctx.setLineDash([6 * ratio, 3 * ratio]);
   ctx.beginPath();
   let pen = false;
-  let last: { x: number; y: number } | null = null;
   for (let k = 0; k < points.tMs.length; k++) {
     const pct = points.pct[k];
     if (pct === null || pct === undefined) {
@@ -316,22 +379,15 @@ export function paintEnergyShare(u: uPlot, points: EnergySharePoints, color: str
     if (pen) ctx.lineTo(x, y);
     else ctx.moveTo(x, y);
     pen = true;
-    last = { x, y };
   }
   ctx.stroke();
-  if (last) {
+  if (box) {
     ctx.setLineDash([]);
     ctx.font = `${Math.round(10 * ratio)}px system-ui, sans-serif`;
     ctx.fillStyle = color;
     ctx.textBaseline = "bottom";
-    const textWidth = ctx.measureText(ED_LABEL).width;
-    const pad = 4 * ratio;
-    // Right of the end point when it fits, else left of it, inside the plot.
-    const fitsRight = last.x + pad + textWidth <= left + width;
-    ctx.textAlign = fitsRight ? "left" : "right";
-    const x = fitsRight ? last.x + pad : last.x - pad;
-    const y = Math.max(top + 12 * ratio, last.y - pad);
-    ctx.fillText(ED_LABEL, x, y);
+    ctx.textAlign = "left";
+    ctx.fillText(ED_LABEL, box.left, box.bottom);
   }
   ctx.restore();
 }

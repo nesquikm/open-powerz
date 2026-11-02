@@ -172,3 +172,39 @@ export function rulerKey(
   }
   return stepRulerCursor(r, id, direction, step, bounds);
 }
+
+/** A ruler tag's box as laid out, CSS px. */
+export interface RulerTagBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** The gap kept between two tags moved apart, px. */
+const TAG_GAP_PX = 2;
+
+/**
+ * How far to move each cursor tag down, px (one per tag, in order), so no two tags touch
+ * or overlap (AC-AXHK2V.14). Tags that do not touch stay put; the first tag never moves,
+ * and each later one drops below any earlier one it would touch.
+ */
+export function rulerTagOffsets(tags: readonly RulerTagBox[]): number[] {
+  const placed: RulerTagBox[] = [];
+  return tags.map((t) => {
+    let dy = 0;
+    for (let moved = true; moved;) {
+      moved = false;
+      for (const p of placed) {
+        const top = t.top + dy;
+        const bottom = t.bottom + dy;
+        if (t.left <= p.right && p.left <= t.right && top <= p.bottom && p.top <= bottom) {
+          dy = p.bottom + TAG_GAP_PX - t.top;
+          moved = true;
+        }
+      }
+    }
+    placed.push({ ...t, top: t.top + dy, bottom: t.bottom + dy });
+    return dy;
+  });
+}

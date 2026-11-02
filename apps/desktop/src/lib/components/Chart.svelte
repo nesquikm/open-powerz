@@ -106,6 +106,7 @@
     extrasNotes,
     marksInRange,
     edColor,
+    edLabelBox,
     paintEnergyShare,
     paintSegmentMarks,
     type LabelBox,
@@ -1379,11 +1380,14 @@
         },
         // The PD status blocks (AC-TGE83D.4).
         (self: uPlot) => drawPdStatus(self),
-        // Segment marks (AC-AXHK2T.4).
+        // Segment marks (AC-AXHK2T.4), then E.D., the energy share (AC-AXHK2T.5). The
+        // "E.D. %" label's box is computed once: mark labels give way to it (AC-AXHK2V.15).
         (self: uPlot) => {
-          const painted = paintSegmentMarks(self, progress.marks, palette.muted);
+          const ed = edLabelBox(self, progress.ed);
+          const painted = paintSegmentMarks(self, progress.marks, palette.muted, ed ? [ed] : []);
+          paintEnergyShare(self, progress.ed, edColor(theme), ed);
           if (E2E_BUILD && probe !== null) {
-            // Canvas px to viewport CSS px, one frame for both (AC-AXHK2V.12).
+            // Canvas px to viewport CSS px, one frame for all (AC-AXHK2V.12, AC-AXHK2V.15).
             const at = self.ctx.canvas.getBoundingClientRect();
             const ratio = globalThis.devicePixelRatio || 1;
             const css = <T extends LabelBox>(b: T): T => ({
@@ -1394,10 +1398,9 @@
               bottom: at.top + b.bottom / ratio,
             });
             probe.markLabels(painted.markLabels.map(css), painted.tickLabels.map(css));
+            probe.edLabel(ed && css(ed));
           }
         },
-        // E.D., the energy share (AC-AXHK2T.5).
-        (self: uPlot) => paintEnergyShare(self, progress.ed, edColor(theme)),
         // The playhead: a vertical line across the plot (AC-FENCD9.5).
         (self: uPlot) => {
           if (playheadMs === null) return;
@@ -1719,7 +1722,7 @@
   {/if}
   {#if edOn}
     <p class="ed-note">
-      <span class="ed-swatch" style:border-color={THEME_COLORS[theme].accent}></span>
+      <span class="ed-swatch" style:border-color={edColor(theme)}></span>
       {ED_DEFINITION}
     </p>
   {/if}

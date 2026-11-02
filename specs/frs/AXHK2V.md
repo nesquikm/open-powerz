@@ -37,6 +37,9 @@ The chart gains axis presets, per-series style, a title and image export.
 - AC-AXHK2V.11: A ruler cursor's edge-marker tag separates its name from its time, as in "◀ T1 · 0.000 s".
 - AC-AXHK2V.12: Segment-mark labels never overlap an axis tick label. When they don't fit, they thin out (every other one) or are left out, and the dashed lines stay. Checked at 1280 and 375 px wide.
 - AC-AXHK2V.13: The E.D. line has its own colour, distinct from every series colour, and a small "E.D. %" label at its right end, so it can't be read against the volts axis.
+- AC-AXHK2V.14: Ruler tags never overlap. An edge-marker tag and an in-view cursor tag that would touch are moved apart, so each name and time stays readable.
+- AC-AXHK2V.15: The "E.D. %" label never overlaps a segment-mark label or an axis tick label. Mark labels give way to it.
+- AC-AXHK2V.16: The E.D. swatch in the explainer note uses the E.D. line's colour and dash in both themes.
 
 ## Technical Design
 
@@ -47,6 +50,8 @@ The chart gains axis presets, per-series style, a title and image export.
 Vitest for the settings and SVG, Rust tests for the PDF writer, Playwright and a visual check.
 
 ## Notes
+
+ACs .14 to .16 come from the dbc94f8 visual check (qa-runs/AXHK2V-visual): T2's tag covered T1's edge tag, "E.D. %" sat on the 95% mark label, and the note's swatch stayed blue.
 
 GIF, BMP and JPG from the vendor list are left out: PNG, SVG and PDF cover the use.
 The image holds the series, axes, title and legend of the current view. The chart's overlays (PD markers, segment marks, E.D., ruler, playhead) stay on screen only.

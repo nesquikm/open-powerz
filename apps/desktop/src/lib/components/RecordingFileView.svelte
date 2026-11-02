@@ -37,6 +37,7 @@
     extrasNotes,
     marksInRange,
     edColor,
+    edLabelBox,
     paintEnergyShare,
     paintSegmentMarks,
     type MarkKind,
@@ -319,10 +320,13 @@
       ...opts.hooks,
       draw: [
         ...(opts.hooks?.draw ?? []),
-        // Segment marks (AC-AXHK2T.4).
-        (self: uPlot) => paintSegmentMarks(self, progress.marks, palette.muted),
-        // E.D., the energy share (AC-AXHK2T.5).
-        (self: uPlot) => paintEnergyShare(self, progress.ed, edColor(theme)),
+        // Segment marks (AC-AXHK2T.4), then E.D., the energy share (AC-AXHK2T.5). The
+        // "E.D. %" label's box is computed once: mark labels give way to it (AC-AXHK2V.15).
+        (self: uPlot) => {
+          const ed = edLabelBox(self, progress.ed);
+          paintSegmentMarks(self, progress.marks, palette.muted, ed ? [ed] : []);
+          paintEnergyShare(self, progress.ed, edColor(theme), ed);
+        },
       ],
       // The plot area has its real width here: a resize asks again at that width.
       setSize: [
@@ -479,7 +483,7 @@
   {/if}
   {#if edOn}
     <p class="ed-note">
-      <span class="ed-swatch" style:border-color={THEME_COLORS[theme].accent}></span>
+      <span class="ed-swatch" style:border-color={edColor(theme)}></span>
       {ED_DEFINITION}
     </p>
   {/if}
