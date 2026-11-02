@@ -50,6 +50,8 @@ The cancel waits up to 120 s, the prompt is lost, and the failure is silent.
 - AC-AXHK2M.14: After a stop, the next step says to replug the meter first, and to hold its button while replugging only if that does not bring it back. A meter the app sees in bootloader mode is shown as such in the device list.
 - AC-AXHK2M.15: After an update ends, stopped or done, the app connects again to the same meter by its serial once it is back in application mode.
 - AC-AXHK2M.16: After an update, the Firmware tab shows the meter's firmware and bootloader versions read anew, never a dash until a reconnect.
+- AC-AXHK2M.17: When a listed meter's vendor interface string turns from application to bootloader or back, at the same USB address or a new one, the device list follows on the next hotplug poll, within 1 s. The open list and the closed device select both show "(bootloader mode)" while the meter is in its bootloader, and drop it once it is back. A backend hotplug test feeds an APP entry and then a BOOT one, and a UI test changes a listed meter's mode under the same entry.
+- AC-AXHK2M.18: app.log has one line for each listed meter whose mode changes, naming the model, the USB address and the old and new mode, with no serial.
 
 ## Technical Design
 
@@ -63,6 +65,8 @@ Each fault is a separate gap the M7a reviews noted; the common cause is scope.
 Unit tests per item in the owning crate or module, and a Vitest test per UI state.
 
 ## Notes
+
+AC.17 and .18 come from the f4abf09 hardware run, step B4. The Firmware tab's Mode row said Bootloader, read from the same listing, but the device select still showed the plain name. The listing likely changed under the same entry and the closed select kept its old text. The run could not tell when the listing flipped, so .18 logs each change.
 
 Source: M7a Implementation notes marked for M7b. The plan lists items deferred with reasons.
 
@@ -89,3 +93,5 @@ Source: M7a Implementation notes marked for M7b. The plan lists items deferred w
 - Every stop point lies before the descriptor, so the stop message's "before anything was erased" holds. A stop before the first stage still shows the replug steps, which is harmless.
 - AC.16 reads the versions anew at the .15 reconnect; until then the page shows the read-back version, or the kept ones after a stop. The V9SK55 test that expected dashes after a done update now follows .16.
 - Fixing the firmware specs found the recording timer's text split in two by the AXHK2R commit, so `REC 0:00:04` read as two lines to tests. TopBar renders it as one text again.
+- AC.18 remembers each meter's last mode by serial, or by its USB id when it has none. A serial-less meter that changes mode at a new address gets no line; whether the bootloader reports a serial is not confirmed on the device. The memory is not cleared on unplug, so a meter that left in application mode and comes back in bootloader mode gets a line, which is what the hardware run needs.
+- The device select keys each option by id and mode, so a mode change puts a new option in place. WebKit does not repaint a closed select whose picked option's text changes in place [inferred from the f4abf09 run].

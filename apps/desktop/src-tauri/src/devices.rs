@@ -554,6 +554,9 @@ pub struct DeviceManager<O, C> {
     demo_serials: HashMap<String, String>,
     /// Where the session events go (AC-4PJRVM.5).
     log: AppLog,
+    /// The mode each listed real meter was last seen in, by serial (or
+    /// device id when it has none), to log its mode changes (AC-AXHK2M.18).
+    modes: HashMap<String, DeviceMode>,
 }
 
 /// Why a request is refused while a firmware update runs.
@@ -1054,6 +1057,7 @@ where
             flash_ended: Arc::default(),
             demo_serials: HashMap::new(),
             log: AppLog::default(),
+            modes: HashMap::new(),
         }
     }
 
@@ -1365,6 +1369,7 @@ where
     /// that cannot be told from it keep waiting, the others come back
     /// (AC-AXHK2M.3).
     pub fn devices_changed(&mut self, devices: &[DeviceListing]) -> bool {
+        self.log_mode_changes(devices);
         let waits = self
             .waiting
             .lock()
@@ -1441,6 +1446,26 @@ where
             started = true;
         }
         started
+    }
+
+    /// One app.log line per listed real meter whose mode changed since the
+    /// last list: model, USB address, old and new mode; never the serial
+    /// (AC-AXHK2M.18).
+    fn log_mode_changes(&mut self, devices: &[DeviceListing]) {
+        for device in devices.iter().filter(|d| d.demo_scenario.is_none()) {
+            let key = device.serial.clone().unwrap_or_else(|| device.id.clone());
+            if let Some(old) = self.modes.insert(key, device.mode)
+                && old != device.mode
+            {
+                self.log.line(&format!(
+                    "mode {} {}: {} to {}",
+                    device.model,
+                    device.id,
+                    old.name(),
+                    device.mode.name()
+                ));
+            }
+        }
     }
 
     /// Every attached meter plus the demo entries; never opens a device.

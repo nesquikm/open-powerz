@@ -815,7 +815,7 @@ function recordingOf(s: Running): MockRecording {
 }
 
 /** Scripted backend behaviours chosen with `?mock=<name>` in the page URL; the device
- * list stays the same in every one but `replug`. */
+ * list stays the same in every one but `replug` and `mode-flip`. */
 export const MOCK_MODES = [
   "permission-denied",
   "rate-locked",
@@ -833,6 +833,7 @@ export const MOCK_MODES = [
   "trigger-unlisted-cable",
   "trigger-charger-gone",
   "bootloader",
+  "mode-flip",
   "firmware-fail-switching",
   "firmware-fail-erasing",
   "firmware-fail-writing",
@@ -878,18 +879,44 @@ const BOOTLOADER_METER: DeviceListing = {
   mode: "bootloader",
 };
 
-/** The replug meter's picker entry at USB address `address`. */
-function replugMeter(address: number): DeviceListing {
+/** `mode-flip`: one real meter (`serial`) listed in application mode at USB address
+ * `address`; `appMs` after the list is first watched it turns to bootloader mode under
+ * the same entry, and `bootMs` later it is back in application mode (AC-AXHK2M.17). */
+export const MOCK_MODE_FLIP = {
+  serial: "MOCK-FLIP-0001",
+  address: 7,
+  appMs: 3_000,
+  bootMs: 3_000,
+} as const;
+
+/** The picker entry of a scripted real KM003C (`serial`) on bus 1 at `address` in `mode`,
+ * labelled the way the backend lists it. */
+function scriptedMeter(
+  serial: string,
+  address: number,
+  mode: "application" | "bootloader",
+): DeviceListing {
+  const label = `KM003C — ${serial}`;
   return {
     id: `usb:1:${address}`,
-    label: `KM003C — ${MOCK_REPLUG.serial}`,
+    label: mode === "bootloader" ? `${label} (bootloader mode)` : label,
     model: "KM003C",
-    serial: MOCK_REPLUG.serial,
+    serial,
     bus: "1",
     address,
     demo_scenario: null,
-    mode: "application",
+    mode,
   };
+}
+
+/** The mode-flip meter's picker entry in `mode` (AC-AXHK2M.17). */
+function flipMeter(mode: "application" | "bootloader"): DeviceListing {
+  return scriptedMeter(MOCK_MODE_FLIP.serial, MOCK_MODE_FLIP.address, mode);
+}
+
+/** The replug meter's picker entry at USB address `address`. */
+function replugMeter(address: number): DeviceListing {
+  return scriptedMeter(MOCK_REPLUG.serial, address, "application");
 }
 
 /** The status event of a mock session that just connected; a null rate is a locked one. */
@@ -1310,6 +1337,9 @@ export class MockBackend {
   /** `replug`: the session the unplug script runs for. */
   #replugFor: Running | null = null;
   #watchers = new Set<(devices: DeviceListing[]) => void>();
+  /** `mode-flip`: the listed meter's mode, and whether its flips are scheduled. */
+  #flipMode: "application" | "bootloader" = "application";
+  #flipStarted = false;
   /** Settings reads so far (FR 1HHT01). */
   #meterSettingsReads = 0;
   /** Settings writes sent so far (FR JKWT3W). */
@@ -1351,6 +1381,7 @@ export class MockBackend {
    * bootloader-mode meter; else null. */
   #listedMeter(): DeviceListing | null {
     if (this.#mode === "bootloader") return BOOTLOADER_METER;
+    if (this.#mode === "mode-flip") return flipMeter(this.#flipMode);
     return this.#mode === "replug" && this.#meterAddress !== null
       ? replugMeter(this.#meterAddress)
       : null;
@@ -1372,11 +1403,25 @@ export class MockBackend {
     return [...meters, ...demos];
   }
 
-  /** The full list now and on every change (only `replug` changes it). */
+  /** The full list now and on every change (only `replug` and `mode-flip` change it). */
   async watchDevices(onChange: (devices: DeviceListing[]) => void): Promise<() => void> {
     this.#watchers.add(onChange);
     onChange(await this.listDevices());
+    if (this.#mode === "mode-flip" && !this.#flipStarted) this.#startFlips();
     return () => this.#watchers.delete(onChange);
+  }
+
+  /** `mode-flip`: into the bootloader after `appMs`, back after `bootMs` more. */
+  #startFlips(): void {
+    this.#flipStarted = true;
+    setTimeout(() => {
+      this.#flipMode = "bootloader";
+      void this.#notifyDevices();
+      setTimeout(() => {
+        this.#flipMode = "application";
+        void this.#notifyDevices();
+      }, MOCK_MODE_FLIP.bootMs);
+    }, MOCK_MODE_FLIP.appMs);
   }
 
   async #notifyDevices(): Promise<void> {

@@ -44,7 +44,9 @@
       }
     }}
   >
-    {#each session.devices as device (device.id)}
+    <!-- Keyed by mode too: a meter that turns to or from its bootloader under the same
+         entry gets a new option, which WebKit needs to repaint the closed select. -->
+    {#each session.devices as device (`${device.id}|${device.mode}`)}
       <option value={device.id}>{deviceOptionLabel(device, hideSerial)}</option>
     {:else}
       <option value="">No device</option>
