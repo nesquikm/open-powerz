@@ -81,6 +81,12 @@ export interface ChartExtrasState {
   sub: { t0Ms: number; t1Ms: number; playheadMs: number | null; playheadX: number | null } | null;
   /** The main plot's playhead x in the viewport, CSS px, or null. */
   playheadX: number | null;
+  /** The segment-mark labels drawn, viewport CSS px (AC-AXHK2V.12); absent while no
+   * segment mark is drawn. */
+  markLabels?: { label: string; left: number; top: number; right: number; bottom: number }[];
+  /** Every axis tick label drawn, viewport CSS px (AC-AXHK2V.12); absent while no
+   * segment mark is drawn. */
+  tickLabels?: { left: number; top: number; right: number; bottom: number }[];
 }
 
 export interface OpenPowerzE2E {

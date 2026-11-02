@@ -29,8 +29,11 @@
   .firmware-live:empty {
     position: absolute;
   }
+  .firmware-live {
+    flex: none;
+  }
   .firmware-notice {
-    margin: 0.75rem 1rem 0;
+    margin: 0 0 1rem;
     padding: 0.5rem 0.875rem;
     border: 1px solid var(--border);
     border-radius: 0.5rem;

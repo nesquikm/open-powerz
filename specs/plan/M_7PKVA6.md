@@ -69,7 +69,7 @@ Build order: the table's order. AXHK2W goes last so it measures the finished cha
   verify: generated-file tests and a round trip
 - [x] Chart ruler, segment marks and energy share — AXHK2T
   verify: pure-module tests, `range_stats` tests, visual check
-- [ ] Chart appearance and image export — AXHK2V
+- [x] Chart appearance and image export — AXHK2V
   verify: SVG and PDF parse tests, visual check
 - [ ] Memory trim at 1000 SPS — AXHK2W
   verify: element-count tests and a macOS demo measurement

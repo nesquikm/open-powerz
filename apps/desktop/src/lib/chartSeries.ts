@@ -2,6 +2,14 @@ import uPlot from "uplot";
 import type { LiveWindowId } from "./chartData";
 import { forEachDashPiece } from "./dashPath";
 import { DASH, MINUS, formatFixed } from "./format";
+import {
+  DEFAULT_CHART_STYLE,
+  axisPresets,
+  seriesLooks,
+  strokeColor,
+  type ChartStyle,
+  type RangePreset,
+} from "./chartStyle";
 import { THEME_COLORS, type ResolvedTheme, type ThemeStorage } from "./theme";
 
 /** One plotted channel. */
@@ -124,7 +132,7 @@ export function timeSplits(min: number, max: number, incrMs: number, originMs: n
 }
 
 /** Time-axis steps: decimal fractions of a second, then seconds, minutes and hours. */
-const TIME_INCRS: readonly number[] = [
+export const TIME_INCRS: readonly number[] = [
   1, 2, 5, 10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 15_000, 30_000, 60_000, 120_000,
   300_000, 600_000, 900_000, 1_800_000, 3_600_000, 7_200_000, 10_800_000, 21_600_000, 43_200_000,
   86_400_000,
@@ -394,15 +402,19 @@ export interface SeriesStroke {
 }
 
 /** Line width every series aims for, in CSS px, before snapping to device pixels. */
-const LINE_WIDTH = 1.5;
+export const LINE_WIDTH = 1.5;
 
 /** Width and dash for `key` at `dpr`, snapped to whole device pixels (AC-AKNVND.1): at
  * DPR 1 a line is 2 px wide, so it is never a 1 px blend with the grid line under it, and
  * every dash and gap is a whole pixel, so dashed series keep their colour. */
-export function seriesStroke(key: ChartSeriesKey, dpr: number): SeriesStroke {
+export function seriesStroke(
+  key: ChartSeriesKey,
+  dpr: number,
+  width: number = LINE_WIDTH,
+): SeriesStroke {
   const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
   const snap = (cssPx: number): number => Math.max(1, Math.round(cssPx * ratio)) / ratio;
-  return { width: snap(LINE_WIDTH), dash: DASHES[key].map(snap) };
+  return { width: snap(width), dash: DASHES[key].map(snap) };
 }
 
 /** The one dash setting every series hands uPlot: none. Shared, so uPlot sets it once. */
@@ -492,6 +504,23 @@ export interface ChartOptionsInput {
   pxRatio?: number;
   /** Draws the current axis upside down; the values stay as measured (AC-AXHK2T.7). */
   reverseCurrent?: boolean;
+  /** The chart's appearance settings: the axis range presets (AC-AXHK2V.1). */
+  style?: ChartStyle;
+}
+
+/** The range of value axis `axis` over the data `dataMin`..`dataMax` under its preset
+ * (AC-AXHK2V.1): a fixed preset shows `[0, max]`, Auto from zero includes zero, Auto
+ * follows `zeroBased`. Shared by the live chart and the SVG export. */
+export function presetRange(
+  axis: ChartAxisId,
+  preset: RangePreset | undefined,
+  dataMin: number | null,
+  dataMax: number | null,
+  zeroBased = false,
+): [number, number] {
+  if (preset?.kind === "fixed" && preset.max !== undefined) return [0, preset.max];
+  if (zeroBased || preset?.kind === "auto0") return zeroBasedRange(dataMin, dataMax);
+  return minSpanRange(dataMin, dataMax, MIN_AXIS_SPAN[axis]);
 }
 
 /** uPlot options: x = ms since the session start (labelled in seconds), then one series per CHART_SERIES entry on its axis scale. */
@@ -504,19 +533,23 @@ export function chartOptions({
   originMs = () => 0,
   pxRatio = globalThis.devicePixelRatio || 1,
   reverseCurrent = false,
+  style = DEFAULT_CHART_STYLE,
 }: ChartOptionsInput): uPlot.Options {
+  const presets = axisPresets(style);
   const p = THEME_COLORS[theme];
-  const styles = seriesStyles(theme);
+  const looks = seriesLooks(theme, style);
   const shown = visibleAxes(visibility);
   const series: uPlot.Series[] = [
     {},
     ...CHART_SERIES.map((s, i) => {
-      const stroke = seriesStroke(s.key, pxRatio);
+      const look = looks[i];
+      const stroke = seriesStroke(s.key, pxRatio, look?.width);
+      const color = look ? strokeColor(look.color, look.opacity) : p.text;
       return {
         label: s.label,
         scale: s.axis,
         show: visibility[s.key],
-        stroke: styles[i]?.stroke,
+        stroke: color,
         width: stroke.width,
         // Never a canvas dash and never a Path2D: WebKit leaks memory with both
         // (AC-4NSVC9.3). Every series strokes itself, a dashed one as solid pieces.
@@ -524,7 +557,7 @@ export function chartOptions({
         spanGaps: false,
         paths: dashedPaths(
           stroke.dash.map((d) => d * pxRatio),
-          styles[i]?.stroke ?? p.text,
+          color,
           stroke.width * pxRatio,
         ),
       };
@@ -569,9 +602,7 @@ export function chartOptions({
         CHART_AXES.map((a): [string, uPlot.Scale] => [
           a.id,
           {
-            range: zeroBased
-              ? (_u, min, max) => zeroBasedRange(min, max)
-              : (_u, min, max) => minSpanRange(min, max, MIN_AXIS_SPAN[a.id]),
+            range: (_u, min, max) => presetRange(a.id, presets[a.id], min, max, zeroBased),
             ...(reverseCurrent && a.id === "amps" ? { dir: -1 as const } : {}),
           },
         ]),

@@ -1016,6 +1016,22 @@ export async function pdSave(suggestedName: string): Promise<ExportResult | null
   return invoke<ExportResult | null>("pd_save", { suggestedName });
 }
 
+/** Opens the save dialog proposing `suggestedName` and writes the chart image `data`
+ * (for a PDF, the PNG the backend wraps in one page; FR AXHK2V). Resolves to the saved
+ * path, or `null` when the dialog was cancelled. */
+export async function saveChartImage(
+  suggestedName: string,
+  format: "png" | "svg" | "pdf",
+  data: Uint8Array,
+): Promise<string | null> {
+  if (mock) return mock.saveChartImage(suggestedName, format, data);
+  return invoke<string | null>("save_chart_image", {
+    suggestedName,
+    format,
+    data: Array.from(data),
+  });
+}
+
 /** App and protocol-library versions for the About dialog. */
 export interface AppInfo {
   appVersion: string;

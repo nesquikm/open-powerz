@@ -36,6 +36,7 @@
     energySharePointCount,
     extrasNotes,
     marksInRange,
+    edColor,
     paintEnergyShare,
     paintSegmentMarks,
     type MarkKind,
@@ -321,7 +322,7 @@
         // Segment marks (AC-AXHK2T.4).
         (self: uPlot) => paintSegmentMarks(self, progress.marks, palette.muted),
         // E.D., the energy share (AC-AXHK2T.5).
-        (self: uPlot) => paintEnergyShare(self, progress.ed, palette.accent),
+        (self: uPlot) => paintEnergyShare(self, progress.ed, edColor(theme)),
       ],
       // The plot area has its real width here: a resize asks again at that width.
       setSize: [

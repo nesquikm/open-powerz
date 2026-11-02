@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod app_log;
 pub mod batch;
+pub mod chart_image;
 pub mod devices;
 #[cfg(feature = "e2e")]
 pub mod e2e;
@@ -1651,6 +1652,33 @@ async fn pd_save(
     .await
 }
 
+/// Asks where to save the chart image proposing `suggested_name`, then
+/// writes `data` there in `format` (`png`, `svg` or `pdf`; a PDF's `data` is
+/// the PNG it wraps; FR AXHK2V). A PNG outside 320 to 7680 px is refused
+/// before the dialog. Resolves to the saved path, `None` when cancelled.
+#[tauri::command]
+async fn save_chart_image(
+    app: tauri::AppHandle,
+    suggested_name: String,
+    format: String,
+    data: Vec<u8>,
+) -> Result<Option<String>, UiError> {
+    use chart_image::{ChartImageFormat, check_chart_image, write_chart_image};
+    let refused =
+        |e: chart_image::ChartImageError| UiError::usage(format!("The image was not saved: {e}."));
+    let format = ChartImageFormat::from_name(&format)
+        .ok_or_else(|| UiError::usage("Chart images are saved as PNG, SVG or PDF."))?;
+    blocking(move || {
+        check_chart_image(format, &data).map_err(refused)?;
+        let Some(path) = choose_save_path(&app, &suggested_name)? else {
+            return Ok(None);
+        };
+        write_chart_image(&path, format, &data).map_err(refused)?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
 /// The worker's event sink over one `tauri::ipc::Channel`: batches, gaps,
 /// status and errors all reach the UI through it. A failed send means the
 /// window is gone: the event is dropped and `stop` is raised so the worker
@@ -1729,6 +1757,7 @@ pub fn run() {
             record_download,
             records_delete,
             pd_save,
+            save_chart_image,
             pd_open,
             pd_import,
             firmware_inspect,

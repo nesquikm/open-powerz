@@ -32,8 +32,11 @@ The chart gains axis presets, per-series style, a title and image export.
 - AC-AXHK2V.6: The export shows the current view with its title, axes and legend, in the current theme or on white by choice.
 - AC-AXHK2V.7: SVG output is valid XML with series as paths. PDF output opens as one page. A test parses both.
 - AC-AXHK2V.8: Settings persist per app, not per meter. A README line and the how-to describe them.
-- AC-AXHK2V.9: On a 1280 × 800 window the firmware warning card covers no chart or settings control. A test pins it.
+- AC-AXHK2V.9: On a 1280 × 800 window the firmware warning card covers no chart, settings control or settings row. A test pins it.
 - AC-AXHK2V.10: Saved chart images, their default file names and default chart titles carry no serial or UID, with "Hide serial numbers" on or off (AC-AXHK2Q.5). A test pins it.
+- AC-AXHK2V.11: A ruler cursor's edge-marker tag separates its name from its time, as in "◀ T1 · 0.000 s".
+- AC-AXHK2V.12: Segment-mark labels never overlap an axis tick label. When they don't fit, they thin out (every other one) or are left out, and the dashed lines stay. Checked at 1280 and 375 px wide.
+- AC-AXHK2V.13: The E.D. line has its own colour, distinct from every series colour, and a small "E.D. %" label at its right end, so it can't be read against the volts axis.
 
 ## Technical Design
 
@@ -46,3 +49,4 @@ Vitest for the settings and SVG, Rust tests for the PDF writer, Playwright and a
 ## Notes
 
 GIF, BMP and JPG from the vendor list are left out: PNG, SVG and PDF cover the use.
+The image holds the series, axes, title and legend of the current view. The chart's overlays (PD markers, segment marks, E.D., ruler, playhead) stay on screen only.

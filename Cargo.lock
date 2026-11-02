@@ -2880,6 +2880,7 @@ dependencies = [
 name = "open-powerz-desktop"
 version = "0.8.1"
 dependencies = [
+ "flate2",
  "libc",
  "objc2",
  "objc2-foundation",

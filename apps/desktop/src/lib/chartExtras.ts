@@ -1,5 +1,5 @@
 import type uPlot from "uplot";
-import type { ThemeStorage } from "./theme";
+import type { ResolvedTheme, ThemeStorage } from "./theme";
 
 /**
  * The chart's extra options (FR AXHK2T): the ruler, segment marks, the E.D. series, the
@@ -113,24 +113,128 @@ export function marksInRange(
   return marks.filter((m) => m.tMs >= min && m.tMs <= max);
 }
 
+/** A text label's box, px, every box in one frame (AC-AXHK2V.12). */
+export interface LabelBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function boxesOverlap(a: LabelBox, b: LabelBox): boolean {
+  return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+}
+
+/** Which of `labels` to draw (one boolean each, in order) so that no drawn label overlaps
+ * another or any `blocked` box (the axis tick labels): all of them when they fit, else
+ * every other one (the first, third, …), else none. A label over a blocked box is always
+ * left out (AC-AXHK2V.12). */
+export function markLabelsShown(
+  labels: readonly LabelBox[],
+  blocked: readonly LabelBox[],
+): boolean[] {
+  const free = labels.map((l) => !blocked.some((b) => boxesOverlap(l, b)));
+  const fits = (pick: (k: number) => boolean): boolean[] | null => {
+    const shown = labels.map((_, k) => free[k]! && pick(k));
+    const drawn = labels.filter((_, k) => shown[k]);
+    for (let a = 0; a < drawn.length; a++) {
+      for (let b = a + 1; b < drawn.length; b++) {
+        if (boxesOverlap(drawn[a]!, drawn[b]!)) return null;
+      }
+    }
+    return shown;
+  };
+  return fits(() => true) ?? fits((k) => k % 2 === 0) ?? labels.map(() => false);
+}
+
+/** uPlot's resolved axis fields (uplot 1.6, pinned in package.json). */
+type ResolvedAxis = uPlot.Axis & {
+  _show?: boolean;
+  _pos?: number;
+  _size?: number;
+  _splits?: number[];
+  _values?: (string | number | null)[];
+  font?: [string, number, number];
+  alignTo?: number;
+};
+
+/** The box of every axis tick label `u` draws, canvas px (AC-AXHK2V.12). */
+export function tickLabelBoxes(u: uPlot): LabelBox[] {
+  const ratio = globalThis.devicePixelRatio || 1;
+  const ctx = u.ctx;
+  const boxes: LabelBox[] = [];
+  const before = ctx.font;
+  for (const raw of u.axes ?? []) {
+    const axis = raw as ResolvedAxis;
+    if (axis.show === false || axis._show === false) continue;
+    const splits = axis._splits;
+    const values = axis._values;
+    const scale = axis.scale;
+    if (!splits || !values || axis._pos === undefined || scale === undefined) continue;
+    const side = axis.side ?? 2;
+    const vertical = side % 2 === 1;
+    const shiftDir = side === 0 || side === 3 ? -1 : 1;
+    const tickSize = axis.ticks?.show === false ? 0 : (axis.ticks?.size ?? 10);
+    const gap = axis.gap ?? 5;
+    const axisGap = axis.alignTo === 2 ? (axis._size ?? 0) - tickSize - gap : gap;
+    const pos = (axis._pos + shiftDir * (tickSize + axisGap)) * ratio;
+    const font = axis.font;
+    if (font) ctx.font = font[0];
+    const h = font?.[1] ?? 10 * ratio;
+    for (let k = 0; k < values.length; k++) {
+      const v = values[k];
+      const at = splits[k];
+      if (v === null || v === undefined || at === undefined) continue;
+      const w = ctx.measureText(String(v)).width;
+      const c = u.valToPos(at, scale, true);
+      if (vertical) {
+        const left = side === 3 ? pos - w : pos;
+        boxes.push({ left, top: c - h / 2, right: left + w, bottom: c + h / 2 });
+      } else {
+        const top = side === 0 ? pos - h : pos;
+        boxes.push({ left: c - w / 2, top, right: c + w / 2, bottom: top + h });
+      }
+    }
+  }
+  ctx.font = before;
+  return boxes;
+}
+
+/** What {@link paintSegmentMarks} drew: the labels shown and the tick labels they kept
+ * clear of, canvas px. */
+export interface PaintedMarkLabels {
+  markLabels: (LabelBox & { label: string })[];
+  tickLabels: LabelBox[];
+}
+
 /** Draws `marks` on `u` as dashed vertical lines, each labelled with its percentage at
- * the top of the plot (AC-AXHK2T.4). */
-export function paintSegmentMarks(u: uPlot, marks: readonly SegmentMark[], color: string): void {
+ * the top of the plot (AC-AXHK2T.4). Labels that would cover an axis tick label or each
+ * other thin out or are left out; the lines always stay (AC-AXHK2V.12). */
+export function paintSegmentMarks(
+  u: uPlot,
+  marks: readonly SegmentMark[],
+  color: string,
+): PaintedMarkLabels {
+  const painted: PaintedMarkLabels = { markLabels: [], tickLabels: [] };
   const min = u.scales.x?.min;
   const max = u.scales.x?.max;
-  if (marks.length === 0 || min == null || max == null) return;
+  if (marks.length === 0 || min == null || max == null) return painted;
   const ratio = globalThis.devicePixelRatio || 1;
   const { top, height } = u.bbox;
   const ctx = u.ctx;
+  const ticks = tickLabelBoxes(u);
+  painted.tickLabels = ticks;
   ctx.save();
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
   ctx.globalAlpha = 0.8;
   ctx.lineWidth = Math.max(1, ratio);
   ctx.setLineDash([4 * ratio, 3 * ratio]);
-  ctx.font = `${Math.round(10 * ratio)}px system-ui, sans-serif`;
+  const fontPx = Math.round(10 * ratio);
+  ctx.font = `${fontPx}px system-ui, sans-serif`;
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
+  const shown: (LabelBox & { label: string })[] = [];
   for (const m of marks) {
     if (m.tMs < min || m.tMs > max) continue;
     const x = Math.round(u.valToPos(m.tMs, "x", true));
@@ -138,9 +242,25 @@ export function paintSegmentMarks(u: uPlot, marks: readonly SegmentMark[], color
     ctx.moveTo(x, top);
     ctx.lineTo(x, top + height);
     ctx.stroke();
-    ctx.fillText(m.label, x + 2 * ratio, top + 2 * ratio);
+    const left = x + 2 * ratio;
+    const y = top + 2 * ratio;
+    shown.push({
+      label: m.label,
+      left,
+      top: y,
+      right: left + ctx.measureText(m.label).width,
+      bottom: y + fontPx,
+    });
+  }
+  const keep = markLabelsShown(shown, ticks);
+  for (let k = 0; k < shown.length; k++) {
+    if (!keep[k]) continue;
+    const l = shown[k]!;
+    ctx.fillText(l.label, l.left, l.top);
+    painted.markLabels.push(l);
   }
   ctx.restore();
+  return painted;
 }
 
 /** The E.D. points to draw: the share of the session's energy at each time. */
@@ -156,8 +276,20 @@ export function energySharePointCount(points: EnergySharePoints): number {
   return n;
 }
 
+/** The E.D. line's own colour per theme: no series uses it, nor the accent, so the line
+ * is never read against the volts axis (AC-AXHK2V.13). */
+const ED_COLORS: Record<ResolvedTheme, string> = { light: "#4d7c0f", dark: "#bef264" };
+
+/** The E.D. line's colour in `theme`. */
+export function edColor(theme: ResolvedTheme): string {
+  return ED_COLORS[theme];
+}
+
+/** The label written at the E.D. line's right end. */
+const ED_LABEL = "E.D. %";
+
 /** Draws the E.D. points on `u` as a dashed line, 0% at the bottom of the plot and 100%
- * at the top (AC-AXHK2T.5). */
+ * at the top (AC-AXHK2T.5), with a small "E.D. %" label at its right end (AC-AXHK2V.13). */
 export function paintEnergyShare(u: uPlot, points: EnergySharePoints, color: string): void {
   if (points.tMs.length === 0) return;
   const ratio = globalThis.devicePixelRatio || 1;
@@ -172,6 +304,7 @@ export function paintEnergyShare(u: uPlot, points: EnergySharePoints, color: str
   ctx.setLineDash([6 * ratio, 3 * ratio]);
   ctx.beginPath();
   let pen = false;
+  let last: { x: number; y: number } | null = null;
   for (let k = 0; k < points.tMs.length; k++) {
     const pct = points.pct[k];
     if (pct === null || pct === undefined) {
@@ -183,7 +316,22 @@ export function paintEnergyShare(u: uPlot, points: EnergySharePoints, color: str
     if (pen) ctx.lineTo(x, y);
     else ctx.moveTo(x, y);
     pen = true;
+    last = { x, y };
   }
   ctx.stroke();
+  if (last) {
+    ctx.setLineDash([]);
+    ctx.font = `${Math.round(10 * ratio)}px system-ui, sans-serif`;
+    ctx.fillStyle = color;
+    ctx.textBaseline = "bottom";
+    const textWidth = ctx.measureText(ED_LABEL).width;
+    const pad = 4 * ratio;
+    // Right of the end point when it fits, else left of it, inside the plot.
+    const fitsRight = last.x + pad + textWidth <= left + width;
+    ctx.textAlign = fitsRight ? "left" : "right";
+    const x = fitsRight ? last.x + pad : last.x - pad;
+    const y = Math.max(top + 12 * ratio, last.y - pad);
+    ctx.fillText(ED_LABEL, x, y);
+  }
   ctx.restore();
 }

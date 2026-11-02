@@ -123,6 +123,14 @@ export function rulerCursorSide(ms: number, view: TimeRange): "before" | "in" | 
   return "in";
 }
 
+/** The tag a ruler cursor shows: its name alone while in view; at an edge an arrow
+ * towards that edge, the name, " · " and the time. */
+export function rulerTag(name: string, side: "before" | "in" | "after", time: string): string {
+  if (side === "before") return `◀ ${name} · ${time}`;
+  if (side === "after") return `${name} · ${time} ▶`;
+  return name;
+}
+
 /**
  * Cursor `id` after `key` on its slider, or null for a key it does not take. ← / → step
  * one pixel of `view` (Shift: a tenth of it), PageUp / PageDown a tenth, Home / End go to

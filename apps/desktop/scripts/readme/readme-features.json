@@ -20,6 +20,7 @@
   "AXHK2R": "recorder-and-charts: auto-stop on low current",
   "AXHK2S": "recorder-and-charts: open a csv recording",
   "AXHK2T": "recorder-and-charts: measure between two cursors with the chart ruler",
+  "AXHK2V": "recorder-and-charts: save the chart as an image",
   "DGSQ6P": "protocol-triggers: trigger 9 v from a pd charger",
   "DGSQ6Q": "protocol-triggers: qc 2.0/3.0, fcp, afc",
   "DGSQ6R": "protocol-triggers: detect which fast-charge protocols",

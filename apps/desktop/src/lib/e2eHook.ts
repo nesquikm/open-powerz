@@ -45,6 +45,19 @@ export class ChartProbe {
   #ampsDir: 1 | -1 = 1;
   #sub: ChartExtrasState["sub"] = null;
   #playheadX: number | null = null;
+  #labels: Required<Pick<ChartExtrasState, "markLabels" | "tickLabels">> | null = null;
+
+  /** The segment-mark labels and tick labels of the last draw, viewport CSS px
+   * (AC-AXHK2V.12); none while no segment mark is drawn. */
+  markLabels(
+    marks: NonNullable<ChartExtrasState["markLabels"]>,
+    ticks: NonNullable<ChartExtrasState["tickLabels"]>,
+  ): void {
+    this.#labels =
+      marks.length === 0 && ticks.length === 0
+        ? null
+        : { markLabels: marks.map((m) => ({ ...m })), tickLabels: ticks.map((t) => ({ ...t })) };
+  }
 
   /** The main plot's playhead x in the viewport, CSS px, or null (AC-AXHK2T.6). */
   playheadX(x: number | null): void {
@@ -147,6 +160,12 @@ export class ChartProbe {
         edPoints: this.#edPoints,
         sub: this.#sub === null ? null : { ...this.#sub },
         playheadX: this.#playheadX,
+        ...(this.#labels === null
+          ? {}
+          : {
+              markLabels: this.#labels.markLabels.map((m) => ({ ...m })),
+              tickLabels: this.#labels.tickLabels.map((t) => ({ ...t })),
+            }),
       }),
     };
   }

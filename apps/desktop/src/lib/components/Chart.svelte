@@ -81,7 +81,12 @@
     type TimeWarp,
   } from "../timeline";
   import { E2E_BUILD, ChartProbe, installChartProbe } from "../e2eHook";
-  import { THEME_COLORS, type MotionSettings, type ResolvedTheme } from "../theme";
+  import { loadChartStyle, saveChartStyle, type ChartStyle } from "../chartStyle";
+  import { chartImageName, type SaveImageChoice } from "../chartExport";
+  import { chartSvg } from "../chartSvg";
+  import { chartPng } from "../chartPng";
+  import { saveChartImage } from "../backend";
+  import { THEME_COLORS, browserStorage, type MotionSettings, type ResolvedTheme } from "../theme";
   import type { PdCapture } from "../pdCapture.svelte";
   import {
     PD_LANE_PX,
@@ -100,8 +105,10 @@
     energySharePointCount,
     extrasNotes,
     marksInRange,
+    edColor,
     paintEnergyShare,
     paintSegmentMarks,
+    type LabelBox,
     type MarkKind,
   } from "../chartExtras";
   import { chartExtras } from "../chartExtrasStore.svelte";
@@ -113,6 +120,7 @@
   import HintText from "./HintText.svelte";
   import RulerReadout from "./RulerReadout.svelte";
   import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
+  import SaveImageDialog from "./SaveImageDialog.svelte";
   import SeriesLegend from "./SeriesLegend.svelte";
   import SubChart from "./SubChart.svelte";
 
@@ -359,6 +367,57 @@
   const subChartOn = $derived(chartExtras.value.subChart);
   const reverseCurrent = $derived(chartExtras.value.reverseCurrent);
   let optionsOpen = $state(false);
+  /** The "Save image" dialog is open (FR AXHK2V). */
+  let saveOpen = $state(false);
+  let saveError = $state("");
+
+  /** Renders the chart as the dialog asked and hands it to the backend to save. */
+  async function saveImage(choice: SaveImageChoice): Promise<void> {
+    saveOpen = false;
+    saveError = "";
+    const u = plot;
+    if (u === null) return;
+    const x = u.scales.x;
+    const view = { t0Ms: x?.min ?? 0, t1Ms: x?.max ?? 0 };
+    try {
+      // A PDF is the PNG, wrapped in one page by the backend.
+      const bytes =
+        choice.format === "svg"
+          ? new TextEncoder().encode(
+              chartSvg({
+                width: choice.width,
+                height: choice.height,
+                title: chartStyle.title,
+                theme,
+                white: choice.white,
+                style: chartStyle,
+                visibility,
+                view,
+                originMs: originMs(),
+                data: u.data as (number | null)[][],
+                zeroBased,
+                reverseCurrent,
+              }),
+            )
+          : await chartPng({
+              width: choice.width,
+              height: choice.height,
+              title: chartStyle.title,
+              white: choice.white,
+              theme,
+              visibility,
+              zeroBased,
+              originMs,
+              reverseCurrent,
+              style: chartStyle,
+              view,
+              data: u.data,
+            });
+      await saveChartImage(chartImageName(choice.format, new Date()), choice.format, bytes);
+    } catch (e) {
+      saveError = `The image was not saved: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
   /** The ruler's cursors and values (AC-AXHK2T.1). */
   const ruler = new RulerState((t0Ms, t1Ms) => history.rangeStats(t0Ms, t1Ms));
   let rulerLayer: ChartRuler | undefined = $state();
@@ -727,6 +786,14 @@
 
   /** "Zero-based axes": every value axis includes 0, kept for the session (AC-AH2AEM.9). */
   let zeroBased = $state(loadZeroBased(sessionStore()));
+
+  /** The chart's appearance settings, kept for the app, not per meter (AC-AXHK2V.8). */
+  let chartStyle: ChartStyle = $state(loadChartStyle(browserStorage()));
+
+  function setChartStyle(next: ChartStyle): void {
+    chartStyle = next;
+    saveChartStyle(next, browserStorage());
+  }
 
   function toggleZeroBased(): void {
     zeroBased = !zeroBased;
@@ -1179,6 +1246,7 @@
       originMs,
       pxRatio,
       reverseCurrent,
+      style: chartStyle,
       ...sizeOf(el),
     });
     const timeAxis = opts.axes?.[0];
@@ -1312,9 +1380,24 @@
         // The PD status blocks (AC-TGE83D.4).
         (self: uPlot) => drawPdStatus(self),
         // Segment marks (AC-AXHK2T.4).
-        (self: uPlot) => paintSegmentMarks(self, progress.marks, palette.muted),
+        (self: uPlot) => {
+          const painted = paintSegmentMarks(self, progress.marks, palette.muted);
+          if (E2E_BUILD && probe !== null) {
+            // Canvas px to viewport CSS px, one frame for both (AC-AXHK2V.12).
+            const at = self.ctx.canvas.getBoundingClientRect();
+            const ratio = globalThis.devicePixelRatio || 1;
+            const css = <T extends LabelBox>(b: T): T => ({
+              ...b,
+              left: at.left + b.left / ratio,
+              top: at.top + b.top / ratio,
+              right: at.left + b.right / ratio,
+              bottom: at.top + b.bottom / ratio,
+            });
+            probe.markLabels(painted.markLabels.map(css), painted.tickLabels.map(css));
+          }
+        },
         // E.D., the energy share (AC-AXHK2T.5).
-        (self: uPlot) => paintEnergyShare(self, progress.ed, palette.accent),
+        (self: uPlot) => paintEnergyShare(self, progress.ed, edColor(theme)),
         // The playhead: a vertical line across the plot (AC-FENCD9.5).
         (self: uPlot) => {
           if (playheadMs === null) return;
@@ -1606,6 +1689,7 @@
     <button type="button" aria-expanded={optionsOpen} onclick={() => (optionsOpen = !optionsOpen)}
       >Chart options</button
     >
+    <button type="button" disabled={!hasData} onclick={() => (saveOpen = true)}>Save image</button>
     <button
       type="button"
       class="live"
@@ -1625,6 +1709,9 @@
       onEd={toggleEd}
       onSubChart={toggleSubChart}
       onReverseCurrent={toggleReverseCurrent}
+      style={chartStyle}
+      onStyle={setChartStyle}
+      {theme}
     />
   {/if}
   {#if extrasNoteText !== ""}
@@ -1636,7 +1723,7 @@
       {ED_DEFINITION}
     </p>
   {/if}
-  <SeriesLegend {theme} {visibility} onToggle={toggle} />
+  <SeriesLegend {theme} {visibility} onToggle={toggle} style={chartStyle} />
   {#if hasPd}
     <ul class="pd-legend" aria-label="PD markers">
       {#each PD_MARKER_KINDS as k (k.kind)}
@@ -1650,6 +1737,21 @@
   <p class="visually-hidden" role="status" aria-live="polite">{announcement}</p>
   {#if rulerOn && ruler.ruler !== null}
     <RulerReadout items={ruler.readout} announcement={ruler.announcement} onReset={resetRuler} />
+  {/if}
+  {#if saveOpen}
+    <SaveImageDialog
+      initialWidth={host?.clientWidth ?? 1280}
+      initialHeight={host?.clientHeight ?? 720}
+      onCancel={() => (saveOpen = false)}
+      onSave={(choice) => void saveImage(choice)}
+    />
+  {/if}
+  {#if saveError !== ""}
+    <p class="extras-note" role="alert">{saveError}</p>
+  {/if}
+  {#if chartStyle.title !== ""}
+    <!-- Text interpolation: the title is shown as typed, never parsed as markup (AC-AXHK2V.4). -->
+    <p class="chart-title">{chartStyle.title}</p>
   {/if}
   <!-- Hover readout: a strip above the plot so it never covers the cursor point. -->
   <div class="hover" aria-live="off">
@@ -1806,6 +1908,12 @@
     width: 0.625rem;
     height: 0.625rem;
     border-radius: 50%;
+  }
+  .chart-title {
+    margin: 0.25rem 0 0;
+    text-align: center;
+    font-weight: 600;
+    overflow-wrap: anywhere;
   }
   .hover {
     display: flex;

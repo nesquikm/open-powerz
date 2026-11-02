@@ -159,6 +159,36 @@ so both always show the same moment at the same place across the window.
 **Reverse current** draws the current axis upside down.
 Reverse current changes no data: the readings, the statistics and every export keep their sign.
 
+## Chart style and Save image
+
+**Chart options** also sets how the chart looks.
+
+- **VBUS range** and **IBUS range** pick each axis's range. **Auto** follows
+  the data. **Auto from zero** follows the data but always starts at 0. A
+  fixed range, such as 0–6, 0–12 or 0–24 V for VBUS and 0–2, 0–5 or 0–8 A for
+  IBUS, stays put whatever the data does.
+- **Series style** sets each series' colour, line width and transparency.
+  Each line keeps its own dash pattern, so the lines stay apart without
+  colour. **Reset** puts a series back on its theme look. A colour that is
+  hard to see on the chart background gets a low-contrast warning, but you
+  can still use it.
+- **Chart title** shows a title above the chart and in saved images. Leave it
+  empty for none.
+
+These settings are kept for the app, not per meter: they survive a restart
+and apply to whichever meter you connect.
+
+**Save image** next to **Chart options** saves the current view as a PNG, SVG
+or PDF file. Pick the width and height, each from 320 to 7680 px, and the
+format. Draw on the theme's background, or tick **White background** for
+white. The file is named `powerz-chart-YYYYMMDD-HHMMSS` with the format's
+extension. No serial number or UID goes into the image or its file name.
+
+The image holds the series, axes, title and legend of the current view, on
+the same axis ranges as the chart (including **Zero-based axes** and
+**Reverse current**). It leaves out the chart's overlays: PD markers, segment
+marks, the E.D. line, the ruler and the playhead.
+
 ## Sample rate during a recording
 
 While a recording runs, the sample rate is fixed: the rate picker is locked,

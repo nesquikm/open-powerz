@@ -5,6 +5,7 @@
     type ChartSeriesKey,
     type SeriesVisibility,
   } from "../chartSeries";
+  import { seriesLooks, type ChartStyle } from "../chartStyle";
   import type { ResolvedTheme } from "../theme";
 
   /** The chart legend: one toggle per series, in its line's colour and dash. Shared by the
@@ -14,15 +15,19 @@
     visibility,
     onToggle,
     label = "Series",
+    style,
   }: {
     theme: ResolvedTheme;
     visibility: SeriesVisibility;
     onToggle: (key: ChartSeriesKey) => void;
     /** The group's accessible name. */
     label?: string;
+    /** The chart's appearance settings: each swatch takes its series' look (AC-AXHK2V.2). */
+    style?: ChartStyle;
   } = $props();
 
   const styles = $derived(seriesStyles(theme));
+  const looks = $derived(style ? seriesLooks(theme, style) : undefined);
 </script>
 
 <div class="legend" role="group" aria-label={label}>
@@ -40,8 +45,9 @@
           y1="4"
           x2="24"
           y2="4"
-          stroke={styles[i]?.stroke}
-          stroke-width="2"
+          stroke={looks?.[i]?.color ?? styles[i]?.stroke}
+          stroke-width={looks?.[i]?.width ?? 2}
+          stroke-opacity={(looks?.[i]?.opacity ?? 1) < 1 ? looks?.[i]?.opacity : undefined}
           stroke-dasharray={styles[i]?.dash.join(" ") || undefined}
         />
       </svg>

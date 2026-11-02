@@ -1365,10 +1365,13 @@
           if (leftStack(e)) holdNotices("focus", false);
         }}
       >
-        <FirmwareNotice warnings={firmwareWarnings} />
         <MeterNoticeList notices={noticesShown} onDismiss={dismissShownNotice} {fileActions} />
       </div>
       <div class="side-panel">
+        <!-- The firmware card stays for as long as the meter is connected, so it takes
+           its own room at the top of the side panel instead of floating over the
+           settings (AC-AXHK2V.9); stacked, it sits between the chart card and Stats. -->
+        <FirmwareNotice warnings={firmwareWarnings} />
         <StatsPanel
           stats={session.stats}
           controls={statsControls}

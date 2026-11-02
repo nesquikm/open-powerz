@@ -3,7 +3,13 @@
   import type uPlot from "uplot";
   import { formatSessionTime } from "../chartSeries";
   import type { TimeRange } from "../chartView";
-  import { moveRulerCursor, rulerCursorSide, rulerKey, type RulerCursorId } from "../ruler";
+  import {
+    moveRulerCursor,
+    rulerCursorSide,
+    rulerKey,
+    rulerTag,
+    type RulerCursorId,
+  } from "../ruler";
   import type { RulerState } from "../rulerState.svelte";
 
   /** The ruler's two cursors over a plot (FR AXHK2T): sliders a mouse drags and the keys
@@ -190,10 +196,7 @@
     >
       <span class="grip" style:top="{laneTopPx}px"></span>
       <span class="tag" aria-hidden="true" style:top="{laneTopPx}px"
-        >{#if c.side === "before"}◀
-        {/if}{c.name}{#if c.side !== "in"}
-          {c.text}{/if}{#if c.side === "after"}
-          ▶{/if}</span
+        >{rulerTag(c.name, c.side, c.text)}</span
       >
     </div>
   {/each}

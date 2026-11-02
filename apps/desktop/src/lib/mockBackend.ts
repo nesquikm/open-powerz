@@ -1325,6 +1325,8 @@ export class MockBackend {
   /** Ends a `slow` open that is under way. */
   #endRecordingOpen: (() => void) | null = null;
   #revealed: string[] = [];
+  /** The chart images saved (FR AXHK2V). */
+  #chartImages: { suggestedName: string; format: string; data: number[] }[] = [];
   /** The head of each export's rows as CSV text, oldest first. */
   #exports: string[] = [];
   /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
@@ -2446,6 +2448,22 @@ export class MockBackend {
   /** There is no file manager to open: the request is recorded instead. */
   async revealPath(path: string): Promise<void> {
     this.#revealed.push(path);
+  }
+
+  /** There is no save dialog: the proposed name is the path, and the image is recorded
+   * (FR AXHK2V). */
+  async saveChartImage(
+    suggestedName: string,
+    format: string,
+    data: Uint8Array,
+  ): Promise<string | null> {
+    this.#chartImages.push({ suggestedName, format, data: Array.from(data) });
+    return suggestedName;
+  }
+
+  /** Every chart image saved, oldest first. */
+  chartImages(): { suggestedName: string; format: string; data: number[] }[] {
+    return this.#chartImages.map((i) => ({ ...i, data: [...i.data] }));
   }
 
   /** Every path `revealPath` was asked to show, oldest first. */
