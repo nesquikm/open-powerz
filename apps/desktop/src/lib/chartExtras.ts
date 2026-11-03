@@ -1,4 +1,6 @@
 import type uPlot from "uplot";
+import { dashAnchorStepMs, traceDashes } from "./dashPath";
+import { drawLoopCap } from "./drawCap";
 import type { ResolvedTheme, ThemeStorage } from "./theme";
 
 /**
@@ -290,6 +292,10 @@ export function edColor(theme: ResolvedTheme): string {
 /** The label written at the E.D. line's right end. */
 const ED_LABEL = "E.D. %";
 
+/** Canvas positions of the E.D. points being stroked. */
+const ED_XS: (number | null)[] = [];
+const ED_YS: (number | null)[] = [];
+
 /** The last E.D. point with a value, canvas px, or null without one. */
 function energyShareEnd(u: uPlot, points: EnergySharePoints): { x: number; y: number } | null {
   const { top, height } = u.bbox;
@@ -365,24 +371,39 @@ export function paintEnergyShare(
   ctx.clip();
   ctx.strokeStyle = color;
   ctx.lineWidth = Math.max(1, 1.5 * ratio);
-  ctx.setLineDash([6 * ratio, 3 * ratio]);
-  ctx.beginPath();
-  let pen = false;
-  for (let k = 0; k < points.tMs.length; k++) {
+  // Laid as solid dash pieces anchored to the points' data times, as the series are, so
+  // the dashes stay on their samples while the view scrolls (AC-SX1VTC.4); no canvas dash.
+  ctx.setLineDash([]);
+  const pattern = [6 * ratio, 3 * ratio];
+  const n = points.tMs.length;
+  // Reused from frame to frame: a live chart makes no new arrays per draw.
+  const xs = ED_XS;
+  const ys = ED_YS;
+  xs.length = n;
+  ys.length = n;
+  for (let k = 0; k < n; k++) {
     const pct = points.pct[k];
-    if (pct === null || pct === undefined) {
-      pen = false;
-      continue;
-    }
-    const x = u.valToPos(points.tMs[k]!, "x", true);
-    const y = top + height - (Math.min(100, Math.max(0, pct)) / 100) * height;
-    if (pen) ctx.lineTo(x, y);
-    else ctx.moveTo(x, y);
-    pen = true;
+    const t = points.tMs[k];
+    const ok = pct !== null && pct !== undefined && t != null && Number.isFinite(t);
+    xs[k] = ok ? u.valToPos(t, "x", true) : null;
+    ys[k] = ok ? top + height - (Math.min(100, Math.max(0, pct)) / 100) * height : null;
   }
+  const xScale = (u.scales as uPlot["scales"] | undefined)?.x;
+  const stepMs = dashAnchorStepMs(pattern, xScale?.min, xScale?.max, width);
+  ctx.beginPath();
+  traceDashes(
+    ctx,
+    xs,
+    ys,
+    pattern,
+    // The plot box the canvas is clipped to: points far off it cost nothing (FR C6VR9K).
+    { left, top, right: left + width, bottom: top + height },
+    drawLoopCap(width, height),
+    points.tMs,
+    stepMs,
+  );
   ctx.stroke();
   if (box) {
-    ctx.setLineDash([]);
     ctx.font = `${Math.round(10 * ratio)}px system-ui, sans-serif`;
     ctx.fillStyle = color;
     ctx.textBaseline = "bottom";

@@ -22,6 +22,7 @@
     gapLabelFits,
     hoverReadout,
     liveRange,
+    pixelSnappedRange,
     steppedRange,
     toAlignedData,
     type ChartFrame,
@@ -33,6 +34,7 @@
     type ChartSeriesKey,
     type SeriesVisibility,
     chartOptions,
+    dashGridStartMs,
     formatSessionTime,
     formatSpan,
     loadLiveWindow,
@@ -830,7 +832,10 @@
       return sessionStartMs !== null && source() === "session" ? [sessionStartMs, range[1]] : range;
     }
     const ms = windowMs(liveWindow);
-    if (motion().chartScroll === "smooth" || ms === null) return range;
+    if (ms === null) return range;
+    if (motion().chartScroll === "smooth") {
+      return pixelSnappedRange(range, ms, plot?.bbox.width ?? 0, buffer.firstMs ?? range[0]);
+    }
     return steppedRange(range, ms, buffer.firstMs ?? range[0]);
   }
 
@@ -858,9 +863,14 @@
     const from = source();
     if (from === "history" && historyFrame !== null) return historyFrame;
     if (from === "session" && sessionFrame !== null) return sessionFrame;
-    return range === null
-      ? emptyFrame()
-      : buffer.window(range[0], range[1], plotWidthPx() || 1, liveFrame);
+    if (range === null) return emptyFrame();
+    // From the dash grid time left of the view, so every dashed series lays its first
+    // cell from the cell's start (FR SX1VTC); the extra stretch keeps the same density.
+    const widthPx = plotWidthPx() || 1;
+    const span = range[1] - range[0];
+    const t0 = plot ? dashGridStartMs(range[0], range[1], plot.bbox.width, pxRatio) : range[0];
+    const lead = span > 0 && t0 < range[0] ? ((range[0] - t0) / span) * widthPx : 0;
+    return buffer.window(t0, range[1], widthPx + lead, liveFrame);
   }
 
   /** In live mode, asks for the whole session while its start is unknown, or while

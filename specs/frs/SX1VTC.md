@@ -46,7 +46,7 @@ The dashes stand still or slide along the line while the line moves, so they shi
 forEachDashPiece in dashPath.ts starts the pattern at phase 0 on the first point of each call, and dashedPaths calls it with the points in view. A scroll changes the first point every frame, so the phase slides. The E.D. line strokes with a canvas dash set in screen space, which slides the same way.
 
 ### Fix
-Pass each point's data time to the dash builder with a grid step. It restarts the phase at every grid time crossing, using an interpolated point on the segment, and lays dashes by arc length inside the cell. The E.D. line moves to the same builder.
+Pass each point's data time to the dash builder with a grid step. It restarts the phase at every grid time crossing, using an interpolated point on the segment, and lays dashes by arc length inside the cell. The E.D. line moves to the same builder. The live window scrolls in whole device pixels, the live frame reaches back to the grid time left of the view, and x positions get a tiny nudge before rounding, so half-pixel samples round the same way every frame.
 
 ## Testing
 

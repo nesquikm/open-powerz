@@ -547,6 +547,23 @@ export function steppedRange(
   return [Math.max(firstMs, end - spanMs), end];
 }
 
+/** A full `spanMs` live window scrolled in whole steps of one plot pixel (`widthPx`
+ * device px wide): every sample moves by a whole pixel from frame to frame, so the line
+ * and its dashes shift rigidly instead of re-rounding and re-antialiasing (FR SX1VTC).
+ * The end never passes the newest sample, and the start never precedes `firstMs`. A
+ * window shorter than its span, or a plot with no width, is returned as it is. */
+export function pixelSnappedRange(
+  range: [number, number],
+  spanMs: number,
+  widthPx: number,
+  firstMs: number,
+): [number, number] {
+  if (range[1] - range[0] < spanMs || !(spanMs > 0) || !(widthPx > 0)) return range;
+  const msPerPx = spanMs / widthPx;
+  const end = Math.floor(range[1] / msPerPx) * msPerPx;
+  return [Math.max(firstMs, end - spanMs), end];
+}
+
 /** uPlot aligned data: x, then one array per series in CHART_SERIES order. */
 export function toAlignedData(frame: ChartFrame): uPlot.AlignedData {
   return [frame.x, ...CHART_SERIES.map((s) => frame.y[s.key])];

@@ -1,6 +1,6 @@
 import uPlot from "uplot";
 import type { LiveWindowId } from "./chartData";
-import { forEachDashPiece } from "./dashPath";
+import { dashAnchorStepMs, traceDashes } from "./dashPath";
 import { drawLoopCap } from "./drawCap";
 import { hasPlotArea } from "./plotInsets";
 import { DASH, MINUS, formatFixed } from "./format";
@@ -419,12 +419,33 @@ export function seriesStroke(
   return { width: snap(width), dash: DASHES[key].map(snap) };
 }
 
+/** The earliest data time the dashed series' patterns restart from for a view of
+ * `xMin..xMax` drawn over `widthPx` device px at `dpr`: the grid time at or before
+ * `xMin` of the coarsest dash grid (FR SX1VTC). A frame that holds the samples from it
+ * lays the first cell in view from its own start, as the previous frame did, so the
+ * dashes left in view do not jump. `xMin` itself when nothing can be anchored. */
+export function dashGridStartMs(xMin: number, xMax: number, widthPx: number, dpr: number): number {
+  const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  let from = xMin;
+  for (const key of Object.keys(DASHES) as ChartSeriesKey[]) {
+    const pattern = seriesStroke(key, ratio).dash.map((d) => d * ratio);
+    const step = dashAnchorStepMs(pattern, xMin, xMax, widthPx);
+    if (step > 0) from = Math.min(from, Math.floor(xMin / step) * step);
+  }
+  return from;
+}
+
 /** The one dash setting every series hands uPlot: none. Shared, so uPlot sets it once. */
 const NO_DASH: number[] = [];
 
 /** Device-pixel positions of the series being stroked, shared by every series. */
 const SCRATCH_X: (number | null)[] = [];
 const SCRATCH_Y: (number | null)[] = [];
+const SCRATCH_T: (number | null)[] = [];
+
+/** Far above float noise in a plot position, far below anything visible: a sample
+ * position that is a half pixel give or take noise always rounds up (FR SX1VTC). */
+const HALF_PX_NUDGE = 1e-6;
 
 /** A uPlot paths builder that strokes the series itself, straight on the plot's context,
  * in `color` at `deviceWidth` and dashed with `devicePattern` (device px; empty: solid),
@@ -448,18 +469,42 @@ export function dashedPaths(
     // A plot with no area (hidden at 1 × 1, or padded past its size) has nothing to show,
     // and its points land far off it (FR C6VR9K).
     if (!hasPlotArea(u.bbox)) return null;
+    // The pattern restarts at grid times fixed in data time, so the dashes stay on their
+    // samples while the view scrolls (FR SX1VTC). The window starts at the sample at or
+    // before the grid time left of the view, so the first cell is laid from its own start.
+    // A plot without an x scale (laid out by hand) dashes from its first point.
+    const xScale = (u.scales as uPlot["scales"] | undefined)?.x;
+    const xMin = xScale?.min;
+    const stepMs = dashAnchorStepMs(devicePattern, xMin, xScale?.max, u.bbox.width);
+    if (stepMs > 0 && xMin != null) {
+      const grid = Math.floor(xMin / stepMs) * stepMs;
+      // Bounded: the walk back takes at most one cell of samples, and never more than
+      // the frame's draw cap, whatever the data hold (AC-SX1VTC.5).
+      let back = drawLoopCap(u.bbox.width, u.bbox.height);
+      while (idx0 > 0 && back-- > 0) {
+        const t = xData[idx0];
+        if (t != null && Number.isFinite(t) && t <= grid) break;
+        idx0--;
+      }
+    }
     const count = idx1 - idx0 + 1;
     // Reused from frame to frame: a live chart makes no new arrays per draw.
     const xs = SCRATCH_X;
     const ys = SCRATCH_Y;
+    const ts = SCRATCH_T;
     xs.length = count;
     ys.length = count;
+    ts.length = count;
     for (let i = 0; i < count; i++) {
       const x = xData[idx0 + i];
       const y = yData[idx0 + i];
+      ts[i] = x ?? null;
       const ok = x != null && y != null && Number.isFinite(x) && Number.isFinite(y);
-      // Whole device pixels, as uPlot's own linear paths round them.
-      xs[i] = ok ? Math.round(u.valToPos(x, "x", true)) : null;
+      // Whole device pixels, as uPlot's own linear paths round them. A pixel-snapped
+      // scroll can put a sample exactly half way between two pixels, where float noise
+      // would round it one way on one frame and the other way on the next; the nudge
+      // rounds it the same way every frame, so the dashes do not twitch (AC-SX1VTC.6).
+      xs[i] = ok ? Math.round(u.valToPos(x, "x", true) + HALF_PX_NUDGE) : null;
       ys[i] = ok ? Math.round(u.valToPos(y, scale, true)) : null;
     }
     const { left, top, width, height } = u.bbox;
@@ -480,19 +525,11 @@ export function dashedPaths(
     ctx.lineCap = "butt";
     ctx.setLineDash(NO_DASH);
     ctx.beginPath();
-    let ex = NaN;
-    let ey = NaN;
-    forEachDashPiece(
+    traceDashes(
+      ctx,
       xs,
       ys,
       devicePattern,
-      (x0, y0, x1, y1) => {
-        // A dash running on across a vertex continues the same subpath.
-        if (x0 !== ex || y0 !== ey) ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
-        ex = x1;
-        ey = y1;
-      },
       // The box the canvas is clipped to: points far off it cost nothing (AC-C6VR9K.4).
       {
         left: clipLeft,
@@ -502,6 +539,8 @@ export function dashedPaths(
       },
       // No layout fault makes one frame stroke without end (AC-C6VR9K.5).
       drawLoopCap(width, height),
+      ts,
+      stepMs,
     );
     ctx.stroke();
     ctx.restore();
