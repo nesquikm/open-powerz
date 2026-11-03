@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Term from "./Term.svelte";
   import { untrack } from "svelte";
   import uPlot from "uplot";
   import "uplot/dist/uPlot.min.css";
@@ -484,7 +485,7 @@
   {#if edOn}
     <p class="ed-note">
       <span class="ed-swatch" style:border-color={edColor(theme)}></span>
-      {ED_DEFINITION}
+      <Term key="term.ed">E.D.</Term>{ED_DEFINITION.slice("E.D.".length)}
     </p>
   {/if}
   {#if rulerOn && ruler.ruler !== null}

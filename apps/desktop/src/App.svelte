@@ -46,8 +46,10 @@
     loadAdvancedFirmware,
     loadHideSerial,
     loadRecorderSettings,
+    loadShowInfoIcons,
     saveAdvancedFirmware,
     saveHideSerial,
+    saveShowInfoIcons,
     saveRecorderSettings,
     type RecorderSettings,
   } from "./lib/settings";
@@ -57,6 +59,7 @@
   import FirmwareView from "./lib/components/FirmwareView.svelte";
   import { FirmwareUpdate, flashMeter } from "./lib/firmwareUpdate.svelte";
   import Notice from "./lib/components/Notice.svelte";
+  import InfoButton from "./lib/components/InfoButton.svelte";
   import PdAnalyzer from "./lib/components/PdAnalyzer.svelte";
   import { PdCapture } from "./lib/pdCapture.svelte";
   import { PdSelection } from "./lib/pdSelection.svelte";
@@ -545,6 +548,13 @@
     hideSerial = on;
     saveHideSerial(on, browserStorage());
   }
+  /** The Show (i) icons switch (FR CW66T1, AC .8); InfoButton reads it from context. */
+  let showInfoIcons = $state(loadShowInfoIcons(browserStorage()));
+  function setShowInfoIcons(on: boolean): void {
+    showInfoIcons = on;
+    saveShowInfoIcons(on, browserStorage());
+  }
+  setContext("showInfoIcons", () => showInfoIcons);
   /** The firmware view's state (FR V9SK55), kept across tab switches. */
   const firmware = new FirmwareUpdate({
     choose: firmwareChoose,
@@ -1477,7 +1487,10 @@
     {/if}
     {#if view === "firmware" && advancedFirmware}
       <div class="firmware-view" role="tabpanel" id="view-firmware" aria-labelledby="tab-firmware">
-        <h2>Firmware</h2>
+        <div class="titled">
+          <h2>Firmware</h2>
+          <InfoButton key="section.firmware" />
+        </div>
         <FirmwareView {firmware} meter={firmwareMeter} {hideSerial} />
       </div>
     {/if}
@@ -1511,6 +1524,8 @@
       onAdvancedFirmware={setAdvancedFirmware}
       {hideSerial}
       onHideSerial={setHideSerial}
+      {showInfoIcons}
+      onShowInfoIcons={setShowInfoIcons}
       onClose={() => (aboutOpen = false)}
     />
   {/if}

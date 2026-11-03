@@ -1,4 +1,5 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
   import {
     EDITABLE_SETTINGS,
     meterSettingRows,
@@ -40,7 +41,10 @@
 <section class="meter-settings" aria-labelledby="meter-settings-title">
   <div class="head">
     <!-- Not a heading: the card's one heading is Stats; the region carries the name. -->
-    <span class="title" id="meter-settings-title">Meter settings</span>
+    <div class="titled">
+      <span class="title" id="meter-settings-title">Meter settings</span>
+      <InfoButton key="section.settings" />
+    </div>
     {#if !panel.editing}
       <div class="actions">
         <button

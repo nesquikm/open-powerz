@@ -1,4 +1,6 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
+  import Term from "./Term.svelte";
   import { isMissing, statsView } from "../stats";
   import type { StatsControls, StatsDeps } from "../stats.svelte";
   import type { StatsSnapshot } from "../backend";
@@ -70,14 +72,19 @@
   {@const parts = split(text)}
   <span class="value"
     ><span class="digits" class:empty={isMissing(text)}>{parts.digits}</span><span class="unit"
-      >{parts.unit}</span
+      >{#if parts.unit === "Ah"}<Term key="term.ah">Ah</Term>{:else if parts.unit === "Wh"}<Term
+          key="term.wh">Wh</Term
+        >{:else}{parts.unit}{/if}</span
     ></span
   >
 {/snippet}
 
 <aside class="stats panel" aria-label="Statistics">
   <div class="head">
-    <h2>Stats</h2>
+    <div class="titled">
+      <h2>Stats</h2>
+      <InfoButton key="section.stats" />
+    </div>
     <button
       type="button"
       onclick={() => void controls.reset(deps)}

@@ -228,6 +228,23 @@ Error messages never name the serial port, with the option on or off, because
 on macOS that name contains the meter's serial. They say "the meter's serial
 port" instead.
 
+## Info popovers for sections and terms
+
+Each section title has a small (i) button beside it. Press it, or focus it and
+press Enter or Space, for a short note on what the section does. The firmware,
+trigger, console and settings notes also say what can go wrong there.
+
+Abbreviations such as VBUS, CC1, PPS or EPR have a dotted underline. Press one
+for the same kind of note on what the term means.
+
+Only one note is open at a time. Escape, a click outside it or a second press
+of its button closes it and puts the focus back on the button. Escape closes
+only the note, not the panel behind it.
+
+To hide the (i) buttons, open **About** and turn off **Show (i) icons**, beside
+Hide serial numbers. It is on by default and stays set after a restart. The
+dotted-underline terms stay either way.
+
 ## A window that stays put
 
 Starting an export moves nothing in the top bar, at any window width: the

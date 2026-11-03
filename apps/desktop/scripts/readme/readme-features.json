@@ -17,6 +17,7 @@
   "AXHK2N": "protocol-triggers: don't ask again",
   "AXHK2P": "protocol-triggers: press read cable",
   "AXHK2Q": "live-meter: hide serial numbers",
+  "CW66T1": "live-meter: for a short note on what it means",
   "AXHK2R": "recorder-and-charts: auto-stop on low current",
   "AXHK2S": "recorder-and-charts: open a csv recording",
   "AXHK2T": "recorder-and-charts: measure between two cursors with the chart ruler",

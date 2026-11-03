@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { RulerReadoutItem } from "../ruler";
+  import Term from "./Term.svelte";
 
   /** The ruler's values between its cursors (FR AXHK2T) and "Reset ruler". The values
    * change on every step, so a screen reader hears them from a separate polite region
@@ -22,7 +23,10 @@
     <dl class="ruler-readout">
       {#each items as item (item.name)}
         <div>
-          <dt title={item.name}>{item.label}</dt>
+          <dt title={item.name}>
+            {#if item.label.startsWith("Δ")}<Term key="term.delta">{item.label}</Term
+              >{:else}{item.label}{/if}
+          </dt>
           <dd aria-label={item.name}>{item.text}</dd>
         </div>
       {/each}

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
+  import Term from "./Term.svelte";
   import type { MessageSop } from "../backend";
   import {
     DISCOVER_IDENTITY_CABLE,
@@ -76,7 +78,7 @@
 
 <div class="console-sections">
   <section class="card" aria-labelledby="pd-builder-title">
-    <h2 id="pd-builder-title">PD message builder</h2>
+    <h2 id="pd-builder-title"><Term key="term.pd">PD</Term> message builder</h2>
     <form
       class="builder"
       onsubmit={(e) => {
@@ -150,7 +152,7 @@
           <dt>Max current</dt>
           <dd>{Number((c.max_current_ma / 1000).toFixed(2))} A</dd>
         {/if}
-        <dt>EPR</dt>
+        <dt><Term key="term.epr">EPR</Term></dt>
         <dd>{c.epr_capable ? "EPR capable" : "Not EPR capable"}</dd>
       </dl>
     {:else}
@@ -159,7 +161,10 @@
   </section>
 
   <section class="card console" aria-labelledby="pd-console-title">
-    <h2 id="pd-console-title">Console</h2>
+    <div class="titled">
+      <h2 id="pd-console-title">Console</h2>
+      <InfoButton key="section.console" />
+    </div>
     <form class="line" onsubmit={(e) => void sendLine(e)}>
       <label for="pd-console-command">Command</label>
       <input

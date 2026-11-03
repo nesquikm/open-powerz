@@ -1,4 +1,6 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
+  import Term from "./Term.svelte";
   import { untrack } from "svelte";
   import type { PdDetails, PdField, PdRow } from "../backend";
   import type { PdCapture } from "../pdCapture.svelte";
@@ -485,6 +487,7 @@
 
 <div class="pd">
   <div class="toolbar" role="toolbar" aria-label="PD capture">
+    <InfoButton key="section.pd" />
     <button
       type="button"
       class="primary"
@@ -540,7 +543,7 @@
         <option value={name}>{name}</option>
       {/each}
     </select>
-    <label for="pd-sop">SOP</label>
+    <label for="pd-sop"><Term key="term.sop">SOP</Term></label>
     <select id="pd-sop" bind:value={sopChoice}>
       <option value="">All</option>
       {#each sopOptions as name (name)}

@@ -40,6 +40,22 @@ export function saveHideSerial(on: boolean, storage: ThemeStorage | undefined): 
   saveSwitch(HIDE_SERIAL_STORAGE_KEY, on, storage);
 }
 
+/** localStorage key of the Show (i) icons switch (FR CW66T1, AC .8). */
+export const SHOW_INFO_ICONS_STORAGE_KEY = "open-powerz.show-info-icons";
+
+/** On by default: only a saved `"false"` turns the (i) buttons off. */
+export function loadShowInfoIcons(storage: ThemeStorage | undefined): boolean {
+  try {
+    return storage?.getItem(SHOW_INFO_ICONS_STORAGE_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+export function saveShowInfoIcons(on: boolean, storage: ThemeStorage | undefined): void {
+  saveSwitch(SHOW_INFO_ICONS_STORAGE_KEY, on, storage);
+}
+
 /** The row limit of a recording unless the user sets another, like the backend's. */
 export const DEFAULT_MAX_ROWS = 10_000_000;
 

@@ -11,6 +11,7 @@
     type ChartStyle,
   } from "../chartStyle";
   import type { ResolvedTheme } from "../theme";
+  import InfoButton from "./InfoButton.svelte";
   import MarkOptions from "./MarkOptions.svelte";
 
   /**
@@ -48,31 +49,40 @@
 </script>
 
 <div class="chart-options" role="group" aria-label="Chart options">
-  <button
-    type="button"
-    class:primary={extras.ruler}
-    aria-pressed={extras.ruler}
-    title="Two cursors, T1 and T2, and the time, charge, energy and averages between them"
-    onclick={onRuler}>Ruler</button
-  >
+  <span class="extra-option">
+    <button
+      type="button"
+      class:primary={extras.ruler}
+      aria-pressed={extras.ruler}
+      title="Two cursors, T1 and T2, and the time, charge, energy and averages between them"
+      onclick={onRuler}>Ruler</button
+    >
+    <InfoButton key="section.ruler" />
+  </span>
   <MarkOptions marks={extras.marks} step={extras.markStep} onChange={onMarks} />
   {#if onEd}
-    <button
-      type="button"
-      class:primary={extras.ed}
-      aria-pressed={extras.ed}
-      title="The energy share: energy so far as a percentage of the session's"
-      onclick={onEd}>E.D.</button
-    >
+    <span class="extra-option">
+      <button
+        type="button"
+        class:primary={extras.ed}
+        aria-pressed={extras.ed}
+        title="The energy share: energy so far as a percentage of the session's"
+        onclick={onEd}>E.D.</button
+      >
+      <InfoButton key="section.ed" />
+    </span>
   {/if}
   {#if onSubChart}
-    <button
-      type="button"
-      class:primary={extras.subChart}
-      aria-pressed={extras.subChart}
-      title="A second plot under this one, with its own series, on the same time range"
-      onclick={onSubChart}>Sub-chart</button
-    >
+    <span class="extra-option">
+      <button
+        type="button"
+        class:primary={extras.subChart}
+        aria-pressed={extras.subChart}
+        title="A second plot under this one, with its own series, on the same time range"
+        onclick={onSubChart}>Sub-chart</button
+      >
+      <InfoButton key="section.subChart" />
+    </span>
   {/if}
   <button
     type="button"
@@ -201,7 +211,8 @@
   .series-look input[type="number"] {
     width: 4rem;
   }
-  .range-option {
+  .range-option,
+  .extra-option {
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;

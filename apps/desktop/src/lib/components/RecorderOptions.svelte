@@ -1,4 +1,5 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
   /**
    * The recorder's options (FR AXHK2R): the file's prefix and folder, auto-stop and the row limit.
    * They are saved here and hold for the next recording, so they lock while a meter
@@ -114,7 +115,10 @@
     tabindex="-1"
     use:focusOnMount
   >
-    <h2 id="recorder-options-title">Recorder options</h2>
+    <div class="titled">
+      <h2 id="recorder-options-title">Recorder options</h2>
+      <InfoButton key="section.recorder" />
+    </div>
     {#if locked}
       <p class="note">These hold for the next recording: stop every recording to change them.</p>
     {/if}

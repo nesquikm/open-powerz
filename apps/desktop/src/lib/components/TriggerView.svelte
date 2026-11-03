@@ -1,4 +1,6 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
+  import Term from "./Term.svelte";
   import { onMount } from "svelte";
   import type { TriggerLimits, TriggerOffer, TriggerProtocol } from "../backend";
   import {
@@ -160,6 +162,8 @@
     text: string | null;
     onvalue: (value: number) => void;
     request?: { label: string; onclick: () => void };
+    /** A PPS / AVS offer: its name at the start of `label` is drawn as terms. */
+    offer?: TriggerOffer;
   }
 
   const SUPPORT_TEXT: Record<string, string> = {
@@ -170,7 +174,11 @@
 </script>
 
 {#snippet slider(p: SliderProps)}
-  <label for={p.id}>{p.label}</label>
+  <label for={p.id}
+    >{#if p.offer}{@render rangeTerms(p.offer)}{p.label.slice(
+        rangeName(p.offer).length,
+      )}{:else}{p.label}{/if}</label
+  >
   <div class="range-row">
     <input
       id={p.id}
@@ -195,6 +203,15 @@
   </div>
 {/snippet}
 
+<!-- The name of a PPS / AVS offer, its abbreviations as terms (FR CW66T1). -->
+{#snippet rangeTerms(o: TriggerOffer)}
+  {#if o.kind === "pps"}<Term key="term.pps">PPS</Term>{:else if o.kind === "epr-avs"}<Term
+      key="term.epr">EPR</Term
+    >
+    <Term key="term.avs">AVS</Term>{:else}<Term key="term.spr">SPR</Term>
+    <Term key="term.avs">AVS</Term>{/if}
+{/snippet}
+
 {#snippet cableFact(id: string, label: string, value: string)}
   <dt id="trigger-cable-{id}">{label}</dt>
   <dd aria-labelledby="trigger-cable-{id}">{value}</dd>
@@ -202,6 +219,7 @@
 
 <div class="trigger">
   <div class="toolbar" role="toolbar" aria-label="Trigger">
+    <InfoButton key="section.trigger" />
     <button
       type="button"
       class="primary"
@@ -253,7 +271,9 @@
     {#if panel.detection}
       <dl class="facts">
         {#each detectionChecks(panel.detection) as check (check.label)}
-          <dt>{check.label}</dt>
+          <dt>
+            {#if check.label === "BC1.2"}<Term key="term.bc12">BC1.2</Term>{:else}{check.label}{/if}
+          </dt>
           <dd>{check.text}</dd>
         {/each}
       </dl>
@@ -282,7 +302,13 @@
   <div class="sections">
     {#each panel.sections as s (s.protocol)}
       <section class="card" aria-labelledby="trigger-{s.protocol}-title">
-        <h2 id="trigger-{s.protocol}-title">{s.title}</h2>
+        <h2 id="trigger-{s.protocol}-title">
+          {#if s.protocol === "qc"}<Term key="term.qc">{s.title}</Term
+            >{:else if s.protocol === "ufcs"}<Term key="term.ufcs">{s.title}</Term
+            >{:else if s.protocol === "afc" || s.protocol === "fcp" || s.protocol === "scp"}<Term
+              key="term.afcFcpScp">{s.title}</Term
+            >{:else}{s.title}{/if}
+        </h2>
         {#if s.state === "pending"}
           <p class="muted">Not listed yet.</p>
         {:else if s.state === "not-supported"}
@@ -312,6 +338,7 @@
               {@render slider({
                 id: `trigger-range-${o.position}`,
                 label: `${rangeName(o)} #${o.position}, ${volts(o.min_voltage_mv)}–${volts(o.max_voltage_mv)}`,
+                offer: o,
                 min: o.min_voltage_mv,
                 max: o.max_voltage_mv,
                 step: rangeStep(o),
@@ -476,7 +503,10 @@
   </section>
 
   <section class="card" aria-labelledby="trigger-cable-title">
-    <h2 id="trigger-cable-title">Cable</h2>
+    <div class="titled">
+      <h2 id="trigger-cable-title">Cable</h2>
+      <InfoButton key="section.cable" />
+    </div>
     <div class="offers">
       <button
         type="button"
@@ -516,9 +546,10 @@
         <HintText hint={panel.cableError.hint} />
       </p>
     {:else if panel.cableNoAnswer}
+      <!-- prettier-ignore -->
       <p>
-        No answer. The cable may have no e-marker. A cable answers only the port that powers it
-        (VCONN). In this wiring the meter may not be the VCONN source.
+        No answer. The cable may have no <Term key="term.emarker">e-marker</Term>. A cable answers only the port that powers it
+        (<Term key="term.vconn">VCONN</Term>). In this wiring the meter may not be the VCONN source.
       </p>
     {:else}
       <p class="muted">Not read yet.</p>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { MARK_STEPS, type MarkKind } from "../chartExtras";
+  import InfoButton from "./InfoButton.svelte";
 
   /** The "Segment marks" and "Mark step" selects of a Chart options group (AC-AXHK2T.4). */
   let {
@@ -31,6 +32,7 @@
       <option value={k}>{k}</option>
     {/each}
   </select>
+  <InfoButton key="section.segmentMarks" />
 </span>
 <span class="mark-option">
   <label for="{uid}-step">Mark step</label>

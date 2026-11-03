@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Term from "./Term.svelte";
+  import InfoButton from "./InfoButton.svelte";
   import uPlot from "uplot";
   import "uplot/dist/uPlot.min.css";
   import { getContext, untrack } from "svelte";
@@ -1686,6 +1688,7 @@
 
 <div class="chart-wrap">
   <div class="toolbar">
+    <InfoButton key="section.chart" />
     <div class="windows" role="group" aria-label="Live window">
       {#each LIVE_WINDOWS as w (w.id)}
         <button
@@ -1756,7 +1759,7 @@
   {#if edOn}
     <p class="ed-note">
       <span class="ed-swatch" style:border-color={edColor(theme)}></span>
-      {ED_DEFINITION}
+      <Term key="term.ed">E.D.</Term>{ED_DEFINITION.slice("E.D.".length)}
     </p>
   {/if}
   <SeriesLegend {theme} {visibility} onToggle={toggle} style={chartStyle} />

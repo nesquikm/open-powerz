@@ -29,6 +29,7 @@ check the download and open the app past the macOS and Windows warnings.
 - Pick a meter or the demo device; the app reconnects on its own after an unplug or a page reload and marks the gap ([explore a session](docs/how-to/explore-a-session.md#when-the-meter-is-unplugged-and-plugged-back-in))
 - Use it from the keyboard and with a screen reader ([keyboard and screen readers](docs/how-to/explore-a-session.md#keyboard-and-screen-readers))
 - Hide serial numbers and UIDs for screenshots and screen shares, with the switch in About or `--hide-serial` in the CLI ([hide serial numbers](docs/how-to/explore-a-session.md#hide-serial-numbers))
+- Press an (i) button beside a section title, or a dotted-underline term such as VBUS or PPS, for a short note on what it means; turn the (i) buttons off in About ([info popovers](docs/how-to/explore-a-session.md#info-popovers-for-sections-and-terms))
 
 ### Recorder and charts
 

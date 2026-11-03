@@ -1,4 +1,5 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
   import {
     formatRecordDuration,
     recordRows,
@@ -96,7 +97,10 @@
 {:else}
   <section class="records" aria-label="Offline records">
     <div class="head">
-      <h2>Offline records</h2>
+      <div class="titled">
+        <h2>Offline records</h2>
+        <InfoButton key="section.records" />
+      </div>
       <div class="actions">
         {#if panel.progress}
           <span class="progress" role="status">
