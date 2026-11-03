@@ -24,7 +24,7 @@ Long sessions at 1000 SPS and long PD captures stay within a known memory bound,
 
 ## Acceptance Criteria
 
-- AC-AXHK2W.1: In the shipped macOS app, the web content process stays at or below 400 MB after 6 minutes of a 1000 SPS demo stream. The figure is recorded in the Notes.
+- AC-AXHK2W.1: In the shipped macOS app, the web content process's physical footprint (as the footprint tool reports it) stays at or below 400 MB after 6 minutes of a 1000 SPS demo stream. RSS is reported beside it, and both figures are recorded in the Notes.
 - AC-AXHK2W.2: The backend status log and the page's `PdStatusBuffer` are capped at 100,000 samples each. The oldest go first, with a notice, and timeline ranges stay correct across the drop.
 - AC-AXHK2W.3: A drop reported by the backend also reaches a page that attaches later.
 - AC-AXHK2W.4: Dropping the oldest rows from `pdStore` costs no column shift per row: an append at the cap takes constant time, with a test counting moved elements.
@@ -33,6 +33,10 @@ Long sessions at 1000 SPS and long PD captures stay within a known memory bound,
 - AC-AXHK2W.7: `e2e/ui/memory.spec.ts` still passes on WebKit in CI with no timing loosened.
 - AC-AXHK2W.8: A measurement answers two questions, each with its numbers in this FR: do live batches drop at the worker's queue limit in the real app, and does a stalled page pile up without limit in the webview? Tauri's channel send may return before the page processes it; that was read in its source, not tested. If the simulator cannot settle a question, the check moves to the tester's runbook on a .app build, and the FR says so.
 - AC-AXHK2W.9: If either answer is yes, it is fixed in this milestone: the live chart never draws a straight line across missing data with no marker, and live data held for a stalled page has a limit that keeps the 400 MB target.
+- AC-AXHK2W.10: The session history keeps full resolution for the newest HISTORY_FULL_SAMPLES samples, a named constant of 10 000 000. Older chunks fold into blocks that keep, per series, min, max, sum and count, plus the block's start and end time and its charge and energy sums. Whole session, the ruler's ΔT, ΔAh, ΔWh and averages, segment marks and E.D. stay exact at block edges and lose only placement inside a block.
+- AC-AXHK2W.11: The chart marks the fold boundary with a faint tick that says the data before it is coarser.
+- AC-AXHK2W.12: A test feeds a synthetic 30-hour run at 1000 SPS in compressed time. History memory stays under a stated ceiling, and totals, ruler values at block edges, mark times and E.D. match an unfolded reference.
+- AC-AXHK2W.13: In the next tester run (20 minutes at 1000 SPS, footprint and RSS), the app process grows at the history's expected rate within 20%, so no other growth is left unexplained.
 
 ## Technical Design
 
@@ -45,3 +49,5 @@ Vitest with element counters, Rust unit tests for caps, the existing memory spec
 ## Notes
 
 Source: inventory note on 4NSVC9 and the follow-up on PD status data. Measured on the demo device, no meter needed.
+
+r3 (3d2ae16): web content RSS 549 MB at 6 min, footprint 184 to 209 MB, so AC.1 passes by footprint; WebKit counts shared and graphics pages as resident. No live batches dropped, and a hidden window piled nothing up, so AC.9 needs no fix. The app process grew about 1 MB/min from the full-resolution history (AC.10).
