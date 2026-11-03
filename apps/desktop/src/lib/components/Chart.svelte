@@ -113,7 +113,8 @@
     type MarkKind,
   } from "../chartExtras";
   import { chartExtras } from "../chartExtrasStore.svelte";
-  import { SharedInsets } from "../plotInsets";
+  import { SharedInsets, hasPlotArea } from "../plotInsets";
+  import { capStride, drawLoopCap } from "../drawCap";
   import { RunProgressFeed } from "../runProgressFeed";
   import { RulerState } from "../rulerState.svelte";
   import ChartOptions from "./ChartOptions.svelte";
@@ -177,10 +178,15 @@
     const min = u.scales.x?.min;
     const max = u.scales.x?.max;
     const markers =
-      pd === null || min === undefined || max === undefined || widthCss <= 0
+      pd === null || min === undefined || max === undefined || widthCss <= 0 || !laidOut(u)
         ? []
         : markersInRange(pd.store, min, max);
-    const clusters: PdMarkerCluster[] = clusterMarkers(markers, (ms) => u.valToPos(ms, "x"));
+    // At most a plot's worth of clusters per frame (AC-C6VR9K.5).
+    const clusters: PdMarkerCluster[] = clusterMarkers(
+      markers,
+      (ms) => u.valToPos(ms, "x"),
+      drawLoopCap(w, h),
+    );
     pdClusters = clusters;
     const colors = markerColors(theme);
     const palette = THEME_COLORS[theme];
@@ -246,7 +252,11 @@
       // The buffer's own columns, read between the bounds: nothing is copied per draw.
       const cols = pd.status.columns;
       const ratio = globalThis.devicePixelRatio || 1;
-      const stride = Math.max(1, Math.ceil((hi - lo) / Math.max(1, 2 * u.bbox.width)));
+      // About two dots per pixel column, and never past the draw cap (AC-C6VR9K.5).
+      const stride = Math.max(
+        Math.ceil((hi - lo) / Math.max(1, 2 * u.bbox.width)) || 1,
+        capStride(hi - lo, drawLoopCap(u.bbox.width, u.bbox.height)),
+      );
       const size = PD_STATUS_DOT_PX * ratio;
       const ctx = u.ctx;
       ctx.save();
@@ -870,9 +880,22 @@
     }
   }
 
+  /** True while the host is hidden (another tab shows) or not laid out: uPlot has
+   * sized the plot 1 × 1 and a draw would only lay points out far off it (FR C6VR9K).
+   * The resize observer draws again once the host has its real size. */
+  function hostHidden(): boolean {
+    return host === undefined || host.clientWidth === 0 || host.clientHeight === 0;
+  }
+
+  /** True once uPlot has laid the plot out. Just after the host shows again it is still
+   * 1 × 1 until the resize observer's frame, which draws again (FR C6VR9K). */
+  function laidOut(u: uPlot): boolean {
+    return hasPlotArea(u.bbox);
+  }
+
   function draw(): void {
     const u = plot;
-    if (!u) return;
+    if (!u || hostHidden() || !laidOut(u)) return;
     refreshSession();
     const range = currentRange();
     const frame = frameFor(range);

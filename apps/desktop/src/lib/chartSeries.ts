@@ -1,6 +1,8 @@
 import uPlot from "uplot";
 import type { LiveWindowId } from "./chartData";
 import { forEachDashPiece } from "./dashPath";
+import { drawLoopCap } from "./drawCap";
+import { hasPlotArea } from "./plotInsets";
 import { DASH, MINUS, formatFixed } from "./format";
 import {
   DEFAULT_CHART_STYLE,
@@ -443,6 +445,9 @@ export function dashedPaths(
     const yData = u.data[seriesIdx];
     const scale = u.series[seriesIdx]?.scale ?? "y";
     if (!ctx || !xData || !yData || idx1 < idx0 || deviceWidth <= 0 || !color) return null;
+    // A plot with no area (hidden at 1 × 1, or padded past its size) has nothing to show,
+    // and its points land far off it (FR C6VR9K).
+    if (!hasPlotArea(u.bbox)) return null;
     const count = idx1 - idx0 + 1;
     // Reused from frame to frame: a live chart makes no new arrays per draw.
     const xs = SCRATCH_X;
@@ -462,12 +467,11 @@ export function dashedPaths(
     const offset = (deviceWidth % 2) / 2;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(
-      left - deviceWidth / 2,
-      top - deviceWidth / 2,
-      width + deviceWidth,
-      height + deviceWidth,
-    );
+    const clipLeft = left - deviceWidth / 2;
+    const clipTop = top - deviceWidth / 2;
+    const clipWidth = width + deviceWidth;
+    const clipHeight = height + deviceWidth;
+    ctx.rect(clipLeft, clipTop, clipWidth, clipHeight);
     ctx.clip();
     ctx.translate(offset, offset);
     ctx.strokeStyle = color;
@@ -478,13 +482,27 @@ export function dashedPaths(
     ctx.beginPath();
     let ex = NaN;
     let ey = NaN;
-    forEachDashPiece(xs, ys, devicePattern, (x0, y0, x1, y1) => {
-      // A dash running on across a vertex continues the same subpath.
-      if (x0 !== ex || y0 !== ey) ctx.moveTo(x0, y0);
-      ctx.lineTo(x1, y1);
-      ex = x1;
-      ey = y1;
-    });
+    forEachDashPiece(
+      xs,
+      ys,
+      devicePattern,
+      (x0, y0, x1, y1) => {
+        // A dash running on across a vertex continues the same subpath.
+        if (x0 !== ex || y0 !== ey) ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ex = x1;
+        ey = y1;
+      },
+      // The box the canvas is clipped to: points far off it cost nothing (AC-C6VR9K.4).
+      {
+        left: clipLeft,
+        top: clipTop,
+        right: clipLeft + clipWidth,
+        bottom: clipTop + clipHeight,
+      },
+      // No layout fault makes one frame stroke without end (AC-C6VR9K.5).
+      drawLoopCap(width, height),
+    );
     ctx.stroke();
     ctx.restore();
     return null;

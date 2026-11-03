@@ -31,6 +31,7 @@
 <script lang="ts">
   import { envelopeRange } from "../chartSeries";
   import { StripEnvelope, bridgeColumns } from "../stripEnvelope";
+  import { drawLoopCap } from "../drawCap";
   import { RateGate } from "../chartView";
   import {
     dragOverview,
@@ -269,7 +270,9 @@
       }
     }
     // Sparse samples read as a line; marked gaps stay open (AC-SX3EDV.6).
-    for (let s = 0; s < keys.length; s++) bridgeColumns(lo[s]!, hi[s]!, columnBlocked);
+    // No layout fault makes one frame walk without end (AC-C6VR9K.5).
+    const cap = drawLoopCap(width, height);
+    for (let s = 0; s < keys.length; s++) bridgeColumns(lo[s]!, hi[s]!, columnBlocked, cap);
     const palette = THEME_COLORS[theme];
     const colors = [palette.chart.voltage, palette.chart.current];
     keys.forEach((k, s) => {
@@ -287,7 +290,7 @@
       ctx.save();
       ctx.globalAlpha = 0.75;
       ctx.fillStyle = colors[s] ?? palette.text;
-      for (let c = 0; c < cols; c++) {
+      for (let c = 0; c < Math.min(cols, cap); c++) {
         const a = lo[s]![c]!;
         const b = hi[s]![c]!;
         if (!(b >= a)) continue;

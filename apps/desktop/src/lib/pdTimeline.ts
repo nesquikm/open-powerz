@@ -131,10 +131,12 @@ export interface PdMarkerCluster {
   markers: PdMarker[];
 }
 
-/** Merges markers closer than {@link PD_MARKER_MERGE_PX} (by `toPx`) into clusters. */
+/** Merges markers closer than {@link PD_MARKER_MERGE_PX} (by `toPx`) into clusters, at
+ * most `cap` of them: it stops at the marker that would start one more (AC-C6VR9K.5). */
 export function clusterMarkers(
   markers: readonly PdMarker[],
   toPx: (ms: number) => number,
+  cap = Infinity,
 ): PdMarkerCluster[] {
   const out: PdMarkerCluster[] = [];
   let current: PdMarkerCluster | null = null;
@@ -151,6 +153,7 @@ export function clusterMarkers(
       current.markers.push(m);
       current.count++;
     } else {
+      if (out.length >= cap) break;
       current = { px, count: 1, markers: [m] };
       out.push(current);
     }

@@ -16,8 +16,10 @@ export function bridgeColumns(
   lo: Float64Array,
   hi: Float64Array,
   blocked: (col: number) => boolean,
+  cap = Infinity,
 ): void {
-  const cols = Math.min(lo.length, hi.length);
+  // At most `cap` columns are visited; those past it are left as they are (AC-C6VR9K.5).
+  const cols = Math.min(lo.length, hi.length, cap);
   /** The last filled column the line can continue from, or -1. */
   let p = -1;
   for (let c = 0; c < cols; c++) {

@@ -19,8 +19,19 @@ interface Member {
   relayout: () => void;
 }
 
-/** A plot's laid-out insets, CSS px: its plot area's distance from its left and right. */
+/** True when a plot has a positive plot area: uPlot sizes a hidden plot 1 × 1, and one
+ * smaller than its axes ends up with none (FR C6VR9K). NaN counts as none. */
+export function hasPlotArea(bbox: Pick<uPlot.BBox, "width" | "height">): boolean {
+  return bbox.width > 0 && bbox.height > 0;
+}
+
+/** A plot's laid-out insets, CSS px: its plot area's distance from its left and right;
+ * null while it is not laid out. A hidden plot (uPlot sizes it 1 × 1) or one smaller
+ * than its axes has no positive plot area, and its `over` keeps the last valid style, as
+ * the browser drops a negative size (FR C6VR9K). */
 function insetsOf(u: uPlot): [number, number] | null {
+  const bb = u.bbox as uPlot.BBox | undefined;
+  if (bb !== undefined && !hasPlotArea(bb)) return null;
   const left = parseFloat(u.over.style.left);
   const width = parseFloat(u.over.style.width);
   if (!Number.isFinite(left) || !Number.isFinite(width) || !(u.width > 0)) return null;
@@ -61,7 +72,12 @@ export class SharedInsets {
     const target: [number, number] = [0, 0];
     for (const m of this.#members.values()) {
       const at = m.plot === null ? null : insetsOf(m.plot);
-      if (at === null) continue;
+      if (at === null) {
+        // Not laid out: no part in the alignment, and no padding to push it further off.
+        // uPlot reads the cleared padding on its next layout.
+        m.extra = [0, 0];
+        continue;
+      }
       const own: [number, number] = [at[0] - m.extra[0], at[1] - m.extra[1]];
       natural.set(m, own);
       target[0] = Math.max(target[0], own[0]);
