@@ -86,7 +86,7 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: glossary completeness test, WebKit keyboard and 375 px e2e, visual set
 - [ ] Window opens off screen and some layout rough edges — EWQ6FQ
   verify: frame-fit unit tests, WebKit layout specs at 375/900/1280 px, flows and keyboard specs, tester runbook step
-- [ ] A click on the overview strip right after connect is ignored — B5XBTA
+- [x] A click on the overview strip right after connect is ignored — B5XBTA
   verify: Vitest click-mapping test, WebKit strip click right after connect, timeline test 20/20
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
