@@ -45,6 +45,7 @@ codename: Fine Print
 | [SX1VTC](../frs/SX1VTC.md) | Dashed series crawl while the chart scrolls | n/a |
 | [CW66T1](../frs/CW66T1.md) | Info popovers for features and abbreviations | n/a |
 | [EWQ6FQ](../frs/EWQ6FQ.md) | Window opens off screen and some layout rough edges | n/a |
+| [B5XBTA](../frs/B5XBTA.md) | A click on the overview strip right after connect is ignored | n/a |
 
 Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (added 2026-11-03 at the user's request) is built while the AXHK2W hardware run waits, before the final gate.
 
@@ -85,6 +86,8 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: glossary completeness test, WebKit keyboard and 375 px e2e, visual set
 - [ ] Window opens off screen and some layout rough edges — EWQ6FQ
   verify: frame-fit unit tests, WebKit layout specs at 375/900/1280 px, flows and keyboard specs, tester runbook step
+- [ ] A click on the overview strip right after connect is ignored — B5XBTA
+  verify: Vitest click-mapping test, WebKit strip click right after connect, timeline test 20/20
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
 - Needs hardware we lack: rotation bits and bit 7 of 0x60, which total the record screen shows, QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS coverage, the EcoFlow no-reply question, the Apple battery curve, Windows `\\?\` paths, the root cause of the rejected stop after a queue overflow.
