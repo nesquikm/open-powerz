@@ -19,6 +19,10 @@ pub const ROW_BATCH_MS: u64 = 17;
 /// keeps as many rows (`PD_MAX_ROWS`).
 pub const MAX_RECORDS: usize = 100_000;
 
+/// Status blocks a capture keeps by default (FR AXHK2W, AC .2), as many as
+/// records; the page's status buffer keeps as many samples.
+pub const MAX_STATUS_SAMPLES: usize = 100_000;
+
 /// Kind of a table row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -157,6 +161,16 @@ impl Default for RecordLimit {
     }
 }
 
+/// How many status blocks a capture keeps.
+#[derive(Debug, Clone, Copy)]
+struct StatusLimit(usize);
+
+impl Default for StatusLimit {
+    fn default() -> StatusLimit {
+        StatusLimit(MAX_STATUS_SAMPLES)
+    }
+}
+
 /// The capture of one PD view: the decoder context, the last `limit` records
 /// and the rows waiting to go out.
 #[derive(Debug, Default)]
@@ -184,9 +198,17 @@ pub struct PdCapture {
     /// times land on the samples they belong to after a reconnect or a
     /// device clock jump.
     session_offset_ms: i64,
-    /// Every status block and record kept so far, in capture order, as a
-    /// pdcap file saves them (FR TGE83E).
-    log: VecDeque<pdcap::Entry>,
+    /// Every record kept so far, with its place in capture order (FR
+    /// TGE83E); merged with `status_log` into what a pdcap file saves.
+    record_log: VecDeque<(u64, pdcap::Entry)>,
+    /// The last `status_limit` status blocks, with their place in capture
+    /// order (FR AXHK2W, AC .2).
+    status_log: VecDeque<(u64, pdcap::Entry)>,
+    /// Place in capture order of the next logged entry.
+    log_seq: u64,
+    status_limit: StatusLimit,
+    /// Status blocks dropped past the limit since the last clear.
+    status_dropped: u64,
     /// Session time of the latest status sample pushed (0 if none).
     last_status_ms: u64,
 }
@@ -344,6 +366,18 @@ impl PdCapture {
         }
     }
 
+    /// This capture, keeping at most `max_status` status blocks.
+    pub fn with_status_limit(mut self, max_status: usize) -> PdCapture {
+        self.status_limit = StatusLimit(max_status);
+        self.trim_status();
+        self
+    }
+
+    /// Status blocks dropped past the limit since the last clear.
+    pub fn status_dropped(&self) -> u64 {
+        self.status_dropped
+    }
+
     /// How many records this capture keeps.
     pub fn limit(&self) -> usize {
         self.limit.0
@@ -367,11 +401,48 @@ impl PdCapture {
             self.entries.pop_front();
             self.base += 1;
             self.dropped += 1;
-            while let Some(entry) = self.log.pop_front() {
-                if matches!(entry, pdcap::Entry::Record { .. }) {
-                    break;
-                }
+            let Some((seq, _)) = self.record_log.pop_front() else {
+                continue;
+            };
+            // Status blocks logged before the dropped record go with it and
+            // count as dropped too (AC-AXHK2W.2), so the backend's count
+            // never says less than it lost.
+            while self.status_log.front().is_some_and(|(s, _)| *s < seq) {
+                self.status_log.pop_front();
+                self.status_dropped += 1;
             }
+        }
+    }
+
+    /// Drop the oldest status blocks past the status limit and count them;
+    /// records stay. Runs as a batch goes out, so the count a batch carries
+    /// covers exactly the blocks sent so far.
+    fn trim_status(&mut self) {
+        while self.status_log.len() > self.status_limit.0 {
+            self.status_log.pop_front();
+            self.status_dropped += 1;
+        }
+    }
+
+    /// `batch`, after trimming the status log if it goes out (see
+    /// [`Self::trim_status`]).
+    fn trimmed_if_sent(
+        &mut self,
+        batch: Option<Vec<PdStatusSample>>,
+    ) -> Option<Vec<PdStatusSample>> {
+        if batch.is_some() {
+            self.trim_status();
+        }
+        batch
+    }
+
+    /// Log `entry` as the next one in capture order.
+    fn log_entry(&mut self, entry: pdcap::Entry) {
+        let seq = self.log_seq;
+        self.log_seq += 1;
+        match entry {
+            pdcap::Entry::Status { .. } => self.status_log.push_back((seq, entry)),
+            pdcap::Entry::Record { .. } => self.record_log.push_back((seq, entry)),
         }
     }
 
@@ -403,7 +474,7 @@ impl PdCapture {
             self.status_out.push(s);
         }
         if let (Some(raw), Some(s)) = (raw_status, status) {
-            self.log.push_back(pdcap::Entry::Status {
+            self.log_entry(pdcap::Entry::Status {
                 session_ms: s.session_ms,
                 status: raw,
             });
@@ -421,7 +492,7 @@ impl PdCapture {
                 offset,
             );
             self.last_elapsed_ms = self.last_elapsed_ms.max(elapsed_ms);
-            self.log.push_back(pdcap::Entry::Record {
+            self.log_entry(pdcap::Entry::Record {
                 session_ms,
                 elapsed_ms,
                 record: r.record.clone(),
@@ -521,7 +592,8 @@ impl PdCapture {
     /// The status blocks waiting to go out, when a batch is due at `now_ms`
     /// (at most 60 a second, like the rows).
     pub fn take_status_due(&mut self, now_ms: u64) -> Option<Vec<PdStatusSample>> {
-        self.status_out.take_due(now_ms)
+        let due = self.status_out.take_due(now_ms);
+        self.trimmed_if_sent(due)
     }
 
     /// When the next status batch can go out, if blocks are waiting.
@@ -531,7 +603,8 @@ impl PdCapture {
 
     /// Every waiting status block, now.
     pub fn take_all_status(&mut self) -> Option<Vec<PdStatusSample>> {
-        self.status_out.take_all()
+        let all = self.status_out.take_all();
+        self.trimmed_if_sent(all)
     }
 
     /// The details of record `index`.
@@ -553,7 +626,7 @@ impl PdCapture {
 
     /// The newest cable Discover Identity ACK the capture keeps (FR AXHK2P).
     pub fn latest_cable(&self) -> Option<CableView> {
-        self.log.iter().rev().find_map(|entry| {
+        self.record_log.iter().rev().find_map(|(_, entry)| {
             let pdcap::Entry::Record { record, .. } = entry else {
                 return None;
             };
@@ -568,7 +641,23 @@ impl PdCapture {
     /// session time: what a pdcap file saves. Rows already sent to the UI
     /// are included; nothing waiting to go out is taken.
     pub fn to_pdcap(&self) -> Vec<pdcap::Entry> {
-        self.log.iter().cloned().collect()
+        let mut out = Vec::with_capacity(self.record_log.len() + self.status_log.len());
+        let (mut records, mut status) = (
+            self.record_log.iter().peekable(),
+            self.status_log.iter().peekable(),
+        );
+        loop {
+            let next = match (records.peek(), status.peek()) {
+                (Some(r), Some(s)) if r.0 < s.0 => records.next(),
+                (Some(_), Some(_)) | (None, Some(_)) => status.next(),
+                (Some(_), None) => records.next(),
+                (None, None) => break,
+            };
+            if let Some((_, e)) = next {
+                out.push(e.clone());
+            }
+        }
+        out
     }
 
     /// A capture rebuilt from the entries of a pdcap file: every row and
@@ -598,8 +687,11 @@ impl PdCapture {
                 }
             }
         }
-        pd.log = entries.iter().cloned().collect();
+        for e in entries {
+            pd.log_entry(e.clone());
+        }
         pd.trim();
+        pd.trim_status();
         pd
     }
 
@@ -615,7 +707,7 @@ impl PdCapture {
         let elapsed_ms = self.last_elapsed_ms.max(session_ms);
         self.last_elapsed_ms = elapsed_ms;
         self.push_row(&record, elapsed_ms, session_ms, vbus_v, ibus_a);
-        self.log.push_back(pdcap::Entry::Record {
+        self.log_entry(pdcap::Entry::Record {
             session_ms,
             elapsed_ms,
             record,
@@ -646,7 +738,9 @@ impl PdCapture {
         self.base += self.entries.len() as u64;
         self.entries.clear();
         self.dropped = 0;
-        self.log.clear();
+        self.record_log.clear();
+        self.status_log.clear();
+        self.status_dropped = 0;
         self.rows_out.clear();
         self.status_out.clear();
         self.base

@@ -175,6 +175,9 @@ pub struct AttachedSession {
     pub recording: Option<RecordingSnapshot>,
     /// The PD capture runs (AC-AXHK2K.7).
     pub pd_capturing: bool,
+    /// Status blocks the PD capture dropped past its limit since the last
+    /// clear (FR AXHK2W, AC .3).
+    pub pd_status_dropped: u64,
 }
 
 /// Opens the pipe for a picked device.
@@ -822,6 +825,7 @@ impl Attacher {
         // Read after the swap: a capture that starts or stops meanwhile also
         // reaches the new page as an event, which it applies after this answer.
         let pd_capturing = self.control.pd_capturing().unwrap_or(false);
+        let pd_status_dropped = self.control.pd_status_dropped().unwrap_or(0);
         Some(AttachedSession {
             device_id,
             model: info.model,
@@ -837,6 +841,7 @@ impl Attacher {
                 paused,
             }),
             pd_capturing,
+            pd_status_dropped,
         })
     }
 }

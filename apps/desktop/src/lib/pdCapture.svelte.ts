@@ -5,7 +5,7 @@
  * are not, why.
  */
 
-import type { BackendEvent, PdRow, PdStatusSample } from "./backend";
+import type { AttachedSession, BackendEvent, PdRow, PdStatusSample } from "./backend";
 import { PdStore } from "./pdStore";
 import { PdStatusBuffer } from "./pdTimeline";
 
@@ -117,7 +117,12 @@ export class PdCapture {
         const floor = this.#statusFloor;
         const samples =
           floor > 0 ? event.data.samples.filter((s) => s.session_ms > floor) : event.data.samples;
-        if (samples.length === 0) break;
+        const before = this.status.dropped;
+        if (event.data.dropped !== undefined) this.status.noteBackendDropped(event.data.dropped);
+        if (samples.length === 0) {
+          if (this.status.dropped !== before) this.statusVersion++;
+          break;
+        }
         this.status.append(samples);
         this.statusVersion++;
         break;
@@ -144,6 +149,15 @@ export class PdCapture {
       default:
         break;
     }
+  }
+
+  /** Applies the attach snapshot of a page that picks up a running session: whether
+   * the capture runs, and the status samples the backend dropped (AC-AXHK2W.3). */
+  adopt(snapshot: AttachedSession): void {
+    this.capturing = snapshot.pd_capturing === true;
+    if (this.opened) return;
+    this.status.noteBackendDropped(snapshot.pd_status_dropped ?? 0);
+    this.statusVersion++;
   }
 
   /** Shows a capture opened from a file in place of the live one: its `rows` (numbered

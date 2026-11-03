@@ -523,6 +523,38 @@ export function presetRange(
   return minSpanRange(dataMin, dataMax, MIN_AXIS_SPAN[axis]);
 }
 
+/** Whether two tick-split arrays hold the same values in the same order. */
+function sameSplits(a: readonly number[], b: readonly number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) return false;
+  return true;
+}
+
+/**
+ * An axis `values` callback that keeps the labels of the last tick set (AC-AXHK2W.5):
+ * a redraw with the same splits, step and `origin()` gets the same label array back,
+ * so a steady stream makes no new labels per frame.
+ */
+function labelCache(
+  make: (splits: number[], incr: number, origin: number) => string[],
+  origin: () => number = () => 0,
+): (u: uPlot, splits: number[], axis: number, space: number, incr: number) => string[] {
+  let lastSplits: number[] = [];
+  let lastIncr = NaN;
+  let lastOrigin = NaN;
+  let labels: string[] | null = null;
+  return (_u, splits, _axis, _space, incr) => {
+    const o = origin();
+    if (labels !== null && incr === lastIncr && o === lastOrigin && sameSplits(splits, lastSplits))
+      return labels;
+    lastSplits = splits.slice();
+    lastIncr = incr;
+    lastOrigin = o;
+    labels = make(splits, incr, o);
+    return labels;
+  };
+}
+
 /** uPlot options: x = ms since the session start (labelled in seconds), then one series per CHART_SERIES entry on its axis scale. */
 export function chartOptions({
   theme,
@@ -568,13 +600,14 @@ export function chartOptions({
       stroke: p.muted,
       incrs: [...TIME_INCRS],
       splits: (_u, _axis, min, max, incr) => timeSplits(min, max, incr, originMs()),
-      values: (_u, splits, _axis, _space, incr) => {
-        const origin = originMs();
-        return timeTicks(
-          splits.map((v) => v - origin),
-          incr,
-        );
-      },
+      values: labelCache(
+        (splits, incr, origin) =>
+          timeTicks(
+            splits.map((v) => v - origin),
+            incr,
+          ),
+        originMs,
+      ),
     },
     ...CHART_AXES.map((a) => ({
       scale: a.id,
@@ -583,8 +616,7 @@ export function chartOptions({
       label: a.title,
       // A little air between the rotated title and its tick labels.
       labelGap: 6,
-      values: (_u: uPlot, splits: number[], _axis: number, _space: number, incr: number) =>
-        axisTicks(splits, incr),
+      values: labelCache((splits, incr) => axisTicks(splits, incr)),
       size: (u: uPlot, values: string[] | null, axisIdx: number, cycleNum: number) =>
         axisSize(u, values, axisIdx, cycleNum),
       stroke: p.muted,

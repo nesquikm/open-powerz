@@ -13,6 +13,7 @@
     timeLabel,
     visibleRange,
   } from "../pdTable";
+  import { pdStatusDroppedText } from "../pdTimeline";
 
   /**
    * The PD analyzer view (FR TGE83C): Start and Stop for the connected meter and the
@@ -96,6 +97,13 @@
   const droppedNotice = $derived.by(() => {
     void pd.version;
     return pdDroppedText(pd.store.dropped);
+  });
+
+  /** Says that a long capture lost its oldest status samples, if it did: the larger of
+   * the page's own count and the backend's (AC-AXHK2W.2, AC-AXHK2W.3). */
+  const statusDroppedNotice = $derived.by(() => {
+    void pd.statusVersion;
+    return pdStatusDroppedText(pd.status.dropped);
   });
 
   /** Store positions the filters let through. */
@@ -541,6 +549,9 @@
     </select>
     {#if droppedNotice}
       <p class="reason">{droppedNotice}</p>
+    {/if}
+    {#if statusDroppedNotice}
+      <p class="reason">{statusDroppedNotice}</p>
     {/if}
   </div>
 

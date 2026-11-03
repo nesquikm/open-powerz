@@ -216,19 +216,56 @@ export interface PdStatusColumns {
   cc2: number[];
 }
 
-/** The PD status blocks of a session, for plotting (FR TGE83D, AC .4). */
+/** Status samples a {@link PdStatusBuffer} keeps by default (FR AXHK2W, AC .2): as
+ * many as the backend's status log and the PD table's rows. */
+export const PD_STATUS_MAX_SAMPLES = 100_000;
+
+/** The notice for `dropped` oldest status samples gone past the cap, or null when
+ * nothing was dropped (FR AXHK2W, AC .2). */
+export function pdStatusDroppedText(dropped: number): string | null {
+  if (dropped <= 0) return null;
+  const n = dropped.toLocaleString("en-US");
+  const cap = PD_STATUS_MAX_SAMPLES.toLocaleString("en-US");
+  const what = dropped === 1 ? "status sample was" : "status samples were";
+  return `The oldest ${n} ${what} dropped: the chart keeps the newest ${cap}.`;
+}
+
+/** The PD status blocks of a session, for plotting (FR TGE83D, AC .4), at most
+ * `maxSamples` of them: past it the oldest go first and are counted (FR AXHK2W, AC .2). */
 export class PdStatusBuffer {
   #t: number[] = [];
   #vbus: number[] = [];
   #ibus: number[] = [];
   #cc1: number[] = [];
   #cc2: number[] = [];
+  /** Index of the oldest kept sample in the columns: those before it were dropped and
+   * are compacted away now and then, not on every append. */
+  #start = 0;
+  #dropped = 0;
+  /** The backend's own count of samples it dropped since the last clear (AC-AXHK2W.3). */
+  #backendDropped = 0;
+  readonly #max: number;
 
-  get length(): number {
-    return this.#t.length;
+  constructor(options: { maxSamples?: number } = {}) {
+    this.#max = Math.max(0, options.maxSamples ?? PD_STATUS_MAX_SAMPLES);
   }
 
-  /** Appends samples in time order. */
+  get length(): number {
+    return this.#t.length - this.#start;
+  }
+
+  /** Samples dropped past the cap since the last clear: the larger of this buffer's
+   * own count and the backend's, which describe the same oldest samples. */
+  get dropped(): number {
+    return Math.max(this.#dropped, this.#backendDropped);
+  }
+
+  /** Takes the backend's count of samples dropped since the last clear (AC-AXHK2W.3). */
+  noteBackendDropped(n: number): void {
+    if (Number.isFinite(n) && n > this.#backendDropped) this.#backendDropped = n;
+  }
+
+  /** Appends samples in time order, dropping the oldest past the cap. */
   append(samples: readonly PdStatusSample[]): void {
     for (const s of samples) {
       this.#t.push(s.session_ms);
@@ -236,6 +273,21 @@ export class PdStatusBuffer {
       this.#ibus.push(s.ibus_a);
       this.#cc1.push(s.cc1_v);
       this.#cc2.push(s.cc2_v);
+    }
+    const excess = this.length - this.#max;
+    if (excess > 0) {
+      this.#start += excess;
+      this.#dropped += excess;
+    }
+    // Compact once the dropped part outgrows the kept part: amortized O(1) a sample.
+    if (this.#start > 0 && this.#start >= this.length) {
+      const k = this.#start;
+      this.#t = this.#t.slice(k);
+      this.#vbus = this.#vbus.slice(k);
+      this.#ibus = this.#ibus.slice(k);
+      this.#cc1 = this.#cc1.slice(k);
+      this.#cc2 = this.#cc2.slice(k);
+      this.#start = 0;
     }
   }
 
@@ -248,8 +300,8 @@ export class PdStatusBuffer {
   /** The `[lo, hi)` indices of the samples with `t0Ms <= session_ms <= t1Ms` in
    * {@link columns}. */
   bounds(t0Ms: number, t1Ms: number): [number, number] {
-    const lo = lowerBound(this.#t, t0Ms);
-    return [lo, Math.max(lo, lowerBound(this.#t, t1Ms, true))];
+    const lo = lowerBound(this.#t, t0Ms, false, this.#start);
+    return [lo, Math.max(lo, lowerBound(this.#t, t1Ms, true, this.#start))];
   }
 
   /** The samples with `t0Ms <= session_ms <= t1Ms`, copied. */
@@ -270,12 +322,15 @@ export class PdStatusBuffer {
     this.#ibus = [];
     this.#cc1 = [];
     this.#cc2 = [];
+    this.#start = 0;
+    this.#dropped = 0;
+    this.#backendDropped = 0;
   }
 }
 
-/** First index with `a[i] >= x` (or `> x` when `after`) in the sorted `a`. */
-function lowerBound(a: readonly number[], x: number, after = false): number {
-  let lo = 0;
+/** First index from `from` with `a[i] >= x` (or `> x` when `after`) in the sorted `a`. */
+function lowerBound(a: readonly number[], x: number, after = false, from = 0): number {
+  let lo = from;
   let hi = a.length;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;

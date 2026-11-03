@@ -303,7 +303,12 @@ export type BackendEvent =
   | { type: "recording"; data: RecordingEvent }
   | { type: "pd_state"; data: { capturing: boolean } }
   | { type: "pd_rows"; data: { rows: PdRow[] } }
-  | { type: "pd_status"; data: { samples: PdStatusSample[] } };
+  | {
+      type: "pd_status";
+      /** `dropped`: status blocks the backend dropped past its limit since the last
+       * clear (FR AXHK2W, AC .2). */
+      data: { samples: PdStatusSample[]; dropped?: number };
+    };
 
 /** Lists the meters and demo devices available right now. */
 export function listDevices(): Promise<DeviceListing[]> {
@@ -376,6 +381,9 @@ export interface AttachedSession {
   recording: RecordingSnapshot | null;
   /** The PD capture runs (AC-AXHK2K.7). */
   pd_capturing?: boolean | undefined;
+  /** Status blocks the PD capture dropped past its limit since the last clear
+   * (FR AXHK2W, AC .3). */
+  pd_status_dropped?: number | undefined;
 }
 
 /** Asks the backend for the running session (after a reload); its later events go to

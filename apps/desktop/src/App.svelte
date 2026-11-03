@@ -989,10 +989,11 @@
               tile.adopt(snapshot);
               meters.add(listingOf(snapshot), tile);
               if (snapshot.recording) meters.park(id, snapshot.recording);
-              // The capture runs on without this page (AC-AXHK2K.7).
-              if (snapshot.pd_capturing) {
+              // The capture runs on without this page (AC-AXHK2K.7); a stopped one
+              // still carries the status samples the backend dropped (AC-AXHK2W.6).
+              if (snapshot.pd_capturing || (snapshot.pd_status_dropped ?? 0) > 0) {
                 const parked = new PdCapture();
-                parked.capturing = true;
+                parked.adopt(snapshot);
                 meters.parkPd(id, parked);
               }
             },
@@ -1021,7 +1022,7 @@
         // The new page's buffer is empty: fill the live windows from the history.
         chart?.backfillFromHistory();
         if (snapshot.recording) recording.adopt(snapshot.recording);
-        pd.capturing = snapshot.pd_capturing === true;
+        pd.adopt(snapshot);
         if (!snapshot.rate_locked && snapshot.rate_sps !== null) {
           requestedRateSps = snapshot.rate_sps;
         }

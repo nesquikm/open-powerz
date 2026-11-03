@@ -60,6 +60,8 @@ pub struct WorkerConfig {
     pub mode: DeviceMode,
     /// Where the measurements come from; the queue by default.
     pub source: MeasurementSource,
+    /// Status blocks the PD capture keeps (FR AXHK2W, AC .2).
+    pub pd_status_limit: usize,
 }
 
 impl WorkerConfig {
@@ -70,6 +72,15 @@ impl WorkerConfig {
             session_id,
             mode: DeviceMode::Application,
             source: MeasurementSource::Queue,
+            pd_status_limit: crate::pd_capture::MAX_STATUS_SAMPLES,
+        }
+    }
+
+    /// These settings, with a PD capture keeping at most `n` status blocks.
+    pub fn with_pd_status_limit(self, n: usize) -> Self {
+        Self {
+            pd_status_limit: n,
+            ..self
         }
     }
 }
@@ -176,6 +187,9 @@ pub struct PdRows {
 pub struct PdStatusBatch {
     /// Status blocks in time order.
     pub samples: Vec<PdStatusSample>,
+    /// Status blocks the backend dropped past its limit since the last
+    /// clear (FR AXHK2W, AC .2).
+    pub dropped: u64,
 }
 
 /// The meter's settings as the panel shows them, in display order (FR
@@ -688,7 +702,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             in_order,
             meter,
             pd_run: None,
-            pd: PdCapture::new(),
+            pd: PdCapture::new().with_status_limit(config.pd_status_limit),
             pd_meter: (info.model.clone(), info.firmware_version.clone()),
             poll_holds: 0,
             pdm_open: None,
@@ -1079,7 +1093,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             self.emit(BackendEvent::PdRows(PdRows { rows }));
         }
         if let Some(samples) = self.pd.take_status_due(now) {
-            self.emit(BackendEvent::PdStatus(PdStatusBatch { samples }));
+            self.emit_pd_status(samples);
         }
         let mut wake = self.next_poll_ms.min(self.batcher.next_due_ms());
         if let Some(run) = &self.pd_run {
@@ -1178,13 +1192,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         Step::Ended
     }
 
+    /// Send a batch of PD status blocks with the count dropped past the
+    /// limit so far (FR AXHK2W, AC .2).
+    fn emit_pd_status(&mut self, samples: Vec<PdStatusSample>) {
+        let dropped = self.pd.status_dropped();
+        self.emit(BackendEvent::PdStatus(PdStatusBatch { samples, dropped }));
+    }
+
     /// Send every waiting PD row now, then report the capture stopped.
     fn emit_pd_stopped(&mut self) {
         if let Some(rows) = self.pd.take_all() {
             self.emit(BackendEvent::PdRows(PdRows { rows }));
         }
         if let Some(samples) = self.pd.take_all_status() {
-            self.emit(BackendEvent::PdStatus(PdStatusBatch { samples }));
+            self.emit_pd_status(samples);
         }
         self.emit(BackendEvent::PdState(PdState { capturing: false }));
     }
@@ -1486,6 +1507,12 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         })
     }
 
+    /// Status blocks the PD capture dropped past its limit since the last
+    /// clear (FR AXHK2W, AC .2).
+    pub fn pd_status_dropped(&self) -> u64 {
+        self.pd.status_dropped()
+    }
+
     /// The PD capture so far, to be saved as a pdcap file (FR TGE83E) off
     /// this thread.
     pub fn pd_save(&self) -> PdSave {
@@ -1678,6 +1705,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::PdCapturing(reply) => {
                 let _ = reply.send(self.pd_run.is_some());
             }
+            Command::PdStatusDropped(reply) => {
+                let _ = reply.send(self.pd_status_dropped());
+            }
             Command::Handover(swap, reply) => {
                 // Read here and swapped behind the events already sent, so
                 // the new sink gets exactly the events after this answer.
@@ -1735,6 +1765,8 @@ enum Command {
     HoldPolling(bool, mpsc::Sender<()>),
     /// Whether the PD capture runs now (AC-AXHK2K.7).
     PdCapturing(mpsc::Sender<bool>),
+    /// Status blocks the PD capture dropped since the last clear (FR AXHK2W, AC .3).
+    PdStatusDropped(mpsc::Sender<u64>),
     /// Run the sink swap of an attach, then answer the open recording's
     /// progress: both on the worker thread, which sends every recording
     /// event, so none can fall between them (FR VEDDFD).
@@ -1775,6 +1807,7 @@ impl std::fmt::Debug for Command {
                 .finish(),
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::PdCapturing(_) => f.write_str("PdCapturing"),
+            Command::PdStatusDropped(_) => f.write_str("PdStatusDropped"),
             Command::Handover(..) => f.write_str("Handover"),
         }
     }
@@ -2131,6 +2164,13 @@ impl WorkerControl {
     pub fn pd_capturing(&self) -> Result<bool, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::PdCapturing(reply), &answer)
+    }
+
+    /// Status blocks the PD capture dropped past its limit since the last
+    /// clear (FR AXHK2W, AC .3).
+    pub fn pd_status_dropped(&self) -> Result<u64, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PdStatusDropped(reply), &answer)
     }
 
     /// Run `swap` on the worker thread between its steps and answer the
