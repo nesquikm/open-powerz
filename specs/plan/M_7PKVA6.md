@@ -41,8 +41,9 @@ codename: Fine Print
 | [AXHK2T](../frs/AXHK2T.md) | Chart ruler, segment marks and energy share | n/a |
 | [AXHK2V](../frs/AXHK2V.md) | Chart appearance and image export | n/a |
 | [AXHK2W](../frs/AXHK2W.md) | Memory trim at 1000 SPS | n/a |
+| [CW66T1](../frs/CW66T1.md) | Info popovers for features and abbreviations | n/a |
 
-Build order: the table's order. AXHK2W goes last so it measures the finished chart.
+Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (added 2026-11-03 at the user's request) is built while the AXHK2W hardware run waits, before the final gate.
 
 **Tasks:**
 - [x] A firmware update never ends a recording unasked — AXHK2F
@@ -73,6 +74,8 @@ Build order: the table's order. AXHK2W goes last so it measures the finished cha
   verify: SVG and PDF parse tests, visual check
 - [ ] Memory trim at 1000 SPS — AXHK2W
   verify: element-count tests and a macOS demo measurement
+- [ ] Info popovers for features and abbreviations — CW66T1
+  verify: glossary completeness test, WebKit keyboard and 375 px e2e, visual set
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
 - Needs hardware we lack: rotation bits and bit 7 of 0x60, which total the record screen shows, QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS coverage, the EcoFlow no-reply question, the Apple battery curve, Windows `\\?\` paths, the root cause of the rejected stop after a queue overflow.
