@@ -27,9 +27,18 @@ fn log_path(tag: &str) -> PathBuf {
     dir.join("app.log")
 }
 
+/// The log's lines, without the live stream's own drop and resume lines: these
+/// rigs never read the stream, so the worker may log a drop spell at any moment
+/// (AC-AXHK2W.8, tested in `live_drop_log.rs`), and the counts here are about
+/// session events only.
 fn lines(path: &Path) -> Vec<String> {
     std::fs::read_to_string(path)
-        .map(|s| s.lines().map(str::to_owned).collect())
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.contains(" live batches "))
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
