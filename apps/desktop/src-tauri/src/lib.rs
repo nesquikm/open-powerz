@@ -33,7 +33,7 @@ use crate::devices::{
 use crate::recording::{ExportProgress, RecordingSummary};
 use crate::recording_file::{FileError, FileSummary, OpenControl, OpenProgress, OpenedFile};
 use crate::ui_error::UiError;
-use crate::worker::{BackendEvent, ExportJob};
+use crate::worker::{BackendEvent, ExportFolded, ExportJob};
 
 /// The app and protocol-library versions shown in the About dialog.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1513,6 +1513,18 @@ async fn history_gaps(
         .await
 }
 
+/// Where the session history's full resolution starts (session time, ms), for
+/// the chart's fold tick: the data before it is folded into coarser blocks.
+/// `None` while nothing is folded (FR AXHK2W, AC-AXHK2W.11).
+#[tauri::command]
+async fn history_fold_boundary(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<Option<u64>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(session_store(&state, device_id.as_deref())?.history_fold_boundary())).await
+}
+
 /// The chart ruler's stats over the session history's raw samples with
 /// `t0_ms <= time <= t1_ms` (FR AXHK2T, AC-AXHK2T.2); `None` when no sample is
 /// in range. Reads the history only; sends nothing to the meter.
@@ -1549,14 +1561,18 @@ async fn run_progress(
 pub struct ExportResult {
     pub path: String,
     pub rows: u64,
+    /// The folded oldest part the export left out; `null` when nothing was
+    /// (FR AXHK2W, AC-AXHK2W.14).
+    pub folded: Option<ExportFolded>,
 }
 
 /// What the export `job` to `path` came to, once it has run to its end.
 fn finished_export(job: ExportJob, path: &Path) -> Result<ExportResult, UiError> {
-    let rows = job.join().map_err(|_| UiError::internal())??;
+    let summary = job.join().map_err(|_| UiError::internal())??;
     Ok(ExportResult {
         path: path.to_string_lossy().into_owned(),
-        rows,
+        rows: summary.rows,
+        folded: summary.folded,
     })
 }
 
@@ -1645,6 +1661,7 @@ async fn pd_save(
                 Ok(ExportResult {
                     path: path.to_string_lossy().into_owned(),
                     rows,
+                    folded: None,
                 })
             },
         )
@@ -1740,6 +1757,7 @@ pub fn run() {
             recording_file_run_progress,
             history_range,
             history_gaps,
+            history_fold_boundary,
             range_stats,
             run_progress,
             stats,

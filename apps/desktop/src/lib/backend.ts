@@ -198,6 +198,19 @@ export interface ExportProgress {
 export interface ExportResult {
   path: string;
   rows: number;
+  /** The folded oldest part of the history the export left out (FR AXHK2W,
+   * AC-AXHK2W.14); absent or `null` when nothing was. */
+  folded?: ExportFolded | null;
+}
+
+/** The oldest part of a session an export left out because the history folded it. */
+export interface ExportFolded {
+  /** Folded samples left out. */
+  samples: number;
+  /** Session time they span, ms. */
+  ms: number;
+  /** Wall-clock time of the file's first row, ms. */
+  start_unix_ms: number;
 }
 
 /** Min, max and mean of one quantity. */
@@ -588,6 +601,13 @@ export async function historyRange<const S extends readonly HistorySeries[]>(
 export async function historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]> {
   if (mock) return mock.historyGaps(t0Ms, t1Ms);
   return invoke<HistoryGap[]>("history_gaps", wholeMs(t0Ms, t1Ms));
+}
+
+/** Where the open session's history keeps full resolution from, ms; the data before it is
+ * folded into coarser blocks. `null` while nothing is folded (AC-AXHK2W.11). */
+export async function historyFoldBoundary(): Promise<number | null> {
+  if (mock) return mock.historyFoldBoundary();
+  return invoke<number | null>("history_fold_boundary");
 }
 
 /** What the ruler shows between its cursors, from the raw samples with
@@ -1363,6 +1383,7 @@ export interface MeterBackend {
     buckets: number,
   ): Promise<BucketsFor<S>>;
   historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]>;
+  historyFoldBoundary(): Promise<number | null>;
   rangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null>;
   runProgress(query: RunProgressQuery): Promise<RunProgress | null>;
   resetStats(): Promise<void>;
@@ -1420,6 +1441,7 @@ export const currentMeterCommands: MeterCommands = {
   stats,
   historyRange,
   historyGaps,
+  historyFoldBoundary,
   rangeStats,
   runProgress,
   resetStats,
@@ -1489,6 +1511,7 @@ export function meterBackend(deviceId: string): MeterBackend {
     historyRange: (series, t0Ms, t1Ms, buckets) =>
       call("history_range", { series, ...wholeMs(t0Ms, t1Ms), buckets }),
     historyGaps: (t0Ms, t1Ms) => call("history_gaps", wholeMs(t0Ms, t1Ms)),
+    historyFoldBoundary: () => call("history_fold_boundary"),
     rangeStats: (t0Ms, t1Ms) => call("range_stats", wholeMs(t0Ms, t1Ms)),
     runProgress: (query) => call("run_progress", { query: wireQuery(query) }),
     resetStats: async () => {

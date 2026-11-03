@@ -193,6 +193,14 @@ impl SessionStore {
         SessionStore::default()
     }
 
+    /// An empty session whose history keeps `full` records at full
+    /// resolution before it folds the oldest (tests fold quickly).
+    pub fn with_full_limit(full: usize) -> SessionStore {
+        let store = SessionStore::default();
+        store.lock().history = History::with_full_limit(full);
+        store
+    }
+
     pub(crate) fn lock(&self) -> MutexGuard<'_, SessionData> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -257,6 +265,13 @@ impl SessionStore {
     /// (session time); a gap that only touches an end is left out.
     pub fn history_gaps(&self, t0: u64, t1: u64) -> Vec<HistoryGap> {
         self.lock().history.gaps(t0, t1)
+    }
+
+    /// Where the history's full resolution starts (session time, ms); the
+    /// data before it is folded into coarser blocks. `None` while nothing is
+    /// folded (FR AXHK2W, AC-AXHK2W.10).
+    pub fn history_fold_boundary(&self) -> Option<u64> {
+        self.lock().history.fold_boundary_ms()
     }
 
     /// The ruler's stats over the history's records with `t0 <= time <= t1`

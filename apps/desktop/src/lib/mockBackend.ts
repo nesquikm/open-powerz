@@ -13,6 +13,7 @@ import type {
   BucketsFor,
   DeviceListing,
   ExportProgress,
+  ExportFolded,
   ExportResult,
   FileSummary,
   FirmwareFileInfo,
@@ -353,6 +354,11 @@ class HistoryColumns {
     }
   }
 
+  /** Sample `i`'s time, ms. */
+  timeAt(i: number): number {
+    return this.#t[i] ?? 0;
+  }
+
   /** The first index whose time is `>= t` (or `> t` when `after`). */
   #search(t: number, after: boolean): number {
     let lo = 0;
@@ -599,6 +605,16 @@ export function pdSyntheticFromUrl(search: string | undefined): number | null {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
+/** `?foldat=<n>` in the page URL: the mock's full-resolution history limit
+ * ({@link MockOptions.historyFullSamples}, FR AXHK2W), a positive whole number of
+ * samples; anything else is ignored. */
+export function foldAtFromUrl(search: string | undefined): number | null {
+  const raw = urlParam(search, "foldat");
+  if (raw === null || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 /** A scripted record-delete failure (FR JKWT3V): `backup` fails the backup (nothing is
  * deleted), `mismatch` keeps the old table so the re-read does not match. */
 export type RecordsFault = "backup" | "mismatch";
@@ -660,6 +676,8 @@ export interface MockOptions {
   settingsFault?: SettingsFault | null;
   /** A scripted recording-file open (FR AXHK2S). */
   recordingFileFault?: RecordingFileFault | null;
+  /** The history's full-resolution limit (FR AXHK2W); none (the default) never folds. */
+  historyFullSamples?: number | null;
 }
 
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
@@ -1371,6 +1389,7 @@ export class MockBackend {
       recordsFault: recordsFaultFromUrl(pageSearch()),
       settingsFault: settingsFaultFromUrl(pageSearch()),
       recordingFileFault: recordingFileFaultFromUrl(pageSearch()),
+      historyFullSamples: foldAtFromUrl(pageSearch()),
     },
   ) {
     this.#mode = mode;
@@ -1480,6 +1499,7 @@ export class MockBackend {
       stats: on(this.stats),
       historyRange: on(this.historyRange) as MockBackend["historyRange"],
       historyGaps: on(this.historyGaps),
+      historyFoldBoundary: on(this.historyFoldBoundary),
       rangeStats: on(this.rangeStats),
       runProgress: on(this.runProgress),
       resetStats: on(this.resetStats),
@@ -1870,7 +1890,8 @@ export class MockBackend {
     onProgress: (progress: ExportProgress) => void,
   ): Promise<ExportResult | null> {
     const s = this.#open();
-    const rows = s.streamed;
+    const folded = this.#exportFolded(s);
+    const rows = folded === null ? s.streamed : s.history.length - folded.samples;
     this.#exports.push(s.history.csvHead(EXPORT_CSV_HEAD_ROWS));
     const slow = this.#mode === "slow-export";
     if (slow) onProgress({ done: Math.floor(rows / 2), total: rows });
@@ -1878,11 +1899,34 @@ export class MockBackend {
       setTimeout(
         () => {
           onProgress({ done: rows, total: rows });
-          resolve({ path: suggestedName, rows });
+          resolve({ path: suggestedName, rows, folded });
         },
         slow ? SLOW_EXPORT_MS : 0,
       ),
     );
+  }
+
+  /** What an export of `s` leaves out once its history is past
+   * {@link MockOptions.historyFullSamples} (AC-AXHK2W.14): the samples before the fold
+   * boundary, their span and the file's start; `null` while nothing would be folded. */
+  #exportFolded(s: Running): ExportFolded | null {
+    const samples = this.#foldedSamples(s);
+    if (samples === null) return null;
+    const h = s.history;
+    const ms = h.timeAt(samples) - h.timeAt(0);
+    return {
+      samples,
+      ms,
+      start_unix_ms: Date.now() - (h.timeAt(h.length - 1) - h.timeAt(samples)),
+    };
+  }
+
+  /** How many of `s`'s oldest samples are past {@link MockOptions.historyFullSamples}
+   * (the ones a real history would fold); `null` while none are. */
+  #foldedSamples(s: Running): number | null {
+    const limit = this.#options.historyFullSamples;
+    if (limit == null || s.history.length <= limit) return null;
+    return s.history.length - Math.max(0, Math.floor(limit));
   }
 
   /** The session's rows as a `.db` file: like {@link exportSession}, which it shares. */
@@ -1994,6 +2038,15 @@ export class MockBackend {
   async historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]> {
     const s = this.#open();
     return s.gaps.filter((g) => g.to_ms > t0Ms && g.from_ms < t1Ms).map((g) => ({ ...g }));
+  }
+
+  /** Where the history's full resolution starts (FR AXHK2W, AC-AXHK2W.11): the oldest of
+   * the newest {@link MockOptions.historyFullSamples} samples, once there are more; the
+   * demo never actually folds. `null` while nothing would be folded. */
+  async historyFoldBoundary(): Promise<number | null> {
+    const s = this.#open();
+    const samples = this.#foldedSamples(s);
+    return samples === null ? null : s.history.timeAt(samples);
   }
 
   /** Replaces the history with `n` (at most {@link MAX_SYNTHETIC_SAMPLES}) scenario

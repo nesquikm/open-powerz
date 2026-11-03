@@ -154,6 +154,7 @@
       buckets: number,
     ) => act().historyRange(series, t0Ms, t1Ms, buckets),
     historyGaps: (t0Ms: number, t1Ms: number) => act().historyGaps(t0Ms, t1Ms),
+    historyFoldBoundary: () => act().historyFoldBoundary(),
     rangeStats: (t0Ms: number, t1Ms: number) => act().rangeStats(t0Ms, t1Ms),
     runProgress: (query: RunProgressQuery) => act().runProgress(query),
   };
@@ -304,9 +305,10 @@
    * then. */
   async function runExport(id: string, job: ExportJob, deps: ExportDeps): Promise<void> {
     await job.run(deps);
-    const { path, rows, error } = job;
+    const { path, rows, folded, error } = job;
     if (path !== null && rows !== null) {
-      meters.notices.raise(id, { tone: "info", text: exportNoticeText({ rows, path }), path });
+      const text = exportNoticeText({ rows, path, folded });
+      meters.notices.raise(id, { tone: "info", text, path });
       job.dismissNotice();
     }
     if (error !== null) {

@@ -683,7 +683,11 @@ fn export_runs_on_its_own_thread_while_the_stream_goes_on() {
     });
     // The worker keeps polling while the export runs.
     assert_eq!(run_for(&mut worker, &clock, 1_000), Step::Continue);
-    let rows = job.join().expect("export thread panicked").expect("export");
+    let rows = job
+        .join()
+        .expect("export thread panicked")
+        .expect("export")
+        .rows;
     assert_eq!(rows, so_far, "export must hold the whole session so far");
     assert!(delivered(&log) as u64 > so_far, "the stream stopped");
     assert!(
@@ -1031,7 +1035,7 @@ fn the_manager_exports_the_session_while_it_streams() {
             *seen.lock().unwrap() = Some(p);
         })
         .expect("export started");
-    let rows = job.join().expect("export thread").expect("export");
+    let rows = job.join().expect("export thread").expect("export").rows;
     // Still streaming afterwards.
     wait_samples(&rx, 10);
     m.disconnect().unwrap();

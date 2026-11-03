@@ -92,6 +92,36 @@ export interface ChartExtrasState {
   edLabel?: { left: number; top: number; right: number; bottom: number };
 }
 
+/** A box in viewport CSS px. */
+export interface ViewportBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** The fold tick of the chart's last draw (FR AXHK2W, AC-AXHK2W.11). */
+export interface ChartFoldTick {
+  /** The fold boundary it marks, session ms. */
+  ms: number;
+  /** The x range of the draw it was drawn in, session ms. */
+  t0Ms: number;
+  t1Ms: number;
+  /** The tick's x in the viewport, CSS px. */
+  x: number;
+  /** Its label text. */
+  label: string;
+  /** The label's chip, viewport CSS px. */
+  chip: ViewportBox;
+  /** The plot area it was drawn in, viewport CSS px. */
+  plot: ViewportBox;
+  /** The label's font size, CSS px. */
+  fontPx: number;
+  /** The label's text colour and the chip's fill, opaque `#rrggbb`. */
+  color: string;
+  background: string;
+}
+
 export interface OpenPowerzE2E {
   /** Points the chart currently has drawn (non-null y values) per series. */
   chartSeriesLengths(): { vbus: number; ibus: number };
@@ -117,6 +147,8 @@ export interface OpenPowerzE2E {
   chartPdStatusLengths(): ChartPdStatusLengths;
   /** The chart options' state of the last draw (FR AXHK2T). */
   chartExtras(): ChartExtrasState;
+  /** The fold tick of the last draw, or null when the draw had none (AC-AXHK2W.11). */
+  chartFoldTick?(): ChartFoldTick | null;
 }
 
 export const HOOK = "__OPEN_POWERZ_E2E__";

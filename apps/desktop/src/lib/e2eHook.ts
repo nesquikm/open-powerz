@@ -11,6 +11,7 @@ import {
   type ChartBreak,
   type ChartDraw,
   type ChartExtrasState,
+  type ChartFoldTick,
   type ChartGapBand,
   type ChartPdMarker,
   type ChartPdStatusLengths,
@@ -23,6 +24,11 @@ import type { StripBreak } from "./timeline";
 /** Whether this web build is a test build that exposes the hook. */
 export const E2E_BUILD: boolean =
   import.meta.env.VITE_E2E === "1" || import.meta.env.VITE_BACKEND === "mock";
+
+/** A deep copy of `tick`, so the probe and its readers never share its boxes. */
+function copyFoldTick(tick: ChartFoldTick | null): ChartFoldTick | null {
+  return tick === null ? null : { ...tick, chip: { ...tick.chip }, plot: { ...tick.plot } };
+}
 
 /** Draws kept for the hook (at least the last 200). */
 const MAX_DRAWS = 1000;
@@ -47,6 +53,12 @@ export class ChartProbe {
   #playheadX: number | null = null;
   #labels: Required<Pick<ChartExtrasState, "markLabels" | "tickLabels">> | null = null;
   #edLabel: NonNullable<ChartExtrasState["edLabel"]> | null = null;
+  #foldTick: ChartFoldTick | null = null;
+
+  /** The fold tick of the last draw, or null when it had none (AC-AXHK2W.11). */
+  foldTick(tick: ChartFoldTick | null): void {
+    this.#foldTick = copyFoldTick(tick);
+  }
 
   /** The "E.D. %" label's box of the last draw, viewport CSS px, or null while it is not
    * drawn (AC-AXHK2V.15). */
@@ -175,6 +187,7 @@ export class ChartProbe {
             }),
         ...(this.#edLabel === null ? {} : { edLabel: { ...this.#edLabel } }),
       }),
+      chartFoldTick: () => copyFoldTick(this.#foldTick),
     };
   }
 }

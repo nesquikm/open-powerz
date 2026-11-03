@@ -6,6 +6,7 @@
   import { getContext, untrack } from "svelte";
   import {
     historyGaps,
+    historyFoldBoundary,
     historyRange,
     rangeStats,
     runProgress,
@@ -119,6 +120,7 @@
   import { chartExtras } from "../chartExtrasStore.svelte";
   import { SharedInsets, hasPlotArea } from "../plotInsets";
   import { capStride, drawLoopCap } from "../drawCap";
+  import { FOLD_CHIP_FONT_PX, foldChip, foldChipColors, foldTick } from "../foldTick";
   import { RunProgressFeed } from "../runProgressFeed";
   import { RulerState } from "../rulerState.svelte";
   import ChartOptions from "./ChartOptions.svelte";
@@ -136,7 +138,7 @@
     active = true,
     pd = null,
     onPdMarker,
-    history = { historyRange, historyGaps, rangeStats, runProgress },
+    history = { historyRange, historyGaps, historyFoldBoundary, rangeStats, runProgress },
   }: {
     theme: ResolvedTheme;
     rateSps?: number | null;
@@ -151,6 +153,8 @@
     history?: {
       historyRange: typeof historyRange;
       historyGaps: typeof historyGaps;
+      /** Where the history's full resolution starts (AC-AXHK2W.11). */
+      historyFoldBoundary?: typeof historyFoldBoundary;
       /** The ruler's values from the raw samples (FR AXHK2T). */
       rangeStats: typeof rangeStats;
       /** Segment marks and E.D. from the raw samples (FR AXHK2T). */
@@ -240,6 +244,23 @@
   const PD_STATUS_SERIES = ["vbus", "ibus", "cc1", "cc2"] as const;
   /** Side of a PD status dot, CSS px. */
   const PD_STATUS_DOT_PX = 2;
+
+  /** Canvas px of `u` to viewport CSS px, one frame for all: what the e2e probes report
+   * (AC-AXHK2V.12, AC-AXHK2V.15, AC-AXHK2W.11). */
+  function canvasToViewport(u: uPlot) {
+    const at = u.ctx.canvas.getBoundingClientRect();
+    const ratio = globalThis.devicePixelRatio || 1;
+    return {
+      x: (x: number): number => at.left + x / ratio,
+      box: <T extends LabelBox>(b: T): T => ({
+        ...b,
+        left: at.left + b.left / ratio,
+        top: at.top + b.top / ratio,
+        right: at.left + b.right / ratio,
+        bottom: at.top + b.bottom / ratio,
+      }),
+    };
+  }
 
   /** Draws the PD status blocks inside the plot's x range over the lines: at most about
    * two dots per pixel column per series, so a long capture stays cheap to draw. */
@@ -1072,6 +1093,7 @@
     historyGeneration++;
     hasData = false;
     sessionGaps.clear();
+    foldBoundaryMs = null;
     sessionStartMs = null;
     sessionFrame = null;
     sessionGate.reset();
@@ -1084,6 +1106,45 @@
 
   /** Bumped by {@link reset}, so gaps from a query sent before it are dropped. */
   let historyGeneration = 0;
+
+  /** Where the session history's full resolution starts, ms, `null` while nothing is
+   * folded: the chart marks it with a faint tick (AC-AXHK2W.11). */
+  let foldBoundaryMs: number | null = null;
+
+  /** Takes a fold boundary answered to a query sent at `generation`: dropped when a
+   * {@link reset} came since. `true` when it moved the tick. */
+  function acceptFoldBoundary(generation: number, fold: number | null): boolean {
+    if (generation !== historyGeneration || fold === foldBoundaryMs) return false;
+    foldBoundaryMs = fold;
+    return true;
+  }
+
+  /** How often the live view asks where the fold boundary is, ms: it moves slowly, so
+   * about once a second, never once per frame (AC-AXHK2W.11). */
+  const FOLD_POLL_MS = 1_000;
+
+  // The live view (live window and "Whole session" while live) knows the boundary too,
+  // not only a paused view asking the history. A paused view keeps the one it was drawn
+  // with until its own query.
+  $effect(() => {
+    const query = history.historyFoldBoundary;
+    if (query === undefined || !active) return;
+    let inFlight = false;
+    const timer = setInterval(() => {
+      if (inFlight || view.mode !== "live" || !hasData) return;
+      inFlight = true;
+      const generation = historyGeneration;
+      query()
+        .then((fold) => {
+          if (acceptFoldBoundary(generation, fold)) scheduler.invalidate();
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false;
+        });
+    }, FOLD_POLL_MS);
+    return () => clearInterval(timer);
+  });
 
   /** The backend history was cleared (FR 5X154V): drop the live buffer, the session start,
    * the whole-session frame, the gaps, the overview envelope and any history answer in
@@ -1104,12 +1165,16 @@
     // connection), which no stream event reports (AC-272WSN.3, AC-272WSN.4).
     fetch: async (req) => {
       const generation = historyGeneration;
-      const [buckets, gaps] = await Promise.all([
+      const [buckets, gaps, fold] = await Promise.all([
         history.historyRange(req.series, req.t0Ms, req.t1Ms, req.buckets),
         // A failed gap query leaves the gaps already known; the buckets still draw.
         history.historyGaps(req.t0Ms, req.t1Ms).catch(() => []),
+        // The fold boundary only moves forward; a failed query keeps the last one.
+        (history.historyFoldBoundary?.() ?? Promise.resolve(null)).catch(() => foldBoundaryMs),
       ]);
       if (generation === historyGeneration) for (const g of gaps) sessionGaps.push(g);
+      // The result's own draw shows it.
+      acceptFoldBoundary(generation, fold);
       return buckets;
     },
     onResult: (req, result) => {
@@ -1413,6 +1478,69 @@
           ctx.stroke();
           ctx.restore();
         },
+        // The fold boundary: a faint tick saying the data before it is coarser
+        // (AC-AXHK2W.11). One tick at most, so the draw stays bounded.
+        (self: uPlot) => {
+          const ms = foldBoundaryMs;
+          const min = self.scales.x?.min;
+          const max = self.scales.x?.max;
+          const tick =
+            ms === null || min === undefined || max === undefined
+              ? null
+              : foldTick(ms, { t0Ms: min, t1Ms: max }, self.bbox.width);
+          if (tick === null || ms === null || min === undefined || max === undefined) {
+            if (E2E_BUILD && probe !== null) probe.foldTick(null);
+            return;
+          }
+          // The axis is warped where gaps collapse: place it through the scale.
+          const x = self.valToPos(ms, "x", true);
+          const ratio = globalThis.devicePixelRatio || 1;
+          const { left, top, width, height } = self.bbox;
+          const ctx = self.ctx;
+          ctx.save();
+          ctx.globalAlpha = 0.45;
+          ctx.strokeStyle = palette.muted;
+          ctx.lineWidth = Math.max(1, ratio);
+          ctx.setLineDash([2 * ratio, 3 * ratio]);
+          ctx.beginPath();
+          ctx.moveTo(x, top);
+          ctx.lineTo(x, top + height);
+          ctx.stroke();
+          // The label on an opaque chip at the top of the plot, on the coarser side.
+          ctx.globalAlpha = 1;
+          ctx.setLineDash([]);
+          ctx.font = `${Math.round(FOLD_CHIP_FONT_PX * ratio)}px system-ui, sans-serif`;
+          const chip = foldChip(x, ctx.measureText(tick.label).width, self.bbox, ratio);
+          const colors = foldChipColors(theme);
+          if (chip !== null) {
+            ctx.fillStyle = colors.background;
+            ctx.fillRect(chip.left, chip.top, chip.right - chip.left, chip.bottom - chip.top);
+            ctx.fillStyle = colors.text;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(tick.label, (chip.left + chip.right) / 2, (chip.top + chip.bottom) / 2);
+          }
+          ctx.restore();
+          if (E2E_BUILD && probe !== null) {
+            const css = canvasToViewport(self);
+            probe.foldTick(
+              chip === null
+                ? null
+                : {
+                    ms,
+                    t0Ms: min,
+                    t1Ms: max,
+                    x: css.x(x),
+                    label: tick.label,
+                    chip: css.box(chip),
+                    plot: css.box({ left, top, right: left + width, bottom: top + height }),
+                    fontPx: FOLD_CHIP_FONT_PX,
+                    color: colors.text,
+                    background: colors.background,
+                  },
+            );
+          }
+        },
         // The PD status blocks (AC-TGE83D.4).
         (self: uPlot) => drawPdStatus(self),
         // Segment marks (AC-AXHK2T.4), then E.D., the energy share (AC-AXHK2T.5). The
@@ -1422,16 +1550,7 @@
           const painted = paintSegmentMarks(self, progress.marks, palette.muted, ed ? [ed] : []);
           paintEnergyShare(self, progress.ed, edColor(theme), ed);
           if (E2E_BUILD && probe !== null) {
-            // Canvas px to viewport CSS px, one frame for all (AC-AXHK2V.12, AC-AXHK2V.15).
-            const at = self.ctx.canvas.getBoundingClientRect();
-            const ratio = globalThis.devicePixelRatio || 1;
-            const css = <T extends LabelBox>(b: T): T => ({
-              ...b,
-              left: at.left + b.left / ratio,
-              top: at.top + b.top / ratio,
-              right: at.left + b.right / ratio,
-              bottom: at.top + b.bottom / ratio,
-            });
+            const css = canvasToViewport(self).box;
             probe.markLabels(painted.markLabels.map(css), painted.tickLabels.map(css));
             probe.edLabel(ed && css(ed));
           }

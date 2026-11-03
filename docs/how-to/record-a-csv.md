@@ -106,6 +106,18 @@ At 1000 SPS the readout shows the temperature with the tooltip "Updated once a
 second at 1000 SPS", because the meter reports it from a separate reading. A
 meter whose firmware reports no temperature at that rate shows "—" instead.
 
+### Long sessions
+
+The chart history keeps the newest 10 million samples at full resolution, about
+2 h 45 min at 1000 samples/s. Older data folds into blocks that keep each
+series' minimum, maximum and average and the block's charge and energy, so the
+statistics, the ruler, segment marks and E.D. stay exact at block edges. A faint
+"coarser before here" tick marks where the folded part ends on the chart.
+
+An export of a folded session holds only the full-resolution part, and its
+notice says how much of the oldest part was left out and the time the file
+starts at. To keep every sample of a long session, use **Record**.
+
 ### Reset the statistics or clear the chart history
 
 Two buttons in the Stats panel erase different things:

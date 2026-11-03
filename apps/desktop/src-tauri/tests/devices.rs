@@ -482,7 +482,8 @@ fn history_stats_and_export_still_answer_after_a_disconnect() {
         .expect("export after disconnect")
         .join()
         .unwrap()
-        .expect("export");
+        .expect("export")
+        .rows;
     assert_eq!(rows, stats.samples);
     let lines = std::fs::read_to_string(&path).unwrap().lines().count() as u64;
     let _ = std::fs::remove_dir_all(&dir);
@@ -817,7 +818,8 @@ fn rate_record_and_export_work_after_attach() {
         .expect("export after attach")
         .join()
         .unwrap()
-        .expect("export");
+        .expect("export")
+        .rows;
     assert!(rows > 0);
     m.disconnect().unwrap();
     recv_until(&rx4, |e| {
@@ -855,7 +857,8 @@ fn a_streamed_session_exports_to_a_db_that_opens_with_the_same_rows() {
         .expect("the export starts")
         .join()
         .unwrap()
-        .expect("written");
+        .expect("written")
+        .rows;
     assert_eq!(rows, samples);
 
     let file = match recording_file::open(&path, &mut OpenControl::silent()) {

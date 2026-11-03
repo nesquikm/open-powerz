@@ -36,6 +36,7 @@ check the download and open the app past the macOS and Windows warnings.
 - Chart VBUS, IBUS, power, D+, D−, CC1 and CC2 live, with per-series toggles ([explore a session](docs/how-to/explore-a-session.md))
 - Pause the chart, then zoom and pan with the overview strip, wheel, trackpad, J/K/L or presets ([move around](docs/how-to/explore-a-session.md#move-around-a-long-session))
 - Read the whole session at once, with gaps shown as "No data" bands ([whole session](docs/how-to/explore-a-session.md#read-the-whole-session))
+- Run long sessions: the newest 10 million samples stay at full resolution, older data folds into coarser blocks marked on the chart, and totals stay exact ([long sessions](docs/how-to/record-a-csv.md#long-sessions))
 - See min, max, average, charge and energy for the session ([statistics](docs/how-to/record-a-csv.md#reset-the-statistics-or-clear-the-chart-history))
 - Record to CSV at up to 1000 samples/s in the vendor's layout, from the app or `powerz stream`, and reveal the file in one click ([record a CSV](docs/how-to/record-a-csv.md))
 - Pause and resume a recording, end it with auto-stop on low current or a row limit, and set its file prefix and folder ([recorder options](docs/how-to/record-a-csv.md#recorder-options))

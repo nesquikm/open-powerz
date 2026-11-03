@@ -1014,7 +1014,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         &mut self,
         out: Box<dyn Write + Send>,
         progress: impl FnMut(ExportProgress) + Send + 'static,
-    ) -> JoinHandle<Result<u64, UiError>> {
+    ) -> ExportJob {
         let now = self.clock.now_ms();
         export_store(&self.store, out, now, progress)
     }
@@ -1831,15 +1831,16 @@ fn export_store(
     now_ms: u64,
     progress: impl FnMut(ExportProgress) + Send + 'static,
 ) -> ExportJob {
-    let (history, start_unix_ms, temps) = store.export_source(now_ms);
+    let source = ExportSource::of(store, now_ms);
     std::thread::spawn(move || {
-        recording::export_iter(
-            history.len() as u64,
-            export_rows(&history, &temps),
+        let rows = recording::export_iter(
+            source.total(),
+            source.rows(),
             out,
-            start_unix_ms,
+            source.start_unix_ms,
             progress,
-        )
+        )?;
+        Ok(source.summary(rows))
     })
 }
 
@@ -1851,31 +1852,75 @@ fn export_store_db(
     now_ms: u64,
     progress: impl FnMut(ExportProgress) + Send + 'static,
 ) -> ExportJob {
-    let (history, start_unix_ms, temps) = store.export_source(now_ms);
+    let source = ExportSource::of(store, now_ms);
     let path = path.to_owned();
     std::thread::spawn(move || {
-        let rate_sps = history.iter().next().map_or(0, |r| r.rate().sps());
-        recording_file::export_db_iter(
-            history.len() as u64,
-            export_rows(&history, &temps),
+        let rate_sps = source.history.iter().next().map_or(0, |r| r.rate().sps());
+        let rows = recording_file::export_db_iter(
+            source.total(),
+            source.rows(),
             &path,
-            start_unix_ms,
+            source.start_unix_ms,
             rate_sps,
             progress,
-        )
+        )?;
+        Ok(source.summary(rows))
     })
 }
 
-/// The records of `history` as an export takes them.
-fn export_rows<'a>(
-    history: &'a Records,
-    temps: &'a TempLog,
-) -> impl Iterator<Item = recording_file::ExportRow> + 'a {
-    let mut cursor = 0;
-    history
-        .iter_runs()
-        .enumerate()
-        .map(move |(i, (r, new_run))| (r, new_run, temp_at(temps, &mut cursor, i, r.time_ms())))
+/// What an export reads: the history's full-resolution part, from the
+/// first record that is not folded (AC-AXHK2W.14).
+struct ExportSource {
+    history: Records,
+    temps: TempLog,
+    /// Wall-clock time of the first exported record, ms.
+    start_unix_ms: u64,
+    folded: Option<ExportFolded>,
+}
+
+impl ExportSource {
+    fn of(store: &SessionStore, now_ms: u64) -> ExportSource {
+        let (history, history_unix_ms, temps) = store.export_source(now_ms);
+        let folded = history.fold_boundary_ms().map(|boundary| {
+            let ms = boundary.saturating_sub(history.time_at(0));
+            ExportFolded {
+                samples: history.folded_len() as u64,
+                ms,
+                start_unix_ms: history_unix_ms + ms,
+            }
+        });
+        ExportSource {
+            start_unix_ms: folded.map_or(history_unix_ms, |f| f.start_unix_ms),
+            history,
+            temps,
+            folded,
+        }
+    }
+
+    /// Rows the export writes.
+    fn total(&self) -> u64 {
+        (self.history.len() - self.history.folded_len()) as u64
+    }
+
+    /// The exported records, each with its own history index's temperature.
+    fn rows(&self) -> impl Iterator<Item = recording_file::ExportRow> + '_ {
+        let skip = self.history.folded_len();
+        let mut cursor = 0;
+        self.history
+            .iter_runs()
+            .enumerate()
+            .map(move |(k, (r, new_run))| {
+                let temp = temp_at(&self.temps, &mut cursor, skip + k, r.time_ms());
+                (r, new_run, temp)
+            })
+    }
+
+    fn summary(&self, rows: u64) -> ExportSummary {
+        ExportSummary {
+            rows,
+            folded: self.folded,
+        }
+    }
 }
 
 /// The file a worker's open recording writes, shared with those outside the
@@ -2038,8 +2083,30 @@ impl PdSave {
     }
 }
 
-/// A running export: joins to the rows written.
-pub type ExportJob = JoinHandle<Result<u64, UiError>>;
+/// A running export: joins to what it wrote.
+pub type ExportJob = JoinHandle<Result<ExportSummary, UiError>>;
+
+/// What an export wrote (FR AXHK2W, AC-AXHK2W.14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportSummary {
+    /// Rows written.
+    pub rows: u64,
+    /// The folded part of the history it left out; `None` when nothing was.
+    pub folded: Option<ExportFolded>,
+}
+
+/// The oldest part of a history that an export left out because it was
+/// folded into coarser blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ExportFolded {
+    /// Folded records left out.
+    pub samples: u64,
+    /// Session time they span, ms: from the history's first record to the
+    /// first exported one.
+    pub ms: u64,
+    /// Wall-clock time of the file's first row, ms.
+    pub start_unix_ms: u64,
+}
 
 /// The next recording's id, across every session of the app: a session that
 /// reconnects under its old id must not reuse one (AC-AXHK2F.5). Starts at 1,

@@ -1,5 +1,6 @@
 import {
   toUiError,
+  type ExportFolded,
   type ExportProgress,
   type ExportResult,
   type RecordingEnd,
@@ -140,9 +141,24 @@ export function recordingSummaryText(
   return path === null ? text : `${text} File: ${path}`;
 }
 
-/** The notice shown once an export has finished: rows written and the file. */
+/** `YYYY-MM-DD HH:MM:SS` in local time. */
+function localTimestamp(ms: number): string {
+  const d = new Date(ms);
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return `${date} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** The notice shown once an export has finished: rows written and the file, and what of
+ * a folded history was left out and when the file starts (AC-AXHK2W.14). */
 export function exportNoticeText(result: ExportResult): string {
-  return `Exported ${rowsText(result.rows)} to ${result.path}`;
+  const text = `Exported ${rowsText(result.rows)} to ${result.path}`;
+  const folded = result.folded;
+  if (!folded) return text;
+  const samples = `${folded.samples.toLocaleString("en-US")} samples`;
+  return (
+    `${text}. The oldest ${formatRecordingElapsed(folded.ms)} (${samples}) was folded and ` +
+    `left out; the file starts at ${localTimestamp(folded.start_unix_ms)}.`
+  );
 }
 
 /** The file-manager action's label for a platform string (`navigator.platform`). */
@@ -467,6 +483,8 @@ export class ExportJob {
   /** Rows the last export wrote, `null` when none finished. */
   rows = $state<number | null>(null);
   path = $state<string | null>(null);
+  /** What of a folded history the last export left out; `null` when nothing was. */
+  folded = $state<ExportFolded | null>(null);
   error = $state<UiError | null>(null);
 
   /** Share of the export done, 0–1. */
@@ -481,6 +499,7 @@ export class ExportJob {
     this.error = null;
     this.rows = null;
     this.path = null;
+    this.folded = null;
     this.done = 0;
     this.total = 0;
     try {
@@ -491,6 +510,7 @@ export class ExportJob {
       if (result !== null) {
         this.rows = result.rows;
         this.path = result.path;
+        this.folded = result.folded ?? null;
       }
     } catch (err) {
       this.error = toUiError(err);
@@ -503,5 +523,6 @@ export class ExportJob {
   dismissNotice(): void {
     this.rows = null;
     this.path = null;
+    this.folded = null;
   }
 }

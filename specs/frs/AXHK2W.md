@@ -34,20 +34,27 @@ Long sessions at 1000 SPS and long PD captures stay within a known memory bound,
 - AC-AXHK2W.8: A measurement answers two questions, each with its numbers in this FR: do live batches drop at the worker's queue limit in the real app, and does a stalled page pile up without limit in the webview? Tauri's channel send may return before the page processes it; that was read in its source, not tested. If the simulator cannot settle a question, the check moves to the tester's runbook on a .app build, and the FR says so.
 - AC-AXHK2W.9: If either answer is yes, it is fixed in this milestone: the live chart never draws a straight line across missing data with no marker, and live data held for a stalled page has a limit that keeps the 400 MB target.
 - AC-AXHK2W.10: The session history keeps full resolution for the newest HISTORY_FULL_SAMPLES samples, a named constant of 10 000 000. Older chunks fold into blocks that keep, per series, min, max, sum and count, plus the block's start and end time and its charge and energy sums. Whole session, the ruler's ΔT, ΔAh, ΔWh and averages, segment marks and E.D. stay exact at block edges and lose only placement inside a block.
-- AC-AXHK2W.11: The chart marks the fold boundary with a faint tick that says the data before it is coarser.
+- AC-AXHK2W.11: The chart marks the fold boundary with a faint tick that says the data before it is coarser, both while live and while paused. The label sits on a small chip at the top of the plot, at the size of the other chart labels, and stays readable over the data in both themes.
 - AC-AXHK2W.12: A test feeds a synthetic 30-hour run at 1000 SPS in compressed time. History memory stays under a stated ceiling, and totals, ruler values at block edges, mark times and E.D. match an unfolded reference.
 - AC-AXHK2W.13: In the next tester run (20 minutes at 1000 SPS, footprint and RSS), the app process grows at the history's expected rate within 20%, so no other growth is left unexplained.
+- AC-AXHK2W.14: Exporting a session that has folded writes only its full-resolution part. Each row keeps its own record's temperature, and the export's row count matches the rows written. The app says, when the export finishes, how much of the oldest part was folded and left out and the time the file starts at. The file itself keeps the plain recorder layout. A test folds a history and checks the rows, temperatures, count and notice.
 
 ## Technical Design
 
 A shared ring for columns replaces array `push` and `shift` in `PdStatusBuffer` and `pdStore`. The backend log becomes a bounded deque. The strip keeps preallocated `Float64Array`s. uPlot axis values get cached per tick set. The cap stays the same as `MAX_RECORDS`.
 
+The history folds its oldest full-resolution chunks into run-bounded blocks of per-series sums, extremes and integrator totals; range stats, marks and E.D. walk blocks, then the full-resolution tail. A boundary command feeds the chart's tick (polled while live) and the export, which skips folded records.
+
 ## Testing
 
 Vitest with element counters, Rust unit tests for caps, the existing memory spec, and a local measurement of the demo stream.
+
+A compressed 30-hour fold test against an unfolded reference, a folded-export test, and a WebKit fold-tick spec.
 
 ## Notes
 
 Source: inventory note on 4NSVC9 and the follow-up on PD status data. Measured on the demo device, no meter needed.
 
 r3 (3d2ae16): web content RSS 549 MB at 6 min, footprint 184 to 209 MB, so AC.1 passes by footprint; WebKit counts shared and graphics pages as resident. No live batches dropped, and a hidden window piled nothing up, so AC.9 needs no fix. The app process grew about 1 MB/min from the full-resolution history (AC.10).
+
+Export of a folded session (AC.14) is the user's choice: the full-resolution tail plus a notice; Record keeps a full long session. The notice is in the app, not the file, so the file stays readable as a recorder file.

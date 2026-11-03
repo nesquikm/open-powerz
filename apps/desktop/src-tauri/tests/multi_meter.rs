@@ -850,7 +850,8 @@ fn an_export_cannot_replace_the_file_another_meter_records_to() {
         .expect("the export runs")
         .join()
         .unwrap()
-        .expect("written");
+        .expect("written")
+        .rows;
     assert!(rows > 0);
     rig.m.disconnect_for(METER_A).expect("disconnect A");
     rig.m.disconnect_for(METER_B).expect("disconnect B");
