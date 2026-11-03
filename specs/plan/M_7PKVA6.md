@@ -44,6 +44,7 @@ codename: Fine Print
 | [C6VR9K](../frs/C6VR9K.md) | A hidden chart's draw loop hangs the window | n/a |
 | [SX1VTC](../frs/SX1VTC.md) | Dashed series crawl while the chart scrolls | n/a |
 | [CW66T1](../frs/CW66T1.md) | Info popovers for features and abbreviations | n/a |
+| [EWQ6FQ](../frs/EWQ6FQ.md) | Window opens off screen and some layout rough edges | n/a |
 
 Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (added 2026-11-03 at the user's request) is built while the AXHK2W hardware run waits, before the final gate.
 
@@ -78,10 +79,12 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: element-count tests and a macOS demo measurement
 - [ ] A hidden chart's draw loop hangs the window — C6VR9K
   verify: WebKit PD-tab e2e, pd-timeline spec, then a tester runbook
-- [ ] Dashed series crawl while the chart scrolls — SX1VTC
+- [x] Dashed series crawl while the chart scrolls — SX1VTC
   verify: two-frame dash test, WebKit pixel e2e, frame-rate check
-- [ ] Info popovers for features and abbreviations — CW66T1
+- [x] Info popovers for features and abbreviations — CW66T1
   verify: glossary completeness test, WebKit keyboard and 375 px e2e, visual set
+- [ ] Window opens off screen and some layout rough edges — EWQ6FQ
+  verify: frame-fit unit tests, WebKit layout specs at 375/900/1280 px, flows and keyboard specs, tester runbook step
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
 - Needs hardware we lack: rotation bits and bit 7 of 0x60, which total the record screen shows, QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS coverage, the EcoFlow no-reply question, the Apple battery curve, Windows `\\?\` paths, the root cause of the rejected stop after a queue overflow.
