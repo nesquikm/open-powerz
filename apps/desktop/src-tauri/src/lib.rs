@@ -16,6 +16,7 @@ pub mod stats;
 pub mod store;
 pub mod trigger;
 pub mod ui_error;
+pub mod window_fit;
 pub mod worker;
 
 use std::path::{Path, PathBuf};
@@ -1728,6 +1729,11 @@ pub fn run() {
             match log {
                 Ok(log) => app.state::<Arc<AppState>>().manager().set_app_log(log),
                 Err(e) => eprintln!("open-powerz: app.log is not available: {e}"),
+            }
+            // A window restored off every screen comes back to the main one
+            // (AC-EWQ6FQ.1).
+            if let Some(window) = app.get_webview_window("main") {
+                window_fit::fit_main_window(&window);
             }
             Ok(())
         })

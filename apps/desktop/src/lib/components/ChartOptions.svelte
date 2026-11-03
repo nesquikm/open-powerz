@@ -190,7 +190,8 @@
 <style>
   .chart-options {
     display: flex;
-    gap: 0.25rem;
+    /* Each control keeps its (i) close; the next group starts 16 px away (AC-EWQ6FQ.3). */
+    gap: 0.25rem 1rem;
     flex-wrap: wrap;
   }
   .series-style {
@@ -203,6 +204,10 @@
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
+    /* On a narrow window the row wraps inside the panel instead of running past it (AC-EWQ6FQ.8). */
+    flex-wrap: wrap;
+    max-width: 100%;
+    min-width: 0;
   }
   .contrast-warning {
     color: var(--danger);

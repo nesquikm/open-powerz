@@ -41,6 +41,7 @@ The window opens off screen; "Open recording" covers the PD analyzer tab; info b
 - AC-EWQ6FQ.5: Regression: the rate-locked test in the flows spec passes. It went stale when Recorder options and Open recording made the button name "Record" match three buttons; it now names the Record button exactly.
 - AC-EWQ6FQ.6: Regression: the keyboard spec's menu-focus test passes. It went stale when Export .db joined the ⋯ menu disabled while there is nothing to export; the menu skips disabled items by design, so the test expects focus on the first enabled item.
 - AC-EWQ6FQ.7: The layout, flows, keyboard, info-popover and chart e2e specs pass on WebKit, and the next tester run confirms the window opens on screen after its display is removed.
+- AC-EWQ6FQ.8: At 375 px each series' style row in Chart options fits the panel: its colour, width, transparency and Reset button are fully visible and clickable, nothing is cut off at the right edge, and the page does not scroll sideways (found in the review screenshots, 2026-11-04).
 
 ## Technical Design
 
@@ -56,4 +57,4 @@ Rust unit tests for frame fit, WebKit layout specs at 375, 900 and 1280 px, the 
 
 ## Notes
 
-Stale-test causes: flows since commit 6769a1d (Recorder options) and 9d71d0a (Open recording); keyboard since 9d71d0a (Export .db in the menu). Choices are the user's: actions wrap below the tabs; a tight pair with a gap per chart option.
+Stale-test causes: flows since commit 6769a1d (Recorder options) and 9d71d0a (Open recording); keyboard since 9d71d0a (Export .db in the menu). Choices are the user's: actions wrap below the tabs; a tight pair with a gap per chart option. The user added AC .8 after the screenshot review.

@@ -493,6 +493,13 @@
     background: var(--bg);
     border-bottom: 1px solid var(--border);
   }
+  /* A phone-wide window puts the strip's buttons on a line under the tabs; the views
+     make room for it at the same width (App.svelte, FR EWQ6FQ). Wider, it stays one row. */
+  @media (max-width: 640px) {
+    .views-strip {
+      flex-wrap: wrap;
+    }
+  }
   .group {
     display: flex;
     flex-wrap: nowrap;

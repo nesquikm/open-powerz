@@ -171,6 +171,7 @@
   }
   .head {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
@@ -179,6 +180,7 @@
     display: flex;
     gap: 0.5rem;
     justify-content: flex-end;
+    margin-left: auto;
   }
   .edit {
     display: grid;
@@ -208,6 +210,7 @@
   .title {
     font-size: 0.875rem;
     font-weight: 600;
+    white-space: nowrap;
   }
   p {
     margin: 0;

@@ -98,8 +98,9 @@ test.describe("errors and notices (AC-AH2AEN.5)", () => {
     await expect(page.getByLabel("Sample rate")).toBeDisabled();
     // The stream goes on at the meter's rate.
     await expectReadoutNear(page, "VBUS", 5, 0.05);
-    // Recording still works while the rate is locked.
-    await expect(page.getByRole("button", { name: "Record" })).toBeEnabled();
+    // Recording still works while the rate is locked. "Record" alone also matches
+    // Recorder options and Open recording, so name the Record button exactly (AC-EWQ6FQ.5).
+    await expect(page.getByRole("button", { name: "Record", exact: true })).toBeEnabled();
   });
 });
 

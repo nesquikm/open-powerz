@@ -1596,25 +1596,23 @@
     cursor: pointer;
     color: var(--muted);
   }
-  /* A phone-wide window: the strip keeps its one row and Add meter stays whole at its end;
-     the tabs that do not fit scroll sideways inside their list, never the page. The list
-     fades out at its end, so tabs past the edge are not a secret. */
+  /* A phone-wide window (FR EWQ6FQ): the strip's row is too narrow for the tabs and the
+     buttons, so the tabs take the first line whole and Open recording and Add meter move
+     to their own line under them. Nothing scrolls sideways; the views keep room for the
+     two lines. */
   @media (max-width: 640px) {
+    .views {
+      padding-top: 4.75rem;
+    }
     .view-tabs {
-      flex: 1 1 0;
+      flex: 1 0 100%;
+      flex-wrap: wrap;
       min-width: 0;
-      overflow-x: auto;
-      scrollbar-width: none;
-      /* Room for the selected tab to sit on the strip's bottom border, which a scroll
-         container would otherwise clip. */
-      padding-bottom: 1px;
-      margin-bottom: -1px;
-      padding-right: 1.5rem;
-      mask-image: linear-gradient(to left, transparent, #000 1.5rem);
     }
     .view-tabs [role="tab"] {
       flex: none;
       white-space: nowrap;
+      padding: 0.3rem 0.6rem;
     }
     .strip-action {
       flex: none;
