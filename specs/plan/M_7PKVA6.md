@@ -42,6 +42,7 @@ codename: Fine Print
 | [AXHK2V](../frs/AXHK2V.md) | Chart appearance and image export | n/a |
 | [AXHK2W](../frs/AXHK2W.md) | Memory trim at 1000 SPS | n/a |
 | [C6VR9K](../frs/C6VR9K.md) | A hidden chart's draw loop hangs the window | n/a |
+| [SX1VTC](../frs/SX1VTC.md) | Dashed series crawl while the chart scrolls | n/a |
 | [CW66T1](../frs/CW66T1.md) | Info popovers for features and abbreviations | n/a |
 
 Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (added 2026-11-03 at the user's request) is built while the AXHK2W hardware run waits, before the final gate.
@@ -77,6 +78,8 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: element-count tests and a macOS demo measurement
 - [ ] A hidden chart's draw loop hangs the window — C6VR9K
   verify: WebKit PD-tab e2e, pd-timeline spec, then a tester runbook
+- [ ] Dashed series crawl while the chart scrolls — SX1VTC
+  verify: two-frame dash test, WebKit pixel e2e, frame-rate check
 - [ ] Info popovers for features and abbreviations — CW66T1
   verify: glossary completeness test, WebKit keyboard and 375 px e2e, visual set
 
