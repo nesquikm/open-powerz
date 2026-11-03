@@ -102,6 +102,13 @@ impl SessionLog {
         self.log.line(&format!("error {meter}: {kind}"));
     }
 
+    /// Add the line for `event` on this meter with its `detail`, like
+    /// `live batches dropped usb:1:7 (KM003C): page fell 512 batches behind`.
+    pub fn event_with(&self, event: &str, detail: &str) {
+        self.log
+            .line(&format!("{event} {}: {detail}", self.meter()));
+    }
+
     /// Add a line of a firmware update: its start, a stage it entered, or
     /// how it ended (AC-AXHK2G.3).
     pub fn firmware(&self, event: &str) {

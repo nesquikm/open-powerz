@@ -2728,6 +2728,106 @@ where
 /// dropped batch when the session ends.
 const MAX_QUEUED_BATCHES: usize = 512;
 
+/// The live batches a slow page lost, told to app.log (AC-AXHK2W.8): one line
+/// when the queue limit first drops a batch, one with the spell's totals when
+/// the page has caught up (its queue at most half full) or the session ends.
+struct LiveDrops {
+    log: SessionLog,
+    /// The newest samples dropped, newer than any batch queued; sent ahead of
+    /// the next event that is not a batch, so not lost yet.
+    newest: Option<Batch>,
+    spell: Option<DropSpell>,
+}
+
+struct DropSpell {
+    started: Instant,
+    batches: u64,
+    samples: u64,
+}
+
+impl LiveDrops {
+    fn new(log: SessionLog) -> LiveDrops {
+        LiveDrops {
+            log,
+            newest: None,
+            spell: None,
+        }
+    }
+
+    /// A batch past the queue limit: held as the newest, and any it replaces
+    /// is lost.
+    fn drop_batch(&mut self, batch: Batch) {
+        if self.spell.is_none() {
+            let detail = format!("page fell {MAX_QUEUED_BATCHES} batches behind");
+            self.log.event_with("live batches dropped", &detail);
+            self.spell = Some(DropSpell {
+                started: Instant::now(),
+                batches: 0,
+                samples: 0,
+            });
+        }
+        if !batch.samples.is_empty() {
+            self.lose_newest();
+            self.newest = Some(batch);
+        }
+    }
+
+    /// A batch with samples goes out with `depth` batches queued ahead: the
+    /// held samples are older, so lost.
+    fn deliver(&mut self, depth: usize) {
+        self.lose_newest();
+        if depth <= MAX_QUEUED_BATCHES / 2
+            && let Some(spell) = self.spell.take()
+        {
+            self.log.event_with("live batches resumed", &spell.totals());
+        }
+    }
+
+    fn lose_newest(&mut self) {
+        if let Some(batch) = self.newest.take()
+            && let Some(spell) = &mut self.spell
+        {
+            spell.batches += 1;
+            spell.samples += batch.samples.len() as u64;
+        }
+    }
+}
+
+impl Drop for LiveDrops {
+    fn drop(&mut self) {
+        self.lose_newest();
+        if let Some(spell) = self.spell.take() {
+            self.log
+                .event_with("live batches lost at session end", &spell.totals());
+        }
+    }
+}
+
+impl DropSpell {
+    /// Like `37 batches, 18,500 samples dropped over 1.2 s`.
+    fn totals(&self) -> String {
+        let secs = self.started.elapsed().as_secs_f64();
+        format!(
+            "{} batches, {} samples dropped over {secs:.1} s",
+            grouped(self.batches),
+            grouped(self.samples)
+        )
+    }
+}
+
+/// `n` with a comma between each group of three digits.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// The worker thread's body: open, then step until stopped or ended.
 #[allow(clippy::too_many_arguments)]
 fn run_worker<T, C, O>(
@@ -2758,27 +2858,27 @@ fn run_worker<T, C, O>(
         });
     });
     let forward_meter = meter.clone();
-    // The newest samples dropped for a slow sink, newer than any batch queued.
-    let mut newest_dropped = None;
+    // The samples dropped for a slow sink, and what app.log hears of them.
+    let mut drops = LiveDrops::new(log.clone());
     let forward: Sink = Box::new(move |event| {
         let mut last_samples = None;
         match &event {
             // A sink stalled for this long gets no more live batches until it
             // catches up; the history and any recording keep every sample.
             BackendEvent::Batch(_) if depth.load(Ordering::SeqCst) >= MAX_QUEUED_BATCHES => {
-                if let BackendEvent::Batch(batch) = event
-                    && !batch.samples.is_empty()
-                {
-                    newest_dropped = Some(batch);
+                if let BackendEvent::Batch(batch) = event {
+                    drops.drop_batch(batch);
                 }
                 return;
             }
-            BackendEvent::Batch(batch) if !batch.samples.is_empty() => newest_dropped = None,
+            BackendEvent::Batch(batch) if !batch.samples.is_empty() => {
+                drops.deliver(depth.load(Ordering::SeqCst));
+            }
             BackendEvent::Batch(_) => {}
             // The samples held go first: no event overtakes samples it
             // follows, and the session's last samples always arrive, so the
             // outage gap starts at the last sample the session history holds.
-            _ => last_samples = newest_dropped.take(),
+            _ => last_samples = drops.newest.take(),
         }
         blocked(forward_meter.as_ref(), || {
             let send = |event: BackendEvent| {
