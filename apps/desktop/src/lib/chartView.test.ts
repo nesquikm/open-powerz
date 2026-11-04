@@ -66,6 +66,37 @@ describe("redraw rate (AC-AH2AEM.2)", () => {
     expect(draws).toBeGreaterThanOrEqual(20);
   });
 
+  it("caps every redraw at 30 per second while the minimum gap asks for it (AC-HR2JAG.3)", () => {
+    const frames = new FakeFrames();
+    let draws = 0;
+    const scheduler = new RedrawScheduler(
+      () => draws++,
+      frames,
+      () => 1000 / 30,
+    );
+    for (let i = 0; i < 60; i++) {
+      scheduler.invalidate();
+      frames.tick((i * 1000) / 60);
+    }
+    expect(draws).toBeLessThanOrEqual(30);
+    expect(draws).toBeGreaterThanOrEqual(20);
+  });
+
+  it("never draws faster than 60 per second, whatever the minimum gap says (AC-HR2JAG.3)", () => {
+    const frames = new FakeFrames();
+    let draws = 0;
+    const scheduler = new RedrawScheduler(
+      () => draws++,
+      frames,
+      () => 0,
+    );
+    for (let i = 0; i < 144; i++) {
+      scheduler.invalidate();
+      frames.tick((i * 1000) / 144);
+    }
+    expect(draws).toBeLessThanOrEqual(60);
+  });
+
   it("draws nothing while nothing changed, and coalesces many invalidations into one frame", () => {
     const frames = new FakeFrames();
     let draws = 0;

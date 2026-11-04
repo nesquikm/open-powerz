@@ -25,15 +25,12 @@
 //     `smooth` means "smoothing active": motion is smooth AND smoothingActive(...)
 //
 //   LIVE_SMOOTH_MIN_FRAME_MS = 1000 / 30   // smoothing redraws at most 30 times a second
-//
-//   smoothFrameDue(lastDrawMs: number | null, nowMs) -> boolean
-//     true when lastDrawMs is null or nowMs - lastDrawMs >= LIVE_SMOOTH_MIN_FRAME_MS
+//   (the chart's RedrawScheduler applies it to every redraw while smoothing; see chartView.test.ts)
 import { describe, expect, it } from "vitest";
 import {
   LIVE_BATCH_INTERVAL_MS,
   LIVE_SMOOTH_MIN_FRAME_MS,
   liveNeedsFrame,
-  smoothFrameDue,
   smoothingActive,
   smoothLiveEnd,
   steppedRange,
@@ -177,36 +174,9 @@ describe("smoothingActive: the 2 px switch (AC-HR2JAG.2)", () => {
   });
 });
 
-describe("smoothFrameDue: at most 30 redraws a second (AC-HR2JAG.3)", () => {
+describe("the smoothing frame cap (AC-HR2JAG.3)", () => {
   it("caps smoothing at 30 frames a second", () => {
     expect(LIVE_SMOOTH_MIN_FRAME_MS).toBeCloseTo(1000 / 30, 9);
-  });
-
-  it("is due on the first frame (nothing drawn yet)", () => {
-    expect(smoothFrameDue(null, 1_000)).toBe(true);
-  });
-
-  it("is not due at 0 ms or 20 ms after the last draw", () => {
-    expect(smoothFrameDue(1_000, 1_000)).toBe(false);
-    expect(smoothFrameDue(1_000, 1_020)).toBe(false);
-  });
-
-  it("is due at 33.4 ms after the last draw", () => {
-    expect(smoothFrameDue(1_000, 1_033.4)).toBe(true);
-  });
-
-  it("drops every other 60 Hz frame: about 30 draws in one second", () => {
-    let last: number | null = null;
-    let draws = 0;
-    for (let i = 0; i < 60; i++) {
-      const now = i * FRAME_MS;
-      if (smoothFrameDue(last, now)) {
-        draws++;
-        last = now;
-      }
-    }
-    expect(draws).toBeLessThanOrEqual(30);
-    expect(draws).toBeGreaterThanOrEqual(20);
   });
 });
 

@@ -590,13 +590,6 @@ export function liveNeedsFrame(s: {
 /** Smoothing redraws at most 30 times a second (AC-HR2JAG.3). */
 export const LIVE_SMOOTH_MIN_FRAME_MS = 1000 / 30;
 
-/** True when a smoothing-only frame may draw at wall time `nowMs`: no frame drawn yet
- * (`lastDrawMs` null) or at least {@link LIVE_SMOOTH_MIN_FRAME_MS} since the last one
- * (AC-HR2JAG.3). */
-export function smoothFrameDue(lastDrawMs: number | null, nowMs: number): boolean {
-  return lastDrawMs === null || nowMs - lastDrawMs >= LIVE_SMOOTH_MIN_FRAME_MS;
-}
-
 /** Reduced motion: `range` (a `spanMs` live window) advanced in tenth-of-a-span steps
  * instead of scrolling; the end never passes the newest sample, so no blank strip
  * shows, and the start never precedes `firstMs`. A window still shorter than its span
