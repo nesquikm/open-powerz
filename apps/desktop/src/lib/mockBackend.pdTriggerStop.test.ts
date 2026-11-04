@@ -1,12 +1,13 @@
 /**
  * FR JQ971R, AC .4: like the backend, the mock backend stops a running PD capture
  * with the reason "trigger" when Detect opens a trigger session; a stop the user
- * asked for and a disconnect carry no reason.
+ * asked for and a disconnect carry no reason. `?mock=pd-start-refused`: like the
+ * meter [device], a PD capture Start after a trigger session is refused until a replug.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BackendEvent } from "./backend";
-import { MockBackend } from "./mockBackend";
+import { MockBackend, mockModeFromUrl } from "./mockBackend";
 
 type PdStateData = { capturing: boolean; reason?: string };
 
@@ -59,6 +60,40 @@ describe("the mock's PD stop reason (AC-JQ971R.4)", () => {
     await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
     await backend.triggerOpen();
     expect(pdStates(events)).toEqual([]);
+    await backend.disconnect();
+  });
+});
+
+describe("`pd-start-refused`: Start refused after a trigger session (AC-JQ971R.4)", () => {
+  it("is a mock mode the page URL can name", () => {
+    expect(mockModeFromUrl("?mock=pd-start-refused")).toBe("pd-start-refused");
+  });
+
+  it("refuses a Start after Detect with the backend's refusal, and sends no start", async () => {
+    const backend = new MockBackend("pd-start-refused", { pdSynthetic: null });
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
+    await backend.pdStart();
+    vi.advanceTimersByTime(100);
+    await backend.triggerOpen();
+    await backend.triggerDetect();
+    await backend.triggerClose();
+    const before = pdStates(events).length;
+    await expect(backend.pdStart()).rejects.toMatchObject({
+      kind: "protocol",
+      message: "The meter refused to start the PD capture.",
+      hint: "Replug the meter and try again.",
+    });
+    expect(pdStates(events).slice(before)).toEqual([]);
+    await backend.disconnect();
+  });
+
+  it("starts a capture as usual before any trigger session", async () => {
+    const backend = new MockBackend("pd-start-refused", { pdSynthetic: null });
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
+    await backend.pdStart();
+    expect(pdStates(events).at(-1)).toEqual({ capturing: true });
     await backend.disconnect();
   });
 });

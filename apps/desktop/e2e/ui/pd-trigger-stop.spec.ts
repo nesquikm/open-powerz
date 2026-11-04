@@ -2,7 +2,9 @@
  * FR JQ971R (AC .2, .3, .4): pressing Detect in the Trigger tab stops a running PD
  * capture; back in the PD analyzer, its status area says why, the captured rows stay,
  * and the notice goes away when a capture starts again. A stop the user asked for
- * shows no notice. On the mocked backend, run on WebKit (the macOS app's engine).
+ * shows no notice. A Start the meter refuses (`?mock=pd-start-refused`: refused after a
+ * trigger session, as on the meter) removes the notice and shows only the refusal. On
+ * the mocked backend, run on WebKit (the macOS app's engine).
  */
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
@@ -20,7 +22,7 @@ import {
 test.use({ viewport: { width: 1600, height: 900 } });
 
 const NOTICE =
-  "The PD capture stopped when Detect opened a trigger session. Start it again once you are done in the Trigger tab.";
+  "The PD capture stopped when Detect opened a trigger session. The meter needs a replug before a new capture.";
 
 function notice(page: Page): Locator {
   return pdView(page).getByText(NOTICE, { exact: true });
@@ -68,4 +70,24 @@ test("the notice goes away when the meter disconnects (AC-JQ971R.3)", async ({ p
 
   await page.getByRole("button", { name: "Disconnect", exact: true }).first().click();
   await expect(notice(page)).toHaveCount(0);
+});
+
+test("a refused Start removes the notice and shows only the refusal (AC-JQ971R.3, .4)", async ({
+  page,
+}) => {
+  await openPd(page, "?mock=pd-start-refused");
+  await capture(page);
+  await detectInTriggerTab(page);
+  await showPd(page);
+  await expect(notice(page)).toBeVisible();
+  const rows = await rowCount(page);
+  expect(rows).toBeGreaterThan(0);
+
+  await startButton(page).click();
+  await expect(
+    page.getByText("The meter refused to start the PD capture.", { exact: true }),
+  ).toBeVisible();
+  await expect(notice(page)).toHaveCount(0);
+  await expect(startButton(page)).toBeEnabled();
+  expect(await rowCount(page)).toBe(rows);
 });

@@ -2143,7 +2143,8 @@ where
             let _ = worker.close();
             return Err(UiError::usage("A trigger session is already open."));
         }
-        // The PD capture pauses while triggering. [inferred]
+        // The PD capture stops for the trigger session; after the session closes the
+        // meter refuses a new capture start until it is replugged. [device]
         let _ = control.stop_pd_for(Some(crate::worker::PdStopReason::Trigger));
         let current = meter
             .live

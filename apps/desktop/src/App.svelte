@@ -731,7 +731,14 @@
   function startPd(): void {
     const cleared = pd.opened ? clearPdNow() : Promise.resolve();
     void cleared
-      .then(() => act().pdStart())
+      .then(() =>
+        act()
+          .pdStart()
+          .catch((err: unknown) => {
+            pd.startRefused();
+            throw err;
+          }),
+      )
       .catch((err: unknown) => session.reportError(toUiError(err)));
   }
 

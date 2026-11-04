@@ -2,7 +2,7 @@
  * FR JQ971R (AC .2, .3): a PD capture that Detect stopped says so. The backend's
  * capture-stopped event carries `reason: "trigger"` when a trigger session stopped the
  * capture; the store keeps a notice from it (shown in the analyzer's status area) until
- * the next start, a disconnect or another meter shown. A stop the user asked for shows
+ * the next start, a refused Start, a disconnect or another meter shown. A stop the user asked for shows
  * no notice. The captured rows stay.
  */
 
@@ -28,7 +28,7 @@ function row(index: number, name = "Accept"): PdRow {
 }
 
 const NOTICE =
-  "The PD capture stopped when Detect opened a trigger session. Start it again once you are done in the Trigger tab.";
+  "The PD capture stopped when Detect opened a trigger session. The meter needs a replug before a new capture.";
 
 const started: BackendEvent = { type: "pd_state", data: { capturing: true } };
 const stopped: BackendEvent = { type: "pd_state", data: { capturing: false } };
@@ -103,6 +103,21 @@ describe("when the notice goes away (AC-JQ971R.3)", () => {
     expect(pd.notice).toBeNull();
     // The parked capture does not bring it back when the first meter returns.
     pd.swapWith(other);
+    expect(pd.notice).toBeNull();
+  });
+
+  it("goes away when a Start is refused, and the rows stay", () => {
+    const pd = stoppedByDetect();
+    pd.startRefused();
+    expect(pd.notice).toBeNull();
+    expect(pd.capturing).toBe(false);
+    expect(pd.store.length).toBe(3);
+  });
+
+  it("a refused Start does not bring the notice back on a later user stop", () => {
+    const pd = stoppedByDetect();
+    pd.startRefused();
+    pd.handleEvent(stopped);
     expect(pd.notice).toBeNull();
   });
 

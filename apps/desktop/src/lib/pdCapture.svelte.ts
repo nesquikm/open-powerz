@@ -31,7 +31,7 @@ export const PD_STOP_FIRST_REASON = "Stop the capture first to open or import a 
 /** The analyzer's notice after a trigger session (Detect) stopped the capture
  * (AC-JQ971R.2). */
 export const PD_TRIGGER_STOP_NOTICE =
-  "The PD capture stopped when Detect opened a trigger session. Start it again once you are done in the Trigger tab.";
+  "The PD capture stopped when Detect opened a trigger session. The meter needs a replug before a new capture.";
 
 export class PdCapture {
   /** The PD sniffer runs. */
@@ -99,6 +99,12 @@ export class PdCapture {
       capture.version++;
       capture.statusVersion++;
     }
+  }
+
+  /** The backend refused a Start: only its refusal shows, so the trigger-stop notice
+   * goes (AC-JQ971R.3). The rows stay. */
+  startRefused(): void {
+    this.notice = null;
   }
 
   /** Takes the PD events of the session channel; a session that ends stops the capture. */

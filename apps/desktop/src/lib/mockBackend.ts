@@ -766,6 +766,9 @@ interface Running {
   triggerVbusV: number | null;
   /** This meter's open trigger session (FR DGSQ6S), null when none (FR 1HHT03). */
   trigger: MockTrigger | null;
+  /** `pd-start-refused`: a trigger session ran on this connection, so the meter refuses
+   * a PD capture Start until a replug [device]. */
+  pdStartRefused?: boolean;
 }
 
 interface MockRecording {
@@ -853,6 +856,7 @@ export const MOCK_MODES = [
   "trigger-unlisted-cable",
   "trigger-charger-gone",
   "trigger-cc-gone",
+  "pd-start-refused",
   "bootloader",
   "mode-flip",
   "firmware-fail-switching",
@@ -2098,6 +2102,13 @@ export class MockBackend {
     const s = this.#open();
     // The PD capture waits while triggering. [inferred]
     if (this.#trigger) throw usage("Close the trigger session to capture PD traffic.");
+    if (s.pdStartRefused) {
+      throw {
+        kind: "protocol",
+        message: "The meter refused to start the PD capture.",
+        hint: "Replug the meter and try again.",
+      } satisfies UiError;
+    }
     const pd = s.pd;
     if (pd.timer !== null) return;
     pd.timer = setInterval(() => this.#pdTick(s), BATCH_MS);
@@ -2579,6 +2590,7 @@ export class MockBackend {
       await this.setRate(TRIGGER_MAX_SPS);
     }
     s.trigger = { entered: null, rateBefore, armed: false, goingAway: false, chargerGone: false };
+    if (this.#mode === "pd-start-refused") s.pdStartRefused = true;
     this.#triggerLog.push("pdm open");
   }
 
