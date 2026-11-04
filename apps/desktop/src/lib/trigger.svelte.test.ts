@@ -37,6 +37,7 @@ import {
   type TriggerApi,
 } from "./trigger.svelte";
 import { PdConsole, type ConsoleApi } from "./console.svelte";
+import * as triggerModule from "./trigger.svelte";
 
 function offer(position: number, mv: number, kind: TriggerOffer["kind"] = "fixed"): TriggerOffer {
   return {
@@ -190,11 +191,15 @@ function requestMv(r: TriggerRequest): number {
   return r.voltage_mv;
 }
 
-function batch(vbus: number, tMs = 0): BackendEvent {
+/** A batch of one reading. CC defaults to a charger attached on CC1 (1.68 V / 0 V), so
+ * only a test that names both CC lines low reads a charger that went away (FR WFSNZD). */
+function batch(vbus: number, tMs = 0, cc: [number, number] = [1.68, 0]): BackendEvent {
   return {
     type: "batch",
     data: {
-      samples: [{ t_ms: tMs, vbus_v: vbus, ibus_a: 0, cc1_v: 0, cc2_v: 0, dp_v: 0, dm_v: 0 }],
+      samples: [
+        { t_ms: tMs, vbus_v: vbus, ibus_a: 0, cc1_v: cc[0], cc2_v: cc[1], dp_v: 0, dm_v: 0 },
+      ],
       temp_c: null,
       stats: {
         elapsed_ms: 0,
@@ -2419,5 +2424,258 @@ describe("AC-AXHK2N.14 review: another meter on screen", () => {
     await asking;
     expect(panel.pending).toBeNull();
     expect(api.sent).toEqual([]);
+  });
+});
+
+// ---- FR WFSNZD: the page hears a charger gone with no contract ----
+
+/** Both CC lines low: the charger is unplugged (or its CC pull-up gone). */
+const CC_LOW: [number, number] = [0.05, 0.02];
+
+/** A low-CC reading at the given VBUS (a charger unplugged takes VBUS down too). */
+function ccLow(vbus = 0): BackendEvent {
+  return batch(vbus, 0, CC_LOW);
+}
+
+/** Counts every question to `api` while `answer` holds the reply. */
+function heldGone(api: FakeApi): { asked(): number; resolve(value: boolean): void } {
+  const answer = held<boolean>();
+  let asked = 0;
+  api.chargerGone = () => {
+    asked += 1;
+    return answer.promise;
+  };
+  return { asked: () => asked, resolve: (v) => answer.resolve(v) };
+}
+
+describe("AC-WFSNZD.1: both CC lines low ask the backend, contract or not", () => {
+  it("the CC level is a named 0.3 V", () => {
+    expect((triggerModule as Record<string, unknown>).CC_GONE_V).toBe(0.3);
+  });
+
+  it("after Detect with no offer pressed, low CC asks and the backend's yes shows the gone state", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(1);
+    expect(panel.chargerGone).toBe(true);
+    nothingListed(panel);
+    expect(panel.sessionOpen).toBe(true);
+  });
+
+  it("asks even when VBUS still reads 5 V", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(ccLow(5.1));
+    await settled();
+    expect(api.goneAsked).toBe(1);
+    expect(panel.chargerGone).toBe(true);
+  });
+
+  it("both lines just under 0.3 V ask", async () => {
+    const { api, panel } = await detected();
+    panel.handleEvent(batch(0, 0, [0.29, 0.29]));
+    await settled();
+    expect(api.goneAsked).toBe(1);
+  });
+
+  it("Read cable then sends nothing", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    const from = api.calls.length;
+    await panel.readCable();
+    expect(api.calls.slice(from)).not.toContain("cable read");
+    expect(panel.cable).toBeNull();
+  });
+
+  it("the backend's no changes nothing", async () => {
+    const { api, panel } = await detected();
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(1);
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.sections[0]?.state).toBe("supported");
+    expect(panel.detection).toEqual(DETECTION);
+  });
+
+  it("a backend that cannot answer changes nothing and shows no error", async () => {
+    const { api, panel } = await detected();
+    let asked = 0;
+    api.chargerGone = async () => {
+      asked += 1;
+      throw { kind: "internal", message: "gone", hint: null };
+    };
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(asked).toBe(1);
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.error).toBeNull();
+  });
+
+  it("low CC under a contract asks too", async () => {
+    const { api, panel } = await armedPanel();
+    collapse(api);
+    panel.handleEvent(ccLow(9));
+    await settled();
+    expect(api.goneAsked).toBeGreaterThan(0);
+    expect(panel.chargerGone).toBe(true);
+  });
+});
+
+describe("AC-WFSNZD.2: no more questions than before otherwise", () => {
+  it("0 V with CC pulled up and no contract asks nothing", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(batch(0, 0, [1.68, 0]));
+    panel.handleEvent(batch(0, 0, [0, 1.68]));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("one CC line at 0.3 V or above asks nothing", async () => {
+    const { api, panel } = await detected();
+    panel.handleEvent(batch(5, 0, [0.3, 0]));
+    panel.handleEvent(batch(5, 0, [0, 0.3]));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+  });
+
+  it("one question is out at a time", async () => {
+    const { api, panel } = await detected();
+    const gone = heldGone(api);
+    panel.handleEvent(ccLow());
+    panel.handleEvent(ccLow());
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(1);
+    gone.resolve(false);
+    await settled();
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(2);
+  });
+
+  it("none is asked with no session", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("none is asked after the session ended", async () => {
+    const { api, panel } = await detected();
+    await panel.leave();
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("none is asked while Detect runs", async () => {
+    const { api, panel } = await detected();
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    await settled();
+    expect(panel.detecting).toBe(true);
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("none is asked once the charger is known gone", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(1);
+    panel.handleEvent(ccLow());
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(1);
+  });
+
+  it("an answer that lands after Detect started changes nothing", async () => {
+    const { api, panel } = await detected();
+    const gone = heldGone(api);
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(1);
+    await panel.detect();
+    gone.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.sections[0]?.state).toBe("supported");
+    expect(panel.detection).toEqual(DETECTION);
+  });
+
+  it("an answer from before Detect is dropped even once a new contract stands", async () => {
+    const { api, panel } = await armedPanel();
+    const gone = heldGone(api);
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(gone.asked()).toBe(1);
+    await panel.detect();
+    await at9V(panel);
+    gone.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+
+  it("an answer that lands after the session ended changes nothing", async () => {
+    const { api, panel } = await detected();
+    const gone = heldGone(api);
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(1);
+    await panel.leave();
+    gone.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("an answer that lands after a disconnect changes nothing", async () => {
+    const { api, panel } = await detected();
+    const gone = heldGone(api);
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(1);
+    panel.handleEvent({ type: "status", data: { state: "disconnected" } } as BackendEvent);
+    gone.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+  });
+});
+
+describe("AC-WFSNZD.3: the contract case works as before", () => {
+  it("a VBUS collapse after an accepted request, CC still up, shows the gone state", async () => {
+    const { api, panel } = await armedPanel();
+    collapse(api);
+    panel.handleEvent(batch(0, 0, [1.68, 0]));
+    await settled();
+    expect(api.goneAsked).toBeGreaterThan(0);
+    expect(panel.chargerGone).toBe(true);
+    expect(panel.armed).toBe(false);
+    nothingListed(panel);
+  });
+
+  it("2 V or more under a contract with CC up asks nothing", async () => {
+    const { api, panel } = await armedPanel();
+    panel.handleEvent(batch(VBUS_GONE_V, 0, [1.68, 0]));
+    await settled();
+    expect(api.goneAsked).toBe(0);
   });
 });

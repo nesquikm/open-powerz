@@ -48,6 +48,9 @@ export const DEVIATION_LIMIT = 0.05;
 export const DEVIATION_DELAY_MS = 2000;
 /** VBUS below this, V, is worth asking the backend about. It decides. */
 export const VBUS_GONE_V = 2;
+/** Both CC lines below this, V, read as no charger attached, contract or not: worth
+ * asking the backend about, which uses the same level. It decides. */
+export const CC_GONE_V = 0.3;
 
 /** Section headings, by protocol. */
 export const PROTOCOL_TITLES: Record<TriggerProtocol, string> = {
@@ -774,10 +777,13 @@ export class TriggerPanel {
     this.cableError = null;
   }
 
-  /** VBUS read low with a contract standing: asks the backend, which also saw the
-   * reading. A backend that cannot answer changes nothing. */
-  async #askChargerGone(): Promise<void> {
-    if (!this.#contract || this.#askingGone) return;
+  /** Asks the backend whether the charger went away; it also saw the reading. Cued by
+   * low VBUS or a refusal under a contract (`underContract`), or by both CC lines low
+   * with or without one. A backend that cannot answer changes nothing. */
+  async #askChargerGone(underContract = true): Promise<void> {
+    if (underContract && !this.#contract) return;
+    if (this.#gone || this.detecting || this.chargerGone || this.#askingGone) return;
+    const detects = this.#detects;
     this.#askingGone = true;
     let gone = false;
     try {
@@ -786,8 +792,8 @@ export class TriggerPanel {
       // Not known to be gone.
     }
     this.#askingGone = false;
-    // `#contract` is down again if the session ended or Detect started meanwhile.
-    if (!gone || !this.#contract) return;
+    // The session ended or Detect started meanwhile: the answer is about the old one.
+    if (!gone || this.#gone || this.detecting || this.#detects !== detects) return;
     this.#forgetCharger();
     this.chargerGone = true;
   }
@@ -804,7 +810,8 @@ export class TriggerPanel {
       if (last === undefined) return;
       this.vbusV = last.vbus_v;
       this.#evaluate();
-      if (last.vbus_v < VBUS_GONE_V) void this.#askChargerGone();
+      if (last.cc1_v < CC_GONE_V && last.cc2_v < CC_GONE_V) void this.#askChargerGone(false);
+      else if (last.vbus_v < VBUS_GONE_V) void this.#askChargerGone();
     }
   }
 }

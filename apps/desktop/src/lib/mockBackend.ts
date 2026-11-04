@@ -852,6 +852,7 @@ export const MOCK_MODES = [
   "trigger-no-cable",
   "trigger-unlisted-cable",
   "trigger-charger-gone",
+  "trigger-cc-gone",
   "bootloader",
   "mode-flip",
   "firmware-fail-switching",
@@ -1074,8 +1075,11 @@ interface MockTrigger {
   armed: boolean;
   /** `trigger-charger-gone`: the charger's going away has been scheduled. */
   goingAway: boolean;
-  /** VBUS collapsed under a contract (FR AXHK2N). */
+  /** VBUS collapsed under a contract (FR AXHK2N), or both CC lines fell after Detect
+   * (`trigger-cc-gone`, FR WFSNZD). */
   chargerGone: boolean;
+  /** `trigger-cc-gone`: both CC lines read 0 V until the next PD listing. */
+  ccLow?: boolean;
   /** The command log's length right after a way back to 5 V; while it is unchanged
    * nothing went out since, so the close skips another (AC-AXHK2P.15). */
   backAt?: number;
@@ -1085,6 +1089,8 @@ interface MockTrigger {
 const TRIGGER_MAX_SPS = 50;
 /** `trigger-charger-gone`: how long after the first accepted request VBUS falls, ms. */
 const CHARGER_GONE_AFTER_MS = 1000;
+/** `trigger-cc-gone`: how long after Detect both CC lines fall, ms. */
+const CC_GONE_AFTER_MS = 1000;
 /** The refusal of what names an offer once the charger went away. */
 const CHARGER_GONE_REFUSAL = "The charger went away. Press Detect.";
 
@@ -1705,6 +1711,10 @@ export class MockBackend {
       const sample = measuredAt(s, Math.round(s.nextMs));
       if (s.triggerVbusV !== null) {
         sample.vbus_v = s.triggerVbusV + 0.01 * Math.sin(s.nextMs / 140);
+      }
+      if (s.trigger?.ccLow) {
+        sample.cc1_v = 0;
+        sample.cc2_v = 0;
       }
       samples.push(sample);
       s.history.push(sample);
@@ -2585,6 +2595,7 @@ export class MockBackend {
     t.armed = false;
     this.#triggerLog.push("entry bc", "entry apple", "entry list", "reset", "pdm parm");
     t.entered = null;
+    this.#scheduleCcGone(t);
     if (this.#mode === "trigger-list-lag") {
       // The meter answers the check one command late, like the backend's `OutOfSync`.
       throw outOfSyncError();
@@ -2612,6 +2623,7 @@ export class MockBackend {
     if (protocol === "pd") {
       this.#triggerLog.push("pdm parm");
       t.entered = "pd";
+      t.ccLow = false;
       if (t.chargerGone) {
         t.chargerGone = false;
         if (this.#session) this.#session.triggerVbusV = null;
@@ -2833,15 +2845,31 @@ export class MockBackend {
   /** `trigger-charger-gone`: VBUS falls to 0 V a moment after the first accepted request,
    * and the session finds out on its own, with nothing sent. */
   #scheduleChargerGone(t: MockTrigger): void {
+    this.#scheduleGone(t, "trigger-charger-gone", CHARGER_GONE_AFTER_MS, (s) => {
+      s.triggerVbusV = 0;
+    });
+  }
+
+  /** `trigger-cc-gone`: a moment after the first Detect both CC lines fall to 0 V and
+   * the session finds the charger gone on its own, with no request and nothing sent. */
+  #scheduleCcGone(t: MockTrigger): void {
+    this.#scheduleGone(t, "trigger-cc-gone", CC_GONE_AFTER_MS, () => {
+      t.ccLow = true;
+    });
+  }
+
+  /** Once per session in `mode`: after `afterMs` the charger goes away (`drop` changes
+   * the stream), unless the session ended or another one took its place. */
+  #scheduleGone(t: MockTrigger, mode: MockMode, afterMs: number, drop: (s: Running) => void): void {
     const s = this.#session;
-    if (this.#mode !== "trigger-charger-gone" || t.goingAway || !s) return;
+    if (this.#mode !== mode || t.goingAway || !s) return;
     t.goingAway = true;
     setTimeout(() => {
       if (s.trigger !== t) return;
-      s.triggerVbusV = 0;
+      drop(s);
       t.armed = false;
       t.chargerGone = true;
-    }, CHARGER_GONE_AFTER_MS);
+    }, afterMs);
   }
 
   /** Back to 5 V: `pd req=1` after PD, `reset` after the others; the session stays.

@@ -837,3 +837,88 @@ describe("AC-AXHK2N.9, .10: a charger that goes away", () => {
     await expect(backend.triggerChargerGone()).resolves.toBe(false);
   });
 });
+
+describe("AC-WFSNZD.4: `trigger-cc-gone`, a charger unplugged right after Detect", () => {
+  /** The CC lines of the last reading streamed, V. */
+  function lastCc(events: BackendEvent[]): [number, number] {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]!;
+      if (e.type === "batch" && e.data.samples.length > 0) {
+        const s = e.data.samples.at(-1)!;
+        return [s.cc1_v, s.cc2_v];
+      }
+    }
+    return [NaN, NaN];
+  }
+
+  /** What the page does on Detect: detect, then list PD. */
+  async function detectedIn(
+    mode: ConstructorParameters<typeof MockBackend>[0],
+  ): Promise<{ backend: MockBackend; events: BackendEvent[] }> {
+    const c = await opened(mode);
+    await c.backend.triggerDetect();
+    await c.backend.triggerList("pd");
+    return c;
+  }
+
+  it("is a mode of the page URL", () => {
+    expect(mockModeFromUrl("?mock=trigger-cc-gone")).toBe("trigger-cc-gone");
+  });
+
+  it("keeps CC up long enough for the page to list the offers", async () => {
+    const { backend, events } = await detectedIn("trigger-cc-gone");
+    await vi.advanceTimersByTimeAsync(300);
+    expect(Math.max(...lastCc(events))).toBeGreaterThan(1);
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("drops both CC lines below 0.3 V a moment after Detect and sets the gone flag, with no request", async () => {
+    const { backend, events } = await detectedIn("trigger-cc-gone");
+    const sent = backend.triggerCommands().length;
+    await vi.advanceTimersByTimeAsync(5000);
+    const [cc1, cc2] = lastCc(events);
+    expect(cc1).toBeLessThan(0.3);
+    expect(cc2).toBeLessThan(0.3);
+    await expect(backend.triggerChargerGone()).resolves.toBe(true);
+    expect(backend.triggerCommands()).toHaveLength(sent);
+    expect(backend.triggerCommands().some((c) => /^pd req=/.test(c))).toBe(false);
+  });
+
+  it("refuses a request once the charger is gone, sending nothing", async () => {
+    const { backend } = await detectedIn("trigger-cc-gone");
+    await vi.advanceTimersByTimeAsync(5000);
+    const sent = backend.triggerCommands().length;
+    await expect(backend.triggerRequest(PD_9V, true)).rejects.toMatchObject({
+      kind: "usage",
+      message: expect.stringMatching(/Press Detect/),
+    });
+    expect(backend.triggerCommands()).toHaveLength(sent);
+  });
+
+  it("the next PD listing clears it and CC comes back", async () => {
+    const { backend, events } = await detectedIn("trigger-cc-gone");
+    await vi.advanceTimersByTimeAsync(5000);
+    await backend.triggerDetect();
+    await backend.triggerList("pd");
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(Math.max(...lastCc(events))).toBeGreaterThan(1);
+  });
+
+  it("closing the session forgets it", async () => {
+    const { backend } = await detectedIn("trigger-cc-gone");
+    await vi.advanceTimersByTimeAsync(5000);
+    await backend.triggerClose();
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("the usual demo charger and `trigger-charger-gone` keep CC up after Detect", async () => {
+    for (const mode of [null, "trigger-charger-gone"] as const) {
+      const { backend, events } = await detectedIn(mode);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(Math.max(...lastCc(events))).toBeGreaterThan(1);
+      await expect(backend.triggerChargerGone()).resolves.toBe(false);
+      await backend.disconnect();
+    }
+  });
+});

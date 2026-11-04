@@ -1145,6 +1145,31 @@ test("the gone charger's reason goes once Detect finds it again (AC-AXHK2P.10)",
   await expect(readCableButton(page)).toBeEnabled();
 });
 
+// ---- FR WFSNZD: a charger unplugged after Detect, before any offer is pressed ----
+//
+// Page contract: `?mock=trigger-cc-gone` drops both CC lines to 0 V and sets the
+// backend's gone flag a moment after Detect, with no request sent. The view then says
+// "The charger went away. Press Detect.", has no offers, and Read cable is off with
+// "No charger to ask: press Detect to read the cable." as its reason.
+
+const NO_CHARGER_REASON = "No charger to ask: press Detect to read the cable.";
+
+test("a charger gone after Detect with no offer pressed shows the gone state (AC-WFSNZD.1, .4)", async ({
+  page,
+}) => {
+  await detected(page, "?mock=trigger-cc-gone");
+  const sent = (await commands(page)).length;
+  await expect(chargerGoneText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(readCableButton(page)).toBeDisabled();
+  await expect(readCableButton(page)).toHaveAccessibleDescription(NO_CHARGER_REASON);
+  await expect(cableCard(page).getByText(NO_CHARGER_REASON)).toBeVisible();
+  // The page only asked: nothing went to the charger.
+  expect((await commands(page)).slice(sent)).toEqual([]);
+  expect((await commands(page)).some((c) => /^pd req=/.test(c))).toBe(false);
+});
+
 // ---- AC-AXHK2P.13, .14: Read cable waits for PD; refusals and no answer in the card ----
 //
 // Page contract: until PD is entered in this trigger session (a PD offer pressed; Detect
