@@ -53,5 +53,7 @@ Vitest for the settings and SVG, Rust tests for the PDF writer, Playwright and a
 
 ACs .14 to .16 come from the dbc94f8 visual check (qa-runs/AXHK2V-visual): T2's tag covered T1's edge tag, "E.D. %" sat on the 95% mark label, and the note's swatch stayed blue.
 
+## Implementation notes
+
 GIF, BMP and JPG from the vendor list are left out: PNG, SVG and PDF cover the use.
 The image holds the series, axes, title and legend of the current view. The chart's overlays (PD markers, segment marks, E.D., ruler, playhead) stay on screen only.

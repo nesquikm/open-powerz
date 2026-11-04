@@ -13,9 +13,11 @@ kind: bug
 
 ## Summary
 
-Right after a stream starts, a click on the overview strip under the chart does nothing: the chart stays Live and the view does not move.
-The click keeps the width of the view on screen, and in the first moment that view is narrower than the chart's narrowest allowed view, so the chart drops it.
-This fix gives the click at least the narrowest view, as panning with the wheel already does.
+Right after a stream starts, a click on the overview strip under the chart does nothing.
+The chart stays Live and the view does not move.
+The click keeps the width of the view on screen.
+In the first moment that view is narrower than the narrowest view the chart allows, so the chart drops it.
+This fix gives the click at least the narrowest view, as wheel panning already does.
 It surfaced as a flaky end-to-end test.
 
 ## Requirement

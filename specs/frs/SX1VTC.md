@@ -13,9 +13,10 @@ kind: bug
 
 ## Summary
 
-While a chart scrolls, the dots and dashes of dashed series slide along their lines instead of moving with the data, which makes an unpleasant ripple.
+While a chart scrolls, the dashes of dashed series slide along their lines instead of moving with the data.
+That makes an unpleasant ripple.
 The dash pattern restarts at the first point drawn, and that point changes every frame.
-This fix restarts the pattern at fixed points in data time, so each dash stays on the samples it was drawn on.
+This fix restarts the pattern at fixed points in data time, so each dash stays on its samples.
 It covers the main chart, the sub-chart, the recording view and the E.D. line.
 
 ## Requirement
@@ -46,7 +47,7 @@ The dashes stand still or slide along the line while the line moves, so they shi
 forEachDashPiece in dashPath.ts starts the pattern at phase 0 on the first point of each call, and dashedPaths calls it with the points in view. A scroll changes the first point every frame, so the phase slides. The E.D. line strokes with a canvas dash set in screen space, which slides the same way.
 
 ### Fix
-Pass each point's data time to the dash builder with a grid step. It restarts the phase at every grid time crossing, using an interpolated point on the segment, and lays dashes by arc length inside the cell. The E.D. line moves to the same builder. The live window scrolls in whole device pixels, the live frame reaches back to the grid time left of the view, and x positions get a tiny nudge before rounding, so half-pixel samples round the same way every frame.
+The dash builder gets each point's data time and a grid step, and restarts the phase wherever a segment crosses a grid time. The E.D. line uses the same builder. The live window scrolls in whole device pixels and reaches back to the grid time left of the view, so the first cell is laid from its start.
 
 ## Testing
 
@@ -55,3 +56,7 @@ Pure dash tests for the grid restart and the two-frame shift, a WebKit pixel e2e
 ## Notes
 
 The anchoring method is the user's choice: grid restart plus arc length inside each cell. Decimated live frames may still move slightly where a bucket's min and max change. That is data, not dash phase.
+
+## Implementation notes
+
+Inside a cell dashes are laid by arc length from an interpolated crossing point. Sample x positions get a tiny nudge before rounding, so half-pixel samples round the same way every frame.

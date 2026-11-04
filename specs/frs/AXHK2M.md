@@ -66,11 +66,11 @@ Unit tests per item in the owning crate or module, and a Vitest test per UI stat
 
 ## Notes
 
-AC.17 and .18 come from the f4abf09 hardware run, step B4. The Firmware tab's Mode row said Bootloader, read from the same listing, but the device select still showed the plain name. The listing likely changed under the same entry and the closed select kept its old text. The run could not tell when the listing flipped, so .18 logs each change.
-
 Source: M7a Implementation notes marked for M7b. The plan lists items deferred with reasons.
 
 ## Implementation notes
+
+AC.17 and .18 come from the f4abf09 hardware run, step B4. The Firmware tab's Mode row said Bootloader, read from the same listing, but the device select still showed the plain name. The listing likely changed under the same entry and the closed select kept its old text. The run could not tell when the listing flipped, so .18 logs each change.
 
 - The `pd cmd` / `pd data` guard and the page's check now treat zero-width blanks as blanks too. The AC named only the console refusal; a hidden blank could carry GoodCRC past the guard.
 - A dropped live batch leaves an unmarked straight line in the live chart. Nothing fetches it on its own. History-drawn views show it. AXHK2W measures whether this happens in the real app and fixes it if so.

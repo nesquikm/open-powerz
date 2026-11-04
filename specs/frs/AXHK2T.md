@@ -45,6 +45,8 @@ Vitest for the pure modules, Rust unit tests for `range_stats`, Playwright and a
 
 The vendor's E.D. formula was never recovered, so this definition is our call. The Apple battery curve stays out: no Apple device here.
 
+## Implementation notes
+
 Marks and E.D. come from the backend's raw samples (`run_progress`), not from the drawn buckets, so they do not move with the zoom or the plot width.
 The ruler counts from each cursor to its nearest sample along the line to the sample just outside, so ΔAh over a steady load is ΔT times the average.
 Marks follow the current run, since the last break; E.D. is a share of the whole session's energy, summed over its runs and never across a break.

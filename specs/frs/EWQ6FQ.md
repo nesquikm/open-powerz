@@ -15,7 +15,9 @@ kind: bug
 
 In the r3 tester run the app window opened far above every screen, so the app seemed not to start.
 This fix moves a window that lands off every screen back onto the main screen at startup.
-It also fixes four layout rough edges: the main tabs at phone width, the grouping of controls with their info buttons in Chart options, a wrapped panel title, and two end-to-end tests that went stale when later features added buttons and menu items.
+It also fixes four layout rough edges.
+They are the main tabs at phone width, control grouping in Chart options, and a wrapped panel title.
+Two end-to-end tests that went stale when later features added controls are fixed too.
 
 ## Requirement
 
