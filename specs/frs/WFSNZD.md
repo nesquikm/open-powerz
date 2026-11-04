@@ -15,7 +15,7 @@ kind: bug
 
 The backend now notices a charger unplugged right after Detect, before any offer is pressed.
 The Trigger view still did not show it in the r5 hardware run.
-The page asks the backend about a lost charger only when VBUS falls under a contract, or after a refused request.
+The page asks about a lost charger only on a VBUS drop under a contract or a refused request.
 With no contract it never asks, so the old offers stay on screen.
 The page now also asks when both CC lines read low, contract or not.
 
