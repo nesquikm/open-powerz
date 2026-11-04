@@ -57,4 +57,6 @@ Source: inventory note on 4NSVC9 and the follow-up on PD status data. Measured o
 
 r3 (3d2ae16): web content RSS 549 MB at 6 min, footprint 184 to 209 MB, so AC.1 passes by footprint; WebKit counts shared and graphics pages as resident. No live batches dropped, and a hidden window piled nothing up, so AC.9 needs no fix. The app process grew about 1 MB/min from the full-resolution history (AC.10).
 
+r4 (334d005, 2026-11-04): footprint 542 MB at 6 min, so AC.1 failed. Do not trust the r3 footprint figures: they were read only at the start and end of the run, and the start value (209 MB) does not match the 69 to 124 MB later runs read for the same process at the start, so r3 most likely read another process. Rerun on the same machine and driver: 3d2ae16 449 MB and 334d005 484 MB at 6 min, so no regression; both pass 400 MB before 6 min. The cause and the fix are in HR2JAG.
+
 Export of a folded session (AC.14) is the user's choice: the full-resolution tail plus a notice; Record keeps a full long session. The notice is in the app, not the file, so the file stays readable as a recorder file.
