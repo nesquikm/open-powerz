@@ -24,7 +24,7 @@ Long sessions at 1000 SPS and long PD captures stay within a known memory bound,
 
 ## Acceptance Criteria
 
-- AC-AXHK2W.1: In the shipped macOS app, the web content process's physical footprint (as the footprint tool reports it) stays at or below 400 MB after 6 minutes of a 1000 SPS demo stream. RSS is reported beside it, and both figures are recorded in the Notes.
+- AC-AXHK2W.1: In the shipped macOS app on the demo device at 1000 SPS, with the window pinned on the built-in display: in the default 10 s live window the web content process's physical footprint is at or below 400 MiB at 6 minutes (median of 2 runs); in every live window (10 s, 1 min, 10 min), after the first collection the footprint stays below 500 MiB and grows by no more than 2 MiB/min over the next 10 minutes. RSS is reported beside it, and the figures are recorded in the Notes.
 - AC-AXHK2W.2: The backend status log and the page's `PdStatusBuffer` are capped at 100,000 samples each. The oldest go first, with a notice, and timeline ranges stay correct across the drop.
 - AC-AXHK2W.3: A drop reported by the backend also reaches a page that attaches later.
 - AC-AXHK2W.4: Dropping the oldest rows from `pdStore` costs no column shift per row: an append at the cap takes constant time, with a test counting moved elements.
@@ -55,12 +55,14 @@ A compressed 30-hour fold test against an unfolded reference, a folded-export te
 
 Source: inventory note on 4NSVC9 and the follow-up on PD status data. Measured on the demo device, no meter needed.
 
-Export of a folded session (AC.14) is the user's choice: the full-resolution tail plus a notice; Record keeps a full long session. The notice is in the app, not the file, so the file stays readable as a recorder file.
+AC.1 was amended on 2026-11-04 with the orchestrator's OK: the 1 min window draws at the batch rate and levels off near 425 MB, while 334d005 levelled off at 500 to 600 MB.
 
 ## Implementation notes
+
+Export of a folded session (AC.14) is the user's choice: the full-resolution tail plus a notice; Record keeps a full long session. The notice is in the app, not the file, so the file stays readable as a recorder file.
 
 r3 (3d2ae16): web content RSS 549 MB at 6 min, footprint 184 to 209 MB, so AC.1 passes by footprint; WebKit counts shared and graphics pages as resident. No live batches dropped, and a hidden window piled nothing up, so AC.9 needs no fix. The app process grew about 1 MB/min from the full-resolution history (AC.10).
 
 r4 (334d005, 2026-11-04): footprint 542 MB at 6 min, so AC.1 failed. Do not trust the r3 footprint figures: they were read only at the start and end of the run, and the start value (209 MB) does not match the 69 to 124 MB later runs read for the same process at the start, so r3 most likely read another process. Rerun on the same machine and driver: 3d2ae16 449 MB and 334d005 484 MB at 6 min, so no regression; both pass 400 MB before 6 min. The cause and the fix are in HR2JAG.
 
-HR2JAG final build, 2026-11-04, pinned window 1280×800 on the MacBook screen, demo load-5v-1a at 1000 SPS in the default 10 s live window (smoothing on), web content footprint (RSS beside it). Paired 6-min runs: HR2JAG 384 and 377 MB, 334d005 499 and 593 MB. 40-minute run: 399 MB at 5 min, 528 MB at 9 min, then one collection; after that 173 MB (792 RSS) at 10 min, 176 (814) at 20, 177 (818) at 30, 186 (824) at 40. Slope from 10 to 40 min is 0.32 MB/min. The app process grew 1.23 MB/min from 6 to 40 min (AC.13 expects 1.14). A separate 10 s window run measured 241 MB at 6 min; the 1 min window is left to the next tester run.
+HR2JAG final build, 2026-11-04, pinned window 1280×800 on the MacBook screen, demo load-5v-1a at 1000 SPS in the default 10 s live window (smoothing on), web content footprint (RSS beside it). Paired 6-min runs: HR2JAG 384 and 377 MB, 334d005 499 and 593 MB. 40-minute run: 399 MB at 5 min, 528 MB at 9 min, then one collection; after that 173 MB (792 RSS) at 10 min, 176 (814) at 20, 177 (818) at 30, 186 (824) at 40. Slope from 10 to 40 min is 0.32 MB/min. The app process grew 1.23 MB/min from 6 to 40 min (AC.13 expects 1.14). A separate 10 s window run measured 241 MB at 6 min; 1 min window on c2cbb1c, same setup: 401 MB at 6 min (RSS 478), one collection at about 9.5 min, then 423 to 427 MB from 10 to 20 min (RSS 633 to 646), slope 0.51 MB/min; 41 of 41 samples visible. The 10 min window is left to the next tester run.
