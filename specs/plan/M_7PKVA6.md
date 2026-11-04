@@ -53,6 +53,7 @@ codename: Fine Print
 | [HR2JAG](../frs/HR2JAG.md) | Live batches at 20 Hz keep the web view's memory down | n/a |
 | [WFSNZD](../frs/WFSNZD.md) | The page hears a charger gone with no contract | n/a |
 | [DS89PS](../frs/DS89PS.md) | The fallback-clear worker test holds the worker at a fixed poll | n/a |
+| [PGY704](../frs/PGY704.md) | The firmware Device list line keeps noting the meter after the update ends | n/a |
 
 Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (added 2026-11-03 at the user's request) is built while the AXHK2W hardware run waits, before the final gate.
 
@@ -109,6 +110,8 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: Vitest trigger store, WebKit Detect-unplug spec, r5-recheck Part T
 - [x] The fallback-clear worker test holds the worker at a fixed poll — DS89PS
   verify: the worker test 20/20 under 24 `yes` loads, then the full workspace suite
+- [ ] The firmware Device list line keeps noting the meter after the update ends — PGY704
+  verify: Vitest store with a late relisting, WebKit late-relist mock with the switch off and on
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
 - Needs hardware we lack: rotation bits and bit 7 of 0x60, which total the record screen shows, QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS coverage, the EcoFlow no-reply question, the Apple battery curve, Windows `\\?\` paths, the root cause of the rejected stop after a queue overflow.
