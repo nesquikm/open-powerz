@@ -84,7 +84,7 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: pure-module tests, `range_stats` tests, visual check
 - [x] Chart appearance and image export — AXHK2V
   verify: SVG and PDF parse tests, visual check
-- [ ] Memory trim at 1000 SPS — AXHK2W
+- [x] Memory trim at 1000 SPS — AXHK2W
   verify: element-count tests and a macOS demo measurement
 - [ ] A hidden chart's draw loop hangs the window — C6VR9K
   verify: WebKit PD-tab e2e, pd-timeline spec, then a tester runbook
@@ -110,7 +110,7 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: Vitest trigger store, WebKit Detect-unplug spec, r5-recheck Part T
 - [x] The fallback-clear worker test holds the worker at a fixed poll — DS89PS
   verify: the worker test 20/20 under 24 `yes` loads, then the full workspace suite
-- [ ] The firmware Device list line keeps noting the meter after the update ends — PGY704
+- [x] The firmware Device list line keeps noting the meter after the update ends — PGY704
   verify: Vitest store with a late relisting, WebKit late-relist mock with the switch off and on
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
