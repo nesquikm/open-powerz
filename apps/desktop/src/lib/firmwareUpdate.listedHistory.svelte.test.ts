@@ -305,3 +305,134 @@ describe("the line outlives the update until its outcome is closed (AC-XCCQAK.3)
     expect(line(fw, false)).toBe(`KM003C — ${SERIAL}`);
   });
 });
+
+/**
+ * FR PGY704: the real backend ends the flash before the OS lists the meter in application
+ * mode again, so the line keeps noting the updated meter after the update ends, until a
+ * label in application mode closes it, or the outcome is closed.
+ *
+ * Store API under test: `firmware.notingListings`, true while an update runs and, once it
+ * ended, until the line's last label is in application mode; false after `dismiss()`.
+ */
+describe("the line keeps noting the meter after the update ends (FR PGY704)", () => {
+  const FULL = `KM003C — ${SERIAL} → KM003C — ${SERIAL} (bootloader mode) → KM003C — ${SERIAL}`;
+  const TWO = `KM003C — ${SERIAL} → KM003C — ${SERIAL} (bootloader mode)`;
+
+  /** A running update whose meter is listed in bootloader mode, not yet back. */
+  async function inBootloader(api: FirmwareUpdateApi) {
+    const r = await running(api);
+    r.fw.noteListings([OTHER, DEMO]);
+    r.fw.noteListings([meterAt(4, "bootloader"), OTHER, DEMO]);
+    return r;
+  }
+
+  it("a meter listed back in application mode after the update ended completes the line (AC-PGY704.1)", async () => {
+    const be = fakeBackend();
+    const { fw, ended } = await inBootloader(be.api);
+    be.resolve({ outcome: "verified", version: "2.0.7" });
+    await ended;
+    await settle();
+    expect(fw.phase).toBe("done");
+    expect(line(fw, false)).toBe(TWO);
+    fw.noteListings([OTHER, DEMO]);
+    fw.noteListings([meterAt(5, "application"), OTHER, DEMO]);
+    expect(line(fw, false)).toBe(FULL);
+    expect(line(fw, true)).toBe(
+      "KM003C — Hidden → KM003C — Hidden (bootloader mode) → KM003C — Hidden",
+    );
+  });
+
+  it("notes while the update runs and, once it is done, until a label in application mode closes the line (AC-PGY704.2)", async () => {
+    const be = fakeBackend();
+    const { fw, ended } = await inBootloader(be.api);
+    expect(fw.notingListings).toBe(true);
+    be.resolve({ outcome: "verified", version: "2.0.7" });
+    await ended;
+    await settle();
+    expect(fw.notingListings).toBe(true);
+    fw.noteListings([meterAt(5, "application"), OTHER, DEMO]);
+    expect(fw.notingListings).toBe(false);
+    // The line is closed: any later list leaves it as it is.
+    fw.noteListings([meterAt(5, "bootloader"), OTHER, DEMO]);
+    fw.noteListings([OTHER, DEMO]);
+    fw.noteListings([meterAt(6, "application"), DEMO]);
+    expect(line(fw, false)).toBe(FULL);
+    expect(fw.listedHistory.map((l) => l.mode)).toEqual([
+      "application",
+      "bootloader",
+      "application",
+    ]);
+  });
+
+  it("a meter relisted in application mode before the end closes the line at the end (AC-PGY704.2)", async () => {
+    const be = fakeBackend();
+    const { fw, ended } = await running(be.api);
+    roundTrip(fw);
+    be.resolve({ outcome: "verified", version: "2.0.7" });
+    await ended;
+    await settle();
+    expect(fw.notingListings).toBe(false);
+    fw.noteListings([meterAt(5, "bootloader"), OTHER, DEMO]);
+    expect(line(fw, false)).toBe(FULL);
+  });
+
+  it("keeps noting after a failed update until the meter is back in application mode (AC-PGY704.2)", async () => {
+    const be = fakeBackend();
+    const { fw, ended } = await inBootloader(be.api);
+    be.reject({ kind: "protocol", message: "The erase failed.", hint: null });
+    await ended;
+    await settle();
+    expect(fw.phase).toBe("failed");
+    expect(fw.notingListings).toBe(true);
+    fw.noteListings([meterAt(4, "bootloader"), DEMO]);
+    expect(line(fw, false)).toBe(TWO);
+    fw.noteListings([DEMO]);
+    fw.noteListings([meterAt(8, "application"), DEMO]);
+    expect(line(fw, false)).toBe(FULL);
+    expect(fw.notingListings).toBe(false);
+    fw.noteListings([meterAt(8, "bootloader"), DEMO]);
+    expect(line(fw, false)).toBe(FULL);
+  });
+
+  it("keeps noting after a stopped update until the meter is back in application mode (AC-PGY704.2)", async () => {
+    const be = fakeBackend();
+    const { fw, ended } = await inBootloader(be.api);
+    be.reject({ kind: "cancelled", message: "The update was stopped.", hint: null });
+    await ended;
+    await settle();
+    expect(fw.phase).toBe("stopped");
+    expect(fw.notingListings).toBe(true);
+    fw.noteListings([meterAt(5, "application"), OTHER, DEMO]);
+    expect(line(fw, false)).toBe(FULL);
+    expect(fw.notingListings).toBe(false);
+    fw.noteListings([meterAt(5, "bootloader"), OTHER, DEMO]);
+    expect(line(fw, false)).toBe(FULL);
+  });
+
+  it("once the outcome is closed, no listing is noted until a new update starts (AC-PGY704.3)", async () => {
+    const be = fakeBackend();
+    const { fw, ended } = await inBootloader(be.api);
+    be.resolve({ outcome: "verified", version: "2.0.7" });
+    await ended;
+    await settle();
+    expect(fw.notingListings).toBe(true);
+    fw.dismiss();
+    expect(fw.phase).toBe("idle");
+    expect(fw.notingListings).toBe(false);
+    expect(fw.listedHistory).toEqual([]);
+    fw.noteListings([meterAt(5, "application"), OTHER, DEMO]);
+    fw.noteListings([meterAt(5, "bootloader"), OTHER, DEMO]);
+    expect(fw.listedHistory).toEqual([]);
+    expect(fw.notingListings).toBe(false);
+
+    const again: FirmwareMeter = { ...METER, id: "usb:1:5" };
+    fw.requestUpdate(again);
+    fw.confirmation = "2.0.7";
+    void fw.start(again);
+    expect(fw.phase).toBe("updating");
+    expect(fw.notingListings).toBe(true);
+    expect(fw.listedHistory).toEqual([]);
+    fw.noteListings([meterAt(5, "application"), DEMO]);
+    expect(line(fw, false)).toBe(`KM003C — ${SERIAL}`);
+  });
+});

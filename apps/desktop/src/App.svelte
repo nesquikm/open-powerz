@@ -626,11 +626,12 @@
    * pick moves only when the listing changes and no session runs: a meter the user
    * connected meanwhile keeps the picker. */
   let followedId: string | null = null;
-  /** While an update runs, every device list it sees is noted for its "Device list" line
-   * (AC-XCCQAK.1): when it starts and on each change of the list. */
+  /** While an update runs, and after it ended until the meter is listed in application
+   * mode, every device list it sees is noted for its "Device list" line (AC-XCCQAK.1,
+   * AC-PGY704.1): when it starts and on each change of the list. */
   $effect(() => {
     const devices = session.devices;
-    if (firmware.busy) untrack(() => firmware.noteListings(devices));
+    if (firmware.notingListings) untrack(() => firmware.noteListings(devices));
   });
   $effect(() => {
     const target = firmware.followTarget(session.devices);

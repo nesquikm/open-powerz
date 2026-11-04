@@ -8,6 +8,10 @@
  * update has switched it, and in application mode again before the update ends, as the
  * backend sees a real meter jump.
  *
+ * `?mock=replug-late` (FR PGY704) is the same, except that the meter is still listed in
+ * bootloader mode when the update ends and is listed in application mode again about
+ * 1.5 s later, as the real backend sees it.
+ *
  * The line reads `<label> → <label> → …`, each label the closed select's own text.
  */
 
@@ -43,8 +47,8 @@ async function deviceListLine(page: Page): Promise<string[] | null> {
 }
 
 /** Pick the listed real meter, without connecting it, and start its update. */
-async function startUpdateOfRealMeter(page: Page): Promise<void> {
-  await open(page, "?mock=replug");
+async function startUpdateOfRealMeter(page: Page, query = "?mock=replug"): Promise<void> {
+  await open(page, query);
   await page.getByLabel("Device", { exact: true }).selectOption(REAL_METER);
   await page.getByRole("tab", { name: "Firmware" }).click();
   await panel(page)
@@ -112,5 +116,34 @@ test.describe("the firmware update's device list line (FR XCCQAK)", () => {
     await panel(page).getByRole("button", { name: "Close", exact: true }).click();
     await expect(progress(page)).toHaveCount(0);
     await expect(panel(page).getByText(/Device list/)).toHaveCount(0);
+  });
+});
+
+test.describe("a relisting after the update ended (FR PGY704)", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript((key) => localStorage.setItem(key, "true"), ADVANCED_KEY);
+  });
+
+  test("a relisting that arrives after the update ended still adds the third label", async ({
+    page,
+  }) => {
+    await startUpdateOfRealMeter(page, "?mock=replug-late");
+    await waitForDone(page);
+
+    // At the outcome the meter is still listed in bootloader mode.
+    expect(await deviceListLine(page)).toEqual([SHOWN, `${SHOWN} (bootloader mode)`]);
+    // It is listed in application mode again only after the update ended.
+    await expect
+      .poll(() => deviceListLine(page), { timeout: 10_000 })
+      .toEqual([SHOWN, `${SHOWN} (bootloader mode)`, SHOWN]);
+
+    await page.locator("#top-bar-about").click();
+    const about = page.getByRole("dialog");
+    await about.getByRole("switch", { name: "Hide serial numbers" }).click();
+    await page.keyboard.press("Escape");
+    await expect
+      .poll(() => deviceListLine(page))
+      .toEqual([HIDDEN, `${HIDDEN} (bootloader mode)`, HIDDEN]);
+    expect(await progress(page).innerText()).not.toContain(MOCK_REPLUG.serial);
   });
 });

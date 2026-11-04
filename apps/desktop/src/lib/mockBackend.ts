@@ -846,6 +846,7 @@ export const MOCK_MODES = [
   "outage",
   "blip",
   "replug",
+  "replug-late",
   "trigger-sag",
   "trigger-all",
   "trigger-out-of-sync",
@@ -869,6 +870,10 @@ export const MOCK_MODES = [
   "firmware-running",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
+
+/** `replug-late` (FR PGY704): after a mocked update the meter is listed in application
+ * mode again only this long after the update ended, as the real backend sees it. */
+const MOCK_LATE_RELIST_MS = 3_000;
 
 /** The `?mock=` mode of the page URL, or null for the normal demo behaviour. */
 export function mockModeFromUrl(search: string | undefined): MockMode | null {
@@ -1420,9 +1425,14 @@ export class MockBackend {
   #listedMeter(): DeviceListing | null {
     if (this.#mode === "bootloader") return BOOTLOADER_METER;
     if (this.#mode === "mode-flip") return flipMeter(this.#flipMode);
-    return this.#mode === "replug" && this.#meterAddress !== null
+    return this.#replugLike() && this.#meterAddress !== null
       ? replugMeter(this.#meterAddress, this.#replugMode)
       : null;
+  }
+
+  /** `replug` and `replug-late` list the same real meter; only the late relist differs. */
+  #replugLike(): boolean {
+    return this.#mode === "replug" || this.#mode === "replug-late";
   }
 
   async listDevices(): Promise<DeviceListing[]> {
@@ -2449,7 +2459,11 @@ export class MockBackend {
     });
     // `replug`: the listed meter turns to bootloader mode once switched, and back before
     // the update ends, as the backend lists a real meter jumping.
-    const jumps = isMeter && this.#mode === "replug";
+    // `replug-late`: the meter is still in bootloader mode when the update ends and is
+    // listed in application mode again only after it (FR PGY704).
+    const jumps = isMeter && this.#replugLike();
+    const late = jumps && this.#mode === "replug-late";
+    let relistLate = false;
     const setReplugMode = (mode: "application" | "bootloader"): void => {
       if (!jumps || this.#replugMode === mode) return;
       this.#replugMode = mode;
@@ -2486,11 +2500,16 @@ export class MockBackend {
       }
       onStage({ stage: "replug", to: "application", reply: "none" });
       await sleep(MOCK_FLASH_MS.replug);
-      setReplugMode("application");
+      if (late) {
+        relistLate = true;
+        setTimeout(() => setReplugMode("application"), MOCK_LATE_RELIST_MS);
+      } else {
+        setReplugMode("application");
+      }
       this.#firmwareVersion = info.version;
       return { outcome: "verified", version: info.version };
     } finally {
-      setReplugMode("application");
+      if (!relistLate) setReplugMode("application");
       this.#flashing = false;
     }
   }

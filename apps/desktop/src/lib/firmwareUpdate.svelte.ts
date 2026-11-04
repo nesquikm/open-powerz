@@ -271,6 +271,11 @@ export class FirmwareUpdate {
     return this.phase === "done" || this.phase === "stopped";
   }
 
+  /** The update has an outcome on show: done, failed or stopped. */
+  get #hasOutcome(): boolean {
+    return this.phase === "done" || this.phase === "failed" || this.phase === "stopped";
+  }
+
   /** `meter` with the versions an ended update knows filled in where it reads none; only
    * for the updated meter (same id, or same serial when known). */
   #withKeptVersions(meter: FirmwareMeter | null): FirmwareMeter | null {
@@ -304,11 +309,20 @@ export class FirmwareUpdate {
     return target?.id ?? null;
   }
 
-  /** Notes the device list `listings` while an update runs: the updated meter's entry
-   * joins {@link listedHistory} when its label differs from the last one kept. */
+  /** The device list is noted for the "Device list" line: while an update runs and, once
+   * it ended (done, failed or stopped), until the line's last label is in application
+   * mode; the OS may list the meter again only after the update ended (AC-PGY704.1-.3). */
+  get notingListings(): boolean {
+    if (this.busy) return true;
+    if (!this.#hasOutcome) return false;
+    return this.listedHistory.at(-1)?.mode !== "application";
+  }
+
+  /** Notes the device list `listings` while {@link notingListings}: the updated meter's
+   * entry joins {@link listedHistory} when its label differs from the last one kept. */
   noteListings(listings: readonly DeviceListing[]): void {
     const updated = this.#updating;
-    if (!this.busy || updated === null) return;
+    if (!this.notingListings || updated === null) return;
     const listing = updatedListing(updated, listings);
     if (listing === undefined) return;
     const last = this.listedHistory.at(-1);
@@ -580,7 +594,7 @@ export class FirmwareUpdate {
 
   /** Clears a finished, failed or stopped update's outcome; the chosen file stays. */
   dismiss(): void {
-    if (this.phase !== "done" && this.phase !== "failed" && this.phase !== "stopped") return;
+    if (!this.#hasOutcome) return;
     this.phase = "idle";
     this.confirmation = "";
     this.#clearOutcome();
