@@ -285,6 +285,36 @@ test.describe("Hide serial numbers (FR AXHK2Q)", () => {
     await expect(page.getByLabel("Controls for KM003C 2")).toHaveCount(1);
   });
 
+  test("the Device select's tooltip follows the switch with no reconnect (AC-NKAD6S.1, .2, .3, .4)", async ({
+    page,
+  }) => {
+    await hideBeforeLoad(page);
+    await open(page, "?mock=replug");
+    const picker = page.getByLabel("Device", { exact: true });
+    await picker.selectOption(FIRST_ADDRESS);
+    const before = await connectedIds(page);
+
+    // AC .1: on, the tooltip names the model only.
+    await expect(picker).toHaveAttribute("title", "KM003C — Hidden");
+    expect(await picker.getAttribute("title")).not.toContain(MOCK_REPLUG.serial);
+
+    // AC .2, .3: off, the tooltip is the selected option's full label, at once.
+    await hideSwitch(await openAbout(page)).click();
+    await page.keyboard.press("Escape");
+    const selected = picker.locator(`option[value="${FIRST_ADDRESS}"]`);
+    await expect(selected).toContainText(MOCK_REPLUG.serial);
+    const fullLabel = (await selected.textContent())?.trim() ?? "";
+    await expect(picker).toHaveAttribute("title", fullLabel);
+    expect(await picker.getAttribute("title")).toContain(MOCK_REPLUG.serial);
+
+    // AC .3: on again, hidden again, still no reconnect.
+    await hideSwitch(await openAbout(page)).click();
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveAttribute("title", "KM003C — Hidden");
+    await expect(picker).toHaveValue(FIRST_ADDRESS);
+    expect(await connectedIds(page)).toEqual(before);
+  });
+
   test("recording and export names carry no serial, on or off (AC-AXHK2Q.5)", async ({ page }) => {
     await open(page);
     await streamDemo(page);

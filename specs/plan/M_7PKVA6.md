@@ -93,7 +93,7 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: frame-fit unit tests, WebKit layout specs at 375/900/1280 px, flows and keyboard specs, tester runbook step
 - [x] A click on the overview strip right after connect is ignored — B5XBTA
   verify: Vitest click-mapping test, WebKit strip click right after connect, timeline test 20/20
-- [ ] The Device select's tooltip is tested under Hide serial numbers — NKAD6S
+- [x] The Device select's tooltip is tested under Hide serial numbers — NKAD6S
   verify: hide-serial WebKit spec, tooltip on/off/on
 - [ ] The firmware update keeps the device list's labels — XCCQAK
   verify: Vitest store history, WebKit mocked update with a mode change
