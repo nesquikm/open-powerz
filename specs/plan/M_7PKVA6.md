@@ -100,11 +100,11 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: Vitest store history, WebKit mocked update with a mode change
 - [x] A charger unplugged with no contract is noticed — TFA5N7
   verify: trigger CC-spell unit tests, simulator scenario, r5 runbook step
-- [ ] Detect stopping a PD capture says so — JQ971R
+- [x] Detect stopping a PD capture says so — JQ971R
   verify: worker reason tests, Vitest store, WebKit Detect notice
 - [x] Live batches at 20 Hz keep the web view's memory down — HR2JAG
   verify: batcher message counts, Vitest live end, WebKit live scroll, macOS 20-min demo footprint
-- [ ] The page hears a charger gone with no contract — WFSNZD
+- [x] The page hears a charger gone with no contract — WFSNZD
   verify: Vitest trigger store, WebKit Detect-unplug spec, r5-recheck Part T
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
