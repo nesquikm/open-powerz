@@ -598,6 +598,28 @@ impl RecordingStart {
     }
 }
 
+/// A history clear of one meter, taken under the manager's lock and run
+/// without it: a running worker sends out its batched samples first, so
+/// every sample recorded before the clear reaches the page before it.
+#[derive(Debug)]
+pub struct HistoryClearer {
+    control: Option<worker::WorkerControl>,
+    store: SessionStore,
+}
+
+impl HistoryClearer {
+    /// Discard the history, through the worker when one runs.
+    pub fn clear(self) -> Result<(), UiError> {
+        match self.control {
+            Some(control) => control.clear_history(),
+            None => {
+                self.store.clear_history();
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Exclusive use of a meter for a firmware update (FR V9SK55, AC .4): while
 /// it is held the manager refuses that meter's measurement stream, PD
 /// capture, recording and triggering, a second update, and any real meter
@@ -1963,10 +1985,20 @@ where
         Ok(())
     }
 
-    /// Discard the session's history.
+    /// Discard the session's history; a running worker sends out its
+    /// batched samples first.
     pub fn clear_history(&self) -> Result<(), UiError> {
-        self.session_store()?.clear_history();
-        Ok(())
+        self.clearer_for(&self.current_id())?.clear()
+    }
+
+    /// What a history clear of meter `id` needs, so a caller can wait for
+    /// the worker's flush after releasing its lock on the manager.
+    pub fn clearer_for(&self, id: &str) -> Result<HistoryClearer, UiError> {
+        let store = self.session_store_for(id)?;
+        Ok(HistoryClearer {
+            control: self.control_for(id).ok(),
+            store,
+        })
     }
 
     /// Take the open session out of the manager, so a caller can close it
@@ -2112,7 +2144,7 @@ where
             return Err(UiError::usage("A trigger session is already open."));
         }
         // The PD capture pauses while triggering. [inferred]
-        let _ = control.stop_pd();
+        let _ = control.stop_pd_for(Some(crate::worker::PdStopReason::Trigger));
         let current = meter
             .live
             .lock()

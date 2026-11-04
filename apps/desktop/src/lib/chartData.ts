@@ -532,6 +532,71 @@ export function liveRange(id: LiveWindowId, buf: LiveBuffer): [number, number] |
   return ms === null ? [first, last] : [Math.max(first, last - ms), last];
 }
 
+/** The backend's live batch flush interval in ms (20 Hz) (FR HR2JAG). */
+export const LIVE_BATCH_INTERVAL_MS = 50;
+
+/** One frame's smoothed live window end (FR HR2JAG). */
+export interface LiveEnd {
+  endMs: number;
+}
+
+/** The smooth live window's end for the frame drawn at wall time `nowMs` (AC-HR2JAG.2):
+ * one batch interval (`lagMs`) behind the newest sample when its batch arrived at
+ * `arrivedAtMs`, moving on with the wall clock until the next batch. It never passes
+ * the newest sample, never trails it by more than `lagMs`, and never moves back from
+ * `prev` (the previous frame's result, or `null` on a stream's first frame). */
+export function smoothLiveEnd(
+  prev: LiveEnd | null,
+  newestMs: number,
+  arrivedAtMs: number,
+  nowMs: number,
+  lagMs: number = LIVE_BATCH_INTERVAL_MS,
+): LiveEnd {
+  const floor = newestMs - lagMs;
+  const clocked = Math.min(newestMs, floor + Math.max(0, nowMs - arrivedAtMs));
+  const endMs = prev === null ? clocked : Math.min(newestMs, Math.max(clocked, prev.endMs));
+  return { endMs };
+}
+
+/** True when one batch interval moves a `spanMs` window drawn `plotWidthPx` wide by at
+ * least 2 px, so the smooth live end is worth clocking between batches (AC-HR2JAG.2);
+ * false for non-finite, zero or negative inputs. */
+export function smoothingActive(
+  spanMs: number,
+  plotWidthPx: number,
+  intervalMs: number = LIVE_BATCH_INTERVAL_MS,
+): boolean {
+  if (!(spanMs > 0) || !(plotWidthPx > 0) || !(intervalMs > 0)) return false;
+  if (!Number.isFinite(spanMs) || !Number.isFinite(plotWidthPx) || !Number.isFinite(intervalMs))
+    return false;
+  return (intervalMs * plotWidthPx) / spanMs >= 2;
+}
+
+/** True when the live chart must redraw on the next animation frame although no batch
+ * came (AC-HR2JAG.3): live, visible, smooth scrolling and its end still behind the
+ * newest sample. A hidden, paused or reduced-motion chart never asks (FR C6VR9K). */
+export function liveNeedsFrame(s: {
+  live: boolean;
+  visible: boolean;
+  smooth: boolean;
+  endMs: number | null;
+  newestMs: number | null;
+}): boolean {
+  if (!s.live || !s.visible || !s.smooth) return false;
+  if (s.endMs === null || s.newestMs === null) return false;
+  return s.endMs < s.newestMs;
+}
+
+/** Smoothing redraws at most 30 times a second (AC-HR2JAG.3). */
+export const LIVE_SMOOTH_MIN_FRAME_MS = 1000 / 30;
+
+/** True when a smoothing-only frame may draw at wall time `nowMs`: no frame drawn yet
+ * (`lastDrawMs` null) or at least {@link LIVE_SMOOTH_MIN_FRAME_MS} since the last one
+ * (AC-HR2JAG.3). */
+export function smoothFrameDue(lastDrawMs: number | null, nowMs: number): boolean {
+  return lastDrawMs === null || nowMs - lastDrawMs >= LIVE_SMOOTH_MIN_FRAME_MS;
+}
+
 /** Reduced motion: `range` (a `spanMs` live window) advanced in tenth-of-a-span steps
  * instead of scrolling; the end never passes the newest sample, so no blank strip
  * shows, and the start never precedes `firstMs`. A window still shorter than its span

@@ -173,6 +173,18 @@ pub struct Gap {
 pub struct PdState {
     /// The PD sniffer runs.
     pub capturing: bool,
+    /// Why the capture stopped, when something other than the user, a
+    /// disconnect or an unplug stopped it (FR JQ971R, AC .1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PdStopReason>,
+}
+
+/// Why a PD capture stopped (FR JQ971R, AC .1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdStopReason {
+    /// Opening a trigger session stopped it.
+    Trigger,
 }
 
 /// A batch of PD table rows (FR TGE83C).
@@ -574,7 +586,7 @@ pub struct Worker<T: Transport, C: Clock> {
     temp_c: Option<f64>,
     /// Wall-clock time `temp_c` was read, ms.
     temp_read_ms: Option<u64>,
-    /// Groups records into UI batches flushed at 20–60 Hz.
+    /// Groups records into UI batches flushed at most 20 times a second.
     batcher: Batcher,
     /// Wall-clock time the next queue poll is due, ms.
     next_poll_ms: u64,
@@ -752,9 +764,18 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     }
 
     /// Send `batch` with the statistics up to and including it.
+    /// Samples recorded before a history clear are dropped, even when the
+    /// clear did not go through the worker (AC-HR2JAG.1).
     fn emit_batch(&mut self, mut batch: Batch) {
         let store = &self.store;
-        batch.stats = blocked(self.meter.as_ref(), || store.stats());
+        let (stats, cleared) = blocked(self.meter.as_ref(), || {
+            let data = store.lock();
+            (data.stats(), data.cleared_through_ms())
+        });
+        batch.stats = stats;
+        if let Some(cleared) = cleared {
+            batch.samples.retain(|s| s.t_ms > cleared);
+        }
         self.emit(BackendEvent::Batch(batch));
     }
 
@@ -1042,8 +1063,11 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     }
 
     /// Discard the session history. A running export works on its own copy
-    /// and a recording writes its own file, so neither is affected.
+    /// and a recording writes its own file, so neither is affected. The
+    /// samples still waiting in the batcher go out first, so every sample
+    /// recorded before the clear reaches the page before it.
     pub fn clear_history(&mut self) {
+        self.flush_batch();
         self.store.clear_history();
     }
 
@@ -1186,7 +1210,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         self.close_recording(EndReason::Disconnected);
         self.flush_batch();
         if self.pd_run.take().is_some() {
-            self.emit_pd_stopped();
+            self.emit_pd_stopped(None);
         }
         self.emit(disconnected(Some(session_error(e))));
         Step::Ended
@@ -1200,14 +1224,17 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     }
 
     /// Send every waiting PD row now, then report the capture stopped.
-    fn emit_pd_stopped(&mut self) {
+    fn emit_pd_stopped(&mut self, reason: Option<PdStopReason>) {
         if let Some(rows) = self.pd.take_all() {
             self.emit(BackendEvent::PdRows(PdRows { rows }));
         }
         if let Some(samples) = self.pd.take_all_status() {
             self.emit_pd_status(samples);
         }
-        self.emit(BackendEvent::PdState(PdState { capturing: false }));
+        self.emit(BackendEvent::PdState(PdState {
+            capturing: false,
+            reason,
+        }));
     }
 
     /// Records and the PD sniffer use requests that were never checked on
@@ -1248,12 +1275,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             clock: CaptureClock::new(),
             next_poll_ms: now,
         });
-        self.emit(BackendEvent::PdState(PdState { capturing: true }));
+        self.emit(BackendEvent::PdState(PdState {
+            capturing: true,
+            reason: None,
+        }));
         Ok(())
     }
 
     /// Stop the PD sniffer (0x11); the captured records stay.
     pub fn stop_pd(&mut self) -> Result<(), UiError> {
+        self.stop_pd_for(None)
+    }
+
+    /// [`stop_pd`](Self::stop_pd) with `reason` on the capture-stopped event.
+    pub fn stop_pd_for(&mut self, reason: Option<PdStopReason>) -> Result<(), UiError> {
         if self.pd_run.take().is_none() {
             return Ok(());
         }
@@ -1263,7 +1298,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             None => Err(not_connected()),
         };
         self.log_pd_capture("stop", result.is_ok(), None);
-        self.emit_pd_stopped();
+        self.emit_pd_stopped(reason);
         result
     }
 
@@ -1593,6 +1628,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             MeasurementSource::Cdc => session.start_adcnew(Content::Adc, rate),
         }
         .map_err(|e| session_error(&e))?;
+        // Samples at the old rate go out ahead of the rate change.
+        self.flush_batch();
         // The interval across the restart was not measured.
         let store = &self.store;
         blocked(self.meter.as_ref(), || store.start_run());
@@ -1668,8 +1705,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::StartPd(reply) => {
                 let _ = reply.send(self.start_pd());
             }
-            Command::StopPd(reply) => {
-                let _ = reply.send(self.stop_pd());
+            Command::StopPd(reason, reply) => {
+                let _ = reply.send(self.stop_pd_for(reason));
             }
             Command::PdDetails(index, reply) => {
                 let _ = reply.send(self.pd_details(index));
@@ -1697,6 +1734,12 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             }
             Command::DeleteRecords(target, confirm, dir, reply) => {
                 let _ = reply.send(self.delete_records(target, &confirm, &dir));
+            }
+            Command::ClearHistory(claimed, reply) => {
+                if !claimed.swap(true, Ordering::SeqCst) {
+                    self.clear_history();
+                }
+                let _ = reply.send(());
             }
             Command::HoldPolling(hold, reply) => {
                 self.hold_polling(hold);
@@ -1742,7 +1785,7 @@ enum Command {
     PauseRecording(mpsc::Sender<Result<(), UiError>>),
     ResumeRecording(mpsc::Sender<Result<(), UiError>>),
     StartPd(mpsc::Sender<Result<(), UiError>>),
-    StopPd(mpsc::Sender<Result<(), UiError>>),
+    StopPd(Option<PdStopReason>, mpsc::Sender<Result<(), UiError>>),
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
     PdCable(mpsc::Sender<Option<CableView>>),
     ClearPd(mpsc::Sender<Result<PdCleared, UiError>>),
@@ -1760,6 +1803,10 @@ enum Command {
         PathBuf,
         mpsc::Sender<Result<RecordDeleteView, UiError>>,
     ),
+    /// Send out the batched samples, then discard the session history;
+    /// whoever claims the flag first (the worker or the caller that gave up
+    /// waiting) does the clear, so it happens exactly once.
+    ClearHistory(Arc<AtomicBool>, mpsc::Sender<()>),
     /// Hold or release the queue polling; answered between steps, so no
     /// poll is in flight once a hold is answered.
     HoldPolling(bool, mpsc::Sender<()>),
@@ -1787,7 +1834,7 @@ impl std::fmt::Debug for Command {
             Command::PauseRecording(_) => f.write_str("PauseRecording"),
             Command::ResumeRecording(_) => f.write_str("ResumeRecording"),
             Command::StartPd(_) => f.write_str("StartPd"),
-            Command::StopPd(_) => f.write_str("StopPd"),
+            Command::StopPd(..) => f.write_str("StopPd"),
             Command::PdDetails(index, _) => f.debug_tuple("PdDetails").field(index).finish(),
             Command::PdCable(_) => f.write_str("PdCable"),
             Command::ClearPd(_) => f.write_str("ClearPd"),
@@ -1805,6 +1852,7 @@ impl std::fmt::Debug for Command {
                 .field(target)
                 .field(dir)
                 .finish(),
+            Command::ClearHistory(..) => f.write_str("ClearHistory"),
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::PdCapturing(_) => f.write_str("PdCapturing"),
             Command::PdStatusDropped(_) => f.write_str("PdStatusDropped"),
@@ -2116,6 +2164,10 @@ static NEXT_RECORDING_ID: AtomicU64 = AtomicU64::new(1);
 /// How long a request to the worker may take before the UI gives up.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a history clear waits for the worker to flush its batched
+/// samples before clearing the history itself.
+const CLEAR_WAIT: Duration = Duration::from_millis(500);
+
 /// How long the UI waits for one offline-record download.
 const RECORD_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -2303,8 +2355,13 @@ impl WorkerControl {
 
     /// Stop the PD capture.
     pub fn stop_pd(&self) -> Result<(), UiError> {
+        self.stop_pd_for(None)
+    }
+
+    /// Stop the PD capture, naming why on the capture-stopped event.
+    pub fn stop_pd_for(&self, reason: Option<PdStopReason>) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(Command::StopPd(reply), &answer)?
+        self.ask(Command::StopPd(reason, reply), &answer)?
     }
 
     /// The raw bytes and field tree of captured PD record `index`.
@@ -2399,9 +2456,19 @@ impl WorkerControl {
         Ok(())
     }
 
-    /// Discard the session history.
+    /// Discard the session history. The worker sends out the samples still
+    /// waiting in its batcher first, so every sample recorded before the
+    /// clear reaches the page before it; a worker that is gone or busy for
+    /// longer than [`CLEAR_WAIT`] leaves the clear to this thread.
     pub fn clear_history(&self) -> Result<(), UiError> {
-        self.store.clear_history();
+        let claimed = Arc::new(AtomicBool::new(false));
+        let (reply, answer) = mpsc::channel();
+        let command = Command::ClearHistory(Arc::clone(&claimed), reply);
+        if self.ask_within(command, &answer, CLEAR_WAIT).is_err()
+            && !claimed.swap(true, Ordering::SeqCst)
+        {
+            self.store.clear_history();
+        }
         Ok(())
     }
 

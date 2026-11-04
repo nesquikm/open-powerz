@@ -307,6 +307,9 @@ export interface PdStatusSample {
   cc2_v: number;
 }
 
+/** Why the app stopped a PD capture the user did not stop (FR JQ971R). */
+export type PdStopReason = "trigger";
+
 /** Every event the backend sends over the session channel. */
 export type BackendEvent =
   | { type: "batch"; data: Batch }
@@ -314,7 +317,7 @@ export type BackendEvent =
   | { type: "status"; data: Status }
   | { type: "error"; data: UiError }
   | { type: "recording"; data: RecordingEvent }
-  | { type: "pd_state"; data: { capturing: boolean } }
+  | { type: "pd_state"; data: { capturing: boolean; reason?: PdStopReason } }
   | { type: "pd_rows"; data: { rows: PdRow[] } }
   | {
       type: "pd_status";

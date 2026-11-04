@@ -24,7 +24,7 @@ describe("MockBackend (scripted demo backend for the browser build)", () => {
     expect(ids).toEqual(["demo:idle", "demo:load-5v-1a", "demo:pd-9v-2a", "demo:noisy-negative"]);
   });
 
-  it("streams the scenario's values in batches at 20–60 Hz", async () => {
+  it("streams the scenario's values in batches at 20–60 Hz (the mock's own 40 Hz cadence)", async () => {
     const backend = new MockBackend();
     const events: BackendEvent[] = [];
     await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));

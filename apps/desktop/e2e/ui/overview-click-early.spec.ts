@@ -6,10 +6,16 @@
  * The page clock is held from before the connect and stepped by hand, so the stream
  * cannot widen the live view between the check and the click: the test reaches the
  * narrow-view state every run instead of by luck.
+ *
+ * It runs on the 10 min live window: one 50 ms batch moves that plot far less than 2 px,
+ * so smooth scrolling (FR HR2JAG) stays off and redraws are not capped at 30 a second.
+ * Under that cap the overview strip can lag the 4 ms steps until the live span has
+ * already reached the narrowest view. AC .2 does not depend on which live window shows.
  */
 
 import { expect, test, type Page } from "@playwright/test";
 import type { ChartDraw } from "../hook";
+import { LIVE_WINDOW_KEY } from "../../src/lib/chartSeries";
 import { minSpanMs } from "../../src/lib/timeline";
 import { badge, chartDraws, connectDemo, holdClock, open, overviewWindow } from "./helpers";
 
@@ -37,6 +43,10 @@ async function newestLive(page: Page): Promise<ChartDraw | undefined> {
 test("AC-B5XBTA.2: a click on the strip while the live view is narrower than the narrowest view pauses and centres there", async ({
   page,
 }) => {
+  await page.addInitScript(([key, value]) => sessionStorage.setItem(key, value), [
+    LIVE_WINDOW_KEY,
+    JSON.stringify("10m"),
+  ] as const);
   await page.clock.install();
   await open(page, `?synthetic=${SEEDED}`);
   const rate = Number(await page.getByLabel("Sample rate").inputValue());

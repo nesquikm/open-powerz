@@ -24,13 +24,18 @@
     gapBands,
     gapLabelFits,
     hoverReadout,
+    liveNeedsFrame,
+    LIVE_SMOOTH_MIN_FRAME_MS,
     liveRange,
     pixelSnappedRange,
+    smoothingActive,
+    smoothLiveEnd,
     steppedRange,
     toAlignedData,
     type ChartFrame,
     type GapBand,
     type HoverReadout,
+    type LiveEnd,
     type LiveWindowId,
   } from "../chartData";
   import {
@@ -56,6 +61,7 @@
     CHART_KEYS,
     HistoryRequester,
     RateGate,
+    MAX_REDRAW_HZ,
     RedrawScheduler,
     animationFrames,
     applyGesture,
@@ -846,9 +852,17 @@
     });
   }
 
+  /** Wall time (performance.now()) the batch carrying the newest sample arrived. */
+  let newestArrivedAt: number | null = null;
+  /** The smooth live window's end on the last frame (AC-HR2JAG.2). */
+  let liveEnd: LiveEnd | null = null;
+  /** The smoothed live end the current draw used, or null when it drew none. */
+  let liveEndDrawn: number | null = null;
+
   /** The live window's range; reduced motion advances it in tenth-of-a-span steps
    * instead of scrolling. */
   function shownRange(): [number, number] | null {
+    liveEndDrawn = null;
     const range = liveRange(liveWindow, buffer);
     if (range === null) return null;
     if (liveWindow === "all") {
@@ -857,9 +871,27 @@
     const ms = windowMs(liveWindow);
     if (ms === null) return range;
     if (motion().chartScroll === "smooth") {
-      return pixelSnappedRange(range, ms, plot?.bbox.width ?? 0, buffer.firstMs ?? range[0]);
+      // The end moves on with the wall clock between batches where one batch moves the
+      // plot by at least 2 px; otherwise it sits on the newest sample (AC-HR2JAG.2).
+      let smooth = range;
+      if (!smoothScrolling(ms)) {
+        liveEnd = null;
+      } else if (newestArrivedAt !== null) {
+        liveEnd = smoothLiveEnd(liveEnd, range[1], newestArrivedAt, performance.now());
+        smooth = [liveEnd.endMs - (range[1] - range[0]), liveEnd.endMs];
+        liveEndDrawn = liveEnd.endMs;
+      }
+      return pixelSnappedRange(smooth, ms, plot?.bbox.width ?? 0, buffer.firstMs ?? range[0]);
     }
     return steppedRange(range, ms, buffer.firstMs ?? range[0]);
+  }
+
+  /** True when a `spanMs` live window scrolls smoothly and one batch moves it by at
+   * least 2 px, so its end is clocked between batches (AC-HR2JAG.2). */
+  function smoothScrolling(spanMs: number | null): boolean {
+    return (
+      motion().chartScroll === "smooth" && spanMs !== null && smoothingActive(spanMs, plotWidthPx())
+    );
   }
 
   /** Plot-area width in CSS pixels, read from the DOM (uPlot's bbox can lag a resize). */
@@ -988,6 +1020,20 @@
     // The cursor stays put while the window scrolls: read its time on the new scale.
     if (hoverLeftPx !== null) hoverAtMs = u.posToVal(hoverLeftPx, "x");
     updateHover();
+    // Keep the line moving between batches until it has caught up (AC-HR2JAG.3).
+    if (smoothingNow()) scheduler.invalidate();
+  }
+
+  /** True while the live, visible chart smooth-scrolls behind the newest sample: every
+   * redraw then, data-driven or not, is capped at 30 a second (AC-HR2JAG.3). */
+  function smoothingNow(): boolean {
+    return liveNeedsFrame({
+      live: view.mode === "live",
+      visible: !hostHidden(),
+      smooth: smoothScrolling(windowMs(liveWindow)),
+      endMs: liveEndDrawn,
+      newestMs: buffer.lastMs,
+    });
   }
 
   /** The overview strip under the plot (AC-FENCD9.1). */
@@ -1024,12 +1070,17 @@
   const probe: ChartProbe | null = E2E_BUILD ? new ChartProbe() : null;
   if (E2E_BUILD && probe !== null) $effect(() => installChartProbe(probe));
 
-  const scheduler = new RedrawScheduler(draw);
+  const scheduler = new RedrawScheduler(draw, animationFrames, () =>
+    smoothingNow() ? LIVE_SMOOTH_MIN_FRAME_MS : 1000 / MAX_REDRAW_HZ,
+  );
   $effect(() => () => scheduler.stop());
 
   /** A batch arrived. */
   export function push(samples: readonly Sample[]): void {
+    const newestBefore = buffer.lastMs;
     buffer.push(samples);
+    if (buffer.lastMs !== null && buffer.lastMs !== newestBefore)
+      newestArrivedAt = performance.now();
     if (!hasData && buffer.length > 0) hasData = true;
     if (backfillArmed) startBackfill();
     scheduler.invalidate();
@@ -1088,6 +1139,8 @@
     progress.clear();
     progressTotals = { marks: null, energy: null };
     buffer.clear();
+    newestArrivedAt = null;
+    liveEnd = null;
     backfillArmed = false;
     backfillGeneration++;
     historyGeneration++;

@@ -18,6 +18,7 @@ import type {
   UiError,
 } from "./backend";
 import cancelTooLate from "./cancel-too-late.txt?raw";
+import { deviceOptionLabel } from "./format";
 
 /** The meter an update would go to: the picked device, with its versions while connected. */
 export interface FirmwareMeter {
@@ -237,6 +238,9 @@ export class FirmwareUpdate {
   followedEnded = $state(false);
   /** A reloaded page stopped hearing about the update it followed (AC-4PJRVJ.3). */
   followedLost = $state(false);
+  /** The updated meter's listings since the update started, one per label the device
+   * select shows, a label repeating only after a different one (AC-XCCQAK.1). */
+  listedHistory = $state.raw<DeviceListing[]>([]);
 
   constructor(api: FirmwareUpdateApi) {
     this.#api = api;
@@ -298,6 +302,19 @@ export class FirmwareUpdate {
       void this.#api.reconnect?.(target.id).catch(() => {});
     }
     return target?.id ?? null;
+  }
+
+  /** Notes the device list `listings` while an update runs: the updated meter's entry
+   * joins {@link listedHistory} when its label differs from the last one kept. */
+  noteListings(listings: readonly DeviceListing[]): void {
+    const updated = this.#updating;
+    if (!this.busy || updated === null) return;
+    const listing = updatedListing(updated, listings);
+    if (listing === undefined) return;
+    const last = this.listedHistory.at(-1);
+    if (last !== undefined && deviceOptionLabel(last, false) === deviceOptionLabel(listing, false))
+      return;
+    this.listedHistory = [...this.listedHistory, listing];
   }
 
   /** The typed text is exactly the chosen file's version. */
@@ -580,5 +597,6 @@ export class FirmwareUpdate {
     this.cancelling = false;
     this.followedEnded = false;
     this.followedLost = false;
+    this.listedHistory = [];
   }
 }

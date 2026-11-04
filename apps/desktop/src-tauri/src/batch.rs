@@ -1,5 +1,5 @@
 //! Pure sample batcher: groups queue records into UI batches flushed at
-//! 20–60 Hz (FR VHY378).
+//! most 20 times a second, with a 4 Hz idle heartbeat (FR VHY378, HR2JAG).
 
 use serde::Serialize;
 
@@ -35,13 +35,13 @@ pub struct Batch {
     pub stats: StatsSnapshot,
 }
 
-/// Flush pending samples once this much time (tenths of a ms, 16.7 ms ≈
-/// 60 Hz) has passed since the last batch.
-const SAMPLE_FLUSH_TENTHS_MS: u64 = 167;
-/// Send an empty heartbeat batch after this long without one (20 Hz).
-const HEARTBEAT_MS: u64 = 50;
+/// Flush pending samples once this long has passed since the last batch
+/// (at most 20 batches a second).
+const SAMPLE_FLUSH_MS: u64 = 50;
+/// Send an empty heartbeat batch after this long without one (4 Hz).
+const HEARTBEAT_MS: u64 = 250;
 
-/// Groups samples into batches flushed at 20–60 Hz.
+/// Groups samples into batches flushed at most 20 times a second.
 #[derive(Debug, Default)]
 pub struct Batcher {
     pending: Vec<Sample>,
@@ -75,7 +75,7 @@ impl Batcher {
         let due = if self.pending.is_empty() {
             elapsed >= HEARTBEAT_MS
         } else {
-            elapsed.saturating_mul(10) >= SAMPLE_FLUSH_TENTHS_MS
+            elapsed >= SAMPLE_FLUSH_MS
         };
         due.then(|| self.take(now_ms))
     }
@@ -90,8 +90,7 @@ impl Batcher {
         if self.pending.is_empty() {
             self.last_ms.saturating_add(HEARTBEAT_MS)
         } else {
-            self.last_ms
-                .saturating_add(SAMPLE_FLUSH_TENTHS_MS.div_ceil(10))
+            self.last_ms.saturating_add(SAMPLE_FLUSH_MS)
         }
     }
 
@@ -121,30 +120,41 @@ mod tests {
         }
     }
 
-    // ---- AC-VHY378.5: flush at 16.7 ms with samples, or at 50 ms ----
+    // ---- AC-HR2JAG.1 (supersedes AC-VHY378.5's 16.7 ms / 50 ms): flush
+    // samples at most 20 times a second, heartbeat every 250 ms ----
 
     #[test]
-    fn batcher_waits_16_7_ms_before_flushing_samples() {
+    fn batcher_waits_50_ms_before_flushing_samples() {
         let mut b = Batcher::new(1_000);
         b.push(s(1));
         b.push(s(2));
-        assert_eq!(b.poll(1_016), None);
-        let batch = b.poll(1_017).expect("no flush after 17 ms");
+        assert_eq!(b.poll(1_017), None, "flushed at 60 Hz");
+        assert_eq!(b.poll(1_049), None, "flushed before 50 ms");
+        let batch = b.poll(1_050).expect("no flush after 50 ms");
         let t: Vec<u32> = batch.samples.iter().map(|x| x.t_ms).collect();
         assert_eq!(t, vec![1, 2]);
-        // Nothing pending right after a flush.
-        assert_eq!(b.poll(1_018), None);
+        b.push(s(3));
+        assert_eq!(b.poll(1_099), None, "two flushes under 50 ms apart");
+        assert!(b.poll(1_100).is_some());
     }
 
     #[test]
-    fn batcher_sends_an_empty_batch_every_50_ms_without_samples() {
+    fn batcher_sends_an_empty_batch_every_250_ms_without_samples() {
         let mut b = Batcher::new(0);
-        assert_eq!(b.poll(17), None, "flushed an empty batch early");
-        assert_eq!(b.poll(49), None);
-        let batch = b.poll(50).expect("no heartbeat batch at 50 ms");
+        assert_eq!(b.poll(50), None, "heartbeat at the old 20 Hz");
+        assert_eq!(b.poll(249), None);
+        let batch = b.poll(250).expect("no heartbeat batch at 250 ms");
         assert!(batch.samples.is_empty());
-        assert_eq!(b.poll(99), None);
-        assert!(b.poll(100).is_some());
+        assert_eq!(b.poll(499), None);
+        assert!(b.poll(500).is_some());
+    }
+
+    #[test]
+    fn next_due_is_50_ms_with_samples_and_250_ms_idle() {
+        let mut b = Batcher::new(1_000);
+        assert_eq!(b.next_due_ms(), 1_250);
+        b.push(s(1));
+        assert_eq!(b.next_due_ms(), 1_050);
     }
 
     #[test]
@@ -152,13 +162,13 @@ mod tests {
         let mut b = Batcher::new(0);
         b.set_temp(Some(30.5));
         b.push(s(1));
-        assert_eq!(b.poll(20).unwrap().temp_c, Some(30.5));
+        assert_eq!(b.poll(50).unwrap().temp_c, Some(30.5));
         b.set_temp(Some(31.0));
         b.push(s(2));
-        assert_eq!(b.poll(40).unwrap().temp_c, Some(31.0));
+        assert_eq!(b.poll(100).unwrap().temp_c, Some(31.0));
         b.set_temp(None);
         b.push(s(3));
-        assert_eq!(b.poll(60).unwrap().temp_c, None);
+        assert_eq!(b.poll(150).unwrap().temp_c, None);
     }
 
     #[test]
@@ -173,23 +183,43 @@ mod tests {
     }
 
     #[test]
-    fn ten_seconds_at_1000_sps_is_at_most_600_batches_in_order() {
+    fn ten_seconds_at_1000_sps_is_at_most_200_batches_in_order() {
         let mut b = Batcher::new(0);
         let mut out = Vec::new();
-        let mut batches = 0;
+        let mut times = Vec::new();
         for t in 1..=10_000u32 {
             b.push(s(t));
             if let Some(batch) = b.poll(u64::from(t)) {
-                batches += 1;
+                times.push(u64::from(t));
                 out.extend(batch.samples.iter().map(|x| x.t_ms));
             }
         }
         if let Some(batch) = b.flush(10_001) {
-            batches += 1;
+            times.push(10_001);
             out.extend(batch.samples.iter().map(|x| x.t_ms));
         }
-        assert!(batches <= 600, "{batches} batches");
-        assert!(batches >= 200, "{batches} batches");
+        assert!(times.len() <= 200, "{} batches", times.len());
+        assert!(times.len() >= 190, "{} batches: below 20 Hz", times.len());
+        // The final forced flush at session end is exempt from the spacing.
+        let polled = &times[..times.len() - 1];
+        assert!(
+            polled.windows(2).all(|w| w[1] - w[0] >= 50),
+            "batches under 50 ms apart"
+        );
         assert_eq!(out, (1..=10_000).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn ten_idle_seconds_are_at_most_40_heartbeats() {
+        let mut b = Batcher::new(0);
+        let mut beats = 0;
+        for t in 1..=10_000u64 {
+            if let Some(batch) = b.poll(t) {
+                assert!(batch.samples.is_empty());
+                beats += 1;
+            }
+        }
+        assert!(beats <= 40, "{beats} heartbeats in 10 s");
+        assert!(beats >= 39, "only {beats} heartbeats in 10 s");
     }
 }

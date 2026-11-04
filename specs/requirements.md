@@ -89,7 +89,7 @@ unsigned for now.
   (device-side gaps are marked, not filled).
 - Live chart stays interactive (≥ 30 fps pan/zoom) with 10 million points per session via
   min/max decimation.
-- Device data reaches the UI in batched IPC frames (20–60 Hz), never one message per sample.
+- Device data reaches the UI in batched IPC frames (at most 20 Hz, a 4 Hz heartbeat when idle), never one message per sample.
 
 ### NFR-2: Security / clean room
 - No vendor code, binaries, firmware, documents or assets in the repository. Protocol code

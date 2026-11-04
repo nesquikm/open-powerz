@@ -28,9 +28,16 @@ export const PD_NO_METER_REASON = "Connect a meter to capture PD traffic.";
  * would go on arriving behind the opened file, unseen. */
 export const PD_STOP_FIRST_REASON = "Stop the capture first to open or import a file.";
 
+/** The analyzer's notice after a trigger session (Detect) stopped the capture
+ * (AC-JQ971R.2). */
+export const PD_TRIGGER_STOP_NOTICE =
+  "The PD capture stopped when Detect opened a trigger session. Start it again once you are done in the Trigger tab.";
+
 export class PdCapture {
   /** The PD sniffer runs. */
   capturing = $state(false);
+  /** Why the capture stopped when the user did not stop it, or null. */
+  notice = $state<string | null>(null);
   /** The captured rows, up to the row limit (not reactive itself: watch {@link version}). */
   store = new PdStore();
   /** Bumped on every change to the store. */
@@ -84,6 +91,9 @@ export class PdCapture {
     [this.#from, other.#from] = [other.#from, this.#from];
     [this.#statusFloor, other.#statusFloor] = [other.#statusFloor, this.#statusFloor];
     for (const capture of [this, other]) {
+      // The trigger-stop notice is about the meter shown when it came: it does not
+      // follow a swap either way (AC-JQ971R.3).
+      capture.notice = null;
       capture.#ticket++;
       capture.emptied++;
       capture.version++;
@@ -96,6 +106,8 @@ export class PdCapture {
     switch (event.type) {
       case "pd_state":
         this.capturing = event.data.capturing;
+        this.notice =
+          !event.data.capturing && event.data.reason === "trigger" ? PD_TRIGGER_STOP_NOTICE : null;
         break;
       case "pd_rows": {
         if (this.opened) break;
@@ -130,6 +142,7 @@ export class PdCapture {
       case "status":
         if (event.data.state === "disconnected" || event.data.state === "waiting") {
           this.capturing = false;
+          this.notice = null;
         } else if (event.data.state === "connected") {
           // A new backend session numbers its records from 0 again; the old
           // session's capture ended with it.

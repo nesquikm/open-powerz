@@ -526,6 +526,9 @@
     {:else if pd.capturing}
       <p class="reason" aria-live="polite">Capturing…</p>
     {/if}
+    {#if pd.notice}
+      <p class="reason" role="status">{pd.notice}</p>
+    {/if}
     {#if controls.openReason}
       <p id="pd-open-reason" class="reason">{controls.openReason}</p>
     {/if}

@@ -39,6 +39,7 @@ import type {
   PdOpened,
   PdRow,
   PdStatusSample,
+  PdStopReason,
   ProtocolSection,
   RecordingEnd,
   RecordingOptions,
@@ -82,7 +83,8 @@ import { DEFAULT_MAX_ROWS } from "./settings";
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
 
-/** Batches go out every 25 ms: 40 Hz, inside the backend's 20–60 Hz band. */
+/** Batches go out every 25 ms (40 Hz). The app's backend sends at most 20 Hz (FR HR2JAG);
+ * the mock keeps its faster cadence, which the browser suite's timings were tuned on. */
 const BATCH_MS = 25;
 
 /** Recording progress goes out every 500 ms, like the backend's. */
@@ -933,8 +935,11 @@ function flipMeter(mode: "application" | "bootloader"): DeviceListing {
 }
 
 /** The replug meter's picker entry at USB address `address`. */
-function replugMeter(address: number): DeviceListing {
-  return scriptedMeter(MOCK_REPLUG.serial, address, "application");
+function replugMeter(
+  address: number,
+  mode: "application" | "bootloader" = "application",
+): DeviceListing {
+  return scriptedMeter(MOCK_REPLUG.serial, address, mode);
 }
 
 /** The status event of a mock session that just connected; a null rate is a locked one. */
@@ -1359,6 +1364,8 @@ export class MockBackend {
   #watchers = new Set<(devices: DeviceListing[]) => void>();
   /** `mode-flip`: the listed meter's mode, and whether its flips are scheduled. */
   #flipMode: "application" | "bootloader" = "application";
+  /** `replug`: the listed meter's mode, bootloader while a mocked update has it switched. */
+  #replugMode: "application" | "bootloader" = "application";
   #flipStarted = false;
   /** Settings reads so far (FR 1HHT01). */
   #meterSettingsReads = 0;
@@ -1404,7 +1411,7 @@ export class MockBackend {
     if (this.#mode === "bootloader") return BOOTLOADER_METER;
     if (this.#mode === "mode-flip") return flipMeter(this.#flipMode);
     return this.#mode === "replug" && this.#meterAddress !== null
-      ? replugMeter(this.#meterAddress)
+      ? replugMeter(this.#meterAddress, this.#replugMode)
       : null;
   }
 
@@ -2136,12 +2143,16 @@ export class MockBackend {
     s.onEvent({ type: "pd_status", data: { samples } });
   }
 
-  /** Stops `s`'s PD capture, if it runs. */
-  #stopPd(s: Running): void {
+  /** Stops `s`'s PD capture, if it runs; `reason` says why when the app stopped it
+   * (FR JQ971R), absent for a stop the user asked for or a disconnect. */
+  #stopPd(s: Running, reason?: PdStopReason): void {
     if (s.pd.timer === null) return;
     clearInterval(s.pd.timer);
     s.pd.timer = null;
-    s.onEvent({ type: "pd_state", data: { capturing: false } });
+    s.onEvent({
+      type: "pd_state",
+      data: reason ? { capturing: false, reason } : { capturing: false },
+    });
   }
 
   async pdStop(): Promise<void> {
@@ -2415,6 +2426,14 @@ export class MockBackend {
       message: `The firmware update failed: ${MOCK_FLASH_FAILURES[stage] ?? stage}.`,
       hint: FLASH_RECOVERY_HINT,
     });
+    // `replug`: the listed meter turns to bootloader mode once switched, and back before
+    // the update ends, as the backend lists a real meter jumping.
+    const jumps = isMeter && this.#mode === "replug";
+    const setReplugMode = (mode: "application" | "bootloader"): void => {
+      if (!jumps || this.#replugMode === mode) return;
+      this.#replugMode = mode;
+      void this.#notifyDevices();
+    };
     try {
       const fromBootloader = isMeter && meter?.mode === "bootloader";
       for (const stage of ["switching", "erasing"] as const) {
@@ -2427,6 +2446,7 @@ export class MockBackend {
         await sleep(MOCK_FLASH_MS[stage]);
         if (failAt === stage) throw fail(stage);
         if (stage === "switching") {
+          setReplugMode("bootloader");
           // The prompt shows whether or not the meter restarts by itself.
           onStage({ stage: "replug", to: "bootloader", reply: "none" });
           await sleep(MOCK_FLASH_MS.replug);
@@ -2445,9 +2465,11 @@ export class MockBackend {
       }
       onStage({ stage: "replug", to: "application", reply: "none" });
       await sleep(MOCK_FLASH_MS.replug);
+      setReplugMode("application");
       this.#firmwareVersion = info.version;
       return { outcome: "verified", version: info.version };
     } finally {
+      setReplugMode("application");
       this.#flashing = false;
     }
   }
@@ -2538,8 +2560,9 @@ export class MockBackend {
     if (!this.#session) throw usage("Connect a meter first.");
     if (this.#trigger) return;
     const s = this.#session;
-    // Like the backend: the PD capture pauses and the queue runs at 50 SPS or less.
-    this.#stopPd(s);
+    // Like the backend: the PD capture stops (with the reason) and the queue runs at
+    // 50 SPS or less.
+    this.#stopPd(s, "trigger");
     let rateBefore: number | null = null;
     if (s.rateSps > TRIGGER_MAX_SPS && !s.recording && this.#mode !== "rate-locked") {
       rateBefore = s.rateSps;

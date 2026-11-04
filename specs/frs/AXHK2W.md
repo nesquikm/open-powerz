@@ -55,8 +55,12 @@ A compressed 30-hour fold test against an unfolded reference, a folded-export te
 
 Source: inventory note on 4NSVC9 and the follow-up on PD status data. Measured on the demo device, no meter needed.
 
+Export of a folded session (AC.14) is the user's choice: the full-resolution tail plus a notice; Record keeps a full long session. The notice is in the app, not the file, so the file stays readable as a recorder file.
+
+## Implementation notes
+
 r3 (3d2ae16): web content RSS 549 MB at 6 min, footprint 184 to 209 MB, so AC.1 passes by footprint; WebKit counts shared and graphics pages as resident. No live batches dropped, and a hidden window piled nothing up, so AC.9 needs no fix. The app process grew about 1 MB/min from the full-resolution history (AC.10).
 
 r4 (334d005, 2026-11-04): footprint 542 MB at 6 min, so AC.1 failed. Do not trust the r3 footprint figures: they were read only at the start and end of the run, and the start value (209 MB) does not match the 69 to 124 MB later runs read for the same process at the start, so r3 most likely read another process. Rerun on the same machine and driver: 3d2ae16 449 MB and 334d005 484 MB at 6 min, so no regression; both pass 400 MB before 6 min. The cause and the fix are in HR2JAG.
 
-Export of a folded session (AC.14) is the user's choice: the full-resolution tail plus a notice; Record keeps a full long session. The notice is in the app, not the file, so the file stays readable as a recorder file.
+HR2JAG final build, 2026-11-04, pinned window 1280×800 on the MacBook screen, demo load-5v-1a at 1000 SPS in the default 10 s live window (smoothing on), web content footprint (RSS beside it). Paired 6-min runs: HR2JAG 384 and 377 MB, 334d005 499 and 593 MB. 40-minute run: 399 MB at 5 min, 528 MB at 9 min, then one collection; after that 173 MB (792 RSS) at 10 min, 176 (814) at 20, 177 (818) at 30, 186 (824) at 40. Slope from 10 to 40 min is 0.32 MB/min. The app process grew 1.23 MB/min from 6 to 40 min (AC.13 expects 1.14). A separate 10 s window run measured 241 MB at 6 min; the 1 min window is left to the next tester run.

@@ -125,6 +125,10 @@ pub(crate) struct SessionData {
     temp_c: Option<(f64, u64)>,
     /// Temperature changes over the history.
     temps: TempLog,
+    /// Session time of the last record when the history was last cleared:
+    /// a sample at or before it that has not reached the page yet never
+    /// does (AC-HR2JAG.1).
+    cleared_through_ms: Option<u32>,
 }
 
 impl SessionData {
@@ -179,6 +183,11 @@ impl SessionData {
     /// The statistics so far.
     pub(crate) fn stats(&self) -> StatsSnapshot {
         self.stats.snapshot()
+    }
+
+    /// Session time of the last record when the history was last cleared.
+    pub(crate) fn cleared_through_ms(&self) -> Option<u32> {
+        self.cleared_through_ms
     }
 }
 
@@ -328,6 +337,7 @@ impl SessionStore {
     pub fn clear_history(&self) {
         let mut data = self.lock();
         data.history.clear();
+        data.cleared_through_ms = data.timeline.last.map(|(t, _)| t);
         data.history_unix_ms = None;
         data.temps.clear();
     }

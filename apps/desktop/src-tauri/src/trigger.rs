@@ -510,6 +510,10 @@ enum Msg {
 pub struct VbusReading {
     /// VBUS, V.
     pub volts: f64,
+    /// CC1, V: a charger attached pulls one CC line up (FR TFA5N7).
+    pub cc1_v: f64,
+    /// CC2, V.
+    pub cc2_v: f64,
     /// The record's device time, ms: the same time is the same record again.
     pub time_ms: u32,
     /// How far apart the stream's records are.
@@ -521,6 +525,8 @@ impl VbusReading {
     pub fn of(r: &powerz_protocol::decode::QueueRecord) -> VbusReading {
         VbusReading {
             volts: r.vbus_v(),
+            cc1_v: r.cc1_v(),
+            cc2_v: r.cc2_v(),
             time_ms: r.time_ms(),
             period: Duration::from_millis(u64::from(1000 / r.rate().sps().max(1))),
         }
@@ -794,19 +800,72 @@ struct Session<P: Read + Write, C: Clock> {
     armed: bool,
     /// Whether a low VBUS reading would mean anything.
     powered: Powered,
-    /// The device time of the first record of the current spell below
-    /// [`VBUS_GONE_V`]; a reading at or above it ends the spell.
-    low_first_ms: Option<u32>,
+    /// The current spell of records below [`VBUS_GONE_V`], V; a reading at or
+    /// above it ends the spell.
+    low_spell: Spell<f64>,
     /// The last record counted: its device time, and when it was first read.
     last_record: Option<(u32, Instant)>,
-    /// The readings of the current low spell, V, for its log line; at most
-    /// [`LOW_READINGS_MAX`], the latest kept.
-    low_readings: std::collections::VecDeque<f64>,
+    /// The current spell of records with both CC lines below [`CC_GONE_V`]:
+    /// CC1 and CC2, V (FR TFA5N7).
+    cc_spell: Spell<(f64, f64)>,
     /// VBUS collapsed under an accepted contract: the offers are forgotten and
     /// every request is refused until a PD listing.
     gone: bool,
     vbus: Option<VbusReader>,
     log: SharedLog,
+}
+
+/// A spell of low records in the stream's device time, with its readings for
+/// the log line: at most [`LOW_READINGS_MAX`], the latest kept.
+struct Spell<T> {
+    /// The device time of the spell's first record.
+    first_ms: Option<u32>,
+    readings: std::collections::VecDeque<T>,
+}
+
+impl<T> Spell<T> {
+    fn new() -> Spell<T> {
+        Spell {
+            first_ms: None,
+            readings: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// The spell, if any, is over: its readings are forgotten.
+    fn end(&mut self) {
+        self.first_ms = None;
+        self.readings.clear();
+    }
+
+    /// Counts one low record and gives how long the spell has lasted in device
+    /// time. A first low record, or the device clock going back, starts a new
+    /// spell.
+    fn push(&mut self, time_ms: u32, reading: T) -> Duration {
+        let first = match self.first_ms {
+            Some(first) if time_ms >= first => first,
+            _ => {
+                self.end();
+                self.first_ms = Some(time_ms);
+                time_ms
+            }
+        };
+        if self.readings.len() >= LOW_READINGS_MAX {
+            self.readings.pop_front();
+        }
+        self.readings.push_back(reading);
+        Duration::from_millis(u64::from(time_ms - first))
+    }
+
+    /// Ends the spell and gives its readings, each as `show` writes it, joined
+    /// with `, `.
+    fn take(&mut self, show: impl Fn(&T) -> String) -> String {
+        self.first_ms = None;
+        self.readings
+            .drain(..)
+            .map(|r| show(&r))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 impl<P: Read + Write, C: Clock> Session<P, C> {
@@ -828,27 +887,21 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
     /// Ends the current low spell and gives its readings as
     /// `1.95 V, 1.85 V, …`.
     fn take_low_spell(&mut self) -> String {
-        self.low_first_ms = None;
-        self.low_readings
-            .drain(..)
-            .map(|v| format!("{v:.2} V"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        self.low_spell.take(|v| format!("{v:.2} V"))
     }
 
     /// The current low spell, if any, is over: its readings are forgotten.
     fn end_low_spell(&mut self) {
-        self.low_first_ms = None;
-        self.low_readings.clear();
+        self.low_spell.end();
     }
 
     /// The current low spell, if any, did not count: logged as a dip.
     fn ignore_low_spell(&mut self) {
-        if !self.low_readings.is_empty() {
+        if !self.low_spell.readings.is_empty() {
             let readings = self.take_low_spell();
             self.log_line(format!("trigger vbus dip ignored: {readings}"));
         }
-        self.low_first_ms = None;
+        self.low_spell.first_ms = None;
     }
 
     /// A PD request or the way back was accepted: VBUS is watched again. The
@@ -866,13 +919,10 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
     /// One look at VBUS. Nothing is written; a collapse only ends what stood
     /// on the charger.
     fn check_vbus(&mut self) {
-        if self.powered == Powered::No {
-            self.end_low_spell();
-            return;
-        }
         let Some(reading) = self.vbus.as_mut().and_then(|read| read()) else {
             // No reading: the spell cannot go on.
             self.ignore_low_spell();
+            self.end_cc_spell();
             return;
         };
         let now = Instant::now();
@@ -883,13 +933,22 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
             Some((time, seen)) if time == reading.time_ms => {
                 if stopped(seen) {
                     self.ignore_low_spell();
+                    self.end_cc_spell();
                 }
                 return;
             }
-            Some((_, seen)) if stopped(seen) => self.ignore_low_spell(),
+            Some((_, seen)) if stopped(seen) => {
+                self.ignore_low_spell();
+                self.end_cc_spell();
+            }
             _ => {}
         }
         self.last_record = Some((reading.time_ms, now));
+        self.check_cc(&reading);
+        if self.powered == Powered::No {
+            self.end_low_spell();
+            return;
+        }
         let volts = reading.volts;
         if volts >= VBUS_GONE_V {
             // One low reading between normal ones is no collapse.
@@ -907,28 +966,51 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
             self.end_low_spell();
             return;
         }
-        let first = match self.low_first_ms {
-            Some(first) if reading.time_ms >= first => first,
-            // A first low record, or the device clock went back: a new spell.
-            _ => {
-                self.end_low_spell();
-                self.low_first_ms = Some(reading.time_ms);
-                reading.time_ms
-            }
-        };
-        if self.low_readings.len() >= LOW_READINGS_MAX {
-            self.low_readings.pop_front();
-        }
-        self.low_readings.push_back(volts);
-        let span = Duration::from_millis(u64::from(reading.time_ms - first));
-        if span >= VBUS_LOW_SPELL {
-            self.powered = Powered::No;
+        if self.low_spell.push(reading.time_ms, volts) >= VBUS_LOW_SPELL {
             let readings = self.take_low_spell();
             self.log_line(format!("trigger vbus collapse: {readings}"));
-            self.gone = true;
-            self.offers.clear();
-            self.shown.clear();
-            self.end_armed(ArmedEnd::ChargerGone);
+            self.mark_gone();
+        }
+    }
+
+    /// The charger is gone (a VBUS collapse or both CC lines low): the offers
+    /// are forgotten and every request is refused until a PD listing.
+    fn mark_gone(&mut self) {
+        self.powered = Powered::No;
+        self.end_low_spell();
+        self.end_cc_spell();
+        self.gone = true;
+        self.offers.clear();
+        self.shown.clear();
+        self.end_armed(ArmedEnd::ChargerGone);
+    }
+
+    /// The current CC spell, if any, is over: its readings are forgotten.
+    fn end_cc_spell(&mut self) {
+        self.cc_spell.end();
+    }
+
+    /// One look at the CC lines of a new record (FR TFA5N7): both below
+    /// [`CC_GONE_V`] for [`VBUS_LOW_SPELL`] of device time means nothing is
+    /// attached, with or without a contract.
+    fn check_cc(&mut self, reading: &VbusReading) {
+        if self.gone {
+            self.end_cc_spell();
+            return;
+        }
+        if reading.cc1_v >= CC_GONE_V || reading.cc2_v >= CC_GONE_V {
+            self.end_cc_spell();
+            return;
+        }
+        let span = self
+            .cc_spell
+            .push(reading.time_ms, (reading.cc1_v, reading.cc2_v));
+        if span >= VBUS_LOW_SPELL {
+            let readings = self
+                .cc_spell
+                .take(|(cc1, cc2)| format!("CC1 {cc1:.2} V CC2 {cc2:.2} V"));
+            self.log_line(format!("trigger cc gone: {readings}"));
+            self.mark_gone();
         }
     }
 
@@ -1311,6 +1393,9 @@ impl<P: Read + Write, C: Clock> Engine for Session<P, C> {
         // automatic list drops VBUS while it probes the charger.
         self.end_armed(ArmedEnd::Detect);
         self.powered = Powered::No;
+        // The probes pull the CC lines about and the stream pauses meanwhile:
+        // a CC spell from before says nothing (AC-TFA5N7.2).
+        self.end_cc_spell();
         let bc12 = detect::bc12(&mut self.pdm).map_err(|e| pdm_error(&e))?;
         let apple = detect::apple(&mut self.pdm).map_err(|e| pdm_error(&e))?;
         let list = detect::list(&mut self.pdm, &ListOptions::default(), &mut |_| {})
@@ -1835,6 +1920,10 @@ pub const VBUS_GONE_V: f64 = 2.0;
 /// gone, in the records' device time: the meter hands out single low readings
 /// between normal ones.
 const VBUS_LOW_SPELL: Duration = Duration::from_millis(300);
+/// Below this, V, on both CC lines nothing is attached: a source pulls one
+/// line up to 1.6 V or more with Rp, and an open line reads near 0 V
+/// [inferred].
+pub const CC_GONE_V: f64 = 0.3;
 /// Readings of one low spell kept for its log line.
 const LOW_READINGS_MAX: usize = 32;
 /// At this, V, VBUS has risen under an accepted contract.
@@ -1924,9 +2013,9 @@ impl TriggerWorker {
                     back_at: None,
                     armed: false,
                     powered: Powered::No,
-                    low_first_ms: None,
+                    low_spell: Spell::new(),
+                    cc_spell: Spell::new(),
                     last_record: None,
-                    low_readings: std::collections::VecDeque::new(),
                     gone: false,
                     vbus: None,
                     log,
@@ -2081,6 +2170,9 @@ fn fresh(
         last = ms;
         Some(VbusReading {
             volts,
+            // A charger stays attached: its pull-up on CC1 (FR TFA5N7).
+            cc1_v: 1.5,
+            cc2_v: 0.0,
             time_ms: ms,
             period: Duration::from_millis(20),
         })
@@ -4061,6 +4153,8 @@ mod tests {
             }
             Some(VbusReading {
                 volts,
+                cc1_v: 1.5,
+                cc2_v: 0.0,
                 time_ms,
                 period: SCRIPT_PERIOD,
             })
@@ -4269,6 +4363,8 @@ mod tests {
                 }
                 Some(VbusReading {
                     volts,
+                    cc1_v: 1.5,
+                    cc2_v: 0.0,
                     time_ms: SCRIPT_T0 + n * period_ms,
                     period: Duration::from_millis(u64::from(period_ms)),
                 })
@@ -4292,6 +4388,8 @@ mod tests {
         let c = w.control();
         let now: Arc<Mutex<VbusReading>> = Arc::new(Mutex::new(VbusReading {
             volts: 0.5,
+            cc1_v: 1.5,
+            cc2_v: 0.0,
             time_ms: SCRIPT_T0,
             period: SCRIPT_PERIOD,
         }));
@@ -4300,6 +4398,8 @@ mod tests {
         let record = |volts: f64, time_ms: u32| {
             *now.lock().unwrap() = VbusReading {
                 volts,
+                cc1_v: 1.5,
+                cc2_v: 0.0,
                 time_ms,
                 period: SCRIPT_PERIOD,
             };
@@ -4712,6 +4812,352 @@ mod tests {
         assert!(!c.charger_gone().expect("charger gone"));
         m.close_trigger().expect("close");
         m.disconnect().expect("disconnect");
+    }
+
+    // ---- FR TFA5N7: a charger unplugged with no contract is noticed ----
+
+    /// The prefix of the line the CC watch writes when the charger is gone.
+    const CC_GONE_PREFIX: &str = "trigger cc gone: ";
+
+    /// One stream record for the CC watch.
+    #[derive(Debug, Clone, Copy)]
+    struct CcRecord {
+        volts: f64,
+        cc1: f64,
+        cc2: f64,
+        time_ms: u32,
+    }
+
+    /// The record at `SCRIPT_T0 + dt`, VBUS `volts`.
+    fn cc(volts: f64, cc1: f64, cc2: f64, dt: u32) -> CcRecord {
+        CcRecord {
+            volts,
+            cc1,
+            cc2,
+            time_ms: SCRIPT_T0 + dt,
+        }
+    }
+
+    /// A charger attached with no contract: VBUS 0 V, CC1 pulled up.
+    fn attached(dt: u32) -> CcRecord {
+        cc(0.0, 1.6, 0.0, dt)
+    }
+
+    /// Nothing attached: VBUS 0 V, both CC lines near zero.
+    fn unplugged(dt: u32) -> CcRecord {
+        cc(0.0, 0.05, 0.02, dt)
+    }
+
+    #[derive(Default)]
+    struct CcState {
+        next: std::collections::VecDeque<CcRecord>,
+        last: Option<CcRecord>,
+    }
+
+    /// The watcher's records, one per look, the last one repeated (the same
+    /// record again, as a stream that stopped gives it).
+    #[derive(Clone, Default)]
+    struct CcScript(Arc<Mutex<CcState>>);
+
+    impl CcScript {
+        fn watch(w: &TriggerWorker, records: &[CcRecord]) -> CcScript {
+            let script = CcScript::default();
+            script.0.lock().unwrap().next = records.iter().copied().collect();
+            let reader = script.clone();
+            w.watch_vbus(move || reader.read());
+            script
+        }
+
+        fn read(&self) -> Option<VbusReading> {
+            let mut s = self.0.lock().unwrap();
+            if let Some(r) = s.next.pop_front() {
+                s.last = Some(r);
+            }
+            s.last.map(|r| VbusReading {
+                volts: r.volts,
+                cc1_v: r.cc1,
+                cc2_v: r.cc2,
+                time_ms: r.time_ms,
+                period: SCRIPT_PERIOD,
+            })
+        }
+
+        /// Wait until every record was looked at, for up to 5 s.
+        fn read_out(&self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !self.0.lock().unwrap().next.is_empty() {
+                assert!(Instant::now() < deadline, "records left unread");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// Nothing marked the charger gone and no CC line was written.
+    fn not_gone(c: &TriggerControl, lines: &Lines, what: &str) {
+        assert!(!c.charger_gone().expect("charger gone"), "{what}");
+        assert_eq!(
+            lines_with(lines, CC_GONE_PREFIX),
+            Vec::<String>::new(),
+            "{what}"
+        );
+    }
+
+    // AC-TFA5N7.1: both CC lines low for 300 ms marks the charger gone.
+
+    #[test]
+    fn the_cc_gone_level_is_0_3_v() {
+        assert_eq!(CC_GONE_V, 0.3);
+    }
+
+    #[test]
+    fn an_unplug_with_no_contract_marks_the_charger_gone() {
+        let (sim, w, _vbus, lines) = watched(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let before = sim.writes().len();
+        let script = CcScript::watch(
+            &w,
+            &[
+                attached(0),
+                unplugged(100),
+                unplugged(200),
+                unplugged(300),
+                unplugged(400),
+                unplugged(500),
+                unplugged(600),
+            ],
+        );
+        wait_for_line(&lines, CC_GONE_PREFIX);
+        assert!(c.charger_gone().expect("charger gone"));
+        // The offers are forgotten and every request is refused.
+        says_press_detect(c.risk(pd(2)));
+        says_press_detect(c.request(pd(2), true));
+        says_press_detect(c.request(pd(1), false));
+        let err = c.request(pd(2), true).expect_err("refused");
+        assert_eq!(err.message, "The charger went away. Press Detect.");
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        script.read_out();
+        std::thread::sleep(THREE_CHECKS);
+        assert_eq!(
+            lines_with(&lines, CC_GONE_PREFIX).len(),
+            1,
+            "one line per event: {:?}",
+            lines.lock().unwrap()
+        );
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn an_unplug_under_a_contract_is_noticed_on_cc_before_vbus_falls() {
+        // VBUS decays slowly after an unplug; CC drops at once.
+        let (sim, w, _vbus, lines) = watched_armed(SimCharger::Epr140W);
+        let c = w.control();
+        let before = sim.writes().len();
+        let records: Vec<CcRecord> = std::iter::once(cc(9.0, 1.6, 0.0, 0))
+            .chain((1..=6).map(|i| cc(4.0, 0.05, 0.02, 100 * i)))
+            .collect();
+        CcScript::watch(&w, &records);
+        wait_for_line(&lines, CC_GONE_PREFIX);
+        assert!(c.charger_gone().expect("charger gone"));
+        assert!(!c.armed().expect("armed"), "don't ask again ends");
+        assert!(
+            ended_lines(&lines).iter().any(|l| l == GONE_LINE),
+            "{:?}",
+            lines.lock().unwrap()
+        );
+        assert_eq!(lines_with(&lines, COLLAPSE_PREFIX), Vec::<String>::new());
+        says_press_detect(c.risk(pd(3)));
+        says_press_detect(c.request(pd(3), false));
+        assert_eq!(writes_after(&sim, before), Vec::<String>::new());
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn just_below_0_3_v_on_both_lines_is_gone() {
+        let (_sim, w, _vbus, lines) = watched(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let records: Vec<CcRecord> = (0..=6).map(|i| cc(0.0, 0.29, 0.29, 100 * i)).collect();
+        CcScript::watch(&w, &records);
+        wait_for_line(&lines, CC_GONE_PREFIX);
+        assert!(c.charger_gone().expect("charger gone"));
+        w.close().expect("close");
+    }
+
+    // AC-TFA5N7.2: what ends or never starts a spell.
+
+    #[test]
+    fn a_single_low_cc_record_never_counts() {
+        let (_sim, w, _vbus, lines) = watched(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let script = CcScript::watch(
+            &w,
+            &[
+                attached(0),
+                unplugged(100),
+                attached(200),
+                attached(300),
+                attached(400),
+                attached(500),
+                attached(600),
+            ],
+        );
+        script.read_out();
+        std::thread::sleep(PAST_THE_SPELL);
+        not_gone(&c, &lines, "one low record");
+        assert_eq!(
+            c.risk(pd(2)).expect("the offers stay"),
+            RiskClass::Above5VRememberable
+        );
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn one_cc_line_at_0_3_v_ends_the_spell() {
+        let (_sim, w, _vbus, lines) = watched(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let script = CcScript::watch(
+            &w,
+            &[
+                unplugged(0),
+                unplugged(100),
+                unplugged(200),
+                // CC2 exactly at the level: the spell is over.
+                cc(0.0, 0.05, 0.3, 300),
+                unplugged(400),
+                unplugged(500),
+                attached(600),
+                attached(700),
+            ],
+        );
+        script.read_out();
+        std::thread::sleep(PAST_THE_SPELL);
+        not_gone(&c, &lines, "the spell was broken at 300 ms");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_charger_with_one_cc_line_pulled_up_is_never_gone() {
+        // This charger keeps VBUS at 0 V with no contract; CC2 carries the pull-up.
+        let (_sim, w, _vbus, lines) = watched(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let records: Vec<CcRecord> = (0..=8).map(|i| cc(0.0, 0.0, 1.5, 100 * i)).collect();
+        let script = CcScript::watch(&w, &records);
+        script.read_out();
+        std::thread::sleep(THREE_CHECKS);
+        not_gone(&c, &lines, "CC2 pulled up");
+        w.close().expect("close");
+    }
+
+    #[test]
+    fn a_low_cc_spell_spanning_detect_is_ignored() {
+        // The automatic list probes the charger; the stream pauses meanwhile,
+        // so the first record after Detect may be one from during it.
+        let (_sim, w, _vbus, lines) = watched(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let script = CcScript::watch(&w, &[unplugged(0), unplugged(100), unplugged(200)]);
+        script.read_out();
+        c.detect().expect("detect");
+        let script = CcScript::watch(
+            &w,
+            &[unplugged(350), attached(450), attached(550), attached(650)],
+        );
+        script.read_out();
+        std::thread::sleep(PAST_THE_SPELL);
+        not_gone(&c, &lines, "the low records around Detect");
+        // After Detect the simulated session's way back to 5 V is not this
+        // AC's concern (see neither_detect_nor_another_protocol_clears_it).
+        let _ = w.close();
+    }
+
+    #[test]
+    fn a_stream_that_stops_ends_the_cc_spell() {
+        let (_sim, w, _vbus, lines) = watched(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        let script = CcScript::watch(&w, &[unplugged(0), unplugged(100)]);
+        script.read_out();
+        // The same record again and again: the stream stopped.
+        std::thread::sleep(Duration::from_millis(700));
+        not_gone(&c, &lines, "a stopped stream");
+        let script = CcScript::watch(&w, &[unplugged(1000), attached(1100), attached(1200)]);
+        script.read_out();
+        std::thread::sleep(THREE_CHECKS);
+        not_gone(&c, &lines, "one low record after the stream came back");
+        w.close().expect("close");
+    }
+
+    // AC-TFA5N7.3: one log line per event, with the low readings.
+
+    #[test]
+    fn the_cc_gone_line_has_both_low_readings() {
+        let (_sim, w, _vbus, lines) = watched(SimCharger::Epr140W);
+        c_list_pd(&w);
+        let records: Vec<CcRecord> = std::iter::once(attached(0))
+            .chain((1..=8).map(|i| cc(0.0, 0.12, 0.04, 100 * i)))
+            .collect();
+        let script = CcScript::watch(&w, &records);
+        script.read_out();
+        std::thread::sleep(THREE_CHECKS);
+        let gone = lines_with(&lines, CC_GONE_PREFIX);
+        assert_eq!(gone.len(), 1, "{:?}", lines.lock().unwrap());
+        let line = &gone[0];
+        for wanted in ["CC1", "CC2", "0.12", "0.04"] {
+            assert!(line.contains(wanted), "no {wanted:?} in {line:?}");
+        }
+        assert!(!line.contains(powerz_sim::SIM_SERIAL), "{line}");
+        w.close().expect("close");
+    }
+
+    fn c_list_pd(w: &TriggerWorker) {
+        w.control().list(TriggerProtocol::Pd).expect("list pd");
+    }
+
+    // AC-TFA5N7.4: the simulator, through the production wiring.
+
+    #[test]
+    fn a_demo_meter_with_no_charger_shows_the_charger_went_away() {
+        let dir =
+            std::env::temp_dir().join(format!("open-powerz-tfa5n7-{}-cc", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the log folder");
+        let path = dir.join("app.log");
+
+        // The idle demo meter reads both CC lines at 0 V: nothing attached.
+        let mut m = DeviceManager::new(|| Ok(Vec::new()), AppOpener, SystemClock);
+        m.set_app_log(crate::app_log::AppLog::open(&path).expect("open app.log"));
+        m.connect_with_stop(
+            "demo:idle",
+            50,
+            |_: BackendEvent| {},
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("the demo device connects");
+        m.open_trigger().expect("the demo PDM port");
+        let c = m.trigger_control().expect("open");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        // No contract: only the CC lines can tell.
+        eventually("the charger gone on CC", || {
+            c.charger_gone().expect("charger gone")
+        });
+        let err = c.request(pd(2), true).expect_err("refused");
+        assert_eq!(err.kind, ErrorKind::Usage, "{err:?}");
+        assert_eq!(err.message, "The charger went away. Press Detect.");
+        m.close_trigger().expect("close");
+        m.disconnect().expect("disconnect");
+
+        let log = std::fs::read_to_string(&path).expect("read app.log");
+        let gone: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("trigger cc gone:"))
+            .collect();
+        assert_eq!(gone.len(), 1, "{log}");
+        assert!(!gone[0].contains(powerz_sim::SIM_SERIAL), "{}", gone[0]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

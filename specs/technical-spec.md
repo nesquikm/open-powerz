@@ -24,7 +24,7 @@ A Rust cargo workspace with six crates and one web UI:
   per connected meter. The worker owns the `Session`, interleaves queue polls with ADC
   snapshots (the queue carries no temperature), keeps the per-session history with a min/max
   decimation pyramid and running statistics, feeds the CSV recorder, and streams batched
-  events (20–60 Hz) to the UI over `tauri::ipc::Channel`.
+  events (at most 20 Hz, a 4 Hz idle heartbeat) to the UI over `tauri::ipc::Channel`.
 - `powerz-record` (library): the vendor-compatible CSV recorder shared by the CLI and the
   desktop app (header, plain-decimal formatting, time origin, signed charge/energy
   integration), and the streaming reader that reads those recordings back.

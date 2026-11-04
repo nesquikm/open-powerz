@@ -18,6 +18,10 @@ use std::sync::Condvar;
 
 include!("common/two_meters.inc.rs");
 
+/// One sample per queue poll (every 100 ms) and so one per batch: each
+/// sample costs a batch now that idle heartbeats come only every 250 ms
+/// (FR HR2JAG), where 50 sps packed five samples into each.
+const RATE_SPS: u32 = 10;
 /// Well past the worker's queue limit at one sample per batch.
 const ENOUGH_SAMPLES: usize = 2_000;
 /// How long the worker gets to meet the unplug, on real time.
@@ -97,7 +101,9 @@ fn the_outage_gap_is_the_history_gap_after_dropped_batches() {
     let gate = Gate::default();
     gate.set_shut(true);
     let (rx, sink) = gated_sink(gate.clone());
-    rig.m.connect(METER_A, 50, sink).expect("connect meter A");
+    rig.m
+        .connect(METER_A, RATE_SPS, sink)
+        .expect("connect meter A");
     wait_for_history(&rig, ENOUGH_SAMPLES);
 
     // The last batches before the unplug go the way of the others.
@@ -140,7 +146,9 @@ fn no_held_samples_arrive_after_the_event_that_follows_them() {
     let mut rig = Rig::new();
     let gate = Gate::default();
     let (rx, sink) = gated_sink(gate.clone());
-    rig.m.connect(METER_A, 50, sink).expect("connect meter A");
+    rig.m
+        .connect(METER_A, RATE_SPS, sink)
+        .expect("connect meter A");
     recv_until(&rx, is_samples);
     let dir = temp_dir("order");
     rig.m
@@ -190,7 +198,9 @@ fn a_dropped_batch_costs_no_sample_in_the_history_the_export_or_a_recording() {
     let mut rig = Rig::new();
     let gate = Gate::default();
     let (rx, sink) = gated_sink(gate.clone());
-    rig.m.connect(METER_A, 50, sink).expect("connect meter A");
+    rig.m
+        .connect(METER_A, RATE_SPS, sink)
+        .expect("connect meter A");
     let first = recv_until(&rx, is_samples);
     let store = rig.m.session_store_for(METER_A).expect("the session store");
 

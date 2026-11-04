@@ -95,13 +95,13 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: Vitest click-mapping test, WebKit strip click right after connect, timeline test 20/20
 - [x] The Device select's tooltip is tested under Hide serial numbers — NKAD6S
   verify: hide-serial WebKit spec, tooltip on/off/on
-- [ ] The firmware update keeps the device list's labels — XCCQAK
+- [x] The firmware update keeps the device list's labels — XCCQAK
   verify: Vitest store history, WebKit mocked update with a mode change
-- [ ] A charger unplugged with no contract is noticed — TFA5N7
+- [x] A charger unplugged with no contract is noticed — TFA5N7
   verify: trigger CC-spell unit tests, simulator scenario, r5 runbook step
-- [ ] Detect stopping a PD capture says so — JQ971R
+- [x] Detect stopping a PD capture says so — JQ971R
   verify: worker reason tests, Vitest store, WebKit Detect notice
-- [ ] Live batches at 20 Hz keep the web view's memory down — HR2JAG
+- [x] Live batches at 20 Hz keep the web view's memory down — HR2JAG
   verify: batcher message counts, Vitest live end, WebKit live scroll, macOS 20-min demo footprint
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**

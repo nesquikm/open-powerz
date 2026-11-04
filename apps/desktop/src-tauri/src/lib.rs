@@ -1474,8 +1474,11 @@ async fn reset_stats(state: Shared<'_>, device_id: Option<String>) -> Result<(),
 async fn clear_history(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        session_store(&state, device_id.as_deref())?.clear_history();
-        Ok(())
+        let clearer = {
+            let manager = state.manager();
+            manager.clearer_for(&manager.target(device_id.as_deref()))?
+        };
+        clearer.clear()
     })
     .await
 }

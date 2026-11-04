@@ -18,6 +18,7 @@
     type FirmwareMeter,
     type FirmwareUpdate,
   } from "../firmwareUpdate.svelte";
+  import { deviceOptionLabel } from "../format";
   import FirmwareConfirmDialog from "./FirmwareConfirmDialog.svelte";
   import FirmwareRecordingDialog from "./FirmwareRecordingDialog.svelte";
   import FirmwareFileInfo from "./FirmwareFileInfo.svelte";
@@ -37,6 +38,10 @@
   } = $props();
 
   const shownMeter = $derived(firmware.meterShown(meter));
+  /** The labels the updated meter took in the device list, joined by arrows (AC-XCCQAK.1). */
+  const listedLine = $derived(
+    firmware.listedHistory.map((l) => deviceOptionLabel(l, hideSerial)).join(" → "),
+  );
   const meterRows = $derived(shownMeter ? firmwareMeterRows(shownMeter) : []);
   const blocker = $derived(firmware.updateBlocker(meter));
   /** Where the update is in `FLASH_STAGES`, -1 before the first stage. */
@@ -159,6 +164,9 @@
         </li>
       {/each}
     </ol>
+    {#if listedLine !== ""}
+      <p class="listed">Device list: {listedLine}</p>
+    {/if}
     <progress
       aria-label="Write progress"
       max="100"
@@ -305,6 +313,9 @@
   }
   li[data-state="failed"] {
     color: var(--danger);
+  }
+  .listed {
+    margin: 0 0 0.5rem;
   }
   progress {
     width: 100%;
