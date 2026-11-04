@@ -729,26 +729,45 @@ fn history_and_stats_are_answered_while_the_worker_is_busy() {
 
 // ---- AC-HR2JAG.1 follow-up: a fallback history clear keeps the page clean ----
 
-/// A transport that lets `skip.load() - 1` more requests through once armed,
-/// then holds the next one until `release` is sent.
-struct HeldAfter<T> {
+/// The ADC-queue poll, counted from 1, that the test transport holds (FR
+/// DS89PS). Until the hold the worker runs on simulated time alone, so this
+/// poll always lands at the same point of the 50 ms batch cycle: the poll
+/// before it recorded samples the batcher has not sent yet, and batches went
+/// out before that. The test checks both, so a schedule change fails it
+/// every run rather than now and then.
+const HOLD_AT_QUEUE_POLL: usize = 6;
+
+/// Whether `request` is an ADC-queue poll (GET_DATA of ATT_ADC_QUEUE).
+fn is_queue_poll(request: &[u8]) -> bool {
+    request.len() >= 4
+        && request[0] & 0x7F == 0x0C
+        && u16::from_le_bytes([request[2], request[3]]) >> 1 == Attribute::ADC_QUEUE.bits()
+}
+
+/// A transport that holds its `hold_at`-th ADC-queue poll until `release`
+/// is sent, telling `held` when it stops there.
+struct HeldAtPoll<T> {
     inner: T,
-    countdown: Arc<std::sync::atomic::AtomicUsize>,
+    hold_at: usize,
+    polls: usize,
+    held: mpsc::Sender<()>,
     release: mpsc::Receiver<()>,
 }
 
 impl<T: powerz_protocol::transport::Transport> powerz_protocol::transport::Transport
-    for HeldAfter<T>
+    for HeldAtPoll<T>
 {
     fn transact(
         &mut self,
         request: &[u8],
         timeout: Duration,
     ) -> Result<Vec<u8>, powerz_protocol::transport::Error> {
-        use std::sync::atomic::Ordering;
-        let left = self.countdown.load(Ordering::SeqCst);
-        if left > 0 && self.countdown.fetch_sub(1, Ordering::SeqCst) == 1 {
-            let _ = self.release.recv_timeout(Duration::from_secs(20));
+        if is_queue_poll(request) {
+            self.polls += 1;
+            if self.polls == self.hold_at {
+                let _ = self.held.send(());
+                let _ = self.release.recv_timeout(Duration::from_secs(20));
+            }
         }
         self.inner.transact(request, timeout)
     }
@@ -758,54 +777,56 @@ impl<T: powerz_protocol::transport::Transport> powerz_protocol::transport::Trans
     }
 }
 
-/// Spawn a 1000 SPS worker (20 ms polls, 50 ms batches) that, after its
-/// first non-empty batch, makes one more poll (its samples recorded and
-/// waiting in the batcher) and is then held in the meter transport until
-/// `release` is sent. Returns the handle, the release sender and every
-/// emitted sample time in emission order.
-fn spawn_held_with_pending() -> (worker::WorkerHandle, mpsc::Sender<()>, Arc<Mutex<Vec<u32>>>) {
+/// A batch as the page received it.
+struct SentBatch {
+    /// The session's sample count through this batch (its statistics).
+    samples_through: u64,
+    /// Its sample times, in order.
+    times: Vec<u32>,
+}
+
+/// Spawn a 1000 SPS worker (20 ms polls, 50 ms batches) and return once it is
+/// held in the meter transport at [`HOLD_AT_QUEUE_POLL`], with the release
+/// sender and every non-empty batch the page receives, in order.
+fn spawn_held_with_pending() -> (
+    worker::WorkerHandle,
+    mpsc::Sender<()>,
+    mpsc::Receiver<SentBatch>,
+) {
     let clock = clock();
     let c = clock.clone();
-    let countdown = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (release_tx, release_rx) = mpsc::channel::<()>();
-    let held = Arc::clone(&countdown);
+    let (held_tx, held_rx) = mpsc::channel::<()>();
     let open = move || {
-        Ok(HeldAfter {
+        Ok(HeldAtPoll {
             inner: Pipe::sim(
                 Scenario::Load5v1a,
                 FaultPlan::new(),
                 &c,
                 PipeOpts::default(),
             ),
-            countdown: held,
+            hold_at: HOLD_AT_QUEUE_POLL,
+            polls: 0,
+            held: held_tx,
             release: release_rx,
         })
     };
-    let emitted = Arc::new(Mutex::new(Vec::<u32>::new()));
-    let sink_emitted = Arc::clone(&emitted);
-    let (seen_tx, seen_rx) = mpsc::channel();
-    let mut seen = false;
+    let (sent_tx, sent_rx) = mpsc::channel::<SentBatch>();
     let sink = move |e: BackendEvent| {
-        if let BackendEvent::Batch(b) = &e {
-            sink_emitted
-                .lock()
-                .unwrap()
-                .extend(b.samples.iter().map(|s| s.t_ms));
-            if !b.samples.is_empty() && !seen {
-                seen = true;
-                // One more poll goes through, the one after it is held.
-                countdown.store(2, std::sync::atomic::Ordering::SeqCst);
-                let _ = seen_tx.send(());
-            }
+        if let BackendEvent::Batch(b) = &e
+            && !b.samples.is_empty()
+        {
+            let _ = sent_tx.send(SentBatch {
+                samples_through: b.stats.samples,
+                times: b.samples.iter().map(|s| s.t_ms).collect(),
+            });
         }
     };
     let handle = worker::spawn(open, clock, config(Rate::Sps1000), sink);
-    seen_rx
+    held_rx
         .recv_timeout(Duration::from_secs(10))
-        .expect("no samples");
-    // Let the worker make its next poll and stop in the transport.
-    std::thread::sleep(Duration::from_millis(300));
-    (handle, release_tx, emitted)
+        .expect("the worker never reached the held poll");
+    (handle, release_tx, sent_rx)
 }
 
 /// Every record time in the session history, oldest first (one bucket per
@@ -823,20 +844,14 @@ fn history_times(control: &worker::WorkerControl) -> Vec<u64> {
 
 #[test]
 fn a_fallback_history_clear_never_sends_pre_clear_samples_after_it() {
-    let (handle, release, emitted) = spawn_held_with_pending();
+    let (handle, release, sent) = spawn_held_with_pending();
     let control = handle.control();
 
+    // The worker is stopped in the transport: the store holds every sample it
+    // recorded, and nothing more is recorded or sent until the release.
+    let recorded_through = control.stats().expect("stats").samples;
     let before = history_times(&control);
     let last_pre_clear = *before.last().expect("history before the clear is empty");
-    let emitted_before_clear = emitted.lock().unwrap().len();
-    let last_emitted = emitted.lock().unwrap().last().copied().map(u64::from);
-    // The setup must leave recorded samples waiting in the batcher, or the
-    // test proves nothing.
-    assert!(
-        last_emitted.is_some_and(|t| t < last_pre_clear),
-        "no recorded sample was waiting in the batcher: last emitted {last_emitted:?}, \
-         last recorded {last_pre_clear}"
-    );
 
     // The worker is held past CLEAR_WAIT: this thread clears the store.
     let started = std::time::Instant::now();
@@ -851,27 +866,43 @@ fn a_fallback_history_clear_never_sends_pre_clear_samples_after_it() {
         "the fallback did not clear the history"
     );
 
-    // Let the worker resume and flush.
+    // Let the worker resume. Its first poll after the release records new
+    // samples before any flush, so every batch it sends from then on counts
+    // more samples than `recorded_through`; the batches sent before the hold
+    // count at most that. The page gets batches in the order they were sent,
+    // so once a post-clear sample arrives, every earlier batch has too.
     let _ = release.send(());
+    let (mut sent_before, mut sent_after) = (Vec::new(), Vec::new());
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let after: Vec<u32> = emitted.lock().unwrap()[emitted_before_clear..].to_vec();
-        if after.iter().any(|&t| u64::from(t) > last_pre_clear) {
+        let wait = deadline.saturating_duration_since(std::time::Instant::now());
+        let batch = sent
+            .recv_timeout(wait)
+            .expect("no post-clear sample reached the page");
+        if batch.samples_through <= recorded_through {
+            sent_before.push(batch);
+            continue;
+        }
+        let post_clear = batch.times.iter().any(|&t| u64::from(t) > last_pre_clear);
+        sent_after.push(batch);
+        if post_clear {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no post-clear sample reached the page: {after:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
     }
     let after_history = history_times(&control);
-    let after_emitted: Vec<u32> = emitted.lock().unwrap()[emitted_before_clear..].to_vec();
     handle.disconnect();
 
-    let stale: Vec<u32> = after_emitted
+    // The setup must leave recorded samples waiting in the batcher, or the
+    // test proves nothing.
+    let sent_through = sent_before.iter().map(|b| b.samples_through).max();
+    assert!(
+        sent_through.is_some_and(|n| n < recorded_through),
+        "no recorded sample was waiting in the batcher: the batches sent before the hold \
+         cover {sent_through:?} of {recorded_through} samples"
+    );
+    let stale: Vec<u32> = sent_after
         .iter()
-        .copied()
+        .flat_map(|b| b.times.iter().copied())
         .filter(|&t| u64::from(t) <= last_pre_clear)
         .collect();
     assert!(

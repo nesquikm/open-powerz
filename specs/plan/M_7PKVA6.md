@@ -107,7 +107,7 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: batcher message counts, Vitest live end, WebKit live scroll, macOS 20-min demo footprint
 - [x] The page hears a charger gone with no contract — WFSNZD
   verify: Vitest trigger store, WebKit Detect-unplug spec, r5-recheck Part T
-- [ ] The fallback-clear worker test holds the worker at a fixed poll — DS89PS
+- [x] The fallback-clear worker test holds the worker at a fixed poll — DS89PS
   verify: the worker test 20/20 under 24 `yes` loads, then the full workspace suite
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
