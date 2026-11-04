@@ -94,7 +94,19 @@ Defined per FR. Core types: `Frame`/`MainHeader`/`SectionHeader`,
   for the PD analyzer `pd_start`, `pd_stop`, `pd_details` (a record's raw bytes and field tree,
   on demand, from the live capture or, with `opened`, from an opened file), `pd_save` / `pd_open`
   (`.pdcap` files) and `pd_import` (read-only vendor PD log), `pd_clear` (answers the next record index; indices never restart, so rows sent
-  before a clear are recognised and dropped) and `pd_release_opened` (lets go of an opened file; only the page releases one, never a connect); backend events `Batch`, `Gap`, `Status`
+  before a clear are recognised and dropped), `pd_release_opened` (lets go of an opened file; only the page releases one, never a connect) and `pd_cable_seen` (the cable identity a capture holds);
+  for the chart `range_stats` and `run_progress` (ruler stats, segment marks and E.D. over the
+  session history; read-only, nothing goes to the meter), their opened-file twins
+  `recording_file_range_stats` and `recording_file_run_progress`, `history_fold_boundary`
+  (where full resolution starts, for the fold tick) and `save_chart_image` (PNG, SVG or PDF);
+  for the protocol trigger panel `trigger_list`, `trigger_open`, `trigger_close`,
+  `trigger_detect`, `trigger_request`, `trigger_back_to_5v`, the risk classes `trigger_risk`,
+  `trigger_message_risk` and `trigger_console_risk`, `trigger_message_send`,
+  `trigger_console_send`, "don't ask again" via `trigger_armed` and `trigger_disarm`,
+  `trigger_charger_gone`, `trigger_pd_entered` and `trigger_cable_read` (one SOP' Discover
+  Identity in the open PD session); for the firmware update `firmware_choose`,
+  `firmware_inspect` (needs no meter), `firmware_flash`, `firmware_cancel` and
+  `firmware_flash_status` (for a reloaded page); backend events `Batch`, `Gap`, `Status`
   (including `waiting`), `Error`, `Recording` (started / progress / stopped / failed),
   `PdState`, `PdRows` (batched, at most 60 a second, decoded in the backend; each row carries
   `session_ms` on the measurement samples' time base) and `PdStatus` (the PD status blocks'
