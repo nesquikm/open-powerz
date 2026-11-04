@@ -51,6 +51,7 @@ codename: Fine Print
 | [TFA5N7](../frs/TFA5N7.md) | A charger unplugged with no contract is noticed | n/a |
 | [JQ971R](../frs/JQ971R.md) | Detect stopping a PD capture says so | n/a |
 | [HR2JAG](../frs/HR2JAG.md) | Live batches at 20 Hz keep the web view's memory down | n/a |
+| [WFSNZD](../frs/WFSNZD.md) | The page hears a charger gone with no contract | n/a |
 
 Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (added 2026-11-03 at the user's request) is built while the AXHK2W hardware run waits, before the final gate.
 
@@ -99,10 +100,12 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: Vitest store history, WebKit mocked update with a mode change
 - [x] A charger unplugged with no contract is noticed — TFA5N7
   verify: trigger CC-spell unit tests, simulator scenario, r5 runbook step
-- [x] Detect stopping a PD capture says so — JQ971R
+- [ ] Detect stopping a PD capture says so — JQ971R
   verify: worker reason tests, Vitest store, WebKit Detect notice
 - [x] Live batches at 20 Hz keep the web view's memory down — HR2JAG
   verify: batcher message counts, Vitest live end, WebKit live scroll, macOS 20-min demo footprint
+- [ ] The page hears a charger gone with no contract — WFSNZD
+  verify: Vitest trigger store, WebKit Detect-unplug spec, r5-recheck Part T
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
 - Needs hardware we lack: rotation bits and bit 7 of 0x60, which total the record screen shows, QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS coverage, the EcoFlow no-reply question, the Apple battery curve, Windows `\\?\` paths, the root cause of the rejected stop after a queue overflow.
