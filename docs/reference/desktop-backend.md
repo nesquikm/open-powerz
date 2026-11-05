@@ -12,6 +12,8 @@ source; the source code has the rest.
 
 ## Session history
 
+Live samples reach the page as `batch` events on the session channel, at most 20 a second. A session with no new samples still sends an empty heartbeat batch after 250 ms, so about 4 a second while idle.
+
 | function | answers |
 |---|---|
 | `historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]>` | The breaks between measuring runs that overlap `t0Ms..=t1Ms`, oldest first. A `HistoryGap` is `{ from_ms, to_ms }`. |
@@ -69,7 +71,7 @@ Session channel events (`BackendEvent`):
 
 | `type` | `data` |
 |---|---|
-| `pd_state` | `{ capturing: boolean }` |
+| `pd_state` | `{ capturing: boolean; reason?: PdStopReason }`. `reason` is `"trigger"` only when opening a trigger session (Detect) stopped the capture; a stop you asked for, a disconnect or an unplug carries none. |
 | `pd_rows` | `{ rows: PdRow[] }`, sent in batches (at most 60 a second) |
 | `pd_status` | `{ samples: PdStatusSample[] }`, the status blocks for the chart |
 
@@ -86,6 +88,13 @@ Types:
 
 A capture keeps its latest 100,000 records and drops the oldest, with a
 notice. Status samples are not part of this limit.
+
+When a capture stops with the `"trigger"` reason, the PD analyzer says "The PD
+capture stopped when Detect opened a trigger session. The meter needs a replug
+before a new capture." and keeps the captured rows. The notice goes when a
+capture starts, when a start is refused (only the refusal shows), or when the
+meter disconnects or another meter is shown. After any trigger session the
+meter refuses a capture start until it is replugged.
 
 On the UI side, `PdCapture` (in `pdCapture.svelte.ts`) holds the rows and the
 status samples for the table and the chart. `THEME_COLORS` and
@@ -115,7 +124,7 @@ Commands:
 | `triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>` | Sends a built PD message; above 5 V only when `confirmed`. |
 | `triggerCableRead(): Promise<CableRead>` | Sends one SOP' Discover Identity with no dialog and no retry, and ends "Don't ask again". Needs a session with PD entered and never opens, enters or closes one; otherwise it fails with `usage` and sends nothing. |
 | `pdCableSeen(): Promise<CableView \| null>` | The cable identity a PD capture holds (the opened file or the live capture), `null` when it holds none. Sends nothing. |
-| `triggerChargerGone(): Promise<boolean>` | Whether VBUS collapsed after a contract was up. It stays true until the next PD listing, whatever that finds, and until then every request is refused with `usage` and nothing is sent. `false` with no session. |
+| `triggerChargerGone(): Promise<boolean>` | Whether the charger is gone: VBUS collapsed after a contract was up, or, while Detect is not running, both CC lines read below 0.3 V on records spanning at least 300 ms of device time, with or without a contract. It stays true until the next PD listing, whatever that finds, and until then every request is refused with `usage` and nothing is sent. `false` with no session. The page asks after a low VBUS reading under a contract, or after a live reading with both CC lines below `CC_GONE_V` (0.3 V); one question is out at a time, and none while Detect runs. |
 | `triggerConsoleRisk(line: string): Promise<RiskClass>` | The risk class of a raw console line. |
 | `triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]>` | Sends a raw console line and answers the transcript lines. Above 5 V (any unparsable line too) only when `confirmed`; GoodCRC is always refused. |
 | `triggerBackTo5v(): Promise<void>` | Back to 5 V: PD sends `pd req=1` (a Hard Reset as the fallback), the other protocols `reset`. The session stays open. |
@@ -185,7 +194,7 @@ Update commands:
 |---|---|
 | `firmwareInspect(path: string): Promise<FirmwareFileInfo>` | Reads a local firmware container and answers its metadata; needs no meter. The file is never decrypted; files over 8 MiB are refused before they are read. A broken file rejects with `usage`, prefixed with the file name. |
 | `firmwareChoose(): Promise<string \| null>` | Opens the open dialog filtered to `.mencrypt` files; `null` when it was cancelled. |
-| `firmwareFlash(deviceId: string, path: string, confirmation: string, onStage: (event: FlashEvent) => void): Promise<FlashDone>` | Updates the meter with the file at `path`. Before anything is sent the backend checks that `confirmation` is the file's version and reads the file again. Each event goes to `onStage` over a channel, about one write message per percent. Rejects with the error and its recovery hint. |
+| `firmwareFlash(deviceId: string, path: string, confirmation: string, onStage: (event: FlashEvent) => void, agreed: FlashHold[] = []): Promise<FlashDone>` | Updates the meter with the file at `path`. Before anything is sent the backend checks that `confirmation` is the file's version and reads the file again. `agreed` names the sessions the user agreed to release (see Firmware update consent below). Each event goes to `onStage` over a channel, about one write message per percent. Rejects with the error and its recovery hint. |
 | `firmwareCancel(): Promise<void>` | Asks the running update to stop. Accepted until the erase begins, and refused after that. An accepted cancel ends the update as a failure at its next safe point: a wait for the meter to switch ends within about a second, and the meter may have switched by then. |
 | `firmwareFlashStatus(): Promise<FlashStatus \| null>` | The running update, else the ended one the backend kept, for a reloaded page: `device_id`, `stage` (the latest stage, or null before the first), `replug` (the pending replug prompt: `to` and `reply`, or null) and `outcome` (how it ended: `result` or `error`, or null while it runs). This read takes a kept outcome, so it answers once; a new update forgets it. Null when neither. |
 
@@ -193,14 +202,29 @@ Types:
 
 | type | fields |
 |---|---|
-| `FirmwareFileInfo` | `vendor`, `container_version`, `model`, `version`, `date`, `crc` (8 uppercase hex digits), `size` (the declared image size in bytes), `release_notes_en` |
+| `FirmwareFileInfo` | `vendor`, `container_version`, `model`, `version`, `date`, `crc` (8 uppercase hex digits), `size` (the declared image size in bytes), `stored_size` (the payload length the file stores, which the update sends in full; the 2.0.7 file stores 16 bytes past its image), `release_notes_en` |
 | `FlashStage` | `{ stage: "switching" }`, `"erasing"`, `{ stage: "writing"; done; total }` (bytes), `"verifying"`, `"finished"`, `"returning"` |
 | `FlashReplug` | `{ stage: "replug"; to: "bootloader" \| "application"; reply }`: a jump was sent; `reply` is the meter's answer to it. The screen asks for a replug if the meter does not restart by itself. It does not change the stage. |
 | `FlashEvent` | `FlashStage \| FlashReplug` |
 | `FlashDone` | `{ outcome: "verified"; version }` (read back from the meter) or `{ outcome: "power_cycle_needed" }` (the image was accepted but the meter stays in its bootloader until it is replugged) |
 
+### Firmware update consent
+
+`firmwareFlash` takes a last argument `agreed: FlashHold[]` (default `[]`): the sessions the user agreed to release. When an update would release a session that `agreed` does not cover, the call rejects with a `UiError` of `ErrorKind` `flash_needs_consent`. Its `sessions` field lists every `FlashHold` the update would release, each with `id`, `label`, `recording` and, while a recording runs, `recording_id`. Nothing is released and nothing is sent. Consent to one recording does not cover a later one on the same session. `toUiError` keeps `sessions`.
+
+A start is also refused with `usage` while a session in scope is still closing or a recording start is pending. The file and the typed confirmation are checked first, so a wrong confirmation releases nothing.
+
 Behaviour:
 
+- **The Writing stage counts the bytes sent.** Its total is the stored
+  payload. When that differs from the file's image size, the file panel adds a
+  "Sent to the meter" row and the progress section a line saying how many
+  bytes the file stores past its image.
+- **The Device list line.** `FirmwareUpdate.listedHistory` keeps each label
+  the updated meter took in the device list since the update started, and the
+  progress section shows them joined by arrows. After the update ends it keeps
+  noting the meter until a label in application mode closes the line; Close
+  clears it, and a new update starts it afresh.
 - **The meter is held for the whole update.** Connecting it, PD capture,
   recording, the rate, the trigger panel and hotplug reconnects are refused
   until it ends, and closing the window or quitting is refused while it runs.

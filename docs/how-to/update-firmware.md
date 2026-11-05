@@ -61,13 +61,18 @@ plugging it in, then run the same command. Check it first with
    appears; the switch is off by default.
 2. Connect the meter, open the **Firmware** tab and press **Choose file…**.
    The file's details show, and **Update** is enabled only when the file
-   passes inspection and its model matches the meter.
+   passes inspection and its model matches the meter. When the file stores
+   more bytes than its image (the 2.0.7 file stores 16 more), a **Sent to the
+   meter** row shows the stored size: the update sends all of it.
 3. Press **Update**, type the version shown (for example `2.0.7`) and press
    **Start update**.
-4. The screen shows each stage and the write progress. If it asks you to
-   replug the meter, unplug it and plug it back in without pressing any
-   button.
-5. When it ends, the screen shows the version read back from the meter.
+4. The screen shows each stage and the write progress, which counts the bytes
+   sent. If it asks you to replug the meter, unplug it and plug it back in
+   without pressing any button.
+5. When it ends, the screen shows the version read back from the meter, and a
+   **Device list** line shows the labels the meter took during the update, for
+   example `KM003C — serial → KM003C — serial (bootloader mode) → KM003C —
+   serial`. The line stays until you press **Close**.
 
 While the update runs, the measurement stream, PD capture, the trigger panel
 and device switching are blocked, and the window cannot be closed.

@@ -39,6 +39,17 @@ In the app:
    protocol the charger does not answer says "Not supported by this charger."
    If the list stalls, the card says it ended early.
 
+If you unplug the charger while the session is open, the view says "The
+charger went away. Press Detect.", the old offers go, and **Read cable** is
+disabled with "No charger to ask: press Detect to read the cable." The app
+notices this with or without an accepted request: both CC lines dropping below
+0.3 V for 300 ms is enough. The message stays after you plug the charger back
+in; press **Detect** to list its offers again.
+
+Detect stops a running PD capture, because the trigger session needs the
+meter's PD port. The PD analyzer says so, and the meter needs a replug before
+it accepts a new capture.
+
 With the CLI:
 
 ```bash
