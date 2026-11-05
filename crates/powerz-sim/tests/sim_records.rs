@@ -214,7 +214,8 @@ fn any_read_reaching_outside_a_listed_window_is_rejected() {
         (addr + len - 16, 32),
         (addr + 16, len),
         (0x9810_0000 - 16, 16),
-        (0x9830_0000, 16),
+        // 0x9830_0000.. is the logo read window (FR A2XTES); just past it.
+        (0x9832_0000, 16),
         (0x9800_0000, 64),
     ]
     .into_iter()

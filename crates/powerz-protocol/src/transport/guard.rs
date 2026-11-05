@@ -118,6 +118,14 @@ pub const LOGO_REGION_START: u32 = 0x0030_0000;
 pub const LOGO_REGION_END: u32 =
     LOGO_REGION_START + crate::logo::padded_len(crate::logo::MAX_BLOB) as u32;
 
+/// Start of the startup-logo memory-read window: 0x98300000 + n reads
+/// flash [`LOGO_REGION_START`] + n \[inferred\] (FR R1ST8Z).
+pub const LOGO_WINDOW_START: u32 = 0x9830_0000;
+
+/// One past the last byte of the startup-logo read window (0x9831FFFF)
+/// \[inferred\].
+pub const LOGO_WINDOW_END: u32 = 0x9832_0000;
+
 /// Accept `plain` only if it is a plaintext startup-logo chunk frame
 /// (FR R1ST8Z) laid out as in `docs/protocol.md` \[static\]: main header
 /// `0x4A | id << 8 | 1 << 16 | (len + 16) << 22` (extend bit clear,

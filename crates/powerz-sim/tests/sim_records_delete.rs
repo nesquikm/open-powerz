@@ -129,7 +129,7 @@ fn a_raw_table_write_replaces_the_table_and_is_finished() {
 fn every_other_set_data_attribute_is_rejected_and_changes_nothing() {
     let (mut s, list) = listed_with(FaultPlan::new());
     let dev = s.transport_mut();
-    for (k, att) in [0x08u16, 0x09, 0x0A, 0x0B, 0x1C, 0x27, 0x29]
+    for (k, att) in [0x08u16, 0x09, 0x0A, 0x0B, 0x1B, 0x27, 0x29]
         .into_iter()
         .enumerate()
     {

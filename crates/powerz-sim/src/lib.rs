@@ -12,6 +12,7 @@
 mod adcnew;
 mod device;
 mod flash;
+mod logo;
 mod memory;
 mod pd;
 mod pdm;
@@ -24,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use flash::{FlashFault, SimMeter, SimMeterPipe};
+pub use logo::{BootScreen, ErasePolicy, LogoFault, LogoFlash, SECTOR_LEN, boot_render};
 pub use pd::PdScenario;
 pub use pdm::{SimCable, SimCharger, SimPdm, SimPdmPort};
 use powerz_protocol::firmware::DeviceMode;
@@ -483,6 +485,18 @@ pub struct SimDevice {
     /// A PDM session dropped the sign-in: auth level 0, memory read
     /// (0x44) REJECTed until a CONNECT. [device] f4abf09
     sign_in_lost: bool,
+    /// The simulated startup-logo flash (FR A2XTES); 0x4A chunks land here.
+    logo_flash: LogoFlash,
+    /// REJECT 0x4A until the session has authenticated (FR A2XTES).
+    logo_auth_required: bool,
+    /// Injected 0x4A fault, if any (FR A2XTES).
+    logo_fault: Option<LogoFault>,
+    /// 0x4A frames seen since the fault was set (the fault's chunk index).
+    logo_chunks: usize,
+    /// The startup-logo flag (SET_DATA 0x1C, FR A2XTES); 0 by default.
+    logo_flag: u32,
+    /// SETTINGS block byte the logo flag is mirrored into, if any.
+    logo_flag_mirror: Option<usize>,
 }
 
 /// The settings a meter keeps, whichever pipe changes them.
@@ -576,6 +590,12 @@ impl SimDevice {
             })),
             sign_in_drop: Arc::new(AtomicBool::new(false)),
             sign_in_lost: false,
+            logo_flash: LogoFlash::new(ErasePolicy::SectorOnFirstWrite),
+            logo_auth_required: false,
+            logo_fault: None,
+            logo_chunks: 0,
+            logo_flag: 0,
+            logo_flag_mirror: None,
         }
     }
 
@@ -688,6 +708,64 @@ impl SimDevice {
             product: Some(self.product_string().to_owned()),
             interfaces,
         }
+    }
+
+    /// Erase the simulated logo flash by `policy` (FR A2XTES).
+    pub fn with_logo_erase(mut self, policy: ErasePolicy) -> SimDevice {
+        self.logo_flash = LogoFlash::new(policy);
+        self
+    }
+
+    /// Inject `fault` into the 0x4A chunk writes (FR A2XTES).
+    pub fn with_logo_fault(mut self, fault: LogoFault) -> SimDevice {
+        self.set_logo_fault(fault);
+        self
+    }
+
+    /// Inject `fault` now; its chunk index counts from the next 0x4A.
+    pub fn set_logo_fault(&mut self, fault: LogoFault) {
+        self.logo_fault = Some(fault);
+        self.logo_chunks = 0;
+    }
+
+    /// REJECT 0x4A until the session has authenticated (off by default).
+    pub fn with_logo_auth_required(mut self, required: bool) -> SimDevice {
+        self.logo_auth_required = required;
+        self
+    }
+
+    /// Start with the startup-logo flag set to `flag` (default 0).
+    pub fn with_logo_flag(mut self, flag: u32) -> SimDevice {
+        self.set_logo_flag(flag);
+        self
+    }
+
+    /// Mirror the startup-logo flag into SETTINGS block byte `offset`.
+    /// The block CRCs are refreshed when the block is served.
+    pub fn with_logo_flag_mirror(mut self, offset: usize) -> SimDevice {
+        self.logo_flag_mirror = Some(offset);
+        self.set_logo_flag(self.logo_flag);
+        self
+    }
+
+    /// Store the logo flag and copy its low byte into the mirror byte.
+    pub(crate) fn set_logo_flag(&mut self, flag: u32) {
+        self.logo_flag = flag;
+        if let Some(at) = self.logo_flag_mirror
+            && let Some(b) = self.stored().settings.get_mut(at)
+        {
+            *b = flag as u8;
+        }
+    }
+
+    /// The simulated logo flash.
+    pub fn logo_flash(&self) -> &LogoFlash {
+        &self.logo_flash
+    }
+
+    /// The startup-logo flag (SET_DATA 0x1C).
+    pub fn logo_flag(&self) -> u32 {
+        self.logo_flag
     }
 
     /// Inject `faults`.

@@ -90,8 +90,9 @@ fn info_sides(info: u32) -> (u32, u32) {
     ((info >> 10) & 0x7FF, (info >> 21) & 0x7FF)
 }
 
-/// `len` rounded up to a multiple of [`CHUNK`].
-pub(crate) const fn padded_len(len: usize) -> usize {
+/// `len` rounded up to a multiple of [`CHUNK`]: the size of a blob of
+/// `len` bytes once padded with 0xFF for writing.
+pub const fn padded_len(len: usize) -> usize {
     len.div_ceil(CHUNK) * CHUNK
 }
 

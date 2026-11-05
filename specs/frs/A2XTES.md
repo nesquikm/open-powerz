@@ -34,7 +34,7 @@ The powerz-sim meter models the logo flash, the 0x1C flag, faults and erase poli
 
 ## Technical Design
 
-New `powerz-sim/src/logo.rs`: `LogoFlash { bytes: BTreeMap<u32, [u8; 4096]>, policy: ErasePolicy }`, `LogoFault::{NoReplyAt(k), RejectAt(k), UnplugAfter(k)}`, `flag: u32`, `auth_required: bool`, `boot_render(&LogoFlash, flag, duration) -> BootScreen`. Wired into `SimDevice` dispatch beside `records.rs` and `memory.rs`, using the protocol's `logo::decode`.
+New `powerz-sim/src/logo.rs`: `LogoFlash { sectors, policy: ErasePolicy }` (a sector erases when a write covers its start), `LogoFault::{NoReplyAt(k), RejectAt(k), UnplugAfter(k)}`, `boot_render(&LogoFlash, flag, duration) -> BootScreen`; `SimDevice` holds `logo_flag`, `logo_auth_required` and `logo_fault`. Wired into `SimDevice` dispatch beside `records.rs` and `memory.rs`, using the protocol's `logo::decode`.
 
 ## Testing
 

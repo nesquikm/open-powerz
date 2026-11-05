@@ -8,6 +8,7 @@ use crate::decode::head::{self, HeadReply};
 use crate::decode::records::MEMORY_READ_MAX_LEN;
 use crate::decode::{DeviceInfoBlock, OtpBlock, Uid};
 use crate::firmware::version::{self, FirmwareWarning};
+use crate::transport::guard::{LOGO_WINDOW_END, LOGO_WINDOW_START};
 use crate::transport::{self, Transport};
 
 /// Hardware / boot-loader info block.
@@ -27,11 +28,6 @@ const HEAD_DELAY: Duration = Duration::from_millis(50);
 
 /// The only memory blocks [`Session::memory_read`] may read.
 const MEMORY_READ_ALLOWED: [(u32, u32); 4] = [HARDWARE_INFO, FIRMWARE_INFO, OTP, UID];
-
-/// Start of the startup-logo read window `[inferred]` (FR R1ST8Z).
-const LOGO_WINDOW_START: u32 = 0x9830_0000;
-/// One past the last byte of the startup-logo read window (0x9831FFFF).
-const LOGO_WINDOW_END: u32 = 0x9832_0000;
 
 /// Length of the plaintext confirmation frame: header + first 16 bytes of
 /// the request plaintext.
