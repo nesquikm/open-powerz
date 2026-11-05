@@ -1,4 +1,5 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
   import {
     EDITABLE_SETTINGS,
     meterSettingRows,
@@ -6,6 +7,7 @@
     type EditableSetting,
     type MeterSettingsPanel,
   } from "../meterSettings.svelte";
+  import HintText from "./HintText.svelte";
 
   let {
     panel,
@@ -39,7 +41,10 @@
 <section class="meter-settings" aria-labelledby="meter-settings-title">
   <div class="head">
     <!-- Not a heading: the card's one heading is Stats; the region carries the name. -->
-    <span class="title" id="meter-settings-title">Meter settings</span>
+    <div class="titled">
+      <span class="title" id="meter-settings-title">Meter settings</span>
+      <InfoButton key="section.settings" />
+    </div>
     {#if !panel.editing}
       <div class="actions">
         <button
@@ -112,7 +117,10 @@
         <p class="hint">Nothing changed yet.</p>
       {/if}
       {#if panel.error}
-        <p class="error" role="alert">{panel.error.message}</p>
+        <p class="error" role="alert">
+          {panel.error.message}
+          <HintText hint={panel.error.hint} />
+        </p>
       {/if}
       <div class="actions">
         <button type="button" onclick={() => panel.cancelEdit()} disabled={panel.applying}>
@@ -124,7 +132,10 @@
       </div>
     </form>
   {:else if panel.error}
-    <p class="error" role="alert">{panel.error.message}</p>
+    <p class="error" role="alert">
+      {panel.error.message}
+      <HintText hint={panel.error.hint} />
+    </p>
   {:else if rows.length === 0}
     <p class="hint">{panel.loading ? "Reading…" : "No settings read yet."}</p>
   {:else}
@@ -160,6 +171,7 @@
   }
   .head {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
@@ -168,6 +180,7 @@
     display: flex;
     gap: 0.5rem;
     justify-content: flex-end;
+    margin-left: auto;
   }
   .edit {
     display: grid;
@@ -197,6 +210,7 @@
   .title {
     font-size: 0.875rem;
     font-weight: 600;
+    white-space: nowrap;
   }
   p {
     margin: 0;

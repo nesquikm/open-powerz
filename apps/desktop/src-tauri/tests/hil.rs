@@ -317,7 +317,8 @@ fn record_and_export(m: &mut Manager, id: &str, rate_sps: u32, record_secs: u64)
     let exported_rows = job
         .join()
         .expect("the export thread ran")
-        .unwrap_or_else(|e| panic!("export failed: {}", e.message));
+        .unwrap_or_else(|e| panic!("export failed: {}", e.message))
+        .rows;
     m.disconnect().unwrap();
 
     let rec_rows = assert_rerenders_byte_for_byte(&rec_path, rate);

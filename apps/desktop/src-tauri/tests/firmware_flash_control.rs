@@ -1,6 +1,7 @@
 //! Cancelling a firmware update and reporting a running one (FR 4PJRVJ,
 //! AC .1 and .3), against the simulated bootloader. Cancel works until the
-//! erase starts; the backend keeps the running stage for a reloaded page.
+//! erase starts; the backend keeps the running stage, the replug prompt and,
+//! once, the outcome for a reloaded page (AC-AXHK2M.2).
 //!
 //! Only the simulator is used; no real device is opened. The container is
 //! synthetic and every identifier is the simulator's made-up one.
@@ -220,7 +221,7 @@ fn the_backend_reports_a_running_update_with_its_meter_and_stage() {
     let (mut m, id) = manager_with_meter();
     assert_eq!(m.flash_status(), None, "no update runs");
 
-    let lease = m.begin_flash(&id).expect("the meter is free");
+    let lease = m.begin_flash(&id, &[]).expect("the meter is free");
     let status = m.flash_status().expect("the lease is held");
     assert_eq!(status.device_id, id);
     assert_eq!(status.stage, None, "no stage reported yet");
@@ -234,11 +235,15 @@ fn the_backend_reports_a_running_update_with_its_meter_and_stage() {
         json!({
             "device_id": id,
             "stage": { "stage": "writing", "done": 4, "total": 8 },
+            "replug": null,
+            "outcome": null,
         })
     );
 
     drop(lease);
-    assert_eq!(m.flash_status(), None, "the update ended");
+    let ended = m.flash_status().expect("the outcome is kept");
+    assert!(ended.outcome.is_some(), "the update ended");
+    assert_eq!(m.flash_status(), None, "read once");
 }
 
 #[test]
@@ -246,12 +251,12 @@ fn the_manager_cancels_the_running_update_until_the_erase() {
     let (mut m, id) = manager_with_meter();
     assert!(m.cancel_flash().is_err(), "nothing runs to cancel");
 
-    let lease = m.begin_flash(&id).expect("the meter is free");
+    let lease = m.begin_flash(&id, &[]).expect("the meter is free");
     m.cancel_flash().expect("not erasing yet");
     assert!(lease.control().stop().load(Ordering::SeqCst));
     drop(lease);
 
-    let lease = m.begin_flash(&id).expect("released");
+    let lease = m.begin_flash(&id, &[]).expect("released");
     assert!(
         !lease.control().stop().load(Ordering::SeqCst),
         "a new update starts with the flag down"
@@ -259,4 +264,127 @@ fn the_manager_cancels_the_running_update_until_the_erase() {
     lease.control().observe(&FlashStage::Erasing);
     let e = m.cancel_flash().expect_err("erasing");
     assert!(e.message.to_lowercase().contains("eras"), "{e:?}");
+}
+
+// ---- AC-AXHK2M.2: a reloaded page gets the prompt and the true outcome ----
+
+fn replug_prompt(to: &'static str) -> FlashStage {
+    FlashStage::Replug {
+        to,
+        reply: "ACCEPT".to_owned(),
+    }
+}
+
+/// The status as the page reads it.
+fn status_json(m: &DeviceManager<LoggingOpener, SimClock>) -> serde_json::Value {
+    serde_json::to_value(m.flash_status().expect("a status")).expect("serialises")
+}
+
+#[test]
+fn the_status_carries_the_pending_replug_prompt_until_the_next_stage() {
+    let (mut m, id) = manager_with_meter();
+    let lease = m.begin_flash(&id, &[]).expect("the meter is free");
+    lease.control().observe(&FlashStage::Switching);
+    lease.control().observe(&replug_prompt("bootloader"));
+    assert_eq!(
+        status_json(&m),
+        json!({
+            "device_id": id,
+            "stage": { "stage": "switching" },
+            "replug": { "to": "bootloader", "reply": "ACCEPT" },
+            "outcome": null,
+        })
+    );
+
+    lease.control().observe(&FlashStage::Erasing);
+    assert_eq!(
+        status_json(&m)["replug"],
+        json!(null),
+        "the meter came back"
+    );
+}
+
+#[test]
+fn the_status_keeps_a_verified_outcome_for_one_read() {
+    let (mut m, id) = manager_with_meter();
+    let lease = m.begin_flash(&id, &[]).expect("the meter is free");
+    lease.control().observe(&FlashStage::Returning);
+    lease.finish(&Ok(FlashDone::Verified {
+        version: "2.0.7".to_owned(),
+    }));
+
+    assert!(!m.flashing(), "the update has released the meter");
+    assert_eq!(
+        status_json(&m),
+        json!({
+            "device_id": id,
+            "stage": { "stage": "returning" },
+            "replug": null,
+            "outcome": {
+                "result": { "outcome": "verified", "version": "2.0.7" },
+                "error": null,
+            },
+        })
+    );
+    assert_eq!(m.flash_status(), None, "told once");
+}
+
+#[test]
+fn the_status_keeps_a_failure_with_its_stage() {
+    let (mut m, id) = manager_with_meter();
+    let lease = m.begin_flash(&id, &[]).expect("the meter is free");
+    lease.control().observe(&FlashStage::Verifying);
+    lease.finish(&Err(UiError::usage("no FINISHED")));
+
+    let status = status_json(&m);
+    assert_eq!(status["stage"], json!({ "stage": "verifying" }));
+    assert_eq!(status["outcome"]["result"], json!(null));
+    assert_eq!(status["outcome"]["error"]["message"], json!("no FINISHED"));
+}
+
+#[test]
+fn an_update_that_never_reported_ends_as_a_failure() {
+    let (mut m, id) = manager_with_meter();
+    drop(m.begin_flash(&id, &[]).expect("the meter is free"));
+
+    let status = status_json(&m);
+    assert_eq!(status["outcome"]["result"], json!(null));
+    let message = status["outcome"]["error"]["message"]
+        .as_str()
+        .expect("an error");
+    assert!(message.contains("did not report"), "{message}");
+    assert_eq!(m.flash_status(), None, "kept for one read");
+}
+
+#[test]
+fn a_reported_outcome_is_not_replaced_by_the_release() {
+    let (mut m, id) = manager_with_meter();
+    let lease = m.begin_flash(&id, &[]).expect("the meter is free");
+    lease.finish(&Ok(FlashDone::PowerCycleNeeded));
+    assert_eq!(status_json(&m)["outcome"]["error"], json!(null));
+}
+
+#[test]
+fn a_new_update_forgets_the_last_outcome() {
+    let (mut m, id) = manager_with_meter();
+    let lease = m.begin_flash(&id, &[]).expect("the meter is free");
+    lease.finish(&Ok(FlashDone::PowerCycleNeeded));
+
+    let lease = m.begin_flash(&id, &[]).expect("released");
+    assert_eq!(status_json(&m)["outcome"], json!(null));
+    drop(lease);
+}
+
+#[test]
+fn the_flash_command_hands_its_result_to_the_lease() {
+    let source = include_str!("../src/lib.rs");
+    let command = source
+        .split("async fn firmware_flash(")
+        .nth(1)
+        .and_then(|rest| rest.split("async fn firmware_cancel(").next())
+        .expect("the firmware_flash command");
+    assert!(
+        command.contains("lease.finish(&done)"),
+        "the outcome never reaches the status"
+    );
 }

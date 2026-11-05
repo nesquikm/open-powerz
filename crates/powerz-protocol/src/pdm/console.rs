@@ -119,14 +119,10 @@ pub struct SentLine {
 
 /// Why the console never sends `command` itself (`pdm open` / `pdm close`:
 /// the session opens and closes itself, so `pdm close` is never sent twice),
-/// or `None`. Judged on the normalised text (lowercase, no whitespace),
-/// since the firmware matches prefixes.
+/// or `None`. Judged on the normalised text (lowercase, no blanks, zero-width
+/// ones included), since the firmware matches prefixes.
 pub fn console_refusal(command: &Command) -> Option<String> {
-    let norm: String = String::from_utf8_lossy(&command.render())
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase();
+    let norm = super::message::without_blanks(&String::from_utf8_lossy(&command.render()));
     (norm.starts_with("pdmopen") || norm.starts_with("pdmclose")).then(|| {
         "the console opens and closes the PDM session itself; `pdm open` and \
          `pdm close` are not sent by hand"

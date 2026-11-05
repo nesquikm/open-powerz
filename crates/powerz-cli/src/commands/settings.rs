@@ -151,7 +151,7 @@ pub const SETTINGS_SAVED_NOTE: &str = "The meter has saved the change; its scree
 
 /// `powerz settings set <field>=<value> … --i-understand`: check every
 /// change, send one settings write between two SETTINGS reads, print the
-/// settings read back to `out` and [`SETTINGS_SAVED_NOTE`] to `note`. A
+/// settings read back to `out` and `SETTINGS_SAVED_NOTE` to `note`. A
 /// mismatching re-read is a device error naming the field; nothing is
 /// retried.
 pub fn settings_set<T: Transport, C: Clock>(

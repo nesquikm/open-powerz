@@ -6,6 +6,8 @@ use powerz_protocol::session;
 use powerz_protocol::transport;
 use serde::Serialize;
 
+use crate::devices::FlashHold;
+
 /// Error category the UI branches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,9 +27,18 @@ pub enum ErrorKind {
     /// The meter's text replies are out of step with the commands: it needs
     /// a power cycle, and the trigger session refuses requests until reopened.
     OutOfSync,
+    /// A firmware update would release sessions the user has not agreed to
+    /// release; [`UiError::sessions`] lists all of them (FR AXHK2F).
+    FlashNeedsConsent,
+    /// The user stopped the firmware update; not a failure (AC-AXHK2M.13).
+    Cancelled,
     /// Anything else.
     Internal,
 }
+
+/// The message of [`transport::Error::Disconnected`]. "No meter was found"
+/// shares its kind, so this is what tells the two apart.
+const UNPLUGGED: &str = "The meter was unplugged.";
 
 /// A plain-language error for the UI.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -38,15 +49,34 @@ pub struct UiError {
     pub message: String,
     /// What to try next, if anything.
     pub hint: Option<String>,
+    /// The sessions a `flash_needs_consent` refusal names; sent only then.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<FlashHold>,
 }
 
 impl UiError {
+    /// Whether a meter that was there has gone, as opposed to none being found.
+    pub fn is_unplugged(&self) -> bool {
+        self.kind == ErrorKind::Disconnected && self.message == UNPLUGGED
+    }
+
     /// A usage error (the request is not valid right now).
     pub fn usage(message: impl Into<String>) -> UiError {
         UiError {
             kind: ErrorKind::Usage,
             message: message.into(),
             hint: None,
+            sessions: Vec::new(),
+        }
+    }
+
+    /// A firmware update refused until the user agrees to release `sessions`.
+    pub fn flash_needs_consent(sessions: Vec<FlashHold>) -> UiError {
+        UiError {
+            kind: ErrorKind::FlashNeedsConsent,
+            message: "The firmware update would end a running session.".to_owned(),
+            hint: Some("Agree to end it, or keep it running and cancel the update.".to_owned()),
+            sessions,
         }
     }
 
@@ -55,6 +85,7 @@ impl UiError {
             kind: ErrorKind::Internal,
             message: "Something went wrong inside the app.".to_owned(),
             hint: None,
+            sessions: Vec::new(),
         }
     }
 }
@@ -97,6 +128,7 @@ fn permission_denied(target_os: &str) -> UiError {
         kind: ErrorKind::PermissionDenied,
         message: "The system did not allow the app to open the meter.".to_owned(),
         hint: Some(hint),
+        sessions: Vec::new(),
     }
 }
 
@@ -112,6 +144,7 @@ fn device_busy(target_os: &str) -> UiError {
         kind: ErrorKind::DeviceBusy,
         message: "The meter is busy or in use by another program or driver.".to_owned(),
         hint: Some(hint),
+        sessions: Vec::new(),
     }
 }
 
@@ -120,6 +153,7 @@ fn timeout() -> UiError {
         kind: ErrorKind::Timeout,
         message: "The meter did not answer in time.".to_owned(),
         hint: Some("Check the cable, then replug the meter and try again.".to_owned()),
+        sessions: Vec::new(),
     }
 }
 
@@ -128,6 +162,7 @@ fn protocol() -> UiError {
         kind: ErrorKind::Protocol,
         message: "The meter sent a reply the app did not understand.".to_owned(),
         hint: Some("Replug the meter and try again; updating its firmware may help.".to_owned()),
+        sessions: Vec::new(),
     }
 }
 
@@ -138,16 +173,18 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
         T::Timeout => timeout(),
         T::Disconnected => UiError {
             kind: ErrorKind::Disconnected,
-            message: "The meter was unplugged.".to_owned(),
+            message: UNPLUGGED.to_owned(),
             hint: Some("Plug the meter back in.".to_owned()),
+            sessions: Vec::new(),
         },
         T::Permission(_) => permission_denied(target_os),
         T::Io(detail) if is_busy(detail) => device_busy(target_os),
-        T::PortHeld { .. } => port_held(),
+        T::PortHeld => port_held(),
         T::NotFound => UiError {
             kind: ErrorKind::Disconnected,
             message: "No meter was found.".to_owned(),
             hint: Some("Plug the meter in and try again.".to_owned()),
+            sessions: Vec::new(),
         },
         T::Forbidden { .. }
         | T::UnsupportedOnHid
@@ -159,12 +196,14 @@ pub fn from_transport(err: &transport::Error, target_os: &str) -> UiError {
             kind: ErrorKind::Usage,
             message: "The meter takes settings changes only over its serial (CDC) port, which could not be used.".to_owned(),
             hint: Some("Close any other program using the meter's serial port and try again.".to_owned()),
+            sessions: Vec::new(),
         },
         T::HidReplyTooLong { .. } => protocol(),
         T::Io(_) => UiError {
             kind: ErrorKind::Internal,
             message: "Talking to the meter failed.".to_owned(),
             hint: Some("Replug the meter and try again.".to_owned()),
+            sessions: Vec::new(),
         },
         T::Mock(_) => UiError::internal(),
     }
@@ -186,11 +225,24 @@ pub fn settings_port_error(err: &transport::Error, target_os: &str) -> UiError {
     port_held()
 }
 
-fn port_held() -> UiError {
+pub(crate) fn port_held() -> UiError {
     UiError {
         kind: ErrorKind::DeviceBusy,
         message: "The meter's serial port is in use by another program.".to_owned(),
         hint: Some("Close that program, then try again.".to_owned()),
+        sessions: Vec::new(),
+    }
+}
+
+/// The meter refused the PD capture start, at its sign-in read (0x44) or
+/// the start itself (0x10): the capture named, no firmware advice
+/// (AC-AXHK2P.11/.12).
+pub fn capture_start_refused() -> UiError {
+    UiError {
+        kind: ErrorKind::Protocol,
+        message: "The meter refused to start the PD capture.".to_owned(),
+        hint: Some("Replug the meter and try again.".to_owned()),
+        sessions: Vec::new(),
     }
 }
 
@@ -200,22 +252,32 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
     match err {
         S::Transport(t) => from_transport(t, target_os),
         S::Protocol(_) | S::Decode(_) | S::Frame(_) => protocol(),
+        // The capture start (START_ANALYZER) is refused by meters that cannot
+        // capture right now; a firmware update is not the fix there.
+        S::Rejected { request_type }
+            if request_type & 0x7F == powerz_protocol::frame::start_pd_sniffer(0)[0] & 0x7F =>
+        {
+            capture_start_refused()
+        }
         S::Rejected { .. } => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter refused the request.".to_owned(),
             hint: Some("Updating the meter's firmware may help.".to_owned()),
+            sessions: Vec::new(),
         },
         S::Forbidden { .. } => UiError::usage("The app refused a request that is not safe."),
         S::AuthFailed => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter did not accept the app's sign-in.".to_owned(),
             hint: Some("Replug the meter and try again.".to_owned()),
+            sessions: Vec::new(),
         },
         S::RecordTableTooLong { .. } => UiError {
             kind: ErrorKind::Usage,
             message: "Deleting that would leave more records than one table write can hold."
                 .to_owned(),
             hint: Some("Delete more records at once, or all of them.".to_owned()),
+            sessions: Vec::new(),
         },
         S::RecordTableMismatch { expected, actual } => UiError {
             kind: ErrorKind::Protocol,
@@ -231,6 +293,7 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
                 )
             },
             hint: Some("Read the list again; nothing was retried.".to_owned()),
+            sessions: Vec::new(),
         },
         S::SettingsWrite(e @ SettingsWriteError::OutOfRange { .. }) => {
             UiError::usage(format!("That setting value is out of range: {e}."))
@@ -242,8 +305,15 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
                     "The meter holds {field} = {value}, which this app cannot write back."
                 ),
                 hint: Some(format!("Change {field} too, then apply again.")),
+                sessions: Vec::new(),
             }
         }
+        S::SettingsReadsDiffer => UiError {
+            kind: ErrorKind::Protocol,
+            message: "Two reads of the meter's settings differ, so nothing was written.".to_owned(),
+            hint: Some("Check the cable, then apply again.".to_owned()),
+            sessions: Vec::new(),
+        },
         S::SettingsMismatch {
             field,
             expected,
@@ -254,11 +324,13 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
                 "The meter's settings do not match after the change: {field} reads {actual}, expected {expected}."
             ),
             hint: Some("Read the settings again; nothing was retried.".to_owned()),
+            sessions: Vec::new(),
         },
         S::BootloaderMidDownload => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter's bootloader was left mid-download.".to_owned(),
             hint: Some("Unplug the meter, then hold Back while plugging it back in.".to_owned()),
+            sessions: Vec::new(),
         },
     }
 }
@@ -274,7 +346,7 @@ mod tests {
     use powerz_protocol::session;
     use powerz_protocol::transport::{self, permission_error};
 
-    /// No raw Rust error text: no debug output, paths or OS error codes.
+    /// No raw Rust error text: no debug output or OS error codes.
     fn assert_plain(e: &UiError) {
         assert!(!e.message.trim().is_empty(), "empty message");
         for raw in [
@@ -396,6 +468,64 @@ mod tests {
         let err = session::Error::Transport(transport::Error::Disconnected);
         let e = from_session(&err, "macos");
         assert_eq!(e.kind, ErrorKind::Disconnected);
+        assert_plain(&e);
+    }
+
+    // ---- AC-AXHK2P.11: a refused PD capture start says so ----
+
+    /// The type byte a REJECT of the PD capture start (0x10) carries, as the
+    /// session builds it: `request[0]` of the start frame.
+    fn capture_start_type() -> u8 {
+        powerz_protocol::frame::start_pd_sniffer(1)[0]
+    }
+
+    #[test]
+    fn a_refused_pd_capture_start_names_the_capture() {
+        let err = session::Error::Rejected {
+            request_type: capture_start_type(),
+        };
+        let e = from_session(&err, "macos");
+        assert_eq!(e.kind, ErrorKind::Protocol);
+        let message = e.message.to_lowercase();
+        assert!(message.contains("pd capture"), "{}", e.message);
+        assert!(message.contains("refused"), "{}", e.message);
+        assert_plain(&e);
+    }
+
+    #[test]
+    fn a_refused_pd_capture_start_gives_no_firmware_advice() {
+        let err = session::Error::Rejected {
+            request_type: capture_start_type(),
+        };
+        for os in ["macos", "linux", "windows"] {
+            let e = from_session(&err, os);
+            assert!(
+                !e.message.to_lowercase().contains("firmware"),
+                "{os}: {}",
+                e.message
+            );
+            let hint = e.hint.clone().unwrap_or_default();
+            assert!(!hint.to_lowercase().contains("firmware"), "{os}: {hint}");
+        }
+    }
+
+    #[test]
+    fn another_refused_request_is_not_called_a_capture() {
+        // GET_DATA (0x0C), as the session builds it: the change stays on the capture start.
+        let get_data =
+            powerz_protocol::frame::get_data(1, powerz_protocol::frame::Attribute::ADC)[0];
+        let e = from_session(
+            &session::Error::Rejected {
+                request_type: get_data,
+            },
+            "macos",
+        );
+        assert_eq!(e.kind, ErrorKind::Protocol);
+        assert!(
+            !e.message.to_lowercase().contains("capture"),
+            "{}",
+            e.message
+        );
         assert_plain(&e);
     }
 

@@ -1,8 +1,18 @@
 <script lang="ts">
+  import Term from "./Term.svelte";
+  import InfoButton from "./InfoButton.svelte";
   import uPlot from "uplot";
   import "uplot/dist/uPlot.min.css";
   import { getContext, untrack } from "svelte";
-  import { historyGaps, historyRange, type Gap, type Sample } from "../backend";
+  import {
+    historyGaps,
+    historyFoldBoundary,
+    historyRange,
+    rangeStats,
+    runProgress,
+    type Gap,
+    type Sample,
+  } from "../backend";
   import { backfillRange, fetchBackfill } from "../backfill";
   import {
     GapList,
@@ -14,19 +24,26 @@
     gapBands,
     gapLabelFits,
     hoverReadout,
+    liveNeedsFrame,
+    LIVE_SMOOTH_MIN_FRAME_MS,
     liveRange,
+    pixelSnappedRange,
+    smoothingActive,
+    smoothLiveEnd,
+    smoothLiveRange,
     steppedRange,
     toAlignedData,
     type ChartFrame,
     type GapBand,
     type HoverReadout,
+    type LiveEnd,
     type LiveWindowId,
   } from "../chartData";
   import {
-    CHART_SERIES,
     type ChartSeriesKey,
     type SeriesVisibility,
     chartOptions,
+    dashGridStartMs,
     formatSessionTime,
     formatSpan,
     loadLiveWindow,
@@ -45,6 +62,7 @@
     CHART_KEYS,
     HistoryRequester,
     RateGate,
+    MAX_REDRAW_HZ,
     RedrawScheduler,
     animationFrames,
     applyGesture,
@@ -75,7 +93,12 @@
     type TimeWarp,
   } from "../timeline";
   import { E2E_BUILD, ChartProbe, installChartProbe } from "../e2eHook";
-  import { THEME_COLORS, type MotionSettings, type ResolvedTheme } from "../theme";
+  import { loadChartStyle, saveChartStyle, type ChartStyle } from "../chartStyle";
+  import { chartImageName, type SaveImageChoice } from "../chartExport";
+  import { chartSvg } from "../chartSvg";
+  import { chartPng } from "../chartPng";
+  import { saveChartImage } from "../backend";
+  import { THEME_COLORS, browserStorage, type MotionSettings, type ResolvedTheme } from "../theme";
   import type { PdCapture } from "../pdCapture.svelte";
   import {
     PD_LANE_PX,
@@ -89,7 +112,32 @@
     revealTime,
     type PdMarkerCluster,
   } from "../pdTimeline";
+  import {
+    ED_DEFINITION,
+    energySharePointCount,
+    extrasNotes,
+    marksInRange,
+    edColor,
+    edLabelBox,
+    paintEnergyShare,
+    paintSegmentMarks,
+    type LabelBox,
+    type MarkKind,
+  } from "../chartExtras";
+  import { chartExtras } from "../chartExtrasStore.svelte";
+  import { SharedInsets, hasPlotArea } from "../plotInsets";
+  import { capStride, drawLoopCap } from "../drawCap";
+  import { FOLD_CHIP_FONT_PX, foldChip, foldChipColors, foldTick } from "../foldTick";
+  import { RunProgressFeed } from "../runProgressFeed";
+  import { RulerState } from "../rulerState.svelte";
+  import ChartOptions from "./ChartOptions.svelte";
+  import ChartRuler from "./ChartRuler.svelte";
+  import HintText from "./HintText.svelte";
+  import RulerReadout from "./RulerReadout.svelte";
   import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
+  import SaveImageDialog from "./SaveImageDialog.svelte";
+  import SeriesLegend from "./SeriesLegend.svelte";
+  import SubChart from "./SubChart.svelte";
 
   let {
     theme,
@@ -97,7 +145,7 @@
     active = true,
     pd = null,
     onPdMarker,
-    history = { historyRange, historyGaps },
+    history = { historyRange, historyGaps, historyFoldBoundary, rangeStats, runProgress },
   }: {
     theme: ResolvedTheme;
     rateSps?: number | null;
@@ -112,6 +160,12 @@
     history?: {
       historyRange: typeof historyRange;
       historyGaps: typeof historyGaps;
+      /** Where the history's full resolution starts (AC-AXHK2W.11). */
+      historyFoldBoundary?: typeof historyFoldBoundary;
+      /** The ruler's values from the raw samples (FR AXHK2T). */
+      rangeStats: typeof rangeStats;
+      /** Segment marks and E.D. from the raw samples (FR AXHK2T). */
+      runProgress: typeof runProgress;
     };
   } = $props();
 
@@ -139,10 +193,15 @@
     const min = u.scales.x?.min;
     const max = u.scales.x?.max;
     const markers =
-      pd === null || min === undefined || max === undefined || widthCss <= 0
+      pd === null || min === undefined || max === undefined || widthCss <= 0 || !laidOut(u)
         ? []
         : markersInRange(pd.store, min, max);
-    const clusters: PdMarkerCluster[] = clusterMarkers(markers, (ms) => u.valToPos(ms, "x"));
+    // At most a plot's worth of clusters per frame (AC-C6VR9K.5).
+    const clusters: PdMarkerCluster[] = clusterMarkers(
+      markers,
+      (ms) => u.valToPos(ms, "x"),
+      drawLoopCap(w, h),
+    );
     pdClusters = clusters;
     const colors = markerColors(theme);
     const palette = THEME_COLORS[theme];
@@ -193,6 +252,23 @@
   /** Side of a PD status dot, CSS px. */
   const PD_STATUS_DOT_PX = 2;
 
+  /** Canvas px of `u` to viewport CSS px, one frame for all: what the e2e probes report
+   * (AC-AXHK2V.12, AC-AXHK2V.15, AC-AXHK2W.11). */
+  function canvasToViewport(u: uPlot) {
+    const at = u.ctx.canvas.getBoundingClientRect();
+    const ratio = globalThis.devicePixelRatio || 1;
+    return {
+      x: (x: number): number => at.left + x / ratio,
+      box: <T extends LabelBox>(b: T): T => ({
+        ...b,
+        left: at.left + b.left / ratio,
+        top: at.top + b.top / ratio,
+        right: at.left + b.right / ratio,
+        bottom: at.top + b.bottom / ratio,
+      }),
+    };
+  }
+
   /** Draws the PD status blocks inside the plot's x range over the lines: at most about
    * two dots per pixel column per series, so a long capture stays cheap to draw. */
   function drawPdStatus(u: uPlot): void {
@@ -208,7 +284,11 @@
       // The buffer's own columns, read between the bounds: nothing is copied per draw.
       const cols = pd.status.columns;
       const ratio = globalThis.devicePixelRatio || 1;
-      const stride = Math.max(1, Math.ceil((hi - lo) / Math.max(1, 2 * u.bbox.width)));
+      // About two dots per pixel column, and never past the draw cap (AC-C6VR9K.5).
+      const stride = Math.max(
+        Math.ceil((hi - lo) / Math.max(1, 2 * u.bbox.width)) || 1,
+        capStride(hi - lo, drawLoopCap(u.bbox.width, u.bbox.height)),
+      );
       const size = PD_STATUS_DOT_PX * ratio;
       const ctx = u.ctx;
       ctx.save();
@@ -261,6 +341,7 @@
   const sessionGate = new RateGate(250);
   /** Why the last history request failed, shown over the plot (the last frame stays). */
   let historyError: string | null = $state(null);
+  let historyHint: string | null = $state(null);
   /** Screen-reader status: the visible range on entering history or returning to live. */
   let announcement = $state("");
   let host: HTMLDivElement | undefined = $state();
@@ -317,6 +398,169 @@
   /** Shows exactly `r`, paused. */
   function showRange(r: TimeRange): void {
     gesture({ kind: "range", t0Ms: r.t0Ms, t1Ms: r.t1Ms });
+  }
+
+  /** The chart options (FR AXHK2T), all off by default, shared with an opened recording
+   * and kept across restarts (AC-AXHK2T.8). Each is read on its own, so a toggle rebuilds
+   * the plot only when it changes how the plot is built (Reverse current). */
+  const rulerOn = $derived(chartExtras.value.ruler);
+  const marksKind: MarkKind = $derived(chartExtras.value.marks);
+  const markStep = $derived(chartExtras.value.markStep);
+  const edOn = $derived(chartExtras.value.ed);
+  const subChartOn = $derived(chartExtras.value.subChart);
+  const reverseCurrent = $derived(chartExtras.value.reverseCurrent);
+  let optionsOpen = $state(false);
+  /** The "Save image" dialog is open (FR AXHK2V). */
+  let saveOpen = $state(false);
+  let saveError = $state("");
+
+  /** Renders the chart as the dialog asked and hands it to the backend to save. */
+  async function saveImage(choice: SaveImageChoice): Promise<void> {
+    saveOpen = false;
+    saveError = "";
+    const u = plot;
+    if (u === null) return;
+    const x = u.scales.x;
+    const view = { t0Ms: x?.min ?? 0, t1Ms: x?.max ?? 0 };
+    try {
+      // A PDF is the PNG, wrapped in one page by the backend.
+      const bytes =
+        choice.format === "svg"
+          ? new TextEncoder().encode(
+              chartSvg({
+                width: choice.width,
+                height: choice.height,
+                title: chartStyle.title,
+                theme,
+                white: choice.white,
+                style: chartStyle,
+                visibility,
+                view,
+                originMs: originMs(),
+                data: u.data as (number | null)[][],
+                zeroBased,
+                reverseCurrent,
+              }),
+            )
+          : await chartPng({
+              width: choice.width,
+              height: choice.height,
+              title: chartStyle.title,
+              white: choice.white,
+              theme,
+              visibility,
+              zeroBased,
+              originMs,
+              reverseCurrent,
+              style: chartStyle,
+              view,
+              data: u.data,
+            });
+      await saveChartImage(chartImageName(choice.format, new Date()), choice.format, bytes);
+    } catch (e) {
+      saveError = `The image was not saved: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+  /** The ruler's cursors and values (AC-AXHK2T.1). */
+  const ruler = new RulerState((t0Ms, t1Ms) => history.rangeStats(t0Ms, t1Ms));
+  let rulerLayer: ChartRuler | undefined = $state();
+
+  // Any option change, here or on an opened recording, redraws (a paused chart too).
+  $effect(() => {
+    void [rulerOn, marksKind, markStep, edOn, subChartOn];
+    untrack(() => scheduler.invalidate());
+  });
+  // The ruler turned off, here or on an opened recording: this chart's goes too.
+  $effect(() => {
+    if (!rulerOn) untrack(() => ruler.clear());
+  });
+
+  function toggleRuler(): void {
+    chartExtras.update({ ruler: !rulerOn });
+  }
+
+  /** New segment marks or step (AC-AXHK2T.4). */
+  function setMarks(marks: MarkKind, step: number): void {
+    chartExtras.update({ marks, markStep: step });
+  }
+
+  /** Reverse current on or off: only the current axis flips (AC-AXHK2T.7). */
+  function toggleReverseCurrent(): void {
+    chartExtras.update({ reverseCurrent: !reverseCurrent });
+  }
+
+  /** E.D. on or off (AC-AXHK2T.5). */
+  function toggleEd(): void {
+    chartExtras.update({ ed: !edOn });
+  }
+
+  /** The sub-chart under the plot (AC-AXHK2T.6), while it is on. */
+  let subChart: SubChart | undefined = $state();
+  /** The main plot and the sub-chart pad to the same plot-area left and right, so one ms
+   * lands at one x in both (AC-AXHK2T.6). */
+  const insets = new SharedInsets();
+
+  /** The sub-chart on or off (AC-AXHK2T.6). */
+  function toggleSubChart(): void {
+    chartExtras.update({ subChart: !subChartOn });
+  }
+
+  /** Segment marks and E.D. from the raw samples, asked for at most 4 times a second
+   * while live (AC-AXHK2T.4, .5); an answer redraws. */
+  const progress = new RunProgressFeed(
+    (q) => history.runProgress(q),
+    () => {
+      progressTotals = {
+        marks: progress.marksTotalPositive,
+        energy: progress.energyTotalPositive,
+      };
+      scheduler.invalidate();
+    },
+  );
+  $effect(() => () => progress.dispose());
+  /** The last answer's totals, for the notes on why nothing is drawn. */
+  let progressTotals: { marks: boolean | null; energy: boolean | null } = $state({
+    marks: null,
+    energy: null,
+  });
+  const extrasNoteText = $derived(
+    extrasNotes({ marks: marksKind, ed: edOn }, progressTotals).join(" "),
+  );
+
+  /** Asks for the marks and E.D. of the range on screen, if anything changed. */
+  function wantProgress(range: [number, number] | null): void {
+    if (range === null || (marksKind === "off" && !edOn)) {
+      progress.want(null);
+      return;
+    }
+    progress.want({
+      marks: marksKind,
+      step: markStep,
+      ed: edOn,
+      edPoints: Math.max(2, Math.round(plotWidthPx())),
+      edT0Ms: range[0],
+      edT1Ms: range[1],
+      // New samples (live or paused) may move the marks and E.D.; a clear resets the feed.
+      stamp: buffer.lastMs ?? -1,
+    });
+  }
+
+  /** With the ruler on and none placed, places it in the range on screen. */
+  function placeRulerIn(range: [number, number] | null): void {
+    if (rulerOn && hasData && range !== null) ruler.placeIn(range[0], range[1]);
+  }
+
+  /** "Reset ruler": both cursors back in the range on screen. */
+  function resetRuler(): void {
+    const range = currentRange();
+    if (range !== null) ruler.reset(range[0], range[1]);
+  }
+
+  /** Where a ruler cursor may go: the session's extent. */
+  function rulerBounds(): TimeRange {
+    const range = currentRange() ?? [0, 0];
+    const s = sessionExtent(range[0], range[1]);
+    return { t0Ms: s.firstMs, t1Ms: s.lastMs };
   }
 
   /** Zoom slider steps (AC-FENCD9.9). */
@@ -586,6 +830,14 @@
   /** "Zero-based axes": every value axis includes 0, kept for the session (AC-AH2AEM.9). */
   let zeroBased = $state(loadZeroBased(sessionStore()));
 
+  /** The chart's appearance settings, kept for the app, not per meter (AC-AXHK2V.8). */
+  let chartStyle: ChartStyle = $state(loadChartStyle(browserStorage()));
+
+  function setChartStyle(next: ChartStyle): void {
+    chartStyle = next;
+    saveChartStyle(next, browserStorage());
+  }
+
   function toggleZeroBased(): void {
     zeroBased = !zeroBased;
     saveZeroBased(zeroBased, sessionStore());
@@ -601,17 +853,46 @@
     });
   }
 
+  /** Wall time (performance.now()) the batch carrying the newest sample arrived. */
+  let newestArrivedAt: number | null = null;
+  /** The smooth live window's end on the last frame (AC-HR2JAG.2). */
+  let liveEnd: LiveEnd | null = null;
+  /** The smoothed live end the current draw used, or null when it drew none. */
+  let liveEndDrawn: number | null = null;
+
   /** The live window's range; reduced motion advances it in tenth-of-a-span steps
    * instead of scrolling. */
   function shownRange(): [number, number] | null {
+    liveEndDrawn = null;
     const range = liveRange(liveWindow, buffer);
     if (range === null) return null;
     if (liveWindow === "all") {
       return sessionStartMs !== null && source() === "session" ? [sessionStartMs, range[1]] : range;
     }
     const ms = windowMs(liveWindow);
-    if (motion().chartScroll === "smooth" || ms === null) return range;
+    if (ms === null) return range;
+    if (motion().chartScroll === "smooth") {
+      // The end moves on with the wall clock between batches where one batch moves the
+      // plot by at least 2 px; otherwise it sits on the newest sample (AC-HR2JAG.2).
+      let smooth = range;
+      if (!smoothScrolling(ms)) {
+        liveEnd = null;
+      } else if (newestArrivedAt !== null) {
+        liveEnd = smoothLiveEnd(liveEnd, range[1], newestArrivedAt, performance.now());
+        smooth = smoothLiveRange(liveEnd.endMs, ms, buffer.firstMs ?? range[0]);
+        liveEndDrawn = liveEnd.endMs;
+      }
+      return pixelSnappedRange(smooth, ms, plot?.bbox.width ?? 0, buffer.firstMs ?? range[0]);
+    }
     return steppedRange(range, ms, buffer.firstMs ?? range[0]);
+  }
+
+  /** True when a `spanMs` live window scrolls smoothly and one batch moves it by at
+   * least 2 px, so its end is clocked between batches (AC-HR2JAG.2). */
+  function smoothScrolling(spanMs: number | null): boolean {
+    return (
+      motion().chartScroll === "smooth" && spanMs !== null && smoothingActive(spanMs, plotWidthPx())
+    );
   }
 
   /** Plot-area width in CSS pixels, read from the DOM (uPlot's bbox can lag a resize). */
@@ -638,9 +919,14 @@
     const from = source();
     if (from === "history" && historyFrame !== null) return historyFrame;
     if (from === "session" && sessionFrame !== null) return sessionFrame;
-    return range === null
-      ? emptyFrame()
-      : buffer.window(range[0], range[1], plotWidthPx() || 1, liveFrame);
+    if (range === null) return emptyFrame();
+    // From the dash grid time left of the view, so every dashed series lays its first
+    // cell from the cell's start (FR SX1VTC); the extra stretch keeps the same density.
+    const widthPx = plotWidthPx() || 1;
+    const span = range[1] - range[0];
+    const t0 = plot ? dashGridStartMs(range[0], range[1], plot.bbox.width, pxRatio) : range[0];
+    const lead = span > 0 && t0 < range[0] ? ((range[0] - t0) / span) * widthPx : 0;
+    return buffer.window(t0, range[1], widthPx + lead, liveFrame);
   }
 
   /** In live mode, asks for the whole session while its start is unknown, or while
@@ -660,15 +946,29 @@
     }
   }
 
+  /** True while the host is hidden (another tab shows) or not laid out: uPlot has
+   * sized the plot 1 × 1 and a draw would only lay points out far off it (FR C6VR9K).
+   * The resize observer draws again once the host has its real size. */
+  function hostHidden(): boolean {
+    return host === undefined || host.clientWidth === 0 || host.clientHeight === 0;
+  }
+
+  /** True once uPlot has laid the plot out. Just after the host shows again it is still
+   * 1 × 1 until the resize observer's frame, which draws again (FR C6VR9K). */
+  function laidOut(u: uPlot): boolean {
+    return hasPlotArea(u.bbox);
+  }
+
   function draw(): void {
     const u = plot;
-    if (!u) return;
+    if (!u || hostHidden() || !laidOut(u)) return;
     refreshSession();
     const range = currentRange();
     const frame = frameFor(range);
     shownFrame = frame;
     updateZoomSlider(range);
     warp = range === null ? warpFor(0, 1, 0) : warpFor(range[0], range[1], plotWidthPx());
+    wantProgress(range);
     u.batch(() => {
       // With no range yet, let uPlot fit the x scale to the (empty) data.
       u.setData(toAlignedData(frame), range === null);
@@ -682,6 +982,12 @@
       historyFrameRange[1] === view.t1Ms;
     drawnFromHistory = fromHistory;
     drawPdMarkers(u);
+    // The sub-chart: the same frame on the same range, with the same playhead.
+    const subDrawn = subChartOn ? (subChart?.draw(frame, range, playheadMs) ?? null) : null;
+    // Both plot areas on the same x span; a change lays them out again (AC-AXHK2T.6).
+    insets.align();
+    placeRulerIn(range);
+    rulerLayer?.layout();
     if (E2E_BUILD && probe !== null) {
       probe.record(frame, {
         mode: view.mode,
@@ -690,6 +996,15 @@
         fromHistory,
       });
       probe.overlay(drawnTicks, drawnBands);
+      probe.segmentMarks(marksInRange(progress.marks, u.scales.x?.min, u.scales.x?.max));
+      probe.edPoints(energySharePointCount(progress.ed));
+      probe.ampsDir(u.scales.amps?.dir === -1 ? -1 : 1);
+      probe.sub(subDrawn);
+      probe.playheadX(
+        playheadMs === null
+          ? null
+          : u.over.getBoundingClientRect().left + u.valToPos(playheadMs, "x"),
+      );
       const min = u.scales.x?.min;
       const max = u.scales.x?.max;
       probe.breaks(
@@ -706,6 +1021,20 @@
     // The cursor stays put while the window scrolls: read its time on the new scale.
     if (hoverLeftPx !== null) hoverAtMs = u.posToVal(hoverLeftPx, "x");
     updateHover();
+    // Keep the line moving between batches until it has caught up (AC-HR2JAG.3).
+    if (smoothingNow()) scheduler.invalidate();
+  }
+
+  /** True while the live, visible chart smooth-scrolls behind the newest sample: every
+   * redraw then, data-driven or not, is capped at 30 a second (AC-HR2JAG.3). */
+  function smoothingNow(): boolean {
+    return liveNeedsFrame({
+      live: view.mode === "live",
+      visible: !hostHidden(),
+      smooth: smoothScrolling(windowMs(liveWindow)),
+      endMs: liveEndDrawn,
+      newestMs: buffer.lastMs,
+    });
   }
 
   /** The overview strip under the plot (AC-FENCD9.1). */
@@ -742,12 +1071,17 @@
   const probe: ChartProbe | null = E2E_BUILD ? new ChartProbe() : null;
   if (E2E_BUILD && probe !== null) $effect(() => installChartProbe(probe));
 
-  const scheduler = new RedrawScheduler(draw);
+  const scheduler = new RedrawScheduler(draw, animationFrames, () =>
+    smoothingNow() ? LIVE_SMOOTH_MIN_FRAME_MS : 1000 / MAX_REDRAW_HZ,
+  );
   $effect(() => () => scheduler.stop());
 
   /** A batch arrived. */
   export function push(samples: readonly Sample[]): void {
+    const newestBefore = buffer.lastMs;
     buffer.push(samples);
+    if (buffer.lastMs !== null && buffer.lastMs !== newestBefore)
+      newestArrivedAt = performance.now();
     if (!hasData && buffer.length > 0) hasData = true;
     if (backfillArmed) startBackfill();
     scheduler.invalidate();
@@ -802,12 +1136,18 @@
     hoverLeftPx = null;
     hoverAtMs = null;
     setPlayhead(null);
+    ruler.clear();
+    progress.clear();
+    progressTotals = { marks: null, energy: null };
     buffer.clear();
+    newestArrivedAt = null;
+    liveEnd = null;
     backfillArmed = false;
     backfillGeneration++;
     historyGeneration++;
     hasData = false;
     sessionGaps.clear();
+    foldBoundaryMs = null;
     sessionStartMs = null;
     sessionFrame = null;
     sessionGate.reset();
@@ -820,6 +1160,45 @@
 
   /** Bumped by {@link reset}, so gaps from a query sent before it are dropped. */
   let historyGeneration = 0;
+
+  /** Where the session history's full resolution starts, ms, `null` while nothing is
+   * folded: the chart marks it with a faint tick (AC-AXHK2W.11). */
+  let foldBoundaryMs: number | null = null;
+
+  /** Takes a fold boundary answered to a query sent at `generation`: dropped when a
+   * {@link reset} came since. `true` when it moved the tick. */
+  function acceptFoldBoundary(generation: number, fold: number | null): boolean {
+    if (generation !== historyGeneration || fold === foldBoundaryMs) return false;
+    foldBoundaryMs = fold;
+    return true;
+  }
+
+  /** How often the live view asks where the fold boundary is, ms: it moves slowly, so
+   * about once a second, never once per frame (AC-AXHK2W.11). */
+  const FOLD_POLL_MS = 1_000;
+
+  // The live view (live window and "Whole session" while live) knows the boundary too,
+  // not only a paused view asking the history. A paused view keeps the one it was drawn
+  // with until its own query.
+  $effect(() => {
+    const query = history.historyFoldBoundary;
+    if (query === undefined || !active) return;
+    let inFlight = false;
+    const timer = setInterval(() => {
+      if (inFlight || view.mode !== "live" || !hasData) return;
+      inFlight = true;
+      const generation = historyGeneration;
+      query()
+        .then((fold) => {
+          if (acceptFoldBoundary(generation, fold)) scheduler.invalidate();
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false;
+        });
+    }, FOLD_POLL_MS);
+    return () => clearInterval(timer);
+  });
 
   /** The backend history was cleared (FR 5X154V): drop the live buffer, the session start,
    * the whole-session frame, the gaps, the overview envelope and any history answer in
@@ -840,12 +1219,16 @@
     // connection), which no stream event reports (AC-272WSN.3, AC-272WSN.4).
     fetch: async (req) => {
       const generation = historyGeneration;
-      const [buckets, gaps] = await Promise.all([
+      const [buckets, gaps, fold] = await Promise.all([
         history.historyRange(req.series, req.t0Ms, req.t1Ms, req.buckets),
         // A failed gap query leaves the gaps already known; the buckets still draw.
         history.historyGaps(req.t0Ms, req.t1Ms).catch(() => []),
+        // The fold boundary only moves forward; a failed query keeps the last one.
+        (history.historyFoldBoundary?.() ?? Promise.resolve(null)).catch(() => foldBoundaryMs),
       ]);
       if (generation === historyGeneration) for (const g of gaps) sessionGaps.push(g);
+      // The result's own draw shows it.
+      acceptFoldBoundary(generation, fold);
       return buckets;
     },
     onResult: (req, result) => {
@@ -869,8 +1252,9 @@
     },
     onError: (e) => {
       if (view.mode !== "history") return;
-      const message = (e as { message?: unknown } | null)?.message;
+      const { message, hint } = (e ?? {}) as { message?: unknown; hint?: unknown };
       historyError = typeof message === "string" ? message : "The history could not be read.";
+      historyHint = typeof hint === "string" ? hint : null;
     },
   });
   $effect(() => () => requester.cancel());
@@ -1016,6 +1400,8 @@
       zeroBased,
       originMs,
       pxRatio,
+      reverseCurrent,
+      style: chartStyle,
       ...sizeOf(el),
     });
     const timeAxis = opts.axes?.[0];
@@ -1146,8 +1532,83 @@
           ctx.stroke();
           ctx.restore();
         },
+        // The fold boundary: a faint tick saying the data before it is coarser
+        // (AC-AXHK2W.11). One tick at most, so the draw stays bounded.
+        (self: uPlot) => {
+          const ms = foldBoundaryMs;
+          const min = self.scales.x?.min;
+          const max = self.scales.x?.max;
+          const tick =
+            ms === null || min === undefined || max === undefined
+              ? null
+              : foldTick(ms, { t0Ms: min, t1Ms: max }, self.bbox.width);
+          if (tick === null || ms === null || min === undefined || max === undefined) {
+            if (E2E_BUILD && probe !== null) probe.foldTick(null);
+            return;
+          }
+          // The axis is warped where gaps collapse: place it through the scale.
+          const x = self.valToPos(ms, "x", true);
+          const ratio = globalThis.devicePixelRatio || 1;
+          const { left, top, width, height } = self.bbox;
+          const ctx = self.ctx;
+          ctx.save();
+          ctx.globalAlpha = 0.45;
+          ctx.strokeStyle = palette.muted;
+          ctx.lineWidth = Math.max(1, ratio);
+          ctx.setLineDash([2 * ratio, 3 * ratio]);
+          ctx.beginPath();
+          ctx.moveTo(x, top);
+          ctx.lineTo(x, top + height);
+          ctx.stroke();
+          // The label on an opaque chip at the top of the plot, on the coarser side.
+          ctx.globalAlpha = 1;
+          ctx.setLineDash([]);
+          ctx.font = `${Math.round(FOLD_CHIP_FONT_PX * ratio)}px system-ui, sans-serif`;
+          const chip = foldChip(x, ctx.measureText(tick.label).width, self.bbox, ratio);
+          const colors = foldChipColors(theme);
+          if (chip !== null) {
+            ctx.fillStyle = colors.background;
+            ctx.fillRect(chip.left, chip.top, chip.right - chip.left, chip.bottom - chip.top);
+            ctx.fillStyle = colors.text;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(tick.label, (chip.left + chip.right) / 2, (chip.top + chip.bottom) / 2);
+          }
+          ctx.restore();
+          if (E2E_BUILD && probe !== null) {
+            const css = canvasToViewport(self);
+            probe.foldTick(
+              chip === null
+                ? null
+                : {
+                    ms,
+                    t0Ms: min,
+                    t1Ms: max,
+                    x: css.x(x),
+                    label: tick.label,
+                    chip: css.box(chip),
+                    plot: css.box({ left, top, right: left + width, bottom: top + height }),
+                    fontPx: FOLD_CHIP_FONT_PX,
+                    color: colors.text,
+                    background: colors.background,
+                  },
+            );
+          }
+        },
         // The PD status blocks (AC-TGE83D.4).
         (self: uPlot) => drawPdStatus(self),
+        // Segment marks (AC-AXHK2T.4), then E.D., the energy share (AC-AXHK2T.5). The
+        // "E.D. %" label's box is computed once: mark labels give way to it (AC-AXHK2V.15).
+        (self: uPlot) => {
+          const ed = edLabelBox(self, progress.ed);
+          const painted = paintSegmentMarks(self, progress.marks, palette.muted, ed ? [ed] : []);
+          paintEnergyShare(self, progress.ed, edColor(theme), ed);
+          if (E2E_BUILD && probe !== null) {
+            const css = canvasToViewport(self).box;
+            probe.markLabels(painted.markLabels.map(css), painted.tickLabels.map(css));
+            probe.edLabel(ed && css(ed));
+          }
+        },
         // The playhead: a vertical line across the plot (AC-FENCD9.5).
         (self: uPlot) => {
           if (playheadMs === null) return;
@@ -1188,8 +1649,18 @@
           }),
       ],
     };
+    // The same plot-area left and right as the sub-chart (AC-AXHK2T.6); alone, the
+    // margins uPlot would give it anyway.
+    const shared = insets.attach("main", () => {
+      if (plot === u) {
+        u.redraw(false, true);
+        scheduler.invalidate();
+      }
+    });
+    opts.padding = shared.padding;
     const u = new uPlot(opts, toAlignedData(emptyFrame()), el);
     plot = u;
+    shared.bind(u);
     const over = u.over;
     // The PD marker lane rides on the plot area, so its x matches the plot's.
     const layer = document.createElement("canvas");
@@ -1360,6 +1831,7 @@
       onDragEnd();
       observer.disconnect();
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      shared.detach();
       u.destroy();
       if (plot === u) plot = null;
       if (pdLayer === layer) pdLayer = null;
@@ -1389,6 +1861,7 @@
 
 <div class="chart-wrap">
   <div class="toolbar">
+    <InfoButton key="section.chart" />
     <div class="windows" role="group" aria-label="Live window">
       {#each LIVE_WINDOWS as w (w.id)}
         <button
@@ -1425,6 +1898,10 @@
     <span class="zoom-span" title="Zoom: visible span" aria-hidden="true"
       >{active ? zoomText : ""}</span
     >
+    <button type="button" aria-expanded={optionsOpen} onclick={() => (optionsOpen = !optionsOpen)}
+      >Chart options</button
+    >
+    <button type="button" disabled={!hasData} onclick={() => (saveOpen = true)}>Save image</button>
     <button
       type="button"
       class="live"
@@ -1436,30 +1913,29 @@
       onclick={() => gesture(liveToggle(view))}>{liveBtn.label}</button
     >
   </div>
-  <div class="legend" role="group" aria-label="Series">
-    {#each CHART_SERIES as s, i (s.key)}
-      <button
-        type="button"
-        class="series"
-        aria-pressed={visibility[s.key]}
-        title={`Show or hide ${s.label}`}
-        onclick={() => toggle(s.key)}
-      >
-        <svg class="swatch" width="24" height="8" aria-hidden="true">
-          <line
-            x1="0"
-            y1="4"
-            x2="24"
-            y2="4"
-            stroke={styles[i]?.stroke}
-            stroke-width="2"
-            stroke-dasharray={styles[i]?.dash.join(" ") || undefined}
-          />
-        </svg>
-        {s.label} <span class="unit">({s.unit})</span>
-      </button>
-    {/each}
-  </div>
+  {#if optionsOpen}
+    <ChartOptions
+      extras={chartExtras.value}
+      onRuler={toggleRuler}
+      onMarks={setMarks}
+      onEd={toggleEd}
+      onSubChart={toggleSubChart}
+      onReverseCurrent={toggleReverseCurrent}
+      style={chartStyle}
+      onStyle={setChartStyle}
+      {theme}
+    />
+  {/if}
+  {#if extrasNoteText !== ""}
+    <p class="extras-note" role="status">{extrasNoteText}</p>
+  {/if}
+  {#if edOn}
+    <p class="ed-note">
+      <span class="ed-swatch" style:border-color={edColor(theme)}></span>
+      <Term key="term.ed">E.D.</Term>{ED_DEFINITION.slice("E.D.".length)}
+    </p>
+  {/if}
+  <SeriesLegend {theme} {visibility} onToggle={toggle} style={chartStyle} />
   {#if hasPd}
     <ul class="pd-legend" aria-label="PD markers">
       {#each PD_MARKER_KINDS as k (k.kind)}
@@ -1471,6 +1947,24 @@
     </ul>
   {/if}
   <p class="visually-hidden" role="status" aria-live="polite">{announcement}</p>
+  {#if rulerOn && ruler.ruler !== null}
+    <RulerReadout items={ruler.readout} announcement={ruler.announcement} onReset={resetRuler} />
+  {/if}
+  {#if saveOpen}
+    <SaveImageDialog
+      initialWidth={host?.clientWidth ?? 1280}
+      initialHeight={host?.clientHeight ?? 720}
+      onCancel={() => (saveOpen = false)}
+      onSave={(choice) => void saveImage(choice)}
+    />
+  {/if}
+  {#if saveError !== ""}
+    <p class="extras-note" role="alert">{saveError}</p>
+  {/if}
+  {#if chartStyle.title !== ""}
+    <!-- Text interpolation: the title is shown as typed, never parsed as markup (AC-AXHK2V.4). -->
+    <p class="chart-title">{chartStyle.title}</p>
+  {/if}
   <!-- Hover readout: a strip above the plot so it never covers the cursor point. -->
   <div class="hover" aria-live="off">
     {#if hover !== null}
@@ -1502,13 +1996,40 @@
     onkeydown={onKeydown}
     onblur={() => (pointerFocus = false)}
   >
+    {#if rulerOn}
+      <ChartRuler
+        bind:this={rulerLayer}
+        {ruler}
+        plot={() => plot}
+        bounds={rulerBounds}
+        {originMs}
+        laneTopPx={PD_LANE_PX}
+      />
+    {/if}
     {#if !active && !hasData}
       <p class="empty-state">Connect a meter to start</p>
     {/if}
     {#if historyError !== null && view.mode === "history"}
-      <p class="history-error" role="status">{historyError}</p>
+      <p class="history-error" role="status">
+        {historyError}
+        <HintText hint={historyHint} />
+      </p>
     {/if}
   </div>
+  {#if subChartOn}
+    <SubChart
+      bind:this={subChart}
+      {theme}
+      {zeroBased}
+      {pxRatio}
+      {reverseCurrent}
+      {insets}
+      {originMs}
+      warp={() => warp}
+      splits={warpedSplits}
+      onresize={() => scheduler.invalidate()}
+    />
+  {/if}
   <!-- Overview strip: the whole session, with a window over the range on screen. -->
   <OverviewStrip
     bind:this={overview}
@@ -1550,6 +2071,18 @@
   .zero-based {
     margin-left: auto;
   }
+  .extras-note,
+  .ed-note {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--muted, GrayText);
+  }
+  .ed-swatch {
+    display: inline-block;
+    width: 1.2rem;
+    border-top: 2px dashed;
+    vertical-align: middle;
+  }
   .zoom-slider {
     width: 8rem;
     align-self: center;
@@ -1567,28 +2100,6 @@
     border-color: var(--accent);
     color: var(--accent);
     box-shadow: inset 0 0 0 1px var(--accent);
-  }
-  .legend {
-    display: flex;
-    gap: 0.25rem;
-    flex-wrap: wrap;
-  }
-  .series {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.375rem;
-  }
-  /* Off state: muted text (still ≥ 4.5:1), struck through, faded swatch. */
-  .series[aria-pressed="false"] {
-    color: var(--muted);
-    border-style: dashed;
-    text-decoration: line-through;
-  }
-  .series[aria-pressed="false"] .swatch {
-    opacity: 0.35;
-  }
-  .unit {
-    color: var(--muted);
   }
   .pd-legend {
     display: flex;
@@ -1609,6 +2120,12 @@
     width: 0.625rem;
     height: 0.625rem;
     border-radius: 50%;
+  }
+  .chart-title {
+    margin: 0.25rem 0 0;
+    text-align: center;
+    font-weight: 600;
+    overflow-wrap: anywhere;
   }
   .hover {
     display: flex;

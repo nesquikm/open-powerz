@@ -4,11 +4,7 @@
  */
 
 import type { ConnectedInfo, DeviceListing, DeviceMode, FirmwareWarningCode } from "./backend";
-
-/** Oldest application firmware the app supports (mirrors `version::MIN_SUPPORTED`). */
-export const MIN_SUPPORTED_FIRMWARE = "1.7.0";
-/** Newest application firmware the app knows of (mirrors `version::KNOWN_LATEST`). */
-export const KNOWN_LATEST_FIRMWARE = "2.0.7";
+import { displaySerial } from "./format";
 
 /** The mode in plain words. */
 export function modeLabel(mode: DeviceMode): string {
@@ -36,15 +32,16 @@ function updateCheckLabel(updateRequired: boolean | null): string {
 }
 
 /** The device details rows of the connected meter; a missing value shows a dash,
- * and each firmware-status problem gets its own row. */
-export function deviceDetailsRows(info: ConnectedInfo): DetailRow[] {
+ * and each firmware-status problem gets its own row. With `hidden`, the Serial row reads
+ * "Hidden". */
+export function deviceDetailsRows(info: ConnectedInfo, hidden: boolean): DetailRow[] {
   const orDash = (s: string | undefined): string => (s === undefined || s.trim() === "" ? "—" : s);
   return [
     { label: "Model", value: orDash(info.model) },
     { label: "Mode", value: modeLabel(info.mode) },
     { label: "Firmware", value: orDash(info.firmware_version) },
     { label: "Bootloader", value: orDash(info.bootloader_version) },
-    { label: "Serial", value: orDash(info.serial) },
+    { label: "Serial", value: displaySerial(orDash(info.serial), hidden) },
     { label: "Update check", value: updateCheckLabel(info.update_required) },
     ...info.firmware_problems.map((value) => ({ label: "Firmware status", value })),
   ];

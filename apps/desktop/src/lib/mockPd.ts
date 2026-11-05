@@ -205,6 +205,13 @@ function header(step: MessageStep, pos: number): number {
   );
 }
 
+/** Whether record `k` is the script's Discover Identity to the cable. The script has no
+ * ACK row, so this stands for the demo cable's answer to it. */
+export function pdIsCableDiscover(k: number): boolean {
+  const { step } = stepOf(k);
+  return step.kind === "message" && step.sop === 1 && step.objects[0] === DISCOVER_IDENTITY;
+}
+
 function volts(mv: number): string {
   return `${(mv / 1000).toFixed(2)} V`;
 }

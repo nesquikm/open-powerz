@@ -64,7 +64,8 @@ test.describe("meter settings panel (FR 1HHT01)", () => {
     const p = panel(page);
     await expect(p).toContainText("English");
     await expect(p.locator("input, select, textarea, [contenteditable='true']")).toHaveCount(0);
-    await expect(p.getByRole("button")).toHaveCount(2);
+    // The panel's info (i) button only opens a note (FR CW66T1); it edits nothing.
+    await expect(p.locator("button:not([data-glossary-key])")).toHaveCount(2);
     await expect(p.getByRole("button", { name: /refresh/i })).toBeVisible();
     await expect(p.getByRole("button", { name: "Edit" })).toBeVisible();
   });

@@ -5,9 +5,10 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { FirmwareFileInfo, FlashDone, FlashEvent, UiError } from "./backend";
+import type { FirmwareFileInfo, FlashDone, FlashEvent, FlashStatus, UiError } from "./backend";
 import {
   CANCEL_PENDING,
+  FOLLOWED_UPDATE_ENDED,
   FirmwareUpdate,
   type FirmwareMeter,
   type FirmwareUpdateApi,
@@ -21,6 +22,7 @@ const INFO: FirmwareFileInfo = {
   date: "2026.9.29",
   crc: "A175E4A0",
   size: 12340,
+  stored_size: 12340,
   release_notes_en: "1. Synthetic note.",
 };
 
@@ -31,6 +33,11 @@ const METER: FirmwareMeter = {
   firmwareVersion: "2.0.6",
   bootloaderVersion: "2.5",
 };
+
+/** What the backend reports for a running update. */
+function status(over: Partial<FlashStatus> = {}): FlashStatus {
+  return { device_id: METER.id, stage: null, replug: null, outcome: null, ...over };
+}
 
 /** A flash the test drives; the fake backend's other calls are spies. */
 function fakeBackend(overrides: Partial<FirmwareUpdateApi> = {}) {
@@ -51,7 +58,6 @@ function fakeBackend(overrides: Partial<FirmwareUpdateApi> = {}) {
     ),
     cancelFlash: vi.fn(async () => {}),
     flashStatus: vi.fn(async () => null),
-    isRecording: vi.fn(() => false),
     stopRecording: vi.fn(async () => {}),
     ...overrides,
   } as FirmwareUpdateApi;
@@ -124,48 +130,14 @@ describe("cancel (AC-4PJRVJ.1)", () => {
 });
 
 describe("a running recording (AC-4PJRVJ.2)", () => {
-  function recording() {
-    return fakeBackend({ isRecording: vi.fn((id: string) => id === METER.id) });
-  }
-
-  it("asks first, and neither stops the recording nor starts the update", async () => {
-    const b = recording();
-    const fw = await confirming(b.api);
-    await fw.start(METER);
-    expect(fw.recordingPrompt).toBe(true);
-    expect(b.api.flash).not.toHaveBeenCalled();
-    expect(b.api.stopRecording).not.toHaveBeenCalled();
-  });
-
-  it("keeps recording when the user declines", async () => {
-    const b = recording();
-    const fw = await confirming(b.api);
-    await fw.start(METER);
-    fw.declineEndRecording();
-    expect(fw.recordingPrompt).toBe(false);
-    expect(fw.phase).toBe("confirming");
-    expect(b.api.flash).not.toHaveBeenCalled();
-    expect(b.api.stopRecording).not.toHaveBeenCalled();
-  });
-
-  it("ends the recording and then updates when the user agrees", async () => {
-    const b = recording();
-    const fw = await confirming(b.api);
-    await fw.start(METER);
-    void fw.confirmEndRecording(METER);
-    await settle();
-    expect(b.api.stopRecording).toHaveBeenCalledWith(METER.id);
-    expect(b.api.flash).toHaveBeenCalledOnce();
-    expect(fw.recordingPrompt).toBe(false);
-    expect(fw.phase).toBe("updating");
-  });
-
-  it("does not ask for a recording on another meter", async () => {
-    const b = fakeBackend({ isRecording: vi.fn((id: string) => id === "usb:1:9") });
+  // The prompt itself is the backend's refusal now (FR AXHK2F): see
+  // firmwareUpdate.consent.svelte.test.ts.
+  it("does not ask while the backend does not refuse", async () => {
+    const b = fakeBackend();
     const fw = await confirming(b.api);
     void fw.start(METER);
     await settle();
-    expect(fw.recordingPrompt).toBe(false);
+    expect(fw.releasePrompt).toBeNull();
     expect(b.api.flash).toHaveBeenCalledOnce();
     expect(b.api.stopRecording).not.toHaveBeenCalled();
   });
@@ -225,7 +197,7 @@ describe("a page reload (AC-4PJRVJ.3)", () => {
     let running = true;
     const b = fakeBackend({
       flashStatus: vi.fn(async () =>
-        running ? { device_id: METER.id, stage: { stage: "verifying" as const } } : null,
+        running ? status({ stage: { stage: "verifying" as const } }) : null,
       ),
     });
     const fw = new FirmwareUpdate(b.api);
@@ -244,7 +216,7 @@ describe("a page reload (AC-4PJRVJ.3)", () => {
     const b = fakeBackend({
       flashStatus: vi.fn(async () => {
         if (!answers) throw new Error("gone");
-        return { device_id: METER.id, stage: null };
+        return status();
       }),
     });
     const fw = new FirmwareUpdate(b.api);
@@ -260,10 +232,7 @@ describe("a page reload (AC-4PJRVJ.3)", () => {
 describe("an accepted Cancel (AC-4PJRVJ.1)", () => {
   it("turns Cancel off and says what is happening", async () => {
     const b = fakeBackend({
-      flashStatus: vi.fn(async () => ({
-        device_id: METER.id,
-        stage: { stage: "switching" as const },
-      })),
+      flashStatus: vi.fn(async () => status({ stage: { stage: "switching" as const } })),
     });
     const fw = new FirmwareUpdate(b.api);
     await fw.reattach();
@@ -271,5 +240,196 @@ describe("an accepted Cancel (AC-4PJRVJ.1)", () => {
     await fw.cancelUpdate();
     expect(fw.cancelling).toBe(true);
     expect(fw.cancelBlocker).toBe(CANCEL_PENDING);
+    expect(CANCEL_PENDING).not.toMatch(/switched/);
+  });
+});
+
+describe("a page reloaded during an update (AC-AXHK2M.2)", () => {
+  const PROMPT = { to: "bootloader", reply: "none" } as const;
+  const FAILED: UiError = { kind: "protocol", message: "no FINISHED", hint: null };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A backend whose status reads come from `reads`; the last one stays. */
+  function following(...reads: (FlashStatus | null)[]) {
+    let at = 0;
+    return fakeBackend({
+      flashStatus: vi.fn(async () => reads[Math.min(at++, reads.length - 1)] ?? null),
+    });
+  }
+
+  it("shows the replug prompt the backend is waiting on", async () => {
+    vi.useFakeTimers();
+    const fw = new FirmwareUpdate(
+      following(status({ stage: { stage: "switching" }, replug: PROMPT })).api,
+    );
+    await fw.reattach();
+    expect(fw.replug).toEqual(PROMPT);
+  });
+
+  it("takes the prompt away once the update moves on", async () => {
+    vi.useFakeTimers();
+    const fw = new FirmwareUpdate(
+      following(
+        status({ stage: { stage: "switching" }, replug: PROMPT }),
+        status({ stage: { stage: "erasing" } }),
+      ).api,
+    );
+    await fw.reattach();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fw.replug).toBeNull();
+    expect(fw.stage).toEqual({ stage: "erasing" });
+  });
+
+  it("raises a prompt that comes while it follows", async () => {
+    vi.useFakeTimers();
+    const fw = new FirmwareUpdate(
+      following(
+        status({ stage: { stage: "returning" } }),
+        status({ stage: { stage: "returning" }, replug: { to: "application", reply: "ACCEPT" } }),
+      ).api,
+    );
+    await fw.reattach();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fw.replug).toEqual({ to: "application", reply: "ACCEPT" });
+  });
+
+  it("ends with the version the update reached", async () => {
+    vi.useFakeTimers();
+    const done: FlashDone = { outcome: "verified", version: "2.0.7" };
+    const fw = new FirmwareUpdate(
+      following(
+        status({ stage: { stage: "returning" }, replug: PROMPT }),
+        status({ stage: { stage: "returning" }, outcome: { result: done, error: null } }),
+      ).api,
+    );
+    await fw.reattach();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fw.phase).toBe("done");
+    expect(fw.result).toEqual(done);
+    expect(fw.replug).toBeNull();
+    expect(fw.followedEnded, "the true outcome replaces the note").toBe(false);
+  });
+
+  it("ends with the failure and the stage it happened at", async () => {
+    vi.useFakeTimers();
+    const fw = new FirmwareUpdate(
+      following(
+        status({ stage: { stage: "verifying" } }),
+        status({ stage: { stage: "verifying" }, outcome: { result: null, error: FAILED } }),
+      ).api,
+    );
+    await fw.reattach();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fw.phase).toBe("failed");
+    expect(fw.error).toEqual(FAILED);
+    expect(fw.failedStage).toBe("verifying");
+    expect(fw.needsRecovery).toBe(true);
+    expect(fw.followedEnded).toBe(false);
+  });
+
+  it("shows an outcome that is already there at the reload", async () => {
+    const done: FlashDone = { outcome: "power_cycle_needed" };
+    const fw = new FirmwareUpdate(
+      following(status({ stage: { stage: "returning" }, outcome: { result: done, error: null } }))
+        .api,
+    );
+    await fw.reattach();
+    expect(fw.phase).toBe("done");
+    expect(fw.result).toEqual(done);
+    expect(fw.busy).toBe(false);
+  });
+
+  it("says only that it ended when the backend kept no outcome", async () => {
+    vi.useFakeTimers();
+    const fw = new FirmwareUpdate(following(status({ stage: { stage: "verifying" } }), null).api);
+    await fw.reattach();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fw.followedEnded).toBe(true);
+    expect(FOLLOWED_UPDATE_ENDED).toMatch(/ended/i);
+  });
+
+  it("takes the kept outcome off the backend when it saw the end itself", async () => {
+    const b = fakeBackend();
+    const fw = await confirming(b.api);
+    void fw.start(METER);
+    await settle();
+    b.resolve({ outcome: "verified", version: "2.0.7" });
+    await settle();
+    expect(fw.phase).toBe("done");
+    expect(b.api.flashStatus, "a later reload would repeat the outcome").toHaveBeenCalledOnce();
+  });
+
+  it("takes a kept failure off the backend too", async () => {
+    const b = fakeBackend();
+    const fw = await confirming(b.api);
+    void fw.start(METER);
+    await settle();
+    b.reject(FAILED);
+    await settle();
+    expect(fw.phase).toBe("failed");
+    expect(b.api.flashStatus).toHaveBeenCalledOnce();
+  });
+
+  it("leaves the backend alone when the start was refused", async () => {
+    const b = fakeBackend();
+    const fw = await confirming(b.api);
+    void fw.start(METER);
+    await settle();
+    b.reject({ kind: "flash_needs_consent", message: "ask", hint: null, sessions: [] });
+    await settle();
+    expect(b.api.flashStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("the note that a followed update ended (AC-AXHK2M.7)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function ended() {
+    vi.useFakeTimers();
+    let running = true;
+    const b = fakeBackend({
+      flashStatus: vi.fn(async () => (running ? status({ stage: { stage: "verifying" } }) : null)),
+    });
+    const fw = new FirmwareUpdate(b.api);
+    await fw.reattach();
+    running = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fw.followedEnded).toBe(true);
+    return fw;
+  }
+
+  it("clears when a file is chosen", async () => {
+    const fw = await ended();
+    await fw.chooseFile();
+    expect(fw.followedEnded).toBe(false);
+  });
+
+  it("clears when a cancelled file dialog was still the next action", async () => {
+    vi.useFakeTimers();
+    let running = true;
+    const b = fakeBackend({
+      choose: vi.fn(async () => null),
+      flashStatus: vi.fn(async () => (running ? status() : null)),
+    });
+    const fw = new FirmwareUpdate(b.api);
+    await fw.reattach();
+    running = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await fw.chooseFile();
+    expect(fw.followedEnded).toBe(false);
+  });
+
+  it("clears when an update is requested", async () => {
+    const fw = await ended();
+    await fw.chooseFile();
+    fw.followedEnded = true;
+    fw.requestUpdate(METER);
+    expect(fw.phase).toBe("confirming");
+    expect(fw.followedEnded).toBe(false);
   });
 });

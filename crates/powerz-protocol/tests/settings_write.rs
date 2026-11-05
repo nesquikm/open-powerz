@@ -545,13 +545,14 @@ fn ac3_a_held_out_of_range_value_sends_nothing() {
 
 type Guarded = Session<GuardedTransport<MockTransport>>;
 
-/// Guarded session: SETTINGS read (id 1) of `before`, then `rest`.
+/// Guarded session: two matching SETTINGS reads (ids 1 and 2) of `before`
+/// (AC-AXHK2J.2), then `rest`.
 fn session(before: &[u8], rest: Vec<Step>) -> Guarded {
     let script = [
-        vec![Step::transact(
-            get_data(1, 0x008),
-            settings_reply(1, before),
-        )],
+        vec![
+            Step::transact(get_data(1, 0x008), settings_reply(1, before)),
+            Step::transact(get_data(2, 0x008), settings_reply(2, before)),
+        ],
         rest,
     ]
     .concat();
@@ -570,12 +571,12 @@ fn settings_writes(s: &Guarded) -> Vec<Vec<u8>> {
 fn ac2_write_reads_then_sends_one_frame_then_reads_again() {
     let before = captured();
     let after = block(&[("brightness", 80)]);
-    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
     let mut s = session(
         &before,
         vec![
-            Step::transact(frame.clone(), accept(2)),
-            Step::transact(get_data(3, 0x008), settings_reply(3, &after)),
+            Step::transact(frame.clone(), accept(3)),
+            Step::transact(get_data(4, 0x008), settings_reply(4, &after)),
         ],
     );
     let m = s
@@ -585,7 +586,12 @@ fn ac2_write_reads_then_sends_one_frame_then_reads_again() {
     assert_eq!(m, decode(&after));
     assert_eq!(
         written(&s),
-        &[get_data(1, 0x008), frame, get_data(3, 0x008)]
+        &[
+            get_data(1, 0x008),
+            get_data(2, 0x008),
+            frame,
+            get_data(4, 0x008),
+        ]
     );
     assert_eq!(s.transport().inner().remaining(), 0);
 }
@@ -593,12 +599,12 @@ fn ac2_write_reads_then_sends_one_frame_then_reads_again() {
 #[test]
 fn ac2_a_rate_change_is_written_and_read_back() {
     let after = block(&[("sample_rate", 1), ("theme", 3)]);
-    let frame = expected_write(2, &captured_entries(&[(0x07, 3), (0x15, 1)]));
+    let frame = expected_write(3, &captured_entries(&[(0x07, 3), (0x15, 1)]));
     let mut s = session(
         &captured(),
         vec![
-            Step::transact(frame.clone(), accept(2)),
-            Step::transact(get_data(3, 0x008), settings_reply(3, &after)),
+            Step::transact(frame.clone(), accept(3)),
+            Step::transact(get_data(4, 0x008), settings_reply(4, &after)),
         ],
     );
     s.write_settings(&[(WritableField::SampleRate, 1), (WritableField::Theme, 3)])
@@ -625,7 +631,7 @@ fn ac3_an_out_of_range_change_sends_no_write() {
             "{}: a write was sent",
             f.name()
         );
-        assert!(written(&s).len() <= 1, "at most the settings read");
+        assert!(written(&s).len() <= 2, "at most the settings reads");
     }
 }
 
@@ -653,12 +659,12 @@ fn ac3_the_write_passes_the_guard_only_on_its_own_path() {
 
 #[test]
 fn ac4_a_re_read_without_the_change_is_an_error_naming_the_field() {
-    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
     let mut s = session(
         &captured(),
         vec![
-            Step::transact(frame, accept(2)),
-            Step::transact(get_data(3, 0x008), settings_reply(3, &captured())),
+            Step::transact(frame, accept(3)),
+            Step::transact(get_data(4, 0x008), settings_reply(4, &captured())),
         ],
     );
     let err = s
@@ -668,20 +674,20 @@ fn ac4_a_re_read_without_the_change_is_an_error_naming_the_field() {
     assert!(msg.contains("brightness"), "{msg}");
     assert!(msg.contains("80") && msg.contains("50"), "{msg}");
     assert_eq!(settings_writes(&s).len(), 1, "the write is not retried");
-    assert_eq!(written(&s).len(), 3, "nothing after the re-read");
+    assert_eq!(written(&s).len(), 4, "nothing after the re-read");
     assert_eq!(s.transport().inner().remaining(), 0);
 }
 
 #[test]
 fn ac4_a_re_read_where_another_field_moved_is_an_error_naming_it() {
     for (moved, code) in [("theme", 4u32), ("auto_rotate", 0), ("startup_logo", 1)] {
-        let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+        let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
         let after = block(&[("brightness", 80), (moved, code)]);
         let mut s = session(
             &captured(),
             vec![
-                Step::transact(frame, accept(2)),
-                Step::transact(get_data(3, 0x008), settings_reply(3, &after)),
+                Step::transact(frame, accept(3)),
+                Step::transact(get_data(4, 0x008), settings_reply(4, &after)),
             ],
         );
         let err = s
@@ -694,15 +700,15 @@ fn ac4_a_re_read_where_another_field_moved_is_an_error_naming_it() {
 
 #[test]
 fn ac4_a_re_read_where_the_calibration_moved_is_an_error() {
-    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
     let mut after = block(&[("brightness", 80)]);
     after[0x58..0x5C].copy_from_slice(&81i32.to_le_bytes());
     fix_crcs(&mut after);
     let mut s = session(
         &captured(),
         vec![
-            Step::transact(frame, accept(2)),
-            Step::transact(get_data(3, 0x008), settings_reply(3, &after)),
+            Step::transact(frame, accept(3)),
+            Step::transact(get_data(4, 0x008), settings_reply(4, &after)),
         ],
     );
     let err = s
@@ -713,14 +719,14 @@ fn ac4_a_re_read_where_the_calibration_moved_is_an_error() {
 
 #[test]
 fn ac4_a_rejected_write_is_an_error_and_is_not_retried() {
-    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
-    let mut s = session(&captured(), vec![Step::transact(frame, reject(2))]);
+    let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
+    let mut s = session(&captured(), vec![Step::transact(frame, reject(3))]);
     assert!(
         s.write_settings(&[(WritableField::Brightness, 80)])
             .is_err()
     );
     assert_eq!(settings_writes(&s).len(), 1);
-    assert_eq!(written(&s).len(), 2, "no re-read and no retry");
+    assert_eq!(written(&s).len(), 3, "no re-read and no retry");
 }
 
 // ---- AC-JKWT3W.2 / .4: replies the meter may send to 0x0A ----
@@ -733,12 +739,12 @@ fn ac4_a_rejected_write_is_an_error_and_is_not_retried() {
 #[test]
 fn ac2_a_finished_reply_is_success() {
     let after = block(&[("brightness", 80)]);
-    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
     let mut s = session(
         &captured(),
         vec![
-            Step::transact(frame.clone(), finished(2)),
-            Step::transact(get_data(3, 0x008), settings_reply(3, &after)),
+            Step::transact(frame.clone(), finished(3)),
+            Step::transact(get_data(4, 0x008), settings_reply(4, &after)),
         ],
     );
     let m = s
@@ -751,12 +757,12 @@ fn ac2_a_finished_reply_is_success() {
 #[test]
 fn ac2_no_reply_is_followed_by_one_read_back_that_decides() {
     let after = block(&[("brightness", 80)]);
-    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
     let mut s = session(
         &captured(),
         vec![
             Step::transact_err(frame.clone(), powerz_protocol::transport::Error::Timeout),
-            Step::transact(get_data(3, 0x008), settings_reply(3, &after)),
+            Step::transact(get_data(4, 0x008), settings_reply(4, &after)),
         ],
     );
     let m = s
@@ -765,7 +771,12 @@ fn ac2_no_reply_is_followed_by_one_read_back_that_decides() {
     assert_eq!(m, decode(&after));
     assert_eq!(
         written(&s),
-        &[get_data(1, 0x008), frame, get_data(3, 0x008)],
+        &[
+            get_data(1, 0x008),
+            get_data(2, 0x008),
+            frame,
+            get_data(4, 0x008),
+        ],
         "one write, one read-back, nothing retried"
     );
     assert_eq!(s.transport().inner().remaining(), 0);
@@ -773,12 +784,12 @@ fn ac2_no_reply_is_followed_by_one_read_back_that_decides() {
 
 #[test]
 fn ac4_no_reply_and_a_read_back_without_the_change_is_a_mismatch() {
-    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
     let mut s = session(
         &captured(),
         vec![
             Step::transact_err(frame, powerz_protocol::transport::Error::Timeout),
-            Step::transact(get_data(3, 0x008), settings_reply(3, &captured())),
+            Step::transact(get_data(4, 0x008), settings_reply(4, &captured())),
         ],
     );
     let err = s
@@ -786,7 +797,7 @@ fn ac4_no_reply_and_a_read_back_without_the_change_is_a_mismatch() {
         .expect_err("not applied");
     assert!(err.to_string().contains("brightness"), "{err}");
     assert_eq!(settings_writes(&s).len(), 1, "the write is not retried");
-    assert_eq!(written(&s).len(), 3);
+    assert_eq!(written(&s).len(), 4);
 }
 
 #[test]
@@ -794,13 +805,13 @@ fn ac2_a_late_reply_to_the_write_is_skipped_by_the_read_back() {
     // Silence within the timeout, then the FINISHED arrives in place of the
     // read-back's reply.
     let after = block(&[("brightness", 80)]);
-    let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
     let mut s = session(
         &captured(),
         vec![
             Step::transact_err(frame, powerz_protocol::transport::Error::Timeout),
-            Step::transact(get_data(3, 0x008), finished(2)),
-            Step::read(settings_reply(3, &after)),
+            Step::transact(get_data(4, 0x008), finished(3)),
+            Step::read(settings_reply(4, &after)),
         ],
     );
     let m = s
@@ -812,14 +823,14 @@ fn ac2_a_late_reply_to_the_write_is_skipped_by_the_read_back() {
 
 #[test]
 fn ac4_any_other_reply_to_the_write_is_an_error_without_a_read_back() {
-    for reply in [vec![0x03, 2, 0, 0], vec![0x41, 2, 0, 0]] {
-        let frame = expected_write(2, &captured_entries(&[(0x03, 80)]));
+    for reply in [vec![0x03, 3, 0, 0], vec![0x41, 3, 0, 0]] {
+        let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
         let mut s = session(&captured(), vec![Step::transact(frame, reply.clone())]);
         assert!(
             s.write_settings(&[(WritableField::Brightness, 80)])
                 .is_err(),
             "{reply:02x?}"
         );
-        assert_eq!(written(&s).len(), 2, "{reply:02x?}: no re-read");
+        assert_eq!(written(&s).len(), 3, "{reply:02x?}: no re-read");
     }
 }

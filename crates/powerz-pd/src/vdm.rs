@@ -108,6 +108,24 @@ pub struct ProductVdo {
     pub bcd_device: u16,
 }
 
+/// USB Highest Speed of a cable VDO (bits 2..0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UsbSpeed {
+    /// 000b: USB 2.0 only.
+    Usb2,
+    /// 001b: USB 3.2 Gen 1.
+    Usb32Gen1,
+    /// 010b: USB 3.2 Gen 2 or USB4 Gen 2.
+    Usb32Gen2,
+    /// 011b: USB4 Gen 3.
+    Usb4Gen3,
+    /// 100b: USB4 Gen 4.
+    Usb4Gen4,
+    /// 101b..111b.
+    Reserved(u8),
+}
+
 /// Passive Cable VDO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PassiveCableVdo {
@@ -452,6 +470,45 @@ fn usb_speed(cable: bool) -> impl Fn(u32) -> String {
             _ => "Reserved",
         }
         .into()
+    }
+}
+
+impl UsbSpeed {
+    fn from_bits(v: u8) -> UsbSpeed {
+        match v & 7 {
+            0 => UsbSpeed::Usb2,
+            1 => UsbSpeed::Usb32Gen1,
+            2 => UsbSpeed::Usb32Gen2,
+            3 => UsbSpeed::Usb4Gen3,
+            4 => UsbSpeed::Usb4Gen4,
+            v => UsbSpeed::Reserved(v),
+        }
+    }
+
+    /// Plain name of the speed.
+    pub fn name(self) -> String {
+        match self {
+            UsbSpeed::Usb2 => "USB 2.0".into(),
+            UsbSpeed::Usb32Gen1 => "USB 3.2 Gen 1".into(),
+            UsbSpeed::Usb32Gen2 => "USB 3.2 Gen 2 / USB4 Gen 2".into(),
+            UsbSpeed::Usb4Gen3 => "USB4 Gen 3".into(),
+            UsbSpeed::Usb4Gen4 => "USB4 Gen 4".into(),
+            UsbSpeed::Reserved(v) => format!("reserved ({v})"),
+        }
+    }
+}
+
+impl PassiveCableVdo {
+    /// USB Highest Speed, decoded.
+    pub fn speed(&self) -> UsbSpeed {
+        UsbSpeed::from_bits(self.usb_speed)
+    }
+}
+
+impl ActiveCableVdo {
+    /// USB Highest Speed, decoded.
+    pub fn speed(&self) -> UsbSpeed {
+        UsbSpeed::from_bits(self.usb_speed)
     }
 }
 
@@ -849,5 +906,146 @@ impl Vdm {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Data objects from their little-endian bytes on the wire.
+    fn objects(bytes: &[u8]) -> Vec<u32> {
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
+            .collect()
+    }
+
+    /// The first product type VDO of a Discover Identity ACK on SOP'.
+    fn cable_vdo(bytes: &[u8]) -> ProductTypeVdo {
+        let vdm = Vdm::decode(&objects(bytes), Sop::SopPrime).expect("a VDM");
+        let VdmBody::DiscoverIdentity(identity) = vdm.body else {
+            panic!("not a Discover Identity ACK: {:?}", vdm.body);
+        };
+        *identity.product_type_vdos.first().expect("a cable VDO")
+    }
+
+    /// ACK header, ID Header, Cert Stat, Product VDO of the session-2 240 W
+    /// cable, with the ID Header's top byte (it holds the product type,
+    /// bits 29..27) as given, then `vdo`. [device]
+    fn ack_of(id_header_top_byte: u8, vdo: [u8; 4]) -> Vec<u8> {
+        let mut b = vec![
+            0x41,
+            0xA8,
+            0x00,
+            0xFF,
+            0x0D,
+            0x05,
+            0x60,
+            id_header_top_byte,
+            0x4D,
+            0x40,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x54,
+            0x82,
+        ];
+        b.extend(vdo);
+        b
+    }
+
+    const PASSIVE: u8 = 0x18;
+    const ACTIVE: u8 = 0x20;
+
+    fn passive_speed(vdo: [u8; 4]) -> UsbSpeed {
+        match cable_vdo(&ack_of(PASSIVE, vdo)) {
+            ProductTypeVdo::PassiveCable(c) => c.speed(),
+            other => panic!("not passive: {other:?}"),
+        }
+    }
+
+    fn active_speed(vdo: [u8; 4]) -> UsbSpeed {
+        match cable_vdo(&ack_of(ACTIVE, vdo)) {
+            ProductTypeVdo::ActiveCable(c) => c.speed(),
+            other => panic!("not active: {other:?}"),
+        }
+    }
+
+    // ---- AC-AXHK2P.7: speed and active or passive from the cable VDOs ----
+
+    #[test]
+    fn the_session_2_cable_is_passive_and_usb_2() {
+        // Session 2: the 240 W cable's Passive Cable VDO, 0x000A2640. [device]
+        assert_eq!(passive_speed([0x40, 0x26, 0x0A, 0x00]), UsbSpeed::Usb2);
+    }
+
+    #[test]
+    fn the_product_type_tells_an_active_cable_from_a_passive_one() {
+        let vdo = [0x43, 0x26, 0x0A, 0x00];
+        assert!(matches!(
+            cable_vdo(&ack_of(PASSIVE, vdo)),
+            ProductTypeVdo::PassiveCable(_)
+        ));
+        assert!(matches!(
+            cable_vdo(&ack_of(ACTIVE, vdo)),
+            ProductTypeVdo::ActiveCable(_)
+        ));
+    }
+
+    #[test]
+    fn every_speed_code_of_a_passive_cable_vdo_decodes() {
+        let expected = [
+            (0, UsbSpeed::Usb2),
+            (1, UsbSpeed::Usb32Gen1),
+            (2, UsbSpeed::Usb32Gen2),
+            (3, UsbSpeed::Usb4Gen3),
+            (4, UsbSpeed::Usb4Gen4),
+            (5, UsbSpeed::Reserved(5)),
+            (6, UsbSpeed::Reserved(6)),
+            (7, UsbSpeed::Reserved(7)),
+        ];
+        for (code, speed) in expected {
+            assert_eq!(passive_speed([0x40 | code, 0x26, 0x0A, 0x00]), speed);
+        }
+    }
+
+    #[test]
+    fn every_speed_code_of_an_active_cable_vdo_decodes() {
+        let expected = [
+            (0, UsbSpeed::Usb2),
+            (1, UsbSpeed::Usb32Gen1),
+            (2, UsbSpeed::Usb32Gen2),
+            (3, UsbSpeed::Usb4Gen3),
+            (4, UsbSpeed::Usb4Gen4),
+            (5, UsbSpeed::Reserved(5)),
+        ];
+        for (code, speed) in expected {
+            assert_eq!(active_speed([0x40 | code, 0x26, 0x0A, 0x00]), speed);
+        }
+    }
+
+    #[test]
+    fn the_speed_reads_bits_2_to_0_only() {
+        // Every other bit of the VDO set: still code 0.
+        assert_eq!(passive_speed([0xF8, 0xFF, 0xFF, 0xFF]), UsbSpeed::Usb2);
+        assert_eq!(active_speed([0xF9, 0xFF, 0xFF, 0xFF]), UsbSpeed::Usb32Gen1);
+    }
+
+    #[test]
+    fn a_speed_has_its_plain_name() {
+        for (speed, name) in [
+            (UsbSpeed::Usb2, "USB 2.0"),
+            (UsbSpeed::Usb32Gen1, "USB 3.2 Gen 1"),
+            (UsbSpeed::Usb32Gen2, "USB 3.2 Gen 2 / USB4 Gen 2"),
+            (UsbSpeed::Usb4Gen3, "USB4 Gen 3"),
+            (UsbSpeed::Usb4Gen4, "USB4 Gen 4"),
+            (UsbSpeed::Reserved(6), "reserved (6)"),
+        ] {
+            assert_eq!(speed.name(), name);
+        }
     }
 }

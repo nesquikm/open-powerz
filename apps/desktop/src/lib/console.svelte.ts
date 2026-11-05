@@ -98,18 +98,24 @@ function hexBytes(text: string): number[] | null {
  * control message in any spelling (lowercased, whitespace removed, the value read
  * leniently; a value that cannot be read is refused too), and `pdm open` / `pdm
  * close`. The backend applies the same rule; `goodcrc_parity.json` pins the two
- * together (U+0085 is whitespace to Rust but not to `\s`). */
+ * together (U+0085 is whitespace to Rust but not to `\s`; U+FEFF to `\s` but not to
+ * Rust; the zero-width blanks to neither, so both drop them by name). */
 export function lineRefusal(line: string): string | null {
-  const text = line.trim();
-  const norm = text.replace(/[\s\u0085]+/g, "").toLowerCase();
-  if (norm.startsWith("pdmopen") || norm.startsWith("pdmclose")) return SESSION_REASON;
+  // Rust's `trim` also takes U+0085.
+  const text = line
+    .trim()
+    .replace(/^\u0085+|\u0085+$/g, "")
+    .trim();
+  const norm = text.replace(/[\s\u0085\u200b-\u200d\u2060]+/g, "").toLowerCase();
+  if (norm.startsWith("pdmopen") || norm.startsWith("pdmclose")) {
+    return hasControl(text) ? controlReason(text) : SESSION_REASON;
+  }
   if (norm.startsWith("pdcmd")) {
     const n = norm.startsWith("pdcmd=") ? lenientNumber(norm.slice("pdcmd=".length)) : null;
     if (n === null) return unsureReason(text);
     // The 5-bit Message Type field of the value.
-    return (n & 0x1fn) === 1n ? GOODCRC_REASON : null;
-  }
-  if (norm.startsWith("pddata")) {
+    if ((n & 0x1fn) === 1n) return GOODCRC_REASON;
+  } else if (norm.startsWith("pddata")) {
     const bytes = norm.startsWith("pddata=") ? hexBytes(norm.slice("pddata=".length)) : null;
     if (bytes === null || bytes.length < 3) return unsureReason(text);
     // SOP byte, then the PD header LE: a control GoodCRC has no data objects,
@@ -119,7 +125,20 @@ export function lineRefusal(line: string): string | null {
       return GOODCRC_REASON;
     }
   }
-  return null;
+  return hasControl(text) ? controlReason(text) : null;
+}
+
+/** Whether `text` holds a C0 or C1 control character, as Rust's `char::is_control`. */
+function hasControl(text: string): boolean {
+  return [...text].some((c) => {
+    const code = c.codePointAt(0) ?? 0;
+    return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+  });
+}
+
+/** Why a line with a control character is refused, as the backend words it. */
+function controlReason(text: string): string {
+  return `cannot tell what ${JSON.stringify(text)} sends: a console line is one command, with no control characters`;
 }
 
 /** `HH:MM:SS.mmm` in local time. */
@@ -163,9 +182,12 @@ export class PdConsole {
   busy = $state(false);
 
   #api: ConsoleApi;
+  /** Detect is running: nothing is sent and no dialog opens. */
+  #held: () => boolean;
 
-  constructor(api: ConsoleApi) {
+  constructor(api: ConsoleApi, held: () => boolean = () => false) {
     this.#api = api;
+    this.#held = held;
   }
 
   /** Runs `job` as the one send in flight; ignored while another runs. */
@@ -186,7 +208,7 @@ export class PdConsole {
    * True when the line went out.
    */
   async sendLine(line: string): Promise<boolean> {
-    if (this.busy) return false;
+    if (this.busy || this.#held()) return false;
     this.error = null;
     const text = line.trim();
     if (text === "") return false;
@@ -198,7 +220,10 @@ export class PdConsole {
     let sent = false;
     await this.#exclusive(async () => {
       // The backend's classifier decides (unknown text is above 5 V).
-      if ((await this.#api.consoleRisk(text)) === "above_5v") {
+      const risk = await this.#api.consoleRisk(text);
+      // Detect started meanwhile: the line is dropped, never answered with a dialog.
+      if (this.#held()) return;
+      if (risk === "above_5v") {
         this.pending = { kind: "line", line: text, message: null, text: CONFIRM_TEXT };
         return;
       }
@@ -210,7 +235,7 @@ export class PdConsole {
 
   /** Sends a built message: GoodCRC is refused, above 5 V waits for {@link confirm}. */
   async sendMessage(message: PdMessageRequest): Promise<void> {
-    if (this.busy) return;
+    if (this.busy || this.#held()) return;
     this.error = null;
     const refusal = messageRefusal(message);
     if (refusal !== null) {
@@ -219,7 +244,9 @@ export class PdConsole {
     }
     await this.#exclusive(async () => {
       // The backend's classifier decides, not the UI's own guess.
-      if ((await this.#api.messageRisk(message)) === "above_5v") {
+      const risk = await this.#api.messageRisk(message);
+      if (this.#held()) return;
+      if (risk === "above_5v") {
         this.pending = { kind: "message", line: null, message, text: CONFIRM_TEXT };
         return;
       }
@@ -232,6 +259,7 @@ export class PdConsole {
     const pending = this.pending;
     if (!pending || this.busy) return false;
     this.pending = null;
+    if (this.#held()) return false;
     this.error = null;
     let lineSent = false;
     await this.#exclusive(async () => {

@@ -1,0 +1,81 @@
+---
+title: One-click cable e-marker panel
+milestone: M_7PKVA6
+status: archived
+archived_at: 2026-11-05T07:00:44Z
+id: fr_01M69QVAS7BY12FMV0Y1AXHK2P
+created_at: 2026-10-31T19:48:09.149Z
+changelog_category: Added
+---
+
+# One-click cable e-marker panel
+
+## Summary
+
+Reading a cable's e-marker needs the PD console today.
+A new Cable card in the trigger view reads it with one click.
+It shows the vendor, current, voltage, speed and whether the cable is active.
+If no answer comes, the card explains why.
+The card can also show an identity already seen in a PD capture, which sends nothing.
+
+## Requirement
+
+The trigger view has a Cable card that reads the e-marker with one click during an open PD session, and falls back to the identity seen in a PD capture.
+
+## Acceptance Criteria
+
+- AC-AXHK2P.1: With a PD session open, a "Read cable" button sends one SOP' Discover Identity and shows vendor, VID, PID, maximum current, maximum voltage, USB speed, active or passive, and EPR capability.
+- AC-AXHK2P.2: The button works only inside an open PD session. It never opens, enters or closes a session, and it never sends any other message. With no session open the backend refuses it and sends nothing, with a test. One press sends one message, with no retry.
+- AC-AXHK2P.3: The backend classes exactly that message as 5 V or lower, by comparing the built bytes with one constant in one backend function, so it needs no dialog. No UI flag can select the exemption. Every other SOP' or SOP'' message keeps today's confirmation.
+- AC-AXHK2P.9: A test changes every byte of the built message in turn, covers SOP and SOP'' targets, header bits, the VDM command and an added or removed byte, and shows each variant still needs the confirmation.
+- AC-AXHK2P.4: When the wait ends with no answer, the card says the cable may have no e-marker or the meter may not be the VCONN source. Nothing is retried on its own.
+- AC-AXHK2P.5: A vendor with no entry in our own table shows as its hex VID. The table is written from the public USB-IF list, not from vendor software.
+- AC-AXHK2P.6: With no session open and a PD capture holding a SOP' Discover Identity ACK, the card shows that identity, labelled as seen in the capture, and sends nothing.
+- AC-AXHK2P.7: `powerz-pd` decodes the speed and the active or passive fields from the cable VDOs, with byte-vector tests.
+- AC-AXHK2P.8: The demo device answers with a sample cable. A README line and the trigger how-to describe the card.
+- AC-AXHK2P.10: Read cable is disabled, with the reason shown, while the charger is gone and while Detect runs.
+- AC-AXHK2P.11: A PD capture start the meter refuses says so, naming the capture, with no advice to update the firmware. `app.log` records the start and the meter's answer.
+- AC-AXHK2P.12: A capture start refused at any step, the sign-in read (0x44) or the start itself (0x10), shows the AC.11 message, and `app.log` names the refused request type. A simulator test in which a trigger session drops the meter's sign-in covers it.
+- AC-AXHK2P.13: Read cable is disabled until PD is entered in this trigger session, with the reason shown in the Cable card. A refusal from a press shows in the Cable card, not only at the top of the view.
+- AC-AXHK2P.14: When a read gets no answer, the card says plainly that a cable answers only the port that powers it (VCONN), which the meter may not be in this wiring. The Read cable send stays the one message of AC.2.
+- AC-AXHK2P.15: Leaving the Trigger tab sends one way back to 5 V, then `pdm close`. A test counts the lines written.
+
+## Technical Design
+
+`CableView` gains `speed` and `vendor`. A `cable_read` command builds the message from one constant and waits once with `await_cable_identity`; it does not go through `send_message`, which would enter PD. The exemption is an exact-byte match in one function, so a cable read needs no dialog. The passive path reads the latest matching record from the capture store.
+
+## Testing
+
+Rust unit tests with the simulator cable, including no-answer; Vitest and Playwright for the card. The tester reads a real e-marked cable from a runbook.
+
+## Notes
+
+The classifier exception is deliberately narrow: it covers one message to the cable, which cannot raise VBUS. The first real send runs through the tester's runbook, with nothing on the meter's output and the user's OK.
+
+## Hardware evidence (r4 to r6)
+
+- [x] AC-AXHK2P.4 and AC-AXHK2P.14: r4 (334d005, 2026-11-04) P5. One Read cable press sent exactly one `trigger sent: pd data=018F1001A800FF`, with no dialog and no retry, and the card read word for word "No answer. The cable may have no e-marker. A cable answers only the port that powers it (VCONN). In this wiring the meter may not be the VCONN source."
+- [x] AC-AXHK2P.10: while Detect ran, Read cable was disabled with "Detect is running; read the cable once it ends." (r4 (334d005, 2026-11-04) P3); with the charger gone, disabled with "No charger to ask: press Detect to read the cable." (r6 (20e4bb1, 2026-11-05) T2). r4 P10 and r5 T2 did not show the gone reason; TFA5N7 and WFSNZD fixed that.
+- [x] AC-AXHK2P.11 and AC-AXHK2P.12: a capture start after a trigger session was refused at the sign-in read in r4 P8, r5 D1 and D3, and r6 D3. Each time the banner read "The meter refused to start the PD capture. Replug the meter and try again.", with no firmware advice, and app.log read `pd capture start refused (request 0x44)`. A refusal at 0x10 was never seen on the meter; the simulator test covers it.
+- AC-AXHK2P.1 stays unticked: it cannot be provoked on demand, since no cable has answered the meter's SOP' send (see the implementation notes). Its evidence is automated: `crates/powerz-sim/tests/pdm_message.rs` › `the_emarked_cable_answers_discover_identity_with_its_details`, `apps/desktop/src/lib/backend.trigger.test.ts` › "AC-AXHK2P.1, .6: the Cable card's commands", and `apps/desktop/e2e/ui/trigger.spec.ts` › "Read cable sends one message and shows the whole e-marker (AC-AXHK2P.1, .2)".
+
+## Implementation notes
+
+- An open PD session means the session has entered PD. With another protocol entered, or none, the read is refused and sends nothing, since the button never enters anything.
+- The exemption lives in one backend function, used by the read and by the built-message risk and send, so the same bytes from the console builder need no dialog either. The raw console keeps asking. The library classifier does not change, so `powerz` keeps asking too.
+- A read ends "don't ask again", like any built message.
+- The vendor table is ours and small. An unlisted vendor shows as hex, which is the normal case.
+- The builder's send enters PD first, as before, so the same bytes from the builder can write `entry pd`. The button never does.
+- AC.9's variants found a hole in the library classifier, older than this FR: a body that did not match the header's object count could class as a control message, so a Request's RDO behind a count of zero went out with no dialog. Any such body is now above 5 V, in the CLI too.
+- `pdm.entered()` sees parsed `entry` lines only. An unparsed confirmed console line that changed protocol would leave it saying PD. The read still cannot raise VBUS, so this stays.
+- A variant that drops the object and clears the count (`01 8F 00`) is a different, complete control message, so it keeps its own class.
+- ACs .10 and .11 come from the a5442bc hardware run. B2 never got a fair try: one low VBUS reading ended the PD session at a steady 5.18 V, so the card never came (AC-AXHK2N.9 and .17 now need 300 ms of low readings). AC.1 stays unproven on the meter.
+- In that run the meter refused the capture start (0x10) after a trigger session, with the cable under test in its female port and nothing beyond it. M3's captures were read by polling without 0x10. Whether the trigger session's state or this wiring causes the refusal is not known. The next runbook starts a capture on a fresh connect before any trigger, then again after one, and the log of .11 shows the answers.
+- AC.11's hint says to replug the meter and try again: the refusal's cause is not known, and a replug clears the trigger session. Only the capture start (0x10) gets the new text; every other refused request keeps its hint. The app.log line `pd capture start refused` holds the start and the answer in one line.
+- The f4abf09 hardware run settled D1. A capture start is refused after a trigger session (Detect, the 5 V offer, leaving the tab) and accepted again after a USB replug; `pdm close` alone does not clear it. The refused request was the 0x44 sign-in read, not 0x10: after the trigger session the meter reported no sign-in level and rejected the memory read, so the AC.11 arm never fired. Why a trigger session drops the bulk sign-in is inferred, not proven.
+- B2 in that run sent one SOP' Discover Identity to a 240 W e-marked cable with its far end free and got no answer. The meter is the sink in a trigger session, and a cable answers the VCONN source; no device run has ever seen a cable answer the meter's own SOP' send, with SVDM 2.0 or 2.1. AC.1 therefore stays unproven on the meter, and the next runbook captures the PD traffic around one press. A VBUS dip to 0.08 V two seconds after that send is not tied to it: the log has whole seconds only, and the next run records it.
+- `docs/protocol.md` named `018F1001A000FF` SVDM 1.0; it is SVDM 2.0 (version bits 00), fixed here.
+
+- AC.15 skips the second way back only when the first succeeded and nothing was written since. If the leave's way back fails, the close tries once more before `pdm close`, which is the safe side.
+- A refused capture start at any step, the sign-in included, now reads as a refused capture. There is no automatic CONNECT or retry: the hint says to replug.
+- Is there a mode where the meter is the VCONN source, so Read cable works in another wiring? The protocol notes and the manual's digest say no. They document the meter's own e-marker reader as a menu module with no PC command. The serial docs say only that a cable message needs the cable powered (VCONN) and firmware above V2.0.4. Nothing names a source role, a VCONN-on switch or a way to start the meter's reader from the PC. `pd drp` and `pd cmd=9` swap the data role, not VCONN. A VCONN_Swap (`pd cmd=11`) is undocumented for this firmware and is a new device command, so it is not added without a spec decision. `em=` emulates an e-marker; it does not read one. AC.1 stays unproven on the meter.

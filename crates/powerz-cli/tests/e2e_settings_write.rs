@@ -110,7 +110,7 @@ fn set_writes_one_frame_and_prints_the_settings_read_back() {
 /// The meter takes the settings write only on its CDC port: over bulk it
 /// was silently ignored (2026-10-29) `[device]`. On CDC there is no CONNECT
 /// (0x02 starts the ADCNEW stream there), so the trace shows only the two
-/// SETTINGS reads and the write.
+/// SETTINGS reads before the write (AC-AXHK2J.2), the write and the read-back.
 #[test]
 fn set_goes_over_the_cdc_port_without_connect() {
     let a = sim()
@@ -129,7 +129,7 @@ fn set_goes_over_the_cdc_port_without_connect() {
         .filter(|l| l.starts_with('>'))
         .map(|l| traced_bytes(l)[0] & 0x7F)
         .collect();
-    assert_eq!(types, vec![0x0C, 0x0A, 0x0C], "{trace}");
+    assert_eq!(types, vec![0x0C, 0x0C, 0x0A, 0x0C], "{trace}");
     assert!(stdout_of(&a).contains("20%"));
 }
 
@@ -244,6 +244,47 @@ fn a_mismatching_re_read_is_exit_5_and_names_the_field() {
     let err = stderr_of(&a);
     assert!(err.contains("brightness"), "{err}");
     assert_eq!(sent_of_type(&err, 0x0A).len(), 1, "not retried: {err}");
+}
+
+/// AC-AXHK2J.2: two reads that differ stop the write. Only GET_DATA 0x008
+/// goes out, twice, and no type 0x0A frame.
+#[test]
+fn two_settings_reads_that_differ_refuse_the_write_with_nothing_sent() {
+    let a = sim()
+        .env("POWERZ_SIM_FAULT", "flaky-settings-read")
+        .args([
+            "--trace",
+            "settings",
+            "set",
+            "brightness=80",
+            "--i-understand",
+        ])
+        .assert()
+        .code(5);
+    let err = stderr_of(&a);
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("settings") && lower.contains("differ"),
+        "{err}"
+    );
+    assert!(
+        sent_of_type(&err, 0x0A).is_empty(),
+        "a write went out: {err}"
+    );
+    let sent: Vec<Vec<u8>> = err
+        .lines()
+        .filter(|l| l.starts_with('>'))
+        .map(traced_bytes)
+        .collect();
+    assert_eq!(sent.len(), 2, "two reads and no retry: {err}");
+    for frame in sent {
+        assert_eq!(frame[0] & 0x7F, 0x0C, "{err}");
+        assert_eq!(
+            u16::from_le_bytes([frame[2], frame[3]]) >> 1,
+            0x008,
+            "{err}"
+        );
+    }
 }
 
 /// The KM003C stores the write at once but redraws a new brightness or

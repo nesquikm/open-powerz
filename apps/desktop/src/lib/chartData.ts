@@ -532,6 +532,75 @@ export function liveRange(id: LiveWindowId, buf: LiveBuffer): [number, number] |
   return ms === null ? [first, last] : [Math.max(first, last - ms), last];
 }
 
+/** The backend's live batch flush interval in ms (20 Hz) (FR HR2JAG). */
+export const LIVE_BATCH_INTERVAL_MS = 50;
+
+/** One frame's smoothed live window end (FR HR2JAG). */
+export interface LiveEnd {
+  endMs: number;
+}
+
+/** The smooth live window `[start, end]` for a smoothed end `liveEndMs` (FR 9QTPNP): the
+ * `spanMs` window ending at `liveEndMs`, never starting before the buffer's first sample
+ * `firstMs`, so a window that is still filling stays on its first sample. */
+export function smoothLiveRange(
+  liveEndMs: number,
+  spanMs: number,
+  firstMs: number,
+): [number, number] {
+  return [Math.max(firstMs, liveEndMs - spanMs), liveEndMs];
+}
+
+/** The smooth live window's end for the frame drawn at wall time `nowMs` (AC-HR2JAG.2):
+ * one batch interval (`lagMs`) behind the newest sample when its batch arrived at
+ * `arrivedAtMs`, moving on with the wall clock until the next batch. It never passes
+ * the newest sample, never trails it by more than `lagMs`, and never moves back from
+ * `prev` (the previous frame's result, or `null` on a stream's first frame). */
+export function smoothLiveEnd(
+  prev: LiveEnd | null,
+  newestMs: number,
+  arrivedAtMs: number,
+  nowMs: number,
+  lagMs: number = LIVE_BATCH_INTERVAL_MS,
+): LiveEnd {
+  const floor = newestMs - lagMs;
+  const clocked = Math.min(newestMs, floor + Math.max(0, nowMs - arrivedAtMs));
+  const endMs = prev === null ? clocked : Math.min(newestMs, Math.max(clocked, prev.endMs));
+  return { endMs };
+}
+
+/** True when one batch interval moves a `spanMs` window drawn `plotWidthPx` wide by at
+ * least 2 px, so the smooth live end is worth clocking between batches (AC-HR2JAG.2);
+ * false for non-finite, zero or negative inputs. */
+export function smoothingActive(
+  spanMs: number,
+  plotWidthPx: number,
+  intervalMs: number = LIVE_BATCH_INTERVAL_MS,
+): boolean {
+  if (!(spanMs > 0) || !(plotWidthPx > 0) || !(intervalMs > 0)) return false;
+  if (!Number.isFinite(spanMs) || !Number.isFinite(plotWidthPx) || !Number.isFinite(intervalMs))
+    return false;
+  return (intervalMs * plotWidthPx) / spanMs >= 2;
+}
+
+/** True when the live chart must redraw on the next animation frame although no batch
+ * came (AC-HR2JAG.3): live, visible, smooth scrolling and its end still behind the
+ * newest sample. A hidden, paused or reduced-motion chart never asks (FR C6VR9K). */
+export function liveNeedsFrame(s: {
+  live: boolean;
+  visible: boolean;
+  smooth: boolean;
+  endMs: number | null;
+  newestMs: number | null;
+}): boolean {
+  if (!s.live || !s.visible || !s.smooth) return false;
+  if (s.endMs === null || s.newestMs === null) return false;
+  return s.endMs < s.newestMs;
+}
+
+/** Smoothing redraws at most 30 times a second (AC-HR2JAG.3). */
+export const LIVE_SMOOTH_MIN_FRAME_MS = 1000 / 30;
+
 /** Reduced motion: `range` (a `spanMs` live window) advanced in tenth-of-a-span steps
  * instead of scrolling; the end never passes the newest sample, so no blank strip
  * shows, and the start never precedes `firstMs`. A window still shorter than its span
@@ -544,6 +613,23 @@ export function steppedRange(
   if (range[1] - range[0] < spanMs || !(spanMs > 0)) return range;
   const step = spanMs / 10;
   const end = Math.floor(range[1] / step) * step;
+  return [Math.max(firstMs, end - spanMs), end];
+}
+
+/** A full `spanMs` live window scrolled in whole steps of one plot pixel (`widthPx`
+ * device px wide): every sample moves by a whole pixel from frame to frame, so the line
+ * and its dashes shift rigidly instead of re-rounding and re-antialiasing (FR SX1VTC).
+ * The end never passes the newest sample, and the start never precedes `firstMs`. A
+ * window shorter than its span, or a plot with no width, is returned as it is. */
+export function pixelSnappedRange(
+  range: [number, number],
+  spanMs: number,
+  widthPx: number,
+  firstMs: number,
+): [number, number] {
+  if (range[1] - range[0] < spanMs || !(spanMs > 0) || !(widthPx > 0)) return range;
+  const msPerPx = spanMs / widthPx;
+  const end = Math.floor(range[1] / msPerPx) * msPerPx;
   return [Math.max(firstMs, end - spanMs), end];
 }
 

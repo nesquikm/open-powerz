@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BackendEvent, TriggerRequest } from "./backend";
+import type { BackendEvent, PdMessageRequest, TriggerRequest } from "./backend";
 import { MockBackend, mockModeFromUrl } from "./mockBackend";
 
 const PD_9V: TriggerRequest = { protocol: "pd", position: 2, voltage_mv: null, current_ma: null };
@@ -95,7 +95,7 @@ describe("AC-DGSQ6S.3: the 5 V risk gate", () => {
     await backend.triggerList("pd");
     await backend.triggerList("qc");
     await expect(backend.triggerRisk(PD_5V)).resolves.toBe("at_most_5v");
-    await expect(backend.triggerRisk(PD_9V)).resolves.toBe("above_5v");
+    await expect(backend.triggerRisk(PD_9V)).resolves.toBe("above_5v_rememberable");
     await expect(backend.triggerRisk({ protocol: "qc", volts: 9 })).resolves.toBe("above_5v");
     await expect(backend.triggerRisk({ protocol: "qc", volts: 5 })).resolves.toBe("at_most_5v");
   });
@@ -308,6 +308,617 @@ describe("AC-DGSQ6S.8: `?mock=trigger-all`, a charger that speaks every protocol
       expect(backend.triggerCommands().at(-1)).toBe("reset");
       vi.advanceTimersByTime(500);
       expect(lastVbus(events)).toBeCloseTo(5, 0);
+    }
+  });
+});
+
+/** FR AXHK2N, AC .7: the mock follows the backend's "don't ask again" rules. */
+describe("AC-AXHK2N.7: the mock's \"don't ask again\"", () => {
+  const PD_15V: TriggerRequest = {
+    protocol: "pd",
+    position: 3,
+    voltage_mv: null,
+    current_ma: null,
+  };
+  const PD_20V: TriggerRequest = {
+    protocol: "pd",
+    position: 4,
+    voltage_mv: null,
+    current_ma: null,
+  };
+  const PD_28V: TriggerRequest = {
+    protocol: "pd",
+    position: 8,
+    voltage_mv: null,
+    current_ma: null,
+  };
+  const pps = (voltage_mv: number): TriggerRequest => ({
+    protocol: "pd",
+    position: 5,
+    voltage_mv,
+    current_ma: 1000,
+  });
+  const AVS_18V: TriggerRequest = {
+    protocol: "pd",
+    position: 9,
+    voltage_mv: 18000,
+    current_ma: 1000,
+  };
+  const QC_9V: TriggerRequest = { protocol: "qc", volts: 9 };
+
+  async function ready(): Promise<MockBackend> {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    return backend;
+  }
+
+  async function armed(): Promise<MockBackend> {
+    const backend = await ready();
+    await backend.triggerRequest(PD_9V, true, true);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+    return backend;
+  }
+
+  /** Disarmed: risk asks again and an unconfirmed 9 V is refused, nothing sent. */
+  async function expectDisarmed(backend: MockBackend): Promise<void> {
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await expect(backend.triggerRisk(PD_9V)).resolves.toBe("above_5v_rememberable");
+    const before = backend.triggerCommands().length;
+    await expect(backend.triggerRequest(PD_9V, false)).rejects.toMatchObject({ kind: "usage" });
+    expect(backend.triggerCommands()).toHaveLength(before);
+  }
+
+  it("classifies what can be remembered", async () => {
+    const backend = await ready();
+    for (const r of [PD_9V, PD_15V, PD_20V, pps(9000), pps(20000)]) {
+      await expect(backend.triggerRisk(r), JSON.stringify(r)).resolves.toBe(
+        "above_5v_rememberable",
+      );
+    }
+    for (const r of [PD_28V, pps(20100), pps(21000), AVS_18V, QC_9V]) {
+      await expect(backend.triggerRisk(r), JSON.stringify(r)).resolves.toBe("above_5v");
+    }
+  });
+
+  it("starts unarmed; a plain confirmation does not arm", async () => {
+    const backend = await ready();
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await backend.triggerRequest(PD_9V, true);
+    await expectDisarmed(backend);
+  });
+
+  it("armed, a later request up to 20 V sends unconfirmed", async () => {
+    const backend = await armed();
+    for (const [r, command] of [
+      [PD_15V, "pd req=3"],
+      [PD_20V, "pd req=4"],
+      [pps(20000), "pd req=5,volt=20000,cur=1000"],
+    ] as [TriggerRequest, string][]) {
+      await expect(backend.triggerRisk(r)).resolves.toBe("armed");
+      await expect(backend.triggerRequest(r, false)).resolves.toMatchObject({ command });
+      expect(backend.triggerCommands().at(-1)).toBe(command);
+    }
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+  });
+
+  it("armed, anything else still asks and sends nothing unconfirmed", async () => {
+    const backend = await armed();
+    await backend.triggerList("qc");
+    const before = backend.triggerCommands().length;
+    for (const r of [PD_28V, pps(21000), AVS_18V, QC_9V]) {
+      await expect(backend.triggerRisk(r), JSON.stringify(r)).resolves.toBe("above_5v");
+      await expect(backend.triggerRequest(r, false), JSON.stringify(r)).rejects.toMatchObject({
+        kind: "usage",
+      });
+    }
+    await expect(backend.triggerConsoleRisk("pd req=3")).resolves.toBe("above_5v");
+    await expect(backend.triggerConsoleSend("pd req=3", false)).rejects.toMatchObject({
+      kind: "usage",
+    });
+    const built = { sop: "sop", msg_type: 2, data_objects: [0x2304b12c] } as const;
+    await expect(
+      backend.triggerMessageRisk({ ...built, data_objects: [...built.data_objects] }),
+    ).resolves.toBe("above_5v");
+    expect(backend.triggerCommands()).toHaveLength(before);
+  });
+
+  it("refuses to remember a request that does not qualify, and sends nothing", async () => {
+    const backend = await ready();
+    await backend.triggerList("qc");
+    const before = backend.triggerCommands().length;
+    for (const r of [PD_28V, pps(21000), AVS_18V, QC_9V]) {
+      await expect(backend.triggerRequest(r, true, true), JSON.stringify(r)).rejects.toMatchObject({
+        kind: "usage",
+      });
+    }
+    expect(backend.triggerCommands()).toHaveLength(before);
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+  });
+
+  it("remember without a confirmation arms nothing and sends nothing", async () => {
+    const backend = await ready();
+    const before = backend.triggerCommands().length;
+    await expect(backend.triggerRequest(PD_9V, false, true)).rejects.toMatchObject({
+      kind: "usage",
+    });
+    expect(backend.triggerCommands()).toHaveLength(before);
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+  });
+
+  it("Clear disarms and sends nothing", async () => {
+    const backend = await armed();
+    const before = backend.triggerCommands().length;
+    await backend.triggerDisarm();
+    expect(backend.triggerCommands()).toHaveLength(before);
+    await expectDisarmed(backend);
+  });
+
+  it("Back to 5 V disarms", async () => {
+    const backend = await armed();
+    await backend.triggerBackTo5v();
+    await expectDisarmed(backend);
+  });
+
+  it("a request at or below 5 V disarms", async () => {
+    const backend = await armed();
+    await backend.triggerRequest(PD_5V, false);
+    await expectDisarmed(backend);
+  });
+
+  it("Detect disarms", async () => {
+    const backend = await armed();
+    await backend.triggerDetect();
+    await backend.triggerList("pd");
+    await expectDisarmed(backend);
+  });
+
+  it("any built message disarms", async () => {
+    const backend = await armed();
+    await backend.triggerMessageSend({ sop: "sop", msg_type: 13, data_objects: [] }, false);
+    await expectDisarmed(backend);
+  });
+
+  it("a console line that is not read-only disarms", async () => {
+    const backend = await armed();
+    await backend.triggerConsoleSend("pd hrst", false);
+    await expectDisarmed(backend);
+  });
+
+  it("a read-only console line stays armed", async () => {
+    const backend = await armed();
+    await backend.triggerConsoleSend("pdm parm", false);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+  });
+
+  it("listing the same offers stays armed", async () => {
+    const backend = await armed();
+    await backend.triggerList("pd");
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+  });
+
+  it("closing the session disarms; a new session starts unarmed", async () => {
+    const backend = await armed();
+    await backend.triggerClose();
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await backend.triggerOpen();
+    await backend.triggerList("pd");
+    await expectDisarmed(backend);
+  });
+
+  it("disconnecting disarms", async () => {
+    const backend = await armed();
+    await backend.disconnect();
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+  });
+
+  it("with no session it reports false and clearing does nothing", async () => {
+    const backend = new MockBackend(null, { pdSynthetic: null });
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await expect(backend.triggerDisarm()).resolves.toBeUndefined();
+  });
+});
+
+describe("FR AXHK2P: the mock's cable read follows the backend's rules", () => {
+  const READ_LINE = "pd data=018F1001A800FF";
+  const READ: PdMessageRequest = {
+    sop: "sop_prime",
+    msg_type: 15,
+    data_objects: [0xff00a801],
+  };
+
+  /** A session with PD entered. */
+  async function inPd(mode: ConstructorParameters<typeof MockBackend>[0] = null) {
+    const { backend } = await opened(mode);
+    await backend.triggerList("pd");
+    return backend;
+  }
+
+  /** `read` adds exactly `expected` to what the charger received. */
+  async function sends(
+    backend: MockBackend,
+    read: () => Promise<unknown>,
+    expected: string[],
+  ): Promise<void> {
+    const before = backend.triggerCommands().length;
+    await read().catch(() => {});
+    expect(backend.triggerCommands().slice(before)).toEqual(expected);
+  }
+
+  it("AC-AXHK2P.8: the demo device answers with a sample cable", async () => {
+    const backend = await inPd();
+    await expect(backend.triggerCableRead()).resolves.toMatchObject({
+      kind: "found",
+      cable: {
+        vid: 0x050d,
+        pid: 0x8254,
+        active: false,
+        max_voltage_v: 50,
+        max_current_ma: 5000,
+        epr_capable: true,
+        speed: "USB 2.0",
+      },
+    });
+  });
+
+  it("AC-AXHK2P.2: one read sends exactly one line", async () => {
+    const backend = await inPd();
+    await sends(backend, () => backend.triggerCableRead(), [READ_LINE]);
+  });
+
+  it("AC-AXHK2P.2: with no session it is refused", async () => {
+    const backend = new MockBackend(null, { pdSynthetic: null });
+    await expect(backend.triggerCableRead()).rejects.toMatchObject({ kind: "usage" });
+  });
+
+  it("AC-AXHK2P.2: with nothing entered it is refused and sends nothing", async () => {
+    const { backend } = await opened();
+    await expect(backend.triggerCableRead()).rejects.toMatchObject({ kind: "usage" });
+    await sends(backend, () => backend.triggerCableRead(), []);
+  });
+
+  it("AC-AXHK2P.2: with a legacy protocol entered last it is refused and sends nothing", async () => {
+    const backend = await inPd();
+    await backend.triggerList("qc");
+    await expect(backend.triggerCableRead()).rejects.toMatchObject({ kind: "usage" });
+    await sends(backend, () => backend.triggerCableRead(), []);
+  });
+
+  it("AC-AXHK2P.2: after a detection it is refused; a PD offer opens it again", async () => {
+    const backend = await inPd();
+    await backend.triggerDetect();
+    await sends(backend, () => backend.triggerCableRead(), []);
+    await backend.triggerList("ufcs");
+    await sends(backend, () => backend.triggerCableRead(), []);
+    await backend.triggerRequest(PD_5V, false);
+    await sends(backend, () => backend.triggerCableRead(), [READ_LINE]);
+  });
+
+  it("AC-AXHK2P.2: out of step it is refused and sends nothing", async () => {
+    const backend = await inPd("trigger-out-of-sync");
+    await expect(backend.triggerCableRead()).rejects.toMatchObject({ kind: "out_of_sync" });
+    await sends(backend, () => backend.triggerCableRead(), []);
+  });
+
+  it("AC-AXHK2P.4: `trigger-no-cable` answers no_answer after one send", async () => {
+    expect(mockModeFromUrl("?mock=trigger-no-cable")).toBe("trigger-no-cable");
+    const backend = await inPd("trigger-no-cable");
+    await expect(backend.triggerCableRead()).resolves.toEqual({ kind: "no_answer" });
+    await sends(backend, () => backend.triggerCableRead(), [READ_LINE]);
+  });
+
+  it("AC-AXHK2P.5: `trigger-unlisted-cable` answers a vendor outside the table", async () => {
+    expect(mockModeFromUrl("?mock=trigger-unlisted-cable")).toBe("trigger-unlisted-cable");
+    const backend = await inPd("trigger-unlisted-cable");
+    await expect(backend.triggerCableRead()).resolves.toMatchObject({
+      kind: "found",
+      cable: { vid: 0x1234, vendor: null },
+    });
+  });
+
+  it("a read ends the armed state, like any built message", async () => {
+    const backend = await inPd();
+    await backend.triggerRequest(PD_9V, true, true);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+    await backend.triggerCableRead();
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+  });
+
+  it("AC-AXHK2P.3: the built message needs no dialog", async () => {
+    const backend = await inPd();
+    await expect(backend.triggerMessageRisk(READ)).resolves.toBe("at_most_5v");
+    await expect(backend.triggerMessageSend(READ, false)).resolves.toMatchObject({
+      command: READ_LINE,
+    });
+  });
+
+  it("AC-AXHK2P.3, .9: any other message to a cable keeps asking", async () => {
+    const backend = await inPd();
+    const others: PdMessageRequest[] = [
+      { ...READ, sop: "sop_double_prime" },
+      { ...READ, sop: "sop" },
+      { ...READ, data_objects: [0xff00a802] },
+      { ...READ, data_objects: [0xff00a841] },
+      { ...READ, data_objects: [0xff008001] },
+      { ...READ, data_objects: [0xff01a801] },
+      { ...READ, data_objects: [0xff00a801, 0] },
+    ];
+    for (const message of others) {
+      await expect(backend.triggerMessageRisk(message)).resolves.toBe("above_5v");
+      await sends(backend, () => backend.triggerMessageSend(message, false), []);
+    }
+  });
+
+  it("AC-AXHK2P.3: the raw console keeps asking for the same bytes", async () => {
+    const backend = await inPd();
+    await expect(backend.triggerConsoleRisk(READ_LINE)).resolves.toBe("above_5v");
+    await sends(backend, () => backend.triggerConsoleSend(READ_LINE, false), []);
+  });
+
+  describe("AC-AXHK2P.6: the cable a capture holds", () => {
+    it("with no capture there is none", async () => {
+      const { backend } = await connected();
+      await expect(backend.pdCableSeen()).resolves.toBeNull();
+    });
+
+    it("with no meter there is none, and no error", async () => {
+      const backend = new MockBackend(null, { pdSynthetic: null });
+      await expect(backend.pdCableSeen()).resolves.toBeNull();
+    });
+
+    it("a capture of the demo negotiation holds the sample cable, and nothing is sent", async () => {
+      const { backend } = await connected();
+      await backend.pdStart();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await backend.pdStop();
+      await expect(backend.pdCableSeen()).resolves.toMatchObject({ vid: 0x050d, pid: 0x8254 });
+      expect(backend.triggerCommands()).toEqual([]);
+    });
+
+    it("a cleared capture holds none", async () => {
+      const { backend } = await connected();
+      await backend.pdStart();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await backend.pdStop();
+      await backend.pdClear();
+      await expect(backend.pdCableSeen()).resolves.toBeNull();
+    });
+  });
+});
+
+describe("AC-AXHK2P.13: the mock says whether PD is entered, like the backend", () => {
+  it("is false with no session", async () => {
+    const backend = new MockBackend(null, { pdSynthetic: null });
+    await expect(backend.triggerPdEntered()).resolves.toBe(false);
+  });
+
+  it("is false in a fresh session and after Detect", async () => {
+    const { backend } = await opened();
+    await expect(backend.triggerPdEntered()).resolves.toBe(false);
+    await backend.triggerList("pd");
+    await backend.triggerDetect();
+    await expect(backend.triggerPdEntered()).resolves.toBe(false);
+  });
+
+  it("follows the protocol entered last", async () => {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    await expect(backend.triggerPdEntered()).resolves.toBe(true);
+    await backend.triggerList("qc");
+    await expect(backend.triggerPdEntered()).resolves.toBe(false);
+    await backend.triggerRequest(PD_5V, false);
+    await expect(backend.triggerPdEntered()).resolves.toBe(true);
+  });
+
+  it("asking sends nothing", async () => {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    const before = backend.triggerCommands().length;
+    await backend.triggerPdEntered();
+    expect(backend.triggerCommands().length).toBe(before);
+  });
+});
+
+describe("AC-AXHK2P.15: the mock's leave sends one way back, then pdm close", () => {
+  it("Back to 5 V on leaving and the close write one pd req=1 between them", async () => {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    await backend.triggerRequest(PD_9V, true);
+    const before = backend.triggerCommands().length;
+    await backend.triggerBackTo5v();
+    await backend.triggerClose();
+    const written = backend.triggerCommands().slice(before);
+    expect(written.filter((c) => c === "pd req=1")).toHaveLength(1);
+    expect(written.at(-1)).toBe("pdm close");
+  });
+});
+
+describe("AC-AXHK2N.9, .10: a charger that goes away", () => {
+  const GONE: { kind: string; message: unknown } = {
+    kind: "usage",
+    message: expect.stringMatching(/Press Detect/),
+  };
+
+  async function goneReady(): Promise<{ backend: MockBackend; events: BackendEvent[] }> {
+    const c = await opened("trigger-charger-gone");
+    await c.backend.triggerDetect();
+    await c.backend.triggerList("pd");
+    return c;
+  }
+
+  /** Long enough for the mock's "a moment after". */
+  async function aMoment(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(5000);
+  }
+
+  it("is a mode of the page URL", () => {
+    expect(mockModeFromUrl("?mock=trigger-charger-gone")).toBe("trigger-charger-gone");
+  });
+
+  it("with no session no charger is gone", async () => {
+    const backend = new MockBackend(null, { pdSynthetic: null });
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("the usual demo charger never goes", async () => {
+    const { backend } = await opened();
+    await backend.triggerList("pd");
+    await backend.triggerRequest(PD_9V, true, true);
+    await aMoment();
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+  });
+
+  it("nothing happens before a request", async () => {
+    const { backend } = await goneReady();
+    await aMoment();
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("stays up long enough for the page to show the request", async () => {
+    const { backend, events } = await goneReady();
+    await backend.triggerRequest(PD_9V, true, true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(lastVbus(events)).toBeGreaterThan(8);
+    await expect(backend.triggerArmed()).resolves.toBe(true);
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("VBUS falls to 0 V a moment after the first request, and armed ends", async () => {
+    const { backend, events } = await goneReady();
+    await backend.triggerRequest(PD_9V, true, true);
+    const sent = backend.triggerCommands().length;
+    await aMoment();
+    expect(lastVbus(events)).toBeLessThan(0.5);
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await expect(backend.triggerChargerGone()).resolves.toBe(true);
+    expect(backend.triggerCommands()).toHaveLength(sent);
+  });
+
+  it("refuses every request until the next PD listing, sending nothing", async () => {
+    const { backend } = await goneReady();
+    await backend.triggerRequest(PD_9V, true);
+    await aMoment();
+    const sent = backend.triggerCommands().length;
+    await expect(backend.triggerRisk(PD_9V)).rejects.toMatchObject(GONE);
+    await expect(backend.triggerRequest(PD_9V, true)).rejects.toMatchObject(GONE);
+    await expect(backend.triggerRequest(PD_5V, false)).rejects.toMatchObject(GONE);
+    expect(backend.triggerCommands()).toHaveLength(sent);
+  });
+
+  it("Detect alone does not clear it; the PD listing does, and arms nothing", async () => {
+    const { backend } = await goneReady();
+    await backend.triggerRequest(PD_9V, true, true);
+    await aMoment();
+    await backend.triggerDetect();
+    await expect(backend.triggerChargerGone()).resolves.toBe(true);
+    await backend.triggerList("pd");
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+    await expect(backend.triggerArmed()).resolves.toBe(false);
+    await expect(backend.triggerRisk(PD_9V)).resolves.toBe("above_5v_rememberable");
+  });
+
+  it("only the first request does it: the next one holds", async () => {
+    const { backend, events } = await goneReady();
+    await backend.triggerRequest(PD_9V, true);
+    await aMoment();
+    await backend.triggerDetect();
+    await backend.triggerList("pd");
+    await backend.triggerRequest(PD_9V, true);
+    await aMoment();
+    expect(lastVbus(events)).toBeGreaterThan(8);
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("closing the session forgets it", async () => {
+    const { backend } = await goneReady();
+    await backend.triggerRequest(PD_9V, true);
+    await aMoment();
+    await backend.triggerClose();
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+});
+
+describe("AC-WFSNZD.4: `trigger-cc-gone`, a charger unplugged right after Detect", () => {
+  /** The CC lines of the last reading streamed, V. */
+  function lastCc(events: BackendEvent[]): [number, number] {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]!;
+      if (e.type === "batch" && e.data.samples.length > 0) {
+        const s = e.data.samples.at(-1)!;
+        return [s.cc1_v, s.cc2_v];
+      }
+    }
+    return [NaN, NaN];
+  }
+
+  /** What the page does on Detect: detect, then list PD. */
+  async function detectedIn(
+    mode: ConstructorParameters<typeof MockBackend>[0],
+  ): Promise<{ backend: MockBackend; events: BackendEvent[] }> {
+    const c = await opened(mode);
+    await c.backend.triggerDetect();
+    await c.backend.triggerList("pd");
+    return c;
+  }
+
+  it("is a mode of the page URL", () => {
+    expect(mockModeFromUrl("?mock=trigger-cc-gone")).toBe("trigger-cc-gone");
+  });
+
+  it("keeps CC up long enough for the page to list the offers", async () => {
+    const { backend, events } = await detectedIn("trigger-cc-gone");
+    await vi.advanceTimersByTimeAsync(300);
+    expect(Math.max(...lastCc(events))).toBeGreaterThan(1);
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("drops both CC lines below 0.3 V a moment after Detect and sets the gone flag, with no request", async () => {
+    const { backend, events } = await detectedIn("trigger-cc-gone");
+    const sent = backend.triggerCommands().length;
+    await vi.advanceTimersByTimeAsync(5000);
+    const [cc1, cc2] = lastCc(events);
+    expect(cc1).toBeLessThan(0.3);
+    expect(cc2).toBeLessThan(0.3);
+    await expect(backend.triggerChargerGone()).resolves.toBe(true);
+    expect(backend.triggerCommands()).toHaveLength(sent);
+    expect(backend.triggerCommands().some((c) => /^pd req=/.test(c))).toBe(false);
+  });
+
+  it("refuses a request once the charger is gone, sending nothing", async () => {
+    const { backend } = await detectedIn("trigger-cc-gone");
+    await vi.advanceTimersByTimeAsync(5000);
+    const sent = backend.triggerCommands().length;
+    await expect(backend.triggerRequest(PD_9V, true)).rejects.toMatchObject({
+      kind: "usage",
+      message: expect.stringMatching(/Press Detect/),
+    });
+    expect(backend.triggerCommands()).toHaveLength(sent);
+  });
+
+  it("the next PD listing clears it and CC comes back", async () => {
+    const { backend, events } = await detectedIn("trigger-cc-gone");
+    await vi.advanceTimersByTimeAsync(5000);
+    await backend.triggerDetect();
+    await backend.triggerList("pd");
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(Math.max(...lastCc(events))).toBeGreaterThan(1);
+  });
+
+  it("closing the session forgets it", async () => {
+    const { backend } = await detectedIn("trigger-cc-gone");
+    await vi.advanceTimersByTimeAsync(5000);
+    await backend.triggerClose();
+    await expect(backend.triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("the usual demo charger and `trigger-charger-gone` keep CC up after Detect", async () => {
+    for (const mode of [null, "trigger-charger-gone"] as const) {
+      const { backend, events } = await detectedIn(mode);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(Math.max(...lastCc(events))).toBeGreaterThan(1);
+      await expect(backend.triggerChargerGone()).resolves.toBe(false);
+      await backend.disconnect();
     }
   });
 });

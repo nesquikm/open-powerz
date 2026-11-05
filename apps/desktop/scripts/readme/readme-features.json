@@ -13,7 +13,16 @@
   "V9SK54": "firmware-update: firmware from the cli",
   "V9SK55": "firmware-update: advanced firmware switch",
   "V9SK56": null,
+  "XCCQAK": "firmware-update: read the device list labels",
   "PR41FT": "protocol-triggers: confirmation above 5 v",
+  "AXHK2N": "protocol-triggers: don't ask again",
+  "AXHK2P": "protocol-triggers: press read cable",
+  "AXHK2Q": "live-meter: hide serial numbers",
+  "CW66T1": "live-meter: for a short note on what it means",
+  "AXHK2R": "recorder-and-charts: auto-stop on low current",
+  "AXHK2S": "recorder-and-charts: open a csv recording",
+  "AXHK2T": "recorder-and-charts: measure between two cursors with the chart ruler",
+  "AXHK2V": "recorder-and-charts: save the chart as an image",
   "DGSQ6P": "protocol-triggers: trigger 9 v from a pd charger",
   "DGSQ6Q": "protocol-triggers: qc 2.0/3.0, fcp, afc",
   "DGSQ6R": "protocol-triggers: detect which fast-charge protocols",
@@ -41,5 +50,6 @@
   "SJGK7E": "live-meter: pick a meter",
   "N6EHQC": "live-meter: see vbus, ibus",
   "STQEA1": "cli: script the meter with",
-  "G0W08Z": "demo-device-and-simulator: try everything without a meter"
+  "G0W08Z": "demo-device-and-simulator: try everything without a meter",
+  "AXHK2W": "recorder-and-charts: run long sessions"
 }

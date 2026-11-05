@@ -4,10 +4,13 @@
  * AC-V9SK52.3 (AC .8).
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ConnectedInfo, FirmwareFileInfo } from "./backend";
 import { deviceDetailsRows, firmwareWarningText } from "./deviceDetails";
+import { CANCEL_TOO_LATE } from "./firmwareUpdate.svelte";
 import { firmwareNotes, notesNumbered } from "./firmwareFile";
 
 function info(overrides: Record<string, unknown> = {}): ConnectedInfo {
@@ -38,6 +41,7 @@ function fileWith(release_notes_en: string): FirmwareFileInfo {
     date: "2026.9.29",
     crc: "A175E4A0",
     size: 1,
+    stored_size: 1,
     release_notes_en,
   };
 }
@@ -90,7 +94,7 @@ describe("numbered release notes (AC-4PJRVJ.8)", () => {
 
 describe("the update check (AC-4PJRVJ.8, AC-V9SK52.3)", () => {
   const updateCheck = (i: ConnectedInfo) =>
-    deviceDetailsRows(i).find((r) => r.label === "Update check")?.value;
+    deviceDetailsRows(i, false).find((r) => r.label === "Update check")?.value;
 
   it("never says update required", () => {
     expect(updateCheck(info({ update_required: true }))).not.toMatch(/update required/i);
@@ -107,5 +111,42 @@ describe("the update check (AC-4PJRVJ.8, AC-V9SK52.3)", () => {
       info(),
     );
     expect(text ?? "").not.toMatch(/update required/i);
+  });
+});
+
+describe("dead firmware code is gone (AC-AXHK2M.4)", () => {
+  const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
+
+  const NOT_SOURCES =
+    /^(\..*|node_modules|target|dist.*|tests|e2e|test-results|gen|docs|specs|snapshots)$/;
+
+  /** Every source file under `dir`, Rust and TypeScript, without the tests. */
+  function sources(dir: string): { path: string; text: string }[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) return NOT_SOURCES.test(entry.name) ? [] : sources(path);
+      if (!/\.(rs|ts|svelte|json|txt)$/.test(path) || path.endsWith(".test.ts")) return [];
+      return [{ path, text: readFileSync(path, "utf8") }];
+    });
+  }
+
+  it("has no firmware constants only the tests read", () => {
+    const details = read("./deviceDetails.ts");
+    expect(details).not.toContain("MIN_SUPPORTED_FIRMWARE");
+    expect(details).not.toContain("KNOWN_LATEST_FIRMWARE");
+  });
+
+  it("states why Cancel is too late in one place", () => {
+    const sentence = "The erase has started, so the update can no longer be cancelled.";
+    const root = fileURLToPath(new URL("../../../../", import.meta.url));
+    const holders = sources(root).filter((f) => f.text.includes(sentence));
+    expect(holders.map((f) => f.path)).toHaveLength(1);
+    expect(CANCEL_TOO_LATE).toBe(sentence);
+  });
+
+  it("makes cancelFlash a required member of the API", () => {
+    const source = read("./firmwareUpdate.svelte.ts");
+    expect(source).toMatch(/\bcancelFlash: \(\) => Promise<void>;/);
+    expect(source).not.toContain("cancelFlash?.");
   });
 });

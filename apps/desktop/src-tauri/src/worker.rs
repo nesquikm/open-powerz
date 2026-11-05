@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -23,12 +23,17 @@ use powerz_protocol::session::{
 use powerz_protocol::transport::{self, Transport, guard::GuardedTransport};
 use serde::{Deserialize, Serialize};
 
+use crate::app_log::SessionLog;
 use crate::batch::{Batch, Batcher, Sample};
-use crate::history::{Series, SeriesBuckets};
+use crate::history::{Records, Series, SeriesBuckets};
 use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
-use crate::recording::{self, ExportProgress, Recorder, RecordingEvent, RecordingSummary};
+use crate::recording::{
+    self, EndReason, ExportProgress, Limits, Recorder, RecordingEvent, RecordingSummary,
+};
+use crate::recording_file;
 use crate::stats::StatsSnapshot;
-use crate::store::{SessionStore, temp_at};
+use crate::store::{SessionStore, TempLog, temp_at};
+use crate::trigger::CableView;
 use crate::ui_error::{self, ErrorKind, UiError};
 
 /// Where the live measurements come from (FR 1HHT02), named on the wire
@@ -55,6 +60,8 @@ pub struct WorkerConfig {
     pub mode: DeviceMode,
     /// Where the measurements come from; the queue by default.
     pub source: MeasurementSource,
+    /// Status blocks the PD capture keeps (FR AXHK2W, AC .2).
+    pub pd_status_limit: usize,
 }
 
 impl WorkerConfig {
@@ -65,6 +72,15 @@ impl WorkerConfig {
             session_id,
             mode: DeviceMode::Application,
             source: MeasurementSource::Queue,
+            pd_status_limit: crate::pd_capture::MAX_STATUS_SAMPLES,
+        }
+    }
+
+    /// These settings, with a PD capture keeping at most `n` status blocks.
+    pub fn with_pd_status_limit(self, n: usize) -> Self {
+        Self {
+            pd_status_limit: n,
+            ..self
         }
     }
 }
@@ -137,6 +153,8 @@ pub enum GapKind {
     Stream,
     /// The meter was unplugged between two connections.
     Outage,
+    /// The recording was paused (FR AXHK2R).
+    Pause,
 }
 
 /// A span of session time without samples.
@@ -155,6 +173,18 @@ pub struct Gap {
 pub struct PdState {
     /// The PD sniffer runs.
     pub capturing: bool,
+    /// Why the capture stopped, when something other than the user, a
+    /// disconnect or an unplug stopped it (FR JQ971R, AC .1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PdStopReason>,
+}
+
+/// Why a PD capture stopped (FR JQ971R, AC .1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdStopReason {
+    /// Opening a trigger session stopped it.
+    Trigger,
 }
 
 /// A batch of PD table rows (FR TGE83C).
@@ -169,6 +199,9 @@ pub struct PdRows {
 pub struct PdStatusBatch {
     /// Status blocks in time order.
     pub samples: Vec<PdStatusSample>,
+    /// Status blocks the backend dropped past its limit since the last
+    /// clear (FR AXHK2W, AC .2).
+    pub dropped: u64,
 }
 
 /// The meter's settings as the panel shows them, in display order (FR
@@ -553,7 +586,7 @@ pub struct Worker<T: Transport, C: Clock> {
     temp_c: Option<f64>,
     /// Wall-clock time `temp_c` was read, ms.
     temp_read_ms: Option<u64>,
-    /// Groups records into UI batches flushed at 20–60 Hz.
+    /// Groups records into UI batches flushed at most 20 times a second.
     batcher: Batcher,
     /// Wall-clock time the next queue poll is due, ms.
     next_poll_ms: u64,
@@ -562,8 +595,13 @@ pub struct Worker<T: Transport, C: Clock> {
     store: SessionStore,
     /// The open recording, if any.
     recording: Option<Recorder>,
-    /// The file the open recording writes, when it was opened by path.
-    recording_path: Option<PathBuf>,
+    /// Which recording [`Worker::recording`] holds, 0 for none, for those
+    /// outside the worker thread: asking the thread would wait on it
+    /// (FR AXHK2F).
+    recording_id: Arc<AtomicU64>,
+    /// The file the open recording writes, when it was opened by path, for
+    /// the manager too: an export of another meter must not replace it.
+    recording_path: RecordingPath,
     sink: Sink,
     in_order: InOrder,
     /// Adds up the time blocked in the worker's own calls, when given.
@@ -580,6 +618,14 @@ pub struct Worker<T: Transport, C: Clock> {
     poll_holds: u32,
     /// Whether a PDM session is open on this meter, when the owner tells.
     pdm_open: Option<PdmOpen>,
+    /// Where errors that leave the session running are logged (FR AXHK2G).
+    log: SessionLog,
+    /// The last queue poll failed, and its error is already in the log.
+    queue_faulted: bool,
+    /// The last PD poll failed, and its error is already in the log.
+    pd_faulted: bool,
+    /// The last snapshot failed, and its error is already in the log.
+    snapshot_faulted: bool,
 }
 
 /// A running PD sniffer.
@@ -662,15 +708,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             next_poll_ms: now,
             store,
             recording: None,
-            recording_path: None,
+            recording_id: Arc::default(),
+            recording_path: RecordingPath::default(),
             sink,
             in_order,
             meter,
             pd_run: None,
-            pd: PdCapture::new(),
+            pd: PdCapture::new().with_status_limit(config.pd_status_limit),
             pd_meter: (info.model.clone(), info.firmware_version.clone()),
             poll_holds: 0,
             pdm_open: None,
+            log: SessionLog::default(),
+            queue_faulted: false,
+            pd_faulted: false,
+            snapshot_faulted: false,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -701,6 +752,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             return Ok(());
         }
         let adc = blocked(self.meter.as_ref(), || session.read_adc())?;
+        self.snapshot_faulted = false;
         self.temp_c = adc.temp_c();
         if let Some(temp) = self.temp_c {
             let now = self.clock.now_ms();
@@ -712,9 +764,18 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     }
 
     /// Send `batch` with the statistics up to and including it.
+    /// Samples recorded before a history clear are dropped, even when the
+    /// clear did not go through the worker (AC-HR2JAG.1).
     fn emit_batch(&mut self, mut batch: Batch) {
         let store = &self.store;
-        batch.stats = blocked(self.meter.as_ref(), || store.stats());
+        let (stats, cleared) = blocked(self.meter.as_ref(), || {
+            let data = store.lock();
+            (data.stats(), data.cleared_through_ms())
+        });
+        batch.stats = stats;
+        if let Some(cleared) = cleared {
+            batch.samples.retain(|s| s.t_ms > cleared);
+        }
         self.emit(BackendEvent::Batch(batch));
     }
 
@@ -788,11 +849,21 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         if let Some(e) = write_err {
             self.fail_recording(recording::io_error(&e));
         }
+        if let Some(ended) = self.recording.as_ref().and_then(Recorder::limit_reached) {
+            self.close_recording(ended);
+        }
+    }
+
+    /// Take the open recording, which is over from here on.
+    fn take_recording(&mut self) -> Option<Recorder> {
+        self.recording_id.store(0, Ordering::SeqCst);
+        self.recording_path.set(None);
+        self.recording.take()
     }
 
     /// End the open recording after a write error, keeping its rows.
     fn fail_recording(&mut self, error: UiError) {
-        if let Some(rec) = self.recording.take() {
+        if let Some(rec) = self.take_recording() {
             // Rows still waiting in the buffer never reached the file.
             let rows = rec.kept_rows();
             // Closing the file is all that is left to do; the error is the news.
@@ -817,11 +888,10 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         }
     }
 
-    /// Close the open recording because the session ended; `unplugged` when
-    /// the meter went away rather than being disconnected on request.
-    fn end_recording(&mut self, unplugged: bool) {
-        if let Some(rec) = self.recording.take() {
-            let event = match rec.finish(unplugged) {
+    /// Close the open recording for `ended` and tell the page.
+    fn close_recording(&mut self, ended: EndReason) {
+        if let Some(rec) = self.take_recording() {
+            let event = match blocked(self.meter.as_ref(), || rec.finish(ended)) {
                 Ok(summary) => RecordingEvent::Stopped(summary),
                 Err((rows, error)) => RecordingEvent::Failed { rows, error },
             };
@@ -840,42 +910,58 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         self.recording.is_some()
     }
 
-    /// Start recording every following record to `out`: the header is
-    /// written and flushed now, rows as they arrive.
-    pub fn start_recording(&mut self, out: Box<dyn Write + Send>) -> Result<(), UiError> {
+    /// Refuse a recording that cannot start now.
+    fn check_recording_start(&self, limits: &Limits) -> Result<(), UiError> {
         if self.session.is_none() {
             return Err(not_connected());
         }
         if self.recording.is_some() {
             return Err(UiError::usage("A recording is already running."));
         }
+        limits.check()
+    }
+
+    /// Start recording every following record to `out`: the header is
+    /// written and flushed now, rows as they arrive.
+    pub fn start_recording(&mut self, out: Box<dyn Write + Send>) -> Result<(), UiError> {
+        self.start_recording_with(out, Limits::default())
+    }
+
+    /// [`start_recording`](Self::start_recording), ended by `limits` as well.
+    pub fn start_recording_with(
+        &mut self,
+        out: Box<dyn Write + Send>,
+        limits: Limits,
+    ) -> Result<(), UiError> {
+        self.check_recording_start(&limits)?;
         let now = self.clock.now_ms();
-        let rec = Recorder::start(out, now).map_err(|e| recording::io_error(&e))?;
+        // Out before the header, the first sign of the recording outside this
+        // thread, so a reader never finds a recording with no id
+        // (AC-AXHK2F.5).
+        let id = NEXT_RECORDING_ID.fetch_add(1, Ordering::SeqCst);
+        self.recording_id.store(id, Ordering::SeqCst);
+        let rec = Recorder::start(out, now, limits).map_err(|e| {
+            self.recording_id.store(0, Ordering::SeqCst);
+            recording::io_error(&e)
+        })?;
         self.recording = Some(rec);
         self.emit(BackendEvent::Recording(RecordingEvent::Started));
         Ok(())
     }
 
-    /// Create the file at `path` and record to it. The checks run first, so a
-    /// refused start never touches the path; a file this call created is
-    /// removed again if the header cannot be written.
-    pub fn record_to(&mut self, path: &Path) -> Result<(), UiError> {
-        if self.session.is_none() {
-            return Err(not_connected());
-        }
-        if self.recording.is_some() {
-            return Err(UiError::usage("A recording is already running."));
-        }
+    /// Create the file at `path` and record to it until `limits` end it. The
+    /// checks run first, so a refused start never touches the path; a file
+    /// this call created is removed again if the header cannot be written.
+    pub fn record_to(&mut self, path: &Path, limits: Limits) -> Result<(), UiError> {
+        self.check_recording_start(&limits)?;
         let existed = path.exists();
         let file = recording::create_file(path)?;
-        match self.start_recording(Box::new(file)) {
-            Ok(()) => {
-                // Canonical, so the export guard sees through symlinks.
-                self.recording_path =
-                    Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()));
-                Ok(())
-            }
+        // Before the first row, so no export slips in behind the start.
+        self.recording_path.set(Some(same_file_path(path)));
+        match self.start_recording_with(Box::new(file), limits) {
+            Ok(()) => Ok(()),
             Err(e) => {
+                self.recording_path.set(None);
                 if !existed {
                     let _ = std::fs::remove_file(path);
                 }
@@ -887,23 +973,60 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// Create the file at `path` and export the session to it, unless it is
     /// the file being recorded to.
     pub fn export_to(&mut self, path: &Path, progress: ProgressFn) -> Result<ExportJob, UiError> {
-        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-        if self.recording.is_some() && self.recording_path.as_deref() == Some(target.as_path()) {
-            return Err(UiError::usage(
-                "That file is being recorded to; pick another name for the export.",
-            ));
-        }
+        self.refuse_recording_file(path)?;
         let file = recording::create_file(path)?;
         Ok(self.export(Box::new(file), progress))
     }
 
-    /// Stop the recording: flush and close the file.
+    /// Export the session to a vendor-layout `.db` file at `path` on a thread
+    /// of its own, unless it is the file being recorded to.
+    pub fn export_db_to(
+        &mut self,
+        path: &Path,
+        progress: ProgressFn,
+    ) -> Result<ExportJob, UiError> {
+        self.refuse_recording_file(path)?;
+        Ok(export_store_db(
+            &self.store,
+            path,
+            self.clock.now_ms(),
+            progress,
+        ))
+    }
+
+    fn refuse_recording_file(&self, path: &Path) -> Result<(), UiError> {
+        refuse_recorded(path, self.recording_path.get().as_slice())
+    }
+
+    /// Stop the recording: flush and close the file. When the last flush fails
+    /// the recording is over all the same, so the page hears that it ended.
     pub fn stop_recording(&mut self) -> Result<RecordingSummary, UiError> {
-        let rec = self
-            .recording
-            .take()
-            .ok_or_else(|| UiError::usage("Nothing is being recorded."))?;
-        rec.finish(false).map_err(|(_, error)| error)
+        let rec = self.take_recording().ok_or_else(nothing_recorded)?;
+        rec.finish(EndReason::Stopped).map_err(|(rows, error)| {
+            self.emit(BackendEvent::Recording(RecordingEvent::Failed {
+                rows,
+                error: error.clone(),
+            }));
+            error
+        })
+    }
+
+    /// Hold the rows back while the stream goes on: the file stays open.
+    pub fn pause_recording(&mut self) -> Result<(), UiError> {
+        self.recording
+            .as_mut()
+            .ok_or_else(nothing_recorded)?
+            .pause();
+        Ok(())
+    }
+
+    /// Write rows again after a pause, in the same file.
+    pub fn resume_recording(&mut self) -> Result<(), UiError> {
+        self.recording
+            .as_mut()
+            .ok_or_else(nothing_recorded)?
+            .resume();
+        Ok(())
     }
 
     /// Export every record of this session to `out` on a thread of its own,
@@ -912,7 +1035,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         &mut self,
         out: Box<dyn Write + Send>,
         progress: impl FnMut(ExportProgress) + Send + 'static,
-    ) -> JoinHandle<Result<u64, UiError>> {
+    ) -> ExportJob {
         let now = self.clock.now_ms();
         export_store(&self.store, out, now, progress)
     }
@@ -940,8 +1063,11 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     }
 
     /// Discard the session history. A running export works on its own copy
-    /// and a recording writes its own file, so neither is affected.
+    /// and a recording writes its own file, so neither is affected. The
+    /// samples still waiting in the batcher go out first, so every sample
+    /// recorded before the clear reaches the page before it.
     pub fn clear_history(&mut self) {
+        self.flush_batch();
         self.store.clear_history();
     }
 
@@ -991,7 +1117,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             self.emit(BackendEvent::PdRows(PdRows { rows }));
         }
         if let Some(samples) = self.pd.take_status_due(now) {
-            self.emit(BackendEvent::PdStatus(PdStatusBatch { samples }));
+            self.emit_pd_status(samples);
         }
         let mut wake = self.next_poll_ms.min(self.batcher.next_due_ms());
         if let Some(run) = &self.pd_run {
@@ -1047,9 +1173,13 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 let offset = blocked(self.meter.as_ref(), || store.offset_ms());
                 self.pd.set_session_offset(offset);
                 self.pd.push(&poll.records, poll.status);
+                self.pd_faulted = false;
                 Step::Continue
             }
-            Err(e) => self.poll_failed(&e),
+            Err(e) => {
+                let repeat = std::mem::replace(&mut self.pd_faulted, true);
+                self.poll_failed(&e, repeat)
+            }
         }
     }
 
@@ -1057,9 +1187,17 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// open PDM session alone: ending the stream would close it, and the
     /// reconnect's bulk CONNECT would silence it [device]. The next polls
     /// try again; once PDM is closed a fault that stays ends the session.
-    fn poll_failed(&mut self, e: &session::Error) -> Step {
+    /// The log and the page get the first failure of a run, not one per poll
+    /// (`repeat`). The log is written off this thread: the polls never wait
+    /// on the disk (FR X2SPDW).
+    fn poll_failed(&mut self, e: &session::Error, repeat: bool) -> Step {
         let pdm_open = self.pdm_open.as_ref();
         if !is_device_loss(e) && blocked(self.meter.as_ref(), || pdm_open.is_some_and(|f| f())) {
+            if !repeat {
+                let error = session_error(e);
+                self.log_failure(error.clone());
+                self.emit(BackendEvent::Error(error));
+            }
             return Step::Continue;
         }
         self.lose_session(e)
@@ -1069,24 +1207,34 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// PD capture, then report the disconnect.
     fn lose_session(&mut self, e: &session::Error) -> Step {
         self.session = None;
-        self.end_recording(true);
+        self.close_recording(EndReason::Disconnected);
         self.flush_batch();
         if self.pd_run.take().is_some() {
-            self.emit_pd_stopped();
+            self.emit_pd_stopped(None);
         }
         self.emit(disconnected(Some(session_error(e))));
         Step::Ended
     }
 
+    /// Send a batch of PD status blocks with the count dropped past the
+    /// limit so far (FR AXHK2W, AC .2).
+    fn emit_pd_status(&mut self, samples: Vec<PdStatusSample>) {
+        let dropped = self.pd.status_dropped();
+        self.emit(BackendEvent::PdStatus(PdStatusBatch { samples, dropped }));
+    }
+
     /// Send every waiting PD row now, then report the capture stopped.
-    fn emit_pd_stopped(&mut self) {
+    fn emit_pd_stopped(&mut self, reason: Option<PdStopReason>) {
         if let Some(rows) = self.pd.take_all() {
             self.emit(BackendEvent::PdRows(PdRows { rows }));
         }
         if let Some(samples) = self.pd.take_all_status() {
-            self.emit(BackendEvent::PdStatus(PdStatusBatch { samples }));
+            self.emit_pd_status(samples);
         }
-        self.emit(BackendEvent::PdState(PdState { capturing: false }));
+        self.emit(BackendEvent::PdState(PdState {
+            capturing: false,
+            reason,
+        }));
     }
 
     /// Records and the PD sniffer use requests that were never checked on
@@ -1109,20 +1257,38 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         if self.pd_run.is_some() {
             return Ok(());
         }
-        blocked(self.meter.as_ref(), || session.start_pd_sniffer())
-            .map_err(|e| session_error(&e))?;
+        let started = blocked(self.meter.as_ref(), || session.start_pd_sniffer());
+        // Any refusal during the start (the sign-in read 0x44 or the start
+        // 0x10) is the capture refused; the log names which (AC-AXHK2P.12).
+        let refused = match &started {
+            Err(session::Error::Rejected { request_type }) => Some(request_type & 0x7F),
+            _ => None,
+        };
+        self.log_pd_capture("start", started.is_ok(), refused);
+        started.map_err(|e| match refused {
+            Some(_) => ui_error::capture_start_refused(),
+            None => session_error(&e),
+        })?;
         self.pd.start_run();
         let now = self.clock.now_ms();
         self.pd_run = Some(PdRun {
             clock: CaptureClock::new(),
             next_poll_ms: now,
         });
-        self.emit(BackendEvent::PdState(PdState { capturing: true }));
+        self.emit(BackendEvent::PdState(PdState {
+            capturing: true,
+            reason: None,
+        }));
         Ok(())
     }
 
     /// Stop the PD sniffer (0x11); the captured records stay.
     pub fn stop_pd(&mut self) -> Result<(), UiError> {
+        self.stop_pd_for(None)
+    }
+
+    /// [`stop_pd`](Self::stop_pd) with `reason` on the capture-stopped event.
+    pub fn stop_pd_for(&mut self, reason: Option<PdStopReason>) -> Result<(), UiError> {
         if self.pd_run.take().is_none() {
             return Ok(());
         }
@@ -1131,8 +1297,24 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 .map_err(|e| session_error(&e)),
             None => Err(not_connected()),
         };
-        self.emit_pd_stopped();
+        self.log_pd_capture("stop", result.is_ok(), None);
+        self.emit_pd_stopped(reason);
         result
+    }
+
+    /// The PD capture's start or stop with the meter's answer (AC-AXHK2N.16),
+    /// off this thread like [`log_failure`](Self::log_failure).
+    /// `refused_type` is the request type the meter REJECTed, if one was.
+    fn log_pd_capture(&mut self, what: &'static str, accepted: bool, refused_type: Option<u8>) {
+        let answer = match (accepted, refused_type) {
+            (true, _) => "accepted".to_owned(),
+            (false, Some(ty)) => format!("refused (request {ty:#04x})"),
+            (false, None) => "refused".to_owned(),
+        };
+        let log = self.log.clone();
+        (self.in_order)(Box::new(move || {
+            log.event(&format!("pd capture {what} {answer}"));
+        }));
     }
 
     /// The raw bytes and field tree of captured record `index`.
@@ -1315,6 +1497,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             kind: ErrorKind::Internal,
             message: format!("The backup failed, so nothing was deleted: {detail}"),
             hint: None,
+            sessions: Vec::new(),
         };
         std::fs::create_dir_all(backup_dir)
             .map_err(|e| backup_failed(format!("cannot create {}: {e}", backup_dir.display())))?;
@@ -1357,6 +1540,12 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             backup_dir: backup_dir.display().to_string(),
             backups,
         })
+    }
+
+    /// Status blocks the PD capture dropped past its limit since the last
+    /// clear (FR AXHK2W, AC .2).
+    pub fn pd_status_dropped(&self) -> u64 {
+        self.pd.status_dropped()
     }
 
     /// The PD capture so far, to be saved as a pdcap file (FR TGE83E) off
@@ -1402,12 +1591,20 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 self.queue_records(&poll);
                 // A failed snapshot only costs the temperature reading; a
                 // dead pipe fails the next queue poll and ends the session.
-                if self.snapshot_if_due().is_err() {
+                if let Err(e) = self.snapshot_if_due() {
                     self.temp_c = None;
+                    let repeat = std::mem::replace(&mut self.snapshot_faulted, true);
+                    if !repeat && !is_device_loss(&e) {
+                        self.log_failure(session_error(&e));
+                    }
                 }
+                self.queue_faulted = false;
                 Step::Continue
             }
-            Err(e) => self.poll_failed(&e),
+            Err(e) => {
+                let repeat = std::mem::replace(&mut self.queue_faulted, true);
+                self.poll_failed(&e, repeat)
+            }
         }
     }
 
@@ -1431,6 +1628,8 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             MeasurementSource::Cdc => session.start_adcnew(Content::Adc, rate),
         }
         .map_err(|e| session_error(&e))?;
+        // Samples at the old rate go out ahead of the rate change.
+        self.flush_batch();
         // The interval across the restart was not measured.
         let store = &self.store;
         blocked(self.meter.as_ref(), || store.start_run());
@@ -1440,6 +1639,21 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             rate_locked: false,
         }));
         Ok(())
+    }
+
+    /// Add the line for an error that leaves the session running, off this
+    /// thread: the polls never wait on the disk (FR X2SPDW). The line queues
+    /// behind the sample batches, and its timestamp is when it is written.
+    fn log_failure(&mut self, error: UiError) {
+        let log = self.log.clone();
+        (self.in_order)(Box::new(move || log.failure(&error)));
+    }
+
+    /// [`log_failure`](Self::log_failure) for a request's answer, if it failed.
+    fn log_if_failed<R>(&mut self, answer: &Result<R, UiError>) {
+        if let Err(error) = answer {
+            self.log_failure(error.clone());
+        }
     }
 
     /// Stop the queue and close the pipe.
@@ -1453,7 +1667,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 MeasurementSource::Cdc => session.stop_adcnew(),
             };
             drop(session);
-            self.end_recording(false);
+            self.close_recording(EndReason::Stopped);
             self.flush_batch();
             self.emit(disconnected(None));
         }
@@ -1466,23 +1680,39 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::SetRate(rate, reply) => {
                 let _ = reply.send(self.set_rate(rate));
             }
-            Command::RecordTo(path, reply) => {
-                let _ = reply.send(self.record_to(&path));
+            Command::RecordTo(path, limits, hold, reply) => {
+                let started = self.record_to(&path, limits);
+                self.log_if_failed(&started);
+                // Before the answer: whoever hears it finds the start settled.
+                drop(hold);
+                let _ = reply.send(started);
             }
             Command::ExportTo(path, progress, reply) => {
                 let _ = reply.send(self.export_to(&path, progress));
             }
+            Command::ExportDbTo(path, progress, reply) => {
+                let _ = reply.send(self.export_db_to(&path, progress));
+            }
             Command::StopRecording(reply) => {
                 let _ = reply.send(self.stop_recording());
+            }
+            Command::PauseRecording(reply) => {
+                let _ = reply.send(self.pause_recording());
+            }
+            Command::ResumeRecording(reply) => {
+                let _ = reply.send(self.resume_recording());
             }
             Command::StartPd(reply) => {
                 let _ = reply.send(self.start_pd());
             }
-            Command::StopPd(reply) => {
-                let _ = reply.send(self.stop_pd());
+            Command::StopPd(reason, reply) => {
+                let _ = reply.send(self.stop_pd_for(reason));
             }
             Command::PdDetails(index, reply) => {
                 let _ = reply.send(self.pd_details(index));
+            }
+            Command::PdCable(reply) => {
+                let _ = reply.send(self.pd.latest_cable());
             }
             Command::ClearPd(reply) => {
                 let _ = reply.send(self.clear_pd());
@@ -1505,17 +1735,30 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::DeleteRecords(target, confirm, dir, reply) => {
                 let _ = reply.send(self.delete_records(target, &confirm, &dir));
             }
+            Command::ClearHistory(claimed, reply) => {
+                if !claimed.swap(true, Ordering::SeqCst) {
+                    self.clear_history();
+                }
+                let _ = reply.send(());
+            }
             Command::HoldPolling(hold, reply) => {
                 self.hold_polling(hold);
                 let _ = reply.send(());
             }
+            Command::PdCapturing(reply) => {
+                let _ = reply.send(self.pd_run.is_some());
+            }
+            Command::PdStatusDropped(reply) => {
+                let _ = reply.send(self.pd_status_dropped());
+            }
             Command::Handover(swap, reply) => {
                 // Read here and swapped behind the events already sent, so
                 // the new sink gets exactly the events after this answer.
-                let path = self.recording_path.as_ref();
+                let path = self.recording_path.get();
                 let path = path.map(|p| p.to_string_lossy().into_owned());
                 let progress = self.recording_progress();
-                let held = progress.map(|(rows, elapsed_ms)| (rows, elapsed_ms, path));
+                let paused = self.recording.as_ref().is_some_and(Recorder::is_paused);
+                let held = progress.map(|(rows, elapsed_ms)| (rows, elapsed_ms, path, paused));
                 (self.in_order)(Box::new(move || {
                     swap();
                     let _ = reply.send(held);
@@ -1530,16 +1773,21 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
 /// on the caller's thread against the [`SessionStore`].
 enum Command {
     SetRate(Rate, mpsc::Sender<Result<(), UiError>>),
-    RecordTo(PathBuf, mpsc::Sender<Result<(), UiError>>),
-    ExportTo(
+    RecordTo(
         PathBuf,
-        ProgressFn,
-        mpsc::Sender<Result<ExportJob, UiError>>,
+        Limits,
+        Option<RecordingStartHold>,
+        mpsc::Sender<Result<(), UiError>>,
     ),
+    ExportTo(PathBuf, ProgressFn, ExportReply),
+    ExportDbTo(PathBuf, ProgressFn, ExportReply),
     StopRecording(mpsc::Sender<Result<RecordingSummary, UiError>>),
+    PauseRecording(mpsc::Sender<Result<(), UiError>>),
+    ResumeRecording(mpsc::Sender<Result<(), UiError>>),
     StartPd(mpsc::Sender<Result<(), UiError>>),
-    StopPd(mpsc::Sender<Result<(), UiError>>),
+    StopPd(Option<PdStopReason>, mpsc::Sender<Result<(), UiError>>),
     PdDetails(u64, mpsc::Sender<Result<PdDetails, UiError>>),
+    PdCable(mpsc::Sender<Option<CableView>>),
     ClearPd(mpsc::Sender<Result<PdCleared, UiError>>),
     PdSave(mpsc::Sender<PdSave>),
     ReadSettings(mpsc::Sender<Result<MeterSettingsView, UiError>>),
@@ -1555,9 +1803,17 @@ enum Command {
         PathBuf,
         mpsc::Sender<Result<RecordDeleteView, UiError>>,
     ),
+    /// Send out the batched samples, then discard the session history;
+    /// whoever claims the flag first (the worker or the caller that gave up
+    /// waiting) does the clear, so it happens exactly once.
+    ClearHistory(Arc<AtomicBool>, mpsc::Sender<()>),
     /// Hold or release the queue polling; answered between steps, so no
     /// poll is in flight once a hold is answered.
     HoldPolling(bool, mpsc::Sender<()>),
+    /// Whether the PD capture runs now (AC-AXHK2K.7).
+    PdCapturing(mpsc::Sender<bool>),
+    /// Status blocks the PD capture dropped since the last clear (FR AXHK2W, AC .3).
+    PdStatusDropped(mpsc::Sender<u64>),
     /// Run the sink swap of an attach, then answer the open recording's
     /// progress: both on the worker thread, which sends every recording
     /// event, so none can fall between them (FR VEDDFD).
@@ -1571,12 +1827,16 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Command::SetRate(rate, _) => f.debug_tuple("SetRate").field(rate).finish(),
-            Command::RecordTo(path, _) => f.debug_tuple("RecordTo").field(path).finish(),
+            Command::RecordTo(path, ..) => f.debug_tuple("RecordTo").field(path).finish(),
             Command::ExportTo(path, ..) => f.debug_tuple("ExportTo").field(path).finish(),
+            Command::ExportDbTo(path, ..) => f.debug_tuple("ExportDbTo").field(path).finish(),
             Command::StopRecording(_) => f.write_str("StopRecording"),
+            Command::PauseRecording(_) => f.write_str("PauseRecording"),
+            Command::ResumeRecording(_) => f.write_str("ResumeRecording"),
             Command::StartPd(_) => f.write_str("StartPd"),
-            Command::StopPd(_) => f.write_str("StopPd"),
+            Command::StopPd(..) => f.write_str("StopPd"),
             Command::PdDetails(index, _) => f.debug_tuple("PdDetails").field(index).finish(),
+            Command::PdCable(_) => f.write_str("PdCable"),
             Command::ClearPd(_) => f.write_str("ClearPd"),
             Command::PdSave(_) => f.write_str("PdSave"),
             Command::ReadSettings(_) => f.write_str("ReadSettings"),
@@ -1592,7 +1852,10 @@ impl std::fmt::Debug for Command {
                 .field(target)
                 .field(dir)
                 .finish(),
+            Command::ClearHistory(..) => f.write_str("ClearHistory"),
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
+            Command::PdCapturing(_) => f.write_str("PdCapturing"),
+            Command::PdStatusDropped(_) => f.write_str("PdStatusDropped"),
             Command::Handover(..) => f.write_str("Handover"),
         }
     }
@@ -1600,8 +1863,12 @@ impl std::fmt::Debug for Command {
 
 type ProgressFn = Box<dyn FnMut(ExportProgress) + Send>;
 
-/// A running recording at a handover: rows, elapsed ms and its file.
-pub type HeldRecording = (u64, u64, Option<String>);
+/// Where a command that starts an export answers.
+type ExportReply = mpsc::Sender<Result<ExportJob, UiError>>;
+
+/// A running recording at a handover: rows, elapsed ms, its file and whether
+/// it is paused.
+pub type HeldRecording = (u64, u64, Option<String>, bool);
 
 /// Export every record of `store` to `out` on a thread of its own; the
 /// export works on a snapshot that shares the stored samples. `now_ms` is
@@ -1612,19 +1879,129 @@ fn export_store(
     now_ms: u64,
     progress: impl FnMut(ExportProgress) + Send + 'static,
 ) -> ExportJob {
-    let (history, start_unix_ms, temps) = store.export_source(now_ms);
+    let source = ExportSource::of(store, now_ms);
     std::thread::spawn(move || {
-        let mut cursor = 0;
-        recording::export_iter(
-            history.len() as u64,
-            history.iter_runs().enumerate().map(|(i, (r, new_run))| {
-                (r, new_run, temp_at(&temps, &mut cursor, i, r.time_ms()))
-            }),
+        let rows = recording::export_iter(
+            source.total(),
+            source.rows(),
             out,
-            start_unix_ms,
+            source.start_unix_ms,
             progress,
-        )
+        )?;
+        Ok(source.summary(rows))
     })
+}
+
+/// [`export_store`] to the vendor-layout `.db` file at `path`. The rate is
+/// the first record's, as the param row describes the start of the session.
+fn export_store_db(
+    store: &SessionStore,
+    path: &Path,
+    now_ms: u64,
+    progress: impl FnMut(ExportProgress) + Send + 'static,
+) -> ExportJob {
+    let source = ExportSource::of(store, now_ms);
+    let path = path.to_owned();
+    std::thread::spawn(move || {
+        let rate_sps = source.history.iter().next().map_or(0, |r| r.rate().sps());
+        let rows = recording_file::export_db_iter(
+            source.total(),
+            source.rows(),
+            &path,
+            source.start_unix_ms,
+            rate_sps,
+            progress,
+        )?;
+        Ok(source.summary(rows))
+    })
+}
+
+/// What an export reads: the history's full-resolution part, from the
+/// first record that is not folded (AC-AXHK2W.14).
+struct ExportSource {
+    history: Records,
+    temps: TempLog,
+    /// Wall-clock time of the first exported record, ms.
+    start_unix_ms: u64,
+    folded: Option<ExportFolded>,
+}
+
+impl ExportSource {
+    fn of(store: &SessionStore, now_ms: u64) -> ExportSource {
+        let (history, history_unix_ms, temps) = store.export_source(now_ms);
+        let folded = history.fold_boundary_ms().map(|boundary| {
+            let ms = boundary.saturating_sub(history.time_at(0));
+            ExportFolded {
+                samples: history.folded_len() as u64,
+                ms,
+                start_unix_ms: history_unix_ms + ms,
+            }
+        });
+        ExportSource {
+            start_unix_ms: folded.map_or(history_unix_ms, |f| f.start_unix_ms),
+            history,
+            temps,
+            folded,
+        }
+    }
+
+    /// Rows the export writes.
+    fn total(&self) -> u64 {
+        (self.history.len() - self.history.folded_len()) as u64
+    }
+
+    /// The exported records, each with its own history index's temperature.
+    fn rows(&self) -> impl Iterator<Item = recording_file::ExportRow> + '_ {
+        let skip = self.history.folded_len();
+        let mut cursor = 0;
+        self.history
+            .iter_runs()
+            .enumerate()
+            .map(move |(k, (r, new_run))| {
+                let temp = temp_at(&self.temps, &mut cursor, skip + k, r.time_ms());
+                (r, new_run, temp)
+            })
+    }
+
+    fn summary(&self, rows: u64) -> ExportSummary {
+        ExportSummary {
+            rows,
+            folded: self.folded,
+        }
+    }
+}
+
+/// The file a worker's open recording writes, shared with those outside the
+/// worker thread as [`Worker::recording_id`] is.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecordingPath(Arc<Mutex<Option<PathBuf>>>);
+
+impl RecordingPath {
+    fn set(&self, path: Option<PathBuf>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = path;
+    }
+
+    fn get(&self) -> Option<PathBuf> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// `path` as the guard compares it: canonical, so it sees through symlinks.
+fn same_file_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// Refuse an export to `path` when it is one of the files in `recorded`.
+fn refuse_recorded(path: &Path, recorded: &[PathBuf]) -> Result<(), UiError> {
+    if recorded.contains(&same_file_path(path)) {
+        return Err(UiError::usage(
+            "That file is being recorded to; pick another name for the export.",
+        ));
+    }
+    Ok(())
 }
 
 /// Exports a session: through its worker while one runs, so the file being
@@ -1634,6 +2011,8 @@ pub struct Exporter {
     control: Option<WorkerControl>,
     store: SessionStore,
     now_ms: u64,
+    /// The files every meter records to: an export replaces none of them.
+    recorded: Vec<PathBuf>,
 }
 
 impl Exporter {
@@ -1643,11 +2022,13 @@ impl Exporter {
         control: Option<WorkerControl>,
         store: SessionStore,
         now_ms: u64,
+        recorded: Vec<PathBuf>,
     ) -> Exporter {
         Exporter {
             control,
             store,
             now_ms,
+            recorded,
         }
     }
 
@@ -1657,6 +2038,7 @@ impl Exporter {
         path: &Path,
         progress: impl FnMut(ExportProgress) + Send + 'static,
     ) -> Result<ExportJob, UiError> {
+        refuse_recorded(path, &self.recorded)?;
         match &self.control {
             Some(control) => control.export_to(path, progress),
             None => {
@@ -1670,6 +2052,19 @@ impl Exporter {
             }
         }
     }
+
+    /// Export the session to a vendor-layout `.db` file at `path`.
+    pub fn export_db_to(
+        &self,
+        path: &Path,
+        progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> Result<ExportJob, UiError> {
+        refuse_recorded(path, &self.recorded)?;
+        match &self.control {
+            Some(control) => control.export_db_to(path, progress),
+            None => Ok(export_store_db(&self.store, path, self.now_ms, progress)),
+        }
+    }
 }
 
 /// Write the file at `path` through `write`, atomically: into a new temp
@@ -1679,7 +2074,7 @@ pub(crate) fn write_file_atomically(
     path: &Path,
     write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let (tmp, file) = create_temp_beside(path)?;
+    let (tmp, file) = recording::create_temp_beside(path)?;
     let attempt = || -> std::io::Result<()> {
         let mut out = std::io::BufWriter::new(file);
         write(&mut out)?;
@@ -1691,39 +2086,6 @@ pub(crate) fn write_file_atomically(
     })?;
     sync_parent(path);
     Ok(())
-}
-
-/// A new, empty hidden file in `path`'s folder (the rename into place must
-/// not cross file systems), named after `path`.
-fn create_temp_beside(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = match path.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => Path::new("."),
-    };
-    let name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidFilename, "no file name"))?;
-    loop {
-        let mut tmp_name = std::ffi::OsString::from(".");
-        tmp_name.push(name);
-        tmp_name.push(format!(
-            ".{}-{}.tmp",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let tmp = dir.join(tmp_name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-        {
-            Ok(file) => return Ok((tmp, file)),
-            // Left over from a crashed run with the same pid: next number.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-    }
 }
 
 /// Best effort: sync `path`'s folder so the rename itself is on disk.
@@ -1769,11 +2131,42 @@ impl PdSave {
     }
 }
 
-/// A running export: joins to the rows written.
-pub type ExportJob = JoinHandle<Result<u64, UiError>>;
+/// A running export: joins to what it wrote.
+pub type ExportJob = JoinHandle<Result<ExportSummary, UiError>>;
+
+/// What an export wrote (FR AXHK2W, AC-AXHK2W.14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportSummary {
+    /// Rows written.
+    pub rows: u64,
+    /// The folded part of the history it left out; `None` when nothing was.
+    pub folded: Option<ExportFolded>,
+}
+
+/// The oldest part of a history that an export left out because it was
+/// folded into coarser blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ExportFolded {
+    /// Folded records left out.
+    pub samples: u64,
+    /// Session time they span, ms: from the history's first record to the
+    /// first exported one.
+    pub ms: u64,
+    /// Wall-clock time of the file's first row, ms.
+    pub start_unix_ms: u64,
+}
+
+/// The next recording's id, across every session of the app: a session that
+/// reconnects under its old id must not reuse one (AC-AXHK2F.5). Starts at 1,
+/// as 0 means no recording.
+static NEXT_RECORDING_ID: AtomicU64 = AtomicU64::new(1);
 
 /// How long a request to the worker may take before the UI gives up.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long a history clear waits for the worker to flush its batched
+/// samples before clearing the history itself.
+const CLEAR_WAIT: Duration = Duration::from_millis(500);
 
 /// How long the UI waits for one offline-record download.
 const RECORD_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1790,11 +2183,17 @@ const RECORD_DELETE_TIMEOUT: Duration = Duration::from_secs(300);
 pub struct WorkerControl {
     commands: mpsc::Sender<Command>,
     store: SessionStore,
+    log: SessionLog,
 }
 
 /// The answer when the worker is gone.
 fn not_connected() -> UiError {
     UiError::usage("The meter is not connected.")
+}
+
+/// The answer when a recording is asked for and none is open.
+fn nothing_recorded() -> UiError {
+    UiError::usage("Nothing is being recorded.")
 }
 
 /// The answer when the worker does not reply in time; the request may still
@@ -1804,6 +2203,7 @@ fn busy() -> UiError {
         kind: ErrorKind::Timeout,
         message: "The meter is busy. Try again.".to_owned(),
         hint: None,
+        sessions: Vec::new(),
     }
 }
 
@@ -1827,24 +2227,69 @@ impl WorkerControl {
         })
     }
 
+    /// Add the line for `answer`, if it failed (FR AXHK2G). Here and not on
+    /// the worker: only the caller knows every way a request fails, and one
+    /// request reads as one error, the one its caller got.
+    fn logged<R>(&self, answer: Result<R, UiError>) -> Result<R, UiError> {
+        answer.inspect_err(|error| self.log.failure(error))
+    }
+
     /// Restart the running queue at `rate` and wait for the worker's answer.
     pub fn set_rate(&self, rate: Rate) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(Command::SetRate(rate, reply), &answer)?
+        self.logged(self.ask(Command::SetRate(rate, reply), &answer).flatten())
+    }
+
+    /// Record to a new file at `path`, ended by `limits` as well.
+    pub fn start_recording_with(&self, path: &Path, limits: Limits) -> Result<(), UiError> {
+        self.record(path, limits, None)
     }
 
     /// Record to a new file at `path`. The worker checks first and creates
     /// the file only when it is going to record, so a refused start (or a
-    /// timed-out answer) never truncates or deletes anything.
-    pub fn record_to(&self, path: &Path) -> Result<(), UiError> {
+    /// timed-out answer) never truncates or deletes anything. `hold` travels
+    /// with the request, so it outlasts a timed-out answer: it goes once the
+    /// worker has applied the request, or when the worker can no longer do so.
+    pub(crate) fn record(
+        &self,
+        path: &Path,
+        limits: Limits,
+        hold: Option<RecordingStartHold>,
+    ) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(Command::RecordTo(path.to_owned(), reply), &answer)?
+        let command = Command::RecordTo(path.to_owned(), limits, hold, reply);
+        self.ask(command, &answer)?
     }
 
     /// Stop the recording and return what it wrote.
     pub fn stop_recording(&self) -> Result<RecordingSummary, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::StopRecording(reply), &answer)?
+    }
+
+    /// Hold the recording's rows back while the stream goes on.
+    pub fn pause_recording(&self) -> Result<(), UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PauseRecording(reply), &answer)?
+    }
+
+    /// Write the recording's rows again after a pause.
+    pub fn resume_recording(&self) -> Result<(), UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::ResumeRecording(reply), &answer)?
+    }
+
+    /// Whether the PD capture runs now (AC-AXHK2K.7).
+    pub fn pd_capturing(&self) -> Result<bool, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PdCapturing(reply), &answer)
+    }
+
+    /// Status blocks the PD capture dropped past its limit since the last
+    /// clear (FR AXHK2W, AC .3).
+    pub fn pd_status_dropped(&self) -> Result<u64, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PdStatusDropped(reply), &answer)
     }
 
     /// Run `swap` on the worker thread between its steps and answer the
@@ -1910,14 +2355,25 @@ impl WorkerControl {
 
     /// Stop the PD capture.
     pub fn stop_pd(&self) -> Result<(), UiError> {
+        self.stop_pd_for(None)
+    }
+
+    /// Stop the PD capture, naming why on the capture-stopped event.
+    pub fn stop_pd_for(&self, reason: Option<PdStopReason>) -> Result<(), UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(Command::StopPd(reply), &answer)?
+        self.ask(Command::StopPd(reason, reply), &answer)?
     }
 
     /// The raw bytes and field tree of captured PD record `index`.
     pub fn pd_details(&self, index: u64) -> Result<PdDetails, UiError> {
         let (reply, answer) = mpsc::channel();
         self.ask(Command::PdDetails(index, reply), &answer)?
+    }
+
+    /// The newest cable identity in the PD capture, if any.
+    pub fn pd_cable_seen(&self) -> Result<Option<CableView>, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask(Command::PdCable(reply), &answer)
     }
 
     /// Drop every captured PD record; returns the index the next one gets.
@@ -1939,7 +2395,8 @@ impl WorkerControl {
         changes: &BTreeMap<String, i32>,
     ) -> Result<MeterSettingsView, UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(Command::WriteSettings(changes.clone(), reply), &answer)?
+        let command = Command::WriteSettings(changes.clone(), reply);
+        self.logged(self.ask(command, &answer).flatten())
     }
 
     /// List the meter's offline records.
@@ -1970,11 +2427,14 @@ impl WorkerControl {
         backup_dir: &Path,
     ) -> Result<RecordDeleteView, UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask_within(
-            Command::DeleteRecords(target, confirm.to_owned(), backup_dir.to_owned(), reply),
-            &answer,
-            RECORD_DELETE_TIMEOUT,
-        )?
+        let command =
+            Command::DeleteRecords(target, confirm.to_owned(), backup_dir.to_owned(), reply);
+        let answer = self.ask_within(command, &answer, RECORD_DELETE_TIMEOUT);
+        // The caller gets the full message, backup folder included; the log
+        // gets the kind.
+        answer
+            .flatten()
+            .inspect_err(|error| self.log.failure_kind(error))
     }
 
     /// Save the PD capture to `path` as a pdcap file; returns the number of
@@ -1996,9 +2456,19 @@ impl WorkerControl {
         Ok(())
     }
 
-    /// Discard the session history.
+    /// Discard the session history. The worker sends out the samples still
+    /// waiting in its batcher first, so every sample recorded before the
+    /// clear reaches the page before it; a worker that is gone or busy for
+    /// longer than `CLEAR_WAIT` leaves the clear to this thread.
     pub fn clear_history(&self) -> Result<(), UiError> {
-        self.store.clear_history();
+        let claimed = Arc::new(AtomicBool::new(false));
+        let (reply, answer) = mpsc::channel();
+        let command = Command::ClearHistory(Arc::clone(&claimed), reply);
+        if self.ask_within(command, &answer, CLEAR_WAIT).is_err()
+            && !claimed.swap(true, Ordering::SeqCst)
+        {
+            self.store.clear_history();
+        }
         Ok(())
     }
 
@@ -2019,11 +2489,46 @@ impl WorkerControl {
         path: &Path,
         progress: impl FnMut(ExportProgress) + Send + 'static,
     ) -> Result<ExportJob, UiError> {
+        self.ask_export(Command::ExportTo, path, Box::new(progress))
+    }
+
+    /// Export the session to a vendor-layout `.db` file at `path`.
+    pub fn export_db_to(
+        &self,
+        path: &Path,
+        progress: impl FnMut(ExportProgress) + Send + 'static,
+    ) -> Result<ExportJob, UiError> {
+        self.ask_export(Command::ExportDbTo, path, Box::new(progress))
+    }
+
+    fn ask_export(
+        &self,
+        command: fn(PathBuf, ProgressFn, ExportReply) -> Command,
+        path: &Path,
+        progress: ProgressFn,
+    ) -> Result<ExportJob, UiError> {
         let (reply, answer) = mpsc::channel();
-        self.ask(
-            Command::ExportTo(path.to_owned(), Box::new(progress), reply),
-            &answer,
-        )?
+        self.ask(command(path.to_owned(), progress, reply), &answer)?
+    }
+}
+
+/// One count on a meter's recording starts that are asked for and not
+/// settled yet: a firmware update does not start past one, as the recording
+/// it may become is not known yet (AC-AXHK2F.5).
+#[derive(Debug)]
+pub struct RecordingStartHold(Arc<AtomicUsize>);
+
+impl RecordingStartHold {
+    /// Take one count on `starts`.
+    pub fn new(starts: &Arc<AtomicUsize>) -> RecordingStartHold {
+        starts.fetch_add(1, Ordering::SeqCst);
+        RecordingStartHold(Arc::clone(starts))
+    }
+}
+
+impl Drop for RecordingStartHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -2034,9 +2539,17 @@ pub struct WorkerHandle {
     stop: Arc<AtomicBool>,
     /// Set when the `disconnected` status has been sent.
     ended: Arc<AtomicBool>,
+    /// The recording the worker has open, 0 for none.
+    recording_id: Arc<AtomicU64>,
+    /// The file that recording writes.
+    recording_path: RecordingPath,
     commands: mpsc::Sender<Command>,
     store: SessionStore,
     thread: Option<JoinHandle<()>>,
+    /// Gone once the worker thread has let go of the meter.
+    thread_alive: Weak<()>,
+    /// Where the session's controls log the requests that fail.
+    log: SessionLog,
 }
 
 impl WorkerHandle {
@@ -2045,6 +2558,31 @@ impl WorkerHandle {
     pub fn is_finished(&self) -> bool {
         self.ended.load(Ordering::SeqCst)
             || self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    /// A probe that outlives this handle: it stops upgrading once the worker
+    /// thread has returned, and with it let go of the meter (FR AXHK2F).
+    pub fn thread_alive(&self) -> Weak<()> {
+        Weak::clone(&self.thread_alive)
+    }
+
+    /// A recording is open. Answers at once, whatever the worker is doing,
+    /// and sends nothing to the meter (FR AXHK2F).
+    pub fn is_recording(&self) -> bool {
+        self.recording_id().is_some()
+    }
+
+    /// Which recording is open, like [`is_recording`](Self::is_recording):
+    /// no two recordings of the app share an id, so a consent can name the
+    /// one the user was told of (AC-AXHK2F.5).
+    pub fn recording_id(&self) -> Option<u64> {
+        Some(self.recording_id.load(Ordering::SeqCst)).filter(|&id| id != 0)
+    }
+
+    /// The file the open recording writes, like
+    /// [`is_recording`](Self::is_recording).
+    pub fn recording_path(&self) -> Option<PathBuf> {
+        self.recording_path.get()
     }
 
     /// Restart the running queue at `rate`.
@@ -2057,6 +2595,7 @@ impl WorkerHandle {
         WorkerControl {
             commands: self.commands.clone(),
             store: self.store.clone(),
+            log: self.log.clone(),
         }
     }
 
@@ -2157,12 +2696,14 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, None, None)
+    let log = SessionLog::default();
+    spawn_inner(open, clock, config, store, sink, stop, None, None, log)
 }
 
 /// [`spawn_with_store`] for a meter that can hold a PDM session: while
 /// `pdm_open` says one is open, a stream error that is not a device loss
-/// does not end the session.
+/// does not end the session; `log` records the error instead.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_watching_pdm<T, C, O>(
     open: O,
     clock: C,
@@ -2171,13 +2712,15 @@ pub fn spawn_watching_pdm<T, C, O>(
     sink: impl EventSink,
     stop: Arc<AtomicBool>,
     pdm_open: PdmOpen,
+    log: SessionLog,
 ) -> WorkerHandle
 where
     T: Transport,
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, None, Some(pdm_open))
+    let pdm_open = Some(pdm_open);
+    spawn_inner(open, clock, config, store, sink, stop, None, pdm_open, log)
 }
 
 /// [`spawn_with_store`] adding the wall time the worker spends blocked in
@@ -2196,7 +2739,8 @@ where
     C: Clock + Clone + Send + 'static,
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
-    spawn_inner(open, clock, config, store, sink, stop, Some(meter), None)
+    let (meter, log) = (Some(meter), SessionLog::default());
+    spawn_inner(open, clock, config, store, sink, stop, meter, None, log)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2209,6 +2753,7 @@ fn spawn_inner<T, C, O>(
     stop: Arc<AtomicBool>,
     meter: Option<BlockedMeter>,
     pdm_open: Option<PdmOpen>,
+    log: SessionLog,
 ) -> WorkerHandle
 where
     T: Transport,
@@ -2216,6 +2761,7 @@ where
     O: FnOnce() -> Result<T, transport::Error> + Send + 'static,
 {
     let flag = Arc::clone(&stop);
+    let control_log = log.clone();
     let (commands, inbox) = mpsc::channel();
     let ended = Arc::new(AtomicBool::new(false));
     let ended_by_sink = Arc::clone(&ended);
@@ -2262,7 +2808,14 @@ where
     let sink = forward.clone();
     let worker_sink = forward;
     let worker_store = store.clone();
+    let recording_id: Arc<AtomicU64> = Arc::default();
+    let worker_recording_id = Arc::clone(&recording_id);
+    let recording_path = RecordingPath::default();
+    let worker_recording_path = recording_path.clone();
+    let alive = Arc::new(());
+    let thread_alive = Arc::downgrade(&alive);
     let thread = std::thread::spawn(move || {
+        let _alive = alive;
         crate::activity::raise_poll_thread_qos();
         let ran = catch_unwind(AssertUnwindSafe(|| {
             run_worker(
@@ -2276,6 +2829,9 @@ where
                 depth,
                 meter,
                 pdm_open,
+                log,
+                worker_recording_id,
+                worker_recording_path,
             )
         }));
         if let Err(payload) = ran {
@@ -2291,15 +2847,120 @@ where
     WorkerHandle {
         stop,
         ended,
+        recording_id,
+        recording_path,
         commands,
         store,
         thread: Some(thread),
+        thread_alive,
+        log: control_log,
     }
 }
 
 /// Most sample batches waiting for a slow sink (about 10 to 25 s of them);
-/// status, gap and recording events are always queued.
+/// status, gap and recording events are always queued, and so is the newest
+/// dropped batch when the session ends.
 const MAX_QUEUED_BATCHES: usize = 512;
+
+/// The live batches a slow page lost, told to app.log (AC-AXHK2W.8): one line
+/// when the queue limit first drops a batch, one with the spell's totals when
+/// the page has caught up (its queue at most half full) or the session ends.
+struct LiveDrops {
+    log: SessionLog,
+    /// The newest samples dropped, newer than any batch queued; sent ahead of
+    /// the next event that is not a batch, so not lost yet.
+    newest: Option<Batch>,
+    spell: Option<DropSpell>,
+}
+
+struct DropSpell {
+    started: Instant,
+    batches: u64,
+    samples: u64,
+}
+
+impl LiveDrops {
+    fn new(log: SessionLog) -> LiveDrops {
+        LiveDrops {
+            log,
+            newest: None,
+            spell: None,
+        }
+    }
+
+    /// A batch past the queue limit: held as the newest, and any it replaces
+    /// is lost.
+    fn drop_batch(&mut self, batch: Batch) {
+        if self.spell.is_none() {
+            let detail = format!("page fell {MAX_QUEUED_BATCHES} batches behind");
+            self.log.event_with("live batches dropped", &detail);
+            self.spell = Some(DropSpell {
+                started: Instant::now(),
+                batches: 0,
+                samples: 0,
+            });
+        }
+        if !batch.samples.is_empty() {
+            self.lose_newest();
+            self.newest = Some(batch);
+        }
+    }
+
+    /// A batch with samples goes out with `depth` batches queued ahead: the
+    /// held samples are older, so lost.
+    fn deliver(&mut self, depth: usize) {
+        self.lose_newest();
+        if depth <= MAX_QUEUED_BATCHES / 2
+            && let Some(spell) = self.spell.take()
+        {
+            self.log.event_with("live batches resumed", &spell.totals());
+        }
+    }
+
+    fn lose_newest(&mut self) {
+        if let Some(batch) = self.newest.take()
+            && let Some(spell) = &mut self.spell
+        {
+            spell.batches += 1;
+            spell.samples += batch.samples.len() as u64;
+        }
+    }
+}
+
+impl Drop for LiveDrops {
+    fn drop(&mut self) {
+        self.lose_newest();
+        if let Some(spell) = self.spell.take() {
+            self.log
+                .event_with("live batches lost at session end", &spell.totals());
+        }
+    }
+}
+
+impl DropSpell {
+    /// Like `37 batches, 18,500 samples dropped over 1.2 s`.
+    fn totals(&self) -> String {
+        let secs = self.started.elapsed().as_secs_f64();
+        format!(
+            "{} batches, {} samples dropped over {secs:.1} s",
+            grouped(self.batches),
+            grouped(self.samples)
+        )
+    }
+}
+
+/// `n` with a comma between each group of three digits.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
 
 /// The worker thread's body: open, then step until stopped or ended.
 #[allow(clippy::too_many_arguments)]
@@ -2314,6 +2975,9 @@ fn run_worker<T, C, O>(
     depth: Arc<AtomicUsize>,
     meter: Option<BlockedMeter>,
     pdm_open: Option<PdmOpen>,
+    log: SessionLog,
+    recording_id: Arc<AtomicU64>,
+    recording_path: RecordingPath,
 ) where
     T: Transport,
     C: Clock + Clone,
@@ -2328,17 +2992,39 @@ fn run_worker<T, C, O>(
         });
     });
     let forward_meter = meter.clone();
+    // The samples dropped for a slow sink, and what app.log hears of them.
+    let mut drops = LiveDrops::new(log.clone());
     let forward: Sink = Box::new(move |event| {
-        if let BackendEvent::Batch(_) = event {
+        let mut last_samples = None;
+        match &event {
             // A sink stalled for this long gets no more live batches until it
             // catches up; the history and any recording keep every sample.
-            if depth.load(Ordering::SeqCst) >= MAX_QUEUED_BATCHES {
+            BackendEvent::Batch(_) if depth.load(Ordering::SeqCst) >= MAX_QUEUED_BATCHES => {
+                if let BackendEvent::Batch(batch) = event {
+                    drops.drop_batch(batch);
+                }
                 return;
             }
-            depth.fetch_add(1, Ordering::SeqCst);
+            BackendEvent::Batch(batch) if !batch.samples.is_empty() => {
+                drops.deliver(depth.load(Ordering::SeqCst));
+            }
+            BackendEvent::Batch(_) => {}
+            // The samples held go first: no event overtakes samples it
+            // follows, and the session's last samples always arrive, so the
+            // outage gap starts at the last sample the session history holds.
+            _ => last_samples = drops.newest.take(),
         }
         blocked(forward_meter.as_ref(), || {
-            let _ = sink.send(Forward::Event(Box::new(event)));
+            let send = |event: BackendEvent| {
+                if matches!(event, BackendEvent::Batch(_)) {
+                    depth.fetch_add(1, Ordering::SeqCst);
+                }
+                let _ = sink.send(Forward::Event(Box::new(event)));
+            };
+            if let Some(batch) = last_samples {
+                send(BackendEvent::Batch(batch));
+            }
+            send(event);
         });
     });
     let opened = open()
@@ -2359,6 +3045,9 @@ fn run_worker<T, C, O>(
         }
     };
     worker.pdm_open = pdm_open;
+    worker.log = log;
+    worker.recording_id = recording_id;
+    worker.recording_path = recording_path;
     'run: while !stop.load(Ordering::SeqCst) {
         loop {
             match inbox.try_recv() {
@@ -2402,6 +3091,7 @@ pub(crate) fn late_hold_control() -> (WorkerControl, Arc<Mutex<Vec<bool>>>) {
     let control = WorkerControl {
         commands,
         store: SessionStore::new(),
+        log: SessionLog::default(),
     };
     (control, seen)
 }
@@ -2415,6 +3105,7 @@ mod tests {
         let control = WorkerControl {
             commands,
             store: SessionStore::new(),
+            log: SessionLog::default(),
         };
         (control, inbox)
     }
@@ -2602,5 +3293,80 @@ mod tests {
             held <= window + free,
             "the meter grew {held:?} in a {window:?} window"
         );
+    }
+
+    /// A recording's output that notes, at each write, the recording id any
+    /// other thread reads at that moment.
+    struct IdAtWrite {
+        id: Arc<AtomicU64>,
+        seen: Arc<Mutex<Vec<u64>>>,
+        fails: bool,
+    }
+
+    impl Write for IdAtWrite {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(self.id.load(Ordering::SeqCst));
+            if self.fails {
+                return Err(std::io::Error::other("disk full"));
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn recording_worker() -> Worker<powerz_sim::SimDevice, powerz_sim::SimClock> {
+        use powerz_sim::{Persona, Scenario, SimClock, SimDevice};
+        let clock = SimClock::new(1_790_000_000_000);
+        let device = SimDevice::with_clock(Persona::Bulk, Scenario::Load5v1a, clock.clone());
+        let config = WorkerConfig::new(Rate::Sps50, 1);
+        Worker::start(device, clock, config, |_event: BackendEvent| {})
+            .unwrap_or_else(|e| panic!("the worker did not start: {e:?}"))
+    }
+
+    /// AC-AXHK2F.5: the header in the file is the first sign of a recording
+    /// outside the worker; by then its id is out, so a reader never finds a
+    /// running recording with no id.
+    #[test]
+    fn a_recording_id_is_visible_no_later_than_the_recording_itself() {
+        let mut worker = recording_worker();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let out = IdAtWrite {
+            id: Arc::clone(&worker.recording_id),
+            seen: Arc::clone(&seen),
+            fails: false,
+        };
+
+        worker.start_recording(Box::new(out)).expect("starts");
+
+        let seen = seen.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "the header was never written");
+        assert!(
+            seen.iter().all(|&id| id != 0),
+            "written with no id visible: {seen:?}"
+        );
+        assert_eq!(worker.recording_id.load(Ordering::SeqCst), seen[0]);
+    }
+
+    /// AC-AXHK2F.5: a start that could not write its header leaves no id, or
+    /// a consent would be asked for a recording that never ran.
+    #[test]
+    fn a_recording_that_failed_to_start_leaves_no_id() {
+        let mut worker = recording_worker();
+        let out = IdAtWrite {
+            id: Arc::clone(&worker.recording_id),
+            seen: Arc::default(),
+            fails: true,
+        };
+
+        assert!(worker.start_recording(Box::new(out)).is_err());
+
+        assert_eq!(worker.recording_id.load(Ordering::SeqCst), 0);
+        assert!(!worker.is_recording());
     }
 }

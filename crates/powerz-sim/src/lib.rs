@@ -19,7 +19,7 @@ mod queue;
 mod records;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -247,6 +247,8 @@ pub struct FaultPlan {
     /// The SETTINGS read answers with the real block of a meter that saved
     /// its settings in an earlier boot.
     settings_saved_before_reboot: bool,
+    /// Every second SETTINGS read shows another brightness.
+    flaky_settings_read: bool,
     /// Pad the record table to this many entries.
     record_count: Option<usize>,
 }
@@ -344,6 +346,14 @@ impl FaultPlan {
         self
     }
 
+    /// Every second SETTINGS read shows another brightness, with CRCs that
+    /// pass, as a read corrupted on the way to the host would. What the meter
+    /// keeps does not change.
+    pub fn flaky_settings_read(mut self) -> FaultPlan {
+        self.flaky_settings_read = true;
+        self
+    }
+
     /// The record table is padded to `count` entries with synthetic records
     /// that have no samples (a shorter table is left alone).
     pub fn record_count(mut self, count: usize) -> FaultPlan {
@@ -353,7 +363,8 @@ impl FaultPlan {
 
     /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`,
     /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`,
-    /// `stir-undecoded-settings`, `settings-saved-before-reboot`.
+    /// `stir-undecoded-settings`, `settings-saved-before-reboot`,
+    /// `flaky-settings-read`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -379,12 +390,14 @@ impl FaultPlan {
                 ("ignore-settings-write", None) => plan.ignore_settings_write(),
                 ("stir-undecoded-settings", None) => plan.stir_undecoded_settings(),
                 ("settings-saved-before-reboot", None) => plan.settings_saved_before_reboot(),
+                ("flaky-settings-read", None) => plan.flaky_settings_read(),
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
                          disconnect@N, wrong-id@N, permission, corrupt-adcnew@N, echo-start, \
                          reject-record-reads, ignore-table-write, ignore-settings-write, \
-                         stir-undecoded-settings or settings-saved-before-reboot)"
+                         stir-undecoded-settings, settings-saved-before-reboot or \
+                         flaky-settings-read)"
                     ));
                 }
             };
@@ -464,6 +477,12 @@ pub struct SimDevice {
     /// What the meter keeps across its pipes: the SETTINGS block and rate
     /// code, shared with a [`cdc_twin`](SimDevice::cdc_twin).
     stored: Arc<Mutex<Stored>>,
+    /// Set by a [`pdm_twin`](SimDevice::pdm_twin) session: the next request
+    /// finds the sign-in dropped.
+    sign_in_drop: Arc<AtomicBool>,
+    /// A PDM session dropped the sign-in: auth level 0, memory read
+    /// (0x44) REJECTed until a CONNECT. [device] f4abf09
+    sign_in_lost: bool,
 }
 
 /// The settings a meter keeps, whichever pipe changes them.
@@ -474,6 +493,8 @@ struct Stored {
     settings: [u8; device::SETTINGS_LEN],
     /// Meter rate code (SETTINGS); the queue falls back to it after 0x0F.
     rate_code: u8,
+    /// SETTINGS reads answered so far, on any pipe (`flaky-settings-read`).
+    settings_reads: usize,
 }
 
 impl SimDevice {
@@ -501,6 +522,15 @@ impl SimDevice {
         twin.mode = self.mode;
         twin.serial = self.serial.clone();
         twin
+    }
+
+    /// This meter's PDM persona (its serial port text session), with
+    /// `charger` on the input. A trigger session there (`pdm open` …) drops
+    /// this meter's bulk sign-in `[device]`: PUT_DATA then reports auth
+    /// level 0, and memory read (0x44) and the PD sniffer start (0x10) are
+    /// REJECTed until a CONNECT (on the meter, a replug).
+    pub fn pdm_twin(&self, charger: pdm::SimCharger, clock: SimClock) -> SimPdm {
+        SimPdm::new(charger, clock).with_sign_in_drop(Arc::clone(&self.sign_in_drop))
     }
 
     /// A freshly opened meter: on bulk one stale DISCONNECT waits on the IN
@@ -542,7 +572,10 @@ impl SimDevice {
             stored: Arc::new(Mutex::new(Stored {
                 settings: device::SETTINGS_206,
                 rate_code: 2,
+                settings_reads: 0,
             })),
+            sign_in_drop: Arc::new(AtomicBool::new(false)),
+            sign_in_lost: false,
         }
     }
 

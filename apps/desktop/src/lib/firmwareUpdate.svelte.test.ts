@@ -25,6 +25,7 @@ import {
   replugPrompt,
   stageLabel,
   stageNameLabel,
+  storedBytesNote,
   type FirmwareMeter,
   type FirmwareUpdateApi,
 } from "./firmwareUpdate.svelte";
@@ -37,12 +38,14 @@ const INFO: FirmwareFileInfo = {
   date: "2026.9.29",
   crc: "A175E4A0",
   size: 12340,
+  stored_size: 12340,
   release_notes_en: "1. Synthetic note.",
 };
 
 const METER: FirmwareMeter = {
   id: "usb:1:4",
   model: "KM003C",
+  serial: "SERIAL-0004",
   mode: "application",
   firmwareVersion: "2.0.6",
   bootloaderVersion: "2.5",
@@ -102,6 +105,7 @@ function api(overrides: Partial<FirmwareUpdateApi> = {}): FirmwareUpdateApi {
     choose: vi.fn(async () => "/fw/KM003C_V2.0.7.mencrypt"),
     inspect: vi.fn(async () => INFO),
     flash: vi.fn(async () => ({ outcome: "verified", version: "2.0.7" }) as FlashDone),
+    cancelFlash: vi.fn(async () => {}),
     ...overrides,
   };
 }
@@ -181,6 +185,17 @@ describe("choosing the file (AC-V9SK55.2)", () => {
     expect(fw.info).toBeNull();
     expect(fw.fileError).toBe("This is not a firmware file.");
     expect(fw.canUpdate(METER)).toBe(false);
+  });
+
+  it("a file that fails inspection keeps its hint, until the next good file", async () => {
+    const err: UiError = { kind: "usage", message: "Not a firmware file.", hint: "Pick another." };
+    const inspect = vi.fn(async () => Promise.reject(err));
+    const fw = await withFile(api({ inspect }));
+    expect(fw.fileErrorHint).toBe("Pick another.");
+
+    inspect.mockImplementation(async () => Promise.resolve(INFO) as never);
+    await fw.chooseFile();
+    expect(fw.fileErrorHint).toBeNull();
   });
 });
 
@@ -463,8 +478,9 @@ describe("review fixes (AC-V9SK55.4, .5)", () => {
     expect(fw.meterShown(disconnected)).toEqual(METER);
     d.resolve({ outcome: "verified", version: "2.0.7" });
     await running;
-    // Done: the old versions are stale now, so show the meter as it is.
-    expect(fw.meterShown(disconnected)).toEqual(disconnected);
+    // Done: the version read back replaces the stale one until the meter is read
+    // again; never a dash (AC-AXHK2M.16 supersedes the dashes here).
+    expect(fw.meterShown(disconnected)).toEqual({ ...METER, firmwareVersion: "2.0.7" });
     expect(fw.meterShown(null)).toBeNull();
   });
 
@@ -521,5 +537,29 @@ describe("the replug prompt (AC-V9SK55.4, AC-V9SK54.1 / .5)", () => {
     expect(boot).toMatch(/unplug the meter and plug it back in/i);
     expect(boot).toContain("bootloader");
     expect(replugPrompt({ to: "application", reply: "none" })).toContain("application");
+  });
+});
+
+describe("storedBytesNote (AC-VQCKC6.3)", () => {
+  it("explains a write total past the chosen file's image size", () => {
+    expect(storedBytesNote(456912, 456896)).toBe(
+      "The file stores 16 bytes past its 456,896-byte image, and the update sends all 456,912.",
+    );
+  });
+
+  it("counts the difference and both sizes with separators", () => {
+    expect(storedBytesNote(12372, 12340)).toBe(
+      "The file stores 32 bytes past its 12,340-byte image, and the update sends all 12,372.",
+    );
+  });
+
+  it("shows no line when the write total is the image size", () => {
+    expect(storedBytesNote(456896, 456896)).toBeNull();
+  });
+
+  it("shows no line before the write stage or without a chosen file", () => {
+    expect(storedBytesNote(null, 456896)).toBeNull();
+    expect(storedBytesNote(456912, null)).toBeNull();
+    expect(storedBytesNote(null, null)).toBeNull();
   });
 });

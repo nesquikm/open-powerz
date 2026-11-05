@@ -10,15 +10,19 @@ import {
   ExportJob,
   RATE_OPTIONS,
   Recording,
+  dbFileName,
   defaultRecordingName,
   exportNoticeText,
   formatRecordingElapsed,
+  memoryDepthText,
   rateChange,
   ratePicker,
   recordingIndicator,
+  recordingOptions,
   recordingSummaryText,
   revealActionLabel,
 } from "./recording.svelte";
+import { DEFAULT_RECORDER_SETTINGS } from "./settings";
 
 const CLOCK = new Date(2026, 9, 21, 9, 5, 7); // local time 2026-10-21 09:05:07
 
@@ -31,6 +35,7 @@ function summary(rows: number, gaps = 0, disconnected = false): RecordingSummary
       to_ms: k * 1000 + 500,
     })),
     disconnected,
+    ended: disconnected ? "disconnected" : "stopped",
   };
 }
 
@@ -73,6 +78,12 @@ describe("recording file name (AC-0P7HSJ.3)", () => {
     expect(defaultRecordingName(new Date(2027, 0, 2, 23, 59, 58))).toBe(
       "powerz-20270102-235958.csv",
     );
+  });
+
+  it("turns a proposed CSV name into a .db name (AC-AXHK2S.6)", () => {
+    expect(dbFileName("powerz-20261021-090507.csv")).toBe("powerz-20261021-090507.db");
+    expect(dbFileName("bench.csv.csv")).toBe("bench.csv.db");
+    expect(dbFileName("no-extension")).toBe("no-extension");
   });
 });
 
@@ -132,7 +143,7 @@ describe("Recording state (AC-0P7HSJ.3, AC-0P7HSJ.6, AC-0P7HSJ.7)", () => {
     expect(r.path).toBe("/tmp/rec.csv");
     expect(r.indicator).toContain("0:00:00");
 
-    r.handleEvent({ state: "progress", rows: 120, elapsed_ms: 2_400 });
+    r.handleEvent({ state: "progress", rows: 120, elapsed_ms: 2_400, paused: false });
     expect(r.rows).toBe(120);
     expect(r.indicator).toContain("0:00:02");
     expect(r.indicator).toMatch(/120 rows/);
@@ -217,6 +228,164 @@ describe("Recording.stop (AC-4PJRVJ.2)", () => {
   });
 });
 
+describe("A start that timed out and started anyway (AC-AXHK2K.9)", () => {
+  it("shows as recording, with the error gone, and can be stopped", async () => {
+    const r = new Recording();
+    const timeout = { kind: "timeout", message: "The meter is busy. Try again.", hint: null };
+    const d = deps({ startRecording: vi.fn(() => Promise.reject(timeout)) });
+    await r.toggle(d);
+    expect(r.phase).toBe("idle");
+    expect(r.error?.kind).toBe("timeout");
+
+    r.handleEvent({ state: "started" });
+
+    expect(r.phase).toBe("recording");
+    expect(r.error).toBeNull();
+    await r.stop(d);
+    expect(d.stopRecording).toHaveBeenCalledTimes(1);
+  });
+
+  it("changes nothing for the usual start, whose answer is on its way", async () => {
+    const r = new Recording();
+    let started: (path: string | null) => void = () => {};
+    const d = deps({
+      startRecording: vi.fn(() => new Promise<string | null>((res) => (started = res))),
+    });
+    const starting = r.toggle(d);
+    r.handleEvent({ state: "started" });
+    expect(r.phase).toBe("starting");
+    started("/tmp/rec.csv");
+    await starting;
+    expect(r.path).toBe("/tmp/rec.csv");
+  });
+});
+
+describe("Recording.stop while it cannot stop yet (AC-AXHK2F.7)", () => {
+  it("answers false while a start is in flight, and the start goes on", async () => {
+    const r = new Recording();
+    let started: (path: string | null) => void = () => {};
+    const d = deps({
+      startRecording: vi.fn(() => new Promise<string | null>((res) => (started = res))),
+    });
+    const starting = r.toggle(d);
+    expect(r.phase).toBe("starting");
+
+    expect(await r.stop(d)).toBe(false);
+    expect(d.stopRecording).not.toHaveBeenCalled();
+
+    started("/tmp/rec.csv");
+    await starting;
+    expect(r.phase).toBe("recording");
+  });
+
+  it("answers false while a stop is in flight, and that stop goes on", async () => {
+    const r = new Recording();
+    let stopped: (s: RecordingSummary) => void = () => {};
+    const d = deps({
+      stopRecording: vi.fn(() => new Promise<RecordingSummary>((res) => (stopped = res))),
+    });
+    await r.toggle(d);
+    const stopping = r.stop(d);
+    expect(r.phase).toBe("stopping");
+
+    expect(await r.stop(d)).toBe(false);
+    expect(d.stopRecording).toHaveBeenCalledTimes(1);
+
+    stopped(summary(5));
+    expect(await stopping).toBe(true);
+    expect(r.phase).toBe("idle");
+  });
+
+  it("a failed stop does not mark the recording ended", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    const failed = deps({ stopRecording: vi.fn(() => Promise.reject(diskFull)) });
+
+    expect(await r.stop(failed)).toBe(false);
+
+    expect(r.phase).toBe("recording");
+    expect(r.path).toBe("/tmp/rec.csv");
+    expect(r.indicator).toMatch(/^REC /);
+    expect(r.notice).toBeNull();
+    expect(r.error).toEqual(diskFull);
+  });
+
+  it("a stop that failed can be tried again", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    await r.stop(deps({ stopRecording: vi.fn(() => Promise.reject(diskFull)) }));
+
+    expect(await r.stop(deps())).toBe(true);
+    expect(r.phase).toBe("idle");
+    expect(r.notice).toMatch(/5 rows/);
+  });
+});
+
+describe("Recording.stop retried after a failure (AC-AXHK2F.7)", () => {
+  it("clears the earlier error when the retry succeeds", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    await r.stop(deps({ stopRecording: vi.fn(() => Promise.reject(diskFull)) }));
+    expect(r.error).toEqual(diskFull);
+
+    expect(await r.stop(deps())).toBe(true);
+
+    expect(r.error).toBeNull();
+    expect(r.phase).toBe("idle");
+  });
+});
+
+describe("Recording.stop whose last flush fails (AC-AXHK2F.7)", () => {
+  // The backend has dropped the recording by then: it sends `failed` and rejects the stop,
+  // and either can reach the page first.
+  const lost: RecordingEvent = { state: "failed", rows: 4, error: diskFull };
+  const nothing: UiError = { kind: "usage", message: "Nothing is being recorded.", hint: null };
+
+  async function stoppedLosing(order: "event first" | "rejection first"): Promise<{
+    r: Recording;
+    answer: boolean;
+  }> {
+    const r = new Recording();
+    await r.toggle(deps());
+    let fail: (e: unknown) => void = () => {};
+    const stopping = r.stop(
+      deps({ stopRecording: vi.fn(() => new Promise<RecordingSummary>((_, rej) => (fail = rej))) }),
+    );
+    if (order === "event first") r.handleEvent(lost);
+    fail(diskFull);
+    const answer = await stopping;
+    if (order === "rejection first") r.handleEvent(lost);
+    return { r, answer };
+  }
+
+  it.each(["event first", "rejection first"] as const)(
+    "answers false and shows no running recording (%s)",
+    async (order) => {
+      const { r, answer } = await stoppedLosing(order);
+
+      expect(answer).toBe(false);
+      expect(r.phase).toBe("idle");
+      expect(r.indicator).toBeNull();
+      expect(r.error).toEqual(diskFull);
+      expect(r.notice).toMatch(/4 rows/);
+      expect(r.savedPath).toBe("/tmp/rec.csv");
+    },
+  );
+
+  it.each(["event first", "rejection first"] as const)(
+    "a retry asks the backend nothing and keeps the real reason (%s)",
+    async (order) => {
+      const { r } = await stoppedLosing(order);
+      const retry = deps({ stopRecording: vi.fn(() => Promise.reject(nothing)) });
+
+      expect(await r.stop(retry)).toBe(true);
+
+      expect(retry.stopRecording).not.toHaveBeenCalled();
+      expect(r.error).toEqual(diskFull);
+    },
+  );
+});
+
 describe("ExportJob (AC-0P7HSJ.5)", () => {
   it("proposes a file name, tracks progress and reports the rows", async () => {
     const job = new ExportJob();
@@ -290,7 +459,7 @@ describe("Recording after the session ends underneath it (review)", () => {
     const stopping = rec.toggle(
       deps({ stopRecording: vi.fn(() => new Promise<RecordingSummary>((_, rej) => (fail = rej))) }),
     );
-    rec.handleEvent({ state: "stopped", rows: 5, gaps: [], disconnected: true });
+    rec.handleEvent({ state: "stopped", ...summary(5, 0, true) });
     fail({ kind: "usage", message: "The meter is not connected.", hint: null });
     await stopping;
     expect(rec.error).toBeNull();
@@ -328,7 +497,7 @@ describe("Recording adopts a running recording on load (AC-VEDDFD.3, AC-VEDDFD.5
   it("follows the progress that comes after", () => {
     const r = new Recording();
     r.adopt({ rows: 100, elapsed_ms: 2_000 });
-    r.handleEvent({ state: "progress", rows: 125, elapsed_ms: 2_500 });
+    r.handleEvent({ state: "progress", rows: 125, elapsed_ms: 2_500, paused: false });
     expect(r.indicator).toBe("REC 0:00:02 · 125 rows");
   });
 
@@ -346,7 +515,7 @@ describe("Recording adopts a running recording on load (AC-VEDDFD.3, AC-VEDDFD.5
   it("ends with the session like one started on this page", () => {
     const r = new Recording();
     r.adopt({ rows: 100, elapsed_ms: 2_000 });
-    r.handleEvent({ state: "stopped", rows: 140, gaps: [], disconnected: true });
+    r.handleEvent({ state: "stopped", ...summary(140, 0, true) });
     expect(r.phase).toBe("idle");
     expect(r.indicator).toBeNull();
   });
@@ -447,5 +616,281 @@ describe("recording saved notice (AC-9CFMD3.2)", () => {
     await r.toggle(d);
     expect(r.phase).toBe("recording");
     expect(r.savedPath).toBeNull();
+  });
+});
+
+// ---- FR AXHK2R: pause, auto-stop, limits, prefix and folder ----
+
+describe("the file name's prefix (AC-AXHK2R.6)", () => {
+  it("replaces powerz", () => {
+    expect(defaultRecordingName(CLOCK, "bench")).toBe("bench-20261021-090507.csv");
+  });
+
+  it("means powerz when empty", () => {
+    expect(defaultRecordingName(CLOCK, "")).toBe("powerz-20261021-090507.csv");
+    expect(defaultRecordingName(CLOCK)).toBe("powerz-20261021-090507.csv");
+  });
+});
+
+describe("the options sent to the backend (AC-AXHK2R.3, .5, .6)", () => {
+  it("sends no folder and no auto-stop by default", () => {
+    const options = recordingOptions(DEFAULT_RECORDER_SETTINGS);
+    expect(options.folder ?? null).toBeNull();
+    expect(options.below_a ?? null).toBeNull();
+    expect(options.for_ms ?? null).toBeNull();
+  });
+
+  it("sends the folder and the row limit", () => {
+    const options = recordingOptions({
+      ...DEFAULT_RECORDER_SETTINGS,
+      folder: "/data/runs",
+      maxRows: 5_000,
+    });
+    expect(options.folder).toBe("/data/runs");
+    expect(options.max_rows).toBe(5_000);
+  });
+
+  it("sends the wait in ms while auto-stop is on", () => {
+    const options = recordingOptions({
+      ...DEFAULT_RECORDER_SETTINGS,
+      autoStop: true,
+      belowA: 0.05,
+      forSeconds: 30,
+    });
+    expect(options.below_a).toBe(0.05);
+    expect(options.for_ms).toBe(30_000);
+  });
+
+  it("sends neither value while auto-stop is off, whatever the fields hold", () => {
+    const options = recordingOptions({
+      ...DEFAULT_RECORDER_SETTINGS,
+      autoStop: false,
+      belowA: 0.05,
+      forSeconds: 30,
+    });
+    expect(options.below_a ?? null).toBeNull();
+    expect(options.for_ms ?? null).toBeNull();
+  });
+});
+
+describe("memory depth (AC-AXHK2R.7)", () => {
+  it("says how long the chart's memory lasts, in plain words", () => {
+    expect(memoryDepthText(600_000, 1000)).toMatch(/\b10 minutes\b/);
+    expect(memoryDepthText(600_000, 50)).toMatch(/\b3(\.\d)? hours?\b/);
+    expect(memoryDepthText(600_000, 2)).toMatch(/\b(3 days?|83 hours)\b/);
+    expect(memoryDepthText(30_000, 1000)).toMatch(/\b30 seconds\b/);
+    expect(memoryDepthText(120, 2)).toMatch(/\b1 minute\b/);
+  });
+
+  it("follows the rate", () => {
+    expect(memoryDepthText(600_000, 50)).not.toBe(memoryDepthText(600_000, 1000));
+  });
+
+  it('reads "measuring" until the rate is known', () => {
+    expect(memoryDepthText(600_000, null)).toMatch(/measuring/i);
+    expect(memoryDepthText(600_000, 0)).toMatch(/measuring/i);
+  });
+});
+
+describe("the summary says why a recording ended (AC-AXHK2R.3, AC-AXHK2R.5)", () => {
+  it("names the low current", () => {
+    const text = recordingSummaryText({ ...summary(42), ended: "low_current" }, "/tmp/rec.csv");
+    expect(text.toLowerCase()).toContain("low current");
+    expect(text).toContain("42 rows");
+    expect(text).toContain("/tmp/rec.csv");
+  });
+
+  it("names the row limit", () => {
+    const text = recordingSummaryText({ ...summary(1000), ended: "row_limit" }, "/tmp/rec.csv");
+    expect(text.toLowerCase()).toContain("row limit");
+    expect(text).toContain("1,000 rows");
+    expect(text).toContain("/tmp/rec.csv");
+  });
+
+  it("says nothing new for a stop the user asked for", () => {
+    const text = recordingSummaryText(summary(5)).toLowerCase();
+    expect(text).not.toContain("low current");
+    expect(text).not.toContain("row limit");
+  });
+
+  it("counts a pause as a gap", () => {
+    const paused: RecordingSummary = {
+      ...summary(10),
+      gaps: [{ kind: "pause", from_ms: 100, to_ms: 2_000 }],
+    };
+    expect(recordingSummaryText(paused)).toMatch(/1 gap\b/);
+  });
+
+  it("ends the recording and keeps its file when a rule stops it", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    r.handleEvent({ state: "stopped", ...summary(300), ended: "row_limit" });
+    expect(r.phase).toBe("idle");
+    expect(r.savedPath).toBe("/tmp/rec.csv");
+    expect(r.notice?.toLowerCase()).toContain("row limit");
+  });
+});
+
+function pauseDeps() {
+  return {
+    pauseRecording: vi.fn(async (): Promise<void> => {}),
+    resumeRecording: vi.fn(async (): Promise<void> => {}),
+  };
+}
+
+describe("Recording.togglePause (AC-AXHK2R.1)", () => {
+  it("pauses, then resumes", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    const d = pauseDeps();
+    expect(r.paused).toBe(false);
+
+    await r.togglePause(d);
+    expect(d.pauseRecording).toHaveBeenCalledTimes(1);
+    expect(r.paused).toBe(true);
+    expect(r.phase).toBe("recording");
+
+    await r.togglePause(d);
+    expect(d.resumeRecording).toHaveBeenCalledTimes(1);
+    expect(r.paused).toBe(false);
+  });
+
+  it("does nothing without a running recording", async () => {
+    const r = new Recording();
+    const d = pauseDeps();
+    await r.togglePause(d);
+    expect(d.pauseRecording).not.toHaveBeenCalled();
+    expect(r.paused).toBe(false);
+  });
+
+  it("shows a refused pause as an error and stays as it was", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    await r.togglePause({ ...pauseDeps(), pauseRecording: vi.fn(() => Promise.reject(diskFull)) });
+    expect(r.paused).toBe(false);
+    expect(r.error).toEqual(diskFull);
+    expect(r.phase).toBe("recording");
+  });
+
+  it("follows the backend's progress", async () => {
+    const r = new Recording();
+    await r.toggle(deps());
+    r.handleEvent({ state: "progress", rows: 5, elapsed_ms: 500, paused: true });
+    expect(r.paused).toBe(true);
+    r.handleEvent({ state: "progress", rows: 5, elapsed_ms: 1_000, paused: false });
+    expect(r.paused).toBe(false);
+  });
+
+  it("is over when the recording is", async () => {
+    const stopped = new Recording();
+    const d = deps();
+    await stopped.toggle(d);
+    await stopped.togglePause(pauseDeps());
+    await stopped.toggle(d);
+    expect(stopped.paused).toBe(false);
+
+    const ruled = new Recording();
+    await ruled.toggle(deps());
+    await ruled.togglePause(pauseDeps());
+    ruled.handleEvent({ state: "stopped", ...summary(5), ended: "row_limit" });
+    expect(ruled.paused).toBe(false);
+  });
+
+  it("carries across a reload and a move between views", async () => {
+    const r = new Recording();
+    r.adopt({ rows: 10, elapsed_ms: 1_000, paused: true });
+    expect(r.paused).toBe(true);
+    expect(r.detach()).toMatchObject({ rows: 10, paused: true });
+    expect(r.paused).toBe(false);
+  });
+});
+
+describe("Recording races with a stop rule (review)", () => {
+  const nothing = { kind: "usage", message: "Nothing is being recorded.", hint: null };
+  const ended: RecordingEvent = {
+    state: "stopped",
+    rows: 9,
+    gaps: [],
+    disconnected: false,
+    ended: "low_current",
+  };
+
+  async function recordingNow(): Promise<Recording> {
+    const r = new Recording();
+    await r.toggle({
+      canRecord: true,
+      startRecording: () => Promise.resolve("/data/a.csv"),
+      stopRecording: () => Promise.reject(nothing),
+      now: () => new Date(2026, 9, 21),
+    });
+    return r;
+  }
+
+  it("a Stop the rule beat leaves no error beside the rule's notice", async () => {
+    const r = await recordingNow();
+    await r.stop({
+      canRecord: true,
+      startRecording: () => Promise.resolve(null),
+      stopRecording: () => Promise.reject(nothing),
+      now: () => new Date(),
+    });
+    expect(r.error?.message).toBe(nothing.message);
+    r.handleEvent(ended);
+    expect(r.error).toBeNull();
+    expect(r.notice).toContain("/data/a.csv");
+    expect(r.phase).toBe("idle");
+  });
+
+  it("a Pause the rule beat leaves no error beside the rule's notice", async () => {
+    const r = await recordingNow();
+    await r.togglePause({
+      pauseRecording: () => Promise.reject(nothing),
+      resumeRecording: () => Promise.resolve(),
+    });
+    r.handleEvent(ended);
+    expect(r.error).toBeNull();
+  });
+
+  it("an end before the start answered still names the file", async () => {
+    const r = new Recording();
+    let answer: (path: string) => void = () => undefined;
+    const started = r.toggle({
+      canRecord: true,
+      startRecording: () => new Promise((resolve) => (answer = resolve)),
+      stopRecording: () => Promise.reject(nothing),
+      now: () => new Date(2026, 9, 21),
+    });
+    r.handleEvent(ended);
+    answer("/data/b.csv");
+    await started;
+    expect(r.phase).toBe("idle");
+    expect(r.savedPath).toBe("/data/b.csv");
+    expect(r.notice).toContain("/data/b.csv");
+  });
+
+  it("a progress sent before a pause does not undo the press on its way", async () => {
+    const r = await recordingNow();
+    let answer: () => void = () => undefined;
+    const pausing = r.togglePause({
+      pauseRecording: () => new Promise((resolve) => (answer = resolve)),
+      resumeRecording: () => Promise.resolve(),
+    });
+    r.handleEvent({ state: "progress", rows: 2, elapsed_ms: 500, paused: false });
+    r.handleEvent({ state: "progress", rows: 2, elapsed_ms: 500, paused: true });
+    expect(r.paused).toBe(false);
+    answer();
+    await pausing;
+    expect(r.paused).toBe(true);
+  });
+
+  it("a second press waits for the first", async () => {
+    const r = await recordingNow();
+    const pauseRecording = vi.fn(() => Promise.resolve());
+    const resumeRecording = vi.fn(() => Promise.resolve());
+    const first = r.togglePause({ pauseRecording, resumeRecording });
+    await r.togglePause({ pauseRecording, resumeRecording });
+    await first;
+    expect(pauseRecording).toHaveBeenCalledTimes(1);
+    expect(resumeRecording).not.toHaveBeenCalled();
   });
 });

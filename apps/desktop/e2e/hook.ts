@@ -68,6 +68,60 @@ export interface ChartPdStatusLengths {
   cc2: number;
 }
 
+/** The chart options' state of the live chart's last draw (FR AXHK2T). */
+export interface ChartExtrasState {
+  /** The segment marks drawn. */
+  segmentMarks: { percent: number; tMs: number; label: string }[];
+  /** The amps scale's direction. */
+  ampsDir: 1 | -1;
+  /** E.D. points drawn. */
+  edPoints: number;
+  /** The sub-chart's x range and playhead (its x in the viewport, CSS px), or null
+   * without one. */
+  sub: { t0Ms: number; t1Ms: number; playheadMs: number | null; playheadX: number | null } | null;
+  /** The main plot's playhead x in the viewport, CSS px, or null. */
+  playheadX: number | null;
+  /** The segment-mark labels drawn, viewport CSS px (AC-AXHK2V.12); absent while no
+   * segment mark is drawn. */
+  markLabels?: { label: string; left: number; top: number; right: number; bottom: number }[];
+  /** Every axis tick label drawn, viewport CSS px (AC-AXHK2V.12); absent while no
+   * segment mark is drawn. */
+  tickLabels?: { left: number; top: number; right: number; bottom: number }[];
+  /** The "E.D. %" label's box, viewport CSS px, in the frame of `markLabels` /
+   * `tickLabels` (AC-AXHK2V.15); absent while the label is not drawn. */
+  edLabel?: { left: number; top: number; right: number; bottom: number };
+}
+
+/** A box in viewport CSS px. */
+export interface ViewportBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** The fold tick of the chart's last draw (FR AXHK2W, AC-AXHK2W.11). */
+export interface ChartFoldTick {
+  /** The fold boundary it marks, session ms. */
+  ms: number;
+  /** The x range of the draw it was drawn in, session ms. */
+  t0Ms: number;
+  t1Ms: number;
+  /** The tick's x in the viewport, CSS px. */
+  x: number;
+  /** Its label text. */
+  label: string;
+  /** The label's chip, viewport CSS px. */
+  chip: ViewportBox;
+  /** The plot area it was drawn in, viewport CSS px. */
+  plot: ViewportBox;
+  /** The label's font size, CSS px. */
+  fontPx: number;
+  /** The label's text colour and the chip's fill, opaque `#rrggbb`. */
+  color: string;
+  background: string;
+}
+
 export interface OpenPowerzE2E {
   /** Points the chart currently has drawn (non-null y values) per series. */
   chartSeriesLengths(): { vbus: number; ibus: number };
@@ -91,9 +145,28 @@ export interface OpenPowerzE2E {
   chartPdMarkers(): ChartPdMarker[];
   /** The points drawn from the PD status blocks per series (FR TGE83D). */
   chartPdStatusLengths(): ChartPdStatusLengths;
+  /** The chart options' state of the last draw (FR AXHK2T). */
+  chartExtras(): ChartExtrasState;
+  /** The fold tick of the last draw, or null when the draw had none (AC-AXHK2W.11). */
+  chartFoldTick?(): ChartFoldTick | null;
 }
 
 export const HOOK = "__OPEN_POWERZ_E2E__";
+
+/** The opened recording's chart options state of its last draw (FR AXHK2T), as
+ * `window.__OPEN_POWERZ_E2E_RECORDING__()` while a recording is open in a test build. */
+export interface RecordingExtrasState {
+  segmentMarks: { percent: number; tMs: number; label: string }[];
+  ampsDir: 1 | -1;
+  edPoints: number;
+  /** The sub-chart's x range, or null without one. */
+  sub: { t0Ms: number; t1Ms: number } | null;
+  /** The main plot's x range. */
+  t0Ms: number;
+  t1Ms: number;
+}
+
+export const RECORDING_HOOK = "__OPEN_POWERZ_E2E_RECORDING__";
 
 /**
  * A simulated page reload for the Playwright UI suite (FR VEDDFD), as

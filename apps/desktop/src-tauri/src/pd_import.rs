@@ -1,7 +1,7 @@
 //! Read-only import of a vendor PD log database into the PD analyzer view
 //! (FR TGE83E, AC .6).
 //!
-//! The vendor app keeps a PD capture in an SQLite file [static]:
+//! The vendor app keeps a PD capture in an SQLite file `[static]`:
 //!
 //! - `pd_table(Time, Vbus, Ibus, Raw)`: one row per record, `Time` in s from
 //!   the log's start, VBUS in V, IBUS in A and `Raw` the record bytes as the
@@ -178,7 +178,7 @@ pub fn import_vendor_pd_log_with(
 }
 
 /// Column `i` as a number; text, blobs and NULL are `None`.
-fn real(row: &Row<'_>, i: usize) -> Result<Option<f64>, rusqlite::Error> {
+pub(crate) fn real(row: &Row<'_>, i: usize) -> Result<Option<f64>, rusqlite::Error> {
     Ok(match row.get_ref(i)? {
         ValueRef::Real(f) => Some(f),
         ValueRef::Integer(n) => Some(n as f64),
@@ -196,7 +196,7 @@ fn blob<'r>(row: &'r Row<'_>, i: usize) -> Result<Option<&'r [u8]>, rusqlite::Er
 
 /// Open `path` read-only; never creates a file. A plain read-only open
 /// (shared lock, sees a WAL) first; immutable only when that fails.
-fn open_read_only(path: &Path) -> Result<Connection, PdImportError> {
+pub(crate) fn open_read_only(path: &Path) -> Result<Connection, rusqlite::Error> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let plain = Connection::open_with_flags(path, flags).and_then(checked);
     match plain {
@@ -205,9 +205,18 @@ fn open_read_only(path: &Path) -> Result<Connection, PdImportError> {
             Connection::open_with_flags(file_uri(path), flags | OpenFlags::SQLITE_OPEN_URI)
                 .and_then(checked)
                 // The first error says best why the file did not open.
-                .map_err(|_| PdImportError::Database(first))
+                .map_err(|_| first)
         }
     }
+}
+
+/// Open `path` immutable: nothing is locked and nothing is written beside
+/// it, and a WAL or journal is not read. Never creates a file.
+pub(crate) fn open_immutable(path: &Path) -> Result<Connection, rusqlite::Error> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_URI;
+    Connection::open_with_flags(file_uri(path), flags).and_then(checked)
 }
 
 /// `db` hardened for an untrusted file, once it reads as an SQLite database.

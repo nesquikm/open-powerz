@@ -13,10 +13,13 @@ import type {
   BucketsFor,
   DeviceListing,
   ExportProgress,
+  ExportFolded,
   ExportResult,
+  FileSummary,
   FirmwareFileInfo,
   FlashDone,
   FlashEvent,
+  FlashHold,
   FlashStatus,
   Gap,
   HistoryGap,
@@ -26,6 +29,7 @@ import type {
   OfflineRecord,
   OfflineRecordEntry,
   OfflineRecordSample,
+  OpenProgress,
   RecordDeleteResult,
   SettingChanges,
   RecordList,
@@ -35,7 +39,10 @@ import type {
   PdOpened,
   PdRow,
   PdStatusSample,
+  PdStopReason,
   ProtocolSection,
+  RecordingEnd,
+  RecordingOptions,
   RecordingSummary,
   RiskClass,
   Sample,
@@ -43,6 +50,7 @@ import type {
   SeriesBuckets,
   StatsSnapshot,
   Detection,
+  CableRead,
   CableView,
   ConsoleLine,
   PdMessageRequest,
@@ -55,16 +63,28 @@ import type {
   UiError,
   MeasurementSource,
   MeterCommands,
+  RangeStats,
+  RunMark,
+  RunProgress,
+  RunProgressQuery,
 } from "./backend";
 import { widenToNeighbours } from "./chartData";
 import { lineRefusal, messageRefusal } from "./console.svelte";
-import { CANCEL_TOO_LATE } from "./firmwareUpdate.svelte";
-import { PD_CYCLE_MS, pdContractAt, pdDetailsOf, pdRecordTime, pdRow } from "./mockPd";
+import {
+  PD_CYCLE_MS,
+  pdContractAt,
+  pdDetailsOf,
+  pdIsCableDiscover,
+  pdRecordTime,
+  pdRow,
+} from "./mockPd";
+import { DEFAULT_MAX_ROWS } from "./settings";
 
 const SCENARIOS = ["idle", "load-5v-1a", "pd-9v-2a", "noisy-negative"] as const;
 type Scenario = (typeof SCENARIOS)[number];
 
-/** Batches go out every 25 ms: 40 Hz, inside the backend's 20–60 Hz band. */
+/** Batches go out every 25 ms (40 Hz). The app's backend sends at most 20 Hz (FR HR2JAG);
+ * the mock keeps its faster cadence, which the browser suite's timings were tuned on. */
 const BATCH_MS = 25;
 
 /** Recording progress goes out every 500 ms, like the backend's. */
@@ -78,6 +98,8 @@ function usage(message: string): UiError {
 const MOCK_RUNNING_FLASH: FlashStatus = {
   device_id: "demo:idle",
   stage: { stage: "writing", done: 4096, total: 8192 },
+  replug: null,
+  outcome: null,
 };
 
 /** Why the mock refuses a request while a firmware update holds the meter (FR V9SK55). */
@@ -86,6 +108,10 @@ const FLASH_REFUSAL = "A firmware update is running. Wait for it to finish befor
 /** The recovery steps of a failed update, as the backend gives them (FR V9SK55, AC .5). */
 const FLASH_RECOVERY_HINT =
   "Hold the Back button while plugging the meter in to start it in bootloader mode, then run the update again.";
+
+/** What a stop the user asked for says, as the backend gives it (AC-AXHK2M.13). */
+const FLASH_STOPPED =
+  "The update was stopped before anything was erased. The meter may be waiting in its bootloader.";
 
 /** How long each stage of a mock update takes, ms: slow enough for the UI suite to see
  * every stage and the blocked controls. The write stage takes `MOCK_FLASH_WRITES` steps. */
@@ -232,8 +258,58 @@ const SERIES_FIELD: Record<Series, keyof Sample> = {
 
 const FIELDS = Object.keys(SERIES_FIELD) as Series[];
 
+/** Rows of each export the demo keeps as text, for a test to compare. */
+const EXPORT_CSV_HEAD_ROWS = 2_000;
+
 /** Spare room left after a synthetic seed, so live samples append without a copy. */
 const SEED_HEADROOM = 1 << 20;
+
+/** A sample's time (ms), current (A) and power (W), for integrating. */
+interface RunPoint {
+  t: number;
+  i: number;
+  p: number;
+}
+
+const MS_PER_HOUR = 3_600_000;
+
+/** The point at time `t` on the line through `a` and `b`, as the trapezoid rule assumes. */
+function toward(a: RunPoint, b: RunPoint, t: number): RunPoint {
+  const w = b.t !== a.t ? (t - a.t) / (b.t - a.t) : 0;
+  return { t, i: a.i + (b.i - a.i) * w, p: a.p + (b.p - a.p) * w };
+}
+
+/** Charge (Ah) and energy (Wh) from `a` to `b` by the trapezoid rule. */
+function trapezoid(a: RunPoint, b: RunPoint): [number, number] {
+  const h = Math.max(0, b.t - a.t) / MS_PER_HOUR;
+  return [((a.i + b.i) / 2) * h, ((a.p + b.p) / 2) * h];
+}
+
+/** The most E.D. points and marks one answer holds, as in the Rust backend. */
+const MAX_ED_POINTS = 8192;
+const MAX_MARKS = 1000;
+
+/** The percentages to mark at every `stepPct`, 0% and 100% left out. */
+function markPercents(stepPct: number): number[] {
+  if (!(stepPct > 0 && stepPct < 100)) return [];
+  const out: number[] = [];
+  for (let k = 1; k <= MAX_MARKS && k * stepPct < 100 - 1e-9; k++) out.push(k * stepPct);
+  return out;
+}
+
+/** `q.ed_points` evenly spaced times over the E.D. window clamped to `runT0..runT1` (the
+ * scope's samples). */
+function edTimes(q: RunProgressQuery, runT0: number, runT1: number): number[] {
+  const n = Math.min(MAX_ED_POINTS, Math.max(0, Math.floor(q.ed_points)));
+  const x = q.ed_t0_ms ?? runT0;
+  const y = q.ed_t1_ms ?? runT1;
+  const a = Math.max(Math.min(x, y), runT0);
+  const b = Math.min(Math.max(x, y), runT1);
+  if (!(n > 0) || a > b) return [];
+  if (n === 1) return [b];
+  const step = (b - a) / (n - 1);
+  return Array.from({ length: n }, (_, k) => (k === n - 1 ? b : a + step * k));
+}
 
 /** The session history as columns (sample times plus one column per series), so a
  * range is found by binary search and bucketed without building sample objects:
@@ -280,6 +356,11 @@ class HistoryColumns {
     }
   }
 
+  /** Sample `i`'s time, ms. */
+  timeAt(i: number): number {
+    return this.#t[i] ?? 0;
+  }
+
   /** The first index whose time is `>= t` (or `> t` when `after`). */
   #search(t: number, after: boolean): number {
     let lo = 0;
@@ -298,6 +379,162 @@ class HistoryColumns {
   #value(name: HistorySeries, j: number): number {
     if (name !== "power") return this.#cols[name][j] as number;
     return (this.#cols.vbus[j] as number) * (this.#cols.ibus[j] as number);
+  }
+
+  /** Sample `j`'s time, current and power. */
+  #pt(j: number): RunPoint {
+    const v = this.#cols.vbus[j] as number;
+    const i = this.#cols.ibus[j] as number;
+    return { t: this.#t[j] as number, i, p: v * i };
+  }
+
+  /** Sample `j` starts a new run: the interval before it is (most of) one of `gaps`. */
+  #startsRun(j: number, gaps: readonly HistoryGap[]): boolean {
+    if (j <= 0 || j >= this.length || gaps.length === 0) return false;
+    const a = this.#t[j - 1] as number;
+    const b = this.#t[j] as number;
+    return gaps.some(
+      (g) => Math.min(b, g.to_ms) - Math.max(a, g.from_ms) >= (g.to_ms - g.from_ms) / 2,
+    );
+  }
+
+  /** The ruler's stats over the samples with `t0 <= t <= t1` (either order), as the Rust
+   * `range_stats` counts them: charge and energy by the trapezoid rule over `t0..t1`
+   * itself (the parts from each end to its nearest sample follow the line to the sample
+   * just outside), nothing across one of `gaps`; plain averages of the samples in range;
+   * `null` with no sample in range (FR AXHK2T). */
+  rangeStats(a: number, b: number, gaps: readonly HistoryGap[] = []): RangeStats | null {
+    const t0 = Math.min(a, b);
+    const t1 = Math.max(a, b);
+    const lo = this.#search(t0, false);
+    const hi = this.#search(t1, true);
+    if (hi <= lo) return null;
+    let chargeAh = 0;
+    let energyWh = 0;
+    let sv = 0;
+    let si = 0;
+    let sp = 0;
+    let prev: RunPoint | null = null;
+    for (let j = lo; j < hi; j++) {
+      const cur = this.#pt(j);
+      if (prev !== null && !this.#startsRun(j, gaps)) {
+        const [dq, de] = trapezoid(prev, cur);
+        chargeAh += dq;
+        energyWh += de;
+      }
+      prev = cur;
+      sv += this.#cols.vbus[j] as number;
+      si += cur.i;
+      sp += cur.p;
+    }
+    if (lo > 0 && !this.#startsRun(lo, gaps)) {
+      const inner = this.#pt(lo);
+      const [dq, de] = trapezoid(toward(this.#pt(lo - 1), inner, t0), inner);
+      chargeAh += dq;
+      energyWh += de;
+    }
+    if (hi < this.length && !this.#startsRun(hi, gaps)) {
+      const inner = this.#pt(hi - 1);
+      const [dq, de] = trapezoid(inner, toward(inner, this.#pt(hi), t1));
+      chargeAh += dq;
+      energyWh += de;
+    }
+    const n = hi - lo;
+    return {
+      samples: n,
+      charge_ah: chargeAh,
+      energy_wh: energyWh,
+      vbus_avg_v: sv / n,
+      ibus_avg_a: si / n,
+      power_avg_w: sp / n,
+    };
+  }
+
+  /** Segment marks of the current run (the samples after the last of `gaps`) and E.D. of
+   * the session (or the run, per `ed_scope`), from the raw samples, as the Rust
+   * `run_progress` does; `null` with no sample. */
+  runProgress(q: RunProgressQuery, gaps: readonly HistoryGap[] = []): RunProgress | null {
+    if (this.length === 0) return null;
+    let start = 0;
+    for (const g of gaps) {
+      const j = this.#search((g.from_ms + g.to_ms) / 2, false);
+      if (j > start && j < this.length) start = j;
+    }
+    const from = q.ed_scope === "run" ? start : 0;
+    const runT0 = this.#t[start] as number;
+    const runT1 = this.#t[this.length - 1] as number;
+    const edT = edTimes(q, this.#t[from] as number, runT1);
+    const edWh: number[] = [];
+    let ah = 0;
+    let wh = 0;
+    let beforeRun: [number, number] = [0, 0];
+    let prev: RunPoint | null = null;
+    for (let j = from; j < this.length; j++) {
+      if (j === start) beforeRun = [ah, wh];
+      if (j > from && this.#startsRun(j, gaps)) prev = null;
+      const b = this.#pt(j);
+      while (edWh.length < edT.length && (edT[edWh.length] as number) <= b.t) {
+        const t = edT[edWh.length] as number;
+        edWh.push(wh + (prev === null ? 0 : trapezoid(prev, toward(prev, b, t))[1]));
+      }
+      if (prev !== null) {
+        const [dq, de] = trapezoid(prev, b);
+        ah += dq;
+        wh += de;
+      }
+      prev = b;
+    }
+    while (edWh.length < edT.length) edWh.push(wh);
+    const edTotalWh = wh;
+    const chargeAh = ah - beforeRun[0];
+    const energyWh = wh - beforeRun[1];
+    const followed = q.kind === "charge" ? chargeAh : energyWh;
+    const marksTotalPositive = followed > 0 && Number.isFinite(followed);
+    const marks: RunMark[] = [];
+    const percents = marksTotalPositive ? markPercents(q.step_pct) : [];
+    let last: { t: number; c: number } | null = null;
+    let c = 0;
+    let before: RunPoint | null = null;
+    for (let j = start; j < this.length && marks.length < percents.length; j++) {
+      const b = this.#pt(j);
+      if (before !== null) c += trapezoid(before, b)[q.kind === "charge" ? 0 : 1];
+      before = b;
+      while (marks.length < percents.length) {
+        const percent = percents[marks.length] as number;
+        const target = (followed * percent) / 100;
+        if (c < target) break;
+        const tMs: number =
+          last !== null && last.c < target
+            ? last.t + ((target - last.c) / (c - last.c)) * (b.t - last.t)
+            : b.t;
+        marks.push({ t_ms: tMs, percent });
+      }
+      last = { t: b.t, c };
+    }
+    const energyTotalPositive = edTotalWh > 0 && Number.isFinite(edTotalWh);
+    return {
+      session_t0_ms: this.#t[0] as number,
+      run_t0_ms: runT0,
+      run_t1_ms: runT1,
+      samples: this.length - start,
+      charge_ah: chargeAh,
+      energy_wh: energyWh,
+      marks_total_positive: marksTotalPositive,
+      marks,
+      ed_total_wh: edTotalWh,
+      energy_total_positive: energyTotalPositive,
+      ed_t_ms: energyTotalPositive ? edT : [],
+      ed_pct: energyTotalPositive ? edWh.map((e) => (100 * e) / edTotalWh) : [],
+    };
+  }
+
+  /** The first `n` samples as CSV text: time, VBUS and IBUS. */
+  csvHead(n: number): string {
+    const lines = ["time_ms,vbus_v,ibus_a"];
+    for (let j = 0; j < Math.min(n, this.length); j++) {
+      lines.push(`${this.#t[j]},${this.#cols.vbus[j]},${this.#cols.ibus[j]}`);
+    }
+    return lines.join("\n");
   }
 
   /** Min / max buckets over `t0..=t1`, at most `buckets` per series, plus the sample
@@ -370,6 +607,16 @@ export function pdSyntheticFromUrl(search: string | undefined): number | null {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
+/** `?foldat=<n>` in the page URL: the mock's full-resolution history limit
+ * ({@link MockOptions.historyFullSamples}, FR AXHK2W), a positive whole number of
+ * samples; anything else is ignored. */
+export function foldAtFromUrl(search: string | undefined): number | null {
+  const raw = urlParam(search, "foldat");
+  if (raw === null || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 /** A scripted record-delete failure (FR JKWT3V): `backup` fails the backup (nothing is
  * deleted), `mismatch` keeps the old table so the re-read does not match. */
 export type RecordsFault = "backup" | "mismatch";
@@ -391,6 +638,36 @@ export function settingsFaultFromUrl(search: string | undefined): SettingsFault 
   return urlParam(search, "settingsfault") === "mismatch" ? "mismatch" : null;
 }
 
+/** A scripted recording-file open (FR AXHK2S): `refused` refuses the file, `slow` holds the
+ * open until Cancel, `truncated` opens a file past the row limit, `dialog` stays in the open
+ * dialog until Cancel, `unknown-total` holds an open that knows no total until Cancel. */
+export type RecordingFileFault = "refused" | "slow" | "truncated" | "dialog" | "unknown-total";
+
+const RECORDING_FILE_FAULTS: readonly RecordingFileFault[] = [
+  "refused",
+  "slow",
+  "truncated",
+  "dialog",
+  "unknown-total",
+];
+
+/** `?recordingfile=<a RecordingFileFault>` in the page URL scripts the open (FR AXHK2S);
+ * anything else is ignored. */
+export function recordingFileFaultFromUrl(search: string | undefined): RecordingFileFault | null {
+  const raw = urlParam(search, "recordingfile");
+  return RECORDING_FILE_FAULTS.find((fault) => fault === raw) ?? null;
+}
+
+/** The recording file the mock opens (FR AXHK2S). */
+export const MOCK_RECORDING_FILE = {
+  name: "demo-recording.csv",
+  rows: 12_345,
+  skipped: 3,
+} as const;
+
+/** Readable rows past the limit in a `truncated` file. */
+const MOCK_LEFT_OUT = 2_500_000;
+
 /** Options of a {@link MockBackend}. */
 export interface MockOptions {
   /** PD records to seed when the capture first starts. */
@@ -399,6 +676,10 @@ export interface MockOptions {
   recordsFault?: RecordsFault | null;
   /** A scripted settings-write failure (FR JKWT3W). */
   settingsFault?: SettingsFault | null;
+  /** A scripted recording-file open (FR AXHK2S). */
+  recordingFileFault?: RecordingFileFault | null;
+  /** The history's full-resolution limit (FR AXHK2W); none (the default) never folds. */
+  historyFullSamples?: number | null;
 }
 
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
@@ -485,17 +766,79 @@ interface Running {
   triggerVbusV: number | null;
   /** This meter's open trigger session (FR DGSQ6S), null when none (FR 1HHT03). */
   trigger: MockTrigger | null;
+  /** `pd-start-refused`: a trigger session ran on this connection, so the meter refuses
+   * a PD capture Start until a replug [device]. */
+  pdStartRefused?: boolean;
 }
 
 interface MockRecording {
+  /** Which recording: no two share one, like the backend's. */
+  id: number;
   path: string;
   rows: number;
   elapsedMs: number;
   sinceProgressMs: number;
+  /** A pause holds the rows back. */
+  paused: boolean;
+  /** Where the pause gap the next rows close began. */
+  pauseFromMs: number | null;
+  gaps: Gap[];
+  /** End once the current's magnitude stays below this, A. */
+  belowA: number | null;
+  /** How long it must stay below, ms. */
+  forMs: number;
+  /** Where the current low-current stretch began. */
+  lowSinceMs: number | null;
+  /** End at this many rows. */
+  maxRows: number;
+}
+
+/** The auto-stop rule over the samples just recorded: whether the wait is over. */
+function currentStayedLow(rec: MockRecording, samples: readonly Sample[]): boolean {
+  if (rec.belowA === null) return false;
+  for (const sample of samples) {
+    if (Math.abs(sample.ibus_a) >= rec.belowA) {
+      rec.lowSinceMs = null;
+    } else {
+      rec.lowSinceMs ??= sample.t_ms;
+      if (sample.t_ms - rec.lowSinceMs >= rec.forMs) return true;
+    }
+  }
+  return false;
+}
+
+/** Writes one tick's samples, like the backend's `Recorder`: a pause holds them back, and the
+ * first row after one closes its gap at `nowMs`. Answers the rule that ended the recording. */
+function writeRows(
+  rec: MockRecording,
+  samples: readonly Sample[],
+  nowMs: number,
+): RecordingEnd | null {
+  if (rec.paused) return null;
+  if (rec.pauseFromMs !== null) {
+    rec.gaps.push({ kind: "pause", from_ms: rec.pauseFromMs, to_ms: nowMs });
+    rec.pauseFromMs = null;
+  }
+  // Like the backend: the records after the row limit are not written.
+  const written = samples.slice(0, rec.maxRows - rec.rows);
+  rec.rows += written.length;
+  if (currentStayedLow(rec, written)) return "low_current";
+  return rec.rows >= rec.maxRows ? "row_limit" : null;
+}
+
+/** What a recording that ended for `ended` wrote. */
+function summaryOf(rec: MockRecording, ended: RecordingEnd): RecordingSummary {
+  return { rows: rec.rows, gaps: rec.gaps, disconnected: false, ended };
+}
+
+/** The open recording of `s`; refused when there is none. */
+function recordingOf(s: Running): MockRecording {
+  if (!s.recording) throw usage("Nothing is being recorded.");
+  return s.recording;
 }
 
 /** Scripted backend behaviours chosen with `?mock=<name>` in the page URL; the device
- * list stays the same in every one but `replug`. */
+ * list stays the same in every one but `replug` and `mode-flip`. */
 export const MOCK_MODES = [
   "permission-denied",
   "rate-locked",
@@ -503,13 +846,20 @@ export const MOCK_MODES = [
   "outage",
   "blip",
   "replug",
+  "replug-late",
   "trigger-sag",
   "trigger-all",
   "trigger-out-of-sync",
   "trigger-req-error",
   "trigger-detect-disagree",
   "trigger-list-lag",
+  "trigger-no-cable",
+  "trigger-unlisted-cable",
+  "trigger-charger-gone",
+  "trigger-cc-gone",
+  "pd-start-refused",
   "bootloader",
+  "mode-flip",
   "firmware-fail-switching",
   "firmware-fail-erasing",
   "firmware-fail-writing",
@@ -520,6 +870,10 @@ export const MOCK_MODES = [
   "firmware-running",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
+
+/** `replug-late` (FR PGY704): after a mocked update the meter is listed in application
+ * mode again only this long after the update ended, as the real backend sees it. */
+const MOCK_LATE_RELIST_MS = 3_000;
 
 /** The `?mock=` mode of the page URL, or null for the normal demo behaviour. */
 export function mockModeFromUrl(search: string | undefined): MockMode | null {
@@ -555,28 +909,62 @@ const BOOTLOADER_METER: DeviceListing = {
   mode: "bootloader",
 };
 
-/** The replug meter's picker entry at USB address `address`. */
-function replugMeter(address: number): DeviceListing {
+/** `mode-flip`: one real meter (`serial`) listed in application mode at USB address
+ * `address`; `appMs` after the list is first watched it turns to bootloader mode under
+ * the same entry, and `bootMs` later it is back in application mode (AC-AXHK2M.17). */
+export const MOCK_MODE_FLIP = {
+  serial: "MOCK-FLIP-0001",
+  address: 7,
+  appMs: 3_000,
+  bootMs: 3_000,
+} as const;
+
+/** The picker entry of a scripted real KM003C (`serial`) on bus 1 at `address` in `mode`,
+ * labelled the way the backend lists it. */
+function scriptedMeter(
+  serial: string,
+  address: number,
+  mode: "application" | "bootloader",
+): DeviceListing {
+  const label = `KM003C — ${serial}`;
   return {
     id: `usb:1:${address}`,
-    label: `KM003C — ${MOCK_REPLUG.serial}`,
+    label: mode === "bootloader" ? `${label} (bootloader mode)` : label,
     model: "KM003C",
-    serial: MOCK_REPLUG.serial,
+    serial,
     bus: "1",
     address,
     demo_scenario: null,
-    mode: "application",
+    mode,
   };
 }
 
+/** The mode-flip meter's picker entry in `mode` (AC-AXHK2M.17). */
+function flipMeter(mode: "application" | "bootloader"): DeviceListing {
+  return scriptedMeter(MOCK_MODE_FLIP.serial, MOCK_MODE_FLIP.address, mode);
+}
+
+/** The replug meter's picker entry at USB address `address`. */
+function replugMeter(
+  address: number,
+  mode: "application" | "bootloader" = "application",
+): DeviceListing {
+  return scriptedMeter(MOCK_REPLUG.serial, address, mode);
+}
+
 /** The status event of a mock session that just connected; a null rate is a locked one. */
-function connectedStatus(serial: string, rateSps: number | null, sessionId = 1): BackendEvent {
+function connectedStatus(
+  serial: string,
+  rateSps: number | null,
+  sessionId = 1,
+  firmwareVersion = "2.0.6",
+): BackendEvent {
   return {
     type: "status",
     data: {
       state: "connected",
       model: "KM003C",
-      firmware_version: "2.0.6",
+      firmware_version: firmwareVersion,
       bootloader_version: "2.5",
       mode: "application",
       warnings: ["outdated"],
@@ -692,10 +1080,28 @@ interface MockTrigger {
   entered: "pd" | "legacy" | null;
   /** The queue rate before the session capped it at 50 SPS, if it did. */
   rateBefore: number | null;
+  /** "Don't ask again" is on (FR AXHK2N). */
+  armed: boolean;
+  /** `trigger-charger-gone`: the charger's going away has been scheduled. */
+  goingAway: boolean;
+  /** VBUS collapsed under a contract (FR AXHK2N), or both CC lines fell after Detect
+   * (`trigger-cc-gone`, FR WFSNZD). */
+  chargerGone: boolean;
+  /** `trigger-cc-gone`: both CC lines read 0 V until the next PD listing. */
+  ccLow?: boolean;
+  /** The command log's length right after a way back to 5 V; while it is unchanged
+   * nothing went out since, so the close skips another (AC-AXHK2P.15). */
+  backAt?: number;
 }
 
 /** The queue rate cap while a trigger session is open, SPS. [inferred] */
 const TRIGGER_MAX_SPS = 50;
+/** `trigger-charger-gone`: how long after the first accepted request VBUS falls, ms. */
+const CHARGER_GONE_AFTER_MS = 1000;
+/** `trigger-cc-gone`: how long after Detect both CC lines fall, ms. */
+const CC_GONE_AFTER_MS = 1000;
+/** The refusal of what names an offer once the charger went away. */
+const CHARGER_GONE_REFUSAL = "The charger went away. Press Detect.";
 
 /** The backend's `OutOfSync` refusal: the meter's replies lag behind the commands. */
 function outOfSyncError(): UiError {
@@ -817,7 +1223,12 @@ const MOCK_CABLE: CableView = {
   max_voltage_v: 50,
   max_current_ma: 5000,
   epr_capable: true,
+  speed: "USB 2.0",
+  vendor: "Belkin",
 };
+
+/** The one message the backend sends a cable with no dialog. */
+const CABLE_READ_LINE = "pd data=018F1001A800FF";
 
 /** The demo meter's settings rows, as the backend decodes the captured FW 2.0.6
  * block (FR 1HHT01): the screen-checked fields confirmed, rotation and the
@@ -929,12 +1340,21 @@ export class MockBackend {
   /** Every running session, in the order the meters were connected (FR 1HHT03). */
   #sessions: Running[] = [];
   #nextSessionId = 1;
+  #lastRecordingId = 0;
   /** The PD capture saved last in the page, and the one opened (FR TGE83E). */
   #savedPd: MockPdFile | null = null;
   #openedPd: MockPdFile | null = null;
   #mode: MockMode | null;
   /** The updates run so far (FR V9SK55). */
   #firmwareFlashes: { deviceId: string; path: string; confirmation: string }[] = [];
+  /** The demo meter's firmware: the flashed file's version after a done update
+   * (AC-AXHK2M.16). */
+  #firmwareVersion = "2.0.6";
+  /** The UI suite's frame-rate tests hold the stream to measure the same page idle:
+   * no batches and no samples while held, the sessions untouched (FR 9QTPNQ). */
+  #held = false;
+  /** Batches sent so far, all sessions (FR 9QTPNQ). */
+  #batchesSent = 0;
   /** A firmware update holds the meter (FR V9SK55, AC .4). */
   #flashing = false;
   /** The meter the running update holds; another one can connect (AC-4PJRVM.4). */
@@ -943,7 +1363,15 @@ export class MockBackend {
   #flashStop = false;
   #flashErasing = false;
   #options: MockOptions;
+  /** The open recording file, which no meter takes part in (FR AXHK2S). */
+  #recordingFile: HistoryColumns | null = null;
+  /** Ends a `slow` open that is under way. */
+  #endRecordingOpen: (() => void) | null = null;
   #revealed: string[] = [];
+  /** The chart images saved (FR AXHK2V). */
+  #chartImages: { suggestedName: string; format: string; data: number[] }[] = [];
+  /** The head of each export's rows as CSV text, oldest first. */
+  #exports: string[] = [];
   /** `replug`: the meter's USB address while the OS lists it, null while unplugged. */
   #meterAddress: number | null = 7;
   /** `replug`: the session whose meter is away, which the backend waits for. */
@@ -954,6 +1382,11 @@ export class MockBackend {
   /** `replug`: the session the unplug script runs for. */
   #replugFor: Running | null = null;
   #watchers = new Set<(devices: DeviceListing[]) => void>();
+  /** `mode-flip`: the listed meter's mode, and whether its flips are scheduled. */
+  #flipMode: "application" | "bootloader" = "application";
+  /** `replug`: the listed meter's mode, bootloader while a mocked update has it switched. */
+  #replugMode: "application" | "bootloader" = "application";
+  #flipStarted = false;
   /** Settings reads so far (FR 1HHT01). */
   #meterSettingsReads = 0;
   /** Settings writes sent so far (FR JKWT3W). */
@@ -982,6 +1415,8 @@ export class MockBackend {
       pdSynthetic: pdSyntheticFromUrl(pageSearch()),
       recordsFault: recordsFaultFromUrl(pageSearch()),
       settingsFault: settingsFaultFromUrl(pageSearch()),
+      recordingFileFault: recordingFileFaultFromUrl(pageSearch()),
+      historyFullSamples: foldAtFromUrl(pageSearch()),
     },
   ) {
     this.#mode = mode;
@@ -994,9 +1429,15 @@ export class MockBackend {
    * bootloader-mode meter; else null. */
   #listedMeter(): DeviceListing | null {
     if (this.#mode === "bootloader") return BOOTLOADER_METER;
-    return this.#mode === "replug" && this.#meterAddress !== null
-      ? replugMeter(this.#meterAddress)
+    if (this.#mode === "mode-flip") return flipMeter(this.#flipMode);
+    return this.#replugLike() && this.#meterAddress !== null
+      ? replugMeter(this.#meterAddress, this.#replugMode)
       : null;
+  }
+
+  /** `replug` and `replug-late` list the same real meter; only the late relist differs. */
+  #replugLike(): boolean {
+    return this.#mode === "replug" || this.#mode === "replug-late";
   }
 
   async listDevices(): Promise<DeviceListing[]> {
@@ -1015,11 +1456,25 @@ export class MockBackend {
     return [...meters, ...demos];
   }
 
-  /** The full list now and on every change (only `replug` changes it). */
+  /** The full list now and on every change (only `replug` and `mode-flip` change it). */
   async watchDevices(onChange: (devices: DeviceListing[]) => void): Promise<() => void> {
     this.#watchers.add(onChange);
     onChange(await this.listDevices());
+    if (this.#mode === "mode-flip" && !this.#flipStarted) this.#startFlips();
     return () => this.#watchers.delete(onChange);
+  }
+
+  /** `mode-flip`: into the bootloader after `appMs`, back after `bootMs` more. */
+  #startFlips(): void {
+    this.#flipStarted = true;
+    setTimeout(() => {
+      this.#flipMode = "bootloader";
+      void this.#notifyDevices();
+      setTimeout(() => {
+        this.#flipMode = "application";
+        void this.#notifyDevices();
+      }, MOCK_MODE_FLIP.bootMs);
+    }, MOCK_MODE_FLIP.appMs);
   }
 
   async #notifyDevices(): Promise<void> {
@@ -1068,11 +1523,17 @@ export class MockBackend {
       setRate: on(this.setRate),
       startRecording: on(this.startRecording),
       stopRecording: on(this.stopRecording),
+      pauseRecording: on(this.pauseRecording),
+      resumeRecording: on(this.resumeRecording),
       saveRecordingAs: on(this.saveRecordingAs),
       exportSession: on(this.exportSession),
+      exportSessionDb: on(this.exportSessionDb),
       stats: on(this.stats),
       historyRange: on(this.historyRange) as MockBackend["historyRange"],
       historyGaps: on(this.historyGaps),
+      historyFoldBoundary: on(this.historyFoldBoundary),
+      rangeStats: on(this.rangeStats),
+      runProgress: on(this.runProgress),
       resetStats: on(this.resetStats),
       clearHistory: on(this.clearHistory),
       pdStart: on(this.pdStart),
@@ -1090,10 +1551,16 @@ export class MockBackend {
       triggerList: on(this.triggerList),
       triggerRisk: on(this.triggerRisk),
       triggerRequest: on(this.triggerRequest),
+      triggerArmed: on(this.triggerArmed),
+      triggerDisarm: on(this.triggerDisarm),
+      triggerChargerGone: on(this.triggerChargerGone),
+      triggerPdEntered: on(this.triggerPdEntered),
       triggerBackTo5v: on(this.triggerBackTo5v),
       triggerClose: on(this.triggerClose),
       triggerMessageRisk: on(this.triggerMessageRisk),
       triggerMessageSend: on(this.triggerMessageSend),
+      triggerCableRead: on(this.triggerCableRead),
+      pdCableSeen: on(this.pdCableSeen),
       triggerConsoleRisk: on(this.triggerConsoleRisk),
       triggerConsoleSend: on(this.triggerConsoleSend),
     };
@@ -1140,7 +1607,7 @@ export class MockBackend {
     const serial = isMeter ? MOCK_REPLUG.serial : this.#freeDemoSerial();
     const sessionId = this.#nextSessionId++;
     // Like the worker: a locked session's rate is unknown until measured.
-    onEvent(connectedStatus(serial, locked ? null : rateSps, sessionId));
+    onEvent(connectedStatus(serial, locked ? null : rateSps, sessionId, this.#firmwareVersion));
     if (locked) {
       onEvent({
         type: "status",
@@ -1231,7 +1698,7 @@ export class MockBackend {
     const gap = { from_ms: from, to_ms: Math.round(s.nextMs) };
     s.gaps.push(gap);
     s.pendingGap = { kind: "outage", ...gap };
-    s.onEvent(connectedStatus(MOCK_REPLUG.serial, s.rateSps));
+    s.onEvent(connectedStatus(MOCK_REPLUG.serial, s.rateSps, 1, this.#firmwareVersion));
     s.timer = setInterval(() => this.#tick(s), BATCH_MS);
     this.#sessions.push(s);
     // Like the backend: the commands without a device id stay on a meter still running.
@@ -1254,6 +1721,7 @@ export class MockBackend {
   }
 
   #tick(s: Running): void {
+    if (this.#held) return;
     s.carry += (s.rateSps * BATCH_MS) / 1000;
     const n = Math.floor(s.carry);
     s.carry -= n;
@@ -1264,6 +1732,10 @@ export class MockBackend {
       if (s.triggerVbusV !== null) {
         sample.vbus_v = s.triggerVbusV + 0.01 * Math.sin(s.nextMs / 140);
       }
+      if (s.trigger?.ccLow) {
+        sample.cc1_v = 0;
+        sample.cc2_v = 0;
+      }
       samples.push(sample);
       s.history.push(sample);
       s.stats.push(sample);
@@ -1272,21 +1744,32 @@ export class MockBackend {
     if (s.pendingGap !== null && n > 0) {
       s.onEvent({ type: "gap", data: s.pendingGap });
       s.pendingGap = null;
+      if (s.recording) s.recording.lowSinceMs = null;
     }
     // Like the backend: the CDC stream carries no temperature.
     const tempC = s.source === "cdc" ? null : 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
     s.onEvent({ type: "batch", data: { samples, temp_c: tempC, stats: s.stats.snapshot() } });
+    this.#batchesSent += 1;
     s.streamed += n;
     const rec = s.recording;
     if (rec) {
-      rec.rows += n;
+      const ended = writeRows(rec, samples, s.nextMs);
+      if (ended !== null) {
+        this.#endRecording(s, ended);
+        return;
+      }
       rec.elapsedMs += BATCH_MS;
       rec.sinceProgressMs += BATCH_MS;
       if (rec.sinceProgressMs >= PROGRESS_MS) {
         rec.sinceProgressMs = 0;
         s.onEvent({
           type: "recording",
-          data: { state: "progress", rows: rec.rows, elapsed_ms: rec.elapsedMs },
+          data: {
+            state: "progress",
+            rows: rec.rows,
+            elapsed_ms: rec.elapsedMs,
+            paused: rec.paused,
+          },
         });
       }
     }
@@ -1308,12 +1791,15 @@ export class MockBackend {
     return {
       device_id: s.deviceId,
       model: "KM003C",
-      firmware_version: "2.0.6",
+      firmware_version: this.#firmwareVersion,
       serial: s.serial,
       rate_sps: s.rateSps,
       rate_locked: s.rateLocked,
       session_id: s.sessionId,
-      recording: rec ? { rows: rec.rows, elapsed_ms: rec.elapsedMs, path: rec.path } : null,
+      recording: rec
+        ? { rows: rec.rows, elapsed_ms: rec.elapsedMs, path: rec.path, paused: rec.paused }
+        : null,
+      pd_capturing: s.pd.timer !== null,
     };
   }
 
@@ -1354,7 +1840,7 @@ export class MockBackend {
       s.recording = null;
       s.onEvent({
         type: "recording",
-        data: { state: "stopped", rows, gaps: [], disconnected: true },
+        data: { state: "stopped", rows, gaps: [], disconnected: true, ended: "disconnected" },
       });
     }
     s.onEvent({ type: "status", data: { state: "disconnected", error } });
@@ -1372,21 +1858,62 @@ export class MockBackend {
     s.onEvent({ type: "status", data: { state: "rate", rate_sps: rateSps, rate_locked: false } });
   }
 
-  /** There is no folder in the browser: the proposed name is the "path". */
-  async startRecording(suggestedName: string): Promise<string | null> {
+  /** A rule ended the recording: the page hears it, as from the backend. */
+  #endRecording(s: Running, ended: RecordingEnd): void {
+    const rec = s.recording;
+    if (!rec) return;
+    s.recording = null;
+    s.onEvent({ type: "recording", data: { state: "stopped", ...summaryOf(rec, ended) } });
+  }
+
+  /** There is no folder dialog in the browser: the choice is fixed. */
+  async chooseRecordingFolder(): Promise<string | null> {
+    return "/demo/recordings";
+  }
+
+  /** There is no folder in the browser: the proposed name, in the folder set, is the
+   * "path". */
+  async startRecording(suggestedName: string, options?: RecordingOptions): Promise<string | null> {
     const s = this.#open();
     if (s.recording) throw usage("A recording is already running.");
-    s.recording = { path: suggestedName, rows: 0, elapsedMs: 0, sinceProgressMs: 0 };
+    const path = options?.folder ? `${options.folder}/${suggestedName}` : suggestedName;
+    s.recording = {
+      id: ++this.#lastRecordingId,
+      path,
+      rows: 0,
+      elapsedMs: 0,
+      sinceProgressMs: 0,
+      paused: false,
+      pauseFromMs: null,
+      gaps: [],
+      belowA: options?.below_a ?? null,
+      forMs: options?.for_ms ?? 0,
+      lowSinceMs: null,
+      maxRows: options?.max_rows ?? DEFAULT_MAX_ROWS,
+    };
     s.onEvent({ type: "recording", data: { state: "started" } });
-    return suggestedName;
+    return path;
   }
 
   async stopRecording(): Promise<RecordingSummary> {
     const s = this.#open();
-    const rec = s.recording;
-    if (!rec) throw usage("Nothing is being recorded.");
+    const rec = recordingOf(s);
     s.recording = null;
-    return { rows: rec.rows, gaps: [], disconnected: false };
+    return summaryOf(rec, "stopped");
+  }
+
+  /** Like the backend: the stream goes on, and a pause adds one gap if rows came before it. */
+  async pauseRecording(): Promise<void> {
+    const s = this.#open();
+    const rec = recordingOf(s);
+    if (rec.paused) return;
+    rec.paused = true;
+    rec.lowSinceMs = null;
+    if (rec.rows > 0) rec.pauseFromMs ??= s.nextMs;
+  }
+
+  async resumeRecording(): Promise<void> {
+    recordingOf(this.#open()).paused = false;
   }
 
   /** There is no save dialog in the browser: the file stays where it is. */
@@ -1401,18 +1928,133 @@ export class MockBackend {
     onProgress: (progress: ExportProgress) => void,
   ): Promise<ExportResult | null> {
     const s = this.#open();
-    const rows = s.streamed;
+    const folded = this.#exportFolded(s);
+    const rows = folded === null ? s.streamed : s.history.length - folded.samples;
+    this.#exports.push(s.history.csvHead(EXPORT_CSV_HEAD_ROWS));
     const slow = this.#mode === "slow-export";
     if (slow) onProgress({ done: Math.floor(rows / 2), total: rows });
     return new Promise((resolve) =>
       setTimeout(
         () => {
           onProgress({ done: rows, total: rows });
-          resolve({ path: suggestedName, rows });
+          resolve({ path: suggestedName, rows, folded });
         },
         slow ? SLOW_EXPORT_MS : 0,
       ),
     );
+  }
+
+  /** What an export of `s` leaves out once its history is past
+   * {@link MockOptions.historyFullSamples} (AC-AXHK2W.14): the samples before the fold
+   * boundary, their span and the file's start; `null` while nothing would be folded. */
+  #exportFolded(s: Running): ExportFolded | null {
+    const samples = this.#foldedSamples(s);
+    if (samples === null) return null;
+    const h = s.history;
+    const ms = h.timeAt(samples) - h.timeAt(0);
+    return {
+      samples,
+      ms,
+      start_unix_ms: Date.now() - (h.timeAt(h.length - 1) - h.timeAt(samples)),
+    };
+  }
+
+  /** How many of `s`'s oldest samples are past {@link MockOptions.historyFullSamples}
+   * (the ones a real history would fold); `null` while none are. */
+  #foldedSamples(s: Running): number | null {
+    const limit = this.#options.historyFullSamples;
+    if (limit == null || s.history.length <= limit) return null;
+    return s.history.length - Math.max(0, Math.floor(limit));
+  }
+
+  /** The session's rows as a `.db` file: like {@link exportSession}, which it shares. */
+  async exportSessionDb(
+    suggestedName: string,
+    onProgress: (progress: ExportProgress) => void,
+  ): Promise<ExportResult | null> {
+    return this.exportSession(suggestedName, onProgress);
+  }
+
+  /** Opens {@link MOCK_RECORDING_FILE}, or what `recordingFileFault` scripts. */
+  async openRecordingFile(
+    onProgress: (progress: OpenProgress) => void,
+  ): Promise<FileSummary | null> {
+    const { rows, name, skipped } = MOCK_RECORDING_FILE;
+    const fault = this.#options.recordingFileFault ?? null;
+    const untilCancel = async (): Promise<null> => {
+      await new Promise<void>((resolve) => (this.#endRecordingOpen = resolve));
+      return null;
+    };
+    if (fault === "dialog") return untilCancel();
+    onProgress({ done: 0, total: 0 });
+    if (fault === "refused") throw usage("This file's header is not a recorder header.");
+    if (fault === "unknown-total") return untilCancel();
+    onProgress({ done: Math.floor(rows / 2), total: rows });
+    if (fault === "slow") return untilCancel();
+    onProgress({ done: rows, total: rows });
+    const stats = new MockStats();
+    const history = new HistoryColumns(rows);
+    for (let t = 0; t < rows; t++) {
+      const sample = sampleAt("load-5v-1a", t);
+      stats.push(sample);
+      history.push(sample);
+    }
+    this.#recordingFile = history;
+    return {
+      name,
+      rows,
+      skipped,
+      left_out: fault === "truncated" ? MOCK_LEFT_OUT : 0,
+      stats: stats.snapshot(),
+    };
+  }
+
+  async cancelRecordingFile(): Promise<void> {
+    this.#endRecordingOpen?.();
+    this.#endRecordingOpen = null;
+  }
+
+  async closeRecordingFile(): Promise<void> {
+    this.#recordingFile = null;
+  }
+
+  async recordingFileRange<const S extends readonly HistorySeries[]>(
+    series: S,
+    t0Ms: number,
+    t1Ms: number,
+    buckets: number,
+  ): Promise<BucketsFor<S>> {
+    const file = this.#recordingFile;
+    if (!file) throw usage("No recording file is open.");
+    return file.buckets(series, t0Ms, t1Ms, buckets) as BucketsFor<S>;
+  }
+
+  /** The ruler's stats over the open recording file's rows (FR AXHK2T). */
+  async recordingFileRangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null> {
+    const file = this.#recordingFile;
+    if (!file) throw usage("No recording file is open.");
+    return file.rangeStats(t0Ms, t1Ms);
+  }
+
+  /** The ruler's stats over the session's history (FR AXHK2T); nothing counts across an
+   * outage. */
+  async rangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null> {
+    const s = this.#open();
+    return s.history.rangeStats(t0Ms, t1Ms, s.gaps);
+  }
+
+  /** Segment marks and E.D. of the open recording file's rows (FR AXHK2T). */
+  async recordingFileRunProgress(query: RunProgressQuery): Promise<RunProgress | null> {
+    const file = this.#recordingFile;
+    if (!file) throw usage("No recording file is open.");
+    return file.runProgress(query);
+  }
+
+  /** Segment marks and E.D. of the session's current run, since its last outage
+   * (FR AXHK2T). */
+  async runProgress(query: RunProgressQuery): Promise<RunProgress | null> {
+    const s = this.#open();
+    return s.history.runProgress(query, s.gaps);
   }
 
   async stats(): Promise<StatsSnapshot> {
@@ -1434,6 +2076,15 @@ export class MockBackend {
   async historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]> {
     const s = this.#open();
     return s.gaps.filter((g) => g.to_ms > t0Ms && g.from_ms < t1Ms).map((g) => ({ ...g }));
+  }
+
+  /** Where the history's full resolution starts (FR AXHK2W, AC-AXHK2W.11): the oldest of
+   * the newest {@link MockOptions.historyFullSamples} samples, once there are more; the
+   * demo never actually folds. `null` while nothing would be folded. */
+  async historyFoldBoundary(): Promise<number | null> {
+    const s = this.#open();
+    const samples = this.#foldedSamples(s);
+    return samples === null ? null : s.history.timeAt(samples);
   }
 
   /** Replaces the history with `n` (at most {@link MAX_SYNTHETIC_SAMPLES}) scenario
@@ -1468,6 +2119,13 @@ export class MockBackend {
     const s = this.#open();
     // The PD capture waits while triggering. [inferred]
     if (this.#trigger) throw usage("Close the trigger session to capture PD traffic.");
+    if (s.pdStartRefused) {
+      throw {
+        kind: "protocol",
+        message: "The meter refused to start the PD capture.",
+        hint: "Replug the meter and try again.",
+      } satisfies UiError;
+    }
     const pd = s.pd;
     if (pd.timer !== null) return;
     pd.timer = setInterval(() => this.#pdTick(s), BATCH_MS);
@@ -1523,12 +2181,16 @@ export class MockBackend {
     s.onEvent({ type: "pd_status", data: { samples } });
   }
 
-  /** Stops `s`'s PD capture, if it runs. */
-  #stopPd(s: Running): void {
+  /** Stops `s`'s PD capture, if it runs; `reason` says why when the app stopped it
+   * (FR JQ971R), absent for a stop the user asked for or a disconnect. */
+  #stopPd(s: Running, reason?: PdStopReason): void {
     if (s.pd.timer === null) return;
     clearInterval(s.pd.timer);
     s.pd.timer = null;
-    s.onEvent({ type: "pd_state", data: { capturing: false } });
+    s.onEvent({
+      type: "pd_state",
+      data: reason ? { capturing: false, reason } : { capturing: false },
+    });
   }
 
   async pdStop(): Promise<void> {
@@ -1680,6 +2342,11 @@ export class MockBackend {
     return { next_index: pd.base, status_floor_ms: pd.statusMs };
   }
 
+  /** The page no longer shows the opened capture. Needs no meter, like the backend. */
+  async pdReleaseOpened(): Promise<void> {
+    this.#openedPd = null;
+  }
+
   /** There is no save dialog: the proposed name is the path. Resolves to the number of
    * records captured so far; the capture is kept for {@link pdOpen}. */
   async pdSave(suggestedName: string): Promise<ExportResult | null> {
@@ -1725,6 +2392,7 @@ export class MockBackend {
       date: "2026.9.29",
       crc: "A175E4A0",
       size: 456896,
+      stored_size: 456912,
       release_notes_en: "1. Demo note: improved PD capture.\n2. Demo note: minor fixes.",
     };
   }
@@ -1734,35 +2402,59 @@ export class MockBackend {
     return "/mock/KM003C_V2.0.7.mencrypt";
   }
 
-  /** Plays a firmware update like the backend (FR V9SK55, AC .4): the typed confirmation
-   * is re-checked first, then the meter is taken from the stream and everything else is
-   * refused until the update ends; each stage goes to `onStage`, the write stage with its
-   * progress. `firmware-fail-<stage>` fails at that stage with the recovery steps. */
+  /** Plays a firmware update like the backend (FR V9SK55, AC .4), checking in its order:
+   * the file and the typed confirmation first, then a session of the meter that `agreed`
+   * does not cover refuses it, with nothing released (FR AXHK2F). The meter is then taken
+   * from the stream and everything else is refused until the update ends; each stage goes
+   * to `onStage`, the write stage with its progress. `firmware-fail-<stage>` fails at that
+   * stage with the recovery steps. */
   async firmwareFlash(
     deviceId: string,
     path: string,
     confirmation: string,
     onStage: (stage: FlashEvent) => void,
+    agreed: FlashHold[] = [],
   ): Promise<FlashDone> {
+    const info = await this.firmwareInspect(path);
+    if (confirmation.trim() !== info.version) {
+      throw usage(`Type the file's version, ${info.version}, to confirm the update.`);
+    }
     if (this.#flashing) throw usage(FLASH_REFUSAL);
     const meter = this.#listedMeter();
     const isMeter = meter?.id === deviceId;
     if (!isMeter && !scenarioOf(deviceId)) throw usage("That meter is no longer attached.");
-    const info = await this.firmwareInspect(path);
-    if (confirmation.trim() !== info.version) {
-      throw usage(`Type the file's version, ${info.version}, to confirm the update.`);
+    const s = this.#sessions.find((x) => x.id === deviceId || x.deviceId === deviceId);
+    if (s) {
+      const listed = (await this.listDevices()).find((d) => d.id === s.deviceId);
+      const rec = s.recording;
+      const hold: FlashHold = {
+        id: s.id,
+        label: listed?.label ?? s.id,
+        recording: rec !== null,
+        ...(rec && { recording_id: rec.id }),
+      };
+      if (!agreed.some((a) => a.id === hold.id && (!rec || a.recording_id === rec.id))) {
+        throw {
+          kind: "flash_needs_consent",
+          message: "The firmware update would end a running session.",
+          hint: null,
+          sessions: [hold],
+        } satisfies UiError;
+      }
     }
     this.#flashing = true;
     this.#flashTarget = deviceId;
     this.#flashStop = false;
     this.#flashErasing = false;
     this.#firmwareFlashes.push({ deviceId, path, confirmation });
-    // Like the backend: the trigger session and the stream let go of the meter first.
-    const s = this.#session;
+    // Like the backend: the meter's trigger session and stream let go of it first, and
+    // the other meters keep running.
     if (s) {
-      this.#closeTrigger();
-      if (this.#replugTimer !== null) clearTimeout(this.#replugTimer);
-      this.#replugTimer = null;
+      if (this.#session === s) this.#closeTrigger();
+      if (this.#replugTimer !== null && this.#replugFor === s) {
+        clearTimeout(this.#replugTimer);
+        this.#replugTimer = null;
+      }
       this.#endSession(s, null);
     }
     const failAt = this.#mode?.startsWith("firmware-fail-")
@@ -1773,28 +2465,37 @@ export class MockBackend {
       message: `The firmware update failed: ${MOCK_FLASH_FAILURES[stage] ?? stage}.`,
       hint: FLASH_RECOVERY_HINT,
     });
+    // `replug`: the listed meter turns to bootloader mode once switched, and back before
+    // the update ends, as the backend lists a real meter jumping.
+    // `replug-late`: the meter is still in bootloader mode when the update ends and is
+    // listed in application mode again only after it (FR PGY704).
+    const jumps = isMeter && this.#replugLike();
+    const late = jumps && this.#mode === "replug-late";
+    let relistLate = false;
+    const setReplugMode = (mode: "application" | "bootloader"): void => {
+      if (!jumps || this.#replugMode === mode) return;
+      this.#replugMode = mode;
+      void this.#notifyDevices();
+    };
     try {
       const fromBootloader = isMeter && meter?.mode === "bootloader";
       for (const stage of ["switching", "erasing"] as const) {
         if (stage === "switching" && fromBootloader) continue;
         if (this.#flashStop) {
-          throw {
-            kind: "protocol",
-            message: `The firmware update failed: interrupted: stopped by the user before the ${stage === "erasing" ? "descriptor" : "update started"}.`,
-            hint: FLASH_RECOVERY_HINT,
-          } satisfies UiError;
+          throw { kind: "cancelled", message: FLASH_STOPPED, hint: null } satisfies UiError;
         }
         if (stage === "erasing") this.#flashErasing = true;
         onStage({ stage });
         await sleep(MOCK_FLASH_MS[stage]);
         if (failAt === stage) throw fail(stage);
         if (stage === "switching") {
+          setReplugMode("bootloader");
           // The prompt shows whether or not the meter restarts by itself.
           onStage({ stage: "replug", to: "bootloader", reply: "none" });
           await sleep(MOCK_FLASH_MS.replug);
         }
       }
-      const total = info.size;
+      const total = info.stored_size;
       for (let k = 0; k <= MOCK_FLASH_WRITES; k++) {
         onStage({ stage: "writing", done: Math.round((total * k) / MOCK_FLASH_WRITES), total });
         if (failAt === "writing" && k === 3) throw fail("writing");
@@ -1807,8 +2508,16 @@ export class MockBackend {
       }
       onStage({ stage: "replug", to: "application", reply: "none" });
       await sleep(MOCK_FLASH_MS.replug);
+      if (late) {
+        relistLate = true;
+        setTimeout(() => setReplugMode("application"), MOCK_LATE_RELIST_MS);
+      } else {
+        setReplugMode("application");
+      }
+      this.#firmwareVersion = info.version;
       return { outcome: "verified", version: info.version };
     } finally {
+      if (!relistLate) setReplugMode("application");
       this.#flashing = false;
     }
   }
@@ -1816,7 +2525,12 @@ export class MockBackend {
   /** Asks the running update to stop, like the backend: until the erase starts. */
   async firmwareCancel(): Promise<void> {
     if (!this.#flashing) throw usage("No firmware update is running.");
-    if (this.#flashErasing) throw usage(CANCEL_TOO_LATE);
+    if (this.#flashErasing) {
+      // Loaded here, not on top: the Playwright helpers import this file outside Vite,
+      // which cannot read the sentence's `.txt?raw` file.
+      const { CANCEL_TOO_LATE } = await import("./firmwareUpdate.svelte");
+      throw usage(CANCEL_TOO_LATE);
+    }
     this.#flashStop = true;
   }
 
@@ -1859,9 +2573,50 @@ export class MockBackend {
     this.#revealed.push(path);
   }
 
+  /** There is no save dialog: the proposed name is the path, and the image is recorded
+   * (FR AXHK2V). */
+  async saveChartImage(
+    suggestedName: string,
+    format: string,
+    data: Uint8Array,
+  ): Promise<string | null> {
+    this.#chartImages.push({ suggestedName, format, data: Array.from(data) });
+    return suggestedName;
+  }
+
+  /** How many chart images were saved: cheap to poll, where {@link chartImages} copies
+   * every image's bytes out of the page (FR X6VSFF). */
+  chartImageCount(): number {
+    return this.#chartImages.length;
+  }
+
+  /** Every chart image saved, oldest first. */
+  chartImages(): { suggestedName: string; format: string; data: number[] }[] {
+    return this.#chartImages.map((i) => ({ ...i, data: [...i.data] }));
+  }
+
+  /** Holds every stream (`true`) or lets it go on (`false`): held, no batch is sent and
+   * no sample is made, and the stream goes on from where it stopped, with no gap. For
+   * the UI suite's idle frame-rate windows (FR 9QTPNQ). */
+  holdStream(held: boolean): void {
+    this.#held = held;
+  }
+
+  /** How many batches every stream has sent so far: the UI suite waits on it to know a
+   * held stream goes on again, whatever tab shows (FR 9QTPNQ). */
+  batchCount(): number {
+    return this.#batchesSent;
+  }
+
   /** Every path `revealPath` was asked to show, oldest first. */
   revealedPaths(): string[] {
     return [...this.#revealed];
+  }
+
+  /** The first rows of each export as CSV text, oldest first: what the export wrote
+   * comes from the samples, never from how the chart draws them (AC-AXHK2T.7). */
+  exportedCsv(): string[] {
+    return [...this.#exports];
   }
 
   // ---- Trigger panel (FR DGSQ6S): a scripted charger behind the demo meter ----
@@ -1872,14 +2627,16 @@ export class MockBackend {
     if (!this.#session) throw usage("Connect a meter first.");
     if (this.#trigger) return;
     const s = this.#session;
-    // Like the backend: the PD capture pauses and the queue runs at 50 SPS or less.
-    this.#stopPd(s);
+    // Like the backend: the PD capture stops (with the reason) and the queue runs at
+    // 50 SPS or less.
+    this.#stopPd(s, "trigger");
     let rateBefore: number | null = null;
     if (s.rateSps > TRIGGER_MAX_SPS && !s.recording && this.#mode !== "rate-locked") {
       rateBefore = s.rateSps;
       await this.setRate(TRIGGER_MAX_SPS);
     }
-    s.trigger = { entered: null, rateBefore };
+    s.trigger = { entered: null, rateBefore, armed: false, goingAway: false, chargerGone: false };
+    if (this.#mode === "pd-start-refused") s.pdStartRefused = true;
     this.#triggerLog.push("pdm open");
   }
 
@@ -1893,8 +2650,10 @@ export class MockBackend {
    * then the `pdm parm` check that the meter is still in step. */
   async triggerDetect(): Promise<Detection> {
     const t = this.#openTrigger();
+    t.armed = false;
     this.#triggerLog.push("entry bc", "entry apple", "entry list", "reset", "pdm parm");
     t.entered = null;
+    this.#scheduleCcGone(t);
     if (this.#mode === "trigger-list-lag") {
       // The meter answers the check one command late, like the backend's `OutOfSync`.
       throw outOfSyncError();
@@ -1922,6 +2681,11 @@ export class MockBackend {
     if (protocol === "pd") {
       this.#triggerLog.push("pdm parm");
       t.entered = "pd";
+      t.ccLow = false;
+      if (t.chargerGone) {
+        t.chargerGone = false;
+        if (this.#session) this.#session.triggerVbusV = null;
+      }
       return {
         protocol,
         supported: true,
@@ -1958,9 +2722,29 @@ export class MockBackend {
 
   /** Like the library classifier: above 5 V, or unknown, needs a confirmation. */
   async triggerRisk(request: TriggerRequest): Promise<RiskClass> {
-    this.#openTrigger();
+    return this.#risk(this.#openTrigger(), request);
+  }
+
+  /** {@link triggerRisk}'s answer, for the request's own check: a test that slows the
+   * question does not slow the request too. */
+  #risk(t: MockTrigger, request: TriggerRequest): RiskClass {
+    if (t.chargerGone) throw usage(CHARGER_GONE_REFUSAL);
     const mv = this.#requestMv(request);
-    return mv !== null && mv <= 5000 ? "at_most_5v" : "above_5v";
+    if (mv !== null && mv <= 5000) return "at_most_5v";
+    if (!this.#rememberable(request)) return "above_5v";
+    return t.armed ? "armed" : "above_5v_rememberable";
+  }
+
+  /** Like the library's `pd::rememberable`: a fixed, PPS or SPR AVS offer at an SPR
+   * position, at or below 20 V. */
+  #rememberable(request: TriggerRequest): boolean {
+    if (request.protocol !== "pd") return false;
+    const offer = MOCK_TRIGGER_OFFERS.find((o) => o.position === request.position);
+    if (!offer || offer.epr) return false;
+    const { voltage_mv: requested } = request;
+    if (offer.kind === "fixed") return requested === null && offer.max_voltage_mv <= 20000;
+    if (offer.kind !== "pps" && offer.kind !== "spr-avs") return false;
+    return requested !== null && Math.max(requested, offer.min_voltage_mv) <= 20000;
   }
 
   /** The command text the meter would receive for `request`. */
@@ -2024,19 +2808,54 @@ export class MockBackend {
     }
   }
 
-  /** Refuses an unconfirmed above-5 V request before anything is sent. */
-  async triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply> {
-    this.#openTrigger();
+  /** Whether "don't ask again" is armed; false with no trigger session. */
+  async triggerArmed(): Promise<boolean> {
+    return this.#trigger?.armed ?? false;
+  }
+
+  /** Ends "don't ask again"; does nothing with no trigger session. */
+  async triggerDisarm(): Promise<void> {
+    if (this.#trigger) this.#trigger.armed = false;
+  }
+
+  /** Whether VBUS collapsed under a contract; false with no trigger session. */
+  async triggerChargerGone(): Promise<boolean> {
+    return this.#trigger?.chargerGone ?? false;
+  }
+
+  /** Whether PD was entered last, like the backend; false with no trigger session. */
+  async triggerPdEntered(): Promise<boolean> {
+    return this.#trigger?.entered === "pd";
+  }
+
+  /** Refuses an unconfirmed above-5 V request before anything is sent, and a `remember`
+   * the offers do not allow; an armed session covers what is rememberable. */
+  async triggerRequest(
+    request: TriggerRequest,
+    confirmed: boolean,
+    remember = false,
+  ): Promise<TriggerReply> {
+    const t = this.#openTrigger();
+    if (t.chargerGone) throw usage(CHARGER_GONE_REFUSAL);
     const mv = this.#requestMv(request);
     if (mv === null && request.protocol === "pd") {
       throw usage(`The charger offers nothing at position ${request.position}.`);
     }
     const refusal = this.#refusal(request);
     if (refusal !== null) throw usage(refusal);
-    if ((await this.triggerRisk(request)) === "above_5v" && !confirmed) {
+    const risk = this.#risk(t, request);
+    const arming = confirmed && remember;
+    if (arming && risk !== "above_5v_rememberable" && risk !== "armed") {
+      throw usage("This request cannot be remembered.");
+    }
+    if ((risk === "above_5v" || risk === "above_5v_rememberable") && !confirmed) {
       throw usage("A request above 5 V needs your confirmation.");
     }
     const command = this.#commandText(request);
+    // Like the session: disarmed before the first write, so a failure leaves "don't ask
+    // again" ended. Only a request that qualifies keeps it.
+    const wasArmed = t.armed;
+    t.armed = false;
     this.#triggerLog.push(command);
     if (this.#mode === "trigger-out-of-sync") {
       // The meter answers with another command's reply (`type=...`), like the backend's
@@ -2052,11 +2871,13 @@ export class MockBackend {
         hint: null,
       } satisfies UiError;
     }
-    this.#openTrigger().entered = request.protocol === "pd" ? "pd" : "legacy";
+    t.entered = request.protocol === "pd" ? "pd" : "legacy";
+    t.armed = arming || (wasArmed && risk === "armed");
     if (this.#session && mv !== null) {
       // The demo VBUS follows the request; `trigger-sag` keeps it 12 % below.
       this.#session.triggerVbusV = (mv / 1000) * (this.#mode === "trigger-sag" ? 0.88 : 0.985);
     }
+    this.#scheduleChargerGone(t);
     if (request.protocol !== "pd") {
       return {
         command,
@@ -2079,7 +2900,38 @@ export class MockBackend {
     };
   }
 
-  /** Back to 5 V: `pd req=1` after PD, `reset` after the others; the session stays. */
+  /** `trigger-charger-gone`: VBUS falls to 0 V a moment after the first accepted request,
+   * and the session finds out on its own, with nothing sent. */
+  #scheduleChargerGone(t: MockTrigger): void {
+    this.#scheduleGone(t, "trigger-charger-gone", CHARGER_GONE_AFTER_MS, (s) => {
+      s.triggerVbusV = 0;
+    });
+  }
+
+  /** `trigger-cc-gone`: a moment after the first Detect both CC lines fall to 0 V and
+   * the session finds the charger gone on its own, with no request and nothing sent. */
+  #scheduleCcGone(t: MockTrigger): void {
+    this.#scheduleGone(t, "trigger-cc-gone", CC_GONE_AFTER_MS, () => {
+      t.ccLow = true;
+    });
+  }
+
+  /** Once per session in `mode`: after `afterMs` the charger goes away (`drop` changes
+   * the stream), unless the session ended or another one took its place. */
+  #scheduleGone(t: MockTrigger, mode: MockMode, afterMs: number, drop: (s: Running) => void): void {
+    const s = this.#session;
+    if (this.#mode !== mode || t.goingAway || !s) return;
+    t.goingAway = true;
+    setTimeout(() => {
+      if (s.trigger !== t) return;
+      drop(s);
+      t.armed = false;
+      t.chargerGone = true;
+    }, afterMs);
+  }
+
+  /** Back to 5 V: `pd req=1` after PD, `reset` after the others; the session stays.
+   * A leave of the view (FR AXHK2N) does the same: the mock keeps no armed-end log. */
   async triggerBackTo5v(): Promise<void> {
     this.#returnTo5v(this.#openTrigger());
   }
@@ -2090,15 +2942,17 @@ export class MockBackend {
   }
 
   #returnTo5v(t: MockTrigger): void {
+    t.armed = false;
     if (t.entered === "pd") this.#triggerLog.push("pd req=1");
     else if (t.entered === "legacy") this.#triggerLog.push("reset");
     if (this.#session) this.#session.triggerVbusV = null;
+    t.backAt = this.#triggerLog.length;
   }
 
   #closeTrigger(): void {
     const t = this.#trigger;
     if (!t) return;
-    this.#returnTo5v(t);
+    if (t.backAt !== this.#triggerLog.length) this.#returnTo5v(t);
     this.#triggerLog.push("pdm close");
     const s = this.#session;
     if (s) s.trigger = null;
@@ -2118,7 +2972,8 @@ export class MockBackend {
    * refused with a reason. */
   async triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass> {
     this.#openTrigger();
-    renderMockMessage(message);
+    // Like the backend: exactly this message, never the raw console's same bytes.
+    if (renderMockMessage(message) === CABLE_READ_LINE) return "at_most_5v";
     if (message.data_objects.length === 0) {
       return SWAP_CONTROL_TYPES.includes(message.msg_type) ? "above_5v" : "at_most_5v";
     }
@@ -2139,6 +2994,7 @@ export class MockBackend {
     if ((await this.triggerMessageRisk(message)) === "above_5v" && !confirmed) {
       throw usage("A message that can raise VBUS above 5 V needs your confirmation.");
     }
+    t.armed = false;
     // Like the backend: PD first, unless PD is what was entered last.
     if (t.entered !== "pd") {
       this.#triggerLog.push("entry pd");
@@ -2151,8 +3007,36 @@ export class MockBackend {
     return {
       command,
       lines: [{ at_ms: Date.now(), direction: "tx", text: command, block: null }],
-      cable: discover ? { ...MOCK_CABLE } : null,
+      cable: discover ? this.#cableAnswer() : null,
     };
+  }
+
+  /** What the cable answers a Discover Identity, by mode. */
+  #cableAnswer(): CableView | null {
+    if (this.#mode === "trigger-no-cable") return null;
+    if (this.#mode === "trigger-unlisted-cable") {
+      return { ...MOCK_CABLE, vid: 0x1234, vendor: null };
+    }
+    return { ...MOCK_CABLE };
+  }
+
+  /** One SOP' Discover Identity, only with PD entered last; no retry. */
+  async triggerCableRead(): Promise<CableRead> {
+    const t = this.#openTrigger();
+    if (t.entered !== "pd") {
+      throw usage("Reading the cable needs an open PD session. Press a PD offer first.");
+    }
+    if (this.#mode === "trigger-out-of-sync") throw outOfSyncError();
+    t.armed = false;
+    this.#triggerLog.push(CABLE_READ_LINE);
+    const cable = this.#cableAnswer();
+    return cable ? { kind: "found", cable } : { kind: "no_answer" };
+  }
+
+  /** The cable identity a capture holds; needs no meter and sends nothing. */
+  async pdCableSeen(): Promise<CableView | null> {
+    const held = [this.#openedPd?.records, this.#session?.pd.records];
+    return held.some((records) => records?.some(pdIsCableDiscover)) ? { ...MOCK_CABLE } : null;
   }
 
   /** The library risk class of a raw console line. */
@@ -2168,9 +3052,11 @@ export class MockBackend {
     // Like the backend: GoodCRC is refused before anything is sent.
     const refusal = lineRefusal(text);
     if (refusal !== null) throw usage(refusal);
-    if (mockLineRisk(text) === "above_5v" && !confirmed) {
+    const risk = mockLineRisk(text);
+    if (risk === "above_5v" && !confirmed) {
       throw usage("A line that can raise VBUS above 5 V needs your confirmation.");
     }
+    if (risk !== "read_only") t.armed = false;
     this.#triggerLog.push(text);
     if (this.#mode === "trigger-out-of-sync") throw outOfSyncError();
     const at = Date.now();

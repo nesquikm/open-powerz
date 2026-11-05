@@ -71,11 +71,8 @@ pub enum Error {
     NotFound,
     /// Discovery listed the meter's serial port, but opening it failed the
     /// way a port someone else holds does.
-    #[error("the meter's serial port {port} is in use by another program")]
-    PortHeld {
-        /// Port name or path.
-        port: String,
-    },
+    #[error("the meter's serial port is in use by another program")]
+    PortHeld,
     /// The mock transport saw something its script did not expect.
     #[error("mock transport: {0}")]
     Mock(String),
@@ -165,16 +162,55 @@ pub fn default_timeout(request: &[u8]) -> Duration {
 }
 
 /// Build an [`Error::Permission`] for `target_os` (e.g. `"linux"`); on Linux
-/// the message names the udev rule `packaging/linux/60-powerz.rules`.
+/// the message names the udev rule `packaging/linux/60-powerz.rules`. A
+/// serial port's name in `detail` is dropped, see `without_port_names`.
 pub fn permission_error(target_os: &str, detail: &str) -> Error {
+    let detail = without_port_names(detail);
     if target_os == "linux" {
         Error::Permission(format!(
             "{detail}; install the udev rule packaging/linux/60-powerz.rules \
              into /etc/udev/rules.d/ and replug the meter"
         ))
     } else {
-        Error::Permission(detail.to_string())
+        Error::Permission(detail)
     }
+}
+
+/// `text` with each serial port name or path in it replaced by "the meter's
+/// serial port". On macOS a port's name holds the meter's serial, and OS and
+/// library texts may quote it, so no such text reaches an error unread.
+pub(crate) fn without_port_names(text: &str) -> String {
+    let is_edge = |c: char| c.is_whitespace() || "\"'`()[]<>,;:.=".contains(c);
+    text.split_inclusive(|c: char| c.is_whitespace() || c == '=' || c == ':')
+        .map(|word| {
+            let name = word.trim_matches(is_edge);
+            if names_a_port(name) {
+                word.replacen(name, "the meter's serial port", 1)
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect()
+}
+
+/// Whether `word` looks like a serial port's name or path on some OS. USB bus
+/// and hidraw paths are not serial ports and carry no serial, and a folder
+/// that is merely called `dev` is no device path.
+fn names_a_port(word: &str) -> bool {
+    let word = word.to_ascii_lowercase();
+    if word.contains("/dev/bus/") || word.contains("/dev/hidraw") {
+        return false;
+    }
+    let com_number = word
+        .strip_prefix("com")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    com_number
+        || word.starts_with("/dev/")
+        || ["usbmodem", "usbserial", r"\\.\"]
+            .iter()
+            .any(|part| word.contains(part))
+        || word.starts_with("cu.")
+        || (word.starts_with("tty") && word.len() > 3)
 }
 
 /// Map an I/O error to a transport [`Error`].
@@ -189,13 +225,21 @@ pub fn map_io_error(err: &std::io::Error, target_os: &str) -> Error {
         | ErrorKind::UnexpectedEof
         | ErrorKind::NotFound => Error::Disconnected,
         ErrorKind::PermissionDenied => permission_error(target_os, &err.to_string()),
-        // ENXIO and ENODEV, what a serial port read answers once the cable is
-        // out; the same numbers mean something else on Windows.
-        _ if target_os != "windows" && matches!(err.raw_os_error(), Some(6 | 19)) => {
+        // What a serial port read answers once the cable is out.
+        _ if err
+            .raw_os_error()
+            .is_some_and(|code| gone_at_open(code, target_os)) =>
+        {
             Error::Disconnected
         }
-        _ => Error::Io(err.to_string()),
+        _ => Error::Io(without_port_names(&err.to_string())),
     }
+}
+
+/// Whether OS error `code` from opening the meter means it has gone: ENXIO
+/// (6) and ENODEV (19). The same numbers mean something else on Windows.
+pub fn gone_at_open(code: i32, target_os: &str) -> bool {
+    target_os != "windows" && matches!(code, 6 | 19)
 }
 
 impl<T: Transport + ?Sized> Transport for Box<T> {
@@ -244,6 +288,50 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
 mod tests {
     use super::*;
     use std::io;
+
+    #[test]
+    fn every_kind_of_port_name_leaves_a_message() {
+        for name in [
+            "/dev/cu.usbmodemFAKE0011",
+            "/dev/tty.usbserial-FAKE0011",
+            "cu.usbmodemFAKE0011",
+            "tty.usbmodemFAKE0011",
+            "ttyACM0",
+            "ttyUSB3",
+            "/dev/ttyACM0",
+            "COM3",
+            "com12",
+            r"\\.\COM3",
+        ] {
+            for text in [
+                format!("cannot open {name}"),
+                format!("\"{name}\": Resource busy"),
+                format!("{name}: denied"),
+                format!("port ({name}), again"),
+                format!("path={name}"),
+                format!("port:{name}"),
+            ] {
+                let clean = without_port_names(&text);
+                assert!(!clean.contains(name), "{clean}");
+                assert!(clean.contains("the meter's serial port"), "{clean}");
+            }
+        }
+    }
+
+    #[test]
+    fn words_that_only_look_like_port_names_stay() {
+        for text in [
+            "/dev/bus/usb/001/002 is busy",
+            "/dev/hidraw3 is busy",
+            "/home/dev/powerz.log is busy",
+            "/Users/dev/meter is busy",
+            "command failed",
+            "the com port replied",
+            "tty",
+        ] {
+            assert_eq!(without_port_names(text), text);
+        }
+    }
 
     // ---- AC-SJGK7E.5: default timeouts and error mapping ----
 

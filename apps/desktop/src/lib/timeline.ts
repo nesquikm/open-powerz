@@ -352,7 +352,8 @@ export function dragOverview(
 }
 
 /** A click on the strip outside the window: the same span centred on the clicked time,
- * kept in the session (AC-FENCD9.2). */
+ * kept in the session (AC-FENCD9.2); never narrower than the session's narrowest view,
+ * which the chart would drop (AC-B5XBTA.1). */
 export function overviewClick(
   xPx: number,
   view: TimeRange,
@@ -362,7 +363,7 @@ export function overviewClick(
 ): TimeRange {
   const { d0, k } = stripScale(session, widthPx, warp);
   const at = warp.bwd(d0 + xPx * k);
-  const span = view.t1Ms - view.t0Ms;
+  const span = Math.max(view.t1Ms - view.t0Ms, sessionMinSpan(session));
   return fitSpan(at - span / 2, span, session);
 }
 

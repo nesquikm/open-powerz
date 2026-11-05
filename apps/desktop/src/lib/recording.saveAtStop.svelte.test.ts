@@ -10,7 +10,7 @@ import { Recording, type RecordingDeps } from "./recording.svelte";
 const CLOCK = new Date(2026, 9, 21, 9, 5, 7);
 const DEFAULT_PATH = "/data/recordings/powerz-20261021-090507.csv";
 const CHOSEN_PATH = "/home/me/run.csv";
-const SUMMARY: RecordingSummary = { rows: 12, gaps: [], disconnected: false };
+const SUMMARY: RecordingSummary = { rows: 12, gaps: [], disconnected: false, ended: "stopped" };
 
 function setup(over: Partial<RecordingDeps> = {}) {
   const calls: string[] = [];

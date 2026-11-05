@@ -211,12 +211,18 @@ pub fn inspect_flash_file<'a>(
 /// with the `--device` serial and never another one (`[device]` the serial
 /// is the same in application and bootloader mode), `None` while it is not
 /// attached; without a serial, the only POWER-Z attached, and two or more
-/// are ambiguous, a usage error naming them.
+/// are ambiguous, a usage error naming them (AC-STQEA1.6). The library's own
+/// text only counts, since it reaches the desktop page.
 pub fn find_flashed_meter<'a>(
     devices: &'a [DeviceEntry],
     serial: Option<&str>,
 ) -> Result<Option<&'a DeviceEntry>, CliError> {
-    discovery::find_flashed_meter(devices, serial).map_err(|e| CliError::Usage(e.to_string()))
+    discovery::find_flashed_meter(devices, serial).map_err(|e| {
+        CliError::Usage(format!(
+            "several POWER-Z devices attached and no serial chosen; pick one with its serial or unplug the others: {}",
+            e.serials.join(", ")
+        ))
+    })
 }
 
 /// `powerz firmware flash`: flash `container` onto the meter `opener`

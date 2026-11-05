@@ -39,7 +39,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { open, streamDemo, useTheme, type Theme } from "./helpers";
-import { backgroundLuminance } from "./pd";
+import { backgroundLuminance, capture, openPd, stopCapture } from "./pd";
 
 test.use({ viewport: { width: 1600, height: 900 } });
 
@@ -639,4 +639,642 @@ test("detection names which check said what when they disagree (AC-DGSQ6R.8)", a
   await detected(page, "?mock=trigger-detect-disagree");
   const detection = view(page).getByRole("region", { name: "Detection" });
   await expect(detection).toContainText("entry bc: not supported · list: supported");
+});
+
+// ---- FR AXHK2N: "don't ask again" ----
+//
+// Page contract: the dialog of a USB PD fixed, PPS or SPR AVS offer up to 20 V has a
+// checkbox named "Don't ask again until I go back to 5 V or disconnect", reachable with
+// Tab; while the backend is armed the view shows "Not asking up to 20 V" with a button
+// named "Clear". The mock's rules are the backend's.
+
+const REMEMBER = "Don't ask again until I go back to 5 V or disconnect";
+const ARMED_STATUS = "Not asking up to 20 V";
+
+function remember(page: Page): Locator {
+  return dialog(page).getByRole("checkbox", { name: REMEMBER });
+}
+
+function armedStatus(page: Page): Locator {
+  return view(page).getByText(ARMED_STATUS);
+}
+
+function clearButton(page: Page): Locator {
+  return view(page).getByRole("button", { name: "Clear", exact: true });
+}
+
+/** Request 9 V and confirm with the box checked: the backend is armed. */
+async function arm(page: Page): Promise<void> {
+  await offerButton(page, 9).click();
+  await remember(page).check();
+  await dialog(page).getByRole("button", { name: "Confirm" }).click();
+  await expect(dialog(page)).toBeHidden();
+  await expect(armedStatus(page)).toBeVisible();
+}
+
+/** Clicks the 15 V offer and expects it to reach the charger with no dialog. */
+async function sends15VUnasked(page: Page): Promise<void> {
+  await offerButton(page, 15).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pd req=3");
+  await expect(dialog(page)).toBeHidden();
+}
+
+/** Clicks the 15 V offer and expects the dialog, then cancels it. */
+async function asks15V(page: Page): Promise<void> {
+  await offerButton(page, 15).click();
+  await expect(dialog(page)).toBeVisible();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog(page)).toBeHidden();
+}
+
+async function typeConsoleLine(page: Page, line: string): Promise<void> {
+  const console = view(page).getByRole("region", { name: "Console", exact: true });
+  await console.getByLabel("Command").fill(line);
+  await console.getByRole("button", { name: "Send", exact: true }).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe(line);
+}
+
+test("the dialog offers the checkbox, unchecked, up to 20 V only (AC-AXHK2N.1)", async ({
+  page,
+}) => {
+  await detected(page);
+  await offerButton(page, 9).click();
+  await expect(remember(page)).toBeVisible();
+  await expect(remember(page)).not.toBeChecked();
+  await remember(page).check();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog(page)).toBeHidden();
+  // Unchecked again the next time.
+  await offerButton(page, 20).click();
+  await expect(remember(page)).not.toBeChecked();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  // Not for an EPR offer, nor for another protocol.
+  await offerButton(page, 28).click();
+  await expect(dialog(page)).toBeVisible();
+  await expect(remember(page)).toHaveCount(0);
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  await section(page, "QC")
+    .getByRole("button", { name: /^9 V\b/ })
+    .click();
+  await expect(dialog(page)).toBeVisible();
+  await expect(remember(page)).toHaveCount(0);
+});
+
+test("Tab stays in the dialog after a click on its text or the backdrop (AC-AXHK2N.1)", async ({
+  page,
+}) => {
+  await detected(page);
+  await offerButton(page, 9).click();
+  await dialog(page).locator("#trigger-confirm-text").click();
+  await page.keyboard.press("Shift+Tab");
+  await expect(dialog(page).locator(":focus")).toHaveCount(1);
+  await page.mouse.click(4, 4);
+  await page.keyboard.press("Tab");
+  await expect(dialog(page).locator(":focus")).toHaveCount(1);
+});
+
+test("the checkbox is reached with Tab and toggled with Space (AC-AXHK2N.1)", async ({ page }) => {
+  await detected(page);
+  await offerButton(page, 9).click();
+  await expect(dialog(page).getByRole("button", { name: "Cancel" })).toBeFocused();
+  await tabTo(page, remember(page), 4);
+  await page.keyboard.press("Space");
+  await expect(remember(page)).toBeChecked();
+});
+
+test("the checked box keeps later requests from asking (AC-AXHK2N.2, .5)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await sends15VUnasked(page);
+  await expect(armedStatus(page)).toBeVisible();
+});
+
+test("an unchecked box leaves the next request asking (AC-AXHK2N.2)", async ({ page }) => {
+  await detected(page);
+  await request9V(page);
+  await expect(armedStatus(page)).toBeHidden();
+  await asks15V(page);
+});
+
+test("armed, EPR, other protocols and the console still ask (AC-AXHK2N.3)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  const before = (await commands(page)).length;
+  await offerButton(page, 28).click();
+  await expect(dialog(page)).toBeVisible();
+  await expect(remember(page)).toHaveCount(0);
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  await section(page, "QC")
+    .getByRole("button", { name: /^9 V\b/ })
+    .click();
+  await expect(dialog(page)).toBeVisible();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  const console = view(page).getByRole("region", { name: "Console", exact: true });
+  await console.getByLabel("Command").fill("pd req=3");
+  await console.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(dialog(page)).toBeVisible();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  expect(await commands(page)).toHaveLength(before);
+  await expect(armedStatus(page)).toBeVisible();
+});
+
+test("Clear brings the dialog back at once (AC-AXHK2N.5)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await clearButton(page).click();
+  await expect(armedStatus(page)).toBeHidden();
+  await expect(clearButton(page)).toBeHidden();
+  await asks15V(page);
+});
+
+test("Back to 5 V ends it (AC-AXHK2N.4)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await backButton(page).click();
+  await expect(armedStatus(page)).toBeHidden();
+  await asks15V(page);
+});
+
+test("a page reload does not arm (AC-AXHK2N.4)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await page.reload();
+  await streamDemo(page);
+  await showTrigger(page);
+  await expect(armedStatus(page)).toBeHidden();
+  await detectButton(page).click();
+  await expect(section(page, "USB PD").getByRole("button").first()).toBeVisible();
+  await asks15V(page);
+});
+
+test("the 5 V offer ends it (AC-AXHK2N.8)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await offerButton(page, 5).click();
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("Detect ends it (AC-AXHK2N.8)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await detectButton(page).click();
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("a console line that is not read-only updates the status (AC-AXHK2N.8)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await typeConsoleLine(page, "pdm parm");
+  await expect(armedStatus(page)).toBeVisible();
+  await typeConsoleLine(page, "pd hrst");
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("a built message updates the status (AC-AXHK2N.8)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  const builder = view(page).getByRole("region", { name: "PD message builder" });
+  await builder.getByLabel("Target").selectOption({ label: "SOP" });
+  await builder.getByLabel("Message type").fill("13");
+  await builder.getByLabel("Data objects").fill("");
+  await builder.getByRole("button", { name: "Send message" }).click();
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("the dialog with the checkbox and the status pass axe (AC-AXHK2N.1, .5)", async ({ page }) => {
+  await detected(page);
+  await offerButton(page, 9).click();
+  await expect(remember(page)).toBeVisible();
+  expect(await axeBlocking(page)).toEqual([]);
+  await remember(page).check();
+  await dialog(page).getByRole("button", { name: "Confirm" }).click();
+  await expect(armedStatus(page)).toBeVisible();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+// ---- FR AXHK2P: the Cable card ----
+//
+// Page contract: a region "Cable" in the view with a button "Read cable", disabled with
+// no open session. Its fields are labelled "Vendor", "VID", "PID", "Maximum current",
+// "Maximum voltage", "USB speed", "Type" (Passive or Active) and "EPR". With no answer it
+// says the cable may have no e-marker or the meter may not be the VCONN source; an
+// identity from a capture is marked "Seen in the capture". `?mock=trigger-no-cable`
+// answers nothing, `?mock=trigger-unlisted-cable` answers VID 0x1234, outside the table.
+// Detect ends on the last protocol it listed, so a PD offer comes first.
+
+const READ_LINE = "pd data=018F1001A800FF";
+
+function cableCard(page: Page): Locator {
+  return view(page).getByRole("region", { name: "Cable", exact: true });
+}
+
+function readCableButton(page: Page): Locator {
+  return cableCard(page).getByRole("button", { name: "Read cable", exact: true });
+}
+
+function cableField(page: Page, name: string): Locator {
+  return cableCard(page).getByLabel(name, { exact: true });
+}
+
+/** A session with PD entered, at 5 V. */
+async function inPd(page: Page, query = ""): Promise<void> {
+  await detected(page, query);
+  await offerButton(page, 5).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pd req=1");
+}
+
+test("Read cable sends one message and shows the whole e-marker (AC-AXHK2P.1, .2)", async ({
+  page,
+}) => {
+  await inPd(page);
+  const before = (await commands(page)).length;
+  await readCableButton(page).click();
+  await expect(cableField(page, "VID")).toHaveText("0x050D");
+  await expect(cableField(page, "PID")).toHaveText("0x8254");
+  await expect(cableField(page, "Maximum current")).toHaveText("5 A");
+  await expect(cableField(page, "Maximum voltage")).toHaveText("50 V");
+  await expect(cableField(page, "USB speed")).toHaveText("USB 2.0");
+  await expect(cableField(page, "Type")).toHaveText("Passive");
+  await expect(cableField(page, "EPR")).toHaveText(/yes/i);
+  await expect(cableField(page, "Vendor")).toBeVisible();
+  await expect(dialog(page)).toBeHidden();
+  expect((await commands(page)).slice(before)).toEqual([READ_LINE]);
+});
+
+test("Read cable is off with no session (AC-AXHK2P.2)", async ({ page }) => {
+  await open(page);
+  await streamDemo(page);
+  await showTrigger(page);
+  await expect(readCableButton(page)).toBeDisabled();
+  expect(await commands(page)).toEqual([]);
+});
+
+test("no answer says why and sends nothing more (AC-AXHK2P.4)", async ({ page }) => {
+  await inPd(page, "?mock=trigger-no-cable");
+  const before = (await commands(page)).length;
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/no e-marker/i);
+  await expect(cableCard(page)).toContainText(/VCONN source/);
+  await expect(cableField(page, "VID")).toBeHidden();
+  await page.waitForTimeout(300);
+  expect((await commands(page)).slice(before)).toEqual([READ_LINE]);
+});
+
+test("an unlisted vendor shows as its hex VID (AC-AXHK2P.5)", async ({ page }) => {
+  await inPd(page, "?mock=trigger-unlisted-cable");
+  await readCableButton(page).click();
+  await expect(cableField(page, "Vendor")).toHaveText("0x1234");
+});
+
+test("a capture's identity shows with no session and sends nothing (AC-AXHK2P.6)", async ({
+  page,
+}) => {
+  await openPd(page);
+  await capture(page);
+  await stopCapture(page);
+  await showTrigger(page);
+  await expect(cableCard(page)).toContainText("Seen in the capture");
+  await expect(cableField(page, "VID")).toHaveText("0x050D");
+  await expect(readCableButton(page)).toBeDisabled();
+  expect(await commands(page)).toEqual([]);
+});
+
+test("a read is not marked as seen in the capture (AC-AXHK2P.6)", async ({ page }) => {
+  await inPd(page);
+  await readCableButton(page).click();
+  await expect(cableField(page, "VID")).toBeVisible();
+  await expect(cableCard(page)).not.toContainText("Seen in the capture");
+});
+
+test('a read ends "don\'t ask again" and asks no question (AC-AXHK2P.3)', async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await readCableButton(page).click();
+  await expect(cableField(page, "VID")).toBeVisible();
+  await expect(dialog(page)).toBeHidden();
+  await expect(armedStatus(page)).toBeHidden();
+});
+
+test("the Cable card passes axe with a cable and with no answer (AC-AXHK2P.1, .4)", async ({
+  page,
+}) => {
+  await inPd(page);
+  await readCableButton(page).click();
+  await expect(cableField(page, "VID")).toBeVisible();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+test("the Cable card's no-answer text passes axe (AC-AXHK2P.4)", async ({ page }) => {
+  await inPd(page, "?mock=trigger-no-cable");
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/no e-marker/i);
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+// ---- FR AXHK2N, AC .9 to .13: a charger that goes away ----
+//
+// Page contract: `?mock=trigger-charger-gone` drops the demo VBUS to 0 V a moment after
+// the first accepted request. The view then says "The charger went away. Press Detect."
+// and has no offers. With no session and no offers it says "Press Detect to see what the
+// charger offers." While a request or a confirmed send is out it shows "Requesting…".
+// (.12 is the app log, which only the Rust tests can see.)
+
+const GONE_TEXT = "The charger went away. Press Detect.";
+const NO_OFFERS_TEXT = "Press Detect to see what the charger offers.";
+const REQUESTING = "Requesting…";
+
+function chargerGoneText(page: Page): Locator {
+  return view(page).getByText(GONE_TEXT);
+}
+
+function noOffersText(page: Page): Locator {
+  return view(page).getByText(NO_OFFERS_TEXT);
+}
+
+function requesting(page: Page): Locator {
+  return view(page).getByText(REQUESTING);
+}
+
+/** Every button that would ask the charger for something. */
+function offerControls(page: Page): Locator {
+  return page
+    .locator("#view-trigger section")
+    .getByRole("button", { name: /^(\d+(\.\d+)? V\b|Request\b)/ });
+}
+
+/** Makes the mock answer `method` only after `ms`. */
+async function slowMock(page: Page, method: string, ms: number): Promise<void> {
+  await page.evaluate(
+    ({ key, method, ms }) => {
+      const mock = (window as unknown as Record<string, Record<string, unknown>>)[key]!;
+      const call = (mock[method] as (...args: unknown[]) => Promise<unknown>).bind(mock);
+      mock[method] = async (...args: unknown[]) => {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+        return call(...args);
+      };
+    },
+    { key: MOCK_HOOK, method, ms },
+  );
+}
+
+test("a collapse ends the status with no press and sends nothing (AC-AXHK2N.9)", async ({
+  page,
+}) => {
+  await detected(page, "?mock=trigger-charger-gone");
+  await arm(page);
+  const sent = (await commands(page)).length;
+  await expect(armedStatus(page)).toBeHidden();
+  await expect(chargerGoneText(page)).toBeVisible();
+  expect(await commands(page)).toHaveLength(sent);
+});
+
+test("a normal charger keeps the status and shows no such text (AC-AXHK2N.9)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await page.waitForTimeout(1500);
+  await expect(armedStatus(page)).toBeVisible();
+  await expect(chargerGoneText(page)).toBeHidden();
+});
+
+test("a collapse leaves no offer to press until Detect (AC-AXHK2N.10)", async ({ page }) => {
+  await detected(page, "?mock=trigger-charger-gone");
+  await request9V(page);
+  await expect(chargerGoneText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(result(page).getByText("pd req=2")).toBeHidden();
+
+  await detectButton(page).click();
+  await expect(offerButton(page, 9)).toBeVisible();
+  await expect(chargerGoneText(page)).toBeHidden();
+  // Nothing stayed armed through it: the next request asks.
+  await asks15V(page);
+});
+
+test("leaving the tab leaves no offers and says to press Detect (AC-AXHK2N.11)", async ({
+  page,
+}) => {
+  await detected(page);
+  await expect(noOffersText(page)).toBeHidden();
+  await request9V(page);
+  await page.getByRole("tab", { name: "Meter" }).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pdm close");
+  await showTrigger(page);
+  await expect(noOffersText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(view(page).getByText("Not detected yet.")).toBeVisible();
+
+  await detectButton(page).click();
+  await expect(offerButton(page, 9)).toBeVisible();
+  await expect(noOffersText(page)).toBeHidden();
+});
+
+test("disconnecting leaves no offers either (AC-AXHK2N.11)", async ({ page }) => {
+  await detected(page);
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await expect(backButton(page)).toBeHidden();
+  await expect(noOffersText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+});
+
+test("a view that never detected says to press Detect (AC-AXHK2N.11)", async ({ page }) => {
+  await open(page);
+  await streamDemo(page);
+  await showTrigger(page);
+  await expect(noOffersText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+});
+
+test("a request at 5 V shows it is in flight (AC-AXHK2N.13)", async ({ page }) => {
+  await detected(page);
+  await expect(requesting(page)).toBeHidden();
+  await slowMock(page, "triggerRequest", 1500);
+  await offerButton(page, 5).click();
+  await expect(requesting(page)).toBeVisible();
+  await expect(requesting(page)).toBeHidden();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pd req=1");
+});
+
+test("a confirmed request shows it is in flight (AC-AXHK2N.13)", async ({ page }) => {
+  await detected(page);
+  await slowMock(page, "triggerRequest", 1500);
+  await offerButton(page, 9).click();
+  await expect(requesting(page)).toBeHidden();
+  await dialog(page).getByRole("button", { name: "Confirm" }).click();
+  await expect(requesting(page)).toBeVisible();
+  await expect(requesting(page)).toBeHidden();
+  await expect.poll(async () => (await commands(page)).at(-1)).toBe("pd req=2");
+});
+
+test("the armed status goes as soon as Detect starts (AC-AXHK2N.13)", async ({ page }) => {
+  await detected(page);
+  await arm(page);
+  await slowMock(page, "triggerDetect", 3000);
+  await detectButton(page).click();
+  await expect(view(page).getByText("Detecting…")).toBeVisible();
+  await expect(armedStatus(page)).toBeHidden({ timeout: 1000 });
+});
+
+// AC-AXHK2P.10: the charger went away, so Read cable is off and its card says why.
+// Page contract: the button's accessible description is the reason shown in the card.
+test("Read cable is off with its reason once the charger went away (AC-AXHK2P.10)", async ({
+  page,
+}) => {
+  await inPd(page, "?mock=trigger-charger-gone");
+  await expect(chargerGoneText(page)).toBeVisible();
+  const before = (await commands(page)).length;
+  await expect(readCableButton(page)).toBeDisabled();
+  await expect(readCableButton(page)).toHaveAccessibleDescription(/charger/i);
+  await expect(cableCard(page).getByText(/charger/i)).toBeVisible();
+  expect((await commands(page)).slice(before)).toEqual([]);
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+test("the gone charger's reason goes once Detect finds it again (AC-AXHK2P.10)", async ({
+  page,
+}) => {
+  await inPd(page, "?mock=trigger-charger-gone");
+  await expect(chargerGoneText(page)).toBeVisible();
+  await expect(readCableButton(page)).toBeDisabled();
+  await detectButton(page).click();
+  await expect(chargerGoneText(page)).toBeHidden();
+  await expect(readCableButton(page)).not.toHaveAccessibleDescription(/charger/i);
+  // AC-AXHK2P.13: Detect ends on the last protocol it listed; a PD offer enters PD.
+  await offerButton(page, 5).click();
+  await expect(readCableButton(page)).toBeEnabled();
+});
+
+// ---- FR WFSNZD: a charger unplugged after Detect, before any offer is pressed ----
+//
+// Page contract: `?mock=trigger-cc-gone` drops both CC lines to 0 V and sets the
+// backend's gone flag a moment after Detect, with no request sent. The view then says
+// "The charger went away. Press Detect.", has no offers, and Read cable is off with
+// "No charger to ask: press Detect to read the cable." as its reason.
+
+const NO_CHARGER_REASON = "No charger to ask: press Detect to read the cable.";
+
+test("a charger gone after Detect with no offer pressed shows the gone state (AC-WFSNZD.1, .4)", async ({
+  page,
+}) => {
+  await detected(page, "?mock=trigger-cc-gone");
+  const sent = (await commands(page)).length;
+  await expect(chargerGoneText(page)).toBeVisible();
+  await expect(offerControls(page)).toHaveCount(0);
+  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(readCableButton(page)).toBeDisabled();
+  await expect(readCableButton(page)).toHaveAccessibleDescription(NO_CHARGER_REASON);
+  await expect(cableCard(page).getByText(NO_CHARGER_REASON)).toBeVisible();
+  // The page only asked: nothing went to the charger.
+  expect((await commands(page)).slice(sent)).toEqual([]);
+  expect((await commands(page)).some((c) => /^pd req=/.test(c))).toBe(false);
+});
+
+// ---- AC-AXHK2P.13, .14: Read cable waits for PD; refusals and no answer in the card ----
+//
+// Page contract: until PD is entered in this trigger session (a PD offer pressed; Detect
+// ends on the last protocol it listed) Read cable is disabled, and its accessible
+// description is the reason shown in the Cable card, naming PD. A refusal of a press
+// shows in the Cable card. With no answer the card says that a cable answers only the
+// port that powers it (VCONN), which the meter may not be in this wiring.
+
+const PD_REASON = /\bPD\b/;
+
+/** Makes the mock refuse the next reads of the cable with `error`. */
+async function refuseCableRead(
+  page: Page,
+  error: { kind: string; message: string; hint: string | null },
+): Promise<void> {
+  await page.evaluate(
+    ({ key, error }) => {
+      const mock = (window as unknown as Record<string, Record<string, unknown>>)[key]!;
+      mock.triggerCableRead = async () => {
+        throw error;
+      };
+    },
+    { key: MOCK_HOOK, error },
+  );
+}
+
+test("Read cable is off with its reason in the card until PD is entered (AC-AXHK2P.13)", async ({
+  page,
+}) => {
+  await detected(page);
+  const before = (await commands(page)).length;
+  await expect(readCableButton(page)).toBeDisabled();
+  await expect(readCableButton(page)).toHaveAccessibleDescription(PD_REASON);
+  const reason = await readCableButton(page).getAttribute("aria-describedby");
+  expect(reason).not.toBeNull();
+  await expect(cableCard(page).locator(`#${reason}`)).toBeVisible();
+  await expect(cableCard(page).locator(`#${reason}`)).toHaveText(PD_REASON);
+  await readCableButton(page).click({ force: true });
+  await page.waitForTimeout(300);
+  expect((await commands(page)).slice(before)).toEqual([]);
+
+  await offerButton(page, 5).click();
+  await expect(readCableButton(page)).toBeEnabled();
+  await expect(readCableButton(page)).not.toHaveAccessibleDescription(PD_REASON);
+});
+
+test("a QC request after PD turns Read cable off again (AC-AXHK2P.13)", async ({ page }) => {
+  await inPd(page);
+  await expect(readCableButton(page)).toBeEnabled();
+  await legacyButton(page, "QC", 5).click();
+  await expect.poll(async () => (await commands(page)).at(-1)).toMatch(/^qc/i);
+  await expect(readCableButton(page)).toBeDisabled();
+  await expect(readCableButton(page)).toHaveAccessibleDescription(PD_REASON);
+});
+
+test("a refusal of a press shows in the Cable card (AC-AXHK2P.13)", async ({ page }) => {
+  await inPd(page);
+  const refusal = {
+    kind: "usage",
+    message: "The meter refused to read the cable.",
+    hint: "Press a PD offer, then try again.",
+  };
+  await refuseCableRead(page, refusal);
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(refusal.message);
+  await expect(cableCard(page)).toContainText(refusal.hint);
+  await expect(cableField(page, "VID")).toBeHidden();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+test("no answer says a cable answers only the port that powers it (AC-AXHK2P.14)", async ({
+  page,
+}) => {
+  await inPd(page, "?mock=trigger-no-cable");
+  const before = (await commands(page)).length;
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/answers only the port that powers it/i);
+  await expect(cableCard(page)).toContainText(/\(VCONN\)/);
+  await expect(cableCard(page)).toContainText(/meter may not be/i);
+  await expect(cableCard(page)).toContainText(/wiring/i);
+  await page.waitForTimeout(300);
+  expect((await commands(page)).slice(before)).toEqual([READ_LINE]);
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+});
+
+test("each press with no answer sends the one message again, nothing else (AC-AXHK2P.14)", async ({
+  page,
+}) => {
+  await inPd(page, "?mock=trigger-no-cable");
+  const before = (await commands(page)).length;
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/VCONN/);
+  await readCableButton(page).click();
+  await expect(cableCard(page)).toContainText(/VCONN/);
+  await page.waitForTimeout(300);
+  expect((await commands(page)).slice(before)).toEqual([READ_LINE, READ_LINE]);
+});
+
+test("the new texts pass axe (AC-AXHK2N.10, .11, .13)", async ({ page }) => {
+  await detected(page, "?mock=trigger-charger-gone");
+  await request9V(page);
+  await expect(chargerGoneText(page)).toBeVisible();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
+  await page.getByRole("tab", { name: "Meter" }).click();
+  await showTrigger(page);
+  await expect(noOffersText(page)).toBeVisible();
+  expect(await axeBlocking(page, "#view-trigger")).toEqual([]);
 });

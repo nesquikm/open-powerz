@@ -47,15 +47,6 @@ impl HeadReply {
     pub fn old_firmware_field(&self) -> u32 {
         self.field
     }
-
-    /// Whether the meter asks for a firmware update: `Some(false)` for a
-    /// field of 0 (current firmware).
-    ///
-    /// Any other value is `None`: an unrecognised reply, never "update
-    /// required", until its meaning is confirmed on the device (AC-V9SK52.3).
-    pub fn update_required(&self) -> Option<bool> {
-        (self.field == 0).then_some(false)
-    }
 }
 
 /// Whether `reply` is a REJECT (type 0x06, extend bit ignored) rather than

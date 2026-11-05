@@ -214,7 +214,7 @@ fn a_failed_head_leaves_update_required_unknown_not_false() {
         let (st, _) = status_after(head, vec![recovery_connect()]);
         assert_eq!(st.update_required, None, "{case}: {st:?}");
         assert!(
-            !st.warnings().contains(&FirmwareWarning::UpdateRequired),
+            st.warnings().iter().all(|w| w.code() != "update_required"),
             "{case}"
         );
     }
@@ -465,7 +465,7 @@ fn the_real_application_mode_head_reply_is_unrecognised_not_update_required() {
         "unknown, never Some(true): {st:?}"
     );
     assert!(
-        !st.warnings().contains(&FirmwareWarning::UpdateRequired),
+        st.warnings().iter().all(|w| w.code() != "update_required"),
         "{:?}",
         st.warnings()
     );

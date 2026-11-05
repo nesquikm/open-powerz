@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use open_powerz_desktop_lib::devices::{DeviceListing, DeviceManager, Opener};
-use open_powerz_desktop_lib::recording::{self, ExportProgress, RecordingEvent, RecordingSummary};
+use open_powerz_desktop_lib::recording::{
+    self, EndReason, ExportProgress, RecordingEvent, RecordingSummary,
+};
 use open_powerz_desktop_lib::ui_error::UiError;
 use open_powerz_desktop_lib::worker::{BackendEvent, GapKind, Status, Step, Worker, WorkerConfig};
 use powerz_cli::StreamOptions;
@@ -203,6 +205,66 @@ fn recording_writes_the_header_then_every_record_received_after_start() {
     // The session goes on after the recording.
     assert_eq!(run_for(&mut worker, &clock, 500), Step::Continue);
     assert!(delivered(&log) > after);
+}
+
+/// A file whose flush fails once `full` is set: the last flush of a stop.
+struct FlushFails(Arc<AtomicBool>);
+
+impl Write for FlushFails {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.0.load(Ordering::SeqCst) {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "No space left on device (os error 28)",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// FR AXHK2F, AC .7: the recording is gone once its last flush failed, so the
+/// page has to hear that it ended, or it shows a recording nothing writes.
+#[test]
+fn a_stop_whose_last_flush_fails_reports_the_recording_as_failed() {
+    let (mut worker, clock, _log, events) = start(
+        Rate::Sps50,
+        Scenario::Load5v1a,
+        FaultPlan::new(),
+        PipeOpts::default(),
+    );
+    let full = Arc::new(AtomicBool::new(false));
+    worker
+        .start_recording(Box::new(FlushFails(Arc::clone(&full))))
+        .unwrap();
+    run_for(&mut worker, &clock, 1_000);
+    let rows_before = worker
+        .recording_progress()
+        .map(|(rows, _)| rows)
+        .expect("recording");
+    assert!(rows_before > 0);
+
+    full.store(true, Ordering::SeqCst);
+    let error = match worker.stop_recording() {
+        Err(e) => e,
+        Ok(summary) => panic!("the failed flush went unreported: {summary:?}"),
+    };
+
+    assert_plain(&error);
+    assert!(!worker.is_recording(), "the recording is over");
+    let failed: Vec<(u64, UiError)> = recording_events(&events)
+        .into_iter()
+        .filter_map(|(_, e)| match e {
+            RecordingEvent::Failed { rows, error } => Some((rows, error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed.len(), 1, "the page hears the recording ended");
+    assert_eq!(failed[0].1.message, error.message);
+    assert!(failed[0].0 <= rows_before, "only the rows in the file");
 }
 
 #[test]
@@ -621,7 +683,11 @@ fn export_runs_on_its_own_thread_while_the_stream_goes_on() {
     });
     // The worker keeps polling while the export runs.
     assert_eq!(run_for(&mut worker, &clock, 1_000), Step::Continue);
-    let rows = job.join().expect("export thread panicked").expect("export");
+    let rows = job
+        .join()
+        .expect("export thread panicked")
+        .expect("export")
+        .rows;
     assert_eq!(rows, so_far, "export must hold the whole session so far");
     assert!(delivered(&log) as u64 > so_far, "the stream stopped");
     assert!(
@@ -769,7 +835,9 @@ fn progress_events_carry_elapsed_time_and_rows_at_least_once_per_second() {
     let progress: Vec<(u64, u64, u64)> = evs
         .iter()
         .filter_map(|(t, e)| match e {
-            RecordingEvent::Progress { rows, elapsed_ms } => Some((*t, *rows, *elapsed_ms)),
+            RecordingEvent::Progress {
+                rows, elapsed_ms, ..
+            } => Some((*t, *rows, *elapsed_ms)),
             _ => None,
         })
         .collect();
@@ -805,18 +873,20 @@ fn recording_events_serialize_for_the_ui() {
     assert_eq!(
         json(RecordingEvent::Progress {
             rows: 3,
-            elapsed_ms: 1_500
+            elapsed_ms: 1_500,
+            paused: false,
         }),
-        serde_json::json!({"type": "recording", "data": {"state": "progress", "rows": 3, "elapsed_ms": 1500}})
+        serde_json::json!({"type": "recording", "data": {"state": "progress", "rows": 3, "elapsed_ms": 1500, "paused": false}})
     );
     let v = json(RecordingEvent::Stopped(RecordingSummary {
         rows: 7,
         gaps: vec![],
         disconnected: true,
+        ended: EndReason::Disconnected,
     }));
     assert_eq!(
         v,
-        serde_json::json!({"type": "recording", "data": {"state": "stopped", "rows": 7, "gaps": [], "disconnected": true}})
+        serde_json::json!({"type": "recording", "data": {"state": "stopped", "rows": 7, "gaps": [], "disconnected": true, "ended": "disconnected"}})
     );
     let v = json(RecordingEvent::Failed {
         rows: 2,
@@ -965,7 +1035,7 @@ fn the_manager_exports_the_session_while_it_streams() {
             *seen.lock().unwrap() = Some(p);
         })
         .expect("export started");
-    let rows = job.join().expect("export thread").expect("export");
+    let rows = job.join().expect("export thread").expect("export").rows;
     // Still streaming afterwards.
     wait_samples(&rx, 10);
     m.disconnect().unwrap();

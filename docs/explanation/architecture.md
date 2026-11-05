@@ -156,7 +156,7 @@ final gate for the confirmation.
 - **The backend owns the session.** One worker thread per connected meter
   polls the stream, keeps the whole session history with min/max summaries for
   every zoom level, and computes statistics. The web UI receives measurements in
-  batches of about 20–60 per second over a Tauri channel, never one message per
+  batches of at most 20 per second over a Tauri channel, never one message per
   sample.
 - **The session outlives the window's page.** When the page reloads (for
   example with a development reload), the new page asks the backend for the

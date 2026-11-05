@@ -200,6 +200,26 @@ mod trigger_pd {
         assert_eq!(s.last().map(String::as_str), Some("pdm close"), "{s:?}");
     }
 
+    // AC-AXHK2N.7: the desktop's "don't ask again" changes nothing here.
+    #[test]
+    fn nine_volts_without_the_flag_is_still_refused() {
+        let a = trigger(&["request", "2"]).assert().failure();
+        assert!(stderr_of(&a).contains("--allow-high-voltage"));
+        let s = sent(&a);
+        assert!(!s.iter().any(|c| c.starts_with("pd req=2")), "{s:?}");
+        assert_eq!(s.last().map(String::as_str), Some("pdm close"), "{s:?}");
+    }
+
+    // AC-AXHK2N.7: nothing is remembered between requests either.
+    #[test]
+    fn nine_volts_with_the_flag_does_not_excuse_the_next_run() {
+        trigger(&["request", "2", "--allow-high-voltage", "--hold", "0"])
+            .assert()
+            .success();
+        let a = trigger(&["request", "2"]).assert().failure();
+        assert!(!sent(&a).iter().any(|c| c.starts_with("pd req=2")));
+    }
+
     #[test]
     fn avs_request_above_5v_without_flag_fails() {
         let a = trigger(&[

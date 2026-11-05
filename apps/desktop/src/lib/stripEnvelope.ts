@@ -16,8 +16,10 @@ export function bridgeColumns(
   lo: Float64Array,
   hi: Float64Array,
   blocked: (col: number) => boolean,
+  cap = Infinity,
 ): void {
-  const cols = Math.min(lo.length, hi.length);
+  // At most `cap` columns are visited; those past it are left as they are (AC-C6VR9K.5).
+  const cols = Math.min(lo.length, hi.length, cap);
   /** The last filled column the line can continue from, or -1. */
   let p = -1;
   for (let c = 0; c < cols; c++) {
@@ -63,4 +65,37 @@ export function bridgeColumns(
 function extend(lo: Float64Array, hi: Float64Array, c: number, v: number): void {
   if (v < lo[c]!) lo[c] = v;
   if (v > hi[c]!) hi[c] = v;
+}
+
+/**
+ * The strip's per-column min / max buffers for `series` series, kept between paints
+ * (AC-AXHK2W.5): while the width stays the same, each paint reuses the same arrays, so a
+ * steady stream makes no new typed array per frame.
+ */
+export class StripEnvelope {
+  readonly #series: number;
+  #lo: Float64Array[] = [];
+  #hi: Float64Array[] = [];
+
+  constructor(series: number) {
+    this.#series = series;
+  }
+
+  /** One `cols`-long buffer pair per series, every column empty (`lo = +Infinity`,
+   * `hi = -Infinity`). The same arrays while `cols` is unchanged; new ones otherwise. */
+  reset(cols: number): { lo: Float64Array[]; hi: Float64Array[] } {
+    if (this.#lo.length !== this.#series || this.#lo[0]?.length !== cols) {
+      this.#lo = [];
+      this.#hi = [];
+      for (let s = 0; s < this.#series; s++) {
+        this.#lo.push(new Float64Array(cols));
+        this.#hi.push(new Float64Array(cols));
+      }
+    }
+    for (let s = 0; s < this.#series; s++) {
+      this.#lo[s]!.fill(Infinity);
+      this.#hi[s]!.fill(-Infinity);
+    }
+    return { lo: this.#lo, hi: this.#hi };
+  }
 }

@@ -96,12 +96,18 @@ pub enum Command {
         /// Also list the simulated demo device (`--transport sim`).
         #[arg(long)]
         include_demo: bool,
+        /// Print `hidden` instead of each meter's serial.
+        #[arg(long)]
+        hide_serial: bool,
     },
     /// Show model, firmware and hardware versions, serial and UID.
     Info {
         /// Print one JSON object instead of labelled lines.
         #[arg(long)]
         json: bool,
+        /// Print `hidden` instead of the serial and the UID.
+        #[arg(long)]
+        hide_serial: bool,
     },
     /// Take one snapshot of VBUS, IBUS, power, temperature, D+/D- and CC1/CC2.
     Read {
@@ -221,7 +227,7 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum SettingsAction {
     /// Write `<field>=<value>` changes (language=chinese|english,
-    /// brightness=1..100, dim_timeout=off|15|30|60, theme=<name>,
+    /// brightness=1..100, dim_timeout=off|15|30|60, theme=`<name>`,
     /// rotation=0|90|180|270, sample_rate=2|10|50|1000), then read the
     /// settings back and print them. Needs --i-understand.
     Set {
@@ -609,6 +615,17 @@ impl Command {
             Command::Watch { source, .. } | Command::Stream { source, .. } => Some(*source),
             _ => None,
         }
+    }
+
+    /// Whether a command that picks a meter was run with `--hide-serial`.
+    pub fn hides_serial(&self) -> bool {
+        matches!(
+            self,
+            Self::Info {
+                hide_serial: true,
+                ..
+            }
+        )
     }
 
     /// The command runs on the meter's CDC port whatever `--transport`

@@ -1,0 +1,135 @@
+---
+milestone: M_7PKVA6
+id: fr_01M69QVAS60M21YPGYA47PKVA6
+status: archived
+archived_at: 2026-11-05T07:00:44Z
+kickoff_branch: null
+frozen_at: null
+migration: none
+codename: Fine Print
+shipped_in: v0.9.0
+---
+
+# Implementation Plan
+
+## M_7PKVA6 — Polish: UX Features {#M_7PKVA6}
+
+**Goal:** Close the M7a partial acceptance criteria and follow-ups, then add the UX features the vendor app has and we lack.
+**Prerequisites:** M_3KPN7D (v0.8.1).
+**Status:** FRs written 2026-10-31. M7 split per user decision 2026-10-30; don't-ask-again per user decision 2026-10-26.
+
+**Scope:**
+- Fixes first: firmware update consent, app log, MSRV job, settings double read and unplug detection, notices, review leftovers.
+- Features: trigger don't-ask-again, cable panel, hide serial, recorder extras, recording import, chart extras, memory trim.
+
+**Out of scope:** startup logo (M7c), Chinese UI, web edition. `CLAUDE.md:11` stays as it is until the user answers.
+
+**FR list:**
+
+| FR | Title | Tracker |
+|----|-------|---------|
+| [AXHK2F](../frs/archive/AXHK2F.md) | A firmware update never ends a recording unasked | n/a |
+| [AXHK2G](../frs/archive/AXHK2G.md) | The app log records errors and firmware updates | n/a |
+| [AXHK2H](../frs/archive/AXHK2H.md) | The MSRV job covers the desktop crate | n/a |
+| [AXHK2J](../frs/archive/AXHK2J.md) | Settings writes and unplugs are detected reliably | n/a |
+| [AXHK2K](../frs/archive/AXHK2K.md) | Notices and opened captures survive other meters' actions | n/a |
+| [AXHK2M](../frs/archive/AXHK2M.md) | Firmware, trigger and release review leftovers | n/a |
+| [AXHK2N](../frs/archive/AXHK2N.md) | Trigger panel "don't ask again" | n/a |
+| [AXHK2P](../frs/archive/AXHK2P.md) | One-click cable e-marker panel | n/a |
+| [AXHK2Q](../frs/archive/AXHK2Q.md) | Hide serial numbers | n/a |
+| [AXHK2R](../frs/archive/AXHK2R.md) | Recorder pause, auto-stop and limits | n/a |
+| [AXHK2S](../frs/archive/AXHK2S.md) | Import recordings and vendor database files | n/a |
+| [AXHK2T](../frs/archive/AXHK2T.md) | Chart ruler, segment marks and energy share | n/a |
+| [AXHK2V](../frs/archive/AXHK2V.md) | Chart appearance and image export | n/a |
+| [AXHK2W](../frs/archive/AXHK2W.md) | Memory trim at 1000 SPS | n/a |
+| [C6VR9K](../frs/archive/C6VR9K.md) | A hidden chart's draw loop hangs the window | n/a |
+| [SX1VTC](../frs/archive/SX1VTC.md) | Dashed series crawl while the chart scrolls | n/a |
+| [CW66T1](../frs/archive/CW66T1.md) | Info popovers for features and abbreviations | n/a |
+| [EWQ6FQ](../frs/archive/EWQ6FQ.md) | Window opens off screen and some layout rough edges | n/a |
+| [B5XBTA](../frs/archive/B5XBTA.md) | A click on the overview strip right after connect is ignored | n/a |
+| [NKAD6S](../frs/archive/NKAD6S.md) | The Device select's tooltip is tested under Hide serial numbers | n/a |
+| [XCCQAK](../frs/archive/XCCQAK.md) | The firmware update keeps the device list's labels | n/a |
+| [TFA5N7](../frs/archive/TFA5N7.md) | A charger unplugged with no contract is noticed | n/a |
+| [JQ971R](../frs/archive/JQ971R.md) | Detect stopping a PD capture says so | n/a |
+| [HR2JAG](../frs/archive/HR2JAG.md) | Live batches at 20 Hz keep the web view's memory down | n/a |
+| [WFSNZD](../frs/archive/WFSNZD.md) | The page hears a charger gone with no contract | n/a |
+| [DS89PS](../frs/archive/DS89PS.md) | The fallback-clear worker test holds the worker at a fixed poll | n/a |
+| [PGY704](../frs/archive/PGY704.md) | The firmware Device list line keeps noting the meter after the update ends | n/a |
+| [VQCKC6](../frs/archive/VQCKC6.md) | The firmware Writing stage explains the bytes the file stores past its image | n/a |
+
+Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (added 2026-11-03 at the user's request) is built while the AXHK2W hardware run waits, before the final gate.
+
+**Tasks:**
+- [x] A firmware update never ends a recording unasked — AXHK2F
+  verify: targeted `devices.rs` tests, Vitest, Playwright prompt path
+- [x] The app log records errors and firmware updates — AXHK2G
+  verify: temporary-log unit tests, including the serial scan
+- [x] The MSRV job covers the desktop crate — AXHK2H
+  verify: `release-workflow.test.ts`, then the job's run on the PR
+- [x] Settings writes and unplugs are detected reliably — AXHK2J
+  verify: session and transport unit tests, then a tester runbook
+- [x] Notices and opened captures survive other meters' actions — AXHK2K
+  verify: Vitest and Playwright tile flows
+- [x] Firmware, trigger and release review leftovers — AXHK2M
+  verify: per-item unit tests
+- [x] Trigger panel "don't ask again" — AXHK2N
+  verify: disarm-path unit tests, Playwright, then a tester runbook
+- [x] One-click cable e-marker panel — AXHK2P
+  verify: simulator cable tests, Playwright, then a tester runbook
+- [x] Hide serial numbers — AXHK2Q
+  verify: Playwright DOM scan and CLI tests
+- [x] Recorder pause, auto-stop and limits — AXHK2R
+  verify: hand-fed record tests and Playwright
+- [x] Import recordings and vendor database files — AXHK2S
+  verify: generated-file tests and a round trip
+- [x] Chart ruler, segment marks and energy share — AXHK2T
+  verify: pure-module tests, `range_stats` tests, visual check
+- [x] Chart appearance and image export — AXHK2V
+  verify: SVG and PDF parse tests, visual check
+- [x] Memory trim at 1000 SPS — AXHK2W
+  verify: element-count tests and a macOS demo measurement
+- [x] A hidden chart's draw loop hangs the window — C6VR9K
+  verify: WebKit PD-tab e2e, pd-timeline spec, then a tester runbook
+- [x] Dashed series crawl while the chart scrolls — SX1VTC
+  verify: two-frame dash test, WebKit pixel e2e, frame-rate check
+- [x] Info popovers for features and abbreviations — CW66T1
+  verify: glossary completeness test, WebKit keyboard and 375 px e2e, visual set
+- [x] Window opens off screen and some layout rough edges — EWQ6FQ
+  verify: frame-fit unit tests, WebKit layout specs at 375/900/1280 px, flows and keyboard specs, tester runbook step
+- [x] A click on the overview strip right after connect is ignored — B5XBTA
+  verify: Vitest click-mapping test, WebKit strip click right after connect, timeline test 20/20
+- [x] The Device select's tooltip is tested under Hide serial numbers — NKAD6S
+  verify: hide-serial WebKit spec, tooltip on/off/on
+- [x] The firmware update keeps the device list's labels — XCCQAK
+  verify: Vitest store history, WebKit mocked update with a mode change
+- [x] A charger unplugged with no contract is noticed — TFA5N7
+  verify: trigger CC-spell unit tests, simulator scenario, r5 runbook step
+- [x] Detect stopping a PD capture says so — JQ971R
+  verify: worker reason tests, Vitest store, WebKit Detect notice
+- [x] Live batches at 20 Hz keep the web view's memory down — HR2JAG
+  verify: batcher message counts, Vitest live end, WebKit live scroll, macOS 20-min demo footprint
+- [x] The page hears a charger gone with no contract — WFSNZD
+  verify: Vitest trigger store, WebKit Detect-unplug spec, r5-recheck Part T
+- [x] The fallback-clear worker test holds the worker at a fixed poll — DS89PS
+  verify: the worker test 20/20 under 24 `yes` loads, then the full workspace suite
+- [x] The firmware Device list line keeps noting the meter after the update ends — PGY704
+  verify: Vitest store with a late relisting, WebKit late-relist mock with the switch off and on
+- [x] The firmware Writing stage explains the bytes the file stores past its image — VQCKC6
+  verify: firmware_file Rust test, Vitest file rows and progress line, WebKit mock update
+
+**Follow-ups for later (triaged from M7a, each kept out on purpose):**
+- Needs hardware we lack: rotation bits and bit 7 of 0x60, which total the record screen shows, QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS coverage, the EcoFlow no-reply question, the Apple battery curve, Windows `\\?\` paths, the root cause of the rejected stop after a queue overflow.
+- Needs a vendor sample we lack: proof that our `.db` opens in the vendor app.
+- Stays refused: delete with 22 or more remaining recordings.
+- Low value, no user effect: mock and simulator divergences, floor test gaps, duplicate asserts, `released` visibility, `limit()` being test-only, FirstSeen filter lists, the hard-coded AppImage name, release-note blank lines, plain string equality in checks, `[doc]` tags, stale wording in two comments, `claim_part` naming, the dead `startRecording` null branch, the `undecoded_diff` skipped words, `is_recording_in` accepting a subdirectory, `entry bc`/`apple` wait time.
+- Outside this repo: the toolkit's evidence renderer report, the syspolicyd reminder for the user.
+- Unchanged by rule: `a_sink_that_blocks_200_ms_per_event_loses_no_record_at_1000_sps` keeps its timing.
+
+**Deferred (hardware checks carried to the M7c sitting):**
+- AXHK2J AC.9: one settings write from the desktop app on the real meter, read back.
+- AXHK2N AC.9: unplug the charger under an accepted contract; the armed state ends within 1 s.
+- AXHK2N AC.10: the same unplug forgets the offers and says the charger went away; a same-charger replug sends nothing.
+
+**Device safety:** the double read adds SETTINGS reads only. AXHK2N and AXHK2P drive the bus and run only through the tester's runbooks, at or below 20 V in the wall-charger setup. No flash, delete or logo write on the real meter is planned.
+
+**Gate:** same gating rule as CLAUDE.md.

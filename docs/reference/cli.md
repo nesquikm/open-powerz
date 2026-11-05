@@ -7,8 +7,8 @@ the built-in help.
 
 | command | what it does | options |
 |---|---|---|
-| `list` | One line per attached meter: model, serial, USB bus/address. With none attached it prints `no POWER-Z devices found` to stderr and still exits 0. | `--json` (array of `model`, `serial`, `bus`, `address`), `--include-demo` (also list the simulated demo device) |
-| `info` | Model, mode (`application`, `bootloader` or `unknown`), application firmware and bootloader versions with their dates, hardware version, serial and UID, then one `Warning:` line per firmware warning: older than 1.7.0, or older than 2.0.7 (the newest version known). Outside application mode it prints only the mode and sends nothing. Each part (the bootloader block, the application block, HEAD, the OTP block, then the UID) that cannot be read costs only that part: the rest, the dated versions and the version warnings are still printed. When HEAD cannot be read it adds `Update check: unavailable (<reason>)`, with the reason and the raw reply. A HEAD field of 0 means the firmware is current; any other value (2.0.6 and 2.0.7 answer `0x00001000`) is reported the same way as an unrecognised reply naming the field and the raw bytes, never as "update required", because what that field means is not yet confirmed on a real meter. Each info block that cannot be read adds one `Firmware status: <problem>` line naming the block, its address and why; its version then prints as `unknown`. The OTP block and the UID are read last, once each: one that cannot be read adds the same line and leaves the serial or UID blank. If the meter cannot be reconnected after a failed step, the remaining steps are skipped and one `Firmware status:` line says so; `info` still succeeds. | `--json` (top level: `model`, `mode`, `firmware_version`, `hardware_version`, `update_required` (null when HEAD was not read or its field was not 0), `warnings` as codes `too_old` / `outdated`, `firmware_problems` (one line per part that could not be read, empty when all were read), `serial`, `uid` (a text field whose part was not read is empty); plus `application` and `bootloader`, each an object with `model`, `version` and `date`, or null) |
+| `list` | One line per attached meter: model, serial, USB bus/address. With none attached it prints `no POWER-Z devices found` to stderr and still exits 0. | `--json` (array of `model`, `serial`, `bus`, `address`), `--include-demo` (also list the simulated demo device), `--hide-serial` (see [Hide serial numbers](#hide-serial-numbers)) |
+| `info` | Model, mode (`application`, `bootloader` or `unknown`), application firmware and bootloader versions with their dates, hardware version, serial and UID, then one `Warning:` line per firmware warning: older than 1.7.0, or older than 2.0.7 (the newest version known). Outside application mode it prints only the mode and sends nothing. Each part (the bootloader block, the application block, HEAD, the OTP block, then the UID) that cannot be read costs only that part: the rest, the dated versions and the version warnings are still printed. When HEAD cannot be read it adds `Update check: unavailable (<reason>)`, with the reason and the raw reply. A HEAD field of 0 means the firmware is current; any other value (2.0.6 and 2.0.7 answer `0x00001000`) is reported the same way as an unrecognised reply naming the field and the raw bytes, never as "update required", because what that field means is not yet confirmed on a real meter. Each info block that cannot be read adds one `Firmware status: <problem>` line naming the block, its address and why; its version then prints as `unknown`. The OTP block and the UID are read last, once each: one that cannot be read adds the same line and leaves the serial or UID blank. If the meter cannot be reconnected after a failed step, the remaining steps are skipped and one `Firmware status:` line says so; `info` still succeeds. | `--json` (top level: `model`, `mode`, `firmware_version`, `hardware_version`, `update_required` (null when HEAD was not read or its field was not 0), `warnings` as codes `too_old` / `outdated`, `firmware_problems` (one line per part that could not be read, empty when all were read), `serial`, `uid` (a text field whose part was not read is empty); plus `application` and `bootloader`, each an object with `model`, `version` and `date`, or null), `--hide-serial` (see [Hide serial numbers](#hide-serial-numbers)) |
 | `read` | One snapshot: VBUS (V), IBUS (A, signed), power (W), temperature (°C), D+, D−, CC1, CC2 (V). | `--json` (`vbus_v`, `ibus_a`, `power_w`, `temp_c` or null, `dp_v`, `dm_v`, `cc1_v`, `cc2_v`) |
 | `settings` | The meter's settings block, read-only: language, brightness, dim timeout, startup logo, theme, auto-rotate, rotation, sample rate, and the voltage, current and offset calibration values as raw numbers. Each line ends with its confidence tag, `[confirmed]` (checked on a meter's screen) or `[inferred]`. It sends one GET_DATA read and never writes a setting (`settings set` does). A block whose CRC-32 check fails is reported as an error (exit 5) instead of being decoded. Bulk pipe (or `sim`) only. | `--json` (`fields`: one object per field with `key`, `label`, `value`, `tag`), `--raw` (hex dump of the 180-byte block, 16 bytes per line with offsets, printed even when the CRC fails) |
 | `settings set` | Writes `<field>=<value>` changes: `language=chinese\|english`, `brightness=1..100`, `dim_timeout=off\|15\|30\|60`, `theme=blue\|green\|pink\|orange\|yellow\|dark-green\|cyan`, `rotation=0\|90\|180\|270`, `sample_rate=2\|10\|50\|1000`; fields left out keep their values. Calibration, auto-rotate and the startup logo are never written. Without `--i-understand`, or with a value out of range, it exits 2 and sends nothing. It reads the settings, sends one settings write over the meter's CDC serial port (the meter ignores it over bulk), reads them back and prints them like `settings`, then says on stderr that the meter's screen shows the change after that setting is opened in its menu. A read-back that differs exits 5 naming the field; nothing is retried. A field the meter holds out of range and you did not change is refused (exit 5, naming it): set that field too. Bulk pipe (or `sim`). | `--i-understand`, `FIELD=VALUE`… |
@@ -173,7 +173,9 @@ that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) 
   plugged in and run the command again; if the meter does not reach its
   bootloader on its own, hold the Back button while plugging it in.
 - **Ctrl-C** stops the flash at its next safe point: before the switch to
-  the bootloader, before the descriptor, or between two payload writes.
+  the bootloader, during the wait for the bootloader, before the descriptor,
+  or between two payload writes. Once the image is written, the wait for
+  the meter to return runs on.
   The command then exits 5 saying the flash was interrupted, with the same
   recovery text as a failure; once the meter is in its bootloader nothing
   more is sent and it stays there until you flash again.
@@ -193,9 +195,9 @@ that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) 
   frame through the flash guard, only from the opposite mode; from
   application mode that frame follows CONNECT, the UID read and a level-1
   authentication, and nothing is jumped if the authentication fails.
-  Ctrl-C applies only before the jump frame is sent: it then sends
-  nothing and exits as interrupted; once the frame is written the jump
-  cannot be undone, and the command waits for the meter as usual. The
+  Ctrl-C before the jump frame is sent sends nothing and exits as
+  interrupted; once the frame is written the jump cannot be undone, and
+  Ctrl-C only ends the wait for the meter, within a second. The
   `Was in:` line, the meter's reply and the replug prompt are printed as
   soon as the jump frame is written, before the wait; the `Was in:` line
   shows even when that write fails. In its bootloader the meter
@@ -226,6 +228,20 @@ that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) 
 - `pd --save` files: the [pdcap format](pdcap.md), JSON Lines with a header
   line and one line per status sample or record. The serial number is never
   written.
+
+## Hide serial numbers
+
+- `powerz list --hide-serial` prints `hidden` for each meter's serial.
+- `powerz info --hide-serial` prints `hidden` for the serial and the UID.
+
+Both work in text and with `--json`. Other output does not change. With several
+meters attached and no `--device`, `info --hide-serial` stops with the number of
+meters instead of their serials. `--trace` prints raw frames, serial and UID
+included, so leave it off for anything you will share.
+
+Errors and messages never name the serial port, with the flag or without it,
+because on macOS that name contains the meter's serial. They say "the meter's
+serial port" instead.
 
 ## Exit codes
 

@@ -1,6 +1,8 @@
 //! Request handling of [`SimDevice`]: one request in, zero or more reply
 //! transfers queued.
 
+use std::sync::atomic::Ordering;
+
 use powerz_protocol::crypto::{self, KEYS};
 use powerz_protocol::decode::records::MEMORY_READ_MAX_LEN;
 use powerz_protocol::decode::settings::apply_settings_write;
@@ -141,6 +143,15 @@ fn settings_payload(block: &[u8; SETTINGS_LEN], rate_code: u8) -> Vec<u8> {
     p
 }
 
+/// Move the brightness (7 bits at bit 3 of the word at 0x00) to another
+/// value in range.
+fn set_other_brightness(block: &mut [u8; SETTINGS_LEN]) {
+    let word = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
+    let code = if (word >> 3) & 0x7F == 90 { 80 } else { 90 };
+    let word = (word & !(0x7F << 3)) | (code << 3);
+    block[..4].copy_from_slice(&word.to_le_bytes());
+}
+
 impl SimDevice {
     /// Main header for a reply of type `ty` with id `id` and the current
     /// auth level in bits 17..18.
@@ -177,6 +188,11 @@ impl SimDevice {
         if self.mode == powerz_protocol::firmware::DeviceMode::Bootloader {
             return self.bootloader_request(req, id);
         }
+        if self.sign_in_drop.swap(false, Ordering::SeqCst) {
+            // A PDM session on the serial port dropped the sign-in. [device]
+            self.auth_level = 0;
+            self.sign_in_lost = true;
+        }
         if self.persona == Persona::Cdc && matches!(b0 & 0x7F, 0x01..=0x03) {
             // ADCNEW framing on CDC: out of scope, no reply.
             return Vec::new();
@@ -184,6 +200,7 @@ impl SimDevice {
         match b0 & 0x7F {
             msg::CONNECT => {
                 self.connected = true;
+                self.sign_in_lost = false;
                 vec![self.control(msg::ACCEPT, id)]
             }
             msg::DISCONNECT => {
@@ -197,6 +214,7 @@ impl SimDevice {
                 vec![self.queue_control(ty, id, code)]
             }
             msg::HEAD => vec![self.head(id)],
+            msg::MEM_READ if self.sign_in_lost => vec![self.control(msg::REJECT, id)],
             msg::MEM_READ => self.memory_read(req, id),
             msg::AUTH => vec![self.auth(req, id)],
             msg::SET_DATA => vec![self.set_data(req, id)],
@@ -245,9 +263,15 @@ impl SimDevice {
         }
         if mask & Attribute::SETTINGS.bits() != 0 {
             sections.push((Attribute::SETTINGS, 0, {
-                let stored = self.stored();
+                let mut stored = self.stored();
+                stored.settings_reads += 1;
                 if self.faults.settings_saved_before_reboot {
                     SETTINGS_207_REBOOTED.to_vec()
+                } else if self.faults.flaky_settings_read && stored.settings_reads.is_multiple_of(2)
+                {
+                    let mut block = stored.settings;
+                    set_other_brightness(&mut block);
+                    settings_payload(&block, stored.rate_code)
                 } else {
                     settings_payload(&stored.settings, stored.rate_code)
                 }

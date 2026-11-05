@@ -11,27 +11,42 @@
     FOLLOWED_UPDATE_LOST,
     FLASH_STAGES,
     RECOVERY_STEPS,
+    STOPPED_STEPS,
     firmwareMeterRows,
     replugPrompt,
     stageNameLabel,
+    storedBytesNote,
     type FirmwareMeter,
     type FirmwareUpdate,
   } from "../firmwareUpdate.svelte";
+  import { deviceOptionLabel } from "../format";
   import FirmwareConfirmDialog from "./FirmwareConfirmDialog.svelte";
   import FirmwareRecordingDialog from "./FirmwareRecordingDialog.svelte";
   import FirmwareFileInfo from "./FirmwareFileInfo.svelte";
+  import HintText from "./HintText.svelte";
 
   let {
     firmware,
     meter,
+    hideSerial,
   }: {
     /** The view's state, kept by the app across tab switches. */
     firmware: FirmwareUpdate;
     /** The meter the update would go to, null when none is picked. */
     meter: FirmwareMeter | null;
+    /** The Hide serial numbers switch (FR AXHK2Q). */
+    hideSerial: boolean;
   } = $props();
 
   const shownMeter = $derived(firmware.meterShown(meter));
+  /** The labels the updated meter took in the device list, joined by arrows (AC-XCCQAK.1). */
+  const listedLine = $derived(
+    firmware.listedHistory.map((l) => deviceOptionLabel(l, hideSerial)).join(" → "),
+  );
+  /** The stored-bytes line under the stages (AC-VQCKC6.3). */
+  const storedNote = $derived(
+    storedBytesNote(firmware.writeProgress?.total ?? null, firmware.info?.size ?? null),
+  );
   const meterRows = $derived(shownMeter ? firmwareMeterRows(shownMeter) : []);
   const blocker = $derived(firmware.updateBlocker(meter));
   /** Where the update is in `FLASH_STAGES`, -1 before the first stage. */
@@ -49,7 +64,9 @@
           : i === stageIndex
             ? firmware.phase === "failed"
               ? "failed"
-              : "current"
+              : firmware.phase === "stopped"
+                ? "stopped"
+                : "current"
             : "pending",
     })),
   );
@@ -73,12 +90,14 @@
     const changed = lastPhase !== undefined && phase !== lastPhase;
     lastPhase = phase;
     if (phase === "updating") progressEl?.focus();
-    else if (changed && (phase === "done" || phase === "failed")) closeEl?.focus();
+    else if (changed && (phase === "done" || phase === "failed" || phase === "stopped"))
+      closeEl?.focus();
   });
   const STATE_TEXT: Record<string, string> = {
     done: "done",
     current: "in progress",
     failed: "failed",
+    stopped: "stopped",
     pending: "to do",
   };
 </script>
@@ -104,7 +123,10 @@
     onclick={() => void firmware.chooseFile()}>Choose file…</button
   >
   {#if firmware.fileError !== null}
-    <p class="error" role="alert">{firmware.fileError}</p>
+    <p class="error" role="alert">
+      {firmware.fileError}
+      <HintText hint={firmware.fileErrorHint} />
+    </p>
   {/if}
   {#if firmware.info !== null}
     <FirmwareFileInfo info={firmware.info} />
@@ -123,14 +145,15 @@
   {/if}
 </div>
 
-{#if firmware.followedEnded}
-  <p role="status">{FOLLOWED_UPDATE_ENDED}</p>
-{/if}
-{#if firmware.followedLost}
-  <p role="status">{FOLLOWED_UPDATE_LOST}</p>
-{/if}
+<!-- Mounted before its text, or a screen reader would not announce it (AC-AXHK2M.7). -->
+<p id="firmware-followed" role="status">
+  {#if firmware.followedEnded}{FOLLOWED_UPDATE_ENDED}{/if}
+</p>
+<p id="firmware-lost" role="status">
+  {#if firmware.followedLost}{FOLLOWED_UPDATE_LOST}{/if}
+</p>
 
-{#if firmware.phase === "updating" || firmware.phase === "done" || firmware.phase === "failed"}
+{#if firmware.phase === "updating" || firmware.phase === "done" || firmware.phase === "failed" || firmware.phase === "stopped"}
   <section class="progress" aria-label="Update progress" tabindex="-1" bind:this={progressEl}>
     <h3>Update progress</h3>
     {#if firmware.replug}
@@ -146,6 +169,12 @@
         </li>
       {/each}
     </ol>
+    {#if storedNote !== null}
+      <p class="stored">{storedNote}</p>
+    {/if}
+    {#if listedLine !== ""}
+      <p class="listed">Device list: {listedLine}</p>
+    {/if}
     <progress
       aria-label="Write progress"
       max="100"
@@ -182,6 +211,25 @@
   <button type="button" bind:this={closeEl} onclick={() => firmware.dismiss()}>Close</button>
 {/if}
 
+{#if firmware.phase === "stopped" && firmware.error !== null}
+  <!-- A stop the user asked for is not a failure (AC-AXHK2M.13): no alert, no error
+       colour, no retry; the backend's message says what state the meter may be in. -->
+  <div class="outcome" role="status">
+    <p>
+      {firmware.error.message}
+      <HintText hint={firmware.error.hint} />
+    </p>
+    <p>Nothing was erased: the meter keeps the firmware it had.</p>
+    <p>Next:</p>
+    <ol>
+      {#each STOPPED_STEPS as step (step)}
+        <li>{step}</li>
+      {/each}
+    </ol>
+  </div>
+  <button type="button" bind:this={closeEl} onclick={() => firmware.dismiss()}>Close</button>
+{/if}
+
 {#if firmware.phase === "failed" && firmware.error !== null}
   <div class="outcome error" role="alert">
     <p>
@@ -191,6 +239,7 @@
         )}.
       {/if}
       {firmware.error.message}
+      <HintText hint={firmware.error.hint} />
     </p>
     {#if firmware.needsRecovery}
       <p>To recover the meter:</p>
@@ -206,10 +255,12 @@
   <button type="button" bind:this={closeEl} onclick={() => firmware.dismiss()}>Close</button>
 {/if}
 
-{#if firmware.recordingPrompt}
+{#if firmware.releasePrompt !== null}
   <FirmwareRecordingDialog
-    onKeep={() => firmware.declineEndRecording()}
-    onEnd={() => void firmware.confirmEndRecording(meter)}
+    sessions={firmware.releasePrompt}
+    {hideSerial}
+    onKeep={() => firmware.declineRelease()}
+    onEnd={() => void firmware.confirmRelease(meter)}
   />
 {:else if firmware.phase === "confirming" && firmware.info !== null}
   <FirmwareConfirmDialog
@@ -265,8 +316,15 @@
   li[data-state="current"] {
     font-weight: 600;
   }
+  li[data-state="stopped"] {
+    color: var(--muted);
+  }
   li[data-state="failed"] {
     color: var(--danger);
+  }
+  .listed,
+  .stored {
+    margin: 0 0 0.5rem;
   }
   progress {
     width: 100%;
@@ -279,6 +337,10 @@
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+  #firmware-followed:empty,
+  #firmware-lost:empty {
+    margin: 0;
   }
   .file button {
     margin-bottom: 0.75rem;

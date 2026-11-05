@@ -24,7 +24,7 @@ describe("MockBackend (scripted demo backend for the browser build)", () => {
     expect(ids).toEqual(["demo:idle", "demo:load-5v-1a", "demo:pd-9v-2a", "demo:noisy-negative"]);
   });
 
-  it("streams the scenario's values in batches at 20–60 Hz", async () => {
+  it("streams the scenario's values in batches at 20–60 Hz (the mock's own 40 Hz cadence)", async () => {
     const backend = new MockBackend();
     const events: BackendEvent[] = [];
     await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
@@ -43,6 +43,41 @@ describe("MockBackend (scripted demo backend for the browser build)", () => {
     }
     expect(got.at(-1)?.temp_c).toBeTypeOf("number");
     expect(events.at(-1)).toEqual({ type: "status", data: { state: "disconnected", error: null } });
+  });
+
+  it("counts saved chart images without copying them out (AC-X6VSFF.2)", async () => {
+    const backend = new MockBackend();
+    expect(backend.chartImageCount()).toBe(0);
+    await backend.saveChartImage("a.png", "png", new Uint8Array([1, 2, 3]));
+    await backend.saveChartImage("b.pdf", "pdf", new Uint8Array([4]));
+    expect(backend.chartImageCount()).toBe(2);
+    expect(backend.chartImages().map((i) => i.suggestedName)).toEqual(["a.png", "b.pdf"]);
+  });
+
+  it("holds the stream: no batches while held, then on from where it stopped (AC-9QTPNQ.3)", async () => {
+    const backend = new MockBackend();
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
+    vi.advanceTimersByTime(1000);
+    const before = batches(events).flatMap((b) => b.samples);
+    expect(before.length).toBe(50);
+    const sentBefore = backend.batchCount();
+    expect(sentBefore).toBe(batches(events).length);
+    backend.holdStream(true);
+    vi.advanceTimersByTime(1000);
+    expect(backend.batchCount(), "no batch counted while held").toBe(sentBefore);
+    expect(batches(events).flatMap((b) => b.samples).length).toBe(50);
+    const heldBatches = batches(events).length;
+    vi.advanceTimersByTime(500);
+    expect(batches(events).length, "no batch while held").toBe(heldBatches);
+    backend.holdStream(false);
+    vi.advanceTimersByTime(1000);
+    await backend.disconnect();
+    const after = batches(events).flatMap((b) => b.samples);
+    expect(after.length).toBe(100);
+    // Device time goes on with no gap: one sample every 20 ms.
+    const t = after.map((s) => s.t_ms);
+    for (let i = 1; i < t.length; i++) expect(t[i]! - t[i - 1]!).toBe(20);
   });
 
   it("reports the snapshot temperature while streaming at 1000 SPS, like the worker (AC-X2SPDW.6)", async () => {
@@ -493,6 +528,7 @@ describe("MockBackend attach (AC-VEDDFD.1–AC-VEDDFD.5)", () => {
       rate_locked: false,
       session_id: 1,
       recording: null,
+      pd_capturing: false,
     });
     vi.advanceTimersByTime(500);
     await backend.disconnect();

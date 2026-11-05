@@ -11,12 +11,15 @@ export function serialSuffix(serial: string | null): string {
 }
 
 /** A tile's title: a real meter by model, a demo meter by its scenario, each with the serial
- * suffix; `reportedSerial` (what the connected meter reported) wins over the listing's. */
+ * suffix; `reportedSerial` (what the connected meter reported) wins over the listing's.
+ * With serial numbers hidden, any meter is its model and position, "KM003C 2" (AC-AXHK2Q.4). */
 export function tileTitle(
   listing: DeviceListing,
   reportedSerial: string | null,
+  masked: { hidden: boolean; position: number },
 ): { name: string; suffix: string } {
-  const name = listing.demo_scenario !== null ? deviceOptionLabel(listing) : listing.model;
+  if (masked.hidden) return { name: `${listing.model} ${masked.position}`, suffix: "" };
+  const name = listing.demo_scenario !== null ? deviceOptionLabel(listing, false) : listing.model;
   return { name, suffix: serialSuffix(reportedSerial ?? listing.serial) };
 }
 

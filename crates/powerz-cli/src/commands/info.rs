@@ -8,7 +8,7 @@ use powerz_protocol::session::{Clock, FirmwareProblemKind, Session};
 use powerz_protocol::transport::Transport;
 
 use crate::error::CliError;
-use crate::output::write_json;
+use crate::output::{HIDDEN, write_json};
 
 /// `powerz info`: model, mode, application and bootloader versions with
 /// their dates, serial and UID.
@@ -44,6 +44,19 @@ pub fn info_in_mode<T: Transport, C: Clock>(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
+    info_with(session, mode, json, false, out)
+}
+
+/// [`info_in_mode`], printing `hidden` for the serial and the UID when
+/// `hide_serial` is set. Outside application mode neither was read, so there
+/// is nothing to hide.
+pub fn info_with<T: Transport, C: Clock>(
+    session: &mut Session<T, C>,
+    mode: DeviceMode,
+    json: bool,
+    hide_serial: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
     if mode != DeviceMode::Application {
         if json {
             return write_json(
@@ -66,7 +79,11 @@ pub fn info_in_mode<T: Transport, C: Clock>(
         writeln!(out, "Mode:       {}", mode.name())?;
         return Ok(());
     }
-    let (d, fw) = session.read_device_info_and_status()?;
+    let (mut d, fw) = session.read_device_info_and_status()?;
+    if hide_serial {
+        HIDDEN.clone_into(&mut d.serial);
+        HIDDEN.clone_into(&mut d.uid);
+    }
     if json {
         let block = |b: &Option<DeviceInfoBlock>| {
             b.as_ref().map(|b| {

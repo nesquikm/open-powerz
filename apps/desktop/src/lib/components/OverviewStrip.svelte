@@ -30,7 +30,8 @@
 
 <script lang="ts">
   import { envelopeRange } from "../chartSeries";
-  import { bridgeColumns } from "../stripEnvelope";
+  import { StripEnvelope, bridgeColumns } from "../stripEnvelope";
+  import { drawLoopCap } from "../drawCap";
   import { RateGate } from "../chartView";
   import {
     dragOverview,
@@ -227,6 +228,9 @@
     ctx.restore();
   }
 
+  /** The VBUS / IBUS envelope buffers, reused while the width stays (AC-AXHK2W.5). */
+  const envelope = new StripEnvelope(2);
+
   /** Paints the per-pixel min / max of VBUS and IBUS over the whole session. */
   function paint(
     canvas: HTMLCanvasElement,
@@ -248,8 +252,7 @@
     const d1 = owarp.fwd(session.lastMs);
     if (!(d1 > d0)) return;
     const keys = ["vbus", "ibus"] as const;
-    const lo = keys.map(() => new Float64Array(cols).fill(Infinity));
-    const hi = keys.map(() => new Float64Array(cols).fill(-Infinity));
+    const { lo, hi } = envelope.reset(cols);
     for (const { frame, beforeMs } of sources(cols)) {
       for (let i = 0; i < frame.x.length; i++) {
         const t = frame.x[i]!;
@@ -267,7 +270,9 @@
       }
     }
     // Sparse samples read as a line; marked gaps stay open (AC-SX3EDV.6).
-    for (let s = 0; s < keys.length; s++) bridgeColumns(lo[s]!, hi[s]!, columnBlocked);
+    // No layout fault makes one frame walk without end (AC-C6VR9K.5).
+    const cap = drawLoopCap(width, height);
+    for (let s = 0; s < keys.length; s++) bridgeColumns(lo[s]!, hi[s]!, columnBlocked, cap);
     const palette = THEME_COLORS[theme];
     const colors = [palette.chart.voltage, palette.chart.current];
     keys.forEach((k, s) => {
@@ -285,7 +290,7 @@
       ctx.save();
       ctx.globalAlpha = 0.75;
       ctx.fillStyle = colors[s] ?? palette.text;
-      for (let c = 0; c < cols; c++) {
+      for (let c = 0; c < Math.min(cols, cap); c++) {
         const a = lo[s]![c]!;
         const b = hi[s]![c]!;
         if (!(b >= a)) continue;

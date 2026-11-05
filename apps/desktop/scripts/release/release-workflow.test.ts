@@ -6,6 +6,7 @@
  * and the manual smoke test of the downloaded files) is verified after the PR.
  */
 
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -454,6 +455,18 @@ const ciText = (): string => (existsSync(CI_PATH) ? readFileSync(CI_PATH, "utf8"
 /** The ci.yml job that reads `rust-version` from Cargo.toml, or undefined. */
 const msrvJob = () => jobs(ciText().split(/\r?\n/)).find((j) => /rust-version/.test(jobText(j)));
 
+/**
+ * The literal 1.x versions in a job's text that could name a Rust toolchain. Action pins
+ * (`@<sha>`, `# v2.9.3`) and the bun pin are other tools' versions: bun's own 1.x line
+ * would otherwise trip this as soon as its minor reaches two digits.
+ */
+const hardCodedRustVersions = (jobBody: string): string[] =>
+  jobBody
+    .replace(/@[0-9a-f]{40}/g, "")
+    .replace(/\bv\d+\.\d+\.\d+\b/g, "")
+    .replace(/^\s*bun-version:.*$/gm, "")
+    .match(/\b1\.\d{2,3}(?:\.\d+)?\b/g) ?? [];
+
 describe("MSRV job in ci.yml (AC-4PJRVN.6)", () => {
   it("Cargo.toml still declares rust-version = 1.96 for the workspace", () => {
     expect(readFileSync(CARGO_TOML, "utf8")).toMatch(/^rust-version\s*=\s*"1\.96"\s*$/m);
@@ -470,19 +483,22 @@ describe("MSRV job in ci.yml (AC-4PJRVN.6)", () => {
   it("never hard-codes a Rust version in the job", () => {
     const t = jobText(msrvJob() ?? { lines: [] });
     expect(t, "the MSRV job is missing").not.toBe("");
-    // Action pins (`@v4.4.0`, `# v2.9.3`) aside, no literal 1.x version appears.
-    const bare = t.replace(/@[0-9a-f]{40}/g, "").replace(/\bv\d+\.\d+\.\d+\b/g, "");
-    expect(bare).not.toMatch(/\b1\.\d{2,3}(?:\.\d+)?\b/);
+    expect(hardCodedRustVersions(t)).toEqual([]);
   });
 
-  it("builds and tests the default members with --locked, without the desktop crate", () => {
+  it("tells a hard-coded Rust version from bun's pin", () => {
+    expect(hardCodedRustVersions("          bun-version: 1.10.2")).toEqual([]);
+    expect(hardCodedRustVersions('channel = "1.96"')).toEqual(["1.96"]);
+    expect(hardCodedRustVersions("rustup toolchain install 1.96.0")).toEqual(["1.96.0"]);
+  });
+
+  // AC-AXHK2H.3: with no -p and no --workspace, cargo builds and tests the default members.
+  it("builds and tests the default members with --locked", () => {
     const t = jobText(msrvJob() ?? { lines: [] });
-    expect(t).toMatch(/\bcargo build\b[^\n]*--locked/);
-    expect(t).toMatch(/\bcargo test\b[^\n]*--locked/);
-    // The default members are the five non-desktop crates; --workspace would pull the
-    // Tauri crate in (it needs a newer Rust and the web build).
-    expect(t).not.toMatch(/--workspace|--all\b/);
-    expect(t).not.toMatch(/open-powerz-desktop|src-tauri|build:web/);
+    expect(t).toMatch(/\bcargo build --locked\s*$/m);
+    expect(t).toMatch(/\bcargo test --locked\s*$/m);
+    // `--all-targets` on the desktop check is fine; only the workspace-wide flags are not.
+    expect(t).not.toMatch(/--workspace|--all(?![-\w])/);
   });
 
   it("installs the Linux libraries the CLI crates link against", () => {
@@ -500,5 +516,121 @@ describe("MSRV job in ci.yml (AC-4PJRVN.6)", () => {
   it("passes the toolchain-pin scan (no named version, channel or cargo +toolchain)", () => {
     expect(msrvJob(), "the MSRV job is missing").toBeDefined();
     expect(scanWorkflow(ciText(), "ci.yml")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR AXHK2H: the MSRV job covers the desktop crate. AC-AXHK2H.5 is proved only by the
+// job's run on the PR, so nothing here stands in for it.
+// ---------------------------------------------------------------------------
+
+/** The belief AC-AXHK2H.4 removes, also across a comment wrapped over two lines. */
+const FALSE_MSRV_CLAIM =
+  /\b(?:needs?|requires?)\s+(?:an?\s+)?(?:newer|later|higher)\s+(?:version\s+of\s+)?Rust\b/i;
+
+/** Joins wrapped comment lines, so a claim split over two of them still matches. */
+const unwrapComments = (src: string): string =>
+  src.replace(/\r?\n[ \t]*(?:\/\/+|#+|\*|<!--)?[ \t]*/g, " ");
+
+/** Records of the bug itself; they describe the claim, they do not make it. */
+const isBugRecord = (path: string): boolean =>
+  path === "specs/frs/AXHK2H.md" ||
+  path.startsWith("specs/frs/archive/") ||
+  path.startsWith("specs/plan/archive/");
+
+/** The tracked text files that can hold a comment or a doc. */
+function commentAndDocFiles(): string[] {
+  return execFileSync("git", ["ls-files"], { cwd: REPO_ROOT, encoding: "utf8" })
+    .split(/\r?\n/)
+    .filter((p) => /\.(?:md|rs|toml|ts|js|svelte|ya?ml|sh)$/.test(p))
+    .filter((p) => !isBugRecord(p) && existsSync(join(REPO_ROOT, p)));
+}
+
+/** The comment lines directly above the `msrv:` job key in ci.yml. */
+function msrvJobComment(): string {
+  const src = ciText().split(/\r?\n/);
+  const at = src.findIndex((l) => /^\s+msrv:\s*$/.test(l));
+  expect(at, "ci.yml has no msrv job").toBeGreaterThanOrEqual(0);
+  let first = at;
+  while (first > 0 && isComment(src[first - 1] ?? "")) first--;
+  return src.slice(first, at).join("\n");
+}
+
+describe("MSRV job covers the desktop crate (FR AXHK2H)", () => {
+  // AC-AXHK2H.1 (regression) and the command of AC-AXHK2H.2.
+  it("the MSRV job also checks the desktop crate", () => {
+    const t = jobText(msrvJob() ?? { lines: [] });
+    expect(t, "the MSRV job is missing").not.toBe("");
+    expect(t).toMatch(/\bcargo check -p open-powerz-desktop --all-targets --locked\s*$/m);
+  });
+
+  it("runs the desktop check on the MSRV toolchain, after the job installs it (AC-AXHK2H.2)", () => {
+    const t = jobText(msrvJob() ?? { lines: [] });
+    const toolchain = t.indexOf("rustup toolchain install");
+    const check = t.indexOf("cargo check -p open-powerz-desktop");
+    expect(toolchain, "the job installs no toolchain").toBeGreaterThanOrEqual(0);
+    expect(check, "the job has no desktop check").toBeGreaterThanOrEqual(0);
+    expect(toolchain).toBeLessThan(check);
+  });
+
+  it("puts the toolchain on Cargo.toml's rust-version before installing it (AC-AXHK2H.2)", () => {
+    const t = jobText(msrvJob() ?? { lines: [] });
+    // Without this rewrite the job silently runs on rust-toolchain.toml's pinned channel.
+    const read = /^\s*(\w+)="\$\(sed\b[^\n]*\brust-version\b[^\n]*\bCargo\.toml\b/m.exec(t);
+    expect(read, "the job does not read rust-version from Cargo.toml").not.toBeNull();
+    const name = read?.[1] ?? "";
+    const assigned = t.match(new RegExp(`^\\s*${name}=`, "gm")) ?? [];
+    expect(assigned, `$${name} must hold only the value read from Cargo.toml`).toHaveLength(1);
+
+    const write = new RegExp(
+      `^\\s*sed\\s[^\\n]*-i\\b[^\\n]*\\bchannel\\b[^\\n]*\\$\\{?${name}\\b[^\\n]*\\brust-toolchain\\.toml\\b`,
+      "m",
+    ).exec(t);
+    expect(write, `no line writes $${name} into rust-toolchain.toml's channel`).not.toBeNull();
+
+    // Bare, so rustup takes the version from the rewritten file.
+    const install = t.search(/^\s*rustup toolchain install\s*$/m);
+    expect(install, "the job does not install from rust-toolchain.toml").toBeGreaterThanOrEqual(0);
+    expect(read?.index ?? -1).toBeLessThan(write?.index ?? -1);
+    expect(write?.index ?? Infinity).toBeLessThan(install);
+  });
+
+  it("builds the web UI before the desktop check (AC-AXHK2H.2)", () => {
+    // tauri::generate_context! needs apps/desktop/dist, so the order matters.
+    const t = jobText(msrvJob() ?? { lines: [] });
+    const setupBun = t.search(/uses:\s*oven-sh\/setup-bun@[0-9a-f]{40}\s+#/);
+    const install = t.indexOf("bun install --frozen-lockfile");
+    const web = t.indexOf("bun run build:web");
+    const check = t.indexOf("cargo check -p open-powerz-desktop");
+    expect(setupBun, "the job does not set up a pinned bun").toBeGreaterThanOrEqual(0);
+    expect(install, "the job does not install the JS packages").toBeGreaterThan(setupBun);
+    expect(web, "the job does not build the web UI").toBeGreaterThan(install);
+    expect(check, "the desktop check must follow the web build").toBeGreaterThan(web);
+  });
+
+  it("installs the Linux libraries the Tauri crate links (AC-AXHK2H.2)", () => {
+    const t = jobText(msrvJob() ?? { lines: [] });
+    for (const lib of ["libwebkit2gtk-4.1-dev", "libappindicator3-dev", "librsvg2-dev"]) {
+      expect(t).toContain(lib);
+    }
+  });
+
+  it("no longer describes the job as leaving the Tauri app out (AC-AXHK2H.4)", () => {
+    expect(msrvJobComment()).not.toMatch(/not\s+(?:#\s+)?the\s+(?:#\s+)?Tauri/i);
+  });
+
+  it("recognizes the removed claim, so the scan below can fail (AC-AXHK2H.4)", () => {
+    const wrapped = ["// the Tauri crate needs a", "// newer Rust"].join("\n");
+    expect(unwrapComments(wrapped)).toMatch(FALSE_MSRV_CLAIM);
+  });
+
+  it("leaves no comment or doc saying the Tauri crate is ahead of the MSRV (AC-AXHK2H.4)", () => {
+    const files = commentAndDocFiles();
+    expect(files).toContain("apps/desktop/scripts/release/release-workflow.test.ts");
+    expect(files).toContain("README.md");
+    const offenders = files.filter((p) =>
+      FALSE_MSRV_CLAIM.test(unwrapComments(readFileSync(join(REPO_ROOT, p), "utf8"))),
+    );
+    expect(offenders).toEqual([]);
   });
 });

@@ -116,7 +116,9 @@ test.describe("AC-M46CTX.2: the ⋯ menu follows the menu pattern (900 px)", () 
   test("ArrowDown / ArrowUp / Home / End move focus between items", async ({ page }) => {
     await open(page);
     await openMenuWithKeyboard(page);
-    const items = menuItems(page);
+    // Disabled items (Export .db with nothing to export) cannot take focus, so the menu
+    // skips them by design: navigation runs over the enabled items only (AC-EWQ6FQ.6).
+    const items = menuItems(page).and(page.locator(":not([disabled])"));
     const count = await items.count();
     expect(count).toBeGreaterThanOrEqual(2);
     await expect(items.nth(0), "opening from the keyboard focuses the first item").toBeFocused();

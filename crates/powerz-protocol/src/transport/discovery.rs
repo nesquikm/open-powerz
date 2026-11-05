@@ -70,6 +70,22 @@ pub struct DeviceEntry {
 }
 
 impl DeviceEntry {
+    /// Whether a device the OS lists with these values is this meter: the
+    /// same product ID, bus and address, and the same serial when this entry
+    /// has one.
+    pub(crate) fn identifies(
+        &self,
+        pid: u16,
+        bus: &str,
+        address: u8,
+        serial: Option<&str>,
+    ) -> bool {
+        self.pid == pid
+            && self.bus == bus
+            && self.address == address
+            && self.serial.as_deref().is_none_or(|s| serial == Some(s))
+    }
+
     /// Application or bootloader mode, from the vendor-interface string.
     pub fn mode(&self) -> DeviceMode {
         DeviceMode::from_interface_string(self.interface_string.as_deref())
@@ -231,23 +247,28 @@ pub fn match_device<'a>(
     devices: &'a [UsbDescriptor],
 ) -> Option<&'a UsbDescriptor> {
     devices.iter().find(|d| {
-        d.vid == crate::VID
-            && d.pid == device.pid
-            && d.bus == device.bus
-            && d.address == device.address
-            && device
-                .serial
-                .as_ref()
-                .is_none_or(|s| d.serial.as_ref() == Some(s))
+        d.vid == crate::VID && device.identifies(d.pid, &d.bus, d.address, d.serial.as_deref())
     })
 }
 
+/// Whether `device` sits in `listed` where it was opened: the same product
+/// ID, bus and address, and the same serial when `device` has one, since
+/// another meter of the same model can land on a freed address. A meter that
+/// came back at a new address does not count: the pipe opened on the old one
+/// is gone.
+pub fn still_listed(device: &DeviceEntry, listed: &[DeviceEntry]) -> bool {
+    listed
+        .iter()
+        .any(|e| device.identifies(e.pid, &e.bus, e.address, e.serial.as_deref()))
+}
+
 /// Two or more POWER-Z devices are attached and no serial was chosen, so
-/// the flash cannot tell which one to talk to.
+/// the flash cannot tell which one to talk to. Its text counts them and names
+/// no serial, since it reaches the desktop page and `app.log` as it is.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "several POWER-Z devices attached and no serial chosen; pick one with its serial or unplug the others: {}",
-    .serials.join(", ")
+    "{} POWER-Z devices attached and no serial chosen; pick one with its serial or unplug the others",
+    .serials.len()
 )]
 pub struct AmbiguousMeter {
     /// Each candidate's serial, `-` for one without.
@@ -324,6 +345,23 @@ pub fn usb_identity(device: &DeviceEntry) -> Result<Option<UsbIdentity>, Error> 
         })
         .collect();
     Ok(match_device(device, &descriptors).map(UsbIdentity::from_descriptor))
+}
+
+#[cfg(test)]
+mod ambiguous_tests {
+    use super::AmbiguousMeter;
+
+    /// The text reaches the desktop's firmware error, where the switch that
+    /// hides serials has no say (AC-AXHK2Q.2).
+    #[test]
+    fn the_ambiguous_meter_text_counts_and_names_no_serial() {
+        let error = AmbiguousMeter {
+            serials: vec!["FAKE-SERIAL-A".to_owned(), "FAKE-SERIAL-B".to_owned()],
+        };
+        let text = error.to_string();
+        assert!(!text.contains("FAKE-SERIAL"), "{text}");
+        assert!(text.contains('2'), "{text}");
+    }
 }
 
 #[cfg(test)]

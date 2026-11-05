@@ -143,10 +143,18 @@ fn records_are_produced_in_real_time() {
     let mut s = Session::open(SimDevice::new(Persona::Bulk, Scenario::Idle));
     s.connect().unwrap();
     s.poll_stream().unwrap();
+    // Bound the count by the time that really passed: a loaded runner can
+    // oversleep, and 50 SPS over that time is the most there can be.
+    let start = std::time::Instant::now();
     std::thread::sleep(ms(400));
     let poll = s.poll_stream().unwrap();
+    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     let n = poll.records.len();
-    assert!((10..=40).contains(&n), "{n} records in ~400 ms at 50 SPS");
+    let most = usize::try_from(elapsed_ms / 20 + 2).unwrap_or(usize::MAX);
+    assert!(
+        (10..=most).contains(&n),
+        "{n} records in {elapsed_ms} ms at 50 SPS (at most {most})"
+    );
     assert!(deltas(&poll.records).iter().all(|&d| d == 20));
 }
 

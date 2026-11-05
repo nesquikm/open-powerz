@@ -22,7 +22,7 @@
 
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { open, streamDemo } from "./helpers";
+import { badge, open, streamDemo } from "./helpers";
 
 /** localStorage key of the Advanced firmware switch (`src/lib/settings.ts`). */
 const ADVANCED_KEY = "open-powerz.advanced-firmware";
@@ -297,6 +297,11 @@ test.describe("firmware update (FR V9SK55)", () => {
     await streamDemo(page);
     await chooseAndConfirm(page);
     await startUpdate(page);
+    // The meter streams, so the update asks first (FR AXHK2F).
+    await page
+      .getByRole("dialog", { name: /session|recording/i })
+      .getByRole("button", { name: /^end /i })
+      .click();
 
     const progress = firmwarePanel(page).getByRole("region", { name: "Update progress" });
     await expect(progress).toBeVisible();
@@ -346,13 +351,51 @@ test.describe("firmware update (FR V9SK55)", () => {
     await expect(done).toContainText(/updated/i);
     await expectAxeClean(page, "success");
 
-    // Released afterwards.
+    // Released afterwards. The app connects the updated meter again on its own
+    // (AC-AXHK2M.15 supersedes a picker left idle here), and a connected session locks
+    // the picker, so the picker is checked once that session is ended.
+    await expect(badge(page)).toHaveText("Streaming", { timeout: 10_000 });
+    await page.getByRole("button", { name: "Disconnect", exact: true }).click();
     await expect(page.getByLabel("Device", { exact: true })).toBeEnabled();
     await expect(page.getByRole("tab", { name: "PD analyzer" })).not.toHaveAttribute(
       "aria-disabled",
       "true",
     );
     expect(await flashLog(page)).toHaveLength(1);
+  });
+
+  test("the file panel and the progress name the bytes the file stores past its image (AC-VQCKC6.2, .3, .5)", async ({
+    page,
+  }) => {
+    await useAdvancedFirmware(page);
+    await open(page);
+    await chooseAndConfirm(page);
+    const file = firmwarePanel(page).getByRole("region", { name: "Firmware file" });
+    // The Sent to the meter row follows Size.
+    const terms = file.locator("dt");
+    const labels = await terms.allTextContents();
+    const at = labels.map((l) => l.trim()).indexOf("Sent to the meter");
+    expect(at, `labels: ${labels.join(", ")}`).toBeGreaterThan(0);
+    expect(labels[at - 1]?.trim()).toBe("Size");
+    await expect(file.locator("dd").nth(at)).toHaveText(
+      "456,912 bytes (16 more than the image; the update sends all the file stores)",
+    );
+
+    await startUpdate(page);
+    const progress = firmwarePanel(page).getByRole("region", { name: "Update progress" });
+    await expect(progress).toBeVisible();
+    await expect(progress.getByText(/^Writing [\d,]+ \/ 456,912 bytes/)).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(
+      progress.getByText(
+        "The file stores 16 bytes past its 456,896-byte image, and the update sends all 456,912.",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    const done = firmwarePanel(page).getByRole("status").filter({ hasText: "2.0.7" });
+    await expect(done).toBeVisible({ timeout: 30_000 });
+    await expect(progress).toContainText("Writing 456,912 / 456,912 bytes");
   });
 
   const FAILURES = [

@@ -9,6 +9,7 @@
     ratePicker,
     recordButton,
     recordingRowsSuffix,
+    recordingWord,
     type ExportJob,
     type Recording,
   } from "../recording.svelte";
@@ -17,6 +18,7 @@
   import {
     ALL_FIT_CLASSES,
     chooseFit,
+    COMPACT_LEVEL,
     EXPORT_IN_MENU_LEVEL,
     fitClasses,
     moreMenuLabel,
@@ -27,10 +29,12 @@
     type Fit,
   } from "../topBarFit";
   import DevicePicker from "./DevicePicker.svelte";
+  import RecorderButtons from "./RecorderButtons.svelte";
   import ThemeControl from "./ThemeControl.svelte";
 
   let {
     session,
+    hideSerial,
     themeChoice,
     onSetTheme,
     onToggleConnect,
@@ -42,14 +46,19 @@
     recording,
     canRecord,
     onToggleRecording,
+    onTogglePause,
+    onRecorderOptions,
     exportJob,
     canExport,
     onExport,
+    onExportDb,
     controlsLabel,
     controlsInTiles,
     views,
   }: {
     session: Session;
+    /** The Hide serial numbers switch (FR AXHK2Q). */
+    hideSerial: boolean;
     themeChoice: ThemeChoice;
     onSetTheme: (choice: ThemeChoice) => void;
     onToggleConnect: () => void;
@@ -65,10 +74,13 @@
     /** A stream is running that can be recorded. */
     canRecord: boolean;
     onToggleRecording: () => void;
+    onTogglePause: () => void;
+    onRecorderOptions: () => void;
     exportJob: ExportJob;
     /** The session holds samples that can be exported. */
     canExport: boolean;
     onExport: () => void;
+    onExportDb: () => void;
     /** Names the meter these controls act on; null with no meter to name. */
     controlsLabel: string | null;
     /** The meter grid shows: each tile carries its meter's controls, so none stay here. */
@@ -187,8 +199,18 @@
     });
     observer.observe(el);
     for (const group of el.querySelectorAll(".group")) observer.observe(group);
+    // The timeout above runs after the paint, so content that grows the bar (the meter
+    // list, settings, a label) would paint one frame overflowing. A mutation callback
+    // runs as a microtask, before the paint: check the fit there and refit only when the
+    // bar no longer fits. The bar's own class changes are not observed, so a fit cannot
+    // set this off again; a bar that shrank is still refit by the resize observer.
+    const mutations = new MutationObserver(() => {
+      if (!fitsOneRow(el)) fit();
+    });
+    mutations.observe(el, { childList: true, subtree: true, characterData: true });
     fit();
     return () => {
+      mutations.disconnect();
       observer.disconnect();
       if (frame) window.clearTimeout(frame);
     };
@@ -262,6 +284,20 @@
   </button>
 {/snippet}
 
+{#snippet exportDbButton(inMenu: boolean)}
+  <button
+    type="button"
+    class={inMenu ? undefined : "export-db"}
+    role={inMenu ? "menuitem" : undefined}
+    tabindex={inMenu ? -1 : undefined}
+    title="Export the session so far to a vendor-layout .db file"
+    disabled={exportJob.running || !canExport}
+    onclick={() => (inMenu ? pick(onExportDb) : onExportDb())}
+  >
+    Export .db
+  </button>
+{/snippet}
+
 <header class="top-bar" aria-label="Device controls" bind:this={bar}>
   <div
     class="named-meter"
@@ -270,7 +306,7 @@
   >
     <div class="group start">
       <span class="brand">open-powerz</span>
-      <DevicePicker {session} />
+      <DevicePicker {session} {hideSerial} />
       <span class="source-inline">{@render sourceSelect()}</span>
       {#if !controlsInTiles}
         <button
@@ -299,12 +335,13 @@
           <!-- Narrow windows show just the time; the row count stays for screen readers. -->
           <span
             class="rec-indicator"
+            class:paused={recording.paused}
             role="timer"
             title={`Recording to CSV: ${recording.indicator}`}
             ><span class="rec-dot" aria-hidden="true"></span><span class="visually-hidden"
               >Recording:
-            </span>REC {formatRecordingElapsed(recording.elapsedMs)}<span class="narrow-hidden"
-              >{recordingRowsSuffix(recording.rows)}</span
+            </span>{`${recordingWord(recording.paused)} ${formatRecordingElapsed(recording.elapsedMs)}`}<span
+              class="narrow-hidden">{recordingRowsSuffix(recording.rows)}</span
             ></span
           >
         {/if}
@@ -317,6 +354,7 @@
         >
           {record.label}
         </button>
+        <RecorderButtons {recording} {onTogglePause} {onRecorderOptions} />
         <!-- The progress fills the disabled Export button's own box, so starting an export
          moves no item and adds nothing to the row's width (lib/topBarFit.ts). -->
         <span class="export-slot" class:exporting={exportJob.running}>
@@ -333,6 +371,7 @@
             </span>
           {/if}
         </span>
+        {@render exportDbButton(false)}
       {/if}
       <!-- Room to spare: theme and About inline. Short of room: behind the "⋯" menu. -->
       <span class="settings-inline">
@@ -404,6 +443,9 @@
                 {#if level >= EXPORT_IN_MENU_LEVEL && !controlsInTiles}
                   {@render exportButton(true)}
                 {/if}
+                {#if level >= COMPACT_LEVEL && !controlsInTiles}
+                  {@render exportDbButton(true)}
+                {/if}
                 <ThemeControl
                   choice={themeChoice}
                   onChoose={(choice) => pick(() => onSetTheme(choice))}
@@ -460,6 +502,13 @@
     padding: 0.375rem 1rem 0;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
+  }
+  /* A phone-wide window puts the strip's buttons on a line under the tabs; the views
+     make room for it at the same width (App.svelte, FR EWQ6FQ). Wider, it stays one row. */
+  @media (max-width: 640px) {
+    .views-strip {
+      flex-wrap: wrap;
+    }
   }
   .group {
     display: flex;
@@ -521,6 +570,12 @@
     height: 0.5rem;
     border-radius: 50%;
     background: var(--danger);
+  }
+  .rec-indicator.paused {
+    color: var(--muted);
+  }
+  .rec-indicator.paused .rec-dot {
+    background: var(--muted);
   }
   .export-slot {
     position: relative;
@@ -660,6 +715,10 @@
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+  /* Level 4: Export .db leaves the row first, so Export stays in it longer. */
+  .top-bar:global(.compact) .export-db {
+    display: none;
   }
   /* Levels 5 and 6: the sample rate, then Export, move into the menu. */
   .top-bar:global(.rate-in-menu) .rate-inline,

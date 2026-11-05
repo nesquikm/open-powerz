@@ -24,5 +24,5 @@ pub use rdo::{AvsRdo, BatteryRdo, FixedRdo, PpsRdo, Rdo, Request};
 pub use vdm::{
     ActiveCableVdo, ActiveCableVdo2, CommandType, DfpVdo, DiscoverIdentity, IdHeader,
     PassiveCableVdo, ProductTypeVdo, ProductVdo, StructuredVdmHeader, UfpVdo,
-    UnstructuredVdmHeader, Vdm, VdmBody, VdmCommand, VdmHeader,
+    UnstructuredVdmHeader, UsbSpeed, Vdm, VdmBody, VdmCommand, VdmHeader,
 };

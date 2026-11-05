@@ -17,13 +17,22 @@ vi.mock("@tauri-apps/api/core", () => {
 
 import {
   TRIGGER_PROTOCOLS,
+  meterBackend,
+  pdCableSeen,
+  triggerArmed,
   triggerBackTo5v,
+  triggerCableRead,
+  triggerChargerGone,
   triggerClose,
   triggerDetect,
+  triggerDisarm,
   triggerList,
   triggerOpen,
+  triggerPdEntered,
   triggerRequest,
   triggerRisk,
+  type CableRead,
+  type CableView,
   type ProtocolSection,
   type TriggerReply,
   type TriggerRequest,
@@ -109,5 +118,146 @@ describe("AC-DGSQ6S.5: Back to 5 V and close", () => {
     await triggerClose();
     expect(invoke).toHaveBeenNthCalledWith(1, "trigger_back_to_5v");
     expect(invoke).toHaveBeenNthCalledWith(2, "trigger_close");
+  });
+});
+
+describe('AC-AXHK2N.2, .5: the "don\'t ask again" commands', () => {
+  const REPLY: TriggerReply = {
+    command: "pd req=2",
+    requested_mv: 9000,
+    requested_ma: 3000,
+    delivered_mv: 8865,
+    delivered_ma: 0,
+    reply: null,
+  };
+
+  it("sends remember only when it is true", async () => {
+    invoke.mockResolvedValue(REPLY);
+    await triggerRequest(PD_9V, true, true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_request", {
+      request: PD_9V,
+      confirmed: true,
+      remember: true,
+    });
+    await triggerRequest(PD_9V, true, false);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_request", { request: PD_9V, confirmed: true });
+    await triggerRequest(PD_9V, false);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_request", {
+      request: PD_9V,
+      confirmed: false,
+    });
+  });
+
+  it("reports the armed state", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(triggerArmed()).resolves.toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_armed");
+  });
+
+  it("clears the armed state", async () => {
+    invoke.mockResolvedValue(undefined);
+    await triggerDisarm();
+    expect(invoke).toHaveBeenLastCalledWith("trigger_disarm");
+  });
+});
+
+describe("AC-AXHK2N.9, .10: the charger gone command", () => {
+  it("reports what the backend says", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(triggerChargerGone()).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("trigger_charger_gone");
+    invoke.mockResolvedValue(false);
+    await expect(triggerChargerGone()).resolves.toBe(false);
+  });
+
+  it("a meter's own command names the meter", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(meterBackend("usb:1:7").triggerChargerGone()).resolves.toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_charger_gone", { deviceId: "usb:1:7" });
+  });
+});
+
+describe("AC-AXHK2P.1, .6: the Cable card's commands", () => {
+  const CABLE: CableView = {
+    vid: 0x05ac,
+    pid: 0x8254,
+    active: true,
+    max_voltage_v: 50,
+    max_current_ma: 5000,
+    epr_capable: true,
+    speed: "USB4 Gen 3",
+    vendor: "Apple",
+  };
+
+  it("reads the cable with no argument: nothing from the page selects the exemption", async () => {
+    const found: CableRead = { kind: "found", cable: CABLE };
+    invoke.mockResolvedValue(found);
+    await expect(triggerCableRead()).resolves.toEqual(found);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("trigger_cable_read");
+  });
+
+  it("passes the backend's no-answer through", async () => {
+    const none: CableRead = { kind: "no_answer" };
+    invoke.mockResolvedValue(none);
+    await expect(triggerCableRead()).resolves.toEqual(none);
+  });
+
+  it("asks for the cable a capture holds", async () => {
+    invoke.mockResolvedValue(CABLE);
+    await expect(pdCableSeen()).resolves.toEqual(CABLE);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("pd_cable_seen");
+    invoke.mockResolvedValue(null);
+    await expect(pdCableSeen()).resolves.toBeNull();
+  });
+
+  it("a meter's own commands name the meter", async () => {
+    invoke.mockResolvedValue({ kind: "no_answer" });
+    const meter = meterBackend("usb:1:7");
+    await meter.triggerCableRead();
+    expect(invoke).toHaveBeenLastCalledWith("trigger_cable_read", { deviceId: "usb:1:7" });
+    invoke.mockResolvedValue(null);
+    await meter.pdCableSeen();
+    expect(invoke).toHaveBeenLastCalledWith("pd_cable_seen", { deviceId: "usb:1:7" });
+  });
+});
+
+describe("AC-AXHK2P.13: whether PD is entered comes from the backend", () => {
+  it("asks the backend with no argument", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(triggerPdEntered()).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("trigger_pd_entered");
+    invoke.mockResolvedValue(false);
+    await expect(triggerPdEntered()).resolves.toBe(false);
+  });
+
+  it("a meter's own question names the meter", async () => {
+    invoke.mockResolvedValue(false);
+    await meterBackend("usb:1:7").triggerPdEntered();
+    expect(invoke).toHaveBeenLastCalledWith("trigger_pd_entered", { deviceId: "usb:1:7" });
+  });
+});
+
+describe("AC-AXHK2N.15: leaving the tab names itself", () => {
+  it("a leave goes to the backend as one", async () => {
+    invoke.mockResolvedValue(undefined);
+    await triggerBackTo5v(true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_back_to_5v", { leaving: true });
+  });
+
+  it("a press of Back to 5 V sends no leave", async () => {
+    invoke.mockResolvedValue(undefined);
+    await triggerBackTo5v();
+    expect(invoke).toHaveBeenLastCalledWith("trigger_back_to_5v");
+    await triggerBackTo5v(false);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_back_to_5v");
+  });
+
+  it("a meter's own leave names the meter", async () => {
+    invoke.mockResolvedValue(undefined);
+    await meterBackend("usb:1:7").triggerBackTo5v(true);
+    expect(invoke).toHaveBeenLastCalledWith("trigger_back_to_5v", {
+      leaving: true,
+      deviceId: "usb:1:7",
+    });
   });
 });

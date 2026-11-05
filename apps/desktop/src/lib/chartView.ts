@@ -27,17 +27,25 @@ export const animationFrames: FrameClock = {
 const JITTER_MS = 1;
 
 /** Draws on an animation frame after `invalidate()`, coalescing invalidations and
- * keeping at least 1/MAX_REDRAW_HZ between draws. */
+ * keeping at least `minGapMs()` (default 1/MAX_REDRAW_HZ) between draws. */
 export class RedrawScheduler {
   #draw: () => void;
   #clock: FrameClock;
   #pending: number | null = null;
   #lastDrawTs: number | null = null;
   #stopped = false;
+  #minGapMs: () => number;
 
-  constructor(draw: () => void, clock: FrameClock = animationFrames) {
+  /** `minGapMs` is read on every frame, so the cap can tighten while the chart
+   * smooth-scrolls (AC-HR2JAG.3). */
+  constructor(
+    draw: () => void,
+    clock: FrameClock = animationFrames,
+    minGapMs: () => number = () => 1000 / MAX_REDRAW_HZ,
+  ) {
     this.#draw = draw;
     this.#clock = clock;
+    this.#minGapMs = minGapMs;
   }
 
   /** Something changed: draw on a coming frame. */
@@ -56,7 +64,7 @@ export class RedrawScheduler {
   #onFrame(ts: number): void {
     this.#pending = null;
     if (this.#stopped) return;
-    const minGap = 1000 / MAX_REDRAW_HZ - JITTER_MS;
+    const minGap = Math.max(this.#minGapMs(), 1000 / MAX_REDRAW_HZ) - JITTER_MS;
     if (this.#lastDrawTs !== null && ts - this.#lastDrawTs < minGap) {
       // Too soon: still dirty, try the next frame.
       this.#pending = this.#clock.request((t) => this.#onFrame(t));

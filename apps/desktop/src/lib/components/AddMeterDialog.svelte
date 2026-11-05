@@ -10,11 +10,14 @@
 
   let {
     devices,
+    hideSerial,
     onCancel,
     onConnect,
   }: {
     /** The devices that can be added. */
     devices: readonly DeviceListing[];
+    /** The Hide serial numbers switch (FR AXHK2Q). */
+    hideSerial: boolean;
     onCancel: () => void;
     onConnect: (id: string) => void;
   } = $props();
@@ -67,7 +70,7 @@
       use:focusOnMount
     >
       {#each devices as device (device.id)}
-        <option value={device.id}>{deviceOptionLabel(device)}</option>
+        <option value={device.id}>{deviceOptionLabel(device, hideSerial)}</option>
       {:else}
         <option value="">No other device</option>
       {/each}

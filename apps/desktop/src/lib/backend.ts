@@ -44,13 +44,29 @@ export type ErrorKind =
   | "disconnected"
   | "usage"
   | "out_of_sync"
+  | "flash_needs_consent"
+  /** The user stopped the firmware update; not a failure (AC-AXHK2M.13). */
+  | "cancelled"
   | "internal";
+
+/** A session a firmware update would release, as the prompt names it (FR AXHK2F); the
+ * page sends back the ones the user agreed to release (mirrors `devices.rs`). */
+export interface FlashHold {
+  id: string;
+  label: string;
+  recording: boolean;
+  /** Which recording, sent only while there is one: a consent covers that recording and
+   * no later one on the same session (AC-AXHK2F.5). */
+  recording_id?: number;
+}
 
 /** A plain-language error. */
 export interface UiError {
   kind: ErrorKind;
   message: string;
   hint: string | null;
+  /** The sessions a `flash_needs_consent` refusal names; sent only then. */
+  sessions?: FlashHold[];
 }
 
 const ERROR_KINDS: readonly ErrorKind[] = [
@@ -61,6 +77,8 @@ const ERROR_KINDS: readonly ErrorKind[] = [
   "disconnected",
   "usage",
   "out_of_sync",
+  "flash_needs_consent",
+  "cancelled",
   "internal",
 ];
 
@@ -81,7 +99,10 @@ export const INTERNAL_MESSAGE = "Something went wrong inside the app.";
 /** Turns a rejected invoke payload (a backend UiError) or any other thrown value into a
  * UiError. Anything else is a bug: its raw text goes to the console, never to the banner. */
 export function toUiError(err: unknown): UiError {
-  if (isUiError(err)) return { kind: err.kind, message: err.message, hint: err.hint ?? null };
+  if (isUiError(err)) {
+    const { kind, message, hint, sessions } = err;
+    return { kind, message, hint: hint ?? null, ...(sessions ? { sessions } : {}) };
+  }
   console.error("open-powerz: unexpected error", err);
   return { kind: "internal", message: INTERNAL_MESSAGE, hint: null };
 }
@@ -135,7 +156,7 @@ export type Status =
   | { state: "waiting"; serial: string };
 
 export interface Gap {
-  kind: "stream" | "outage";
+  kind: "stream" | "outage" | "pause";
   from_ms: number;
   to_ms: number;
 }
@@ -148,18 +169,22 @@ export interface HistoryGap {
   to_ms: number;
 }
 
+/** Why a recording ended (mirrors `EndReason`). */
+export type RecordingEnd = "stopped" | "disconnected" | "low_current" | "row_limit";
+
 /** What a finished recording wrote. */
 export interface RecordingSummary {
   rows: number;
   gaps: Gap[];
   /** The recording ended because the meter went away. */
   disconnected: boolean;
+  ended: RecordingEnd;
 }
 
 /** Recording state changes (mirrors `src-tauri/src/recording.rs`). */
 export type RecordingEvent =
   | { state: "started" }
-  | { state: "progress"; rows: number; elapsed_ms: number }
+  | { state: "progress"; rows: number; elapsed_ms: number; paused: boolean }
   | ({ state: "stopped" } & RecordingSummary)
   | { state: "failed"; rows: number; error: UiError };
 
@@ -173,6 +198,19 @@ export interface ExportProgress {
 export interface ExportResult {
   path: string;
   rows: number;
+  /** The folded oldest part of the history the export left out (FR AXHK2W,
+   * AC-AXHK2W.14); absent or `null` when nothing was. */
+  folded?: ExportFolded | null;
+}
+
+/** The oldest part of a session an export left out because the history folded it. */
+export interface ExportFolded {
+  /** Folded samples left out. */
+  samples: number;
+  /** Session time they span, ms. */
+  ms: number;
+  /** Wall-clock time of the file's first row, ms. */
+  start_unix_ms: number;
 }
 
 /** Min, max and mean of one quantity. */
@@ -269,6 +307,9 @@ export interface PdStatusSample {
   cc2_v: number;
 }
 
+/** Why the app stopped a PD capture the user did not stop (FR JQ971R). */
+export type PdStopReason = "trigger";
+
 /** Every event the backend sends over the session channel. */
 export type BackendEvent =
   | { type: "batch"; data: Batch }
@@ -276,9 +317,14 @@ export type BackendEvent =
   | { type: "status"; data: Status }
   | { type: "error"; data: UiError }
   | { type: "recording"; data: RecordingEvent }
-  | { type: "pd_state"; data: { capturing: boolean } }
+  | { type: "pd_state"; data: { capturing: boolean; reason?: PdStopReason } }
   | { type: "pd_rows"; data: { rows: PdRow[] } }
-  | { type: "pd_status"; data: { samples: PdStatusSample[] } };
+  | {
+      type: "pd_status";
+      /** `dropped`: status blocks the backend dropped past its limit since the last
+       * clear (FR AXHK2W, AC .2). */
+      data: { samples: PdStatusSample[]; dropped?: number };
+    };
 
 /** Lists the meters and demo devices available right now. */
 export function listDevices(): Promise<DeviceListing[]> {
@@ -335,6 +381,8 @@ export interface RecordingSnapshot {
   elapsed_ms: number;
   /** Its file. */
   path?: string | null | undefined;
+  /** A pause holds its rows back. */
+  paused?: boolean | undefined;
 }
 
 /** The running session as a new page picks it up after a reload (mirrors `devices.rs`). */
@@ -347,6 +395,11 @@ export interface AttachedSession {
   rate_locked: boolean;
   session_id: number;
   recording: RecordingSnapshot | null;
+  /** The PD capture runs (AC-AXHK2K.7). */
+  pd_capturing?: boolean | undefined;
+  /** Status blocks the PD capture dropped past its limit since the last clear
+   * (FR AXHK2W, AC .3). */
+  pd_status_dropped?: number | undefined;
 }
 
 /** Asks the backend for the running session (after a reload); its later events go to
@@ -389,17 +442,46 @@ export async function setRate(rateSps: number): Promise<void> {
   await invoke("set_rate", { rateSps });
 }
 
+/** What a recording starts with (FR AXHK2R); the backend checks them too. */
+export interface RecordingOptions {
+  folder?: string | null | undefined;
+  below_a?: number | null | undefined;
+  for_ms?: number | null | undefined;
+  max_rows?: number | null | undefined;
+}
+
 /** Starts recording at once to a default file named after `suggestedName`. Resolves to
  * its path; {@link saveRecordingAs} moves the finished file. */
-export async function startRecording(suggestedName: string): Promise<string | null> {
-  if (mock) return mock.startRecording(suggestedName);
-  return invoke<string | null>("start_recording", { suggestedName });
+export async function startRecording(
+  suggestedName: string,
+  options?: RecordingOptions,
+): Promise<string | null> {
+  if (mock) return mock.startRecording(suggestedName, options);
+  return invoke<string | null>("start_recording", { suggestedName, options });
+}
+
+/** Asks which folder recordings go to; `null` when the dialog was cancelled. */
+export async function chooseRecordingFolder(): Promise<string | null> {
+  if (mock) return mock.chooseRecordingFolder();
+  return invoke<string | null>("choose_recording_folder");
 }
 
 /** Stops the recording; resolves to its row count and gaps. */
 export async function stopRecording(): Promise<RecordingSummary> {
   if (mock) return mock.stopRecording();
   return invoke<RecordingSummary>("stop_recording");
+}
+
+/** Holds the recording's rows back while the stream goes on. */
+export async function pauseRecording(): Promise<void> {
+  if (mock) return mock.pauseRecording();
+  await invoke("recording_pause");
+}
+
+/** Writes the recording's rows again, in the same file. */
+export async function resumeRecording(): Promise<void> {
+  if (mock) return mock.resumeRecording();
+  await invoke("recording_resume");
 }
 
 /** Opens the save dialog for the finished recording at `path` and moves it to the chosen
@@ -421,6 +503,18 @@ export async function exportSession(
   return invoke<ExportResult | null>("export_session", { suggestedName, onProgress: channel });
 }
 
+/** Opens the save dialog proposing `suggestedName` and exports the session so far to a
+ * vendor-layout `.db` file (FR AXHK2S). Resolves like {@link exportSession}. */
+export async function exportSessionDb(
+  suggestedName: string,
+  onProgress: (progress: ExportProgress) => void,
+): Promise<ExportResult | null> {
+  if (mock) return mock.exportSessionDb(suggestedName, onProgress);
+  const channel = new Channel<ExportProgress>();
+  channel.onmessage = onProgress;
+  return invoke<ExportResult | null>("export_session_db", { suggestedName, onProgress: channel });
+}
+
 /** Statistics of the open session since its start or the last reset. */
 export async function stats(): Promise<StatsSnapshot> {
   if (mock) return mock.stats();
@@ -432,6 +526,65 @@ export async function stats(): Promise<StatsSnapshot> {
  * failing to parse. */
 function wholeMs(t0Ms: number, t1Ms: number): { t0Ms: number; t1Ms: number } {
   return { t0Ms: Math.max(0, Math.floor(t0Ms)), t1Ms: Math.max(0, Math.ceil(t1Ms)) };
+}
+
+/** What the view shows of an opened recording file (mirrors `src-tauri/src/recording_file.rs`). */
+export interface FileSummary {
+  /** The file's name, without its folder. */
+  name: string;
+  rows: number;
+  /** Damaged rows skipped. */
+  skipped: number;
+  /** Readable rows past the row limit, or past the time a record holds. */
+  left_out: number;
+  stats: StatsSnapshot;
+}
+
+/** How far an open has got, in a unit of the reader's own. */
+export interface OpenProgress {
+  done: number;
+  /** 0 when the end is not known. */
+  total: number;
+}
+
+/** Opens the open dialog and reads the chosen CSV or vendor `.db` recording (FR AXHK2S),
+ * off the UI thread; needs no meter and sends nothing to one. Resolves to its summary, or
+ * `null` when the dialog was dismissed or Cancel ended the open. */
+export async function openRecordingFile(
+  onProgress: (progress: OpenProgress) => void,
+): Promise<FileSummary | null> {
+  if (mock) return mock.openRecordingFile(onProgress);
+  const channel = new Channel<OpenProgress>();
+  channel.onmessage = onProgress;
+  return invoke<FileSummary | null>("recording_file_open", { onProgress: channel });
+}
+
+/** Ends the open under way: it resolves to `null`. */
+export async function cancelRecordingFile(): Promise<void> {
+  if (mock) return mock.cancelRecordingFile();
+  await invoke("recording_file_cancel");
+}
+
+/** Closes the open recording file. */
+export async function closeRecordingFile(): Promise<void> {
+  if (mock) return mock.closeRecordingFile();
+  await invoke("recording_file_close");
+}
+
+/** Min / max buckets of the open recording file over `t0Ms..=t1Ms`, at most `buckets` per
+ * series. */
+export async function recordingFileRange<const S extends readonly HistorySeries[]>(
+  series: S,
+  t0Ms: number,
+  t1Ms: number,
+  buckets: number,
+): Promise<BucketsFor<S>> {
+  if (mock) return mock.recordingFileRange(series, t0Ms, t1Ms, buckets);
+  return invoke<BucketsFor<S>>("recording_file_range", {
+    series,
+    ...wholeMs(t0Ms, t1Ms),
+    buckets,
+  });
 }
 
 /** Min / max buckets of the open session's history over `t0Ms..=t1Ms`, at most
@@ -451,6 +604,126 @@ export async function historyRange<const S extends readonly HistorySeries[]>(
 export async function historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]> {
   if (mock) return mock.historyGaps(t0Ms, t1Ms);
   return invoke<HistoryGap[]>("history_gaps", wholeMs(t0Ms, t1Ms));
+}
+
+/** Where the open session's history keeps full resolution from, ms; the data before it is
+ * folded into coarser blocks. `null` while nothing is folded (AC-AXHK2W.11). */
+export async function historyFoldBoundary(): Promise<number | null> {
+  if (mock) return mock.historyFoldBoundary();
+  return invoke<number | null>("history_fold_boundary");
+}
+
+/** What the ruler shows between its cursors, from the raw samples with
+ * `t0 <= t <= t1` (FR AXHK2T). */
+export interface RangeStats {
+  samples: number;
+  charge_ah: number;
+  energy_wh: number;
+  vbus_avg_v: number;
+  ibus_avg_a: number;
+  power_avg_w: number;
+}
+
+/** The ruler's stats over the open session's history between `t0Ms` and `t1Ms`; `null`
+ * when no sample is in range (AC-AXHK2T.2). */
+export async function rangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null> {
+  if (mock) return mock.rangeStats(t0Ms, t1Ms);
+  return invoke<RangeStats | null>("range_stats", wholeMs(t0Ms, t1Ms));
+}
+
+/** The ruler's stats over the open recording file between `t0Ms` and `t1Ms`. */
+export async function recordingFileRangeStats(
+  t0Ms: number,
+  t1Ms: number,
+): Promise<RangeStats | null> {
+  if (mock) return mock.recordingFileRangeStats(t0Ms, t1Ms);
+  return invoke<RangeStats | null>("recording_file_range_stats", wholeMs(t0Ms, t1Ms));
+}
+
+/** What segment marks follow (FR AXHK2T). */
+export type RunMarkKind = "charge" | "energy";
+
+/** What E.D. is a share of: the whole session's energy (summed over its runs, never
+ * across a run break) or the current run's (AC-AXHK2T.5). */
+export type EdScope = "session" | "run";
+
+/** What `run_progress` is asked for (mirrors `RunProgressQuery` in
+ * `src-tauri/src/history.rs`). */
+export interface RunProgressQuery {
+  /** The running total the marks follow. */
+  kind: RunMarkKind;
+  /** Mark every `step_pct` percent; 0% and 100% are never marked, and a step outside
+   * `0 < step < 100` marks nothing. */
+  step_pct: number;
+  /** Evenly spaced E.D. points to sample, about the plot width (at most 8192); 0 for none. */
+  ed_points: number;
+  /** The E.D. window, ms, clamped to the scope's samples (either order); all of them when
+   * left out. */
+  ed_t0_ms?: number | null;
+  ed_t1_ms?: number | null;
+  /** What E.D. is a share of; `"session"` when left out. Marks always follow the run. */
+  ed_scope?: EdScope;
+}
+
+/** One segment mark: where the run's running total first reached `percent` of its final
+ * value, ms (between records, so not whole). */
+export interface RunMark {
+  t_ms: number;
+  percent: number;
+}
+
+/** Segment marks of the current run (since the last run break) and E.D. of the session
+ * (or the run, per `ed_scope`), integrated over the raw samples (AC-AXHK2T.4, .5). */
+export interface RunProgress {
+  /** The first sample's time of the session (or file), ms. */
+  session_t0_ms: number;
+  run_t0_ms: number;
+  run_t1_ms: number;
+  samples: number;
+  charge_ah: number;
+  energy_wh: number;
+  /** The followed total is above zero; when not (idle, discharging, one sample) `marks`
+   * is empty and the UI can say why. */
+  marks_total_positive: boolean;
+  marks: RunMark[];
+  /** The E.D. total: the session's (or the run's) energy, Wh. */
+  ed_total_wh: number;
+  /** `ed_total_wh` is above zero; when not, `ed_t_ms` and `ed_pct` are empty. */
+  energy_total_positive: boolean;
+  ed_t_ms: number[];
+  /** Running energy at each `ed_t_ms` as a percentage of `ed_total_wh`. */
+  ed_pct: number[];
+}
+
+/** `q` as the backend takes it: whole, non-negative counts and milliseconds. */
+function wireQuery(q: RunProgressQuery): Required<RunProgressQuery> {
+  const ms = (t: number | null | undefined, round: (x: number) => number): number | null =>
+    t === null || t === undefined || !Number.isFinite(t) ? null : Math.max(0, round(t));
+  const lo = ms(q.ed_t0_ms, Math.floor);
+  const hi = ms(q.ed_t1_ms, Math.ceil);
+  return {
+    kind: q.kind,
+    step_pct: q.step_pct,
+    ed_points: Number.isFinite(q.ed_points) ? Math.max(0, Math.floor(q.ed_points)) : 0,
+    ed_t0_ms: lo,
+    ed_t1_ms: hi,
+    ed_scope: q.ed_scope === "run" ? "run" : "session",
+  };
+}
+
+/** Segment marks and E.D. of the open session's current run; `null` with an empty
+ * history (AC-AXHK2T.4, .5). */
+export async function runProgress(query: RunProgressQuery): Promise<RunProgress | null> {
+  if (mock) return mock.runProgress(query);
+  return invoke<RunProgress | null>("run_progress", { query: wireQuery(query) });
+}
+
+/** Segment marks and E.D. of the open recording file's rows. */
+export async function recordingFileRunProgress(
+  query: RunProgressQuery,
+): Promise<RunProgress | null> {
+  if (mock) return mock.recordingFileRunProgress(query);
+  return invoke<RunProgress | null>("recording_file_run_progress", { query: wireQuery(query) });
 }
 
 /** Zeroes the session statistics; they count again from the next sample. */
@@ -634,6 +907,13 @@ export async function pdOpen(): Promise<PdOpened | null> {
   return invoke<PdOpened | null>("pd_open");
 }
 
+/** Releases the capture opened from a file, which the page no longer shows
+ * (AC-AXHK2K.5). The slot is the app's, not a meter's: it needs no meter. */
+export async function pdReleaseOpened(): Promise<void> {
+  if (mock) return mock.pdReleaseOpened();
+  await invoke("pd_release_opened");
+}
+
 /** Opens the open dialog and imports the chosen vendor PD log database (`.sqlite`)
  * read-only (FR TGE83E, AC .6); needs no meter. Resolves like {@link pdOpen}: the
  * imported capture, or `null` when the dialog was cancelled. */
@@ -652,6 +932,8 @@ export interface FirmwareFileInfo {
   date: string;
   crc: string;
   size: number;
+  /** Payload length the file stores, bytes; may exceed `size` (display only). */
+  stored_size: number;
   release_notes_en: string;
 }
 
@@ -695,20 +977,24 @@ export type FlashDone =
  * backend holds the meter for the update, re-checks that `confirmation` is the file's
  * version before anything is sent, and reports each stage (and each replug prompt) to
  * `onStage`. Resolves to the
- * outcome, or rejects with the error and its recovery steps. */
+ * outcome, or rejects with the error and its recovery steps. `agreed` names the sessions
+ * the user agreed to release; a session it does not cover gets a `flash_needs_consent`
+ * refusal, with nothing released or sent (FR AXHK2F). */
 export async function firmwareFlash(
   deviceId: string,
   path: string,
   confirmation: string,
   onStage: (stage: FlashEvent) => void,
+  agreed: FlashHold[] = [],
 ): Promise<FlashDone> {
-  if (mock) return mock.firmwareFlash(deviceId, path, confirmation, onStage);
+  if (mock) return mock.firmwareFlash(deviceId, path, confirmation, onStage, agreed);
   const channel = new Channel<FlashEvent>();
   channel.onmessage = onStage;
   return invoke<FlashDone>("firmware_flash", {
     deviceId,
     path,
     confirmation,
+    agreed,
     onProgress: channel,
   });
 }
@@ -719,14 +1005,21 @@ export async function firmwareCancel(): Promise<void> {
   return invoke<void>("firmware_cancel");
 }
 
-/** A running firmware update as the backend reports it (AC-4PJRVJ.3); `stage` is null
- * before its first stage. */
+/** How an update ended, as the backend keeps it for a reloaded page (AC-AXHK2M.2). */
+export type FlashEnd = { result: FlashDone; error: null } | { result: null; error: UiError };
+
+/** A firmware update as the backend reports it (AC-4PJRVJ.3): running, or ended with an
+ * `outcome` not read yet (AC-AXHK2M.2). `stage` is null before its first stage, `replug`
+ * is the prompt it waits on. */
 export interface FlashStatus {
   device_id: string;
   stage: FlashStage | null;
+  replug?: Omit<FlashReplug, "stage"> | null;
+  outcome?: FlashEnd | null;
 }
 
-/** The update the backend is running, null when none: a reloaded page picks it up. */
+/** The update the backend is running, else the ended one it kept, which this read takes;
+ * null when neither: a reloaded page picks it up. */
 export async function firmwareFlashStatus(): Promise<FlashStatus | null> {
   if (mock) return mock.firmwareFlashStatus();
   return invoke<FlashStatus | null>("firmware_flash_status");
@@ -754,6 +1047,22 @@ export async function pdClear(): Promise<PdCleared> {
 export async function pdSave(suggestedName: string): Promise<ExportResult | null> {
   if (mock) return mock.pdSave(suggestedName);
   return invoke<ExportResult | null>("pd_save", { suggestedName });
+}
+
+/** Opens the save dialog proposing `suggestedName` and writes the chart image `data`
+ * (for a PDF, the PNG the backend wraps in one page; FR AXHK2V). Resolves to the saved
+ * path, or `null` when the dialog was cancelled. */
+export async function saveChartImage(
+  suggestedName: string,
+  format: "png" | "svg" | "pdf",
+  data: Uint8Array,
+): Promise<string | null> {
+  if (mock) return mock.saveChartImage(suggestedName, format, data);
+  return invoke<string | null>("save_chart_image", {
+    suggestedName,
+    format,
+    data: Array.from(data),
+  });
 }
 
 /** App and protocol-library versions for the About dialog. */
@@ -862,8 +1171,9 @@ export type TriggerRequest =
   | { protocol: "scp" | "vfcp" | "tfcp"; voltage_mv: number; current_ma: number }
   | { protocol: "ufcs"; index: number; voltage_mv: number; current_ma: number };
 
-/** The library risk class of a request. */
-export type RiskClass = "read_only" | "at_most_5v" | "above_5v";
+/** The library risk class of a request. `above_5v_rememberable` is `above_5v` whose
+ * dialog offers "don't ask again"; `armed` is covered by one and needs no dialog. */
+export type RiskClass = "read_only" | "at_most_5v" | "above_5v" | "above_5v_rememberable" | "armed";
 
 /** What the charger answered. */
 export interface TriggerReply {
@@ -893,25 +1203,64 @@ export async function triggerList(protocol: TriggerProtocol): Promise<ProtocolSe
   return invoke<ProtocolSection>("trigger_list", { protocol });
 }
 
-/** The risk class of `request`: `above_5v` needs the user's confirmation. */
+/** The risk class of `request`: `above_5v` and `above_5v_rememberable` need the user's
+ * confirmation. */
 export async function triggerRisk(request: TriggerRequest): Promise<RiskClass> {
   if (mock) return mock.triggerRisk(request);
   return invoke<RiskClass>("trigger_risk", { request });
 }
 
-/** Sends `request`; the backend refuses an above-5 V one unless `confirmed`. */
+/** Sends `request`; the backend refuses an above-5 V one unless `confirmed` or armed.
+ * `remember` with `confirmed` asks it to arm "don't ask again" (FR AXHK2N). */
 export async function triggerRequest(
   request: TriggerRequest,
   confirmed: boolean,
+  remember = false,
 ): Promise<TriggerReply> {
-  if (mock) return mock.triggerRequest(request, confirmed);
-  return invoke<TriggerReply>("trigger_request", { request, confirmed });
+  if (mock) return mock.triggerRequest(request, confirmed, remember);
+  return invoke<TriggerReply>("trigger_request", requestArgs(request, confirmed, remember));
 }
 
-/** Back to 5 V; the session stays open. */
-export async function triggerBackTo5v(): Promise<void> {
+/** The `trigger_request` arguments; `remember` goes only when it is true. */
+function requestArgs(
+  request: TriggerRequest,
+  confirmed: boolean,
+  remember?: boolean,
+): Record<string, unknown> {
+  return remember ? { request, confirmed, remember } : { request, confirmed };
+}
+
+/** Whether "don't ask again" is armed; false with no trigger session. */
+export async function triggerArmed(): Promise<boolean> {
+  if (mock) return mock.triggerArmed();
+  return invoke<boolean>("trigger_armed");
+}
+
+/** Ends "don't ask again"; does nothing with no trigger session. */
+export async function triggerDisarm(): Promise<void> {
+  if (mock) return mock.triggerDisarm();
+  await invoke("trigger_disarm");
+}
+
+/** Whether VBUS collapsed under a contract; false with no trigger session. */
+export async function triggerChargerGone(): Promise<boolean> {
+  if (mock) return mock.triggerChargerGone();
+  return invoke<boolean>("trigger_charger_gone");
+}
+
+/** Whether PD is entered in the trigger session, so Read cable goes out (AC-AXHK2P.13);
+ * false with no trigger session. Nothing is sent to the meter. */
+export async function triggerPdEntered(): Promise<boolean> {
+  if (mock) return mock.triggerPdEntered();
+  return invoke<boolean>("trigger_pd_entered");
+}
+
+/** Back to 5 V; the session stays open. `leaving`: the trigger view was left, which
+ * the log names as the reason "don't ask again" ended (FR AXHK2N). */
+export async function triggerBackTo5v(leaving = false): Promise<void> {
   if (mock) return mock.triggerBackTo5v();
-  await invoke("trigger_back_to_5v");
+  if (leaving) await invoke("trigger_back_to_5v", { leaving: true });
+  else await invoke("trigger_back_to_5v");
 }
 
 /** Back to 5 V where the protocol allows it, then closes the session. */
@@ -953,7 +1302,14 @@ export interface CableView {
   max_voltage_v: number | null;
   max_current_ma: number | null;
   epr_capable: boolean;
+  /** USB speed in words (`USB 3.2 Gen 1`); null when the cable sent no cable VDO. */
+  speed: string | null;
+  /** The name from our own vendor table; null for a VID it does not list. */
+  vendor: string | null;
 }
+
+/** What one Read cable press found. */
+export type CableRead = { kind: "found"; cable: CableView } | { kind: "no_answer" };
 
 /** What sending a built message did. */
 export interface PdSendReply {
@@ -977,6 +1333,19 @@ export async function triggerMessageSend(
   return invoke<PdSendReply>("trigger_message_send", { message, confirmed });
 }
 
+/** One SOP' Discover Identity inside the open PD session, no dialog (FR AXHK2P). Takes
+ * no argument: nothing from the page selects the exemption. */
+export async function triggerCableRead(): Promise<CableRead> {
+  if (mock) return mock.triggerCableRead();
+  return invoke<CableRead>("trigger_cable_read");
+}
+
+/** The cable identity a PD capture holds, null when it holds none; sends nothing. */
+export async function pdCableSeen(): Promise<CableView | null> {
+  if (mock) return mock.pdCableSeen();
+  return invoke<CableView | null>("pd_cable_seen");
+}
+
 /** The library risk class of a raw console line. */
 export async function triggerConsoleRisk(line: string): Promise<RiskClass> {
   if (mock) return mock.triggerConsoleRisk(line);
@@ -998,10 +1367,16 @@ export interface MeterBackend {
   disconnect(): Promise<void>;
   cancelWait(): Promise<void>;
   setRate(rateSps: number): Promise<void>;
-  startRecording(suggestedName: string): Promise<string | null>;
+  startRecording(suggestedName: string, options?: RecordingOptions): Promise<string | null>;
   stopRecording(): Promise<RecordingSummary>;
+  pauseRecording(): Promise<void>;
+  resumeRecording(): Promise<void>;
   saveRecordingAs(path: string): Promise<string | null>;
   exportSession(
+    suggestedName: string,
+    onProgress: (progress: ExportProgress) => void,
+  ): Promise<ExportResult | null>;
+  exportSessionDb(
     suggestedName: string,
     onProgress: (progress: ExportProgress) => void,
   ): Promise<ExportResult | null>;
@@ -1013,6 +1388,9 @@ export interface MeterBackend {
     buckets: number,
   ): Promise<BucketsFor<S>>;
   historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]>;
+  historyFoldBoundary(): Promise<number | null>;
+  rangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null>;
+  runProgress(query: RunProgressQuery): Promise<RunProgress | null>;
   resetStats(): Promise<void>;
   clearHistory(): Promise<void>;
   pdStart(): Promise<void>;
@@ -1029,11 +1407,21 @@ export interface MeterBackend {
   triggerDetect(): Promise<Detection>;
   triggerList(protocol: TriggerProtocol): Promise<ProtocolSection>;
   triggerRisk(request: TriggerRequest): Promise<RiskClass>;
-  triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply>;
-  triggerBackTo5v(): Promise<void>;
+  triggerRequest(
+    request: TriggerRequest,
+    confirmed: boolean,
+    remember?: boolean,
+  ): Promise<TriggerReply>;
+  triggerArmed(): Promise<boolean>;
+  triggerDisarm(): Promise<void>;
+  triggerChargerGone(): Promise<boolean>;
+  triggerPdEntered(): Promise<boolean>;
+  triggerBackTo5v(leaving?: boolean): Promise<void>;
   triggerClose(): Promise<void>;
   triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>;
   triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>;
+  triggerCableRead(): Promise<CableRead>;
+  pdCableSeen(): Promise<CableView | null>;
   triggerConsoleRisk(line: string): Promise<RiskClass>;
   triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]>;
 }
@@ -1050,11 +1438,17 @@ export const currentMeterCommands: MeterCommands = {
   setRate,
   startRecording,
   stopRecording,
+  pauseRecording,
+  resumeRecording,
   saveRecordingAs,
   exportSession,
+  exportSessionDb,
   stats,
   historyRange,
   historyGaps,
+  historyFoldBoundary,
+  rangeStats,
+  runProgress,
   resetStats,
   clearHistory,
   pdStart,
@@ -1072,10 +1466,16 @@ export const currentMeterCommands: MeterCommands = {
   triggerList,
   triggerRisk,
   triggerRequest,
+  triggerArmed,
+  triggerDisarm,
+  triggerChargerGone,
+  triggerPdEntered,
   triggerBackTo5v,
   triggerClose,
   triggerMessageRisk,
   triggerMessageSend,
+  triggerCableRead,
+  pdCableSeen,
   triggerConsoleRisk,
   triggerConsoleSend,
 };
@@ -1097,18 +1497,28 @@ export function meterBackend(deviceId: string): MeterBackend {
     setRate: async (rateSps) => {
       await call("set_rate", { rateSps });
     },
-    startRecording: (suggestedName) => call("start_recording", { suggestedName }),
+    startRecording: (suggestedName, options) => call("start_recording", { suggestedName, options }),
     stopRecording: () => call("stop_recording"),
+    pauseRecording: () => call("recording_pause"),
+    resumeRecording: () => call("recording_resume"),
     saveRecordingAs: (path) => call("save_recording_as", { path }),
     exportSession: (suggestedName, onProgress) => {
       const channel = new Channel<ExportProgress>();
       channel.onmessage = onProgress;
       return call("export_session", { suggestedName, onProgress: channel });
     },
+    exportSessionDb: (suggestedName, onProgress) => {
+      const channel = new Channel<ExportProgress>();
+      channel.onmessage = onProgress;
+      return call("export_session_db", { suggestedName, onProgress: channel });
+    },
     stats: () => call("stats"),
     historyRange: (series, t0Ms, t1Ms, buckets) =>
       call("history_range", { series, ...wholeMs(t0Ms, t1Ms), buckets }),
     historyGaps: (t0Ms, t1Ms) => call("history_gaps", wholeMs(t0Ms, t1Ms)),
+    historyFoldBoundary: () => call("history_fold_boundary"),
+    rangeStats: (t0Ms, t1Ms) => call("range_stats", wholeMs(t0Ms, t1Ms)),
+    runProgress: (query) => call("run_progress", { query: wireQuery(query) }),
     resetStats: async () => {
       await call("reset_stats");
     },
@@ -1137,9 +1547,17 @@ export function meterBackend(deviceId: string): MeterBackend {
     triggerDetect: () => call("trigger_detect"),
     triggerList: (protocol) => call("trigger_list", { protocol }),
     triggerRisk: (request) => call("trigger_risk", { request }),
-    triggerRequest: (request, confirmed) => call("trigger_request", { request, confirmed }),
-    triggerBackTo5v: async () => {
-      await call("trigger_back_to_5v");
+    triggerRequest: (request, confirmed, remember) =>
+      call("trigger_request", requestArgs(request, confirmed, remember)),
+    triggerArmed: () => call("trigger_armed"),
+    triggerDisarm: async () => {
+      await call("trigger_disarm");
+    },
+    triggerChargerGone: () => call("trigger_charger_gone"),
+    triggerPdEntered: () => call("trigger_pd_entered"),
+    triggerBackTo5v: async (leaving = false) => {
+      if (leaving) await call("trigger_back_to_5v", { leaving: true });
+      else await call("trigger_back_to_5v");
     },
     triggerClose: async () => {
       await call("trigger_close");
@@ -1147,6 +1565,8 @@ export function meterBackend(deviceId: string): MeterBackend {
     triggerMessageRisk: (message) => call("trigger_message_risk", { message }),
     triggerMessageSend: (message, confirmed) =>
       call("trigger_message_send", { message, confirmed }),
+    triggerCableRead: () => call("trigger_cable_read"),
+    pdCableSeen: () => call("pd_cable_seen"),
     triggerConsoleRisk: (line) => call("trigger_console_risk", { line }),
     triggerConsoleSend: (line, confirmed) => call("trigger_console_send", { line, confirmed }),
   };

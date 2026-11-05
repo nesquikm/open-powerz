@@ -6,8 +6,12 @@
 
 import {
   HOOK,
+  RECORDING_HOOK,
+  type RecordingExtrasState,
   type ChartBreak,
   type ChartDraw,
+  type ChartExtrasState,
+  type ChartFoldTick,
   type ChartGapBand,
   type ChartPdMarker,
   type ChartPdStatusLengths,
@@ -20,6 +24,11 @@ import type { StripBreak } from "./timeline";
 /** Whether this web build is a test build that exposes the hook. */
 export const E2E_BUILD: boolean =
   import.meta.env.VITE_E2E === "1" || import.meta.env.VITE_BACKEND === "mock";
+
+/** A deep copy of `tick`, so the probe and its readers never share its boxes. */
+function copyFoldTick(tick: ChartFoldTick | null): ChartFoldTick | null {
+  return tick === null ? null : { ...tick, chip: { ...tick.chip }, plot: { ...tick.plot } };
+}
 
 /** Draws kept for the hook (at least the last 200). */
 const MAX_DRAWS = 1000;
@@ -37,6 +46,62 @@ export class ChartProbe {
   #overviewBreaks: StripBreak[] = [];
   #pdMarkers: ChartPdMarker[] = [];
   #pdStatus: ChartPdStatusLengths = { vbus: 0, ibus: 0, cc1: 0, cc2: 0 };
+  #segmentMarks: ChartExtrasState["segmentMarks"] = [];
+  #edPoints = 0;
+  #ampsDir: 1 | -1 = 1;
+  #sub: ChartExtrasState["sub"] = null;
+  #playheadX: number | null = null;
+  #labels: Required<Pick<ChartExtrasState, "markLabels" | "tickLabels">> | null = null;
+  #edLabel: NonNullable<ChartExtrasState["edLabel"]> | null = null;
+  #foldTick: ChartFoldTick | null = null;
+
+  /** The fold tick of the last draw, or null when it had none (AC-AXHK2W.11). */
+  foldTick(tick: ChartFoldTick | null): void {
+    this.#foldTick = copyFoldTick(tick);
+  }
+
+  /** The "E.D. %" label's box of the last draw, viewport CSS px, or null while it is not
+   * drawn (AC-AXHK2V.15). */
+  edLabel(box: ChartExtrasState["edLabel"] | null): void {
+    this.#edLabel = box ? { ...box } : null;
+  }
+
+  /** The segment-mark labels and tick labels of the last draw, viewport CSS px
+   * (AC-AXHK2V.12); none while no segment mark is drawn. */
+  markLabels(
+    marks: NonNullable<ChartExtrasState["markLabels"]>,
+    ticks: NonNullable<ChartExtrasState["tickLabels"]>,
+  ): void {
+    this.#labels =
+      marks.length === 0 && ticks.length === 0
+        ? null
+        : { markLabels: marks.map((m) => ({ ...m })), tickLabels: ticks.map((t) => ({ ...t })) };
+  }
+
+  /** The main plot's playhead x in the viewport, CSS px, or null (AC-AXHK2T.6). */
+  playheadX(x: number | null): void {
+    this.#playheadX = x;
+  }
+
+  /** The sub-chart's x range and playhead of the last draw, or null (AC-AXHK2T.6). */
+  sub(drawn: ChartExtrasState["sub"]): void {
+    this.#sub = drawn === null ? null : { ...drawn };
+  }
+
+  /** The current axis direction of the last draw: -1 with Reverse current (AC-AXHK2T.7). */
+  ampsDir(dir: 1 | -1): void {
+    this.#ampsDir = dir;
+  }
+
+  /** The E.D. points of the last draw (AC-AXHK2T.5). */
+  edPoints(n: number): void {
+    this.#edPoints = n;
+  }
+
+  /** The segment marks of the last draw (AC-AXHK2T.4). */
+  segmentMarks(marks: ChartExtrasState["segmentMarks"]): void {
+    this.#segmentMarks = marks.map((m) => ({ ...m }));
+  }
 
   /** The PD markers and badges of the last draw (FR TGE83D). */
   pdMarkers(markers: readonly ChartPdMarker[]): void {
@@ -108,6 +173,21 @@ export class ChartProbe {
       overviewBreaks: () => this.#overviewBreaks.map((b) => ({ ...b })),
       chartPdMarkers: () => this.#pdMarkers.map((m) => ({ ...m, indices: [...m.indices] })),
       chartPdStatusLengths: () => ({ ...this.#pdStatus }),
+      chartExtras: () => ({
+        segmentMarks: this.#segmentMarks.map((m) => ({ ...m })),
+        ampsDir: this.#ampsDir,
+        edPoints: this.#edPoints,
+        sub: this.#sub === null ? null : { ...this.#sub },
+        playheadX: this.#playheadX,
+        ...(this.#labels === null
+          ? {}
+          : {
+              markLabels: this.#labels.markLabels.map((m) => ({ ...m })),
+              tickLabels: this.#labels.tickLabels.map((t) => ({ ...t })),
+            }),
+        ...(this.#edLabel === null ? {} : { edLabel: { ...this.#edLabel } }),
+      }),
+      chartFoldTick: () => copyFoldTick(this.#foldTick),
     };
   }
 }
@@ -119,5 +199,14 @@ export function installChartProbe(probe: ChartProbe): () => void {
   w[HOOK] = hook;
   return () => {
     if (w[HOOK] === hook) delete w[HOOK];
+  };
+}
+
+/** Installs the opened recording's probe (FR AXHK2T); returns the uninstall. */
+export function installRecordingProbe(read: () => RecordingExtrasState): () => void {
+  const w = window as unknown as Record<string, unknown>;
+  w[RECORDING_HOOK] = read;
+  return () => {
+    if (w[RECORDING_HOOK] === read) delete w[RECORDING_HOOK];
   };
 }

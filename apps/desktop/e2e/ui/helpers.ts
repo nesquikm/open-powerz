@@ -56,10 +56,32 @@ const WIDE_FONT_CSS = `html, body, button, select, input, progress {
   font-family: Verdana, "DejaVu Sans", sans-serif !important;
 }`;
 
+/** Puts `css` in the page as soon as it has a root element (an init script). */
+function installWideFont(css: string): void {
+  const add = (): void => {
+    const style = document.createElement("style");
+    style.textContent = css;
+    (document.head ?? document.documentElement).appendChild(style);
+  };
+  if (document.documentElement) {
+    add();
+    return;
+  }
+  const watch = new MutationObserver(() => {
+    if (!document.documentElement) return;
+    watch.disconnect();
+    add();
+  });
+  watch.observe(document, { childList: true });
+}
+
 /** Load the app and wait until the picker lists the demo devices. */
 export async function open(page: Page, query = ""): Promise<void> {
+  // Before the page's first frame, as a machine whose system font is wide (CI Linux)
+  // has it from the start: a font swapped in after load is a style change no layout
+  // code sees until it is measured again (FR QBSMHA).
+  if (process.env.E2E_WIDE_FONT === "1") await page.addInitScript(installWideFont, WIDE_FONT_CSS);
   await page.goto(`/${query}`);
-  if (process.env.E2E_WIDE_FONT === "1") await page.addStyleTag({ content: WIDE_FONT_CSS });
   await expect(page.getByLabel("Device", { exact: true })).toBeEnabled();
   await expect(
     page.getByLabel("Device", { exact: true }).locator(`option[value="${DEMO_LOAD}"]`),
@@ -370,4 +392,113 @@ export async function holdClock(page: Page): Promise<void> {
       if (leadMs >= 3_200 || !String(e).includes("Cannot fast-forward to the past")) throw e;
     }
   }
+}
+
+/** The frame-rate tests' rule for CI runners (FR 9QTPNQ), where a frame-rate result is
+ * recorded, not failed:
+ * - WebKit on any runner: the runners have no GPU, so WebKit draws on the CPU, on Linux and
+ *   macOS alike, and the build before shows the same cost (SX1VTC Notes);
+ * - both browsers on the macOS runner, a GPU-less VM whose frame pacing swings more than
+ *   any 5% bound (idle medians from 26.8 to 55.4 fps within one job).
+ * Chromium on the Linux and Windows runners (a steady 60/60), and every browser on a
+ * developer machine, still fail on it. Path-call bounds are never relaxed. */
+export function fpsRecordedOnly(browserName: string): boolean {
+  if (!process.env.CI) return false;
+  return browserName === "webkit" || process.platform === "darwin";
+}
+
+/** The tag of the frame-rate tests: CI runs them once per OS in a one-worker step,
+ * outside the shards (FR 9QTPNR). */
+export const PERF_TAG = "@perf";
+
+/** rAF frames a second over the next `ms`, counted from a frame boundary. */
+export async function framesPerSecond(page: Page, ms: number): Promise<number> {
+  return page.evaluate(
+    (windowMs) =>
+      new Promise<number>((resolve) => {
+        let frames = 0;
+        let t0 = -1;
+        const tick = (t: number): void => {
+          if (t0 < 0) t0 = t;
+          else frames++;
+          if (t - t0 < windowMs) requestAnimationFrame(tick);
+          else resolve(frames / ((t - t0) / 1000));
+        };
+        requestAnimationFrame(tick);
+      }),
+    ms,
+  );
+}
+
+/** The interleaved frame-rate windows (AC-9QTPNQ.3, .4): this many idle and this many
+ * streaming windows, each this long, idle first. */
+export const FPS_ROUNDS = 3;
+export const FPS_WINDOW_MS = 2_000;
+
+/** Idle and streaming frame rates of one page, interleaved in time. */
+export interface InterleavedFps {
+  idle: number[];
+  stream: number[];
+  idleMedian: number;
+  streamMedian: number;
+}
+
+export function median(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/** Holds the mock's stream (`true`) or lets it go on (`false`). */
+async function holdStream(page: Page, held: boolean): Promise<void> {
+  await page.evaluate(
+    ([hook, on]) =>
+      (window as unknown as Record<string, { holdStream(held: boolean): void }>)[
+        hook as string
+      ]!.holdStream(on as boolean),
+    ["__OPEN_POWERZ_MOCK__", held] as const,
+  );
+}
+
+/** How many batches the mock's streams have sent so far. */
+async function batchCount(page: Page): Promise<number> {
+  return page.evaluate(
+    (hook) => (window as unknown as Record<string, { batchCount(): number }>)[hook]!.batchCount(),
+    "__OPEN_POWERZ_MOCK__",
+  );
+}
+
+/**
+ * The page's frame rate idle and streaming, interleaved so a runner whose frame rate
+ * drifts is measured against itself (AC-9QTPNQ.3, .4): {@link FPS_ROUNDS} idle windows
+ * (the stream held, the session and its buffers kept) and as many streaming ones,
+ * {@link FPS_WINDOW_MS} each, idle first. The page must be streaming when called and is
+ * streaming again on return. Every window goes to the log under `label`.
+ */
+export async function interleavedFps(page: Page, label: string): Promise<InterleavedFps> {
+  const idle: number[] = [];
+  const stream: number[] = [];
+  try {
+    for (let round = 0; round < FPS_ROUNDS; round++) {
+      await holdStream(page, true);
+      // The chart has caught up with the last batch and has nothing left to draw.
+      await animationFrames(page, 10);
+      idle.push(await framesPerSecond(page, FPS_WINDOW_MS));
+      const sent = await batchCount(page);
+      await holdStream(page, false);
+      // The stream goes on again: a few batches have come, on whatever tab shows.
+      await expect
+        .poll(() => batchCount(page), { message: "the stream goes on" })
+        .toBeGreaterThanOrEqual(sent + 3);
+      stream.push(await framesPerSecond(page, FPS_WINDOW_MS));
+    }
+  } finally {
+    await holdStream(page, false);
+  }
+  const result = { idle, stream, idleMedian: median(idle), streamMedian: median(stream) };
+  const show = (v: readonly number[]) => v.map((f) => f.toFixed(1)).join(", ");
+  console.log(
+    `${label}: stream median ${result.streamMedian.toFixed(1)} fps [${show(stream)}], idle median ${result.idleMedian.toFixed(1)} fps [${show(idle)}]`,
+  );
+  return result;
 }

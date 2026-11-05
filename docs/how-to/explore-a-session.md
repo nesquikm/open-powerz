@@ -94,6 +94,101 @@ With zero-based axes off, each value axis spans at least 0.1 V, 0.02 A or
 0.1 W. Noise around an idle output no longer fills the whole axis; real swings
 still autoscale. The overview strip uses the same minimum span.
 
+## Chart tools
+
+**Chart options** above the chart opens the chart's extra tools. Each one is
+off until you turn it on. The app remembers your choices, so they are kept
+after a restart. An opened recording has every tool too: the ruler, segment
+marks, E.D., the sub-chart and Reverse current. It shares the choices with the
+live chart, so turning a tool on or off in one turns it on or off in the other.
+
+### Ruler
+
+**Ruler** puts two cursors, T1 and T2, on the chart. Drag either one with the
+mouse by its line, or focus it with Tab and use the keys:
+
+- the arrow keys move it one pixel's worth; hold Shift to move a tenth of the
+  view;
+- Page Up and Page Down move it a tenth of the view;
+- Home and End take it to the start and the end of the session (or the file).
+
+An arrow key keeps a cursor inside the range on screen. When a cursor is
+outside it (the live chart scrolls on, or you zoomed or panned), it shows at
+the edge of the plot with its name and time, and you can still focus it.
+**Reset ruler** puts both cursors back in the range on screen.
+
+Between the cursors the ruler shows the delta time, the delta charge in Ah and
+the delta energy in Wh, plus the averages:
+average voltage in V, current in A and power in W. It reads the raw samples, not the points drawn on screen, so a
+zoomed-out view gives the same numbers. While a new answer is on its way the
+values show "…". A screen reader announces the values once they stop changing.
+
+### Segment marks
+
+**Segment marks** draws a dashed line each time the current run reaches the
+next step of its total charge or energy, labelled with the percentage. Pick
+charge or energy, then the **Mark step**: 5%, 10% (the default), 20% or 25%.
+The marks follow the current run only, that is the samples since the last
+break in the stream. While the run goes on its total grows, so the marks move.
+When the run has no charge (or energy) yet, the chart says so instead of
+drawing marks.
+
+### E.D.
+
+**E.D.** draws a dashed line over the chart: the energy share, from 0% at the
+bottom of the plot to 100% at the top. Unlike the marks it is a share of the
+whole session's energy, summed over its runs; nothing counts across a break.
+The text under the options says what it is, in the same words as here:
+
+E.D. is our own definition, not the vendor's number: the energy measured from
+the start of the session up to each moment, as a percentage of the whole
+session's energy.
+
+While a session is still running, "the whole session" means everything
+measured so far, so the line ends at 100% at the newest sample.
+
+### Sub-chart
+
+**Sub-chart** adds a second, smaller plot under the main one.
+It has its own series and its own legend.
+It shares the main plot's time range, cursor and zoom,
+so both always show the same moment at the same place across the window.
+
+### Reverse current
+
+**Reverse current** draws the current axis upside down.
+Reverse current changes no data: the readings, the statistics and every export keep their sign.
+
+## Chart style and Save image
+
+**Chart options** also sets how the chart looks.
+
+- **VBUS range** and **IBUS range** pick each axis's range. **Auto** follows
+  the data. **Auto from zero** follows the data but always starts at 0. A
+  fixed range, such as 0–6, 0–12 or 0–24 V for VBUS and 0–2, 0–5 or 0–8 A for
+  IBUS, stays put whatever the data does.
+- **Series style** sets each series' colour, line width and transparency.
+  Each line keeps its own dash pattern, so the lines stay apart without
+  colour. **Reset** puts a series back on its theme look. A colour that is
+  hard to see on the chart background gets a low-contrast warning, but you
+  can still use it.
+- **Chart title** shows a title above the chart and in saved images. Leave it
+  empty for none.
+
+These settings are kept for the app, not per meter: they survive a restart
+and apply to whichever meter you connect.
+
+**Save image** next to **Chart options** saves the current view as a PNG, SVG
+or PDF file. Pick the width and height, each from 320 to 7680 px, and the
+format. Draw on the theme's background, or tick **White background** for
+white. The file is named `powerz-chart-YYYYMMDD-HHMMSS` with the format's
+extension. No serial number or UID goes into the image or its file name.
+
+The image holds the series, axes, title and legend of the current view, on
+the same axis ranges as the chart (including **Zero-based axes** and
+**Reverse current**). It leaves out the chart's overlays: PD markers, segment
+marks, the E.D. line, the ruler and the playhead.
+
 ## Sample rate during a recording
 
 While a recording runs, the sample rate is fixed: the rate picker is locked,
@@ -114,6 +209,41 @@ The chart's status announces every view change for screen readers, for example
 "Paused: 1:20 to 1:30" or "Live: 1 min". It writes as many decimals as the
 visible span needs: one from 1 s up, two from 100 ms, three below that, so a
 40 ms view reads "Paused: 11.200 s to 11.240 s".
+
+## Hide serial numbers
+
+Turn this on before a screenshot or a screen share. Open **About** and turn on
+**Hide serial numbers**. It is off by default and stays set after a restart.
+
+With it on, the app shows no serial number or UID anywhere. Those fields read
+"Hidden". Meter tiles are titled by model and position, for example
+"KM003C 2", so two meters stay easy to tell apart. Turn it off and the values
+come back with no reconnect.
+
+The CLI has a matching flag: see
+[Hide serial numbers](../reference/cli.md#hide-serial-numbers) in the CLI
+reference.
+
+Error messages never name the serial port, with the option on or off, because
+on macOS that name contains the meter's serial. They say "the meter's serial
+port" instead.
+
+## Info popovers for sections and terms
+
+Each section title has a small (i) button beside it. Press it, or focus it and
+press Enter or Space, for a short note on what the section does. The firmware,
+trigger, console and settings notes also say what can go wrong there.
+
+Abbreviations such as VBUS, CC1, PPS or EPR have a dotted underline. Press one
+for the same kind of note on what the term means.
+
+Only one note is open at a time. Escape, a click outside it or a second press
+of its button closes it and puts the focus back on the button. Escape closes
+only the note, not the panel behind it.
+
+To hide the (i) buttons, open **About** and turn off **Show (i) icons**, beside
+Hide serial numbers. It is on by default and stays set after a restart. The
+dotted-underline terms stay either way.
 
 ## A window that stays put
 

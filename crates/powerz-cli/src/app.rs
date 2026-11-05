@@ -35,10 +35,10 @@ use crate::commands::{
     DeleteOptions, DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions,
     PdSendOptions, PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions,
     console, detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
-    firmware_probe_unavailable, info_in_mode, inspect_flash_file, list, pd, pd_decode, pd_save,
-    pd_send, read, records_delete, records_get, records_list, select_device, settings,
-    settings_set, stream, stream_cdc, trigger_legacy_list, trigger_legacy_request, trigger_pd_list,
-    trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
+    firmware_probe_unavailable, info_with, inspect_flash_file, list_with, pd, pd_decode, pd_save,
+    pd_send, read, records_delete, records_get, records_list, select_device, select_device_with,
+    settings, settings_set, stream, stream_cdc, trigger_legacy_list, trigger_legacy_request,
+    trigger_pd_list, trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport, TracedOpener};
@@ -96,7 +96,12 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
         return jump_mode(cli, *to, *i_understand);
     }
     validate(cli)?;
-    if let Command::List { json, include_demo } = cli.command {
+    if let Command::List {
+        json,
+        include_demo,
+        hide_serial,
+    } = cli.command
+    {
         let mut devices = if include_demo {
             // The demo device is listed even where USB discovery fails.
             transport::discovery::list_devices().unwrap_or_default()
@@ -106,9 +111,10 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
         if include_demo {
             devices.push(demo_entry());
         }
-        return list(
+        return list_with(
             &devices,
             json,
+            hide_serial,
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         );
@@ -136,7 +142,7 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
         return run_sim(cli);
     }
     let devices = transport::discovery::list_devices()?;
-    let device = select_device(&devices, cli.device.as_deref())?;
+    let device = select_device_with(&devices, cli.device.as_deref(), cli.command.hides_serial())?;
     let mode = device.mode();
     if cli.command.needs_cdc() {
         // The ADCNEW stream and the settings write live on the CDC port,
@@ -415,7 +421,8 @@ fn jump_mode(cli: &Cli, to: JumpTo, i_understand: bool) -> Result<(), CliError> 
         JumpTo::Application => JumpTarget::Application,
     };
     let mut out = std::io::stdout().lock();
-    // Ctrl-C before the jump stops it; the jump itself is one write.
+    // Ctrl-C before the jump stops it, and after it ends the wait for the
+    // meter; the jump itself is one write.
     let stop = ctrl_c_flag()?;
     if cli.transport == TransportKind::Sim {
         select_demo(cli)?;
@@ -1225,7 +1232,9 @@ fn dispatch<T: Transport, C: Clock>(
             unreachable!("trigger, detect and console are handled before opening a device")
         }
         Command::Firmware { .. } => unreachable!("firmware is handled before opening a device"),
-        Command::Info { json } => info_in_mode(&mut session, mode, *json, &mut out),
+        Command::Info { json, hide_serial } => {
+            info_with(&mut session, mode, *json, *hide_serial, &mut out)
+        }
         Command::Read { json } => read(&mut session, *json, &mut out),
         Command::Settings {
             action:

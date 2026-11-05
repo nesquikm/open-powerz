@@ -434,8 +434,9 @@ fn the_update_takes_the_meter_from_the_stream_and_refuses_everything_else_until_
         .unwrap_or_else(|e| panic!("the meter did not connect: {e:?}"));
     wait_connected(&events, 0);
 
+    let holds = m.flash_holds(&id);
     let lease = m
-        .begin_flash(&id)
+        .begin_flash(&id, &holds)
         .unwrap_or_else(|e| panic!("the update could not take the meter: {e:?}"));
     assert_eq!(lease.device().id, id);
 
@@ -468,7 +469,7 @@ fn the_update_takes_the_meter_from_the_stream_and_refuses_everything_else_until_
     refused_for_update("reconnecting the stream", m.connect(&id, 50, sink2));
     refused_for_update("the session control (PD capture, recording)", m.control());
     refused_for_update("opening a trigger session", m.trigger_opener());
-    refused_for_update("a second update", m.begin_flash(&id));
+    refused_for_update("a second update", m.begin_flash(&id, &[]));
     assert!(
         !m.devices_changed(&m.list_devices()),
         "a re-enumerated meter reconnected during the update"
@@ -504,7 +505,7 @@ fn a_meter_in_bootloader_mode_can_be_taken_for_an_update() {
         .find(|d| d.demo_scenario.is_none())
         .expect("the meter is listed");
     let lease = m
-        .begin_flash(&device.id)
+        .begin_flash(&device.id, &[])
         .unwrap_or_else(|e| panic!("a bootloader-mode meter cannot be recovered: {e:?}"));
     assert_eq!(lease.device().mode, DeviceMode::Bootloader);
 }
@@ -517,7 +518,7 @@ fn an_unlisted_meter_cannot_be_taken_for_an_update() {
         logs: Arc::default(),
     };
     let mut m = DeviceManager::new(|| Ok(vec![listed("APP", 4)]), opener, clock.clone());
-    let e = match m.begin_flash("usb:9:99") {
+    let e = match m.begin_flash("usb:9:99", &[]) {
         Err(e) => e,
         Ok(_) => panic!("an unlisted meter was taken"),
     };
@@ -548,7 +549,7 @@ fn a_meter_that_may_be_the_flash_target_at_a_new_address_is_refused() {
         .id
         .clone();
     let _lease = m
-        .begin_flash(&id)
+        .begin_flash(&id, &[])
         .unwrap_or_else(|e| panic!("the update could not take its target: {e:?}"));
 
     let moved = |entry: DeviceEntry| DeviceEntry {
@@ -624,7 +625,7 @@ fn an_update_of_another_device_leaves_the_connected_meter_alone() {
     wait_connected(&events, 0);
 
     let _lease = m
-        .begin_flash(&other)
+        .begin_flash(&other, &[])
         .unwrap_or_else(|e| panic!("the update could not take its target: {e:?}"));
     assert_eq!(m.running_ids(), vec![id.clone()], "the meter keeps running");
     assert!(m.control_for(&id).is_ok(), "and is not refused");

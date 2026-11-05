@@ -2878,8 +2878,9 @@ dependencies = [
 
 [[package]]
 name = "open-powerz-desktop"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
+ "flate2",
  "libc",
  "objc2",
  "objc2-foundation",
@@ -3135,7 +3136,7 @@ checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "powerz-cli"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -3153,14 +3154,14 @@ dependencies = [
 
 [[package]]
 name = "powerz-pd"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "powerz-protocol"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "aes",
  "crc32fast",
@@ -3178,14 +3179,15 @@ dependencies = [
 
 [[package]]
 name = "powerz-record"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "powerz-protocol",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "powerz-sim"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "powerz-protocol",
  "sha2 0.11.1",

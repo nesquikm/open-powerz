@@ -19,6 +19,7 @@ use powerz_protocol::transport::bulk::{BulkFlashOpener, BulkTransport};
 use powerz_sim::SimMeter;
 use serde::Serialize;
 
+use crate::app_log::SessionLog;
 use crate::ui_error::{ErrorKind, UiError};
 
 /// One stage of the update, as the UI receives it.
@@ -74,8 +75,24 @@ impl From<FlashProgress> for FlashStage {
     }
 }
 
-/// Why Cancel is refused once the erase has begun (AC-4PJRVJ.1).
-pub const ERASE_BEGAN: &str = "The erase has started, so the update can no longer be cancelled.";
+impl FlashStage {
+    /// The stage's name in the log; a replug prompt is not a stage.
+    fn log_name(&self) -> Option<&'static str> {
+        match self {
+            FlashStage::Switching => Some("switching"),
+            FlashStage::Erasing => Some("erasing"),
+            FlashStage::Writing { .. } => Some("writing"),
+            FlashStage::Verifying => Some("verifying"),
+            FlashStage::Finished => Some("finished"),
+            FlashStage::Returning => Some("returning"),
+            FlashStage::Replug { .. } => None,
+        }
+    }
+}
+
+/// Why Cancel is refused once the erase has begun (AC-4PJRVJ.1). The UI reads the same
+/// file for `CANCEL_TOO_LATE`, so the two cannot drift (AC-AXHK2M.4).
+pub const ERASE_BEGAN: &str = include_str!("../../src/lib/cancel-too-late.txt").trim_ascii();
 
 /// The stop request of one running update, and the stage it has reached.
 /// Cancel is accepted only until the erase starts (AC-4PJRVJ.1).
@@ -89,7 +106,17 @@ pub struct FlashControl {
 #[derive(Debug, Default)]
 struct FlashGate {
     stage: Option<FlashStage>,
+    replug: Option<FlashPrompt>,
     erase_began: bool,
+}
+
+/// A replug prompt the update waits on, for a reloaded page (AC-AXHK2M.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlashPrompt {
+    /// The mode the meter should come back in.
+    pub to: &'static str,
+    /// The meter's reply to the jump frame.
+    pub reply: String,
 }
 
 impl FlashControl {
@@ -99,14 +126,21 @@ impl FlashControl {
     }
 
     /// Note a stage the engine reported. A replug prompt is not a stage of
-    /// its own and changes nothing.
+    /// its own: it stands until the next stage.
     pub fn observe(&self, stage: &FlashStage) {
         let mut gate = self.gate();
         match stage {
-            FlashStage::Replug { .. } => return,
+            FlashStage::Replug { to, reply } => {
+                gate.replug = Some(FlashPrompt {
+                    to,
+                    reply: reply.clone(),
+                });
+                return;
+            }
             FlashStage::Switching => {}
             _ => gate.erase_began = true,
         }
+        gate.replug = None;
         gate.stage = Some(stage.clone());
     }
 
@@ -125,6 +159,11 @@ impl FlashControl {
         self.gate().stage.clone()
     }
 
+    /// The replug prompt the update waits on, if any.
+    pub fn replug(&self) -> Option<FlashPrompt> {
+        self.gate().replug.clone()
+    }
+
     fn gate(&self) -> std::sync::MutexGuard<'_, FlashGate> {
         self.gate.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -141,6 +180,25 @@ pub enum FlashDone {
     },
     /// The image was accepted but the meter stayed in its bootloader.
     PowerCycleNeeded,
+}
+
+/// How an update ended, as a reloaded page reads it (AC-AXHK2M.2): one of
+/// the two is set.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FlashEnd {
+    /// The outcome of an update that succeeded.
+    pub result: Option<FlashDone>,
+    /// Why it failed.
+    pub error: Option<UiError>,
+}
+
+impl From<&Result<FlashDone, UiError>> for FlashEnd {
+    fn from(done: &Result<FlashDone, UiError>) -> FlashEnd {
+        FlashEnd {
+            result: done.as_ref().ok().cloned(),
+            error: done.as_ref().err().cloned(),
+        }
+    }
 }
 
 /// The recovery steps shown with every failed update (AC-V9SK55.5).
@@ -198,6 +256,31 @@ impl MeterOpener for UsbFlashOpener {
     }
 }
 
+/// The container in `bytes`, read from `path`, once it passes inspection and
+/// `confirmation` equals its version; either refusal is a usage error.
+fn confirmed_container<'a>(
+    path: &Path,
+    bytes: &'a [u8],
+    confirmation: &str,
+) -> Result<FirmwareContainer<'a>, UiError> {
+    let container = FirmwareContainer::parse(bytes)
+        .map_err(|e| UiError::usage(format!("{}: {e}", path.display())))?;
+    let version = container.firmware_version().trim();
+    if confirmation.trim() != version {
+        return Err(UiError::usage(format!(
+            "Type the file's version, {version}, to confirm the update."
+        )));
+    }
+    Ok(container)
+}
+
+/// The refusals of [`flash_file`] that need no meter, for a start to make
+/// before it lets go of any session (AC-AXHK2F.2).
+pub fn check_confirmation(path: &Path, confirmation: &str) -> Result<(), UiError> {
+    let bytes = read_container_file(path).map_err(|e| UiError::usage(e.to_string()))?;
+    confirmed_container(path, &bytes, confirmation).map(|_| ())
+}
+
 /// Update the meter `opener` finds with the firmware container at `path`.
 ///
 /// Nothing is sent unless the file passes inspection and `confirmation`
@@ -212,29 +295,77 @@ pub fn flash_file<O: FlashOpener, C: Clock>(
     stop: &AtomicBool,
     progress: &mut dyn FnMut(FlashStage),
 ) -> Result<FlashDone, UiError> {
-    let bytes = read_container_file(path).map_err(|e| UiError::usage(e.to_string()))?;
-    let container = FirmwareContainer::parse(&bytes)
-        .map_err(|e| UiError::usage(format!("{}: {e}", path.display())))?;
-    let version = container.firmware_version().trim();
-    if confirmation.trim() != version {
-        return Err(UiError::usage(format!(
-            "Type the file's version, {version}, to confirm the update."
-        )));
-    }
+    let log = SessionLog::default();
+    flash_file_logged(path, confirmation, opener, clock, stop, &log, progress)
+}
+
+/// [`flash_file`] with the update in `log` (AC-AXHK2G.3): a line at the
+/// start, one per stage entered, and one for how it ended.
+pub fn flash_file_logged<O: FlashOpener, C: Clock>(
+    path: &Path,
+    confirmation: &str,
+    opener: &mut O,
+    clock: C,
+    stop: &AtomicBool,
+    log: &SessionLog,
+    progress: &mut dyn FnMut(FlashStage),
+) -> Result<FlashDone, UiError> {
+    log.firmware("start");
+    let refused = |error: UiError| {
+        log.firmware_failed(&error);
+        error
+    };
+    let bytes = read_container_file(path).map_err(|e| refused(UiError::usage(e.to_string())))?;
+    let container = confirmed_container(path, &bytes, confirmation).map_err(refused)?;
     opener.arm(FlashAck::acknowledge());
+    let mut entered = None;
     let outcome = flash(
         FlashAck::acknowledge(),
         &container,
         opener,
         clock,
         stop,
-        &mut |p| progress(p.into()),
-    )
-    .map_err(|e| flash_error(&e))?;
-    Ok(match outcome {
-        FlashOutcome::Verified { version } => FlashDone::Verified { version },
-        FlashOutcome::PowerCycleNeeded => FlashDone::PowerCycleNeeded,
-    })
+        &mut |p| {
+            let stage = FlashStage::from(p);
+            if let Some(name) = stage.log_name()
+                && entered != Some(name)
+            {
+                entered = Some(name);
+                log.firmware(&format!("stage {name}"));
+            }
+            progress(stage);
+        },
+    );
+    match outcome {
+        Ok(outcome) => {
+            log.firmware("finished");
+            Ok(match outcome {
+                FlashOutcome::Verified { version } => FlashDone::Verified { version },
+                FlashOutcome::PowerCycleNeeded => FlashDone::PowerCycleNeeded,
+            })
+        }
+        Err(FlashError::Interrupted { .. }) => {
+            log.firmware("cancelled");
+            Err(stopped_by_user())
+        }
+        Err(e) => Err(refused(flash_error(&e))),
+    }
+}
+
+/// What a stop the user asked for says (AC-AXHK2M.13): it stopped, nothing was
+/// erased (Cancel is refused once the erase begins), and the meter may be
+/// waiting in its bootloader. Not a failure, so no retry and no recovery hint.
+pub const STOPPED_MESSAGE: &str = "The update was stopped before anything was erased. \
+     The meter may be waiting in its bootloader.";
+
+/// The UI error for a stop the user asked for.
+fn stopped_by_user() -> UiError {
+    UiError {
+        kind: ErrorKind::Cancelled,
+        message: STOPPED_MESSAGE.to_owned(),
+        hint: None,
+        sessions: Vec::new(),
+    }
 }
 
 /// A failed update for the UI: what failed, and how to recover.
@@ -247,5 +378,6 @@ fn flash_error(e: &FlashError) -> UiError {
         kind,
         message: format!("The firmware update failed: {e}."),
         hint: Some(RECOVERY_HINT.to_owned()),
+        sessions: Vec::new(),
     }
 }

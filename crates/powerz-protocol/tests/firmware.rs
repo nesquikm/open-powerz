@@ -286,66 +286,34 @@ fn versions_compare_numerically_not_as_text() {
 
 #[test]
 fn firmware_below_1_7_0_is_too_old() {
-    assert_eq!(
-        version::warnings("1.6.9", false),
-        vec![FirmwareWarning::TooOld]
-    );
-    assert_eq!(
-        version::warnings("1.0", false),
-        vec![FirmwareWarning::TooOld]
-    );
+    assert_eq!(version::warnings("1.6.9"), vec![FirmwareWarning::TooOld]);
+    assert_eq!(version::warnings("1.0"), vec![FirmwareWarning::TooOld]);
 }
 
 #[test]
 fn firmware_below_the_newest_known_is_outdated() {
     for v in ["1.7.0", "2.0.0", "2.0.6"] {
-        assert_eq!(
-            version::warnings(v, false),
-            vec![FirmwareWarning::Outdated],
-            "{v}"
-        );
+        assert_eq!(version::warnings(v), vec![FirmwareWarning::Outdated], "{v}");
     }
 }
 
 #[test]
 fn newest_or_newer_firmware_has_no_warning() {
     for v in ["2.0.7", "2.1", "3.0.0"] {
-        assert_eq!(version::warnings(v, false), Vec::new(), "{v}");
+        assert_eq!(version::warnings(v), Vec::new(), "{v}");
     }
 }
 
 #[test]
-fn head_update_required_adds_its_own_warning() {
-    assert_eq!(
-        version::warnings("2.0.7", true),
-        vec![FirmwareWarning::UpdateRequired]
-    );
-    let w = version::warnings("1.2.0", true);
-    assert!(w.contains(&FirmwareWarning::TooOld), "{w:?}");
-    assert!(w.contains(&FirmwareWarning::UpdateRequired), "{w:?}");
-}
-
-#[test]
 fn unparseable_version_gives_no_version_warning_and_no_panic() {
-    assert_eq!(version::warnings("", false), Vec::new());
-    assert_eq!(version::warnings("garbage", false), Vec::new());
-    assert_eq!(
-        version::warnings("garbage", true),
-        vec![FirmwareWarning::UpdateRequired]
-    );
+    assert_eq!(version::warnings(""), Vec::new());
+    assert_eq!(version::warnings("garbage"), Vec::new());
 }
 
 #[test]
 fn warnings_have_stable_codes_and_readable_text() {
     assert_eq!(FirmwareWarning::TooOld.code(), "too_old");
     assert_eq!(FirmwareWarning::Outdated.code(), "outdated");
-    assert_eq!(FirmwareWarning::UpdateRequired.code(), "update_required");
     assert!(FirmwareWarning::TooOld.to_string().contains("1.7.0"));
     assert!(FirmwareWarning::Outdated.to_string().contains("2.0.7"));
-    assert!(
-        FirmwareWarning::UpdateRequired
-            .to_string()
-            .to_lowercase()
-            .contains("update required")
-    );
 }

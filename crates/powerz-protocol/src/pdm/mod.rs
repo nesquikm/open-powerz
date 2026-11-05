@@ -17,6 +17,7 @@
 //! - [`legacy`]: QC, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS triggering.
 //! - [`message`]: custom PD messages (`pd cmd=` / `pd data=`) and cable identity.
 //! - [`console`]: the raw text console.
+//! - [`vendors`]: our own USB vendor name table for cable identities.
 
 pub mod caps;
 pub mod command;
@@ -29,10 +30,11 @@ pub mod port;
 pub mod reply;
 pub mod risk;
 pub mod session;
+pub mod vendors;
 
 pub use caps::{CapBlock, Capabilities, PdoBlock, ScpCaps, TfcpCaps, UfcsCap, UfcsCaps, VfcpCaps};
 pub use command::{Command, FixedProtocol, Protocol};
-pub use port::{find_port, open_port};
+pub use port::{find_port, open_found, open_port};
 pub use reply::{ReplyItem, ReplyReader};
 pub use risk::{Risk, classify};
 pub use session::{HighVoltageConfirmation, PdmSession};
@@ -133,6 +135,10 @@ pub enum Error {
         /// How many candidate ports there were.
         count: usize,
     },
+    /// The listing named the meter's serial port, but opening it failed the
+    /// way a port someone else holds does.
+    #[error("the meter's serial port is in use by another program")]
+    PortHeld,
     /// The port went away.
     #[error("meter disconnected")]
     Disconnected,
@@ -146,6 +152,6 @@ pub enum Error {
 fn map_io(err: &std::io::Error) -> Error {
     match crate::transport::map_io_error(err, std::env::consts::OS) {
         crate::transport::Error::Disconnected => Error::Disconnected,
-        _ => Error::Io(err.to_string()),
+        _ => Error::Io(crate::transport::without_port_names(&err.to_string())),
     }
 }

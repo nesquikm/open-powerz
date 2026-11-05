@@ -1,6 +1,7 @@
 <script lang="ts">
   import { SHORTCUTS } from "../shortcuts";
   import Panel from "./Panel.svelte";
+  import Term from "./Term.svelte";
 
   let { onClose }: { onClose: () => void } = $props();
 </script>
@@ -15,7 +16,11 @@
   <dl>
     {#each SHORTCUTS as s (s.keys)}
       <dt><kbd>{s.keys}</kbd></dt>
-      <dd>{s.description}</dd>
+      <dd>
+        {#if s.description.endsWith(" SPS")}{s.description.slice(0, -"SPS".length)}<Term
+            key="term.sps">SPS</Term
+          >{:else}{s.description}{/if}
+      </dd>
     {/each}
   </dl>
 </Panel>

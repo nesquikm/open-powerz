@@ -9,6 +9,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BackendEvent,
+  CableRead,
+  CableView,
+  ConsoleLine,
+  PdSendReply,
   Detection,
   ProtocolSection,
   RiskClass,
@@ -24,12 +28,16 @@ import {
   DEVIATION_LIMIT,
   PROTOCOL_TITLES,
   TriggerPanel,
+  VBUS_GONE_V,
+  cableVendorText,
   confirmationText,
   detectionChecks,
   deviates,
   requestVoltageMv,
   type TriggerApi,
 } from "./trigger.svelte";
+import { PdConsole, type ConsoleApi } from "./console.svelte";
+import * as triggerModule from "./trigger.svelte";
 
 function offer(position: number, mv: number, kind: TriggerOffer["kind"] = "fixed"): TriggerOffer {
   return {
@@ -67,6 +75,17 @@ const DETECTION: Detection = {
   complete: false,
 };
 
+const CABLE: CableView = {
+  vid: 0x050d,
+  pid: 0x8254,
+  active: false,
+  max_voltage_v: 50,
+  max_current_ma: 5000,
+  epr_capable: true,
+  speed: "USB 2.0",
+  vendor: null,
+};
+
 const PD_9V: TriggerRequest = { protocol: "pd", position: 2, voltage_mv: null, current_ma: null };
 const PD_5V: TriggerRequest = { protocol: "pd", position: 1, voltage_mv: null, current_ma: null };
 
@@ -75,6 +94,20 @@ class FakeApi implements TriggerApi {
   calls: string[] = [];
   sent: { request: TriggerRequest; confirmed: boolean }[] = [];
   supported: TriggerProtocol[] = ["pd", "qc"];
+  /** What `armed` answers. */
+  armedNow = false;
+  /** What `cableRead` answers. */
+  cableAnswer: CableRead = { kind: "found", cable: CABLE };
+  /** What `cableSeen` answers. */
+  cableInCapture: CableView | null = null;
+  /** What `chargerGone` answers. */
+  goneNow = false;
+  /** How many times `chargerGone` was asked. */
+  goneAsked = 0;
+  /** What `pdEntered` answers (AC-AXHK2P.13); true so the older tests read as before. */
+  pdEnteredNow = true;
+  /** How many times `pdEntered` was asked. */
+  pdEnteredAsked = 0;
 
   async open(): Promise<void> {
     this.calls.push("open");
@@ -115,11 +148,37 @@ class FakeApi implements TriggerApi {
       reply: null,
     };
   }
-  async backTo5v(): Promise<void> {
+  async backTo5v(leaving?: boolean): Promise<void> {
+    // Leaving the view and the Back button read alike here; the flag is checked on its own.
+    void leaving;
     this.calls.push("back");
   }
   async close(): Promise<void> {
     this.calls.push("close");
+  }
+  async armed(): Promise<boolean> {
+    return this.armedNow;
+  }
+  async disarm(): Promise<void> {
+    this.calls.push("disarm");
+    this.armedNow = false;
+  }
+  async chargerGone(): Promise<boolean> {
+    this.goneAsked += 1;
+    return this.goneNow;
+  }
+  async cableRead(): Promise<CableRead> {
+    this.calls.push("cable read");
+    return this.cableAnswer;
+  }
+  async cableSeen(): Promise<CableView | null> {
+    this.calls.push("cable seen");
+    return this.cableInCapture;
+  }
+  async pdEntered(): Promise<boolean> {
+    // Not in `calls`: asking sends nothing to the meter.
+    this.pdEnteredAsked += 1;
+    return this.pdEnteredNow;
   }
 }
 
@@ -132,11 +191,15 @@ function requestMv(r: TriggerRequest): number {
   return r.voltage_mv;
 }
 
-function batch(vbus: number, tMs = 0): BackendEvent {
+/** A batch of one reading. CC defaults to a charger attached on CC1 (1.68 V / 0 V), so
+ * only a test that names both CC lines low reads a charger that went away (FR WFSNZD). */
+function batch(vbus: number, tMs = 0, cc: [number, number] = [1.68, 0]): BackendEvent {
   return {
     type: "batch",
     data: {
-      samples: [{ t_ms: tMs, vbus_v: vbus, ibus_a: 0, cc1_v: 0, cc2_v: 0, dp_v: 0, dm_v: 0 }],
+      samples: [
+        { t_ms: tMs, vbus_v: vbus, ibus_a: 0, cc1_v: cc[0], cc2_v: cc[1], dp_v: 0, dm_v: 0 },
+      ],
       temp_c: null,
       stats: {
         elapsed_ms: 0,
@@ -826,5 +889,1793 @@ describe("AC-4PJRVH.1: the result never mixes an old and a new request", () => {
 
     expect(panel.reply).toBeNull();
     expect(panel.requestedMv).toBeNull();
+  });
+});
+
+/**
+ * FR AXHK2N: "don't ask again". The backend's rules, as the panel sees them: PD up to
+ * 20 V is rememberable (position 5 here goes to 21 V), every other request above 5 V
+ * is not; once armed a rememberable request is `armed` and sends unconfirmed; anything
+ * at or below 5 V, Back to 5 V, Detect and closing disarm. Records the exact arguments
+ * of every request.
+ */
+class ArmedApi extends FakeApi {
+  requestArgs: unknown[][] = [];
+
+  static rememberable(r: TriggerRequest): boolean {
+    return r.protocol === "pd" && requestMv(r) <= 20000;
+  }
+
+  override async detect(): Promise<Detection> {
+    this.armedNow = false;
+    return super.detect();
+  }
+  override async risk(request: TriggerRequest): Promise<RiskClass> {
+    this.calls.push("risk");
+    if (requestMv(request) <= 5000) return "at_most_5v";
+    if (!ArmedApi.rememberable(request)) return "above_5v";
+    return this.armedNow ? "armed" : "above_5v_rememberable";
+  }
+  override async request(
+    ...args: [request: TriggerRequest, confirmed: boolean, remember?: boolean]
+  ): Promise<TriggerReply> {
+    this.requestArgs.push(args);
+    const [request, confirmed, remember] = args;
+    const mv = requestMv(request);
+    if (mv > 5000 && !confirmed && !(this.armedNow && ArmedApi.rememberable(request))) {
+      throw { kind: "usage", message: "Above 5 V needs confirmation.", hint: null };
+    }
+    if (remember && !ArmedApi.rememberable(request)) {
+      throw { kind: "usage", message: "This request cannot be remembered.", hint: null };
+    }
+    if (mv <= 5000) this.armedNow = false;
+    if (remember) this.armedNow = true;
+    return super.request(request, true);
+  }
+  override async backTo5v(): Promise<void> {
+    this.armedNow = false;
+    return super.backTo5v();
+  }
+  override async close(): Promise<void> {
+    this.armedNow = false;
+    return super.close();
+  }
+}
+
+const PD_15V: TriggerRequest = { protocol: "pd", position: 3, voltage_mv: null, current_ma: null };
+const PPS_12V: TriggerRequest = {
+  protocol: "pd",
+  position: 5,
+  voltage_mv: 12000,
+  current_ma: 1000,
+};
+const PPS_21V: TriggerRequest = {
+  protocol: "pd",
+  position: 5,
+  voltage_mv: 21000,
+  current_ma: 1000,
+};
+const QC_9V: TriggerRequest = { protocol: "qc", volts: 9 };
+
+async function rememberPanel(): Promise<{ api: ArmedApi; panel: TriggerPanel }> {
+  const api = new ArmedApi();
+  const panel = new TriggerPanel(api);
+  await panel.detect();
+  return { api, panel };
+}
+
+/** A panel armed by a confirmed 9 V with the box checked. */
+async function armedPanel(): Promise<{ api: ArmedApi; panel: TriggerPanel }> {
+  const { api, panel } = await rememberPanel();
+  await panel.ask(PD_9V);
+  panel.remember = true;
+  await panel.confirm();
+  expect(panel.armed).toBe(true);
+  return { api, panel };
+}
+
+describe("AC-AXHK2N.1: the checkbox", () => {
+  it("is offered for a rememberable request", async () => {
+    const { panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    expect(panel.pending?.request).toEqual(PD_9V);
+    expect(panel.pending?.rememberable).toBe(true);
+  });
+
+  it("is not offered for any other request above 5 V", async () => {
+    const { panel } = await rememberPanel();
+    for (const request of [PPS_21V, QC_9V]) {
+      await panel.ask(request);
+      expect(panel.pending?.request).toEqual(request);
+      expect(panel.pending?.rememberable).toBe(false);
+      panel.cancel();
+    }
+  });
+
+  it("starts unchecked every time a dialog opens", async () => {
+    const { panel } = await rememberPanel();
+    expect(panel.remember).toBe(false);
+    await panel.ask(PD_9V);
+    expect(panel.remember).toBe(false);
+    panel.remember = true;
+    panel.cancel();
+    await panel.ask(PD_9V);
+    expect(panel.remember).toBe(false);
+    panel.remember = true;
+    await panel.confirm();
+    panel.cancel();
+    await panel.backTo5v();
+    await panel.ask(PD_15V);
+    expect(panel.remember).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.2: remembered requests", () => {
+  it("passes remember only when the box is checked", async () => {
+    const { api, panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    await panel.confirm();
+    expect(api.requestArgs.at(-1)).toEqual([PD_9V, true]);
+    expect(api.requestArgs.at(-1)).toHaveLength(2);
+    expect(panel.armed).toBe(false);
+    await panel.ask(PD_15V);
+    panel.remember = true;
+    await panel.confirm();
+    expect(api.requestArgs.at(-1)).toEqual([PD_15V, true, true]);
+    expect(panel.armed).toBe(true);
+  });
+
+  it("sends later rememberable requests with no dialog, unconfirmed", async () => {
+    const { api, panel } = await armedPanel();
+    for (const request of [PD_15V, PPS_12V]) {
+      await panel.ask(request);
+      expect(panel.pending).toBeNull();
+      expect(api.requestArgs.at(-1)).toEqual([request, false]);
+    }
+    expect(panel.reply?.command).toBe("pd req=5");
+    expect(panel.armed).toBe(true);
+  });
+
+  it("a checked box on a dialog that does not offer it remembers nothing", async () => {
+    const { api, panel } = await rememberPanel();
+    await panel.ask(PPS_21V);
+    panel.remember = true;
+    await panel.confirm();
+    expect(api.requestArgs.at(-1)).toEqual([PPS_21V, true]);
+    expect(api.requestArgs.at(-1)).toHaveLength(2);
+    expect(panel.armed).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.3: what always asks", () => {
+  it("armed, a request that does not qualify opens the dialog and Cancel sends nothing", async () => {
+    const { api, panel } = await armedPanel();
+    const sent = api.requestArgs.length;
+    for (const request of [PPS_21V, QC_9V]) {
+      await panel.ask(request);
+      expect(panel.pending?.rememberable).toBe(false);
+      panel.cancel();
+    }
+    expect(api.requestArgs).toHaveLength(sent);
+  });
+});
+
+describe("AC-AXHK2N.4: the status follows the backend", () => {
+  it("Back to 5 V clears it", async () => {
+    const { panel } = await armedPanel();
+    await panel.backTo5v();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a Back to 5 V that fails clears it too", async () => {
+    const { api, panel } = await armedPanel();
+    api.backTo5v = async () => {
+      api.armedNow = false;
+      throw { kind: "out_of_sync", message: "Out of step.", hint: null };
+    };
+    await panel.backTo5v();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("leaving the view clears it", async () => {
+    const { panel } = await armedPanel();
+    await panel.leave();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a meter that disconnects clears it", async () => {
+    const { panel } = await armedPanel();
+    panel.handleEvent({
+      type: "status",
+      data: { state: "disconnected" },
+    } as BackendEvent);
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a new page starts unarmed and shows what an armed backend reports", async () => {
+    const api = new ArmedApi();
+    api.armedNow = true;
+    const panel = new TriggerPanel(api);
+    expect(panel.armed).toBe(false);
+    await panel.refreshArmed();
+    expect(panel.armed).toBe(true);
+  });
+
+  it("a page reload does not arm a backend that is not armed", async () => {
+    const api = new ArmedApi();
+    const panel = new TriggerPanel(api);
+    await panel.refreshArmed();
+    expect(panel.armed).toBe(false);
+    expect(api.armedNow).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.5: Clear", () => {
+  it("disarms the backend at once, and the dialog comes back", async () => {
+    const { api, panel } = await armedPanel();
+    await panel.clearArmed();
+    expect(api.calls).toContain("disarm");
+    expect(api.armedNow).toBe(false);
+    expect(panel.armed).toBe(false);
+    await panel.ask(PD_15V);
+    expect(panel.pending?.rememberable).toBe(true);
+  });
+});
+
+describe("AC-AXHK2N.6: the backend decides", () => {
+  it("a refused arming request leaves the panel unarmed, with the failure shown", async () => {
+    const { api, panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    api.request = async () => {
+      throw { kind: "usage", message: "This request cannot be remembered.", hint: null };
+    };
+    panel.remember = true;
+    await panel.confirm();
+    expect(panel.armed).toBe(false);
+    expect(panel.error).toMatchObject({ kind: "usage" });
+  });
+});
+
+describe("AC-AXHK2N.8: the status follows every other way it ends", () => {
+  it("a request at 5 V clears it", async () => {
+    const { panel } = await armedPanel();
+    await panel.ask(PD_5V);
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a request that fails clears it", async () => {
+    const { api, panel } = await armedPanel();
+    api.request = async () => {
+      api.armedNow = false;
+      throw { kind: "protocol", message: "The charger refused the request.", hint: null };
+    };
+    await panel.ask(PD_15V);
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a held request whose offer changed goes back to asking", async () => {
+    const { api, panel } = await armedPanel();
+    const send = api.request;
+    api.request = async () => {
+      api.armedNow = false;
+      throw { kind: "usage", message: "The charger's offers changed.", hint: null };
+    };
+    await panel.ask(PD_15V);
+    expect(panel.error).toMatchObject({ kind: "usage" });
+    expect(panel.armed).toBe(false);
+    api.request = send;
+    await panel.ask(PD_15V);
+    expect(panel.pending?.rememberable).toBe(true);
+  });
+
+  it("a risk that is no longer armed takes the status down with the dialog", async () => {
+    const { api, panel } = await armedPanel();
+    api.armedNow = false;
+    api.risk = async () => "above_5v_rememberable";
+    await panel.ask(PD_15V);
+    expect(panel.pending).not.toBeNull();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a confirmed request the backend disarmed on takes the status down", async () => {
+    const { api, panel } = await armedPanel();
+    api.risk = async () => "above_5v";
+    await panel.ask(PD_15V);
+    api.armedNow = false;
+    await panel.confirm();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("Detect clears it", async () => {
+    const { panel } = await armedPanel();
+    await panel.detect();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("refreshArmed takes in what a console line or built message did", async () => {
+    const { api, panel } = await armedPanel();
+    api.armedNow = false;
+    await panel.refreshArmed();
+    expect(panel.armed).toBe(false);
+  });
+
+  it("a refresh that fails reads as not armed and is no error", async () => {
+    const { api, panel } = await armedPanel();
+    api.armed = async () => {
+      throw { kind: "usage", message: "The trigger session is closed.", hint: null };
+    };
+    await panel.refreshArmed();
+    expect(panel.armed).toBe(false);
+    expect(panel.error).toBeNull();
+  });
+});
+
+describe("FR AXHK2P: the Cable card", () => {
+  /** An open session; the calls of the detection are forgotten. */
+  async function inSession(): Promise<{ api: FakeApi; panel: TriggerPanel }> {
+    const { api, panel } = await detected();
+    api.calls = [];
+    return { api, panel };
+  }
+
+  /** A `cableRead` that answers only when `release` is called. */
+  function heldRead(api: FakeApi): (answer: CableRead) => void {
+    let release: (answer: CableRead) => void = () => {};
+    api.cableRead = () => {
+      api.calls.push("cable read");
+      return new Promise((resolve) => (release = resolve));
+    };
+    return (answer) => release(answer);
+  }
+
+  describe("AC-AXHK2P.1: one read", () => {
+    it("starts with nothing on the card", () => {
+      const panel = new TriggerPanel(new FakeApi());
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+      expect(panel.cableBusy).toBe(false);
+    });
+
+    it("shows what the cable answered, as read", async () => {
+      const { panel } = await inSession();
+      await panel.readCable();
+      expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+      expect(panel.cableNoAnswer).toBe(false);
+      expect(panel.error).toBeNull();
+    });
+
+    it("is busy while the read runs", async () => {
+      const { api, panel } = await inSession();
+      const release = heldRead(api);
+      const read = panel.readCable();
+      expect(panel.cableBusy).toBe(true);
+      release({ kind: "found", cable: CABLE });
+      await read;
+      expect(panel.cableBusy).toBe(false);
+    });
+  });
+
+  describe("AC-AXHK2P.2: the read and nothing else", () => {
+    it("never opens, enters, lists, detects or closes", async () => {
+      const { api, panel } = await inSession();
+      await panel.readCable();
+      expect(api.calls).toEqual(["cable read"]);
+    });
+
+    it("with no session it calls nothing", async () => {
+      const api = new FakeApi();
+      const panel = new TriggerPanel(api);
+      await panel.readCable();
+      expect(api.calls).toEqual([]);
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+    });
+
+    it("out of step it calls nothing and the power-cycle error stays", async () => {
+      const { api, panel } = await inSession();
+      const outOfSync = { kind: "out_of_sync", message: "Power-cycle it.", hint: null };
+      api.cableRead = async () => {
+        api.calls.push("cable read");
+        throw outOfSync;
+      };
+      await panel.readCable();
+      expect(panel.requestsDisabled).toBe(true);
+      expect(panel.error).toEqual(outOfSync);
+      await panel.readCable();
+      expect(api.calls).toEqual(["cable read"]);
+      expect(panel.error).toEqual(outOfSync);
+    });
+
+    it("a second press while one runs does nothing", async () => {
+      const { api, panel } = await inSession();
+      const release = heldRead(api);
+      const first = panel.readCable();
+      await panel.readCable();
+      await panel.readCable();
+      expect(api.calls).toEqual(["cable read"]);
+      release({ kind: "found", cable: CABLE });
+      await first;
+      expect(api.calls).toEqual(["cable read"]);
+    });
+
+    it("a refusal shows as the error, with no retry and nothing on the card", async () => {
+      const { api, panel } = await inSession();
+      const refusal = { kind: "usage", message: "Enter PD first.", hint: null };
+      api.cableRead = async () => {
+        api.calls.push("cable read");
+        throw refusal;
+      };
+      await panel.readCable();
+      expect(api.calls).toEqual(["cable read"]);
+      expect(panel.error).toEqual(refusal);
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+      expect(panel.cableBusy).toBe(false);
+    });
+
+    it("a late answer from a session that ended is dropped", async () => {
+      const { api, panel } = await inSession();
+      const release = heldRead(api);
+      const read = panel.readCable();
+      await panel.leave();
+      release({ kind: "found", cable: CABLE });
+      await read;
+      expect(panel.cable).toBeNull();
+      expect(panel.cableBusy).toBe(false);
+    });
+  });
+
+  describe("AC-AXHK2P.4: no answer", () => {
+    it("says so once and asks again only on the next press", async () => {
+      const { api, panel } = await inSession();
+      api.cableAnswer = { kind: "no_answer" };
+      await panel.readCable();
+      expect(panel.cableNoAnswer).toBe(true);
+      expect(panel.cable).toBeNull();
+      expect(api.calls).toEqual(["cable read"]);
+    });
+
+    it("an old answer does not stay next to it", async () => {
+      const { api, panel } = await inSession();
+      await panel.readCable();
+      api.cableAnswer = { kind: "no_answer" };
+      await panel.readCable();
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(true);
+    });
+
+    it("a later answer clears it", async () => {
+      const { api, panel } = await inSession();
+      api.cableAnswer = { kind: "no_answer" };
+      await panel.readCable();
+      api.cableAnswer = { kind: "found", cable: CABLE };
+      await panel.readCable();
+      expect(panel.cableNoAnswer).toBe(false);
+      expect(panel.cable?.source).toBe("read");
+    });
+  });
+
+  describe('a read ends "don\'t ask again"', () => {
+    it("takes the status down from the backend", async () => {
+      const api = new FakeApi();
+      const panel = new TriggerPanel(api);
+      await panel.detect();
+      api.armedNow = true;
+      await panel.refreshArmed();
+      expect(panel.armed).toBe(true);
+      api.cableRead = async () => {
+        api.armedNow = false;
+        return { kind: "no_answer" };
+      };
+      await panel.readCable();
+      expect(panel.armed).toBe(false);
+    });
+  });
+
+  describe("AC-AXHK2P.5: the vendor", () => {
+    it("shows a listed vendor by name", () => {
+      expect(cableVendorText({ ...CABLE, vendor: "Apple", vid: 0x05ac })).toBe("Apple");
+    });
+
+    it("shows an unlisted vendor as its hex VID", () => {
+      expect(cableVendorText({ ...CABLE, vendor: null, vid: 0x1234 })).toBe("0x1234");
+      expect(cableVendorText({ ...CABLE, vendor: null, vid: 0x00ab })).toBe("0x00AB");
+    });
+  });
+
+  describe("AC-AXHK2P.6: the identity a capture holds", () => {
+    it("with no session it shows the capture's identity and sends nothing", async () => {
+      const api = new FakeApi();
+      api.cableInCapture = CABLE;
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      expect(panel.cable).toEqual({ cable: CABLE, source: "capture" });
+      expect(api.calls).toEqual(["cable seen"]);
+    });
+
+    it("a capture with no identity leaves the card empty", async () => {
+      const api = new FakeApi();
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+    });
+
+    it("a capture cleared since then takes it away", async () => {
+      const api = new FakeApi();
+      api.cableInCapture = CABLE;
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      api.cableInCapture = null;
+      await panel.loadCaptureCable();
+      expect(panel.cable).toBeNull();
+    });
+
+    it("with a session open it does not cover what the cable answers", async () => {
+      const { api, panel } = await inSession();
+      api.cableInCapture = { ...CABLE, vid: 0x18d1 };
+      await panel.readCable();
+      await panel.loadCaptureCable();
+      expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+      expect(api.calls).not.toContain("cable seen");
+    });
+
+    it("a read replaces the capture's identity", async () => {
+      const api = new FakeApi();
+      api.cableInCapture = { ...CABLE, vid: 0x18d1 };
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      await panel.detect();
+      await panel.readCable();
+      expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+    });
+
+    it("no answer replaces the capture's identity", async () => {
+      const api = new FakeApi();
+      api.cableInCapture = CABLE;
+      api.cableAnswer = { kind: "no_answer" };
+      const panel = new TriggerPanel(api);
+      await panel.loadCaptureCable();
+      await panel.detect();
+      await panel.readCable();
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(true);
+    });
+
+    it("the end of a session empties the card", async () => {
+      const { api, panel } = await inSession();
+      await panel.readCable();
+      await panel.leave();
+      expect(panel.cable).toBeNull();
+      api.cableAnswer = { kind: "no_answer" };
+      await panel.detect();
+      await panel.readCable();
+      await panel.leave();
+      expect(panel.cableNoAnswer).toBe(false);
+    });
+
+    it("a disconnected meter empties the card", async () => {
+      const { panel } = await inSession();
+      await panel.readCable();
+      panel.handleEvent({ type: "status", data: { state: "disconnected", error: null } });
+      expect(panel.cable).toBeNull();
+      expect(panel.cableNoAnswer).toBe(false);
+    });
+  });
+});
+
+describe("AXHK2P review: the card never outlives what it describes", () => {
+  it("a read that fails leaves no older reading on the card", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    api.cableRead = async () => ({ kind: "no_answer" });
+    await panel.readCable();
+    expect(panel.cableNoAnswer).toBe(true);
+    api.cableRead = async () => {
+      throw { kind: "usage", message: "no", hint: null };
+    };
+    await panel.readCable();
+    expect(panel.cableNoAnswer).toBe(false);
+    expect(panel.cable).toBeNull();
+  });
+
+  it("another meter on screen drops the card and reads the capture again", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    const shown = {
+      vid: 1,
+      pid: null,
+      active: false,
+      max_voltage_v: 20,
+      max_current_ma: 3000,
+      epr_capable: false,
+      speed: null,
+      vendor: null,
+    };
+    api.cableSeen = async () => shown;
+    await panel.loadCaptureCable();
+    expect(panel.cable?.source).toBe("capture");
+    api.cableSeen = async () => null;
+    await panel.meterChanged();
+    expect(panel.cable).toBeNull();
+  });
+});
+
+// ---- AC-AXHK2P.13: Read cable waits for PD; a refusal shows in the Cable card ----
+
+describe("AC-AXHK2P.13: Read cable is off until PD is entered", () => {
+  /** A detected session whose backend says PD is not entered (Detect ends on the last
+   * protocol it listed); the calls of the detection are forgotten. */
+  async function detectedOutsidePd(): Promise<{ api: FakeApi; panel: TriggerPanel }> {
+    const api = new FakeApi();
+    api.pdEnteredNow = false;
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    api.calls = [];
+    return { api, panel };
+  }
+
+  /** The fake's PD request enters PD, as the backend's does. */
+  function requestEntersPd(api: FakeApi): void {
+    const request = api.request.bind(api);
+    api.request = async (r, confirmed) => {
+      const reply = await request(r, confirmed);
+      api.pdEnteredNow = r.protocol === "pd";
+      return reply;
+    };
+  }
+
+  it("starts with PD not entered", () => {
+    const panel = new TriggerPanel(new FakeApi());
+    expect(panel.pdEntered).toBe(false);
+  });
+
+  it("takes the state from the backend after Detect", async () => {
+    const { api, panel } = await detectedOutsidePd();
+    expect(api.pdEnteredAsked).toBeGreaterThan(0);
+    expect(panel.pdEntered).toBe(false);
+  });
+
+  it("a press with PD not entered sends nothing", async () => {
+    const { api, panel } = await detectedOutsidePd();
+    await panel.readCable();
+    expect(api.calls).toEqual([]);
+    expect(panel.cable).toBeNull();
+    expect(panel.cableNoAnswer).toBe(false);
+  });
+
+  it("a PD offer press enters PD and the read goes out", async () => {
+    const { api, panel } = await detectedOutsidePd();
+    requestEntersPd(api);
+    await panel.ask(PD_5V);
+    expect(panel.pdEntered).toBe(true);
+    api.calls = [];
+    await panel.readCable();
+    expect(api.calls).toEqual(["cable read"]);
+  });
+
+  it("a request of another protocol leaves PD", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    requestEntersPd(api);
+    await panel.ask(PD_5V);
+    expect(panel.pdEntered).toBe(true);
+    await panel.ask({ protocol: "qc", volts: 5 });
+    expect(panel.pdEntered).toBe(false);
+  });
+
+  it("the end of the session takes it down", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    expect(panel.pdEntered).toBe(true);
+    await panel.leave();
+    expect(panel.pdEntered).toBe(false);
+  });
+
+  it("a disconnected meter takes it down", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    panel.handleEvent({ type: "status", data: { state: "disconnected", error: null } });
+    expect(panel.pdEntered).toBe(false);
+  });
+});
+
+describe("AC-AXHK2P.13: a refusal from a press shows in the Cable card", () => {
+  const REFUSAL: UiError = {
+    kind: "usage",
+    message: "Reading the cable needs an open PD session.",
+    hint: "Press a PD offer first.",
+  };
+
+  async function refusedRead(): Promise<{ api: FakeApi; panel: TriggerPanel }> {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    api.cableRead = async () => {
+      api.calls.push("cable read");
+      throw REFUSAL;
+    };
+    await panel.readCable();
+    return { api, panel };
+  }
+
+  it("starts with no failure on the card", () => {
+    expect(new TriggerPanel(new FakeApi()).cableError).toBeNull();
+  });
+
+  it("keeps the refusal for the card", async () => {
+    const { panel } = await refusedRead();
+    expect(panel.cableError).toEqual(REFUSAL);
+    expect(panel.cable).toBeNull();
+    expect(panel.cableNoAnswer).toBe(false);
+  });
+
+  it("the next answer clears it", async () => {
+    const { api, panel } = await refusedRead();
+    api.cableRead = async () => ({ kind: "found", cable: CABLE });
+    await panel.readCable();
+    expect(panel.cableError).toBeNull();
+    expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+  });
+
+  it("a no answer clears it too", async () => {
+    const { api, panel } = await refusedRead();
+    api.cableRead = async () => ({ kind: "no_answer" });
+    await panel.readCable();
+    expect(panel.cableError).toBeNull();
+    expect(panel.cableNoAnswer).toBe(true);
+  });
+
+  it("the end of the session clears it", async () => {
+    const { panel } = await refusedRead();
+    await panel.leave();
+    expect(panel.cableError).toBeNull();
+  });
+
+  it("an out-of-step refusal shows on the card as well", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    const outOfSync: UiError = { kind: "out_of_sync", message: "Power-cycle it.", hint: null };
+    api.cableRead = async () => {
+      throw outOfSync;
+    };
+    await panel.readCable();
+    expect(panel.cableError).toEqual(outOfSync);
+    expect(panel.requestsDisabled).toBe(true);
+  });
+});
+
+// ---- AC-AXHK2N.9 to .13: a charger that goes away, and a view with nothing dead on it ----
+
+const GONE_REFUSAL: UiError = {
+  kind: "usage",
+  message: "The charger went away. Press Detect.",
+  hint: null,
+};
+
+/** Lets the answers of the promises already settled land. */
+async function settled(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve));
+}
+
+/** A promise settled from outside. */
+function held<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+/** The backend after a collapse: it reports it, and refuses what names an offer. */
+function collapse(api: ArmedApi): void {
+  api.goneNow = true;
+  api.armedNow = false;
+  api.risk = async () => {
+    throw GONE_REFUSAL;
+  };
+  api.request = async () => {
+    throw GONE_REFUSAL;
+  };
+}
+
+/** The panel of an armed session, after a batch at 0 V saw the collapse. */
+async function collapsed(): Promise<{ api: ArmedApi; panel: TriggerPanel }> {
+  const { api, panel } = await armedPanel();
+  collapse(api);
+  panel.handleEvent(batch(0));
+  await settled();
+  return { api, panel };
+}
+
+function nothingListed(panel: TriggerPanel): void {
+  expect(panel.sections.map((s) => s.state)).toEqual(TRIGGER_PROTOCOLS.map(() => "pending"));
+  expect(panel.sections.every((s) => s.section === null)).toBe(true);
+  expect(panel.detection).toBeNull();
+}
+
+describe("AC-AXHK2N.9: VBUS collapses", () => {
+  it("the level is 2 V", () => {
+    expect(VBUS_GONE_V).toBe(2);
+  });
+
+  it("a batch below it after a request asks the backend, and its yes ends the status", async () => {
+    const { api, panel } = await armedPanel();
+    collapse(api);
+    panel.handleEvent(batch(1.99));
+    await settled();
+    expect(api.goneAsked).toBeGreaterThan(0);
+    expect(panel.armed).toBe(false);
+    expect(panel.chargerGone).toBe(true);
+  });
+
+  it("the backend's no changes nothing", async () => {
+    const { api, panel } = await armedPanel();
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(api.goneAsked).toBeGreaterThan(0);
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.armed).toBe(true);
+    expect(panel.reply).not.toBeNull();
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+
+  it("a dip to 4.5 V during a voltage change asks nothing", async () => {
+    const { api, panel } = await armedPanel();
+    panel.handleEvent(batch(4.5));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.armed).toBe(true);
+  });
+
+  it("exactly 2 V asks nothing", async () => {
+    const { api, panel } = await armedPanel();
+    panel.handleEvent(batch(VBUS_GONE_V));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+  });
+
+  it("0 V before any request asks nothing", async () => {
+    const { api, panel } = await rememberPanel();
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+
+  it("0 V after Back to 5 V counts, since that request was accepted too", async () => {
+    const { api, panel } = await armedPanel();
+    await panel.backTo5v();
+    collapse(api);
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.chargerGone).toBe(true);
+  });
+
+  it("a backend that cannot answer changes nothing and shows no error", async () => {
+    const { api, panel } = await armedPanel();
+    api.chargerGone = async () => {
+      throw { kind: "internal", message: "gone", hint: null };
+    };
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.armed).toBe(true);
+    expect(panel.error).toBeNull();
+  });
+
+  it("an answer that lands after leaving the view is dropped", async () => {
+    const { api, panel } = await armedPanel();
+    const answer = held<boolean>();
+    api.chargerGone = () => answer.promise;
+    panel.handleEvent(batch(0));
+    await panel.leave();
+    answer.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.10: the collapse forgets the charger", () => {
+  it("drops the offers, the detection and the request's result", async () => {
+    const { panel } = await collapsed();
+    nothingListed(panel);
+    expect(panel.reply).toBeNull();
+    expect(panel.requestedMv).toBeNull();
+  });
+
+  it("drops the cable it read from that charger", async () => {
+    const { api, panel } = await armedPanel();
+    await panel.readCable();
+    expect(panel.cable).not.toBeNull();
+    collapse(api);
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.cable).toBeNull();
+  });
+
+  it("closes a dialog still open on an offer that is gone", async () => {
+    const { api, panel } = await rememberPanel();
+    await at9V(panel);
+    await panel.ask(PD_15V);
+    expect(panel.pending).not.toBeNull();
+    collapse(api);
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.pending).toBeNull();
+  });
+
+  it("leaves the session open and calls nothing else", async () => {
+    const { api, panel } = await armedPanel();
+    collapse(api);
+    const calls = [...api.calls];
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(panel.sessionOpen).toBe(true);
+    expect(api.calls).toEqual(calls);
+  });
+
+  it("a request after it is refused: nothing is sent and the refusal shows", async () => {
+    const { api, panel } = await collapsed();
+    const sent = api.sent.length;
+    await panel.ask(PD_9V);
+    expect(api.sent).toHaveLength(sent);
+    expect(panel.pending).toBeNull();
+    expect(panel.error?.message).toMatch(/Press Detect/);
+  });
+
+  it("does not ask again once it knows", async () => {
+    const { api, panel } = await collapsed();
+    const asked = api.goneAsked;
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(api.goneAsked).toBe(asked);
+  });
+
+  it("Detect clears it as it starts, and lists the charger again", async () => {
+    const { api, panel } = await collapsed();
+    api.goneNow = false;
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(panel.detection).toEqual(DETECTION);
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+});
+
+describe("AC-AXHK2P.10: Read cable is off while the charger is gone", () => {
+  it("a press after the charger went away sends nothing and shows nothing", async () => {
+    const { api, panel } = await collapsed();
+    expect(panel.chargerGone).toBe(true);
+    expect(panel.sessionOpen).toBe(true);
+    const from = api.calls.length;
+    await panel.readCable();
+    expect(api.calls.slice(from)).not.toContain("cable read");
+    expect(panel.cable).toBeNull();
+    expect(panel.cableNoAnswer).toBe(false);
+    expect(panel.cableBusy).toBe(false);
+  });
+
+  it("a second press while the charger is gone sends nothing either", async () => {
+    const { api, panel } = await collapsed();
+    const from = api.calls.length;
+    await panel.readCable();
+    await panel.readCable();
+    expect(api.calls.slice(from).filter((c) => c === "cable read")).toEqual([]);
+  });
+
+  it("reads again once Detect found the charger", async () => {
+    const { api, panel } = await collapsed();
+    // The charger is back and Detect saw it.
+    api.goneNow = false;
+    await panel.detect();
+    expect(panel.chargerGone).toBe(false);
+    const from = api.calls.length;
+    await panel.readCable();
+    expect(api.calls.slice(from)).toEqual(["cable read"]);
+    expect(panel.cable).toEqual({ cable: CABLE, source: "read" });
+  });
+});
+
+describe("AC-AXHK2N.11: the end of a session leaves nothing that does nothing", () => {
+  it("leaving the view drops the offers and the detection", async () => {
+    const { panel } = await detected();
+    await panel.leave();
+    nothingListed(panel);
+  });
+
+  it("a disconnect drops them too", async () => {
+    const { panel } = await detected();
+    panel.handleEvent({ type: "status", data: { state: "disconnected" } } as BackendEvent);
+    nothingListed(panel);
+  });
+
+  it("a collapse is forgotten with the session", async () => {
+    const { panel } = await collapsed();
+    await panel.leave();
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("the next Detect lists them again", async () => {
+    const { panel } = await detected();
+    await panel.leave();
+    await panel.detect();
+    expect(panel.detection).toEqual(DETECTION);
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+
+  it("asking with no session says to press Detect and calls nothing", async () => {
+    const { api, panel } = await detected();
+    await panel.leave();
+    api.calls = [];
+    await panel.ask(PD_5V);
+    expect(api.calls).toEqual([]);
+    expect(panel.error?.kind).toBe("usage");
+    expect(panel.error?.message).toMatch(/Press Detect/);
+  });
+
+  it("asking on a page that never detected says so too", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.ask(PD_9V);
+    expect(api.calls).toEqual([]);
+    expect(panel.error?.message).toMatch(/Press Detect/);
+  });
+});
+
+describe("AC-AXHK2N.13: a request in flight, and Detect", () => {
+  /** A backend whose requests wait for `gate`. */
+  function heldRequests(api: ArmedApi): { release(): void } {
+    const gate = held<void>();
+    const send = api.request.bind(api);
+    api.request = async (...args) => {
+      await gate.promise;
+      return send(...args);
+    };
+    return { release: () => gate.resolve() };
+  }
+
+  it("is not requesting before anything was sent", async () => {
+    const { panel } = await rememberPanel();
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("a request sent at once shows until its answer", async () => {
+    const { api, panel } = await rememberPanel();
+    const { release } = heldRequests(api);
+    const asking = panel.ask(PD_5V);
+    await settled();
+    expect(panel.requesting).toBe(true);
+    release();
+    await asking;
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("a dialog waiting for the user is not a request in flight", async () => {
+    const { panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    expect(panel.pending).not.toBeNull();
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("a confirmed send shows until its answer", async () => {
+    const { api, panel } = await rememberPanel();
+    const { release } = heldRequests(api);
+    await panel.ask(PD_9V);
+    const confirming = panel.confirm();
+    await settled();
+    expect(panel.requesting).toBe(true);
+    release();
+    await confirming;
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("a failed request stops showing", async () => {
+    const { api, panel } = await rememberPanel();
+    api.request = async () => {
+      throw { kind: "timeout", message: "No answer.", hint: null };
+    };
+    await panel.ask(PD_5V);
+    expect(panel.requesting).toBe(false);
+    expect(panel.error?.kind).toBe("timeout");
+  });
+
+  it("a request still out when the view is left stops showing once it ends", async () => {
+    const { api, panel } = await rememberPanel();
+    const { release } = heldRequests(api);
+    const asking = panel.ask(PD_5V);
+    await settled();
+    await panel.leave();
+    release();
+    await asking;
+    expect(panel.requesting).toBe(false);
+  });
+
+  it("Detect takes the armed status down as it starts", async () => {
+    const { api, panel } = await armedPanel();
+    const answer = held<Detection>();
+    api.detect = () => {
+      api.armedNow = false;
+      return answer.promise;
+    };
+    const detecting = panel.detect();
+    expect(panel.armed).toBe(false);
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(panel.armed).toBe(false);
+  });
+
+  it("an armed answer from before Detect does not bring the status back", async () => {
+    const { api, panel } = await armedPanel();
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const reading = panel.refreshArmed();
+    const detecting = panel.detect();
+    await reading;
+    expect(panel.armed).toBe(false);
+    answer.resolve(DETECTION);
+    await detecting;
+  });
+});
+
+describe("AC-AXHK2N.13: a second press while the first is out", () => {
+  it("sends one request", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    const send = vi.spyOn(api, "request");
+    await Promise.all([panel.ask(PD_15V), panel.ask(PD_15V)]);
+    await panel.confirm();
+    await panel.confirm();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("AC-AXHK2N.10: a refused press re-reads the backend", () => {
+  it("takes the page down when the backend knows the charger went away", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    await panel.detect();
+    await panel.ask(PD_15V);
+    await panel.confirm();
+    api.risk = async () => {
+      throw { kind: "usage", message: "The charger went away. Press Detect.", hint: null };
+    };
+    api.goneNow = true;
+    await panel.ask(PD_15V);
+    await vi.waitFor(() => expect(panel.chargerGone).toBe(true));
+  });
+});
+
+describe("AC-AXHK2N.14: Detect holds every control that sends", () => {
+  /** A panel whose next Detect waits until `finish`. */
+  async function detectingPanel(): Promise<{
+    api: ArmedApi;
+    panel: TriggerPanel;
+    finish(): Promise<void>;
+  }> {
+    const { api, panel } = await rememberPanel();
+    const answer = held<Detection>();
+    api.detect = () => {
+      api.calls.push("detect");
+      return answer.promise;
+    };
+    const detecting = panel.detect();
+    await settled();
+    return {
+      api,
+      panel,
+      finish: async () => {
+        answer.resolve(DETECTION);
+        await detecting;
+        await settled();
+      },
+    };
+  }
+
+  /** What went to the backend that could reach the meter, after the first `from` calls. */
+  function sends(api: FakeApi, from: number): string[] {
+    return api.calls
+      .slice(from)
+      .filter((c) => c === "risk" || c.startsWith("request") || c === "back" || c === "cable read");
+  }
+
+  it("says Detect is running from its start to its end, and only then", async () => {
+    const { panel } = await rememberPanel();
+    expect(panel.detecting).toBe(false);
+    const api = new ArmedApi();
+    const fresh = new TriggerPanel(api);
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = fresh.detect();
+    expect(fresh.detecting).toBe(true);
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(fresh.detecting).toBe(false);
+  });
+
+  it("a Detect that fails stops saying so", async () => {
+    const { api, panel } = await rememberPanel();
+    api.detect = async () => {
+      throw { kind: "timeout", message: "No answer.", hint: null };
+    };
+    const detecting = panel.detect();
+    expect(panel.detecting).toBe(true);
+    await detecting;
+    expect(panel.detecting).toBe(false);
+  });
+
+  it("an offer pressed during Detect asks nothing and opens no dialog after it", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    const from = api.calls.length;
+    await panel.ask(PD_9V);
+    expect(panel.pending).toBeNull();
+    await finish();
+    expect(panel.pending).toBeNull();
+    expect(sends(api, from)).toEqual([]);
+    expect(api.sent).toEqual([]);
+  });
+
+  it("a press the backend answers only after Detect ended opens no dialog", async () => {
+    // The meter's session answers in turn: the risk of a press waits behind Detect.
+    const { api, panel, finish } = await detectingPanel();
+    const risk = held<RiskClass>();
+    api.risk = () => {
+      api.calls.push("risk");
+      return risk.promise;
+    };
+    const asking = panel.ask(PD_9V);
+    await finish();
+    risk.resolve("above_5v_rememberable");
+    await asking;
+    await settled();
+    expect(panel.pending).toBeNull();
+    expect(api.sent).toEqual([]);
+  });
+
+  it("a 5 V offer pressed during Detect sends nothing", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    const from = api.calls.length;
+    await panel.ask(PD_5V);
+    await finish();
+    expect(sends(api, from)).toEqual([]);
+    expect(api.sent).toEqual([]);
+    expect(panel.reply).toBeNull();
+  });
+
+  it("Back to 5 V pressed during Detect sends nothing", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    const from = api.calls.length;
+    await panel.backTo5v();
+    await finish();
+    expect(sends(api, from)).toEqual([]);
+  });
+
+  it("Read cable pressed during Detect sends nothing", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    const from = api.calls.length;
+    await panel.readCable();
+    await finish();
+    expect(sends(api, from)).toEqual([]);
+    expect(panel.cable).toBeNull();
+  });
+
+  it("a press after Detect ended is answered as before", async () => {
+    const { api, panel, finish } = await detectingPanel();
+    await finish();
+    await panel.ask(PD_9V);
+    expect(panel.pending).not.toBeNull();
+    await panel.confirm();
+    expect(api.sent.map((s) => s.request)).toEqual([PD_9V]);
+  });
+});
+
+describe("AC-AXHK2N.15: leaving the tab names itself to the backend", () => {
+  it("leaving returns to 5 V as a leave", async () => {
+    const { api, panel } = await detected();
+    const back = vi.spyOn(api, "backTo5v");
+    await panel.leave();
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(back.mock.calls[0]).toEqual([true]);
+  });
+
+  it("a press of Back to 5 V is no leave", async () => {
+    const { api, panel } = await detected();
+    const back = vi.spyOn(api, "backTo5v");
+    await panel.backTo5v();
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(back.mock.calls[0]?.[0]).not.toBe(true);
+  });
+});
+
+describe("AC-AXHK2N.14 review: one Detect at a time", () => {
+  /** `api.detect` answers only when the returned function is called. */
+  function heldDetect(api: FakeApi): (answer: Detection) => void {
+    const answer = held<Detection>();
+    api.detect = () => {
+      api.calls.push("detect");
+      return answer.promise;
+    };
+    return (d) => answer.resolve(d);
+  }
+
+  it("a second Detect while one runs returns at once and sends nothing", async () => {
+    const { api, panel } = await rememberPanel();
+    const finish = heldDetect(api);
+    const first = panel.detect();
+    await settled();
+    const from = api.calls.length;
+    await panel.detect();
+    expect(api.calls.slice(from)).toEqual([]);
+    expect(panel.detecting).toBe(true);
+    finish(DETECTION);
+    await first;
+    expect(panel.detecting).toBe(false);
+  });
+
+  it("leave during Detect, come back, a second Detect: the first one's end does not re-enable presses", async () => {
+    const { api, panel } = await rememberPanel();
+    const finishFirst = heldDetect(api);
+    const first = panel.detect();
+    await settled();
+    await panel.leave();
+    expect(panel.detecting).toBe(false);
+    const finishSecond = heldDetect(api);
+    const second = panel.detect();
+    await settled();
+    expect(panel.detecting).toBe(true);
+    const from = api.calls.length;
+    finishFirst(DETECTION);
+    await first;
+    await settled();
+    // The first one stopped: no listing, and Detect still holds the presses.
+    expect(api.calls.slice(from)).toEqual([]);
+    expect(panel.detecting).toBe(true);
+    await panel.ask(PD_9V);
+    expect(panel.pending).toBeNull();
+    expect(api.calls.slice(from)).toEqual([]);
+    finishSecond(DETECTION);
+    await second;
+    expect(panel.detecting).toBe(false);
+    expect(api.calls.filter((c) => c === "list pd")).toHaveLength(2);
+  });
+
+  it("a session end during Detect stops it and clears detecting", async () => {
+    const { api, panel } = await rememberPanel();
+    const finish = heldDetect(api);
+    const running = panel.detect();
+    await settled();
+    panel.handleEvent({
+      type: "status",
+      data: { state: "disconnected", error: null },
+    } as BackendEvent);
+    expect(panel.detecting).toBe(false);
+    const from = api.calls.length;
+    finish(DETECTION);
+    await running;
+    expect(api.calls.slice(from).filter((c) => c.startsWith("list"))).toEqual([]);
+    expect(panel.detecting).toBe(false);
+  });
+});
+
+describe("AC-AXHK2N.14 review: the console during Detect", () => {
+  class ConsoleFake implements ConsoleApi {
+    sent: string[] = [];
+    risk = held<RiskClass>();
+    async messageRisk(): Promise<RiskClass> {
+      return this.risk.promise;
+    }
+    async messageSend(): Promise<PdSendReply> {
+      this.sent.push("message");
+      return { command: "pd cmd=13", lines: [], cable: null };
+    }
+    async consoleRisk(): Promise<RiskClass> {
+      return this.risk.promise;
+    }
+    async consoleSend(line: string): Promise<ConsoleLine[]> {
+      this.sent.push(line);
+      return [];
+    }
+  }
+
+  /** A detected panel and its console, wired as the page wires them. */
+  async function wired(): Promise<{
+    api: ArmedApi;
+    panel: TriggerPanel;
+    con: PdConsole;
+    capi: ConsoleFake;
+  }> {
+    const api = new ArmedApi();
+    const capi = new ConsoleFake();
+    // eslint-disable-next-line prefer-const
+    let con: PdConsole;
+    const panel = new TriggerPanel(api, { onDetect: () => con.cancel() });
+    con = new PdConsole(capi, () => panel.detecting);
+    await panel.detect();
+    return { api, panel, con, capi };
+  }
+
+  it("a console risk answer that lands during Detect opens no dialog", async () => {
+    const { api, panel, con, capi } = await wired();
+    const sending = con.sendLine("pd req=2");
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    await settled();
+    capi.risk.resolve("above_5v");
+    await sending;
+    expect(con.pending).toBeNull();
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(con.pending).toBeNull();
+    expect(capi.sent).toEqual([]);
+  });
+
+  it("a built message's risk answer during Detect opens no dialog either", async () => {
+    const { api, panel, con, capi } = await wired();
+    const sending = con.sendMessage({ sop: "sop", msg_type: 13, data_objects: [] });
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    await settled();
+    capi.risk.resolve("above_5v");
+    await sending;
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(con.pending).toBeNull();
+    expect(capi.sent).toEqual([]);
+  });
+
+  it("Detect clears a pending dialog of the panel and of the console", async () => {
+    const { panel, con, capi } = await wired();
+    capi.risk.resolve("above_5v");
+    await con.sendLine("pd req=2");
+    expect(con.pending).not.toBeNull();
+    await panel.ask(PD_9V);
+    expect(panel.pending).not.toBeNull();
+    const detecting = panel.detect();
+    expect(panel.pending).toBeNull();
+    expect(con.pending).toBeNull();
+    await detecting;
+    expect(capi.sent).toEqual([]);
+  });
+
+  it("panel.confirm() sends nothing while Detect runs", async () => {
+    const { api, panel } = await wired();
+    await panel.ask(PD_9V);
+    const pending = panel.pending;
+    expect(pending).not.toBeNull();
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    // A dialog that stayed on screen is pressed anyway.
+    panel.pending = pending;
+    await panel.confirm();
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(api.sent).toEqual([]);
+  });
+
+  it("a console confirm during Detect sends nothing", async () => {
+    const { api, panel, con, capi } = await wired();
+    capi.risk.resolve("above_5v");
+    await con.sendLine("pd req=2");
+    const pending = con.pending;
+    expect(pending).not.toBeNull();
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    con.pending = pending;
+    await con.confirm();
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(capi.sent).toEqual([]);
+  });
+});
+
+describe("AC-AXHK2N.14 review: another meter on screen", () => {
+  it("drops the pending dialog", async () => {
+    const { api, panel } = await rememberPanel();
+    await panel.ask(PD_9V);
+    expect(panel.pending).not.toBeNull();
+    await panel.meterChanged();
+    expect(panel.pending).toBeNull();
+    await panel.confirm();
+    expect(api.sent).toEqual([]);
+  });
+
+  it("stops a running Detect, so nothing later goes to the other meter", async () => {
+    const { api, panel } = await rememberPanel();
+    const answer = held<Detection>();
+    api.detect = () => {
+      api.calls.push("detect");
+      return answer.promise;
+    };
+    const running = panel.detect();
+    await settled();
+    await panel.meterChanged();
+    expect(panel.detecting).toBe(false);
+    const from = api.calls.length;
+    answer.resolve(DETECTION);
+    await running;
+    await settled();
+    expect(api.calls.slice(from).filter((c) => c.startsWith("list"))).toEqual([]);
+  });
+
+  it("a press whose answer lands after the switch opens no dialog", async () => {
+    const { api, panel } = await rememberPanel();
+    const risk = held<RiskClass>();
+    api.risk = () => {
+      api.calls.push("risk");
+      return risk.promise;
+    };
+    const asking = panel.ask(PD_9V);
+    await settled();
+    await panel.meterChanged();
+    risk.resolve("above_5v_rememberable");
+    await asking;
+    expect(panel.pending).toBeNull();
+    expect(api.sent).toEqual([]);
+  });
+});
+
+// ---- FR WFSNZD: the page hears a charger gone with no contract ----
+
+/** Both CC lines low: the charger is unplugged (or its CC pull-up gone). */
+const CC_LOW: [number, number] = [0.05, 0.02];
+
+/** A low-CC reading at the given VBUS (a charger unplugged takes VBUS down too). */
+function ccLow(vbus = 0): BackendEvent {
+  return batch(vbus, 0, CC_LOW);
+}
+
+/** Counts every question to `api` while `answer` holds the reply. */
+function heldGone(api: FakeApi): { asked(): number; resolve(value: boolean): void } {
+  const answer = held<boolean>();
+  let asked = 0;
+  api.chargerGone = () => {
+    asked += 1;
+    return answer.promise;
+  };
+  return { asked: () => asked, resolve: (v) => answer.resolve(v) };
+}
+
+describe("AC-WFSNZD.1: both CC lines low ask the backend, contract or not", () => {
+  it("the CC level is a named 0.3 V", () => {
+    expect((triggerModule as Record<string, unknown>).CC_GONE_V).toBe(0.3);
+  });
+
+  it("after Detect with no offer pressed, low CC asks and the backend's yes shows the gone state", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(1);
+    expect(panel.chargerGone).toBe(true);
+    nothingListed(panel);
+    expect(panel.sessionOpen).toBe(true);
+  });
+
+  it("asks even when VBUS still reads 5 V", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(ccLow(5.1));
+    await settled();
+    expect(api.goneAsked).toBe(1);
+    expect(panel.chargerGone).toBe(true);
+  });
+
+  it("both lines just under 0.3 V ask", async () => {
+    const { api, panel } = await detected();
+    panel.handleEvent(batch(0, 0, [0.29, 0.29]));
+    await settled();
+    expect(api.goneAsked).toBe(1);
+  });
+
+  it("Read cable then sends nothing", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    const from = api.calls.length;
+    await panel.readCable();
+    expect(api.calls.slice(from)).not.toContain("cable read");
+    expect(panel.cable).toBeNull();
+  });
+
+  it("the backend's no changes nothing", async () => {
+    const { api, panel } = await detected();
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(1);
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.sections[0]?.state).toBe("supported");
+    expect(panel.detection).toEqual(DETECTION);
+  });
+
+  it("a backend that cannot answer changes nothing and shows no error", async () => {
+    const { api, panel } = await detected();
+    let asked = 0;
+    api.chargerGone = async () => {
+      asked += 1;
+      throw { kind: "internal", message: "gone", hint: null };
+    };
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(asked).toBe(1);
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.error).toBeNull();
+  });
+
+  it("low CC under a contract asks too", async () => {
+    const { api, panel } = await armedPanel();
+    collapse(api);
+    panel.handleEvent(ccLow(9));
+    await settled();
+    expect(api.goneAsked).toBeGreaterThan(0);
+    expect(panel.chargerGone).toBe(true);
+  });
+});
+
+describe("AC-WFSNZD.2: no more questions than before otherwise", () => {
+  it("0 V with CC pulled up and no contract asks nothing", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(batch(0, 0, [1.68, 0]));
+    panel.handleEvent(batch(0, 0, [0, 1.68]));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("one CC line at 0.3 V or above asks nothing", async () => {
+    const { api, panel } = await detected();
+    panel.handleEvent(batch(5, 0, [0.3, 0]));
+    panel.handleEvent(batch(5, 0, [0, 0.3]));
+    await settled();
+    expect(api.goneAsked).toBe(0);
+  });
+
+  it("one question is out at a time", async () => {
+    const { api, panel } = await detected();
+    const gone = heldGone(api);
+    panel.handleEvent(ccLow());
+    panel.handleEvent(ccLow());
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(1);
+    gone.resolve(false);
+    await settled();
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(2);
+  });
+
+  it("none is asked with no session", async () => {
+    const api = new FakeApi();
+    const panel = new TriggerPanel(api);
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("none is asked after the session ended", async () => {
+    const { api, panel } = await detected();
+    await panel.leave();
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("none is asked while Detect runs", async () => {
+    const { api, panel } = await detected();
+    const answer = held<Detection>();
+    api.detect = () => answer.promise;
+    const detecting = panel.detect();
+    await settled();
+    expect(panel.detecting).toBe(true);
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(0);
+    answer.resolve(DETECTION);
+    await detecting;
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("none is asked once the charger is known gone", async () => {
+    const { api, panel } = await detected();
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(1);
+    panel.handleEvent(ccLow());
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(api.goneAsked).toBe(1);
+  });
+
+  it("an answer that lands after Detect started changes nothing", async () => {
+    const { api, panel } = await detected();
+    const gone = heldGone(api);
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(1);
+    await panel.detect();
+    gone.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.sections[0]?.state).toBe("supported");
+    expect(panel.detection).toEqual(DETECTION);
+  });
+
+  it("an answer from before Detect is dropped even once a new contract stands", async () => {
+    const { api, panel } = await armedPanel();
+    const gone = heldGone(api);
+    panel.handleEvent(batch(0));
+    await settled();
+    expect(gone.asked()).toBe(1);
+    await panel.detect();
+    await at9V(panel);
+    gone.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+    expect(panel.sections[0]?.state).toBe("supported");
+  });
+
+  it("an answer that lands after the session ended changes nothing", async () => {
+    const { api, panel } = await detected();
+    const gone = heldGone(api);
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(1);
+    await panel.leave();
+    gone.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+  });
+
+  it("an answer that lands after a disconnect changes nothing", async () => {
+    const { api, panel } = await detected();
+    const gone = heldGone(api);
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(gone.asked()).toBe(1);
+    panel.handleEvent({ type: "status", data: { state: "disconnected" } } as BackendEvent);
+    gone.resolve(true);
+    await settled();
+    expect(panel.chargerGone).toBe(false);
+  });
+});
+
+describe("AC-WFSNZD.3: the contract case works as before", () => {
+  it("a VBUS collapse after an accepted request, CC still up, shows the gone state", async () => {
+    const { api, panel } = await armedPanel();
+    collapse(api);
+    panel.handleEvent(batch(0, 0, [1.68, 0]));
+    await settled();
+    expect(api.goneAsked).toBeGreaterThan(0);
+    expect(panel.chargerGone).toBe(true);
+    expect(panel.armed).toBe(false);
+    nothingListed(panel);
+  });
+
+  it("2 V or more under a contract with CC up asks nothing", async () => {
+    const { api, panel } = await armedPanel();
+    panel.handleEvent(batch(VBUS_GONE_V, 0, [1.68, 0]));
+    await settled();
+    expect(api.goneAsked).toBe(0);
   });
 });

@@ -292,4 +292,28 @@ mod pd_send {
         assert!(!s.iter().any(|c| c.starts_with("pd data=")), "{s:?}");
         closes_last(&s);
     }
+
+    // ---- AC-AXHK2P.3: only the desktop button is exempt, `powerz` keeps asking ----
+
+    #[test]
+    fn the_cable_preset_without_the_flag_fails_and_sends_nothing() {
+        let a = send(&["--preset", "discover-identity-cable"])
+            .assert()
+            .failure();
+        let err = stderr_of(&a);
+        assert!(err.contains("--allow-high-voltage"), "{err}");
+        let s = sent(&a);
+        assert!(!s.iter().any(|c| c.starts_with("pd data=")), "{s:?}");
+        closes_last(&s);
+    }
+
+    #[test]
+    fn the_same_message_as_hex_without_the_flag_fails_and_sends_nothing() {
+        let a = send(&["8F1001A800FF", "--sop", "sop1"]).assert().failure();
+        let err = stderr_of(&a);
+        assert!(err.contains("--allow-high-voltage"), "{err}");
+        let s = sent(&a);
+        assert!(!s.iter().any(|c| c.starts_with("pd data=")), "{s:?}");
+        closes_last(&s);
+    }
 }

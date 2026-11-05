@@ -1,4 +1,6 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
+  import Term from "./Term.svelte";
   import { untrack } from "svelte";
   import type { PdDetails, PdField, PdRow } from "../backend";
   import type { PdCapture } from "../pdCapture.svelte";
@@ -13,6 +15,7 @@
     timeLabel,
     visibleRange,
   } from "../pdTable";
+  import { pdStatusDroppedText } from "../pdTimeline";
 
   /**
    * The PD analyzer view (FR TGE83C): Start and Stop for the connected meter and the
@@ -96,6 +99,13 @@
   const droppedNotice = $derived.by(() => {
     void pd.version;
     return pdDroppedText(pd.store.dropped);
+  });
+
+  /** Says that a long capture lost its oldest status samples, if it did: the larger of
+   * the page's own count and the backend's (AC-AXHK2W.2, AC-AXHK2W.3). */
+  const statusDroppedNotice = $derived.by(() => {
+    void pd.statusVersion;
+    return pdStatusDroppedText(pd.status.dropped);
   });
 
   /** Store positions the filters let through. */
@@ -477,6 +487,7 @@
 
 <div class="pd">
   <div class="toolbar" role="toolbar" aria-label="PD capture">
+    <InfoButton key="section.pd" />
     <button
       type="button"
       class="primary"
@@ -515,6 +526,9 @@
     {:else if pd.capturing}
       <p class="reason" aria-live="polite">Capturing…</p>
     {/if}
+    {#if pd.notice}
+      <p class="reason" role="status">{pd.notice}</p>
+    {/if}
     {#if controls.openReason}
       <p id="pd-open-reason" class="reason">{controls.openReason}</p>
     {/if}
@@ -532,7 +546,7 @@
         <option value={name}>{name}</option>
       {/each}
     </select>
-    <label for="pd-sop">SOP</label>
+    <label for="pd-sop"><Term key="term.sop">SOP</Term></label>
     <select id="pd-sop" bind:value={sopChoice}>
       <option value="">All</option>
       {#each sopOptions as name (name)}
@@ -541,6 +555,9 @@
     </select>
     {#if droppedNotice}
       <p class="reason">{droppedNotice}</p>
+    {/if}
+    {#if statusDroppedNotice}
+      <p class="reason">{statusDroppedNotice}</p>
     {/if}
   </div>
 

@@ -6,9 +6,14 @@
  * The device details live in the About dialog while a meter is connected (region
  * "Device details"); the firmware warning is a status notice on the main page.
  * `?mock=bootloader` adds one real meter in bootloader mode to the picker.
+ *
+ * FR AXHK2M (AC .17): `?mock=mode-flip` lists one real meter in application mode that
+ * turns to bootloader mode under the same entry after `MOCK_MODE_FLIP.appMs`, and back
+ * after `MOCK_MODE_FLIP.bootMs` more.
  */
 
 import { expect, test, type Page } from "@playwright/test";
+import { MOCK_MODE_FLIP } from "../../src/lib/mockBackend";
 import { open, streamDemo } from "./helpers";
 
 async function openAbout(page: Page): Promise<void> {
@@ -56,5 +61,51 @@ test.describe("device details (FR V9SK52)", () => {
     await expect(page.getByRole("alert")).toHaveCount(0);
     // The demo device still connects.
     await streamDemo(page);
+  });
+
+  test("a picked meter changing mode under the same entry is shown in its new mode, open and closed (AC-AXHK2M.17)", async ({
+    page,
+  }) => {
+    await open(page, "?mock=mode-flip");
+    const picker = page.getByLabel("Device", { exact: true });
+    const id = `usb:1:${MOCK_MODE_FLIP.address}`;
+    const option = picker.locator(`option[value="${id}"]`);
+    await expect(option).toHaveCount(1);
+    await expect(option).not.toHaveText(/bootloader mode/);
+    await picker.selectOption(id);
+
+    /** The closed select: its value, the text it shows, its tooltip. */
+    const closed = () =>
+      picker.evaluate((el: HTMLSelectElement) => ({
+        value: el.value,
+        text: el.selectedOptions[0]?.text.trim() ?? "",
+        title: el.title,
+      }));
+    // Tag the option the select shows now. WebKit keeps a closed select's painted
+    // text when only its picked option's text changes in place, so the flipped entry
+    // must come as a new option for the closed select to repaint.
+    await option.evaluate((el) => el.setAttribute("data-e2e-before-flip", "1"));
+
+    // Into the bootloader: within the 1 s the AC allows after the change.
+    await expect(option).toHaveText(/\(bootloader mode\)/, {
+      timeout: MOCK_MODE_FLIP.appMs + 1_000,
+    });
+    await expect.poll(closed).toMatchObject({ value: id });
+    const boot = await closed();
+    expect(boot.text).toContain("(bootloader mode)");
+    expect(boot.title).toContain("(bootloader mode)");
+    await expect(picker.locator("option[data-e2e-before-flip]")).toHaveCount(0);
+
+    // And back: the suffix goes from both.
+    await option.evaluate((el) => el.setAttribute("data-e2e-before-back", "1"));
+    await expect(option).not.toHaveText(/bootloader mode/, {
+      timeout: MOCK_MODE_FLIP.bootMs + 1_000,
+    });
+    const back = await closed();
+    expect(back.value).toBe(id);
+    expect(back.text).not.toContain("bootloader mode");
+    expect(back.title).not.toContain("bootloader mode");
+    await expect(picker.locator("option[data-e2e-before-back]")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
   });
 });

@@ -7,16 +7,124 @@
 //! six channels and the per-record power (VBUS × IBUS). The rate (which sets the CC / D±
 //! scale) is kept as runs, one entry per rate change. Chunks are shared, so
 //! an export snapshot costs a few pointers, not a copy of the samples.
+//!
+//! Only the newest [`HISTORY_FULL_SAMPLES`] samples keep full resolution
+//! (FR AXHK2W, AC-AXHK2W.10): older whole chunks fold into blocks of at most
+//! `FOLD_BLOCK` records that keep, per series, min, max, sum and count,
+//! plus their first and last record and their charge and energy. A block
+//! never spans a run break. Record indices keep counting folded records, so
+//! totals, the ruler at block edges, segment marks and E.D. stay exact there.
 
 use std::sync::Arc;
 
 use powerz_protocol::decode::{QueueRecord, Rate};
+use powerz_record::Integrator;
 use serde::{Deserialize, Serialize};
+
+/// Samples a history keeps at full resolution; older whole chunks fold.
+pub const HISTORY_FULL_SAMPLES: usize = 10_000_000;
 
 /// Samples per chunk (a power of two).
 const CHUNK_SHIFT: u32 = 16;
 const CHUNK_LEN: usize = 1 << CHUNK_SHIFT;
 const CHUNK_MASK: usize = CHUNK_LEN - 1;
+
+/// Most records one folded block holds (divides [`CHUNK_LEN`]).
+const FOLD_BLOCK: usize = 4096;
+
+/// One record's time and SI readings, enough to integrate from or to it.
+#[derive(Debug, Clone, Copy)]
+struct Sample {
+    t: u32,
+    v: f64,
+    i: f64,
+}
+
+impl Sample {
+    fn of(r: &QueueRecord) -> Sample {
+        Sample {
+            t: r.time_ms(),
+            v: r.vbus_v(),
+            i: r.ibus_a(),
+        }
+    }
+
+    fn point(self) -> Point {
+        Point {
+            t: f64::from(self.t),
+            i: self.i,
+            p: self.v * self.i,
+        }
+    }
+}
+
+/// Folded records `i0..i1` of one measuring run.
+#[derive(Debug, Clone)]
+struct Block {
+    i0: usize,
+    i1: usize,
+    first: Sample,
+    last: Sample,
+    min: [f32; SERIES],
+    max: [f32; SERIES],
+    /// Sum of each series over the records, in SI units.
+    sum: [f64; SERIES],
+    /// Charge and energy between the block's own records (trapezoid rule).
+    charge_ah: f64,
+    energy_wh: f64,
+}
+
+impl Block {
+    fn start(r: &QueueRecord, i: usize) -> Block {
+        let s = Sample::of(r);
+        Block {
+            i0: i,
+            i1: i,
+            first: s,
+            last: s,
+            min: [f32::MAX; SERIES],
+            max: [f32::MIN; SERIES],
+            sum: [0.0; SERIES],
+            charge_ah: 0.0,
+            energy_wh: 0.0,
+        }
+    }
+
+    fn add(&mut self, r: &QueueRecord, integrator: &mut Integrator) {
+        let v = values_f64(r);
+        for (s, &x) in v.iter().enumerate() {
+            self.min[s] = self.min[s].min(x as f32);
+            self.max[s] = self.max[s].max(x as f32);
+            self.sum[s] += x;
+        }
+        let s = Sample::of(r);
+        (self.charge_ah, self.energy_wh) = integrator.push(s.t, s.v, s.i);
+        self.last = s;
+        self.i1 += 1;
+    }
+
+    fn count(&self) -> u64 {
+        (self.i1 - self.i0) as u64
+    }
+
+    fn t0(&self) -> u64 {
+        u64::from(self.first.t)
+    }
+
+    fn t1(&self) -> u64 {
+        u64::from(self.last.t)
+    }
+}
+
+/// An integrator whose previous sample is `prev`, if any, so the next push
+/// counts the stretch from it.
+fn primed(prev: Option<Sample>) -> Integrator {
+    let mut integrator = Integrator::new();
+    if let Some(s) = prev {
+        integrator.push(s.t, s.v, s.i);
+    }
+    integrator
+}
 
 /// Most buckets one [`History::range`] query returns per series.
 pub const MAX_BUCKETS: usize = 8192;
@@ -141,6 +249,160 @@ pub struct HistoryGap {
     pub to_ms: u64,
 }
 
+/// What the chart ruler shows between its two times (FR AXHK2T), from the raw
+/// samples in range, never from the drawn buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct RangeStats {
+    /// Records in range.
+    pub samples: u64,
+    /// Charge by the trapezoid rule between neighbouring records, Ah (signed).
+    pub charge_ah: f64,
+    /// Energy by the trapezoid rule between neighbouring records, Wh (signed).
+    pub energy_wh: f64,
+    pub vbus_avg_v: f64,
+    pub ibus_avg_a: f64,
+    /// Mean of VBUS × IBUS over the records, W.
+    pub power_avg_w: f64,
+}
+
+/// What segment marks follow (FR AXHK2T, AC-AXHK2T.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkKind {
+    Charge,
+    Energy,
+}
+
+/// What E.D. is a share of (FR AXHK2T, AC-AXHK2T.5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EdScope {
+    /// The whole history's energy, summed over its runs (never across a run
+    /// break); the window is clamped to the history.
+    #[default]
+    Session,
+    /// The current run's energy; the window is clamped to the run.
+    Run,
+}
+
+/// What [`Records::run_progress`] is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct RunProgressQuery {
+    /// The running total the marks follow.
+    pub kind: MarkKind,
+    /// Mark every `step_pct` percent of the total; 0% and 100% are never
+    /// marked, and a step outside `0 < step < 100` marks nothing.
+    pub step_pct: f64,
+    /// How many evenly spaced E.D. points to sample (at most [`MAX_BUCKETS`]);
+    /// about the plot width. 0 samples none.
+    pub ed_points: usize,
+    /// The E.D. window, clamped to the scope's records (either order); all
+    /// of them when left out.
+    #[serde(default)]
+    pub ed_t0_ms: Option<u64>,
+    #[serde(default)]
+    pub ed_t1_ms: Option<u64>,
+    /// What E.D. is a share of; the session when left out. Marks always
+    /// follow the current run.
+    #[serde(default)]
+    pub ed_scope: EdScope,
+}
+
+/// One segment mark: where the run's running total first reached `percent`
+/// of its final value.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct RunMark {
+    /// Session (or file) time, ms, interpolated between records.
+    pub t_ms: f64,
+    pub percent: f64,
+}
+
+/// Segment marks and E.D. of the current run (FR AXHK2T, AC-AXHK2T.4, .5),
+/// integrated over the raw samples, never the drawn buckets.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RunProgress {
+    /// Time of the history's (or file's) first record, ms.
+    pub session_t0_ms: u64,
+    /// Time of the run's first and last record, ms.
+    pub run_t0_ms: u64,
+    pub run_t1_ms: u64,
+    /// Records in the run.
+    pub samples: u64,
+    /// The run's charge and energy by the trapezoid rule (signed).
+    pub charge_ah: f64,
+    pub energy_wh: f64,
+    /// The followed total (charge or energy, per the query) is above zero.
+    /// When it is not (an idle or discharging run, or a single record),
+    /// `marks` is empty: there is no share of it to mark.
+    pub marks_total_positive: bool,
+    pub marks: Vec<RunMark>,
+    /// The E.D. total (the session's or the run's energy, per the query's
+    /// `ed_scope`), Wh.
+    pub ed_total_wh: f64,
+    /// `ed_total_wh` is above zero. When it is not, `ed_t_ms` and `ed_pct`
+    /// are empty.
+    pub energy_total_positive: bool,
+    /// E.D. sample times, ms, evenly spaced over the window.
+    pub ed_t_ms: Vec<f64>,
+    /// The running energy at each of `ed_t_ms` as a percentage of
+    /// `ed_total_wh`.
+    pub ed_pct: Vec<f64>,
+}
+
+/// One pass of [`Records::integrate`].
+struct Integrated {
+    /// The running energy (Wh) at each asked time.
+    at_wh: Vec<f64>,
+    /// Energy from the first record of the pass to the last, Wh.
+    total_wh: f64,
+    /// Charge and energy of the current run alone.
+    run_ah: f64,
+    run_wh: f64,
+}
+
+/// Most marks one [`Records::run_progress`] answer holds.
+const MAX_MARKS: usize = 1000;
+
+/// One record's time (ms), current (A) and power (W), for integrating.
+#[derive(Debug, Clone, Copy)]
+struct Point {
+    t: f64,
+    i: f64,
+    p: f64,
+}
+
+impl Point {
+    fn of(r: &QueueRecord) -> Point {
+        let (v, i) = (r.vbus_v(), r.ibus_a());
+        Point {
+            t: f64::from(r.time_ms()),
+            i,
+            p: v * i,
+        }
+    }
+
+    /// The point at time `t` on the straight line through `self` and `b` (in
+    /// either order), as the trapezoid rule assumes between two records.
+    fn towards(self, b: Point, t: f64) -> Point {
+        let w = if b.t != self.t {
+            (t - self.t) / (b.t - self.t)
+        } else {
+            0.0
+        };
+        Point {
+            t,
+            i: self.i + (b.i - self.i) * w,
+            p: self.p + (b.p - self.p) * w,
+        }
+    }
+
+    /// Charge (Ah) and energy (Wh) from `self` to `b` by the trapezoid rule.
+    fn trapezoid(self, b: Point) -> (f64, f64) {
+        let hours = (b.t - self.t).max(0.0) / 3_600_000.0;
+        ((self.i + b.i) / 2.0 * hours, (self.p + b.p) / 2.0 * hours)
+    }
+}
+
 /// The buckets of one series.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SeriesBuckets {
@@ -159,10 +421,15 @@ pub struct Records {
     /// outage or a clock jump), in order.
     breaks: Vec<usize>,
     len: usize,
+    /// Records `0..folded` (whole chunks) live only in `blocks`; `chunks`
+    /// starts at chunk `folded / CHUNK_LEN`.
+    folded: usize,
+    /// The folded records, oldest first.
+    blocks: Arc<Vec<Block>>,
 }
 
 impl Records {
-    /// Number of records.
+    /// Number of records, folded ones included.
     pub fn len(&self) -> usize {
         self.len
     }
@@ -172,33 +439,410 @@ impl Records {
         self.len == 0
     }
 
-    /// Record `i`, exactly as it was pushed.
+    /// Record `i`, exactly as it was pushed; `None` for a folded one.
     pub fn get(&self, i: usize) -> Option<QueueRecord> {
         if i >= self.len {
             return None;
         }
         let run = self.rates.partition_point(|&(start, _)| start <= i);
         let (_, rate) = *self.rates.get(run.checked_sub(1)?)?;
-        self.chunks.get(i >> CHUNK_SHIFT)?.get(i & CHUNK_MASK, rate)
+        self.chunk(i)?.get(i & CHUNK_MASK, rate)
     }
 
-    /// Every record, in order.
+    /// The stored chunk holding record `i`; `None` for a folded one.
+    fn chunk(&self, i: usize) -> Option<&Chunk> {
+        let c = (i >> CHUNK_SHIFT).checked_sub(self.folded >> CHUNK_SHIFT)?;
+        self.chunks.get(c).map(|c| &**c)
+    }
+
+    /// Number of records folded into coarser blocks (the first ones).
+    pub(crate) fn folded_len(&self) -> usize {
+        self.folded
+    }
+
+    /// Where full resolution starts, ms: the time of the oldest record not
+    /// folded; `None` while nothing is folded.
+    pub(crate) fn fold_boundary_ms(&self) -> Option<u64> {
+        (self.folded > 0).then(|| self.time_at(self.folded))
+    }
+
+    /// Every record still at full resolution, in order.
     pub fn iter(&self) -> impl Iterator<Item = QueueRecord> + '_ {
-        (0..self.len).filter_map(|i| self.get(i))
+        self.iter_range(0, self.len).map(|(_, r)| r)
     }
 
-    /// Every record, in order, with whether it starts a new measuring run
-    /// (nothing was measured between it and the record before).
+    /// Records `i0..i1` with their indices, in order, folded ones left out.
+    /// Walks the chunks and the rate runs alongside, so each record costs
+    /// O(1), not a search.
+    fn iter_range(&self, i0: usize, i1: usize) -> impl Iterator<Item = (usize, QueueRecord)> + '_ {
+        let i0 = i0.max(self.folded);
+        let i1 = i1.min(self.len);
+        let mut run = self
+            .rates
+            .partition_point(|&(start, _)| start <= i0)
+            .saturating_sub(1);
+        (i0..i1).filter_map(move |i| {
+            while self
+                .rates
+                .get(run + 1)
+                .is_some_and(|&(start, _)| start <= i)
+            {
+                run += 1;
+            }
+            let &(_, rate) = self.rates.get(run)?;
+            let r = self.chunk(i)?.get(i & CHUNK_MASK, rate)?;
+            Some((i, r))
+        })
+    }
+
+    /// Record `i` starts a new measuring run.
+    fn starts_run(&self, i: usize) -> bool {
+        self.breaks.binary_search(&i).is_ok()
+    }
+
+    /// The folded block holding record `i`.
+    fn block_of(&self, i: usize) -> Option<&Block> {
+        if i >= self.folded {
+            return None;
+        }
+        self.blocks.get(self.blocks.partition_point(|b| b.i1 <= i))
+    }
+
+    /// The folded blocks within records `i0..i1` (`i0` on a block start).
+    fn blocks_between(&self, i0: usize, i1: usize) -> &[Block] {
+        let lo = self.blocks.partition_point(|b| b.i1 <= i0);
+        let hi = self.blocks.partition_point(|b| b.i0 < i1).max(lo);
+        self.blocks.get(lo..hi).unwrap_or(&[])
+    }
+
+    /// Record `i` as a sample: a full-resolution record, or the first or
+    /// last record of a block; `None` inside a block.
+    fn sample_at(&self, i: usize) -> Option<Sample> {
+        match self.block_of(i) {
+            Some(b) if i == b.i0 => Some(b.first),
+            Some(b) if i + 1 == b.i1 => Some(b.last),
+            Some(_) => None,
+            None => self.get(i).map(|r| Sample::of(&r)),
+        }
+    }
+
+    /// Record indices `i0..i1` with `t0 <= time <= t1` (times never
+    /// decrease). A folded block that overlaps `t0..=t1` is in range whole.
+    fn index_range(&self, t0: u64, t1: u64) -> (usize, usize) {
+        let first = |pred: &dyn Fn(usize) -> bool| {
+            let (mut lo, mut hi) = (0, self.len);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if pred(mid) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
+        };
+        let end_time = |i: usize| self.block_of(i).map_or_else(|| self.time_at(i), Block::t1);
+        let start_time = |i: usize| self.block_of(i).map_or_else(|| self.time_at(i), Block::t0);
+        let i0 = first(&|i| end_time(i) < t0);
+        let i1 = first(&|i| start_time(i) <= t1);
+        (i0, i1.max(i0))
+    }
+
+    /// The ruler's stats over the records with `t0 <= time <= t1` (either
+    /// order); `None` when no record is in range.
+    ///
+    /// Charge and energy are the trapezoid rule over `t0..t1` itself: between
+    /// neighbouring records in range as [`Integrator`] counts them, plus the
+    /// parts from each end to its nearest record, along the line to the
+    /// record just outside (so ΔAh is ΔT × the average for a steady load).
+    /// Nothing counts across a run break, edge parts included. Averages are
+    /// over the records in range. A folded block overlapping the range
+    /// counts whole, with no edge part on its side.
+    pub fn range_stats(&self, t0: u64, t1: u64) -> Option<RangeStats> {
+        let (t0, t1) = if t1 < t0 { (t1, t0) } else { (t0, t1) };
+        let (i0, i1) = self.index_range(t0, t1);
+        if i0 >= i1 {
+            return None;
+        }
+        let (mut charge_ah, mut energy_wh) = (0.0, 0.0);
+        let (mut samples, mut v_sum, mut i_sum, mut p_sum) = (0u64, 0.0, 0.0, 0.0);
+        // The folded part, block by block, with the stretches between them.
+        let mut prev: Option<Sample> = None;
+        for b in self.blocks_between(i0, i1) {
+            if let Some(a) = prev.filter(|_| !self.starts_run(b.i0)) {
+                let (dq, de) = a.point().trapezoid(b.first.point());
+                charge_ah += dq;
+                energy_wh += de;
+            }
+            charge_ah += b.charge_ah;
+            energy_wh += b.energy_wh;
+            samples += b.count();
+            v_sum += b.sum[series_index(Series::Vbus)];
+            i_sum += b.sum[series_index(Series::Ibus)];
+            p_sum += b.sum[series_index(Series::Power)];
+            prev = Some(b.last);
+        }
+        // The full-resolution part.
+        let j0 = i0.max(self.folded);
+        let mut next_break = self.breaks.partition_point(|&b| b < j0);
+        let mut integrator = primed(prev);
+        let base = (charge_ah, energy_wh);
+        for (i, r) in self.iter_range(j0, i1) {
+            if self.breaks.get(next_break) == Some(&i) {
+                integrator.break_run();
+                next_break += 1;
+            }
+            let (v, a) = (r.vbus_v(), r.ibus_a());
+            let (dq, de) = integrator.push(r.time_ms(), v, a);
+            (charge_ah, energy_wh) = (base.0 + dq, base.1 + de);
+            samples += 1;
+            v_sum += v;
+            i_sum += a;
+            p_sum += v * a;
+        }
+        // The part from `t0` to the first record in range, and from the last
+        // one to `t1`, each within one run (none from inside a block).
+        let edges = [
+            (
+                i0.checked_sub(1).filter(|_| !self.starts_run(i0)),
+                i0,
+                t0 as f64,
+                true,
+            ),
+            (
+                Some(i1).filter(|&o| o < self.len && !self.starts_run(o)),
+                i1 - 1,
+                t1 as f64,
+                false,
+            ),
+        ];
+        for (outside, inside, at, start) in edges {
+            let (Some(o), Some(inner)) = (
+                outside.and_then(|o| self.sample_at(o)),
+                self.sample_at(inside),
+            ) else {
+                continue;
+            };
+            let (o, inner) = (o.point(), inner.point());
+            if (start && at > inner.t) || (!start && at < inner.t) {
+                continue;
+            }
+            let end = o.towards(inner, at);
+            let (dq, de) = if end.t < inner.t {
+                end.trapezoid(inner)
+            } else {
+                inner.trapezoid(end)
+            };
+            charge_ah += dq;
+            energy_wh += de;
+        }
+        let n = samples as f64;
+        (samples > 0).then(|| RangeStats {
+            samples,
+            charge_ah,
+            energy_wh,
+            vbus_avg_v: v_sum / n,
+            ibus_avg_a: i_sum / n,
+            power_avg_w: p_sum / n,
+        })
+    }
+
+    /// Segment marks and E.D.: the marks follow the current run (the records
+    /// since the last run break; a break with no record after it yet is not
+    /// counted), the whole history when there is none. E.D. is a share of the
+    /// session's energy, or of the run's when the query asks. `None` with no
+    /// record.
+    ///
+    /// Charge and energy are integrated over the raw records by the trapezoid
+    /// rule, never across a run break. A mark sits where the running total
+    /// first reaches its step, linearly between the two records around it.
+    /// Each E.D. point is the running energy at its time (the trapezoid rule
+    /// up to it) over the E.D. total. A total that is not above zero gives
+    /// no marks or E.D., and says so in the answer's flags. Inside a folded
+    /// block, marks and E.D. are placed linearly between its edges.
+    pub fn run_progress(&self, q: &RunProgressQuery) -> Option<RunProgress> {
+        let start = self
+            .breaks
+            .iter()
+            .rev()
+            .find(|&&b| b < self.len)
+            .copied()
+            .unwrap_or(0);
+        let last = self.len.checked_sub(1)?;
+        let (run_t0_ms, run_t1_ms) = (self.time_at(start), self.time_at(last));
+        let from = match q.ed_scope {
+            EdScope::Session => 0,
+            EdScope::Run => start,
+        };
+        let ed_t_ms = ed_times(q, self.time_at(from), run_t1_ms);
+
+        // Pass 1: the totals, and the running energy at each E.D. time.
+        let Integrated {
+            at_wh,
+            total_wh,
+            run_ah: charge_ah,
+            run_wh: energy_wh,
+        } = self.integrate(from, start, &ed_t_ms);
+
+        let followed = match q.kind {
+            MarkKind::Charge => charge_ah,
+            MarkKind::Energy => energy_wh,
+        };
+        let marks_total_positive = followed > 0.0 && followed.is_finite();
+        let marks = if marks_total_positive {
+            self.marks(start, q.kind, followed, &mark_percents(q.step_pct))
+        } else {
+            Vec::new()
+        };
+        let energy_total_positive = total_wh > 0.0 && total_wh.is_finite();
+        let (ed_t_ms, ed_pct) = if energy_total_positive {
+            let pct = at_wh.iter().map(|wh| 100.0 * wh / total_wh).collect();
+            (ed_t_ms, pct)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        Some(RunProgress {
+            session_t0_ms: self.time_at(0),
+            run_t0_ms,
+            run_t1_ms,
+            samples: (self.len - start) as u64,
+            charge_ah,
+            energy_wh,
+            marks_total_positive,
+            marks,
+            ed_total_wh: total_wh,
+            energy_total_positive,
+            ed_t_ms,
+            ed_pct,
+        })
+    }
+
+    /// One pass over records `from..`: the running energy at each of `times`
+    /// (ascending), nothing counted across a run break, the energy over the
+    /// whole pass, and the charge and energy of the run that starts at record
+    /// `run_start` (`>= from`, with no break after it). `from` and
+    /// `run_start` are on block starts or full-resolution records.
+    fn integrate(&self, from: usize, run_start: usize, times: &[f64]) -> Integrated {
+        let mut at_wh = Vec::with_capacity(times.len());
+        let (mut ah, mut wh) = (0.0, 0.0);
+        let mut before_run = (0.0, 0.0);
+        let mut prev: Option<Sample> = None;
+        for b in self.blocks_between(from, self.len) {
+            if self.starts_run(b.i0) {
+                prev = None;
+            }
+            if b.i0 == run_start {
+                before_run = (ah, wh);
+            }
+            let (f, l) = (b.first.point(), b.last.point());
+            // Up to the block's first record, along the line from the record
+            // before it.
+            let a = prev.map(Sample::point);
+            while let Some(&t) = times.get(at_wh.len()).filter(|&&t| t <= f.t) {
+                let part = a.map_or(0.0, |a| a.trapezoid(a.towards(f, t)).1);
+                at_wh.push(wh + part);
+            }
+            if let Some(a) = a {
+                let (dq, de) = a.trapezoid(f);
+                ah += dq;
+                wh += de;
+            }
+            // Inside the block, linearly between its edges.
+            while let Some(&t) = times.get(at_wh.len()).filter(|&&t| t <= l.t) {
+                at_wh.push(wh + b.energy_wh * (t - f.t) / (l.t - f.t));
+            }
+            ah += b.charge_ah;
+            wh += b.energy_wh;
+            prev = Some(b.last);
+        }
+        let j0 = from.max(self.folded);
+        let mut next_break = self.breaks.partition_point(|&b| b < j0);
+        let mut integrator = primed(prev);
+        let base = (ah, wh);
+        let mut prev = prev.map(Sample::point);
+        for (i, r) in self.iter_range(j0, self.len) {
+            if self.breaks.get(next_break) == Some(&i) {
+                integrator.break_run();
+                prev = None;
+                next_break += 1;
+            }
+            if i == run_start {
+                before_run = (ah, wh);
+            }
+            let b = Point::of(&r);
+            while let Some(&t) = times.get(at_wh.len()).filter(|&&t| t <= b.t) {
+                let part = prev.map_or(0.0, |a| a.trapezoid(a.towards(b, t)).1);
+                at_wh.push(wh + part);
+            }
+            let (dq, de) = integrator.push(r.time_ms(), r.vbus_v(), r.ibus_a());
+            (ah, wh) = (base.0 + dq, base.1 + de);
+            prev = Some(b);
+        }
+        at_wh.resize(times.len(), wh);
+        Integrated {
+            at_wh,
+            total_wh: wh,
+            run_ah: ah - before_run.0,
+            run_wh: wh - before_run.1,
+        }
+    }
+
+    /// Pass 2 of [`Self::run_progress`]: where the running `kind` total of
+    /// records `start..` first reaches each of `percents` of `total` (> 0).
+    fn marks(&self, start: usize, kind: MarkKind, total: f64, percents: &[f64]) -> Vec<RunMark> {
+        let pick = |ah: f64, wh: f64| if kind == MarkKind::Charge { ah } else { wh };
+        let mut walk = MarkWalk {
+            marks: Vec::with_capacity(percents.len()),
+            percents,
+            total,
+            prev: None,
+        };
+        let mut c = 0.0;
+        let mut last: Option<Sample> = None;
+        for b in self.blocks_between(start, self.len) {
+            if walk.done() {
+                return walk.marks;
+            }
+            let f = b.first.point();
+            if let Some(a) = last {
+                let (dq, de) = a.point().trapezoid(f);
+                c += pick(dq, de);
+            }
+            walk.step(f.t, c);
+            c += pick(b.charge_ah, b.energy_wh);
+            if b.i1 - b.i0 > 1 {
+                walk.step(f64::from(b.last.t), c);
+            }
+            last = Some(b.last);
+        }
+        let mut integrator = primed(last);
+        let base = c;
+        for (_, r) in self.iter_range(start.max(self.folded), self.len) {
+            if walk.done() {
+                break;
+            }
+            let (ah, wh) = integrator.push(r.time_ms(), r.vbus_v(), r.ibus_a());
+            walk.step(f64::from(r.time_ms()), base + pick(ah, wh));
+        }
+        walk.marks
+    }
+
+    /// Every record still at full resolution, in order, with whether it
+    /// starts a new measuring run (nothing was measured between it and the
+    /// record before).
     pub fn iter_runs(&self) -> impl Iterator<Item = (QueueRecord, bool)> + '_ {
         let mut breaks = self.breaks.iter().peekable();
-        self.iter().enumerate().map(move |(i, r)| {
+        self.iter_range(0, self.len).map(move |(i, r)| {
+            while breaks.next_if(|&&b| b < i).is_some() {}
             let new_run = breaks.next_if(|&&b| b == i).is_some();
             (r, new_run)
         })
     }
 
     fn push(&mut self, r: &QueueRecord) {
-        if self.len & CHUNK_MASK == 0 && self.len >> CHUNK_SHIFT == self.chunks.len() {
+        if self.len & CHUNK_MASK == 0
+            && self.len >> CHUNK_SHIFT == self.chunks.len() + (self.folded >> CHUNK_SHIFT)
+        {
             self.chunks.push(Arc::new(Chunk::new()));
         }
         if let Some(chunk) = self.chunks.last_mut() {
@@ -210,10 +854,35 @@ impl Records {
         self.len += 1;
     }
 
-    /// Time of record `i`, ms.
-    fn time_at(&self, i: usize) -> u64 {
-        self.chunks
-            .get(i >> CHUNK_SHIFT)
+    /// Fold the oldest stored chunk (it must be complete) into blocks of at
+    /// most [`FOLD_BLOCK`] records, cut at every run break, and free it.
+    fn fold_oldest_chunk(&mut self) {
+        let (base, end) = (self.folded, self.folded + CHUNK_LEN);
+        if end > self.len || self.chunks.is_empty() {
+            return;
+        }
+        let mut blocks = Vec::with_capacity(CHUNK_LEN / FOLD_BLOCK);
+        let mut open: Option<(Block, Integrator)> = None;
+        for (i, r) in self.iter_range(base, end) {
+            if open.is_some() && (i % FOLD_BLOCK == 0 || self.starts_run(i)) {
+                blocks.extend(open.take().map(|(b, _)| b));
+            }
+            let (block, integrator) =
+                open.get_or_insert_with(|| (Block::start(&r, i), Integrator::new()));
+            block.add(&r, integrator);
+        }
+        blocks.extend(open.map(|(b, _)| b));
+        Arc::make_mut(&mut self.blocks).extend(blocks);
+        self.chunks.remove(0);
+        self.folded = end;
+    }
+
+    /// Time of record `i`, ms; inside a folded block, its first record's.
+    pub(crate) fn time_at(&self, i: usize) -> u64 {
+        if let Some(b) = self.block_of(i) {
+            return if i + 1 == b.i1 { b.t1() } else { b.t0() };
+        }
+        self.chunk(i)
             .and_then(|c| c.time_ms.get(i & CHUNK_MASK))
             .map_or(u64::MAX, |&t| u64::from(t))
     }
@@ -230,17 +899,77 @@ impl Records {
             + self.chunks.capacity() * size_of::<Arc<Chunk>>()
             + self.rates.capacity() * size_of::<(usize, Rate)>()
             + self.breaks.capacity() * size_of::<usize>()
+            + self.blocks.capacity() * size_of::<Block>()
+    }
+}
+
+/// The running total of [`Records::marks`], record (or block edge) by
+/// record.
+struct MarkWalk<'a> {
+    marks: Vec<RunMark>,
+    percents: &'a [f64],
+    total: f64,
+    /// The previous `(time, total)`.
+    prev: Option<(f64, f64)>,
+}
+
+impl MarkWalk<'_> {
+    fn done(&self) -> bool {
+        self.marks.len() >= self.percents.len()
+    }
+
+    /// The running total is `c` at time `t`: mark every step it reached
+    /// since the previous point, linearly between the two.
+    fn step(&mut self, t: f64, c: f64) {
+        while let Some(&p) = self.percents.get(self.marks.len()) {
+            let target = self.total * p / 100.0;
+            if c < target {
+                break;
+            }
+            let t_ms = match self.prev {
+                Some((t0, c0)) if c0 < target => t0 + (target - c0) / (c - c0) * (t - t0),
+                _ => t,
+            };
+            self.marks.push(RunMark { t_ms, percent: p });
+        }
+        self.prev = Some((t, c));
     }
 }
 
 /// Every record of a session, columnar, in raw device units.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct History {
     records: Records,
     /// Min / max pyramid: level `k` holds one entry per block of
     /// [`block_len`]`(k)` records. Level 0 covers every record; a higher
-    /// level's entry holds only its child blocks that are complete.
-    pyramid: Vec<Vec<Entry>>,
+    /// level's entry holds only its child blocks that are complete. Entries
+    /// of blocks that are folded whole are dropped.
+    pyramid: Vec<Level>,
+    /// Newest records kept at full resolution, at least.
+    full_limit: usize,
+}
+
+impl Default for History {
+    fn default() -> History {
+        History::with_full_limit(HISTORY_FULL_SAMPLES)
+    }
+}
+
+/// One pyramid level: the entries of blocks `first..`.
+#[derive(Debug, Clone, Default)]
+struct Level {
+    first: usize,
+    entries: Vec<Entry>,
+}
+
+impl Level {
+    fn get(&self, b: usize) -> Option<&Entry> {
+        self.entries.get(b.checked_sub(self.first)?)
+    }
+
+    fn get_mut(&mut self, b: usize) -> Option<&mut Entry> {
+        self.entries.get_mut(b.checked_sub(self.first)?)
+    }
 }
 
 /// Records per block at the finest pyramid level.
@@ -251,15 +980,61 @@ const SERIES: usize = 7;
 type Entry = [(f32, f32); SERIES];
 
 impl History {
-    /// An empty history.
+    /// An empty history that keeps the newest [`HISTORY_FULL_SAMPLES`]
+    /// records at full resolution.
     pub fn new() -> History {
         History::default()
+    }
+
+    /// An empty history that keeps at least the newest `full` records (one
+    /// at least) at full resolution and folds whole older chunks.
+    pub fn with_full_limit(full: usize) -> History {
+        History {
+            records: Records::default(),
+            pyramid: Vec::new(),
+            full_limit: full.max(1),
+        }
     }
 
     /// Append one record; amortized constant time.
     pub fn push(&mut self, r: &QueueRecord) {
         self.records.push(r);
         self.extend_pyramid(r);
+        while self.records.len >= self.records.folded + CHUNK_LEN + self.full_limit {
+            let before = self.records.folded;
+            self.records.fold_oldest_chunk();
+            if self.records.folded == before {
+                break;
+            }
+            self.trim_pyramid();
+        }
+    }
+
+    /// Drop the pyramid entries of blocks that are folded whole.
+    fn trim_pyramid(&mut self) {
+        let folded = self.records.folded;
+        for (k, level) in self.pyramid.iter_mut().enumerate() {
+            let drop = (folded / block_len(k))
+                .saturating_sub(level.first)
+                .min(level.entries.len());
+            level.entries.drain(..drop);
+            level.first += drop;
+        }
+    }
+
+    /// Where full resolution starts, ms: the time of the oldest record not
+    /// folded; `None` while nothing is folded.
+    pub fn fold_boundary_ms(&self) -> Option<u64> {
+        self.records.fold_boundary_ms()
+    }
+
+    /// Each folded block's first and last record time, ms, oldest first.
+    pub fn fold_blocks_ms(&self) -> Vec<(u64, u64)> {
+        self.records
+            .blocks
+            .iter()
+            .map(|b| (b.t0(), b.t1()))
+            .collect()
     }
 
     /// The next record pushed starts a new measuring run: nothing was
@@ -288,7 +1063,7 @@ impl History {
             let size = block_len(k);
             let b = (n - 1) / size;
             if self.pyramid.len() == k {
-                self.pyramid.push(Vec::new());
+                self.pyramid.push(Level::default());
             }
             let Some(level) = self.pyramid.get_mut(k) else {
                 return;
@@ -299,7 +1074,7 @@ impl History {
                         *x = merge_pair(*x, entry[s]);
                     }
                 }
-                None => level.push(entry),
+                None => level.entries.push(entry),
             }
             // A completed block goes up one level.
             if !n.is_multiple_of(size) {
@@ -313,7 +1088,7 @@ impl History {
         }
     }
 
-    /// Number of records.
+    /// Number of records, folded ones included.
     pub fn len(&self) -> usize {
         self.records.len()
     }
@@ -323,19 +1098,19 @@ impl History {
         self.records.is_empty()
     }
 
-    /// Record `i`, exactly as it was pushed.
+    /// Record `i`, exactly as it was pushed; `None` for a folded one.
     pub fn get(&self, i: usize) -> Option<QueueRecord> {
         self.records.get(i)
     }
 
-    /// Every record, in order.
+    /// Every record still at full resolution, in order.
     pub fn iter(&self) -> impl Iterator<Item = QueueRecord> + '_ {
         self.records.iter()
     }
 
     /// Drop every record and free the memory.
     pub fn clear(&mut self) {
-        *self = History::new();
+        *self = History::with_full_limit(self.full_limit);
     }
 
     /// Bytes allocated by the store (capacity, not just length).
@@ -345,7 +1120,7 @@ impl History {
             + self
                 .pyramid
                 .iter()
-                .map(|l| l.capacity() * size_of::<Entry>())
+                .map(|l| l.entries.capacity() * size_of::<Entry>())
                 .sum::<usize>()
     }
 
@@ -356,10 +1131,21 @@ impl History {
     /// Picks the coarsest pyramid level that still gives at least `buckets`
     /// blocks in range, merges whole blocks into buckets and reads raw
     /// samples only at the two edges of the range.
+    ///
+    /// Folded blocks in range (whole) share the buckets with the
+    /// full-resolution records in proportion to the records each holds.
     pub fn range(&self, series: &[Series], t0: u64, t1: u64, buckets: usize) -> Vec<SeriesBuckets> {
         let buckets = buckets.min(MAX_BUCKETS);
         let (i0, i1) = self.index_range(t0, t1);
-        let plan = (buckets > 0 && i0 < i1).then(|| self.plan(i0, i1, buckets));
+        let folded = self.records.folded;
+        let blocks = self.records.blocks_between(i0, i1.min(folded));
+        let (r0, r1) = (i0.max(folded), i1);
+        let (to_blocks, to_records) = split_buckets(
+            buckets,
+            i1.min(folded).saturating_sub(i0),
+            r1.saturating_sub(r0),
+        );
+        let plan = (to_records > 0 && r0 < r1).then(|| self.plan(r0, r1, to_records));
         // Where each series was first answered.
         let mut first: [Option<usize>; SERIES] = [None; SERIES];
         let mut out: Vec<SeriesBuckets> = Vec::with_capacity(series.len());
@@ -369,9 +1155,14 @@ impl History {
                 Some(done) => done.buckets.clone(),
                 None => {
                     *slot = Some(out.len());
-                    plan.as_ref()
-                        .map(|plan| self.buckets_of(s, plan))
-                        .unwrap_or_default()
+                    let mut b = folded_buckets(blocks, series_index(s), to_blocks);
+                    if let Some(plan) = &plan {
+                        b.extend(self.buckets_of(s, plan));
+                    }
+                    if b.len() > buckets {
+                        b = merge_buckets(&b);
+                    }
+                    b
                 }
             };
             out.push(SeriesBuckets { series: s, buckets });
@@ -392,6 +1183,18 @@ impl History {
             })
             .filter(|g| g.to_ms > t0 && g.from_ms < t1)
             .collect()
+    }
+
+    /// The ruler's stats over the records with `t0 <= time <= t1`; see
+    /// [`Records::range_stats`]. Reads the history only.
+    pub fn range_stats(&self, t0: u64, t1: u64) -> Option<RangeStats> {
+        self.records.range_stats(t0, t1)
+    }
+
+    /// Segment marks and E.D. of the current run; see
+    /// [`Records::run_progress`]. Reads the history only.
+    pub fn run_progress(&self, q: &RunProgressQuery) -> Option<RunProgress> {
+        self.records.run_progress(q)
     }
 
     /// `t0..=t1` widened to the record just outside each end that falls
@@ -424,21 +1227,7 @@ impl History {
 
     /// Record indices `i0..i1` with `t0 <= time <= t1` (times never decrease).
     fn index_range(&self, t0: u64, t1: u64) -> (usize, usize) {
-        let first = |pred: &dyn Fn(u64) -> bool| {
-            let (mut lo, mut hi) = (0, self.records.len);
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                if pred(self.time_at(mid)) {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
-            }
-            lo
-        };
-        let i0 = first(&|t| t < t0);
-        let i1 = first(&|t| t <= t1);
-        (i0, i1.max(i0))
+        self.records.index_range(t0, t1)
     }
 
     /// How to cut `i0..i1` into at most `buckets` buckets.
@@ -528,6 +1317,85 @@ impl History {
     }
 }
 
+/// How many of `buckets` go to `folded` folded records and how many to
+/// `full` full-resolution ones, in proportion, each part with any records
+/// getting one at least (one each when only one bucket is asked for).
+fn split_buckets(buckets: usize, folded: usize, full: usize) -> (usize, usize) {
+    match (folded, full) {
+        _ if buckets == 0 => (0, 0),
+        (0, _) => (0, buckets),
+        (_, 0) => (buckets, 0),
+        _ if buckets == 1 => (1, 1),
+        _ => {
+            let share = buckets as f64 * folded as f64 / (folded + full) as f64;
+            let to_blocks = (share.round() as usize).clamp(1, buckets - 1);
+            (to_blocks, buckets - to_blocks)
+        }
+    }
+}
+
+/// Min / max buckets of series `s` over `blocks`, whole blocks evenly
+/// grouped into at most `buckets` buckets.
+fn folded_buckets(blocks: &[Block], s: usize, buckets: usize) -> Vec<Bucket> {
+    if buckets == 0 || blocks.is_empty() {
+        return Vec::new();
+    }
+    let per = blocks.len().div_ceil(buckets);
+    blocks
+        .chunks(per)
+        .map(|group| Bucket {
+            t_ms: group.first().map_or(0, Block::t0),
+            min: group.iter().fold(f32::MAX, |m, b| m.min(b.min[s])),
+            max: group.iter().fold(f32::MIN, |m, b| m.max(b.max[s])),
+        })
+        .collect()
+}
+
+/// `buckets` merged into one.
+fn merge_buckets(buckets: &[Bucket]) -> Vec<Bucket> {
+    let Some(first) = buckets.first() else {
+        return Vec::new();
+    };
+    vec![buckets.iter().fold(*first, |acc, b| Bucket {
+        t_ms: acc.t_ms,
+        min: acc.min.min(b.min),
+        max: acc.max.max(b.max),
+    })]
+}
+
+/// The percentages to mark at every `step_pct`, 0% and 100% left out; none
+/// for a step outside `0 < step < 100`, at most [`MAX_MARKS`].
+fn mark_percents(step_pct: f64) -> Vec<f64> {
+    if !(step_pct > 0.0 && step_pct < 100.0) {
+        return Vec::new();
+    }
+    (1..=MAX_MARKS)
+        .map(|k| k as f64 * step_pct)
+        // A tolerance keeps a step like 100 / 3 from marking 100%.
+        .take_while(|&p| p < 100.0 - 1e-9)
+        .collect()
+}
+
+/// `q.ed_points` (at most [`MAX_BUCKETS`]) evenly spaced times over the E.D.
+/// window clamped to `run_t0..=run_t1` (the scope's records); none when it
+/// misses them.
+fn ed_times(q: &RunProgressQuery, run_t0: u64, run_t1: u64) -> Vec<f64> {
+    let n = q.ed_points.min(MAX_BUCKETS);
+    let (a, b) = (q.ed_t0_ms.unwrap_or(run_t0), q.ed_t1_ms.unwrap_or(run_t1));
+    let (a, b) = (a.min(b).max(run_t0), a.max(b).min(run_t1));
+    if n == 0 || a > b {
+        return Vec::new();
+    }
+    let (a, b) = (a as f64, b as f64);
+    if n == 1 {
+        return vec![b];
+    }
+    let step = (b - a) / (n - 1) as f64;
+    (0..n)
+        .map(|k| if k + 1 == n { b } else { a + step * k as f64 })
+        .collect()
+}
+
 /// Records per block at pyramid level `k`: 64·4^k.
 fn block_len(k: usize) -> usize {
     PYRAMID_BASE << (2 * k)
@@ -555,7 +1423,7 @@ fn merge(a: Option<(f32, f32)>, b: Option<(f32, f32)>) -> Option<(f32, f32)> {
 }
 
 /// Column of `series` in a pyramid entry.
-fn series_index(series: Series) -> usize {
+const fn series_index(series: Series) -> usize {
     match series {
         Series::Vbus => 0,
         Series::Ibus => 1,
@@ -569,20 +1437,53 @@ fn series_index(series: Series) -> usize {
 
 /// The values of every series for `r`, in SI units, in [`series_index`] order.
 fn values(r: &QueueRecord) -> [f32; SERIES] {
+    values_f64(r).map(|x| x as f32)
+}
+
+/// [`values`] before the cast to f32.
+fn values_f64(r: &QueueRecord) -> [f64; SERIES] {
     [
-        r.vbus_v() as f32,
-        r.ibus_a() as f32,
-        r.dp_v() as f32,
-        r.dm_v() as f32,
-        r.cc1_v() as f32,
-        r.cc2_v() as f32,
-        (r.vbus_v() * r.ibus_a()) as f32,
+        r.vbus_v(),
+        r.ibus_a(),
+        r.dp_v(),
+        r.dm_v(),
+        r.cc1_v(),
+        r.cc2_v(),
+        r.vbus_v() * r.ibus_a(),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sequential_walk_matches_record_by_record_lookup() {
+        // Across chunk boundaries and rate changes, from any start.
+        let mut r = Records::default();
+        let n = CHUNK_LEN * 2 + 77;
+        for i in 0..n {
+            let rate = match i / 40_000 {
+                0 => Rate::Sps1000,
+                1 => Rate::Sps10,
+                _ => Rate::Sps1000,
+            };
+            let t = u32::try_from(i).unwrap_or(u32::MAX);
+            r.push(&QueueRecord::from_raw(
+                t,
+                5_000_000,
+                1_000_000,
+                [100, 200, 300, 400],
+                rate,
+            ));
+        }
+        for i0 in [0, 1, 39_999, 40_000, CHUNK_LEN - 1, CHUNK_LEN, n - 1] {
+            let walked: Vec<_> = r.iter_range(i0, n).collect();
+            let looked_up: Vec<_> = (i0..n).filter_map(|i| r.get(i).map(|x| (i, x))).collect();
+            assert_eq!(walked, looked_up, "from {i0}");
+        }
+        assert_eq!(r.iter_range(5, n + 10).count(), n - 5);
+    }
 
     #[test]
     fn an_empty_span_has_no_min_or_max() {

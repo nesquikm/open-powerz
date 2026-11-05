@@ -1,16 +1,22 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
+  import Term from "./Term.svelte";
+  import { onMount } from "svelte";
   import type { TriggerLimits, TriggerOffer, TriggerProtocol } from "../backend";
   import {
     LEGACY_FIXED_VOLTS,
     QC3_RANGE,
     clampToLimits,
+    cableVendorText,
     detectionChecks,
+    hexId,
     isFixedVoltProtocol,
     isLimitsProtocol,
     limitsRequest,
     type TriggerPanel,
   } from "../trigger.svelte";
   import type { PdConsole } from "../console.svelte";
+  import HintText from "./HintText.svelte";
   import PdConsoleView from "./PdConsoleView.svelte";
   import TriggerConfirmDialog from "./TriggerConfirmDialog.svelte";
 
@@ -30,18 +36,19 @@
     pdConsole?: PdConsole;
   } = $props();
 
-  let busy = $state(false);
+  // A reloaded page starts unarmed; an armed backend says so here.
+  onMount(() => void panel.refreshArmed());
+
+  // With no session the Cable card shows what a PD capture holds, if anything.
+  $effect(() => {
+    void connected;
+    if (!panel.sessionOpen) void panel.loadCaptureCable();
+  });
+
+  /** No session, and none on its way. */
+  const noSession = $derived(!panel.sessionOpen && !panel.detecting);
 
   const reason = $derived(connected ? null : "Connect a meter to detect the charger's protocols.");
-
-  async function detect(): Promise<void> {
-    busy = true;
-    try {
-      await panel.detect();
-    } finally {
-      busy = false;
-    }
-  }
 
   /** `9 V` or `3.3 V`, from millivolts. */
   function volts(mv: number): string {
@@ -111,10 +118,25 @@
     limitsMa = {};
   });
 
+  /** Offer and protocol presses: off while Detect runs or once the meter fell out of step. */
+  const pressesOff = $derived(panel.requestsDisabled || panel.detecting);
+
   /** Request controls work only in an open session, not while a confirmation is
-   *  waiting, and not once the meter fell out of step (until the session is reopened). */
-  const requestsOff = $derived(
-    !panel.sessionOpen || panel.pending !== null || panel.requestsDisabled,
+   *  waiting, not while Detect runs, and not once the meter fell out of step (until
+   *  the session is reopened). */
+  const requestsOff = $derived(!panel.sessionOpen || panel.pending !== null || pressesOff);
+
+  /** Why Read cable is off, shown in the Cable card and as the button's description. */
+  const cableReason = $derived(
+    noSession
+      ? "Press Detect to read the cable."
+      : panel.detecting
+        ? "Detect is running; read the cable once it ends."
+        : panel.chargerGone
+          ? "No charger to ask: press Detect to read the cable."
+          : !panel.pdEntered
+            ? "Reading the cable needs PD entered: press a USB PD offer first."
+            : null,
   );
 
   /** `SCP` or `UFCS #2`: the name of a limits block. */
@@ -140,6 +162,8 @@
     text: string | null;
     onvalue: (value: number) => void;
     request?: { label: string; onclick: () => void };
+    /** A PPS / AVS offer: its name at the start of `label` is drawn as terms. */
+    offer?: TriggerOffer;
   }
 
   const SUPPORT_TEXT: Record<string, string> = {
@@ -150,7 +174,11 @@
 </script>
 
 {#snippet slider(p: SliderProps)}
-  <label for={p.id}>{p.label}</label>
+  <label for={p.id}
+    >{#if p.offer}{@render rangeTerms(p.offer)}{p.label.slice(
+        rangeName(p.offer).length,
+      )}{:else}{p.label}{/if}</label
+  >
   <div class="range-row">
     <input
       id={p.id}
@@ -165,28 +193,52 @@
     <output for={p.id}>{p.text}</output>
     {#if p.request}
       {@const r = p.request}
-      <button type="button" disabled={panel.requestsDisabled} onclick={r.onclick}>{r.label}</button>
+      <button
+        type="button"
+        disabled={pressesOff}
+        aria-disabled={panel.requesting}
+        onclick={r.onclick}>{r.label}</button
+      >
     {/if}
   </div>
 {/snippet}
 
+<!-- The name of a PPS / AVS offer, its abbreviations as terms (FR CW66T1). -->
+{#snippet rangeTerms(o: TriggerOffer)}
+  {#if o.kind === "pps"}<Term key="term.pps">PPS</Term>{:else if o.kind === "epr-avs"}<Term
+      key="term.epr">EPR</Term
+    >
+    <Term key="term.avs">AVS</Term>{:else}<Term key="term.spr">SPR</Term>
+    <Term key="term.avs">AVS</Term>{/if}
+{/snippet}
+
+{#snippet cableFact(id: string, label: string, value: string)}
+  <dt id="trigger-cable-{id}">{label}</dt>
+  <dd aria-labelledby="trigger-cable-{id}">{value}</dd>
+{/snippet}
+
 <div class="trigger">
   <div class="toolbar" role="toolbar" aria-label="Trigger">
+    <InfoButton key="section.trigger" />
     <button
       type="button"
       class="primary"
-      disabled={!connected || busy}
+      disabled={!connected || panel.detecting}
       aria-describedby={reason ? "trigger-reason" : undefined}
-      onclick={() => void detect()}>Detect</button
+      onclick={() => void panel.detect()}>Detect</button
     >
     {#if panel.showBackTo5v}
-      <button type="button" onclick={() => void panel.backTo5v()}>Back to 5 V</button>
+      <button type="button" disabled={panel.detecting} onclick={() => void panel.backTo5v()}
+        >Back to 5 V</button
+      >
     {/if}
     {#if reason}
       <p id="trigger-reason" class="reason">{reason}</p>
-    {:else if busy}
+    {:else if panel.detecting}
       <p class="reason" aria-live="polite">Detecting…</p>
     {/if}
+    <!-- Always there, with its room kept: live regions announce a change, and nothing moves. -->
+    <p class="reason requesting" aria-live="polite">{panel.requesting ? "Requesting…" : ""}</p>
   </div>
 
   <p class="reason">
@@ -194,9 +246,23 @@
     VBUS above 5 V on some chargers.
   </p>
 
+  {#if noSession}
+    <p class="reason">Press Detect to see what the charger offers.</p>
+  {/if}
+  {#if panel.chargerGone}
+    <p class="armed" role="status">The charger went away. Press Detect.</p>
+  {/if}
+  {#if panel.armed}
+    <p class="armed" role="status">
+      Not asking up to 20 V
+      <button type="button" onclick={() => void panel.clearArmed()}>Clear</button>
+    </p>
+  {/if}
+
   {#if panel.error}
     <p class="error" role="alert">
-      {panel.error.hint ? `${panel.error.message} ${panel.error.hint}` : panel.error.message}
+      {panel.error.message}
+      <HintText hint={panel.error.hint} />
     </p>
   {/if}
 
@@ -205,7 +271,9 @@
     {#if panel.detection}
       <dl class="facts">
         {#each detectionChecks(panel.detection) as check (check.label)}
-          <dt>{check.label}</dt>
+          <dt>
+            {#if check.label === "BC1.2"}<Term key="term.bc12">BC1.2</Term>{:else}{check.label}{/if}
+          </dt>
           <dd>{check.text}</dd>
         {/each}
       </dl>
@@ -234,7 +302,13 @@
   <div class="sections">
     {#each panel.sections as s (s.protocol)}
       <section class="card" aria-labelledby="trigger-{s.protocol}-title">
-        <h2 id="trigger-{s.protocol}-title">{s.title}</h2>
+        <h2 id="trigger-{s.protocol}-title">
+          {#if s.protocol === "qc"}<Term key="term.qc">{s.title}</Term
+            >{:else if s.protocol === "ufcs"}<Term key="term.ufcs">{s.title}</Term
+            >{:else if s.protocol === "afc" || s.protocol === "fcp" || s.protocol === "scp"}<Term
+              key="term.afcFcpScp">{s.title}</Term
+            >{:else}{s.title}{/if}
+        </h2>
         {#if s.state === "pending"}
           <p class="muted">Not listed yet.</p>
         {:else if s.state === "not-supported"}
@@ -245,7 +319,8 @@
               {#each s.section.offers.filter((o) => o.kind === "fixed") as o (o.position)}
                 <button
                   type="button"
-                  disabled={panel.requestsDisabled}
+                  disabled={pressesOff}
+                  aria-disabled={panel.requesting}
                   onclick={() =>
                     void panel.ask({
                       protocol: "pd",
@@ -263,6 +338,7 @@
               {@render slider({
                 id: `trigger-range-${o.position}`,
                 label: `${rangeName(o)} #${o.position}, ${volts(o.min_voltage_mv)}–${volts(o.max_voltage_mv)}`,
+                offer: o,
                 min: o.min_voltage_mv,
                 max: o.max_voltage_mv,
                 step: rangeStep(o),
@@ -300,6 +376,7 @@
                 <button
                   type="button"
                   disabled={requestsOff}
+                  aria-disabled={panel.requesting}
                   onclick={() => void panel.ask({ protocol: p, volts: v })}>{v} V</button
                 >
               {/each}
@@ -360,6 +437,7 @@
                 <button
                   type="button"
                   disabled={requestsOff || (p === "ufcs" && l.index === null)}
+                  aria-disabled={panel.requesting}
                   title={p === "ufcs" && l.index === null
                     ? "This UFCS capability has no number, so it cannot be requested."
                     : undefined}
@@ -407,9 +485,8 @@
       </dl>
     {:else if panel.requestFailure}
       <p class="error">
-        Request failed: {panel.requestFailure.message}{panel.requestFailure.hint
-          ? ` ${panel.requestFailure.hint}`
-          : ""}
+        Request failed: {panel.requestFailure.message}
+        <HintText hint={panel.requestFailure.hint} />
       </p>
     {:else}
       <p class="muted">No request yet.</p>
@@ -425,14 +502,70 @@
     {/if}
   </section>
 
+  <section class="card" aria-labelledby="trigger-cable-title">
+    <div class="titled">
+      <h2 id="trigger-cable-title">Cable</h2>
+      <InfoButton key="section.cable" />
+    </div>
+    <div class="offers">
+      <button
+        type="button"
+        disabled={requestsOff || panel.cableBusy || panel.chargerGone || !panel.pdEntered}
+        aria-describedby={cableReason ? "trigger-cable-reason" : undefined}
+        onclick={() => void panel.readCable()}>Read cable</button
+      >
+    </div>
+    {#if cableReason}
+      <p id="trigger-cable-reason" class="muted">{cableReason}</p>
+    {/if}
+    {#if panel.cableBusy}
+      <p class="muted" aria-live="polite">Reading the cable…</p>
+    {/if}
+    {#if panel.cable}
+      {@const c = panel.cable.cable}
+      <dl class="facts">
+        {@render cableFact("vendor", "Vendor", cableVendorText(c))}
+        {@render cableFact("vid", "VID", hexId(c.vid))}
+        {@render cableFact("pid", "PID", c.pid === null ? "—" : hexId(c.pid))}
+        {@render cableFact("current", "Maximum current", amps(c.max_current_ma) ?? "—")}
+        {@render cableFact(
+          "voltage",
+          "Maximum voltage",
+          c.max_voltage_v === null ? "—" : `${c.max_voltage_v} V`,
+        )}
+        {@render cableFact("speed", "USB speed", c.speed ?? "—")}
+        {@render cableFact("type", "Type", c.active ? "Active" : "Passive")}
+        {@render cableFact("epr", "EPR", c.epr_capable ? "Yes" : "No")}
+      </dl>
+      {#if panel.cable.source === "capture"}
+        <p class="muted">Seen in the capture.</p>
+      {/if}
+    {:else if panel.cableError}
+      <p class="error">
+        {panel.cableError.message}
+        <HintText hint={panel.cableError.hint} />
+      </p>
+    {:else if panel.cableNoAnswer}
+      <!-- prettier-ignore -->
+      <p>
+        No answer. The cable may have no <Term key="term.emarker">e-marker</Term>. A cable answers only the port that powers it
+        (<Term key="term.vconn">VCONN</Term>). In this wiring the meter may not be the VCONN source.
+      </p>
+    {:else}
+      <p class="muted">Not read yet.</p>
+    {/if}
+  </section>
+
   {#if pdConsole && panel.sessionOpen}
-    <PdConsoleView {pdConsole} />
+    <PdConsoleView {pdConsole} held={panel.detecting} />
   {/if}
 
   {#if panel.pending}
     <TriggerConfirmDialog
       voltageMv={panel.pending.voltageMv}
       text={panel.pending.text}
+      rememberable={panel.pending.rememberable}
+      bind:remember={panel.remember}
       onCancel={() => panel.cancel()}
       onConfirm={() => void panel.confirm()}
     />
@@ -458,8 +591,26 @@
     color: var(--muted);
     font-size: 0.875rem;
   }
+  .requesting {
+    min-width: 6.5em;
+    min-height: 1lh;
+    white-space: nowrap;
+  }
+  /* Not `disabled`: a keyboard press keeps its focus, and the panel ignores the press. */
+  button[aria-disabled="true"] {
+    opacity: 0.6;
+    cursor: progress;
+  }
   .error {
     margin: 0;
+  }
+  .armed {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
   }
   .live {
     margin: 0;

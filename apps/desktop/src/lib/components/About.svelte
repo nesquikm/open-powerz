@@ -11,6 +11,10 @@
     advancedFirmware = false,
     advancedFirmwareLocked = false,
     onAdvancedFirmware,
+    hideSerial = false,
+    onHideSerial,
+    showInfoIcons = true,
+    onShowInfoIcons,
   }: {
     onClose: () => void;
     /** The Advanced firmware switch (FR V9SK55, AC .1): shows the Firmware tab. */
@@ -18,6 +22,12 @@
     /** An update runs: the switch cannot be turned off. */
     advancedFirmwareLocked?: boolean;
     onAdvancedFirmware?: (on: boolean) => void;
+    /** The Hide serial numbers switch (FR AXHK2Q, AC .1). */
+    hideSerial?: boolean;
+    onHideSerial?: (on: boolean) => void;
+    /** The Show (i) icons switch (FR CW66T1, AC .8). */
+    showInfoIcons?: boolean;
+    onShowInfoIcons?: (on: boolean) => void;
     /** The connected meter's details (FR V9SK52, AC .5), null while none is connected. */
     details?: ConnectedInfo | null;
     /** The control that opened About; focus returns there on close (or to ⋯ when it is gone). */
@@ -54,7 +64,7 @@
     <section aria-label="Device details">
       <h3>Device details</h3>
       <dl>
-        {#each deviceDetailsRows(details) as row, i (`${row.label}:${i}`)}
+        {#each deviceDetailsRows(details, hideSerial) as row, i (`${row.label}:${i}`)}
           <dt>{row.label}</dt>
           <dd>{row.value}</dd>
         {/each}
@@ -72,6 +82,24 @@
       onclick={() => onAdvancedFirmware?.(!advancedFirmware)}
     >
       Advanced firmware
+    </button>
+    <button
+      type="button"
+      role="switch"
+      class="switch"
+      aria-checked={hideSerial}
+      onclick={() => onHideSerial?.(!hideSerial)}
+    >
+      Hide serial numbers
+    </button>
+    <button
+      type="button"
+      role="switch"
+      class="switch"
+      aria-checked={showInfoIcons}
+      onclick={() => onShowInfoIcons?.(!showInfoIcons)}
+    >
+      Show (i) icons
     </button>
   </section>
 </Panel>
@@ -94,7 +122,7 @@
     color: var(--muted);
   }
   .switch {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     gap: 0.5rem;
     font: inherit;

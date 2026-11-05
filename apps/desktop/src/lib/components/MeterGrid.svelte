@@ -11,6 +11,7 @@
 
   let {
     meters,
+    hideSerial,
     onExpand,
     onDisconnect,
     recordingOf,
@@ -18,10 +19,15 @@
     defaultRateSps,
     onSelectRate,
     onToggleRecording,
+    onTogglePause,
+    onRecorderOptions,
     onExport,
+    onExportDb,
     fileActions,
   }: {
     meters: Meters;
+    /** The Hide serial numbers switch (FR AXHK2Q). */
+    hideSerial: boolean;
     /** "Expand": meter `id` in the full single-meter view. */
     onExpand: (id: string) => void;
     /** "Disconnect": ends meter `id`'s session only (AC-1HHT03.3). */
@@ -33,7 +39,10 @@
     defaultRateSps: number;
     onSelectRate: (entry: MeterEntry, sps: number) => void;
     onToggleRecording: (entry: MeterEntry) => void;
+    onTogglePause: (entry: MeterEntry) => void;
+    onRecorderOptions: (entry: MeterEntry) => void;
     onExport: (entry: MeterEntry) => void;
+    onExportDb: (entry: MeterEntry) => void;
     /** What can be done with a saved file. */
     fileActions: Snippet<[string]>;
   } = $props();
@@ -43,7 +52,10 @@
      the window narrows, never after a late resize event. -->
 <section class="meter-grid" class:paired={meters.entries.length >= 2} aria-label="Meters">
   {#each meters.entries as entry (entry.listing.id)}
-    {@const title = tileTitle(entry.listing, entry.session.details?.serial ?? null)}
+    {@const title = tileTitle(entry.listing, entry.session.details?.serial ?? null, {
+      hidden: hideSerial,
+      position: meters.position(entry.listing.id),
+    })}
     <article class="tile" aria-label={title.name}>
       <header>
         <h2>{title.name}</h2>
@@ -61,10 +73,15 @@
         session={entry.session}
         recording={recordingOf(entry)}
         exportJob={exportJobOf(entry)}
+        notices={meters.notices.of(entry.listing.id)}
+        onDismissNotice={(notice) => meters.notices.dismiss(entry.listing.id, notice)}
         rateSps={entry.session.rateSps ?? defaultRateSps}
         onSelectRate={(sps) => onSelectRate(entry, sps)}
         onToggleRecording={() => onToggleRecording(entry)}
+        onTogglePause={() => onTogglePause(entry)}
+        onRecorderOptions={() => onRecorderOptions(entry)}
         onExport={() => onExport(entry)}
+        onExportDb={() => onExportDb(entry)}
         onDisconnect={() => onDisconnect(entry.listing.id)}
         {fileActions}
       />

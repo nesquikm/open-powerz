@@ -5,7 +5,7 @@
  * are not, why.
  */
 
-import type { BackendEvent, PdRow, PdStatusSample } from "./backend";
+import type { AttachedSession, BackendEvent, PdRow, PdStatusSample } from "./backend";
 import { PdStore } from "./pdStore";
 import { PdStatusBuffer } from "./pdTimeline";
 
@@ -28,9 +28,16 @@ export const PD_NO_METER_REASON = "Connect a meter to capture PD traffic.";
  * would go on arriving behind the opened file, unseen. */
 export const PD_STOP_FIRST_REASON = "Stop the capture first to open or import a file.";
 
+/** The analyzer's notice after a trigger session (Detect) stopped the capture
+ * (AC-JQ971R.2). */
+export const PD_TRIGGER_STOP_NOTICE =
+  "The PD capture stopped when Detect opened a trigger session. The meter needs a replug before a new capture.";
+
 export class PdCapture {
   /** The PD sniffer runs. */
   capturing = $state(false);
+  /** Why the capture stopped when the user did not stop it, or null. */
+  notice = $state<string | null>(null);
   /** The captured rows, up to the row limit (not reactive itself: watch {@link version}). */
   store = new PdStore();
   /** Bumped on every change to the store. */
@@ -84,6 +91,9 @@ export class PdCapture {
     [this.#from, other.#from] = [other.#from, this.#from];
     [this.#statusFloor, other.#statusFloor] = [other.#statusFloor, this.#statusFloor];
     for (const capture of [this, other]) {
+      // The trigger-stop notice is about the meter shown when it came: it does not
+      // follow a swap either way (AC-JQ971R.3).
+      capture.notice = null;
       capture.#ticket++;
       capture.emptied++;
       capture.version++;
@@ -91,11 +101,19 @@ export class PdCapture {
     }
   }
 
+  /** The backend refused a Start: only its refusal shows, so the trigger-stop notice
+   * goes (AC-JQ971R.3). The rows stay. */
+  startRefused(): void {
+    this.notice = null;
+  }
+
   /** Takes the PD events of the session channel; a session that ends stops the capture. */
   handleEvent(event: BackendEvent): void {
     switch (event.type) {
       case "pd_state":
         this.capturing = event.data.capturing;
+        this.notice =
+          !event.data.capturing && event.data.reason === "trigger" ? PD_TRIGGER_STOP_NOTICE : null;
         break;
       case "pd_rows": {
         if (this.opened) break;
@@ -117,7 +135,12 @@ export class PdCapture {
         const floor = this.#statusFloor;
         const samples =
           floor > 0 ? event.data.samples.filter((s) => s.session_ms > floor) : event.data.samples;
-        if (samples.length === 0) break;
+        const before = this.status.dropped;
+        if (event.data.dropped !== undefined) this.status.noteBackendDropped(event.data.dropped);
+        if (samples.length === 0) {
+          if (this.status.dropped !== before) this.statusVersion++;
+          break;
+        }
         this.status.append(samples);
         this.statusVersion++;
         break;
@@ -125,6 +148,7 @@ export class PdCapture {
       case "status":
         if (event.data.state === "disconnected" || event.data.state === "waiting") {
           this.capturing = false;
+          this.notice = null;
         } else if (event.data.state === "connected") {
           // A new backend session numbers its records from 0 again; the old
           // session's capture ended with it.
@@ -132,7 +156,8 @@ export class PdCapture {
           this.#held = null;
           this.#from = 0;
           this.#statusFloor = 0;
-          this.opened = false;
+          // An opened file stays until the page closes it (AC-AXHK2K.5).
+          if (this.opened) break;
           this.store.clear();
           this.emptied++;
           this.version++;
@@ -143,6 +168,15 @@ export class PdCapture {
       default:
         break;
     }
+  }
+
+  /** Applies the attach snapshot of a page that picks up a running session: whether
+   * the capture runs, and the status samples the backend dropped (AC-AXHK2W.3). */
+  adopt(snapshot: AttachedSession): void {
+    this.capturing = snapshot.pd_capturing === true;
+    if (this.opened) return;
+    this.status.noteBackendDropped(snapshot.pd_status_dropped ?? 0);
+    this.statusVersion++;
   }
 
   /** Shows a capture opened from a file in place of the live one: its `rows` (numbered

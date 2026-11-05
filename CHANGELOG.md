@@ -4,6 +4,34 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-11-05 — "Fine Print"
+
+### Added
+- Trigger panel "don't ask again": the confirmation dialog can skip the question for later requests up to 20 V until you go back to 5 V, hard reset, disconnect or quit; EPR requests above 20 V and the raw console always ask (AXHK2N)
+- Cable card: one Read cable press asks the cable's e-marker for its vendor, current, voltage, speed and whether it is active, says plainly why when no answer comes, and can show an identity already seen in a PD capture without sending anything (AXHK2P)
+- Hide serial numbers: one option hides serial numbers everywhere in the desktop app, tiles switch to position labels, and the CLI gains a matching flag (AXHK2Q)
+- Recorder: pause and resume, an automatic stop when current stays low, a row limit, a file name prefix, a default folder, and how long memory can hold the current stream (AXHK2R)
+- Open recordings: CSV recordings in our layout or the vendor's open for charts and statistics, and the vendor's SQLite database format can be read and written (AXHK2S)
+- Chart ruler, percentage marks and energy share: a two-cursor ruler shows time, charge, energy and averages, marks show when charge or energy reached each share, plus an energy share series, a second chart and a reversed current axis (AXHK2T)
+- Chart appearance and image export: axis range presets, a title, per-series colour, width and transparency, and PNG, SVG or PDF export at a chosen size with no serial number (AXHK2V)
+- Info popovers: every feature and abbreviation has an (i) that says what it does and, where it matters, its risk (CW66T1)
+- Firmware update: the progress section keeps the device list's labels for the updated meter, so the bootloader switch can be read after the update ends (XCCQAK)
+
+### Changed
+- Memory at 1000 SPS: PD status data is capped, the chart allocates less, long live sessions keep older samples at a coarser resolution, and live batches go to the page 20 times a second instead of 60, so the macOS web view stays within its budget (AXHK2W, HR2JAG)
+
+### Fixed
+- Firmware update: the backend never ends a session you did not agree to release, cancel and reload work as expected, the device list line keeps its last label, and the Writing stage explains the 16 bytes the file stores past its image (AXHK2F, AXHK2M, PGY704, VQCKC6)
+- App log: errors that leave a session running and firmware updates are logged, the file size is limited, and it still holds no serial or UID (AXHK2G)
+- Settings writes read the settings block twice and refuse when the reads differ, an unplug that surfaces as a timeout is caught, and a replugged meter is matched more carefully (AXHK2J)
+- Several meters: notices for every tile show, and connecting a second meter keeps an opened PD file (AXHK2K)
+- Trigger panel: a charger unplugged with no contract is noticed and the page says so, and the PD analyzer says why Detect stopped its capture (TFA5N7, WFSNZD, JQ971R)
+- Charts: a hidden chart no longer hangs the window, dashed series move with their line, a click on the overview strip right after connect counts, and a filling live window keeps its start on the first sample instead of wobbling before it (C6VR9K, SX1VTC, B5XBTA, 9QTPNP)
+- Window and layout: a window left on a removed display opens on screen, the tabs, chart options and settings fit at 375, 900 and 1280 px, and the top bar no longer flashes a sideways scrollbar for a frame when its contents change (EWQ6FQ, QBSMHA)
+- Tests and CI: the MSRV job covers the desktop crate, the Device select tooltip is tested under Hide serial numbers, and a timing-sensitive worker test holds at a fixed poll (AXHK2H, NKAD6S, DS89PS)
+
+Total test count at release: 5447 tests, 0 failures, 0 errors.
+
 ## [0.8.1] — 2026-10-31 — "Loose Ends"
 
 ### Fixed

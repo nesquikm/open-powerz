@@ -28,14 +28,21 @@ check the download and open the app past the macOS and Windows warnings.
 - See VBUS, IBUS, power, D+, D−, CC1, CC2 and temperature in a big live readout, in a light, dark or system theme ([getting started](docs/tutorials/getting-started.md#the-desktop-app))
 - Pick a meter or the demo device; the app reconnects on its own after an unplug or a page reload and marks the gap ([explore a session](docs/how-to/explore-a-session.md#when-the-meter-is-unplugged-and-plugged-back-in))
 - Use it from the keyboard and with a screen reader ([keyboard and screen readers](docs/how-to/explore-a-session.md#keyboard-and-screen-readers))
+- Hide serial numbers and UIDs for screenshots and screen shares, with the switch in About or `--hide-serial` in the CLI ([hide serial numbers](docs/how-to/explore-a-session.md#hide-serial-numbers))
+- Press an (i) button beside a section title, or a dotted-underline term such as VBUS or PPS, for a short note on what it means; turn the (i) buttons off in About ([info popovers](docs/how-to/explore-a-session.md#info-popovers-for-sections-and-terms))
 
 ### Recorder and charts
 
 - Chart VBUS, IBUS, power, D+, D−, CC1 and CC2 live, with per-series toggles ([explore a session](docs/how-to/explore-a-session.md))
 - Pause the chart, then zoom and pan with the overview strip, wheel, trackpad, J/K/L or presets ([move around](docs/how-to/explore-a-session.md#move-around-a-long-session))
 - Read the whole session at once, with gaps shown as "No data" bands ([whole session](docs/how-to/explore-a-session.md#read-the-whole-session))
+- Run long sessions: the newest 10 million samples stay at full resolution, older data folds into coarser blocks marked on the chart, and totals stay exact ([long sessions](docs/how-to/record-a-csv.md#long-sessions))
 - See min, max, average, charge and energy for the session ([statistics](docs/how-to/record-a-csv.md#reset-the-statistics-or-clear-the-chart-history))
 - Record to CSV at up to 1000 samples/s in the vendor's layout, from the app or `powerz stream`, and reveal the file in one click ([record a CSV](docs/how-to/record-a-csv.md))
+- Pause and resume a recording, end it with auto-stop on low current or a row limit, and set its file prefix and folder ([recorder options](docs/how-to/record-a-csv.md#recorder-options))
+- Open a CSV recording or a vendor `.db` file in a read-only tab with no meter needed, and export a session to a `.db` in the vendor's layout ([open a recording](docs/how-to/record-a-csv.md#open-a-recording))
+- Measure between two cursors with the chart ruler, and add segment marks, the E.D. energy share, a sub-chart and Reverse current, kept across restarts ([chart tools](docs/how-to/explore-a-session.md#chart-tools))
+- Set axis ranges, each series' colour, width and transparency, and a chart title, then save the chart as an image in PNG, SVG or PDF ([chart style](docs/how-to/explore-a-session.md#chart-style-and-save-image))
 
 ### PD analyzer
 
@@ -48,14 +55,17 @@ check the download and open the app past the macOS and Windows warnings.
 
 - Detect which fast-charge protocols a charger speaks ([trigger a charger](docs/how-to/trigger-a-charger.md))
 - Trigger 9 V from a PD charger, or any fixed, PPS or EPR AVS voltage it offers, from the desktop trigger panel or the CLI, with a confirmation above 5 V and a way back to 5 V ([trigger a charger](docs/how-to/trigger-a-charger.md))
+- Skip the dialog for PD requests up to 20 V with "Don't ask again" in the desktop trigger panel, until you go back to 5 V or disconnect ([trigger a charger](docs/how-to/trigger-a-charger.md#dont-ask-again))
 - Trigger QC 2.0/3.0, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS chargers ([CLI triggering](docs/reference/cli.md#protocol-triggering))
 - Send custom PD messages, read a cable's e-marker, or type raw commands in a console ([custom PD messages](docs/reference/cli.md#custom-pd-messages))
+- Press Read cable in an open PD session to see a cable's vendor, limits, speed and type from its e-marker ([read a cable](docs/how-to/trigger-a-charger.md#read-a-cable))
 
 ### Firmware update
 
 - See the meter's mode and firmware version, with a warning for old firmware ([CLI reference](docs/reference/cli.md))
 - Inspect a ChargerLAB firmware file before you use it ([update firmware](docs/how-to/update-firmware.md))
 - Update the meter's firmware from the CLI or behind the app's Advanced firmware switch, with recovery steps if it fails ([update firmware](docs/how-to/update-firmware.md))
+- After an update, read the device list labels the meter took, bootloader mode included ([update firmware](docs/how-to/update-firmware.md))
 
 ### Offline records
 

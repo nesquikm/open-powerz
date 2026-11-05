@@ -7,10 +7,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BackendEvent, FlashDone, FlashEvent, UiError } from "./backend";
+import type { BackendEvent, FlashDone, FlashEvent, FlashHold, UiError } from "./backend";
 import { MOCK_MODES, MockBackend, mockModeFromUrl, type MockMode } from "./mockBackend";
 
 const DEMO = "demo:load-5v-1a";
+/** The demo session, as a refused update names it (FR AXHK2F). */
+const DEMO_HOLD: FlashHold = { id: DEMO, label: "Demo device — load-5v-1a", recording: false };
 
 const FAIL_MODES = [
   ["firmware-fail-switching", "switching"],
@@ -158,7 +160,7 @@ describe("MockBackend firmware update", () => {
     const path = (await backend.firmwareChoose()) ?? "";
     let settled = false;
     const flashing = backend
-      .firmwareFlash(DEMO, path, "2.0.7", () => {})
+      .firmwareFlash(DEMO, path, "2.0.7", () => {}, [DEMO_HOLD])
       .finally(() => {
         settled = true;
       });
@@ -186,5 +188,63 @@ describe("MockBackend firmware update", () => {
     // Released afterwards.
     await expect(backend.connect(DEMO, 50, () => {})).resolves.toBeUndefined();
     await backend.disconnect();
+  });
+});
+
+describe("consent (FR AXHK2F)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function connected(events: BackendEvent[] = []) {
+    const backend = new MockBackend();
+    await backend.connect(DEMO, 50, (e) => events.push(e));
+    const path = (await backend.firmwareChoose()) ?? "";
+    return { backend, path };
+  }
+
+  it("refuses an update of a connected meter that nobody agreed to (AC-AXHK2F.2)", async () => {
+    const events: BackendEvent[] = [];
+    const { backend, path } = await connected(events);
+    await expect(backend.firmwareFlash(DEMO, path, "2.0.7", () => {})).rejects.toEqual({
+      kind: "flash_needs_consent",
+      message: expect.any(String),
+      hint: null,
+      sessions: [DEMO_HOLD],
+    });
+    expect(backend.firmwareFlashLog()).toEqual([]);
+    expect(events.some((e) => e.type === "status" && e.data.state === "disconnected")).toBe(false);
+  });
+
+  it("says when the session records (AC-AXHK2F.4)", async () => {
+    const { backend, path } = await connected();
+    await backend.startRecording("a.csv");
+    await expect(backend.firmwareFlash(DEMO, path, "2.0.7", () => {})).rejects.toMatchObject({
+      kind: "flash_needs_consent",
+      sessions: [{ ...DEMO_HOLD, recording: true }],
+    });
+  });
+
+  it("does not cover a recording that started after the consent (AC-AXHK2F.5)", async () => {
+    const { backend, path } = await connected();
+    await backend.startRecording("a.csv");
+    await expect(
+      backend.firmwareFlash(DEMO, path, "2.0.7", () => {}, [DEMO_HOLD]),
+    ).rejects.toMatchObject({ kind: "flash_needs_consent" });
+    expect(backend.firmwareFlashLog()).toEqual([]);
+  });
+
+  it("asks nothing for a meter with no session", async () => {
+    const backend = new MockBackend();
+    const path = (await backend.firmwareChoose()) ?? "";
+    const flashing = backend.firmwareFlash(DEMO, path, "2.0.7", () => {}).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(backend.firmwareFlashLog()).toHaveLength(1);
+    await vi.runAllTimersAsync();
+    await flashing;
   });
 });

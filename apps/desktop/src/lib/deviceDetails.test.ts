@@ -5,14 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { ConnectedInfo, DeviceListing } from "./backend";
-import {
-  KNOWN_LATEST_FIRMWARE,
-  MIN_SUPPORTED_FIRMWARE,
-  canConnectTo,
-  deviceDetailsRows,
-  firmwareWarningText,
-  modeLabel,
-} from "./deviceDetails";
+import { canConnectTo, deviceDetailsRows, firmwareWarningText, modeLabel } from "./deviceDetails";
 
 function info(over: Partial<ConnectedInfo> = {}): ConnectedInfo {
   return {
@@ -46,13 +39,6 @@ function listing(mode: DeviceListing["mode"], demo: string | null = null): Devic
   };
 }
 
-describe("firmware constants", () => {
-  it("match the protocol library's floor and newest known version", () => {
-    expect(MIN_SUPPORTED_FIRMWARE).toBe("1.7.0");
-    expect(KNOWN_LATEST_FIRMWARE).toBe("2.0.7");
-  });
-});
-
 describe("modeLabel", () => {
   it("names each mode in plain words", () => {
     expect(modeLabel("application")).toBe("Application");
@@ -63,7 +49,7 @@ describe("modeLabel", () => {
 
 describe("deviceDetailsRows", () => {
   it("lists the mode and both versions of the connected meter", () => {
-    const rows = deviceDetailsRows(info());
+    const rows = deviceDetailsRows(info(), false);
     const byLabel = Object.fromEntries(rows.map((r) => [r.label, r.value]));
     expect(byLabel["Mode"]).toBe("Application");
     expect(byLabel["Firmware"]).toBe("2.0.6");
@@ -72,16 +58,16 @@ describe("deviceDetailsRows", () => {
   });
 
   it("shows a dash for a version the meter did not report", () => {
-    const rows = deviceDetailsRows(info({ bootloader_version: "" }));
+    const rows = deviceDetailsRows(info({ bootloader_version: "" }), false);
     expect(rows.find((r) => r.label === "Bootloader")?.value).toBe("—");
   });
 });
 
 describe("deviceDetailsRows firmware status (AC-V9SK52.4)", () => {
   const value = (i: ConnectedInfo, label: string): string | undefined =>
-    deviceDetailsRows(i).find((r) => r.label === label)?.value;
+    deviceDetailsRows(i, false).find((r) => r.label === label)?.value;
   const problemRows = (i: ConnectedInfo): string[] =>
-    deviceDetailsRows(i)
+    deviceDetailsRows(i, false)
       .filter((r) => r.label === "Firmware status")
       .map((r) => r.value);
 
@@ -141,5 +127,25 @@ describe("canConnectTo", () => {
 
   it("allows nothing when no device is picked", () => {
     expect(canConnectTo(null)).toBe(false);
+  });
+});
+
+describe("device details with serial numbers hidden (AC-AXHK2Q.2, .3)", () => {
+  const serialRow = (hidden: boolean) =>
+    deviceDetailsRows(info({ serial: "FAKE-SERIAL-0001" }), hidden).find(
+      (r) => r.label === "Serial",
+    );
+
+  it("the Serial row reads Hidden with the option on", () => {
+    expect(serialRow(true)?.value).toBe("Hidden");
+  });
+
+  it("no row carries the serial with the option on", () => {
+    const rows = deviceDetailsRows(info({ serial: "FAKE-SERIAL-0001" }), true);
+    expect(rows.map((r) => r.value).join("\n")).not.toContain("FAKE-SERIAL-0001");
+  });
+
+  it("the Serial row shows the serial with the option off", () => {
+    expect(serialRow(false)?.value).toBe("FAKE-SERIAL-0001");
   });
 });

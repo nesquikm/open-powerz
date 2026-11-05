@@ -56,12 +56,17 @@ record delete and settings writes. **Later** = UFCS analyzer, vendor
 `.db`/`.sqlite` export, polish (M7), then a browser edition. Each lands as its own FR in
 `specs/frs/`.
 
-Roadmap (one plan per milestone in `specs/plan/`; done ones move to `specs/plan/archive/`):
-M_34BAXK Protocol Core and CLI (done) → M_R4WG4Q Desktop Meter (done) → M_NE3C7K PD Analyzer
-(done) → M_X4VEQ3 Protocol Triggers (done) → M_MJ7KE9 Firmware Update (done) → M_WBBQ7F
-Release Pipeline (done) → M_FW682R Release Publish Fix (done) → M_1HHSZZ Meter Data, read
-side (done, v0.7.0) → M6b meter data writes → M7 polish → browser edition. Releases are
-unsigned for now.
+Roadmap: one plan per milestone in `specs/plan/`; shipped ones move to
+`specs/plan/archive/`. The remaining work is the rest of the polish milestones, then the
+browser edition. Releases are unsigned for now.
+
+### Shipped milestones
+
+M_34BAXK Protocol Core and CLI (v0.1.0) → M_R4WG4Q Desktop Meter (v0.2.0) → M_NE3C7K PD
+Analyzer (v0.3.0) → M_X4VEQ3 Protocol Triggers (v0.4.0) → M_MJ7KE9 Firmware Update (v0.5.0)
+→ M_WBBQ7F Release Pipeline (v0.6.0) → M_FW682R Release Publish Fix (v0.6.1) → M_1HHSZZ
+Meter Data, read side (v0.7.0) → M_93MYZZ README Features (v0.7.1) → M_CD7M3M Meter Writes
+(v0.8.0) → M_3KPN7D Polish: Fixes (v0.8.1).
 
 ## 2. Functional Requirements (cross-cutting only)
 
@@ -89,7 +94,7 @@ unsigned for now.
   (device-side gaps are marked, not filled).
 - Live chart stays interactive (≥ 30 fps pan/zoom) with 10 million points per session via
   min/max decimation.
-- Device data reaches the UI in batched IPC frames (20–60 Hz), never one message per sample.
+- Device data reaches the UI in batched IPC frames (at most 20 Hz, a 4 Hz heartbeat when idle), never one message per sample.
 
 ### NFR-2: Security / clean room
 - No vendor code, binaries, firmware, documents or assets in the repository. Protocol code

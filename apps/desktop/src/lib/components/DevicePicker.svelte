@@ -4,12 +4,12 @@
   import { deviceOptionLabel } from "../format";
   import type { Session } from "../session.svelte";
 
-  let { session }: { session: Session } = $props();
+  let { session, hideSerial }: { session: Session; hideSerial: boolean } = $props();
 
   /** The selected entry's full label, as a tooltip in case the select is cut short. */
   const selectedLabel = $derived.by(() => {
     const device = session.devices.find((d) => d.id === session.selectedId);
-    return device ? deviceOptionLabel(device) : undefined;
+    return device ? deviceOptionLabel(device, hideSerial) : undefined;
   });
 
   onMount(() => {
@@ -44,8 +44,10 @@
       }
     }}
   >
-    {#each session.devices as device (device.id)}
-      <option value={device.id}>{deviceOptionLabel(device)}</option>
+    <!-- Keyed by mode too: a meter that turns to or from its bootloader under the same
+         entry gets a new option, which WebKit needs to repaint the closed select. -->
+    {#each session.devices as device (`${device.id}|${device.mode}`)}
+      <option value={device.id}>{deviceOptionLabel(device, hideSerial)}</option>
     {:else}
       <option value="">No device</option>
     {/each}
@@ -57,7 +59,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.375rem;
-    min-width: 0;
+    min-width: 7rem;
   }
   /* As wide as its longest entry where the bar has room; when the top bar runs out of
      room it may shrink, cut with an ellipsis (the full label stays in the tooltip). */

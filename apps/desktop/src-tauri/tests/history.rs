@@ -857,7 +857,7 @@ fn clear_history_discards_the_history_and_the_stream_goes_on() {
     // An export right after the clear holds nothing but the header.
     let (tx, rx) = mpsc::channel();
     let job = worker.export(Box::new(ChannelWriter(tx)), |_| {});
-    assert_eq!(job.join().unwrap().unwrap(), 0);
+    assert_eq!(job.join().unwrap().unwrap().rows, 0);
     let text: Vec<u8> = rx.try_iter().flatten().collect();
     assert_eq!(
         String::from_utf8(text).unwrap(),
@@ -890,23 +890,44 @@ fn ac_5x154v_3_an_export_after_a_clear_holds_only_the_rows_recorded_after_it() {
     let (events, sink) = capture(&clock);
     let mut worker = Worker::start(pipe, clock.clone(), config(Rate::Sps1000), sink).unwrap();
     run_for(&mut worker, &clock, 1_000);
-    let before = samples_of(&events).len();
-    assert!(before > 0);
-    assert_eq!(worker.history_len(), before);
+    // Under batching some recorded samples may still wait in the batcher;
+    // the history holds every sample recorded so far.
+    let recorded_before = worker.history_len();
+    assert!(recorded_before > 0);
+    assert!(
+        samples_of(&events).len() <= recorded_before,
+        "the page never sees a sample the history does not hold"
+    );
 
+    // A clear first sends out the samples still waiting in the batcher, so
+    // every sample recorded before it reaches the page before it takes effect.
     worker.clear_history();
+    assert_eq!(worker.history_len(), 0);
+    let at_clear = samples_of(&events);
+    let before = at_clear.len();
+    assert_eq!(
+        before, recorded_before,
+        "the clear sends every sample recorded before it to the page first"
+    );
+    let last_pre_clear_t = at_clear.last().map(|s| s.t_ms).unwrap_or(0);
+
     run_for(&mut worker, &clock, 1_000);
     worker.stop();
     let all = samples_of(&events);
     let after = all.len() - before;
     assert!(after > 0, "the stream stopped after the clear");
+    assert!(
+        all[before..].iter().all(|s| s.t_ms > last_pre_clear_t),
+        "no sample recorded before the clear reaches the page after it"
+    );
 
     let (tx, rx) = mpsc::channel();
     let rows = worker
         .export(Box::new(ChannelWriter(tx)), |_| {})
         .join()
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .rows;
     let exported: Vec<u8> = rx.try_iter().flatten().collect();
     assert_eq!(rows, after as u64, "the export counts only the later rows");
     assert_eq!(
@@ -1296,7 +1317,8 @@ fn a_reconnect_on_the_same_store_continues_history_and_stats_without_outage_char
         .export(Box::new(ChannelWriter(tx)), |_| {})
         .join()
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .rows;
     assert_eq!(rows, all.len() as u64);
     let csv: Vec<u8> = rx.try_iter().flatten().collect();
     assert_eq!(csv.iter().filter(|&&b| b == b'\n').count(), all.len() + 1);

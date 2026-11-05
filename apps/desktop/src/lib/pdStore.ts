@@ -99,6 +99,9 @@ export class PdStore {
   #direction = new Uint32Array(0);
   #revision = new Uint32Array(0);
   #summary: string[] = [];
+  /** Column slot of store position 0: the columns are a ring once rows drop at the
+   * limit, so dropping the oldest rows moves no column (FR AXHK2W, AC .4). */
+  #head = 0;
   #strings = new Interner();
   /** Session times never go back (and none is missing) since the last clear. */
   #sessionSorted = true;
@@ -116,15 +119,30 @@ export class PdStore {
     return this.#dropped;
   }
 
+  /** The column slot of store position `i` (in `[0, length)`), or -1 outside it. */
+  #slot(i: number): number {
+    if (!(i >= 0 && i < this.length)) return -1;
+    const p = this.#head + i;
+    return p >= this.#capacity ? p - this.#capacity : p;
+  }
+
   #alloc(capacity: number): void {
+    // Unwraps the ring into the new columns: position 0 lands in slot 0.
+    const head = this.#head;
+    const first = Math.min(this.length, this.#capacity - head);
     const grow = <T extends Float64Array | Int8Array | Uint8Array | Uint32Array>(
       old: T,
       make: (n: number) => T,
     ): T => {
       const next = make(capacity);
-      next.set(old.subarray(0, this.length) as never);
+      next.set(old.subarray(head, head + first) as never);
+      if (first < this.length) next.set(old.subarray(0, this.length - first) as never, first);
       return next;
     };
+    if (head > 0) {
+      const summary = this.#summary;
+      this.#summary = Array.from({ length: this.length }, (_, i) => summary[this.#slot(i)] ?? "");
+    }
     this.#index = grow(this.#index, (n) => new Float64Array(n));
     this.#elapsed = grow(this.#elapsed, (n) => new Float64Array(n));
     this.#session = grow(this.#session, (n) => new Float64Array(n));
@@ -138,27 +156,12 @@ export class PdStore {
     this.#direction = grow(this.#direction, (n) => new Uint32Array(n));
     this.#revision = grow(this.#revision, (n) => new Uint32Array(n));
     this.#capacity = capacity;
+    this.#head = 0;
   }
 
-  /** Drops the oldest `n` rows; the rest move to the front of the columns. */
+  /** Drops the oldest `n` rows: the ring's head moves past them, no column moves. */
   #dropOldest(n: number): void {
-    for (const col of [
-      this.#index,
-      this.#elapsed,
-      this.#session,
-      this.#vbus,
-      this.#ibus,
-      this.#messageId,
-      this.#objects,
-      this.#kind,
-      this.#name,
-      this.#sop,
-      this.#direction,
-      this.#revision,
-    ]) {
-      col.copyWithin(0, n, this.length);
-    }
-    this.#summary.splice(0, n);
+    this.#head = (this.#head + n) % this.#capacity;
     this.length -= n;
     this.#dropped += n;
   }
@@ -180,12 +183,14 @@ export class PdStore {
     if (needed > this.#capacity) {
       this.#alloc(Math.min(this.#maxRows, Math.max(needed, this.#capacity * 2)));
     }
+    const cap = this.#capacity;
     for (const r of kept) {
-      const i = this.length++;
+      const prev = this.length === 0 ? -Infinity : this.sessionMs(this.length - 1);
+      let i = this.#head + this.length++;
+      if (i >= cap) i -= cap;
       this.#index[i] = r.index;
       this.#elapsed[i] = r.elapsed_ms;
       const session = r.session_ms ?? NaN;
-      const prev = i === 0 ? -Infinity : this.#session[i - 1]!;
       // NaN compares false, so a missing time also ends the sorted order.
       if (!(session >= prev)) this.#sessionSorted = false;
       this.#session[i] = session;
@@ -207,17 +212,18 @@ export class PdStore {
   }
 
   /** The row at store position `i`. */
-  row(i: number): PdRow {
+  row(pos: number): PdRow {
+    const i = this.#slot(pos);
     const id = this.#messageId[i] ?? -1;
     const objects = this.#objects[i] ?? -1;
-    const session = this.sessionMs(i);
+    const session = this.sessionMs(pos);
     return {
       index: this.#index[i] ?? 0,
       elapsed_ms: this.#elapsed[i] ?? 0,
       ...(Number.isNaN(session) ? {} : { session_ms: session }),
-      kind: this.isEvent(i) ? "event" : "message",
+      kind: this.isEvent(pos) ? "event" : "message",
       sop: this.#strings.value(this.#sop[i] ?? NONE),
-      name: this.name(i),
+      name: this.name(pos),
       message_id: id < 0 ? null : id,
       direction: this.#strings.value(this.#direction[i] ?? NONE) as PdDirection | null,
       objects: objects < 0 ? null : objects,
@@ -230,7 +236,7 @@ export class PdStore {
 
   /** The session time of store position `i` (NaN when unknown). */
   sessionMs(i: number): number {
-    return this.#session[i] ?? NaN;
+    return this.#session[this.#slot(i)] ?? NaN;
   }
 
   /** Whether session times never go back (and none is missing), so a time range can
@@ -241,17 +247,17 @@ export class PdStore {
 
   /** Whether store position `i` holds an event. */
   isEvent(i: number): boolean {
-    return this.#kind[i] === KIND_EVENT;
+    return this.#kind[this.#slot(i)] === KIND_EVENT;
   }
 
   /** The message or event name at store position `i`. */
   name(i: number): string {
-    return this.#strings.value(this.#name[i] ?? NONE) ?? "";
+    return this.#strings.value(this.#name[this.#slot(i)] ?? NONE) ?? "";
   }
 
   /** The record index at store position `i`. */
   indexAt(i: number): number {
-    return this.#index[i] ?? -1;
+    return this.#index[this.#slot(i)] ?? -1;
   }
 
   /** The store position of record `index`, or -1 (FR TGE83D, AC .2). */
@@ -261,7 +267,7 @@ export class PdStore {
     let hi = this.length - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      const at = this.#index[mid] ?? -1;
+      const at = this.indexAt(mid);
       if (at === index) return mid;
       if (at < index) lo = mid + 1;
       else hi = mid - 1;
@@ -272,6 +278,7 @@ export class PdStore {
   /** Drops every row; the store starts over. */
   clear(): void {
     this.length = 0;
+    this.#head = 0;
     this.#summary = [];
     this.#sessionSorted = true;
     this.#dropped = 0;
@@ -293,14 +300,15 @@ export class PdStore {
       }
     }
     let n = 0;
-    for (let i = 0; i < this.length; i++) {
+    const cap = this.#capacity;
+    for (let pos = 0, i = this.#head; pos < this.length; pos++, i = i + 1 === cap ? 0 : i + 1) {
       const name = this.#name[i] as number;
       if (types !== null && !types.has(name)) continue;
       if (this.#kind[i] !== KIND_EVENT) {
         if (goodCrc !== undefined && name === goodCrc) continue;
         if (sop !== undefined && this.#sop[i] !== sop) continue;
       }
-      out[n++] = i;
+      out[n++] = pos;
     }
     return out.subarray(0, n);
   }

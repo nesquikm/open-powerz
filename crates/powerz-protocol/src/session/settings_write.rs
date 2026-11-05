@@ -41,11 +41,13 @@ const KEPT: [&str; 5] = [
 ];
 
 impl<T: Transport, C: Clock> Session<T, C> {
-    /// Read SETTINGS, send one settings write carrying `changes` over the
-    /// values just read, then read SETTINGS again. \[static\]
+    /// Read SETTINGS twice, send one settings write carrying `changes` over
+    /// the values read, then read SETTINGS again. \[static\]
     ///
-    /// An out-of-range value is [`Error::SettingsWrite`], sent after the
-    /// first read only. An ACCEPT or a FINISHED counts as sent; so does no
+    /// Two reads that differ in any of the 180 bytes are
+    /// [`Error::SettingsReadsDiffer`]: nothing is written or read again. An
+    /// out-of-range value is [`Error::SettingsWrite`], sent after the two
+    /// reads only. An ACCEPT or a FINISHED counts as sent; so does no
     /// reply at all, since the vendor app never reads one \[static\]: then
     /// the read-back alone decides. A REJECT or any other reply is an error,
     /// and nothing is retried. A
@@ -67,6 +69,12 @@ impl<T: Transport, C: Clock> Session<T, C> {
     ) -> Result<SettingsWritten, Error> {
         let block_before = self.read_settings()?;
         let before = block_before.meter_settings()?;
+        // A write sends every display key at its read value, and the block
+        // check can pass a corrupted read: a second read must agree on all
+        // 180 bytes. A difference refuses the write; it is never retried.
+        if self.read_settings()?.raw() != block_before.raw() {
+            return Err(Error::SettingsReadsDiffer);
+        }
         let request = settings_write_request(self.counter.next(), &before, changes)?;
         let timeout = transport::default_timeout(&request);
         let reply = self
@@ -128,4 +136,155 @@ fn verify(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::crypto;
+    use crate::frame::Attribute;
+    use crate::transport::GuardedTransport;
+
+    /// The captured FW 2.0.6 SETTINGS reply: 8 header bytes, then 180 bytes.
+    const CAPTURED: &str = include_str!("../../tests/vectors/settings_188.hex");
+    const HEADER: usize = 8;
+
+    fn captured_frame() -> Vec<u8> {
+        let hex: String = CAPTURED
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .flat_map(|l| l.chars().filter(|c| c.is_ascii_hexdigit()))
+            .collect();
+        hex.as_bytes()
+            .chunks(2)
+            .map(|b| u8::from_str_radix(std::str::from_utf8(b).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn captured() -> Vec<u8> {
+        captured_frame()[HEADER..].to_vec()
+    }
+
+    /// `edit` applied to the captured block, then both CRCs made right: the
+    /// corruption passes the block checks.
+    fn passing(edit: impl Fn(&mut [u8])) -> Vec<u8> {
+        let mut p = captured();
+        edit(&mut p);
+        let a = crypto::crc32(&p[0x00..0x5C]);
+        p[0x5C..0x60].copy_from_slice(&a.to_le_bytes());
+        let b = crypto::crc32(&p[0x60..0xB0]);
+        p[0xB0..0xB4].copy_from_slice(&b.to_le_bytes());
+        p
+    }
+
+    /// Brightness (7 bits at bit 3 of the word at 0x00) set to `code`.
+    fn brightness(p: &mut [u8], code: u32) {
+        let word = u32::from_le_bytes(p[..4].try_into().unwrap());
+        let word = (word & !(0x7F << 3)) | (code << 3);
+        p[..4].copy_from_slice(&word.to_le_bytes());
+    }
+
+    /// A meter whose SETTINGS reads answer `blocks` in turn, for ever, and
+    /// that takes a settings write. `None` is a read that gets no reply.
+    struct Reads {
+        blocks: Vec<Option<Vec<u8>>>,
+        reads: usize,
+        sent: Vec<Vec<u8>>,
+    }
+
+    impl Transport for Reads {
+        fn transact(
+            &mut self,
+            request: &[u8],
+            _timeout: Duration,
+        ) -> Result<Vec<u8>, crate::transport::Error> {
+            self.sent.push(request.to_vec());
+            assert!(self.sent.len() <= 8, "sent without end: {:02x?}", self.sent);
+            if request[0] & 0x7F == 0x0A {
+                return Ok(vec![0x07, request[1], 0, 0]);
+            }
+            let block = self.blocks[self.reads % self.blocks.len()].clone();
+            self.reads += 1;
+            let payload = block.ok_or(crate::transport::Error::Timeout)?;
+            let mut reply = captured_frame()[..HEADER].to_vec();
+            reply[1] = request[1];
+            reply.extend(payload);
+            Ok(reply)
+        }
+
+        fn read(&mut self, _timeout: Duration) -> Result<Vec<u8>, crate::transport::Error> {
+            Err(crate::transport::Error::Timeout)
+        }
+    }
+
+    fn write_over(blocks: Vec<Option<Vec<u8>>>) -> (Result<SettingsWritten, Error>, Vec<Vec<u8>>) {
+        let meter = Reads {
+            blocks,
+            reads: 0,
+            sent: Vec::new(),
+        };
+        let mut session = Session::open(GuardedTransport::new(meter));
+        let result = session.write_settings_checked(&[(WritableField::Brightness, 80)]);
+        let sent = session.transport().inner().sent.clone();
+        (result, sent)
+    }
+
+    fn settings_read(id: u8) -> Vec<u8> {
+        crate::frame::get_data(id, Attribute::SETTINGS).to_vec()
+    }
+
+    #[test]
+    fn settings_write_refuses_when_two_reads_differ() {
+        let reference = passing(|_| {});
+        let cases = [
+            ("a display field", passing(|p| brightness(p, 90))),
+            ("a byte no field decodes", passing(|p| p[0x08] ^= 0x01)),
+            ("a byte of block B", passing(|p| p[0x70] ^= 0x01)),
+        ];
+        for (what, other) in cases {
+            for blocks in [
+                vec![Some(reference.clone()), Some(other.clone())],
+                vec![Some(other.clone()), Some(reference.clone())],
+            ] {
+                let (result, sent) = write_over(blocks);
+                let err = match result {
+                    Ok(w) => panic!("{what}: the write went through: {w:?}"),
+                    Err(e) => e,
+                };
+                let text = err.to_string().to_lowercase();
+                assert!(
+                    text.contains("settings") && text.contains("differ"),
+                    "{what}: not a clear refusal: {text}"
+                );
+                assert_eq!(
+                    sent,
+                    vec![settings_read(1), settings_read(2)],
+                    "{what}: exactly two SETTINGS reads and no write, nothing retried"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_read_that_gets_no_reply_sends_no_write() {
+        let (result, sent) = write_over(vec![Some(captured()), None]);
+        assert_eq!(
+            result.as_ref().map(|_| ()).map_err(ToString::to_string),
+            Err(Error::Transport(crate::transport::Error::Timeout).to_string())
+        );
+        assert_eq!(sent, vec![settings_read(1), settings_read(2)]);
+    }
+
+    #[test]
+    fn two_matching_reads_are_followed_by_the_write_and_the_read_back() {
+        let before = captured();
+        let after = passing(|p| brightness(p, 80));
+        let (result, sent) = write_over(vec![Some(before.clone()), Some(before), Some(after)]);
+        let written = result.expect("the two reads match");
+        assert_eq!(written.settings.brightness.value, 80);
+        let types: Vec<u8> = sent.iter().map(|f| f[0] & 0x7F).collect();
+        assert_eq!(types, vec![0x0C, 0x0C, 0x0A, 0x0C], "{sent:02x?}");
+    }
 }

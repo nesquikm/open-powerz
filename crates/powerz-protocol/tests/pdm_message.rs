@@ -425,6 +425,71 @@ mod pdm_message {
         );
     }
 
+    // AC-AXHK2M.6: the blanks `raw_refusal` and JavaScript's `\s` see, plus
+    // the zero-width ones, are blanks to the console's refusal too.
+    #[test]
+    fn the_console_refusal_treats_unicode_blanks_as_blank() {
+        for line in [
+            "\u{FEFF}pdm close",
+            "pdm\u{FEFF}close",
+            "pdm\u{200B}open",
+            "pdm\u{00A0}close",
+            "p\u{200D}dm\u{2060}open",
+        ] {
+            let reason = console::console_refusal(&console::command_of(line));
+            assert!(reason.is_some(), "{line:?} was not refused");
+        }
+        for line in ["pd cmd=1", "entry pd"] {
+            let reason = console::console_refusal(&console::command_of(line));
+            assert_eq!(reason, None, "{line:?}");
+        }
+    }
+
+    // AC-AXHK2M.6: a zero-width blank does not carry GoodCRC past the check.
+    #[test]
+    fn a_zero_width_blank_does_not_hide_good_crc() {
+        for line in [
+            "pd\u{200B}cmd=1",
+            "p\u{200C}d cmd=1",
+            "pd cm\u{200D}d=1",
+            "pd\u{2060}cmd=1",
+            "pd\u{FEFF}cmd=1",
+            "pd\u{200B}data=000100",
+        ] {
+            let refused = powerz_protocol::pdm::message::refusal(&console::command_of(line));
+            assert!(refused.is_some(), "{line:?} was not refused");
+        }
+    }
+
+    // AC-AXHK2M.6: a line is one command. A control character could end it
+    // early on the meter and start a second one past the checks.
+    #[test]
+    fn a_control_character_never_reaches_the_meter() {
+        let port = port();
+        let now = Rc::new(Cell::new(T0));
+        let mut s = open(&port, &now);
+        let before = port.writes().len();
+        for line in [
+            "reset\npd cmd=1",
+            "reset\r\npdm close",
+            "pd\u{1}cmd=1",
+            "x\0pd cmd=1",
+            "hello\u{85}meter",
+        ] {
+            let cmd = console::command_of(line);
+            let conf = HighVoltageConfirmation::for_command(&cmd);
+            let err = console::send_line(&mut s, line, Some(conf), LISTEN).expect_err("refused");
+            assert!(matches!(err, Error::Refused { .. }), "{line:?}: {err:?}");
+        }
+        assert_eq!(port.writes().len(), before, "{:?}", port.writes());
+    }
+
+    #[test]
+    fn a_line_keeps_its_trailing_newline_allowance() {
+        let reason = powerz_protocol::pdm::message::refusal(&console::command_of("entry pd\r\n"));
+        assert_eq!(reason, None);
+    }
+
     #[test]
     fn the_console_refuses_pdm_open_and_pdm_close() {
         let port = port();

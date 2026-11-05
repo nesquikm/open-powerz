@@ -21,6 +21,10 @@ up with the power chart, then save it or open an older one.
    Events (attach, detach, resets) look different from messages.
 5. Press **Stop capture** when you are done.
 
+Pressing **Detect** in the Trigger tab stops a running capture and the analyzer
+says so. After any trigger session the meter refuses a new capture until you
+unplug it and plug it back in; the refusal says to replug.
+
 While capturing, the table follows new rows. Scroll up to stop following;
 **Follow** jumps back to the newest row. **Clear capture** empties the table
 after you confirm.

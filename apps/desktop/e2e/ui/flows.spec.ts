@@ -92,14 +92,22 @@ test.describe("errors and notices (AC-AH2AEN.5)", () => {
     await open(page, "?mock=rate-locked");
     await connectDemo(page);
     await expect(badge(page)).toHaveText("Rate locked");
-    await expect(
-      page.getByText("Rate set on the meter: 50 SPS — authentication unavailable"),
-    ).toBeVisible();
+    // In the bar, or in the "⋯" menu where a short bar (a wide font, as on CI Linux)
+    // has moved it (AC-9QTPNQ.2).
+    const note = "Rate set on the meter: 50 SPS — authentication unavailable";
+    const inline = page.locator(".top-bar .inline-note");
+    await expect(inline).toHaveText(note);
+    if (!(await inline.isVisible())) {
+      await page.getByRole("button", { name: /^More:/ }).click();
+      await expect(page.locator(".top-bar .menu-note")).toHaveText(note);
+      await expect(page.locator(".top-bar .menu-note")).toBeVisible();
+    }
     await expect(page.getByLabel("Sample rate")).toBeDisabled();
     // The stream goes on at the meter's rate.
     await expectReadoutNear(page, "VBUS", 5, 0.05);
-    // Recording still works while the rate is locked.
-    await expect(page.getByRole("button", { name: "Record" })).toBeEnabled();
+    // Recording still works while the rate is locked. "Record" alone also matches
+    // Recorder options and Open recording, so name the Record button exactly (AC-EWQ6FQ.5).
+    await expect(page.getByRole("button", { name: "Record", exact: true })).toBeEnabled();
   });
 });
 

@@ -44,6 +44,14 @@ async function chooseFile(page: Page): Promise<void> {
   await expect(panel(page).getByRole("region", { name: "Firmware file" })).toBeVisible();
 }
 
+/** Agree to end the streaming meter's session (FR AXHK2F). */
+async function agreeToEnd(page: Page): Promise<void> {
+  await page
+    .getByRole("dialog", { name: /session|recording/i })
+    .getByRole("button", { name: /^end /i })
+    .click();
+}
+
 async function requestStart(page: Page): Promise<void> {
   await panel(page).getByRole("button", { name: "Update", exact: true }).click();
   await confirmDialog(page)
@@ -63,9 +71,16 @@ test.describe("firmware fixes (FR 4PJRVJ)", () => {
     await streamDemo(page);
     await chooseFile(page);
     await requestStart(page);
+    await agreeToEnd(page);
     await expect(cancelButton(page)).toBeEnabled();
     await cancelButton(page).click();
-    await expect(panel(page).getByText(/stopped|cancelled/i)).toBeVisible();
+    // The stopped stage now carries its own "(stopped)" state text (AC-AXHK2M.13), so
+    // the outcome is found by its status role rather than by the words alone.
+    await expect(
+      panel(page)
+        .getByRole("status")
+        .filter({ hasText: /stopped|cancelled/i }),
+    ).toBeVisible();
     await expect(panel(page).getByRole("listitem").filter({ hasText: "Erasing" })).toHaveAttribute(
       "data-state",
       "pending",
@@ -77,6 +92,7 @@ test.describe("firmware fixes (FR 4PJRVJ)", () => {
     await streamDemo(page);
     await chooseFile(page);
     await requestStart(page);
+    await agreeToEnd(page);
     const erasing = panel(page).getByRole("listitem").filter({ hasText: "Erasing" });
     await expect(erasing).toHaveAttribute("data-state", "current");
     await expect(cancelButton(page)).toBeDisabled();

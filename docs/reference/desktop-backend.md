@@ -12,9 +12,35 @@ source; the source code has the rest.
 
 ## Session history
 
+Live samples reach the page as `batch` events on the session channel, at most 20 a second. A session with no new samples still sends an empty heartbeat batch after 250 ms, so about 4 a second while idle.
+
 | function | answers |
 |---|---|
 | `historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]>` | The breaks between measuring runs that overlap `t0Ms..=t1Ms`, oldest first. A `HistoryGap` is `{ from_ms, to_ms }`. |
+
+### A slow sink
+
+The session channel never holds up the meter polls. The worker queues its
+events and a forwarder thread delivers them, so a slow sink, one that takes too
+long to accept them, only makes the queue grow. At most 512 sample batches wait
+there, about 10 to 25 s of them; what is shown can lag by that much. Past the
+limit the worker drops new batches until the queue has room again. Status, gap
+and recording events are always queued, and the newest dropped batch is still
+sent when the session ends.
+
+The session history, the export and a recording keep every sample of a dropped
+batch. On screen, its samples are lost to the live view in some places and only
+delayed in others:
+
+| where | the dropped samples are |
+|---|---|
+| Live chart: the 10 s, 1 min and 10 min windows, and Whole session while the live buffer reaches back to the session start | Lost to the live view. The chart draws what the channel brought, and nothing fetches a batch it missed. No gap event goes out, because the history has no gap, so the line runs straight from the last sample before the hole to the first one after it, with no break or marker. |
+| Overview strip | The same for the stretch the live buffer holds. Older than that, it draws the history. |
+| Chart zoomed, panned or paused | Only delayed: the view is drawn from the history. Going back to live brings the straight line back. |
+| Whole session once the session is older than the live buffer | Only delayed: drawn from the history, asked again at most 4 times a second. |
+| Chart after a reload, or after picking a meter for the full view | Only delayed for the 10 minutes before the first sample that arrives: the live buffer is refilled from the history, as min and max buckets. |
+| Statistics | Only delayed: the backend counts every sample, and the next batch that arrives carries the totals. |
+| Readout (latest values) | Lost to the live view, and not missed: it shows the newest batch that arrives. |
 
 ## Replug
 
@@ -38,13 +64,14 @@ Commands:
 | `pdDetails(index: number, opened = false): Promise<PdDetails>` | The raw bytes and field tree of record `index`: of the capture opened from a file when `opened`, of the live capture otherwise. |
 | `pdSave(suggestedName: string): Promise<ExportResult \| null>` | Opens the save dialog and saves the capture so far as a [pdcap file](pdcap.md). Answers `{ path, rows }`, or `null` when the dialog was cancelled. |
 | `pdOpen(): Promise<PdOpened \| null>` | Opens the open dialog and loads a pdcap file. Needs no meter. `null` when cancelled. |
+| `pdReleaseOpened(): Promise<void>` | Lets go of the opened file (Tauri command `pd_release_opened`). The page sends it when the file leaves the view; connecting a meter, reconnects included, never releases one. |
 | `pdImport(): Promise<PdOpened \| null>` | Opens the open dialog and imports a vendor PD log database (`.sqlite`) read-only. Needs no meter. `null` when cancelled. |
 
 Session channel events (`BackendEvent`):
 
 | `type` | `data` |
 |---|---|
-| `pd_state` | `{ capturing: boolean }` |
+| `pd_state` | `{ capturing: boolean; reason?: PdStopReason }`. `reason` is `"trigger"` only when opening a trigger session (Detect) stopped the capture; a stop you asked for, a disconnect or an unplug carries none. |
 | `pd_rows` | `{ rows: PdRow[] }`, sent in batches (at most 60 a second) |
 | `pd_status` | `{ samples: PdStatusSample[] }`, the status blocks for the chart |
 
@@ -61,6 +88,13 @@ Types:
 
 A capture keeps its latest 100,000 records and drops the oldest, with a
 notice. Status samples are not part of this limit.
+
+When a capture stops with the `"trigger"` reason, the PD analyzer says "The PD
+capture stopped when Detect opened a trigger session. The meter needs a replug
+before a new capture." and keeps the captured rows. The notice goes when a
+capture starts, when a start is refused (only the refusal shows), or when the
+meter disconnects or another meter is shown. After any trigger session the
+meter refuses a capture start until it is replugged.
 
 On the UI side, `PdCapture` (in `pdCapture.svelte.ts`) holds the rows and the
 status samples for the table and the chart. `THEME_COLORS` and
@@ -82,10 +116,15 @@ Commands:
 | `triggerOpen(): Promise<void>` | Opens the trigger session on the connected meter (a simulated one for a demo device). Fails with `usage` when no meter is connected or a session is already open. |
 | `triggerDetect(): Promise<Detection>` | BC1.2, Apple and the automatic list. Nothing above 5 V is asked. The stream's polling pauses while it runs (see below). |
 | `triggerList(protocol: TriggerProtocol): Promise<ProtocolSection>` | Enters `protocol` and reports its section. A protocol the charger does not answer is `supported: false`, not an error. |
-| `triggerRisk(request: TriggerRequest): Promise<RiskClass>` | The library's risk class of `request`, given what the charger offered. `above_5v` needs the user's confirmation. |
-| `triggerRequest(request: TriggerRequest, confirmed: boolean): Promise<TriggerReply>` | Sends `request`. The backend is the final gate: above 5 V it is refused unless `confirmed`. A request for another protocol than the one entered enters that protocol again first. |
-| `triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>` | The risk class of a built PD message. GoodCRC and malformed messages fail with `usage` and the reason. |
+| `triggerRisk(request: TriggerRequest): Promise<RiskClass>` | The library's risk class of `request`, given what the charger offered. It fails with `usage` after the charger went away. `above_5v` and `above_5v_rememberable` need the user's confirmation; the second one lets the dialog offer "Don't ask again". `armed` is covered by it and needs no dialog. |
+| `triggerRequest(request: TriggerRequest, confirmed: boolean, remember?: boolean): Promise<TriggerReply>` | Sends `request`. The backend is the final gate: above 5 V it is refused unless `confirmed` or armed. `remember` with `confirmed` arms "Don't ask again"; a request that does not qualify fails with `usage` and sends nothing. A request above 5 V whose offer differs from the one last listed is refused with `usage` and not sent. A request for another protocol than the one entered enters that protocol again first. |
+| `triggerArmed(): Promise<boolean>` | Whether "Don't ask again" is armed. `false` with no session. |
+| `triggerDisarm(): Promise<void>` | Ends "Don't ask again" and sends nothing. Does nothing with no session. |
+| `triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass>` | The risk class of a built PD message. The SOP' Discover Identity is `at_most_5v`. Every other message keeps the library's class, so a data message to a cable asks. GoodCRC and malformed messages fail with `usage` and the reason. |
 | `triggerMessageSend(message: PdMessageRequest, confirmed: boolean): Promise<PdSendReply>` | Sends a built PD message; above 5 V only when `confirmed`. |
+| `triggerCableRead(): Promise<CableRead>` | Sends one SOP' Discover Identity with no dialog and no retry, and ends "Don't ask again". Needs a session with PD entered and never opens, enters or closes one; otherwise it fails with `usage` and sends nothing. |
+| `pdCableSeen(): Promise<CableView \| null>` | The cable identity a PD capture holds (the opened file or the live capture), `null` when it holds none. Sends nothing. |
+| `triggerChargerGone(): Promise<boolean>` | Whether the charger is gone: VBUS collapsed after a contract was up, or, while Detect is not running, both CC lines read below 0.3 V on records spanning at least 300 ms of device time, with or without a contract. It stays true until the next PD listing, whatever that finds, and until then every request is refused with `usage` and nothing is sent. `false` with no session. The page asks after a low VBUS reading under a contract, or after a live reading with both CC lines below `CC_GONE_V` (0.3 V); one question is out at a time, and none while Detect runs. |
 | `triggerConsoleRisk(line: string): Promise<RiskClass>` | The risk class of a raw console line. |
 | `triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]>` | Sends a raw console line and answers the transcript lines. Above 5 V (any unparsable line too) only when `confirmed`; GoodCRC is always refused. |
 | `triggerBackTo5v(): Promise<void>` | Back to 5 V: PD sends `pd req=1` (a Hard Reset as the fallback), the other protocols `reset`. The session stays open. |
@@ -101,12 +140,13 @@ Types (they mirror `src-tauri/src/trigger.rs`):
 | `TriggerOffer` | `position`, `kind` (`"fixed"`, `"battery"`, `"variable"`, `"pps"`, `"spr-avs"`, `"epr-avs"`), `min_voltage_mv`, `max_voltage_mv`, `max_current_ma`, `max_power_mw`, `epr` |
 | `TriggerLimits` | `index` (the UFCS capability number, else `null`), `min_voltage_mv`, `max_voltage_mv`, `min_current_ma`, `max_current_ma`, `max_power_mw` |
 | `TriggerRequest` | One of `{ protocol: "pd"; position; voltage_mv; current_ma }` (the last two `null` for a fixed offer), `{ protocol: "qc" \| "fcp" \| "afc" \| "sfcp"; volts }`, `{ protocol: "qc3"; voltage_mv }`, `{ protocol: "scp" \| "vfcp" \| "tfcp"; voltage_mv; current_ma }`, `{ protocol: "ufcs"; index; voltage_mv; current_ma }` |
-| `RiskClass` | `"read_only"`, `"at_most_5v"` or `"above_5v"` |
+| `RiskClass` | `"read_only"`, `"at_most_5v"`, `"above_5v"`, `"above_5v_rememberable"` or `"armed"` |
 | `TriggerReply` | `command`, `requested_mv`, `requested_ma`, `delivered_mv`, `delivered_ma`, `reply` |
 | `PdMessageRequest` | `sop` (`"sop"`, `"sop_prime"` or `"sop_double_prime"`), `msg_type` (the 5-bit Message Type), `data_objects` (32-bit numbers; none means a control message) |
 | `ConsoleLine` | `at_ms` (clock time, ms since the Unix epoch), `direction` (`"tx"` or `"rx"`), `text`, `block` (a parsed binary block in words, or `null`) |
 | `PdSendReply` | `command`, `lines` (`ConsoleLine[]`), `cable` (`CableView` or `null`) |
-| `CableView` | `vid`, `pid`, `active`, `max_voltage_v`, `max_current_ma`, `epr_capable` |
+| `CableView` | `vid`, `pid`, `active`, `max_voltage_v`, `max_current_ma`, `epr_capable`, `speed` (USB speed in words, `null` with no cable VDO), `vendor` (from our table, `null` for an unlisted VID) |
+| `CableRead` | `{ kind: "found"; cable: CableView }` or `{ kind: "no_answer" }` |
 
 Behaviour:
 
@@ -154,22 +194,37 @@ Update commands:
 |---|---|
 | `firmwareInspect(path: string): Promise<FirmwareFileInfo>` | Reads a local firmware container and answers its metadata; needs no meter. The file is never decrypted; files over 8 MiB are refused before they are read. A broken file rejects with `usage`, prefixed with the file name. |
 | `firmwareChoose(): Promise<string \| null>` | Opens the open dialog filtered to `.mencrypt` files; `null` when it was cancelled. |
-| `firmwareFlash(deviceId: string, path: string, confirmation: string, onStage: (event: FlashEvent) => void): Promise<FlashDone>` | Updates the meter with the file at `path`. Before anything is sent the backend checks that `confirmation` is the file's version and reads the file again. Each event goes to `onStage` over a channel, about one write message per percent. Rejects with the error and its recovery hint. |
-| `firmwareCancel(): Promise<void>` | Asks the running update to stop. Accepted until the erase begins, and refused after that. An accepted cancel ends the update as a failure at its next safe point, which is after the meter has switched if it is switching. |
-| `firmwareFlashStatus(): Promise<FlashStatus \| null>` | The running update, for a reloaded page: `device_id` and `stage` (the latest stage, or null before the first). Null when none runs. |
+| `firmwareFlash(deviceId: string, path: string, confirmation: string, onStage: (event: FlashEvent) => void, agreed: FlashHold[] = []): Promise<FlashDone>` | Updates the meter with the file at `path`. Before anything is sent the backend checks that `confirmation` is the file's version and reads the file again. `agreed` names the sessions the user agreed to release (see Firmware update consent below). Each event goes to `onStage` over a channel, about one write message per percent. Rejects with the error and its recovery hint. |
+| `firmwareCancel(): Promise<void>` | Asks the running update to stop. Accepted until the erase begins, and refused after that. An accepted cancel ends the update as a failure at its next safe point: a wait for the meter to switch ends within about a second, and the meter may have switched by then. |
+| `firmwareFlashStatus(): Promise<FlashStatus \| null>` | The running update, else the ended one the backend kept, for a reloaded page: `device_id`, `stage` (the latest stage, or null before the first), `replug` (the pending replug prompt: `to` and `reply`, or null) and `outcome` (how it ended: `result` or `error`, or null while it runs). This read takes a kept outcome, so it answers once; a new update forgets it. Null when neither. |
 
 Types:
 
 | type | fields |
 |---|---|
-| `FirmwareFileInfo` | `vendor`, `container_version`, `model`, `version`, `date`, `crc` (8 uppercase hex digits), `size` (the declared image size in bytes), `release_notes_en` |
+| `FirmwareFileInfo` | `vendor`, `container_version`, `model`, `version`, `date`, `crc` (8 uppercase hex digits), `size` (the declared image size in bytes), `stored_size` (the payload length the file stores, which the update sends in full; the 2.0.7 file stores 16 bytes past its image), `release_notes_en` |
 | `FlashStage` | `{ stage: "switching" }`, `"erasing"`, `{ stage: "writing"; done; total }` (bytes), `"verifying"`, `"finished"`, `"returning"` |
 | `FlashReplug` | `{ stage: "replug"; to: "bootloader" \| "application"; reply }`: a jump was sent; `reply` is the meter's answer to it. The screen asks for a replug if the meter does not restart by itself. It does not change the stage. |
 | `FlashEvent` | `FlashStage \| FlashReplug` |
 | `FlashDone` | `{ outcome: "verified"; version }` (read back from the meter) or `{ outcome: "power_cycle_needed" }` (the image was accepted but the meter stays in its bootloader until it is replugged) |
 
+### Firmware update consent
+
+`firmwareFlash` takes a last argument `agreed: FlashHold[]` (default `[]`): the sessions the user agreed to release. When an update would release a session that `agreed` does not cover, the call rejects with a `UiError` of `ErrorKind` `flash_needs_consent`. Its `sessions` field lists every `FlashHold` the update would release, each with `id`, `label`, `recording` and, while a recording runs, `recording_id`. Nothing is released and nothing is sent. Consent to one recording does not cover a later one on the same session. `toUiError` keeps `sessions`.
+
+A start is also refused with `usage` while a session in scope is still closing or a recording start is pending. The file and the typed confirmation are checked first, so a wrong confirmation releases nothing.
+
 Behaviour:
 
+- **The Writing stage counts the bytes sent.** Its total is the stored
+  payload. When that differs from the file's image size, the file panel adds a
+  "Sent to the meter" row and the progress section a line saying how many
+  bytes the file stores past its image.
+- **The Device list line.** `FirmwareUpdate.listedHistory` keeps each label
+  the updated meter took in the device list since the update started, and the
+  progress section shows them joined by arrows. After the update ends it keeps
+  noting the meter until a label in application mode closes the line; Close
+  clears it, and a new update starts it afresh.
 - **The meter is held for the whole update.** Connecting it, PD capture,
   recording, the rate, the trigger panel and hotplug reconnects are refused
   until it ends, and closing the window or quitting is refused while it runs.
@@ -194,14 +249,19 @@ A page that attaches to a running meter gets the open file's path in
 a firmware update opens no dialog.
 
 The app also keeps `app.log` in the OS log folder: one UTC line per connect, session
-end and replug, naming the device id and model, never the serial or UID.
+end, replug, failed rate change, settings write, record delete or recording write, stream
+error that keeps the session, firmware update start, stage and outcome, the charger's offers
+each time they are listed, and why "Don't ask again" ended. Each line names
+the device id and model, never the serial or UID. A run of the same stream failure logs one
+line. A failed record delete or firmware update logs only the error kind. A log over 5 MB
+moves to `app.log.1` when the app starts, replacing any earlier one.
 
 ## Meter settings
 
 | function | what it does |
 |---|---|
 | `meterSettings(): Promise<MeterSettings>` | Reads the connected meter's settings block (Tauri command `meter_settings`). Only one GET_DATA for the settings attribute (0x008) goes out; the stream keeps running. Rejects with `usage` when no meter is connected, and with the backend's error when the block fails its CRC check. |
-| `meterSettingsWrite(changes): Promise<MeterSettings>` | Writes `changes` (`SettingChanges`: the new wire code per changed field) to the connected meter (Tauri command `meter_settings_write`): one settings read, one settings write over the meter's CDC port, one read back, and resolves to the settings as read back, with `warnings` naming any undecoded bytes the read-back found changed (these do not fail the write). Rejects with `usage` for a value out of range or no meter, and with the backend's error when the read-back does not match (naming the field) or the meter holds a value out of range for a field not being changed. Nothing is retried. |
+| `meterSettingsWrite(changes): Promise<MeterSettings>` | Writes `changes` (`SettingChanges`: the new wire code per changed field) to the connected meter (Tauri command `meter_settings_write`): two settings reads, one settings write over the meter's CDC port, one read back, and resolves to the settings as read back, with `warnings` naming any undecoded bytes the read-back found changed (these do not fail the write). Rejects with `usage` for a value out of range or no meter, and with the backend's error when the two reads differ (nothing is written), when the read-back does not match (naming the field) or the meter holds a value out of range for a field not being changed. Nothing is retried. |
 
 Types:
 
@@ -289,7 +349,7 @@ when none runs.
 | `meterBackend(deviceId): MeterBackend` | The commands of one meter: each invokes its Tauri command with `deviceId`, so an action never reaches another meter. `MeterBackend` holds `deviceId` and the per-meter commands (disconnect, rate, recording, export, stats, history, PD, meter settings, records, trigger). |
 | `currentMeterCommands: MeterCommands` | The same commands without a device id; they act on the backend's current meter, as with one meter. |
 | `connectedMeters(): Promise<string[]>` | The device ids of the running sessions, in connect order (Tauri command `running_meters`). |
-| `attach(onEvent, deviceId?)` | With `deviceId`, picks up that meter's running session after a reload; without it, the current meter's. |
+| `attach(onEvent, deviceId?)` | With `deviceId`, picks up that meter's running session after a reload; without it, the current meter's. The snapshot's `pd_capturing` says whether its PD capture is running. |
 
 Every Tauri command that acts on a meter takes an optional `deviceId`.
 Without it the backend uses its current meter: the most recently connected
@@ -319,6 +379,9 @@ it does:
 | `?mock=trigger-all` | The demo charger speaks every protocol, with decoded limits for SCP, VFCP, TFCP and UFCS. |
 | `?mock=trigger-out-of-sync` | Every trigger request fails with an `out_of_sync` error. |
 | `?mock=trigger-req-error` | The charger refuses every request above 5 V (`req error 252`); the session stays usable. |
+| `?mock=trigger-charger-gone` | VBUS falls to 0 V a moment after the first accepted request, so armed ends and the offers go. |
+| `?mock=trigger-no-cable` | Read cable gets no answer. |
+| `?mock=trigger-unlisted-cable` | Read cable finds a cable whose vendor is not in the table (VID 0x1234). |
 | `?mock=trigger-detect-disagree` | BC1.2 says not supported while the automatic list says supported. |
 | `?mock=trigger-list-lag` | Detection fails with an `out_of_sync` error after the list, as when the meter answers one command late. |
 | `?mock=bootloader` | One meter in bootloader mode is listed before the demo devices. |

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import InfoButton from "./InfoButton.svelte";
+  import Term from "./Term.svelte";
   import type { MessageSop } from "../backend";
   import {
     DISCOVER_IDENTITY_CABLE,
@@ -7,13 +9,21 @@
     parseDataObjects,
     type PdConsole,
   } from "../console.svelte";
+  import HintText from "./HintText.svelte";
   import TriggerConfirmDialog from "./TriggerConfirmDialog.svelte";
 
   /**
    * The PD message builder, the cable's e-marker details and the raw console (FR
    * DGSQ6T), on the open trigger session.
    */
-  let { pdConsole }: { pdConsole: PdConsole } = $props();
+  let {
+    pdConsole,
+    held = false,
+  }: {
+    pdConsole: PdConsole;
+    /** Detect is running: nothing is sent, and a send made meanwhile is dropped. */
+    held?: boolean;
+  } = $props();
 
   const TARGETS: readonly { value: MessageSop; label: string }[] = [
     { value: "sop", label: "SOP" },
@@ -27,8 +37,8 @@
   let objectsError = $state<string | null>(null);
   let typeError = $state<string | null>(null);
   let command = $state("");
-  /** No send while one is in flight or waits for its confirmation. */
-  const controlsOff = $derived(pdConsole.busy || pdConsole.pending !== null);
+  /** No send while one is in flight, waits for its confirmation, or Detect runs. */
+  const controlsOff = $derived(held || pdConsole.busy || pdConsole.pending !== null);
 
   /** Hex with `0x`, at least four digits. */
   function hex(n: number): string {
@@ -36,6 +46,7 @@
   }
 
   async function sendBuilt(): Promise<void> {
+    if (held) return;
     typeError = messageTypeError(msgType);
     if (typeError !== null) return;
     const dataObjects = parseDataObjects(objects);
@@ -54,6 +65,7 @@
 
   async function sendLine(e: SubmitEvent): Promise<void> {
     e.preventDefault();
+    if (held) return;
     await clearAfter(() => pdConsole.sendLine(command));
   }
 
@@ -66,7 +78,7 @@
 
 <div class="console-sections">
   <section class="card" aria-labelledby="pd-builder-title">
-    <h2 id="pd-builder-title">PD message builder</h2>
+    <h2 id="pd-builder-title"><Term key="term.pd">PD</Term> message builder</h2>
     <form
       class="builder"
       onsubmit={(e) => {
@@ -111,8 +123,9 @@
         <button
           type="button"
           disabled={controlsOff}
-          onclick={() => void pdConsole.sendMessage(DISCOVER_IDENTITY_CABLE)}
-          >Discover cable identity</button
+          onclick={() => {
+            if (!held) void pdConsole.sendMessage(DISCOVER_IDENTITY_CABLE);
+          }}>Discover cable identity</button
         >
       </div>
     </form>
@@ -139,7 +152,7 @@
           <dt>Max current</dt>
           <dd>{Number((c.max_current_ma / 1000).toFixed(2))} A</dd>
         {/if}
-        <dt>EPR</dt>
+        <dt><Term key="term.epr">EPR</Term></dt>
         <dd>{c.epr_capable ? "EPR capable" : "Not EPR capable"}</dd>
       </dl>
     {:else}
@@ -148,7 +161,10 @@
   </section>
 
   <section class="card console" aria-labelledby="pd-console-title">
-    <h2 id="pd-console-title">Console</h2>
+    <div class="titled">
+      <h2 id="pd-console-title">Console</h2>
+      <InfoButton key="section.console" />
+    </div>
     <form class="line" onsubmit={(e) => void sendLine(e)}>
       <label for="pd-console-command">Command</label>
       <input
@@ -162,9 +178,8 @@
     </form>
     {#if pdConsole.error}
       <p class="error" role="alert" {@attach reveal}>
-        {pdConsole.error.hint
-          ? `${pdConsole.error.message} ${pdConsole.error.hint}`
-          : pdConsole.error.message}
+        {pdConsole.error.message}
+        <HintText hint={pdConsole.error.hint} />
       </p>
     {/if}
     <div class="transcript" role="log" aria-label="Console transcript">

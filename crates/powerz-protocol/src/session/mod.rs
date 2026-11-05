@@ -113,6 +113,10 @@ pub enum Error {
     /// A settings change was refused before anything was sent.
     #[error(transparent)]
     SettingsWrite(#[from] crate::decode::settings::SettingsWriteError),
+    /// Two SETTINGS reads ahead of a settings write differ; nothing was
+    /// written and neither read was retried.
+    #[error("two reads of the meter's settings differ, so nothing was written")]
+    SettingsReadsDiffer,
     /// After a settings write the meter reads a field other than expected;
     /// nothing was retried.
     #[error("after the settings write the meter reads {field} = {actual}, expected {expected}")]

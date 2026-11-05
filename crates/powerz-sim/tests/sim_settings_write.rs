@@ -211,3 +211,27 @@ fn the_fault_parses_from_its_cli_name() {
         Ok(FaultPlan::new().ignore_settings_write())
     );
 }
+
+// ---- AC-AXHK2J.1: the fault behind the double-read tests ----
+
+/// `flaky-settings-read`: every second SETTINGS read shows another
+/// brightness, with bytes that pass the block checks.
+#[test]
+fn the_flaky_read_fault_makes_two_reads_differ_and_both_pass_the_block_checks() {
+    let faults = FaultPlan::parse("flaky-settings-read").expect("a known fault");
+    let clock = clock();
+    let mut d = device(Persona::Cdc, Scenario::Idle, &clock).with_faults(faults);
+    let reads: Vec<Vec<u8>> = (1..=4).map(|id| raw_settings(&mut d, id)).collect();
+    let decoded: Vec<MeterSettings> = reads
+        .iter()
+        .map(|p| {
+            Settings::decode(p)
+                .and_then(|s| s.meter_settings())
+                .expect("the block checks pass")
+        })
+        .collect();
+    assert_ne!(reads[0], reads[1]);
+    assert_ne!(decoded[0].brightness, decoded[1].brightness);
+    assert_eq!(reads[0], reads[2]);
+    assert_eq!(reads[1], reads[3]);
+}

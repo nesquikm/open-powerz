@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
-use super::{Error, GuardedTransport, Transport, map_io_error};
+use super::{Error, GuardedTransport, Transport, map_io_error, without_port_names};
 use crate::adcnew::{AdcnewCounters, CdcDemux, CdcItem, Frame, Request};
 use crate::frame::{DeclaredEnd, HEADER_LEN, MainHeader, declared_end, frame_type, msg};
 
@@ -345,11 +345,69 @@ pub(crate) fn open_serial(
     Ok(port)
 }
 
-/// Open the port in `ports` that [`match_port`] picks for `serial`, through
-/// `open`. `serialport` 4.10.1 reports a held port (EBUSY on unix,
+/// The OS text [`port_gone`] reads as a port gone.
+const NOT_FOUND_TEXT: &str = "The system cannot find the file specified.";
+
+/// `e` from opening port `name`, as a port gone when it answered `NoDevice`
+/// and has left `ports`, a fresh listing. Windows words its errors in the
+/// system's language, so [`port_gone`] cannot read them there. A listing that
+/// failed proves nothing.
+pub(crate) fn gone_if_unlisted<E>(
+    e: serialport::Error,
+    name: &str,
+    ports: Result<Vec<PortCandidate>, E>,
+) -> serialport::Error {
+    let left = ports.is_ok_and(|ports| ports.iter().all(|port| port.name != name));
+    if left {
+        serialport::Error::new(serialport::ErrorKind::NoDevice, NOT_FOUND_TEXT)
+    } else {
+        e
+    }
+}
+
+/// `open_serial` for a port just listed, with the failure read through
+/// [`gone_if_unlisted`].
+pub(crate) fn open_listed_serial(
+    name: String,
+) -> Result<Box<dyn serialport::SerialPort>, serialport::Error> {
+    open_serial(name.clone()).map_err(|e| {
+        if e.kind == serialport::ErrorKind::NoDevice {
+            gone_if_unlisted(e, &name, usb_ports())
+        } else {
+            e
+        }
+    })
+}
+
+/// Whether `e`, from opening a port, says the port itself has gone.
+/// `serialport` keeps no code for these, only the OS text: on Windows
+/// ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND share kind `NoDevice` with a
+/// held port, and ENXIO and ENODEV come as `Unknown` with nix's text.
+pub(crate) fn port_gone(e: &serialport::Error) -> bool {
+    let text = e.description.as_str();
+    match e.kind {
+        serialport::ErrorKind::NoDevice => matches!(
+            text,
+            NOT_FOUND_TEXT | "The system cannot find the path specified."
+        ),
+        serialport::ErrorKind::Unknown => {
+            matches!(text, "No such device or address" | "No such device")
+        }
+        _ => false,
+    }
+}
+
+/// Whether `e`, from opening a port discovery just listed, means another
+/// program holds it. `serialport` 4.10.1 reports a held port (EBUSY on unix,
 /// ERROR_ACCESS_DENIED on Windows) as kind `NoDevice`, the kind of a missing
-/// one; a port discovery just listed is not missing, so here that kind is
-/// [`Error::PortHeld`]. No matching port is [`Error::NotFound`].
+/// one; a port just listed is not missing, unless [`port_gone`] says so.
+pub(crate) fn port_held(e: &serialport::Error) -> bool {
+    e.kind == serialport::ErrorKind::NoDevice && !port_gone(e)
+}
+
+/// Open the port in `ports` that [`match_port`] picks for `serial`, through
+/// `open`. A port someone else holds is [`Error::PortHeld`] (see
+/// `port_held`), no matching port is [`Error::NotFound`].
 pub fn open_listed<P>(
     ports: &[PortCandidate],
     serial: &str,
@@ -359,9 +417,12 @@ pub fn open_listed<P>(
         .ok_or(Error::NotFound)?
         .name
         .clone();
-    open(name.clone()).map_err(|e| match e.kind {
-        serialport::ErrorKind::NoDevice => Error::PortHeld { port: name },
-        _ => serial_error(e),
+    open(name).map_err(|e| {
+        if port_held(&e) {
+            Error::PortHeld
+        } else {
+            serial_error(e)
+        }
     })
 }
 
@@ -373,19 +434,22 @@ impl SerialCdcTransport {
     /// [`FIRST_FRAME_DELAY`].
     pub fn open(serial: &str) -> Result<GuardedTransport<Self>, Error> {
         let ports = usb_ports().map_err(serial_error)?;
-        let port = open_listed(&ports, serial, open_serial)?;
+        let port = open_listed(&ports, serial, open_listed_serial)?;
         std::thread::sleep(FIRST_FRAME_DELAY);
         Ok(CdcTransport::with_port(port))
     }
 }
 
 fn serial_error(e: serialport::Error) -> Error {
+    if port_gone(&e) {
+        return Error::Disconnected;
+    }
     match e.kind {
         serialport::ErrorKind::NoDevice => Error::NotFound,
         serialport::ErrorKind::Io(kind) => {
             map_io_error(&io::Error::new(kind, e.description), std::env::consts::OS)
         }
-        _ => Error::Io(e.description),
+        _ => Error::Io(without_port_names(&e.description)),
     }
 }
 
@@ -1061,6 +1125,26 @@ mod tests {
     }
 
     #[test]
+    fn a_port_gone_from_a_fresh_listing_is_not_held_in_any_language() {
+        // Windows words a missing port in the system's language.
+        let german = || {
+            serialport::Error::new(
+                serialport::ErrorKind::NoDevice,
+                "Das System kann die angegebene Datei nicht finden.",
+            )
+        };
+        let name = "COM7";
+        let empty: Result<Vec<PortCandidate>, ()> = Ok(Vec::new());
+        assert!(port_gone(&gone_if_unlisted(german(), name, empty)));
+
+        let listed: Result<_, ()> = Ok(vec![meter_port(name, "KM1")]);
+        assert!(port_held(&gone_if_unlisted(german(), name, listed)));
+
+        let unlistable: Result<Vec<PortCandidate>, ()> = Err(());
+        assert!(port_held(&gone_if_unlisted(german(), name, unlistable)));
+    }
+
+    #[test]
     fn no_device_from_opening_a_listed_port_means_it_is_held() {
         let ports = [meter_port("/dev/cu.usbmodem1101", "KM1")];
         let mut opened = None;
@@ -1069,7 +1153,67 @@ mod tests {
             Err::<(), _>(held())
         });
         assert_eq!(opened.as_deref(), Some("/dev/cu.usbmodem1101"));
-        assert!(matches!(result, Err(Error::PortHeld { .. })), "{result:?}");
+        assert!(matches!(result, Err(Error::PortHeld)), "{result:?}");
+    }
+
+    // ---- AC-AXHK2J.7: a vanished port is not a held one ----
+
+    fn open_failing(kind: serialport::ErrorKind, text: &str) -> Result<(), Error> {
+        let ports = [meter_port("/dev/cu.usbmodem1101", "KM1")];
+        open_listed(&ports, "KM1", |_| {
+            Err::<(), _>(serialport::Error::new(kind, text))
+        })
+    }
+
+    #[test]
+    fn every_way_serialport_says_held_stays_held() {
+        for text in [
+            "Resource busy",
+            "Device or resource busy",
+            "Unable to acquire exclusive lock on serial port",
+            "Unable to acquire shared lock on serial port",
+            "Access is denied.",
+        ] {
+            let result = open_failing(serialport::ErrorKind::NoDevice, text);
+            assert!(matches!(result, Err(Error::PortHeld)), "{text}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn a_port_that_vanished_before_the_open_is_not_held() {
+        // ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND share kind `NoDevice`
+        // with a held port on Windows (windows/error.rs).
+        for text in [
+            "The system cannot find the file specified.",
+            "The system cannot find the path specified.",
+        ] {
+            let result = open_failing(serialport::ErrorKind::NoDevice, text);
+            assert_eq!(result, Err(Error::Disconnected), "{text}");
+        }
+        // ENOENT on unix.
+        let result = open_failing(
+            serialport::ErrorKind::Io(io::ErrorKind::NotFound),
+            "No such file or directory",
+        );
+        assert_eq!(result, Err(Error::Disconnected));
+    }
+
+    // ---- AC-AXHK2J.5: ENXIO and ENODEV at open mean the meter is gone ----
+
+    #[test]
+    fn enxio_and_enodev_at_open_are_the_meter_gone() {
+        // serialport has no kind for them (posix/error.rs): both are
+        // `Unknown` with nix's text.
+        for text in ["No such device or address", "No such device"] {
+            let result = open_failing(serialport::ErrorKind::Unknown, text);
+            assert_eq!(result, Err(Error::Disconnected), "{text}");
+        }
+    }
+
+    #[test]
+    fn another_unknown_open_failure_stays_an_io_error() {
+        let result = open_failing(serialport::ErrorKind::Unknown, "Input/output error");
+        assert!(matches!(result, Err(Error::Io(_))), "{result:?}");
     }
 
     #[test]
@@ -1127,6 +1271,6 @@ mod tests {
 
         let ports = [meter_port(&path, "KM1")];
         let result = open_listed(&ports, "KM1", open_serial).map(|_| ());
-        assert!(matches!(result, Err(Error::PortHeld { .. })), "{result:?}");
+        assert!(matches!(result, Err(Error::PortHeld)), "{result:?}");
     }
 }

@@ -15,7 +15,7 @@ CLI and the desktop app and take your first readings, with or without a meter.
 Recipes for one task each, in [how-to/](how-to/):
 
 - [Record a high-rate CSV](how-to/record-a-csv.md), from the CLI or the desktop app
-- [Explore a session in the desktop app](how-to/explore-a-session.md): pause, zoom, gaps, replug, keyboard
+- [Explore a session in the desktop app](how-to/explore-a-session.md): pause, zoom, gaps, replug, keyboard, hide serial numbers
 - [Read the meter's recordings and settings](how-to/read-the-meters-memory.md): download offline records as CSV and view the settings block, read-only
 - [Use several meters at once](how-to/use-several-meters.md) in the desktop app: add, expand, disconnect, replug
 - [Analyze USB PD traffic](how-to/analyze-pd-traffic.md): capture, filter and read PD messages, see them on the power chart, save and open captures

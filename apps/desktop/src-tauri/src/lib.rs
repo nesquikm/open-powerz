@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod app_log;
 pub mod batch;
+pub mod chart_image;
 pub mod devices;
 #[cfg(feature = "e2e")]
 pub mod e2e;
@@ -10,10 +11,12 @@ pub mod history;
 pub mod pd_capture;
 pub mod pd_import;
 pub mod recording;
+pub mod recording_file;
 pub mod stats;
 pub mod store;
 pub mod trigger;
 pub mod ui_error;
+pub mod window_fit;
 pub mod worker;
 
 use std::path::{Path, PathBuf};
@@ -29,8 +32,9 @@ use crate::devices::{
     AppOpener, AttachedSession, DeviceListing, DeviceManager, FlashStatus, WatchHandle,
 };
 use crate::recording::{ExportProgress, RecordingSummary};
+use crate::recording_file::{FileError, FileSummary, OpenControl, OpenProgress, OpenedFile};
 use crate::ui_error::UiError;
-use crate::worker::BackendEvent;
+use crate::worker::{BackendEvent, ExportFolded, ExportJob};
 
 /// The app and protocol-library versions shown in the About dialog.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -59,8 +63,13 @@ struct AppState {
     watch: Mutex<Option<WatchHandle>>,
     /// The PD capture opened from a file (FR TGE83E): outside the
     /// per-connection worker, so it opens without a meter and never mixes
-    /// with a live capture.
-    opened_pd: Arc<Mutex<Option<pd_capture::PdCapture>>>,
+    /// with a live capture. Only the page lets it go (AC-AXHK2K.5).
+    opened_pd: Mutex<Option<pd_capture::PdCapture>>,
+    /// The recording file in the File tab (FR AXHK2S): outside every
+    /// connection too, so it opens without a meter and touches none.
+    opened_file: Mutex<Option<OpenedFile>>,
+    /// Raised by Cancel: the flag of the open that started last.
+    file_cancel: Mutex<Arc<AtomicBool>>,
 }
 
 impl AppState {
@@ -72,25 +81,17 @@ impl AppState {
         ))
     }
 
-    fn with_manager(mut manager: AppManager) -> AppState {
-        // The page drops a capture opened from a file when a session
-        // reports `connected` (a user Connect or an automatic reconnect);
-        // the backend releases its copy at that same moment. A session that
-        // fails to open keeps the file on both sides.
-        let opened_pd: Arc<Mutex<Option<pd_capture::PdCapture>>> = Arc::default();
-        let slot = Arc::clone(&opened_pd);
-        manager.set_on_connected(move || {
-            *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        });
+    fn with_manager(manager: AppManager) -> AppState {
         AppState {
             manager: Mutex::new(manager),
             watch: Mutex::new(None),
-            opened_pd,
+            opened_pd: Mutex::new(None),
+            opened_file: Mutex::new(None),
+            file_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
         }
     }
 
-    /// Connect to `device_id` at `rate_sps`; events go to `sink`. The
-    /// opened capture is released once the session reports `connected`.
+    /// Connect to `device_id` at `rate_sps`; events go to `sink`.
     #[cfg(test)]
     fn connect_session(
         &self,
@@ -122,8 +123,7 @@ impl AppState {
     }
 
     /// The hotplug watcher's device list; returns whether it started a
-    /// reconnect. The opened capture is released once that session reports
-    /// `connected`, as with Connect.
+    /// reconnect.
     fn devices_changed(&self, devices: &[DeviceListing]) -> bool {
         self.manager().devices_changed(devices)
     }
@@ -132,6 +132,12 @@ impl AppState {
         self.opened_pd
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Let go of the opened capture, if there is one: the page no longer
+    /// shows it (AC-AXHK2K.5).
+    fn release_opened_pd(&self) {
+        *self.opened_pd() = None;
     }
 
     /// Put `pd`, opened from the file at `path`, in the opened-capture slot
@@ -177,6 +183,18 @@ impl AppState {
         let pd = pd_capture::PdCapture::from_pdcap(&loaded.entries);
         let damaged_line = loaded.error.as_ref().map(|e| e.line());
         Ok(self.show_opened(path, pd, damaged_line, LeftOut::default()))
+    }
+
+    fn opened_file(&self) -> MutexGuard<'_, Option<OpenedFile>> {
+        self.opened_file
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn file_cancel(&self) -> MutexGuard<'_, Arc<AtomicBool>> {
+        self.file_cancel
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn manager(&self) -> MutexGuard<'_, AppManager> {
@@ -464,19 +482,82 @@ async fn trigger_risk(
     .await
 }
 
-/// Send a request; above 5 V it is refused unless `confirmed` (the backend
-/// is the final gate).
+/// Send a request; above 5 V it is refused unless `confirmed` or covered by
+/// an armed "don't ask again" (the backend is the final gate). `remember`
+/// with `confirmed` asks to arm; the session decides whether it may.
 #[tauri::command]
 async fn trigger_request(
     state: Shared<'_>,
     device_id: Option<String>,
     request: trigger::TriggerRequest,
     confirmed: bool,
+    remember: Option<bool>,
 ) -> Result<trigger::TriggerReply, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let control = trigger_control(&state, device_id.as_deref())?;
-        control.request(request, confirmed)
+        let confirm = match (confirmed, remember) {
+            (true, Some(true)) => trigger::Confirm::YesRemember,
+            _ => confirmed.into(),
+        };
+        control.request(request, confirm)
+    })
+    .await
+}
+
+/// Whether "don't ask again" is armed; false with no trigger session.
+#[tauri::command]
+async fn trigger_armed(state: Shared<'_>, device_id: Option<String>) -> Result<bool, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        Ok(trigger_control(&state, device_id.as_deref())
+            .and_then(|control| control.armed())
+            .unwrap_or(false))
+    })
+    .await
+}
+
+/// End "don't ask again"; with no trigger session there is nothing to end.
+#[tauri::command]
+async fn trigger_disarm(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        if let Ok(control) = trigger_control(&state, device_id.as_deref()) {
+            // A session that ended is not armed either.
+            let _ = control.disarm();
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Whether the session saw VBUS collapse under a contract; false with no
+/// trigger session.
+fn charger_gone_of(state: &AppState, device_id: Option<&str>) -> bool {
+    trigger_control(state, device_id)
+        .and_then(|control| control.charger_gone())
+        .unwrap_or(false)
+}
+
+/// See [`charger_gone_of`].
+#[tauri::command]
+async fn trigger_charger_gone(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<bool, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(charger_gone_of(&state, device_id.as_deref()))).await
+}
+
+/// Whether PD is entered in the trigger session, so Read cable goes out
+/// (AC-AXHK2P.13); false with no trigger session. Nothing is written.
+#[tauri::command]
+async fn trigger_pd_entered(state: Shared<'_>, device_id: Option<String>) -> Result<bool, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        Ok(trigger_control(&state, device_id.as_deref())
+            .and_then(|control| control.pd_entered())
+            .unwrap_or(false))
     })
     .await
 }
@@ -513,6 +594,41 @@ async fn trigger_message_send(
     .await
 }
 
+/// One press of Read cable on meter `device_id` (FR AXHK2P).
+fn cable_read_of(state: &AppState, device_id: Option<&str>) -> Result<trigger::CableRead, UiError> {
+    trigger_control(state, device_id)?.cable_read()
+}
+
+/// One SOP' Discover Identity inside the open PD session: nothing from the
+/// page selects it, and nothing else is ever sent.
+#[tauri::command]
+async fn trigger_cable_read(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<trigger::CableRead, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || cable_read_of(&state, device_id.as_deref())).await
+}
+
+/// The newest cable identity in the capture the PD view shows: the one opened
+/// from a file, else the meter's own. Nothing is sent.
+fn cable_seen_of(state: &AppState, device_id: Option<&str>) -> Option<trigger::CableView> {
+    if let Some(cable) = state.opened_pd().as_ref().and_then(|pd| pd.latest_cable()) {
+        return Some(cable);
+    }
+    control(state, device_id).ok()?.pd_cable_seen().ok()?
+}
+
+/// The cable identity a PD capture holds; none, not an error, with no capture.
+#[tauri::command]
+async fn pd_cable_seen(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<Option<trigger::CableView>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(cable_seen_of(&state, device_id.as_deref()))).await
+}
+
 /// The library risk class of a raw console line (FR DGSQ6T).
 #[tauri::command]
 async fn trigger_console_risk(
@@ -546,13 +662,22 @@ async fn trigger_console_send(
 }
 
 /// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
-/// protocols `reset`. The session stays open.
+/// protocols `reset`. The session stays open. `leaving`: the trigger view
+/// was left, logged as its own armed-end reason (FR AXHK2N).
 #[tauri::command]
-async fn trigger_back_to_5v(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
+async fn trigger_back_to_5v(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    leaving: Option<bool>,
+) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let control = trigger_control(&state, device_id.as_deref())?;
-        control.back_to_5v()
+        if leaving.unwrap_or(false) {
+            control.leave_view()
+        } else {
+            control.back_to_5v()
+        }
     })
     .await
 }
@@ -629,7 +754,7 @@ async fn meter_settings_write(
     changes: std::collections::BTreeMap<String, i32>,
 ) -> Result<worker::MeterSettingsView, UiError> {
     let state = Arc::clone(&state);
-    blocking(move || control(&state, device_id.as_deref())?.write_settings(&changes)).await
+    blocking(move || logged_control(&state, device_id.as_deref())?.write_settings(&changes)).await
 }
 
 /// List the connected meter's offline records (GET_DATA 0x200 only) for
@@ -669,8 +794,9 @@ async fn records_delete(
 ) -> Result<worker::RecordDeleteView, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let dir = backup_dir(&app)?;
-        control(&state, device_id.as_deref())?.delete_records(index, &confirm, &dir)
+        let device = device_id.as_deref();
+        let dir = backup_dir(&app).inspect_err(|error| log_failure(&state, device, error))?;
+        logged_control(&state, device)?.delete_records(index, &confirm, &dir)
     })
     .await
 }
@@ -710,6 +836,18 @@ async fn pd_clear(
             Err(e) => return Err(e),
         };
         control.clear_pd()
+    })
+    .await
+}
+
+/// The page no longer shows the capture opened from a file: release it
+/// (AC-AXHK2K.5). Needs no meter, and with no opened capture changes nothing.
+#[tauri::command]
+async fn pd_release_opened(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        state.release_opened_pd();
+        Ok(())
     })
     .await
 }
@@ -812,6 +950,115 @@ async fn pd_import(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<Pd
     .await
 }
 
+/// Ask for a recording file and open it for the File tab (FR AXHK2S); needs
+/// no meter and sends nothing to one. Resolves to its summary, or `null` when
+/// the dialog was dismissed or Cancel ended the open. A file is built whole
+/// before it replaces the one open, so whatever fails keeps that one.
+#[tauri::command]
+async fn recording_file_open(
+    app: tauri::AppHandle,
+    state: Shared<'_>,
+    on_progress: Channel<OpenProgress>,
+) -> Result<Option<FileSummary>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let cancel = Arc::new(AtomicBool::new(false));
+        *state.file_cancel() = Arc::clone(&cancel);
+        let Some(path) = choose_open_path(&app, "Recording", &["csv", "db"])? else {
+            return Ok(None);
+        };
+        let mut control = OpenControl {
+            cancel,
+            progress: Box::new(move |p| {
+                let _ = on_progress.send(p);
+            }),
+        };
+        match recording_file::open(&path, &mut control) {
+            Ok(file) => {
+                let summary = file.summary();
+                // The old file is freed outside the lock.
+                let _old = state.opened_file().replace(file);
+                Ok(Some(summary))
+            }
+            Err(FileError::Cancelled) => Ok(None),
+            Err(FileError::Refused(why)) => Err(UiError::usage(why)),
+        }
+    })
+    .await
+}
+
+/// Cancel: the open under way ends as `null`.
+#[tauri::command]
+async fn recording_file_cancel(state: Shared<'_>) -> Result<(), UiError> {
+    state.file_cancel().store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Close the open recording file.
+#[tauri::command]
+async fn recording_file_close(state: Shared<'_>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        // A large file is freed off the async runtime, outside the lock.
+        let _old = state.opened_file().take();
+        Ok(())
+    })
+    .await
+}
+
+/// Min / max buckets of the open recording file over `t0_ms..=t1_ms`.
+#[tauri::command]
+async fn recording_file_range(
+    state: Shared<'_>,
+    series: Vec<history::Series>,
+    t0_ms: u64,
+    t1_ms: u64,
+    buckets: usize,
+) -> Result<Vec<history::SeriesBuckets>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        state
+            .opened_file()
+            .as_ref()
+            .map(|file| file.range_to_edges(&series, t0_ms, t1_ms, buckets))
+            .ok_or_else(|| UiError::usage("No recording file is open."))
+    })
+    .await
+}
+
+/// The chart ruler's stats over the open recording file's rows with
+/// `t0_ms <= time <= t1_ms` (FR AXHK2T, AC-AXHK2T.2); `None` when no row is in range.
+#[tauri::command]
+async fn recording_file_range_stats(
+    state: Shared<'_>,
+    t0_ms: u64,
+    t1_ms: u64,
+) -> Result<Option<history::RangeStats>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(opened_records(&state)?.range_stats(t0_ms, t1_ms))).await
+}
+
+/// The open recording file's rows, sharing its stored samples: taken under
+/// the file lock, scanned after it is released.
+fn opened_records(state: &AppState) -> Result<history::Records, UiError> {
+    state
+        .opened_file()
+        .as_ref()
+        .map(recording_file::OpenedFile::records)
+        .ok_or_else(|| UiError::usage("No recording file is open."))
+}
+
+/// Segment marks and E.D. of the open recording file's current run, from its
+/// raw rows (FR AXHK2T, AC-AXHK2T.4, .5); `None` when it has no row.
+#[tauri::command]
+async fn recording_file_run_progress(
+    state: Shared<'_>,
+    query: history::RunProgressQuery,
+) -> Result<Option<history::RunProgress>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(opened_records(&state)?.run_progress(&query))).await
+}
+
 /// Inspect the firmware container at `path` (FR V9SK53, AC .3); needs no
 /// meter. Resolves to its metadata with the English release notes.
 #[tauri::command]
@@ -833,20 +1080,26 @@ async fn firmware_choose(app: tauri::AppHandle) -> Result<Option<String>, UiErro
 /// Update the meter `device_id` with the firmware container at `path`
 /// (FR V9SK55, AC .4): takes the meter from every other use for the
 /// update, re-checks that `confirmation` is the file's version before
-/// anything is sent, streams each stage over `on_progress` (the write
-/// stage about every percent) and releases the meter afterwards.
+/// anything is released or sent, streams each stage over `on_progress` (the write
+/// stage about every percent) and releases the meter afterwards. `agreed`
+/// names the sessions the user agreed to release (FR AXHK2F).
 #[tauri::command]
 async fn firmware_flash(
     state: Shared<'_>,
     device_id: String,
     path: String,
     confirmation: String,
+    agreed: Vec<devices::FlashHold>,
     on_progress: Channel<firmware_flash::FlashStage>,
 ) -> Result<firmware_flash::FlashDone, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let lease = state.manager().begin_flash(&device_id)?;
+        // Before the lock: a slow file stalls no other command, and a start
+        // that could not go on releases nothing (AC-AXHK2F.2).
+        firmware_flash::check_confirmation(Path::new(&path), &confirmation)?;
+        let lease = state.manager().begin_flash(&device_id, &agreed)?;
         let device = lease.device().clone();
+        let log = lease.session_log();
         let control = Arc::clone(lease.control());
         let stop = control.stop();
         let observer = Arc::clone(&control);
@@ -872,28 +1125,30 @@ async fn firmware_flash(
                     powerz_sim::Persona::Bulk,
                     scenario,
                 ));
-                firmware_flash::flash_file(
+                firmware_flash::flash_file_logged(
                     path,
                     &confirmation,
                     &mut meter,
                     SystemClock,
                     stop,
+                    &log,
                     &mut progress,
                 )
             }
             None => {
                 let mut opener = firmware_flash::UsbFlashOpener::new(device.serial.clone());
-                firmware_flash::flash_file(
+                firmware_flash::flash_file_logged(
                     path,
                     &confirmation,
                     &mut opener,
                     SystemClock,
                     stop,
+                    &log,
                     &mut progress,
                 )
             }
         };
-        drop(lease);
+        lease.finish(&done);
         done
     })
     .await
@@ -907,8 +1162,8 @@ async fn firmware_cancel(state: Shared<'_>) -> Result<(), UiError> {
     blocking(move || state.manager().cancel_flash()).await
 }
 
-/// The running firmware update, if any, for a reloaded page to pick up
-/// (AC-4PJRVJ.3).
+/// The running firmware update, if any, else the ended one not read yet,
+/// for a reloaded page to pick up (AC-4PJRVJ.3, AC-AXHK2M.2).
 #[tauri::command]
 async fn firmware_flash_status(state: Shared<'_>) -> Result<Option<FlashStatus>, UiError> {
     let state = Arc::clone(&state);
@@ -916,10 +1171,12 @@ async fn firmware_flash_status(state: Shared<'_>) -> Result<Option<FlashStatus>,
 }
 
 /// The save dialog's file type for a proposed file name: a PD capture for
-/// `.pdcap`, CSV otherwise.
+/// `.pdcap`, a database for `.db`, CSV otherwise.
 fn save_filter(suggested_name: &str) -> (&'static str, &'static [&'static str]) {
     if suggested_name.ends_with(".pdcap") {
         ("PD capture", &["pdcap"])
+    } else if suggested_name.ends_with(".db") {
+        ("SQLite database", &["db"])
     } else {
         ("CSV", &["csv"])
     }
@@ -1029,22 +1286,38 @@ fn recordings_dir(app: &tauri::AppHandle) -> Result<PathBuf, UiError> {
 
 /// Record the stream at once to a new default file named after
 /// `suggested_name`, and resolve to its path. Where the file ends up is asked
-/// at Stop: see [`save_recording_as`].
+/// at Stop: see [`save_recording_as`]. With `options.folder` the file goes
+/// there instead, and nothing is asked.
 #[tauri::command]
 async fn start_recording(
     app: tauri::AppHandle,
     state: Shared<'_>,
     device_id: Option<String>,
     suggested_name: String,
+    options: Option<recording::RecordingOptions>,
 ) -> Result<String, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        let control = control(&state, device_id.as_deref())?;
-        let path = recording::default_recording_path(&recordings_dir(&app)?, &suggested_name)?;
-        if let Err(refused) = control.record_to(&path) {
-            let _ = std::fs::remove_file(&path);
-            return Err(refused);
+        if !recording::recording_name_ok(&suggested_name) {
+            return Err(recording::bad_recording_name());
         }
+        let options = options.unwrap_or_default();
+        let limits = options.limits();
+        limits.check()?;
+        if options.folder.as_ref().is_some_and(|dir| dir.is_relative()) {
+            return Err(UiError::usage("Pick the recording folder again."));
+        }
+        let start = {
+            let manager = state.manager();
+            manager
+                .recording_start_for(&manager.target(device_id.as_deref()))?
+                .with_limits(limits)
+        };
+        let path = match &options.folder {
+            Some(dir) => recording::folder_recording_path(dir, &suggested_name)?,
+            None => recording::default_recording_path(&recordings_dir(&app)?, &suggested_name)?,
+        };
+        recording::start_at(&path, |path| start.record_to(path))?;
         Ok(path.to_string_lossy().into_owned())
     })
     .await
@@ -1075,6 +1348,23 @@ async fn save_recording_as(app: tauri::AppHandle, path: String) -> Result<Option
     .await
 }
 
+/// Ask which folder recordings go to; `null` when the dialog was cancelled.
+#[tauri::command]
+async fn choose_recording_folder(app: tauri::AppHandle) -> Result<Option<String>, UiError> {
+    blocking(move || {
+        let Some(choice) = app.dialog().file().blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let path = choice.into_path().map_err(|_| {
+            UiError::usage(
+                "The folder dialog did not return a folder on disk; pick one on this computer.",
+            )
+        })?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
 /// Stop the recording and return its row count and gaps.
 #[tauri::command]
 async fn stop_recording(
@@ -1085,6 +1375,28 @@ async fn stop_recording(
     blocking(move || {
         let control = control(&state, device_id.as_deref())?;
         control.stop_recording()
+    })
+    .await
+}
+
+/// Hold the recording's rows back while the stream goes on.
+#[tauri::command]
+async fn recording_pause(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = control(&state, device_id.as_deref())?;
+        control.pause_recording()
+    })
+    .await
+}
+
+/// Write the recording's rows again, in the same file.
+#[tauri::command]
+async fn recording_resume(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let control = control(&state, device_id.as_deref())?;
+        control.resume_recording()
     })
     .await
 }
@@ -1104,6 +1416,25 @@ fn session_store(
 fn control(state: &AppState, device_id: Option<&str>) -> Result<worker::WorkerControl, UiError> {
     let manager = state.manager();
     manager.control_for(&manager.target(device_id))
+}
+
+/// Add the line for `error` of a command on meter `device_id` (the current
+/// session's without one) that failed before reaching the worker (FR AXHK2G).
+fn log_failure(state: &AppState, device_id: Option<&str>, error: &UiError) {
+    let log = {
+        let manager = state.manager();
+        manager.session_log_for(&manager.target(device_id))
+    };
+    log.failure(error);
+}
+
+/// [`control`] for a command whose failures the log records; a refusal adds
+/// its line here, the worker never hears of it.
+fn logged_control(
+    state: &AppState,
+    device_id: Option<&str>,
+) -> Result<worker::WorkerControl, UiError> {
+    control(state, device_id).inspect_err(|error| log_failure(state, device_id, error))
 }
 
 /// The trigger handle of meter `device_id` (the current session's without
@@ -1143,8 +1474,11 @@ async fn reset_stats(state: Shared<'_>, device_id: Option<String>) -> Result<(),
 async fn clear_history(state: Shared<'_>, device_id: Option<String>) -> Result<(), UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
-        session_store(&state, device_id.as_deref())?.clear_history();
-        Ok(())
+        let clearer = {
+            let manager = state.manager();
+            manager.clearer_for(&manager.target(device_id.as_deref()))?
+        };
+        clearer.clear()
     })
     .await
 }
@@ -1183,11 +1517,67 @@ async fn history_gaps(
         .await
 }
 
+/// Where the session history's full resolution starts (session time, ms), for
+/// the chart's fold tick: the data before it is folded into coarser blocks.
+/// `None` while nothing is folded (FR AXHK2W, AC-AXHK2W.11).
+#[tauri::command]
+async fn history_fold_boundary(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<Option<u64>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(session_store(&state, device_id.as_deref())?.history_fold_boundary())).await
+}
+
+/// The chart ruler's stats over the session history's raw samples with
+/// `t0_ms <= time <= t1_ms` (FR AXHK2T, AC-AXHK2T.2); `None` when no sample is
+/// in range. Reads the history only; sends nothing to the meter.
+#[tauri::command]
+async fn range_stats(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    t0_ms: u64,
+    t1_ms: u64,
+) -> Result<Option<history::RangeStats>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        Ok(session_store(&state, device_id.as_deref())?.history_range_stats(t0_ms, t1_ms))
+    })
+    .await
+}
+
+/// Segment marks and E.D. of the session history's current run, from its raw
+/// samples (FR AXHK2T, AC-AXHK2T.4, .5); `None` when the history is empty.
+/// Reads the history only; sends nothing to the meter.
+#[tauri::command]
+async fn run_progress(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    query: history::RunProgressQuery,
+) -> Result<Option<history::RunProgress>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || Ok(session_store(&state, device_id.as_deref())?.history_run_progress(&query)))
+        .await
+}
+
 /// Where an export went and how many rows it wrote.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExportResult {
     pub path: String,
     pub rows: u64,
+    /// The folded oldest part the export left out; `null` when nothing was
+    /// (FR AXHK2W, AC-AXHK2W.14).
+    pub folded: Option<ExportFolded>,
+}
+
+/// What the export `job` to `path` came to, once it has run to its end.
+fn finished_export(job: ExportJob, path: &Path) -> Result<ExportResult, UiError> {
+    let summary = job.join().map_err(|_| UiError::internal())??;
+    Ok(ExportResult {
+        path: path.to_string_lossy().into_owned(),
+        rows: summary.rows,
+        folded: summary.folded,
+    })
 }
 
 /// Open the save dialog with `suggested_name` and export the session so far
@@ -1213,18 +1603,39 @@ async fn export_session(
                 let job = exporter.export_to(path, move |p| {
                     let _ = on_progress.send(p);
                 })?;
-                let rows = job
-                    .join()
-                    .map_err(|_| UiError::internal())
-                    .and_then(|done| done)
-                    .inspect_err(|_| {
-                        // A half-written export is worse than none.
-                        let _ = std::fs::remove_file(path);
-                    })?;
-                Ok(ExportResult {
-                    path: path.to_string_lossy().into_owned(),
-                    rows,
+                finished_export(job, path).inspect_err(|_| {
+                    // A half-written export is worse than none.
+                    let _ = std::fs::remove_file(path);
                 })
+            },
+        )
+    })
+    .await
+}
+
+/// Open the save dialog with `suggested_name` and export the session so far
+/// to a vendor-layout `.db` file (FR AXHK2S). Resolves like `export_session`.
+#[tauri::command]
+async fn export_session_db(
+    app: tauri::AppHandle,
+    state: Shared<'_>,
+    device_id: Option<String>,
+    suggested_name: String,
+    on_progress: Channel<ExportProgress>,
+) -> Result<Option<ExportResult>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        with_save_path(
+            &state,
+            &app,
+            device_id.as_deref(),
+            &suggested_name,
+            |m: &AppManager, id| m.exporter_for(id),
+            |exporter, path| {
+                let job = exporter.export_db_to(path, move |p| {
+                    let _ = on_progress.send(p);
+                })?;
+                finished_export(job, path)
             },
         )
     })
@@ -1254,9 +1665,37 @@ async fn pd_save(
                 Ok(ExportResult {
                     path: path.to_string_lossy().into_owned(),
                     rows,
+                    folded: None,
                 })
             },
         )
+    })
+    .await
+}
+
+/// Asks where to save the chart image proposing `suggested_name`, then
+/// writes `data` there in `format` (`png`, `svg` or `pdf`; a PDF's `data` is
+/// the PNG it wraps; FR AXHK2V). A PNG outside 320 to 7680 px is refused
+/// before the dialog. Resolves to the saved path, `None` when cancelled.
+#[tauri::command]
+async fn save_chart_image(
+    app: tauri::AppHandle,
+    suggested_name: String,
+    format: String,
+    data: Vec<u8>,
+) -> Result<Option<String>, UiError> {
+    use chart_image::{ChartImageFormat, check_chart_image, write_chart_image};
+    let refused =
+        |e: chart_image::ChartImageError| UiError::usage(format!("The image was not saved: {e}."));
+    let format = ChartImageFormat::from_name(&format)
+        .ok_or_else(|| UiError::usage("Chart images are saved as PNG, SVG or PDF."))?;
+    blocking(move || {
+        check_chart_image(format, &data).map_err(refused)?;
+        let Some(path) = choose_save_path(&app, &suggested_name)? else {
+            return Ok(None);
+        };
+        write_chart_image(&path, format, &data).map_err(refused)?;
+        Ok(Some(path.to_string_lossy().into_owned()))
     })
     .await
 }
@@ -1294,6 +1733,11 @@ pub fn run() {
                 Ok(log) => app.state::<Arc<AppState>>().manager().set_app_log(log),
                 Err(e) => eprintln!("open-powerz: app.log is not available: {e}"),
             }
+            // A window restored off every screen comes back to the main one
+            // (AC-EWQ6FQ.1).
+            if let Some(window) = app.get_webview_window("main") {
+                window_fit::fit_main_window(&window);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1308,10 +1752,23 @@ pub fn run() {
             set_rate,
             start_recording,
             stop_recording,
+            recording_pause,
+            recording_resume,
             save_recording_as,
+            choose_recording_folder,
             export_session,
+            export_session_db,
+            recording_file_open,
+            recording_file_cancel,
+            recording_file_close,
+            recording_file_range,
+            recording_file_range_stats,
+            recording_file_run_progress,
             history_range,
             history_gaps,
+            history_fold_boundary,
+            range_stats,
+            run_progress,
             stats,
             reset_stats,
             clear_history,
@@ -1319,12 +1776,15 @@ pub fn run() {
             pd_stop,
             pd_details,
             pd_clear,
+            pd_release_opened,
+            pd_cable_seen,
             meter_settings,
             meter_settings_write,
             records_list,
             record_download,
             records_delete,
             pd_save,
+            save_chart_image,
             pd_open,
             pd_import,
             firmware_inspect,
@@ -1337,9 +1797,14 @@ pub fn run() {
             trigger_list,
             trigger_risk,
             trigger_request,
+            trigger_armed,
+            trigger_disarm,
+            trigger_charger_gone,
+            trigger_pd_entered,
             trigger_back_to_5v,
             trigger_message_risk,
             trigger_message_send,
+            trigger_cable_read,
             trigger_console_risk,
             trigger_console_send,
             trigger_close
@@ -1403,6 +1868,155 @@ mod tests {
     fn the_save_dialog_offers_the_file_type_of_the_proposed_name() {
         assert_eq!(save_filter("powerz-pd-20261022-101500.pdcap").1, ["pdcap"]);
         assert_eq!(save_filter("powerz-20261022-101500.csv").1, ["csv"]);
+    }
+
+    // ---- AC-AXHK2P.2, .6: the card's two commands ----
+
+    /// The Discover Identity ACK of the session-2 240 W cable, as a record.
+    /// [device]
+    fn cable_ack_record() -> powerz_protocol::session::CapturedRecord {
+        use powerz_protocol::decode::pd_packet::{PdMessage, PdRecord, PdRecordKind};
+        let objects: [u32; 5] = [
+            0xFF00_A841,
+            0x1860_050D,
+            0x0000_404D,
+            0x8254_0000,
+            0x000A_2640,
+        ];
+        powerz_protocol::session::CapturedRecord {
+            elapsed_ms: 0,
+            record: PdRecord {
+                time_ms: 0,
+                from_meter: false,
+                raw: Vec::new(),
+                kind: PdRecordKind::Message(PdMessage {
+                    sop: 1,
+                    header: 0x518F,
+                    body: objects.iter().flat_map(|o| o.to_le_bytes()).collect(),
+                }),
+            },
+        }
+    }
+
+    fn no_usb() -> AppState {
+        AppState::with_manager(DeviceManager::new(
+            || Ok(Vec::new()),
+            AppOpener,
+            SystemClock,
+        ))
+    }
+
+    #[test]
+    fn a_cable_read_with_no_session_is_a_usage_error() {
+        let state = no_usb();
+        let Err(err) = cable_read_of(&state, None) else {
+            panic!("the read was not refused");
+        };
+        assert_eq!(err.kind, ui_error::ErrorKind::Usage, "{err:?}");
+    }
+
+    #[test]
+    fn a_cable_read_with_a_connected_meter_but_no_trigger_session_is_a_usage_error() {
+        let state = no_usb();
+        state
+            .connect_session(
+                "demo:idle",
+                50,
+                |_: BackendEvent| {},
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the demo device connects");
+        let read = cable_read_of(&state, None);
+        let _ = state.manager().disconnect_for("demo:idle");
+        let Err(err) = read else {
+            panic!("the read was not refused");
+        };
+        assert_eq!(err.kind, ui_error::ErrorKind::Usage, "{err:?}");
+    }
+
+    #[test]
+    fn no_capture_has_no_cable_and_no_error() {
+        let state = no_usb();
+        assert_eq!(cable_seen_of(&state, None), None);
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        assert_eq!(cable_seen_of(&state, None), None);
+    }
+
+    #[test]
+    fn the_opened_capture_answers_the_cable_it_holds() {
+        let state = no_usb();
+        let mut pd = pd_capture::PdCapture::new();
+        pd.push(&[cable_ack_record()], None);
+        *state.opened_pd() = Some(pd);
+        let cable = cable_seen_of(&state, None).expect("the ACK");
+        assert_eq!(cable.vid, 0x050D);
+        assert_eq!(cable.pid, Some(0x8254));
+        assert_eq!(cable.speed.as_deref(), Some("USB 2.0"));
+    }
+
+    #[test]
+    fn a_connected_meter_with_no_capture_has_no_cable() {
+        let state = no_usb();
+        state
+            .connect_session(
+                "demo:idle",
+                50,
+                |_: BackendEvent| {},
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the demo device connects");
+        let seen = cable_seen_of(&state, None);
+        let _ = state.manager().disconnect_for("demo:idle");
+        assert_eq!(seen, None);
+    }
+
+    #[test]
+    fn with_no_session_no_charger_is_gone() {
+        let state = no_usb();
+        assert!(!charger_gone_of(&state, None));
+        state
+            .connect_session(
+                "demo:idle",
+                50,
+                |_: BackendEvent| {},
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the demo device connects");
+        let gone = charger_gone_of(&state, Some("demo:idle"));
+        let _ = state.manager().disconnect_for("demo:idle");
+        assert!(!gone);
+    }
+
+    #[test]
+    fn the_charger_gone_command_is_registered() {
+        let source = include_str!("lib.rs");
+        let handlers = source
+            .split("generate_handler![")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the handler list");
+        assert!(
+            handlers
+                .split(',')
+                .any(|h| h.trim() == "trigger_charger_gone"),
+            "trigger_charger_gone is not registered"
+        );
+    }
+
+    #[test]
+    fn the_cards_commands_are_registered() {
+        let source = include_str!("lib.rs");
+        let handlers = source
+            .split("generate_handler![")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the handler list");
+        for name in ["trigger_cable_read", "pd_cable_seen"] {
+            assert!(
+                handlers.split(',').any(|h| h.trim() == name),
+                "{name} is not registered"
+            );
+        }
     }
 
     #[test]
@@ -1497,29 +2111,100 @@ mod tests {
         }
     }
 
+    /// A sink that counts the sessions that reported `connected`.
+    fn counting_connects(
+        connects: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl worker::EventSink + use<> {
+        let connects = Arc::clone(connects);
+        move |event: BackendEvent| {
+            if matches!(event, BackendEvent::Status(worker::Status::Connected(_))) {
+                connects.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
     #[test]
-    fn connecting_a_meter_releases_the_opened_capture_once_it_reports_connected() {
-        // No USB discovery: only the demo device is listed.
+    fn connecting_a_meter_keeps_the_opened_capture() {
+        // AC-AXHK2K.5: only the page's command lets it go. No USB discovery:
+        // only the demo devices are listed.
         let state = AppState::with_manager(DeviceManager::new(
             || Ok(Vec::new()),
             AppOpener,
             SystemClock,
         ));
         *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         state
             .connect_session(
                 "demo:idle",
                 1000,
-                |_: BackendEvent| {},
+                counting_connects(&connects),
                 Arc::new(AtomicBool::new(false)),
             )
             .expect("the demo device connects");
-        wait_for("the opened capture was released", || {
-            state.opened_pd().is_none()
+        wait_for("the session reported connected", || {
+            connects.load(Ordering::SeqCst) == 1
         });
+        assert!(
+            state.opened_pd().is_some(),
+            "connecting a meter released the opened capture"
+        );
         if let Ok(session) = state.manager().take_session() {
             session.disconnect();
         }
+    }
+
+    #[test]
+    fn connecting_a_second_meter_keeps_the_opened_capture() {
+        let state = AppState::with_manager(DeviceManager::new(
+            || Ok(Vec::new()),
+            AppOpener,
+            SystemClock,
+        ));
+        let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .connect_session(
+                "demo:idle",
+                1000,
+                counting_connects(&connects),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the first demo device connects");
+        wait_for("the first session reported connected", || {
+            connects.load(Ordering::SeqCst) == 1
+        });
+        // The file opens while the first meter runs; the second one joins.
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        state
+            .connect_session(
+                "demo:load-5v-1a",
+                1000,
+                counting_connects(&connects),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("the second demo device connects");
+        wait_for("the second session reported connected", || {
+            connects.load(Ordering::SeqCst) == 2
+        });
+        assert!(
+            state.opened_pd().is_some(),
+            "a second meter released the opened capture"
+        );
+        let ids = state.manager().connected_ids();
+        for id in ids {
+            let _ = state.manager().disconnect_for(&id);
+        }
+    }
+
+    #[test]
+    fn the_page_releases_the_opened_capture() {
+        let state = AppState::new();
+        *state.opened_pd() = Some(pd_capture::PdCapture::new());
+        state.release_opened_pd();
+        assert!(state.opened_pd().is_none(), "it stayed opened");
+        // Nothing opened: nothing to do, no error.
+        state.release_opened_pd();
+        assert!(state.opened_pd().is_none());
     }
 
     #[test]
@@ -1540,7 +2225,7 @@ mod tests {
         assert!(state.opened_pd().is_some(), "a refused Connect dropped it");
     }
 
-    // ---- AC-4PJRVK.7: an automatic reconnect releases the opened capture ----
+    // ---- AC-AXHK2K.5: an automatic reconnect keeps the opened capture ----
 
     const SERIAL: &str = "SERIAL-RECONNECT";
 

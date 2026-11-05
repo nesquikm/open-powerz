@@ -4,14 +4,18 @@
 //! the history and the statistics go on across the outage.
 //!
 //! Queries run on the caller's thread under the store lock; the worker
-//! takes the lock only briefly per poll to append.
+//! takes the lock only briefly per poll to append. A query that scans every
+//! record (the ruler's stats, segment marks) takes a snapshot under the lock
+//! and scans it after letting go.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use powerz_protocol::decode::QueueRecord;
 use powerz_protocol::session::SnapshotCadence;
 
-use crate::history::{History, HistoryGap, Records, Series, SeriesBuckets};
+use crate::history::{
+    History, HistoryGap, RangeStats, Records, RunProgress, RunProgressQuery, Series, SeriesBuckets,
+};
 use crate::stats::{Stats, StatsSnapshot};
 
 /// Maps device time onto a session time that never goes backwards.
@@ -121,6 +125,10 @@ pub(crate) struct SessionData {
     temp_c: Option<(f64, u64)>,
     /// Temperature changes over the history.
     temps: TempLog,
+    /// Session time of the last record when the history was last cleared:
+    /// a sample at or before it that has not reached the page yet never
+    /// does (AC-HR2JAG.1).
+    cleared_through_ms: Option<u32>,
 }
 
 impl SessionData {
@@ -176,6 +184,11 @@ impl SessionData {
     pub(crate) fn stats(&self) -> StatsSnapshot {
         self.stats.snapshot()
     }
+
+    /// Session time of the last record when the history was last cleared.
+    pub(crate) fn cleared_through_ms(&self) -> Option<u32> {
+        self.cleared_through_ms
+    }
 }
 
 /// A session's data, shared by its connections and the commands that
@@ -187,6 +200,14 @@ impl SessionStore {
     /// An empty session.
     pub fn new() -> SessionStore {
         SessionStore::default()
+    }
+
+    /// An empty session whose history keeps `full` records at full
+    /// resolution before it folds the oldest (tests fold quickly).
+    pub fn with_full_limit(full: usize) -> SessionStore {
+        let store = SessionStore::default();
+        store.lock().history = History::with_full_limit(full);
+        store
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, SessionData> {
@@ -255,6 +276,52 @@ impl SessionStore {
         self.lock().history.gaps(t0, t1)
     }
 
+    /// Where the history's full resolution starts (session time, ms); the
+    /// data before it is folded into coarser blocks. `None` while nothing is
+    /// folded (FR AXHK2W, AC-AXHK2W.10).
+    pub fn history_fold_boundary(&self) -> Option<u64> {
+        self.lock().history.fold_boundary_ms()
+    }
+
+    /// The ruler's stats over the history's records with `t0 <= time <= t1`
+    /// (FR AXHK2T); `None` when none is in range.
+    pub fn history_range_stats(&self, t0: u64, t1: u64) -> Option<RangeStats> {
+        self.history_range_stats_then(t0, t1, || {})
+    }
+
+    /// [`Self::history_range_stats`], running `between` after the lock is
+    /// released and before the scan.
+    pub(crate) fn history_range_stats_then(
+        &self,
+        t0: u64,
+        t1: u64,
+        between: impl FnOnce(),
+    ) -> Option<RangeStats> {
+        // Only the snapshot (a few shared chunk pointers) is taken under the
+        // lock, so a long scan never stalls appends or the other queries.
+        let records = self.snapshot();
+        between();
+        records.range_stats(t0, t1)
+    }
+
+    /// Segment marks and E.D. of the history's current run (FR AXHK2T,
+    /// AC-AXHK2T.4, .5); `None` when the history is empty.
+    pub fn history_run_progress(&self, q: &RunProgressQuery) -> Option<RunProgress> {
+        self.history_run_progress_then(q, || {})
+    }
+
+    /// [`Self::history_run_progress`], running `between` after the lock is
+    /// released and before the scan.
+    pub(crate) fn history_run_progress_then(
+        &self,
+        q: &RunProgressQuery,
+        between: impl FnOnce(),
+    ) -> Option<RunProgress> {
+        let records = self.snapshot();
+        between();
+        records.run_progress(q)
+    }
+
     /// The statistics so far.
     pub fn stats(&self) -> StatsSnapshot {
         self.lock().stats()
@@ -270,6 +337,7 @@ impl SessionStore {
     pub fn clear_history(&self) {
         let mut data = self.lock();
         data.history.clear();
+        data.cleared_through_ms = data.timeline.last.map(|(t, _)| t);
         data.history_unix_ms = None;
         data.temps.clear();
     }
@@ -295,6 +363,73 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store holding `n` records of 5 V / 1 A, one every millisecond.
+    fn store_of(n: u32) -> SessionStore {
+        use powerz_protocol::decode::Rate;
+        let store = SessionStore::new();
+        for t in 0..n {
+            let r = QueueRecord::from_raw(t, 5_000_000, 1_000_000, [0; 4], Rate::Sps1000);
+            store.lock().append(&r, u64::from(t));
+        }
+        store
+    }
+
+    #[test]
+    fn range_stats_scans_a_snapshot_without_holding_the_store_lock() {
+        // A long scan must not stall the worker's appends or the other queries:
+        // the lock is free while the records are integrated, and a record
+        // pushed meanwhile is not in the answer (it reads a snapshot).
+        let store = store_of(2_000);
+        let mut free = false;
+        let s = store
+            .history_range_stats_then(0, 10_000, || {
+                free = store.0.try_lock().is_ok();
+                if !free {
+                    // Locking again here would deadlock this thread.
+                    return;
+                }
+                store.lock().append(
+                    &QueueRecord::from_raw(
+                        2_000,
+                        5_000_000,
+                        1_000_000,
+                        [0; 4],
+                        powerz_protocol::decode::Rate::Sps1000,
+                    ),
+                    2_000,
+                );
+            })
+            .expect("stats");
+        assert!(free, "the store lock was held while integrating");
+        assert_eq!(
+            s.samples, 2_000,
+            "the scan saw a record pushed after its snapshot"
+        );
+        assert_eq!(store.history_len(), 2_001);
+    }
+
+    #[test]
+    fn run_progress_scans_a_snapshot_without_holding_the_store_lock() {
+        use crate::history::MarkKind;
+        let store = store_of(2_000);
+        let q = RunProgressQuery {
+            kind: MarkKind::Charge,
+            step_pct: 10.0,
+            ed_points: 0,
+            ed_t0_ms: None,
+            ed_t1_ms: None,
+            ed_scope: crate::history::EdScope::Session,
+        };
+        let mut free = false;
+        let p = store
+            .history_run_progress_then(&q, || {
+                free = store.0.try_lock().is_ok();
+            })
+            .expect("a run");
+        assert!(free, "the store lock was held while integrating");
+        assert_eq!(p.samples, 2_000);
+    }
 
     #[test]
     fn a_fresh_timeline_follows_device_time() {

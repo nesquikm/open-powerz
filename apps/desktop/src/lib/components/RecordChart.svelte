@@ -2,7 +2,13 @@
   import uPlot from "uplot";
   import "uplot/dist/uPlot.min.css";
   import type { OfflineRecord } from "../backend";
-  import { CHART_SERIES, chartOptions, type SeriesVisibility } from "../chartSeries";
+  import {
+    CHART_SERIES,
+    RECORDING_VISIBILITY,
+    chartOptions,
+    followRecordingPlotSize,
+    recordingPlotSize,
+  } from "../chartSeries";
   import { recordChartData } from "../records.svelte";
   import type { ResolvedTheme } from "../theme";
 
@@ -10,16 +16,7 @@
    * (FR 1HHT00, AC .5); a plot of its own, so the live history is never touched. */
   let { record, theme }: { record: OfflineRecord; theme: ResolvedTheme } = $props();
 
-  /** VBUS, IBUS and power: the channels a record holds. */
-  const VISIBILITY = Object.fromEntries(
-    CHART_SERIES.map((s) => [s.key, s.key === "vbus" || s.key === "ibus" || s.key === "power"]),
-  ) as SeriesVisibility;
-
   let el: HTMLDivElement | undefined = $state();
-
-  function sizeOf(node: HTMLElement): { width: number; height: number } {
-    return { width: Math.max(node.clientWidth, 100), height: Math.max(node.clientHeight, 100) };
-  }
 
   /** x in ms (the chart's unit), then one column per chart series. */
   function alignedData(rec: OfflineRecord): uPlot.AlignedData {
@@ -33,22 +30,13 @@
     const node = el;
     if (!node) return;
     const u = new uPlot(
-      chartOptions({ theme, visibility: VISIBILITY, ...sizeOf(node) }),
+      chartOptions({ theme, visibility: RECORDING_VISIBILITY, ...recordingPlotSize(node) }),
       alignedData(record),
       node,
     );
-    let frame = 0;
-    const observer = new ResizeObserver(() => {
-      if (frame) return;
-      frame = requestAnimationFrame(() => {
-        frame = 0;
-        u.setSize(sizeOf(node));
-      });
-    });
-    observer.observe(node);
+    const stopFollowing = followRecordingPlotSize(u, node);
     return () => {
-      observer.disconnect();
-      if (frame) cancelAnimationFrame(frame);
+      stopFollowing();
       u.destroy();
     };
   });

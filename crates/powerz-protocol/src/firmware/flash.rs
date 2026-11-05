@@ -456,11 +456,12 @@ impl FlashError {
 /// Runs the bootloader sequence, then sends JUMP_APROM and reads the
 /// application info block to confirm the new version. Nothing is retried.
 /// `stop` is the user's request to stop the flash. It is honoured only at
-/// safe boundaries: before JUMP_DFU, before the descriptor and after each
-/// payload write's SYNC read (never between a write and its SYNC). Once the
-/// meter is in its bootloader a stop sends nothing more and leaves it there.
-/// The desktop app stops asking once the erase has begun, so it never stops
-/// a write.
+/// safe boundaries: before JUMP_DFU, during the wait for the bootloader,
+/// before the descriptor and after each payload write's SYNC read (never
+/// between a write and its SYNC). Once the meter is in its bootloader a stop
+/// sends nothing more and leaves it there. The desktop app stops asking once
+/// the erase has begun, so it never stops a write. The wait after JUMP_APROM
+/// ignores a stop: the image is written by then.
 pub fn flash<O: MeterOpener, C: Clock>(
     _ack: FlashAck,
     container: &FirmwareContainer<'_>,
@@ -486,7 +487,7 @@ pub fn flash<O: MeterOpener, C: Clock>(
         DeviceMode::Bootloader => meter,
         DeviceMode::Application => {
             progress(FlashProgress::Switching);
-            switch_to_bootloader(meter, container, opener, &mut clock, progress)?
+            switch_to_bootloader(meter, container, opener, &mut clock, stop, progress)?
         }
         DeviceMode::Unknown => {
             return Err(FlashError::NotInBootloader {
@@ -510,17 +511,26 @@ pub fn flash<O: MeterOpener, C: Clock>(
         reply,
     });
     drop(pipe);
-    let mut app = match wait_for(opener, &mut clock, DeviceMode::Application, RETURN_TIMEOUT) {
+    let returned = wait_for(
+        opener,
+        &mut clock,
+        DeviceMode::Application,
+        RETURN_TIMEOUT,
+        None,
+    );
+    let mut app = match returned {
         Ok(app) => app,
-        Err(None) => return Ok(FlashOutcome::PowerCycleNeeded),
         // FINISHED has already confirmed the image, so say so plainly.
-        Err(Some(e)) => {
+        Err(WaitEnd::TimedOut(Some(e))) => {
             return Err(FlashError::Device {
                 detail: format!(
                     "the image was written and verified, but the meter could not be found \
                      again because {e}; unplug it and plug it back in, then check its version"
                 ),
             });
+        }
+        Err(WaitEnd::Stopped | WaitEnd::TimedOut(None)) => {
+            return Ok(FlashOutcome::PowerCycleNeeded);
         }
     };
     let verify = |detail: String| FlashError::Verify {
@@ -609,6 +619,7 @@ fn switch_to_bootloader<O: MeterOpener, C: Clock>(
     container: &FirmwareContainer<'_>,
     opener: &mut O,
     clock: &mut C,
+    stop: &AtomicBool,
     progress: &mut dyn FnMut(FlashProgress),
 ) -> Result<Meter<O::Pipe>, FlashError> {
     let info = read_app_info(&mut meter.pipe, &mut *clock).map_err(|detail| FlashError::Read {
@@ -631,8 +642,14 @@ fn switch_to_bootloader<O: MeterOpener, C: Clock>(
             reply,
         })
     };
-    let seen = match jump_and_wait(meter.pipe, target, opener, clock, &mut sent)? {
+    let seen = match jump_and_wait(meter.pipe, target, opener, clock, stop, &mut sent)? {
         Waited::Reached(boot) => return Ok(boot),
+        Waited::Stopped => {
+            return Err(interrupted(
+                "while waiting for the meter after JUMP_DFU; nothing was erased; \
+                 the meter may have switched to bootloader mode",
+            ));
+        }
         Waited::Seen(Some(mode)) => format!("{} mode", mode.name()),
         Waited::Seen(None) => "no meter".into(),
         Waited::OpenError(e) => format!("the meter could not be opened: {e}"),
@@ -646,6 +663,8 @@ fn switch_to_bootloader<O: MeterOpener, C: Clock>(
 enum Waited<P> {
     /// The meter came back in the target mode.
     Reached(Meter<P>),
+    /// The user stopped the wait.
+    Stopped,
     /// It did not; a last look shows this mode (`None`: no meter attached).
     Seen(Option<DeviceMode>),
     /// It did not, and opening it kept failing with this error (not "no
@@ -655,13 +674,14 @@ enum Waited<P> {
 
 /// Send the jump frame for `target` through the strict flash guard, hand
 /// the meter's reply to `sent`, wait for the meter to come back in `target`
-/// mode (for [`SWITCH_TIMEOUT`] or [`RETURN_TIMEOUT`]) and, if it does not,
-/// look once more at what is attached.
+/// mode (for [`SWITCH_TIMEOUT`] or [`RETURN_TIMEOUT`], or until `stop`) and,
+/// if it does not, look once more at what is attached.
 fn jump_and_wait<O: MeterOpener, C: Clock>(
     pipe: O::Pipe,
     target: JumpTarget,
     opener: &mut O,
     clock: &mut C,
+    stop: &AtomicBool,
     sent: &mut dyn FnMut(JumpReply),
 ) -> Result<Waited<O::Pipe>, FlashError> {
     let (ty, limit) = match target {
@@ -680,15 +700,18 @@ fn jump_and_wait<O: MeterOpener, C: Clock>(
     // Release the pipe before the meter re-enumerates.
     drop(pipe);
     sent(reply);
-    Ok(match wait_for(opener, clock, target.mode(), limit) {
-        Ok(m) => Waited::Reached(m),
-        Err(Some(e)) => Waited::OpenError(e),
-        Err(None) => match opener.open() {
-            Ok(m) => Waited::Seen(m.map(|m| m.mode)),
-            Err(e) if no_device_yet(&e) => Waited::Seen(None),
-            Err(e) => Waited::OpenError(e),
+    Ok(
+        match wait_for(opener, clock, target.mode(), limit, Some(stop)) {
+            Ok(m) => Waited::Reached(m),
+            Err(WaitEnd::Stopped) => Waited::Stopped,
+            Err(WaitEnd::TimedOut(Some(e))) => Waited::OpenError(e),
+            Err(WaitEnd::TimedOut(None)) => match opener.open() {
+                Ok(m) => Waited::Seen(m.map(|m| m.mode)),
+                Err(e) if no_device_yet(&e) => Waited::Seen(None),
+                Err(e) => Waited::OpenError(e),
+            },
         },
-    })
+    )
 }
 
 /// Send the write-only jump frame `ty` (JUMP_DFU or JUMP_APROM) with
@@ -825,7 +848,8 @@ pub enum JumpOutcome {
 /// ([`FlashError::UnknownMode`]) or a `stop` already requested sends
 /// nothing. After the jump the meter is looked for on clock time, for
 /// [`SWITCH_TIMEOUT`] (to the bootloader) or [`RETURN_TIMEOUT`] (to the
-/// application).
+/// application); a `stop` during that wait ends it with
+/// [`FlashError::Interrupted`], though the jump itself cannot be undone.
 pub fn jump<O: MeterOpener, C: Clock>(
     _ack: FlashAck,
     target: JumpTarget,
@@ -853,8 +877,12 @@ pub fn jump<O: MeterOpener, C: Clock>(
             reply,
         })
     };
-    match jump_and_wait(meter.pipe, target, opener, &mut clock, &mut report)? {
+    match jump_and_wait(meter.pipe, target, opener, &mut clock, stop, &mut report)? {
         Waited::Reached(m) => Ok(JumpOutcome::Reached(m.mode)),
+        Waited::Stopped => Err(interrupted(&format!(
+            "while waiting for the meter after {}",
+            target.frame_name()
+        ))),
         Waited::Seen(seen) => Ok(JumpOutcome::NotReached { seen }),
         Waited::OpenError(e) => Err(FlashError::Device {
             detail: format!(
@@ -1002,20 +1030,32 @@ fn check_container(container: &FirmwareContainer<'_>) -> Result<(), FlashError> 
     Ok(())
 }
 
+/// Why [`wait_for`] ended without the meter.
+enum WaitEnd {
+    /// `stop` was raised.
+    Stopped,
+    /// The time ran out. Holds the last opener error that is not "no device
+    /// yet" (`None`: there was none).
+    TimedOut(Option<TransportError>),
+}
+
 /// Poll `opener` until the meter is in `mode`, for up to `limit` of clock
-/// time (measured, so slow opens count toward the wait). If the wait ends
-/// without it, the error is the last opener error that is not "no device
-/// yet" (`None`: there was none).
+/// time (measured, so slow opens count toward the wait). `stop`, when given,
+/// is checked before each [`POLL_INTERVAL`] sleep and ends the wait.
 fn wait_for<O: MeterOpener, C: Clock>(
     opener: &mut O,
     clock: &mut C,
     mode: DeviceMode,
     limit: Duration,
-) -> Result<Meter<O::Pipe>, Option<TransportError>> {
+    stop: Option<&AtomicBool>,
+) -> Result<Meter<O::Pipe>, WaitEnd> {
     let start = clock.now_ms();
     let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
     let mut last_error = None;
     while clock.now_ms().saturating_sub(start) < limit_ms {
+        if stop.is_some_and(stopped) {
+            return Err(WaitEnd::Stopped);
+        }
         clock.sleep(POLL_INTERVAL);
         // A meter that is re-enumerating may fail to open; look again.
         match opener.open() {
@@ -1027,7 +1067,7 @@ fn wait_for<O: MeterOpener, C: Clock>(
             Err(e) => last_error = Some(e),
         }
     }
-    Err(last_error)
+    Err(WaitEnd::TimedOut(last_error))
 }
 
 /// Whether an opener error only means the meter is not back yet (it is
@@ -1245,4 +1285,117 @@ fn download<P: FlashTransport, C: Clock>(
     }
     progress(FlashProgress::Finished);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::bulk::GONE_CHECK_MIN_WAIT;
+
+    // ---- AC-AXHK2J.8: the erase path's expected timeouts stay out of the
+    // presence check, so they neither list USB nor pause ----
+
+    #[test]
+    fn the_descriptor_wait_is_under_the_presence_check_ceiling() {
+        assert!(DESCRIPTOR_WAIT < GONE_CHECK_MIN_WAIT);
+    }
+
+    #[test]
+    fn the_erase_short_wait_is_under_the_presence_check_ceiling() {
+        assert!(ERASE_SHORT_WAIT < GONE_CHECK_MIN_WAIT);
+    }
+
+    // ---- AC-AXHK2M.1: a stop ends the wait for the meter within a second ----
+
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// When the fake clock raises the stop flag: well into the wait.
+    const STOP_AT_MS: u64 = 5_000;
+
+    /// A pipe that takes every write and answers nothing.
+    struct Mute;
+
+    impl Transport for Mute {
+        fn transact(&mut self, _: &[u8], _: Duration) -> Result<Vec<u8>, TransportError> {
+            Err(TransportError::Timeout)
+        }
+
+        fn read(&mut self, _: Duration) -> Result<Vec<u8>, TransportError> {
+            Err(TransportError::Timeout)
+        }
+    }
+
+    impl FlashTransport for Mute {
+        fn write_raw(&mut self, _: &[u8], _: Duration) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    /// A bootloader-mode meter that never comes back after its jump.
+    #[derive(Default)]
+    struct Vanishes {
+        opened: bool,
+    }
+
+    impl MeterOpener for Vanishes {
+        type Pipe = Mute;
+
+        fn open(&mut self) -> Result<Option<Meter<Mute>>, TransportError> {
+            let first = !std::mem::replace(&mut self.opened, true);
+            Ok(first.then_some(Meter {
+                mode: DeviceMode::Bootloader,
+                model: Model::Km003c,
+                pipe: Mute,
+            }))
+        }
+    }
+
+    /// Clock time that passes only in sleeps, and raises `stop` at
+    /// [`STOP_AT_MS`], as a cancel from another thread would.
+    struct StoppingClock {
+        now: Rc<Cell<u64>>,
+        stop: Rc<AtomicBool>,
+    }
+
+    impl Clock for StoppingClock {
+        fn now_ms(&mut self) -> u64 {
+            self.now.get()
+        }
+
+        fn random_u64(&mut self) -> u64 {
+            0
+        }
+
+        fn sleep(&mut self, duration: Duration) {
+            self.now.set(self.now.get() + duration.as_millis() as u64);
+            if self.now.get() >= STOP_AT_MS {
+                self.stop.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[test]
+    fn a_stop_during_wait_for_ends_within_a_second() {
+        let now = Rc::new(Cell::new(0));
+        let stop = Rc::new(AtomicBool::new(false));
+        let clock = StoppingClock {
+            now: Rc::clone(&now),
+            stop: Rc::clone(&stop),
+        };
+        let r = jump(
+            FlashAck::acknowledge(),
+            JumpTarget::Application,
+            &mut Vanishes::default(),
+            clock,
+            &stop,
+            &mut |_| {},
+        );
+        assert!(
+            matches!(r, Err(FlashError::Interrupted { .. })),
+            "a stop during the wait must end it: {r:?}"
+        );
+        let late = now.get().saturating_sub(STOP_AT_MS);
+        assert!(late < 1_000, "the wait ran {late} ms past the stop");
+    }
 }

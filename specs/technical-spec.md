@@ -24,10 +24,10 @@ A Rust cargo workspace with six crates and one web UI:
   per connected meter. The worker owns the `Session`, interleaves queue polls with ADC
   snapshots (the queue carries no temperature), keeps the per-session history with a min/max
   decimation pyramid and running statistics, feeds the CSV recorder, and streams batched
-  events (20–60 Hz) to the UI over `tauri::ipc::Channel`.
+  events (at most 20 Hz, a 4 Hz idle heartbeat) to the UI over `tauri::ipc::Channel`.
 - `powerz-record` (library): the vendor-compatible CSV recorder shared by the CLI and the
   desktop app (header, plain-decimal formatting, time origin, signed charge/energy
-  integration).
+  integration), and the streaming reader that reads those recordings back.
 - `powerz-pd` (library): the USB PD r3.2 message decoder (headers, PDOs/RDOs, VDMs,
   extended messages and chunk reassembly, a one-line summary and a field tree per
   message). It has no dependencies and does no I/O, so it also builds for wasm32 (checked
@@ -49,11 +49,11 @@ Cargo.toml                       # workspace: resolver 3, edition 2024, MSRV 1.9
 package.json / bun.lock          # Bun workspace root (apps/desktop)
 crates/powerz-protocol/src/      # transport/, frame, decode/, session/, crypto/, pdm/, adcnew, firmware/, pdcap
 crates/powerz-cli/src/main.rs    # `powerz` binary
-crates/powerz-record/src/        # shared CSV recorder + charge/energy integrator
+crates/powerz-record/src/        # shared CSV recorder + reader + charge/energy integrator
 crates/powerz-pd/src/            # USB PD message decoder (no deps, no I/O, wasm32-clean)
 crates/powerz-sim/src/           # simulated KM003C (demo device, e2e double)
 apps/desktop/src/                # App.svelte, main.ts, lib/*.ts (+ co-located *.test.ts)
-apps/desktop/src-tauri/          # Tauri crate: commands, devices, worker, batch, history, stats, recording
+apps/desktop/src-tauri/          # Tauri crate: commands, devices, worker, batch, history, stats, recording, recording_file
 apps/desktop/e2e/app/            # WebdriverIO + tauri-driver suite (real app, Linux + Windows)
 apps/desktop/e2e/ui/             # Playwright + axe suite (web build, mocked backend, all OSes)
 docs/                            # user docs + protocol.md
@@ -87,14 +87,26 @@ Defined per FR. Core types: `Frame`/`MainHeader`/`SectionHeader`,
 - Tauri commands: `app_info`, `list_devices`, `watch_devices`, `connect`, `attach` (a reloaded page
   takes over the running session), `disconnect`, `set_rate`,
   `history_range`, `history_gaps`, `stats`, `reset_stats`, `clear_history`, `start_recording`,
-  `stop_recording`, `save_recording_as`, `export_session`, `cancel_wait` (stop waiting for an unplugged meter),
+  `stop_recording`, `save_recording_as`, `recording_pause`, `recording_resume`, `choose_recording_folder`, `export_session`, `export_session_db`, `recording_file_open`, `recording_file_cancel`, `recording_file_close`, `recording_file_range`, `cancel_wait` (stop waiting for an unplugged meter),
   `running_meters` (the running sessions' device ids, for a reload), `meter_settings`,
   `records_list` and `record_download` (read-only meter data), `records_delete` and
   `meter_settings_write` (the two meter writes, each confirmed in the UI first), and
   for the PD analyzer `pd_start`, `pd_stop`, `pd_details` (a record's raw bytes and field tree,
   on demand, from the live capture or, with `opened`, from an opened file), `pd_save` / `pd_open`
-  (`.pdcap` files) and `pd_import` (read-only vendor PD log) and `pd_clear` (answers the next record index; indices never restart, so rows sent
-  before a clear are recognised and dropped); backend events `Batch`, `Gap`, `Status`
+  (`.pdcap` files) and `pd_import` (read-only vendor PD log), `pd_clear` (answers the next record index; indices never restart, so rows sent
+  before a clear are recognised and dropped), `pd_release_opened` (lets go of an opened file; only the page releases one, never a connect) and `pd_cable_seen` (the cable identity a capture holds);
+  for the chart `range_stats` and `run_progress` (ruler stats, segment marks and E.D. over the
+  session history; read-only, nothing goes to the meter), their opened-file twins
+  `recording_file_range_stats` and `recording_file_run_progress`, `history_fold_boundary`
+  (where full resolution starts, for the fold tick) and `save_chart_image` (PNG, SVG or PDF);
+  for the protocol trigger panel `trigger_list`, `trigger_open`, `trigger_close`,
+  `trigger_detect`, `trigger_request`, `trigger_back_to_5v`, the risk classes `trigger_risk`,
+  `trigger_message_risk` and `trigger_console_risk`, `trigger_message_send`,
+  `trigger_console_send`, "don't ask again" via `trigger_armed` and `trigger_disarm`,
+  `trigger_charger_gone`, `trigger_pd_entered` and `trigger_cable_read` (one SOP' Discover
+  Identity in the open PD session); for the firmware update `firmware_choose`,
+  `firmware_inspect` (needs no meter), `firmware_flash`, `firmware_cancel` and
+  `firmware_flash_status` (for a reloaded page); backend events `Batch`, `Gap`, `Status`
   (including `waiting`), `Error`, `Recording` (started / progress / stopped / failed),
   `PdState`, `PdRows` (batched, at most 60 a second, decoded in the backend; each row carries
   `session_ms` on the measurement samples' time base) and `PdStatus` (the PD status blocks'

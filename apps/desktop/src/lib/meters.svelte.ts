@@ -4,6 +4,7 @@
 import { SvelteMap } from "svelte/reactivity";
 import type { BackendEvent, DeviceListing, RecordingSnapshot } from "./backend";
 import type { PdCapture } from "./pdCapture.svelte";
+import { MeterNotices } from "./meterNotices.svelte";
 import { ExportJob, Recording } from "./recording.svelte";
 import { Session } from "./session.svelte";
 
@@ -26,6 +27,9 @@ export interface MeterEntry {
 export class Meters {
   /** Every meter, in the order they were added (or {@link arrange}d). */
   #entries = $state.raw<MeterEntry[]>([]);
+  /** Each meter's notices. They outlive its entry: a meter's last recording still speaks
+   * of its file once the meter has gone. */
+  readonly notices = new MeterNotices();
   /** The PD capture of each meter that left the full view with one running (AC-4PJRVM.4). */
   #parkedPd = new SvelteMap<string, PdCapture>();
   /** The order a reload found the meters in, for the ones still to join (AC-4PJRVM.3). */
@@ -51,12 +55,18 @@ export class Meters {
     return this.#entries.find((e) => e.listing.id === id);
   }
 
+  /** Meter `id`'s 1-based place in tile order; 1 for a meter with no tile, the only one shown. */
+  position(id: string): number {
+    return Math.max(this.ids.indexOf(id), 0) + 1;
+  }
+
   /** Adds a meter with a store of its own (or `session`); a meter already held keeps its
    * store. */
   add(listing: DeviceListing, session: Session = new Session()): MeterEntry {
     const held = this.get(listing.id);
     if (held) return held;
-    const entry = { listing, session, recording: new Recording(), exportJob: new ExportJob() };
+    const recording = new Recording((n) => this.notices.setRecording(listing.id, n));
+    const entry = { listing, session, recording, exportJob: new ExportJob() };
     this.#entries = this.#arranged([...this.#entries, entry]);
     return entry;
   }
@@ -147,11 +157,6 @@ export class Meters {
   /** Keeps meter `id`'s recording while the meter is away from the full view. */
   park(id: string, recording: RecordingSnapshot): void {
     this.get(id)?.recording.adopt(recording);
-  }
-
-  /** A recording is parked for meter `id`. */
-  hasParked(id: string): boolean {
-    return this.get(id)?.recording.phase === "recording";
   }
 
   /** The recording parked for meter `id`, once; undefined when none. */

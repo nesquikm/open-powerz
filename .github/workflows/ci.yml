@@ -85,21 +85,25 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo build -p powerz-pd --target wasm32-unknown-unknown --locked
 
-  # FR 4PJRVN (AC .6): build and test the default members (the library and CLI crates,
-  # not the Tauri app) with the MSRV that Cargo.toml declares as `rust-version`. The job
-  # reads that value at run time and writes it into rust-toolchain.toml's channel, so
-  # rustup installs it from the file like every other job and no version is named here.
+  # FR 4PJRVN (AC .6), FR AXHK2H: hold the whole workspace to the MSRV that Cargo.toml
+  # declares as `rust-version`. The job builds and tests the default members (the library
+  # and CLI crates), then typechecks the desktop crate. It reads that value at run time
+  # and writes it into rust-toolchain.toml's channel, so rustup installs it from the file
+  # like every other job and no version is named here.
   msrv:
     name: msrv (ubuntu-24.04)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The gate job's budget: this apt install alone has taken over 28 minutes there, and
+    # a timed-out run saves no Rust cache, so the next run would start cold again.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Linux system dependencies (hidapi, serialport)
+      - name: Linux system dependencies (Tauri, hidapi, serialport)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libudev-dev libusb-1.0-0-dev
 
       - name: Rust toolchain (MSRV from Cargo.toml rust-version)
         run: |
@@ -120,6 +124,20 @@ jobs:
 
       - name: Rust test (MSRV, default members)
         run: cargo test --locked
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: JS install
+        run: bun install --frozen-lockfile
+
+      # tauri::generate_context! needs apps/desktop/dist.
+      - name: Web UI build
+        run: bun run build:web
+
+      - name: Rust check (MSRV, desktop crate)
+        run: cargo check -p open-powerz-desktop --all-targets --locked
 
   # Desktop end-to-end suites, separate from the gate. Both jobs are plain required jobs
   # (no continue-on-error): list them as required checks in branch protection.
@@ -245,14 +263,78 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # FR 9QTPNR: Linux's Playwright system packages, fetched once per runner image. This job
+  # alone lists what the image lacks (Playwright's own dry run), downloads those .deb files
+  # from the Ubuntu mirror when the cache has none for this image yet, and saves them; the
+  # Linux UI jobs only restore and install offline. The mirror can be slow, so the cost is
+  # paid here once, with a generous limit, instead of by every shard at the same time.
+  playwright-linux-deps:
+    name: playwright-linux-deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      missing: ${{ steps.packages.outputs.missing }}
+      key: ${{ steps.packages.outputs.key }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: JS install
+        run: bun install --frozen-lockfile
+
+      - name: Playwright system packages
+        id: packages
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh list >> "$GITHUB_OUTPUT"
+
+      - name: Playwright system package cache
+        id: package-cache
+        if: steps.packages.outputs.missing == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ steps.packages.outputs.key }}
+          lookup-only: true
+
+      - name: Playwright system package download
+        id: package-download
+        if: steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 20
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh download
+
+      # A killed apt leaves its locks and half-configured packages: cleared first.
+      - name: Playwright system package download (retry)
+        if: steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true' && steps.package-download.outcome == 'failure'
+        timeout-minutes: 15
+        working-directory: apps/desktop
+        run: |
+          ../../.github/scripts/playwright-deps.sh unlock
+          ../../.github/scripts/playwright-deps.sh download
+
+      - name: Playwright system package cache save
+        if: steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ steps.packages.outputs.key }}
+
   # UI suite (Playwright): the mock-backend web build in Playwright's bundled Chromium and
   # WebKit on all three OSes. No Rust needed; the config builds and serves the web UI.
+  # FR 9QTPNR: four shards per OS, so each job fits its limit with headroom (a macOS
+  # runner has one worker). The frame-rate tests (@perf) run in e2e-ui-perf instead.
   e2e-ui:
-    name: e2e-ui (${{ matrix.os }})
+    name: e2e-ui (${{ matrix.os }}, ${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest, windows-latest]
+        shard: [1, 2, 3, 4]
+    needs: playwright-linux-deps
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -265,27 +347,199 @@ jobs:
       - name: JS install
         run: bun install --frozen-lockfile
 
-      # Linux needs the browsers' system libraries too (--with-deps); macOS and Windows do not.
-      - name: Playwright browsers
-        working-directory: apps/desktop
-        run: bunx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium webkit
+      # FR 9QTPNR: the browsers are cached per OS and exact Playwright version (bun.lock).
+      # The download gets its own time limit and one retry, so a stalled download fails
+      # fast instead of eating the job's budget.
+      - name: Playwright version
+        id: playwright
+        run: echo "version=$(grep -o '"@playwright/test@[0-9.]*"' bun.lock | head -1 | sed -E 's/.*@([0-9.]+)"/\1/')" >> "$GITHUB_OUTPUT"
 
+      - name: Playwright browser cache
+        id: browser-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/Library/Caches/ms-playwright
+            ~/AppData/Local/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      - name: Playwright browsers
+        id: browsers
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 8
+        working-directory: apps/desktop
+        run: bunx playwright install chromium webkit
+
+      - name: Playwright browsers (retry)
+        if: steps.browser-cache.outputs.cache-hit != 'true' && steps.browsers.outcome == 'failure'
+        timeout-minutes: 8
+        working-directory: apps/desktop
+        run: bunx playwright install chromium webkit
+
+      # Linux's system packages (FR 9QTPNR): the .deb files the playwright-linux-deps job
+      # cached for this runner image, installed offline; this job never asks the mirror.
+      - name: Playwright system package cache (Linux)
+        id: package-cache
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ needs.playwright-linux-deps.outputs.key }}
+
+      - name: Playwright system package cache miss (Linux)
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "::error::No cached .deb files for key ${{ needs.playwright-linux-deps.outputs.key }}: the playwright-linux-deps job did not save them. Re-run that job, then this one."
+          exit 1
+
+      - name: Playwright system package install (Linux)
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true'
+        timeout-minutes: 5
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh install
+
+      # Checked on every Linux job, also when the prep job found nothing missing: this
+      # runner may be on a different image than the prep job's.
+      - name: Playwright system package check (Linux)
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh check
+
+      # Only after a setup that worked: a later step that runs on !cancelled() must not
+      # meet half-installed browsers.
+      - name: Browsers ready
+        id: ready
+        run: echo "browsers and system libraries are in place"
+
+      # FR 9QTPNR: each OS runs the engine the app ships there. Windows renders with
+      # WebView2 (Chromium), so it runs the chromium project only; Playwright's Windows
+      # WebKit (the WinCairo port) is an engine no user of the app ever gets. macOS
+      # (WKWebView) and Linux (WebKitGTK) run both projects.
       - name: UI e2e
-        run: bun run e2e:ui
+        run: bun run e2e:ui --shard=${{ matrix.shard }}/4 --grep-invert @perf ${{ runner.os == 'Windows' && '--project=chromium' || '' }}
+
+      # A job cut off at its limit is cancelled, not failed: keep its report too.
+      - name: Upload Playwright report
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report-${{ matrix.os }}-${{ matrix.shard }}
+          path: |
+            apps/desktop/playwright-report/
+            apps/desktop/e2e/ui/playwright-report/
+            apps/desktop/e2e/ui/test-results/
+            apps/desktop/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # FR 9QTPNQ / 9QTPNR: the frame-rate tests and the WebKit memory bound, once per OS,
+  # each alone with one worker, so no other page competes for the runner. Where an idle
+  # page cannot reach a frame-rate bound, the test says so in an annotation.
+  e2e-ui-perf:
+    name: e2e-ui-perf (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    needs: playwright-linux-deps
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: JS install
+        run: bun install --frozen-lockfile
+
+      # FR 9QTPNR: the browsers are cached per OS and exact Playwright version (bun.lock).
+      # The download gets its own time limit and one retry, so a stalled download fails
+      # fast instead of eating the job's budget.
+      - name: Playwright version
+        id: playwright
+        run: echo "version=$(grep -o '"@playwright/test@[0-9.]*"' bun.lock | head -1 | sed -E 's/.*@([0-9.]+)"/\1/')" >> "$GITHUB_OUTPUT"
+
+      - name: Playwright browser cache
+        id: browser-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/Library/Caches/ms-playwright
+            ~/AppData/Local/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      - name: Playwright browsers
+        id: browsers
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 8
+        working-directory: apps/desktop
+        run: bunx playwright install chromium webkit
+
+      - name: Playwright browsers (retry)
+        if: steps.browser-cache.outputs.cache-hit != 'true' && steps.browsers.outcome == 'failure'
+        timeout-minutes: 8
+        working-directory: apps/desktop
+        run: bunx playwright install chromium webkit
+
+      # Linux's system packages (FR 9QTPNR): the .deb files the playwright-linux-deps job
+      # cached for this runner image, installed offline; this job never asks the mirror.
+      - name: Playwright system package cache (Linux)
+        id: package-cache
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ needs.playwright-linux-deps.outputs.key }}
+
+      - name: Playwright system package cache miss (Linux)
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "::error::No cached .deb files for key ${{ needs.playwright-linux-deps.outputs.key }}: the playwright-linux-deps job did not save them. Re-run that job, then this one."
+          exit 1
+
+      - name: Playwright system package install (Linux)
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true'
+        timeout-minutes: 5
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh install
+
+      # Checked on every Linux job, also when the prep job found nothing missing: this
+      # runner may be on a different image than the prep job's.
+      - name: Playwright system package check (Linux)
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh check
+
+      # Only after a setup that worked: a later step that runs on !cancelled() must not
+      # meet half-installed browsers.
+      - name: Browsers ready
+        id: ready
+        run: echo "browsers and system libraries are in place"
+
+      # Windows: the chromium project only, as in e2e-ui (WebView2 is Chromium).
+      - name: UI frame rate
+        run: bun run e2e:ui --grep @perf --workers=1 ${{ runner.os == 'Windows' && '--project=chromium' || '' }}
 
       # FR 4NSVC9: the WebKit memory bound, alone with one worker so no other page's
       # process is measured. It reads RSS with ps, so not on Windows.
       - name: UI memory (WebKit)
-        if: runner.os != 'Windows'
+        if: ${{ !cancelled() && runner.os != 'Windows' && steps.ready.outcome == 'success' }}
         env:
           MEMORY_TEST: "1"
         run: bun run e2e:ui memory.spec.ts --project=webkit --workers=1
 
+      # A job cut off at its limit is cancelled, not failed: keep its report too.
       - name: Upload Playwright report
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: playwright-report-${{ matrix.os }}
+          name: playwright-report-perf-${{ matrix.os }}
           path: |
             apps/desktop/playwright-report/
             apps/desktop/e2e/ui/playwright-report/

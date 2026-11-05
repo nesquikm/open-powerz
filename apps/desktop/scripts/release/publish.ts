@@ -9,7 +9,8 @@
 // (the v0.6.0 run failed that way). The release stays a draft until every file is
 // attached and checked; files left over from an earlier run are deleted only then.
 // Every update sends the tag name, and the published release's tag is checked
-// against the tag this run built (FR 4PJRVN).
+// against the tag this run built (FR 4PJRVN); on a mismatch the release goes back to
+// draft (FR AXHK2M).
 
 import { readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
@@ -69,19 +70,52 @@ export interface PublishOptions {
 export const isReleaseId = (id: unknown): id is number =>
   typeof id === "number" && Number.isInteger(id) && id > 0;
 
-/** The numeric `[major, minor, patch]` of a release tag (see `parseTag`), or undefined. */
-function versionOf(tag: string): number[] | undefined {
+/** A release tag's version: `[major, minor, patch]` and any pre-release identifiers. */
+interface TagVersion {
+  core: number[];
+  pre: string[] | undefined;
+}
+
+/** The version of a release tag (see `parseTag`), or undefined when it is not one. */
+function versionOf(tag: string): TagVersion | undefined {
   try {
-    return parseTag(tag).version.split("-")[0]?.split(".").map(Number);
+    const { version } = parseTag(tag);
+    const dash = version.indexOf("-");
+    if (dash < 0) return { core: version.split(".").map(Number), pre: undefined };
+    return {
+      core: version.slice(0, dash).split(".").map(Number),
+      pre: version.slice(dash + 1).split("."),
+    };
   } catch {
     return undefined;
   }
 }
 
-/** Numeric order of two versions (negative when a < b). */
-function compareVersions(a: number[], b: number[]): number {
-  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return (a[i] ?? 0) - (b[i] ?? 0);
-  return 0;
+const NUMERIC = /^\d+$/;
+
+/** Semver order of two pre-release identifiers (negative when a < b). */
+function compareIdentifiers(a: string, b: string): number {
+  const aNumeric = NUMERIC.test(a);
+  const bNumeric = NUMERIC.test(b);
+  if (aNumeric && bNumeric) return Number(a) - Number(b);
+  if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Semver order of two versions (negative when a < b): a pre-release sorts below its release. */
+function compareVersions(a: TagVersion, b: TagVersion): number {
+  for (let i = 0; i < 3; i++) {
+    if (a.core[i] !== b.core[i]) return (a.core[i] ?? 0) - (b.core[i] ?? 0);
+  }
+  if (a.pre === undefined || b.pre === undefined) {
+    return a.pre === b.pre ? 0 : a.pre === undefined ? 1 : -1;
+  }
+  const shared = Math.min(a.pre.length, b.pre.length);
+  for (let i = 0; i < shared; i++) {
+    const order = compareIdentifiers(a.pre[i] ?? "", b.pre[i] ?? "");
+    if (order !== 0) return order;
+  }
+  return a.pre.length - b.pre.length;
 }
 
 /**
@@ -185,11 +219,32 @@ export async function publishRelease(gh: GitHubClient, opts: PublishOptions): Pr
 
   // The published release must sit on the tag this run built (the v0.6.0 run ended
   // on an `untagged-…` tag); the check reads the tag GitHub reports in the response.
+  // A release on the wrong tag does not stay public: it goes back to draft.
   if (published?.tag_name !== tag) {
-    throw new Error(
-      `release ${id} was published on tag ${String(published?.tag_name)}, not on ${tag}; ` +
-        `it is public now, so set its tag by hand (PATCH /releases/${id} with tag_name=${tag})`,
-    );
+    const wrongTag = `release ${id} was published on tag ${String(published?.tag_name)}, not on ${tag}`;
+    const fixTag = `PATCH /releases/${id} with tag_name=${tag}`;
+    log(`${wrongTag}; turning it back into a draft`);
+    let rolledBack;
+    try {
+      rolledBack = await gh.updateRelease(id, { tag_name: tag, draft: true });
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `${wrongTag}; turning it back into a draft failed (${why}), ` +
+          `so it is public now: set its tag by hand (${fixTag})`,
+        { cause: e },
+      );
+    }
+    if (rolledBack?.draft !== true) {
+      throw new Error(
+        `${wrongTag}; GitHub did not make it a draft, ` +
+          `so it is public now: set its tag by hand (${fixTag})`,
+      );
+    }
+    throw new Error(`${wrongTag}; it is a draft again, so fix its tag by hand (${fixTag})`);
+  }
+  if (published?.draft === true) {
+    throw new Error(`release ${id} is still a draft after publishing it, so nobody can see ${tag}`);
   }
 }
 
