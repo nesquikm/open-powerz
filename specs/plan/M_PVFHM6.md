@@ -37,19 +37,19 @@ codename: First Impression
 Build order: the table's order. The guards need the encoder's header check; the session flows are tested on the simulator; the CLI and the desktop wrap the session.
 
 **Tasks:**
-- [ ] Logo image encoder and decoder — PVFHM7
+- [x] Logo image encoder and decoder — PVFHM7
   verify: byte-vector unit tests on the worked examples, wasm32 check without the file feature
-- [ ] Guarded logo write, flag and read paths — R1ST8Z
+- [x] Guarded logo write, flag and read paths — R1ST8Z
   verify: accept/refuse table tests in guard and memory modules
-- [ ] Simulated logo flash — A2XTES
+- [x] Simulated logo flash — A2XTES
   verify: sim unit tests per erase policy and fault
-- [ ] Logo upload, remove and read-back in the session — TZK5K4
+- [x] Logo upload, remove and read-back in the session — TZK5K4
   verify: mock-transport tests, then sim end-to-end and fault cases
-- [ ] Command line logo commands — YCRQRQ
+- [x] Command line logo commands — YCRQRQ
   verify: CLI integration tests against the simulator
-- [ ] Desktop startup logo view — MEHQC0
+- [x] Desktop startup logo view — MEHQC0
   verify: Rust command tests, Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
-- [ ] Hardware runbooks for stages 1–4 and the M7b carry-overs, in `../qa-runs/m7c/runbooks/` (outside the repo)
+- [x] Hardware runbooks for stages 1–4 and the M7b carry-overs, in `../qa-runs/m7c/runbooks/` (outside the repo)
   verify: each runbook has its approval gate, stop rules, photos, read-back and settings diffs, and the recovery ladder
 
 **Hardware stages (separate test agents, each write stage with the user's explicit OK in that agent's tab):**
