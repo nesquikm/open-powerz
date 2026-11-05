@@ -8,6 +8,8 @@
  * AC-9QTPNR.3: every UI job uploads its report on failure or cancellation, named apart.
  * AC-9QTPNR.6: Windows runs only the chromium project (the app's WebView2 is Chromium);
  * macOS and Linux run both.
+ * AC-9QTPNR.7: both UI jobs cache the browsers per OS and Playwright version, and bound
+ * the download with its own time limit and one retry.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -133,6 +135,60 @@ describe("CI: a cut-off job keeps its report (AC-9QTPNR.3)", () => {
       const lines = job(name);
       expect(ifOf(lines, "Upload Playwright report")).toBe("if: failure() || cancelled()");
       expect(lines.map((l) => l.trim())).toContain(`name: ${artifact}`);
+    });
+  }
+});
+
+/** The lines of the step named `name` in `lines`, up to the next step. */
+function stepOf(lines: string[], name: string): string[] {
+  const at = lines.findIndex((l) => l.trim() === `- name: ${name}`);
+  if (at < 0) throw new Error(`no step ${name}`);
+  const body: string[] = [];
+  for (const l of lines.slice(at + 1)) {
+    if (/^\s+- /.test(l)) break;
+    body.push(l.trim());
+  }
+  return body;
+}
+
+describe("CI: the browsers are cached and their download bounded (AC-9QTPNR.7)", () => {
+  for (const name of ["e2e-ui", "e2e-ui-perf"]) {
+    const lines = job(name);
+
+    it(`${name} caches the browsers per OS and exact Playwright version`, () => {
+      expect(runOf(lines, "Playwright version")).toContain("@playwright/test@");
+      const cache = stepOf(lines, "Playwright browser cache");
+      expect(cache.some((l) => /^uses: actions\/cache@[0-9a-f]{40} # v4/.test(l))).toBe(true);
+      expect(cache).toContain(
+        "key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}",
+      );
+      for (const path of [
+        "~/.cache/ms-playwright",
+        "~/Library/Caches/ms-playwright",
+        "~/AppData/Local/ms-playwright",
+      ]) {
+        expect(cache).toContain(path);
+      }
+    });
+
+    it(`${name} gives the download its own time limit and one retry`, () => {
+      const first = stepOf(lines, "Playwright browsers");
+      const retry = stepOf(lines, "Playwright browsers (retry)");
+      expect(first).toContain("if: steps.browser-cache.outputs.cache-hit != 'true'");
+      expect(first).toContain("continue-on-error: true");
+      expect(first).toContain("timeout-minutes: 8");
+      expect(retry).toContain(
+        "if: steps.browser-cache.outputs.cache-hit != 'true' && steps.browsers.outcome == 'failure'",
+      );
+      expect(retry).toContain("timeout-minutes: 8");
+    });
+
+    it(`${name} still installs Linux's system libraries on a cache hit`, () => {
+      const deps = stepOf(lines, "Playwright system libraries (Linux, cached browsers)");
+      expect(deps).toContain(
+        "if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'",
+      );
+      expect(deps).toContain("run: bunx playwright install-deps chromium webkit");
     });
   }
 });
