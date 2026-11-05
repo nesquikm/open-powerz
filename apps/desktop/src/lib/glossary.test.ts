@@ -1,5 +1,5 @@
 // FR CW66T1: the glossary that every info popover reads (AC .1, .2, .3, .9).
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -87,7 +87,10 @@ function entryFor(group: readonly string[]): GlossaryKey | undefined {
 }
 
 function frNotes(): string {
-  const fr = readFileSync(join(repoRoot, "specs/frs/CW66T1.md"), "utf8");
+  // The FR moves to specs/frs/archive/ when its milestone is archived.
+  const live = join(repoRoot, "specs/frs/CW66T1.md");
+  const path = existsSync(live) ? live : join(repoRoot, "specs/frs/archive/CW66T1.md");
+  const fr = readFileSync(path, "utf8");
   const at = fr.indexOf("\n## Notes");
   expect(at, "the FR has a ## Notes section").toBeGreaterThan(-1);
   const rest = fr.slice(at + "\n## Notes".length);
