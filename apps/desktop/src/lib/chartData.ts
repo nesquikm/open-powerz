@@ -540,6 +540,17 @@ export interface LiveEnd {
   endMs: number;
 }
 
+/** The smooth live window `[start, end]` for a smoothed end `liveEndMs` (FR 9QTPNP): the
+ * `spanMs` window ending at `liveEndMs`, never starting before the buffer's first sample
+ * `firstMs`, so a window that is still filling stays on its first sample. */
+export function smoothLiveRange(
+  liveEndMs: number,
+  spanMs: number,
+  firstMs: number,
+): [number, number] {
+  return [Math.max(firstMs, liveEndMs - spanMs), liveEndMs];
+}
+
 /** The smooth live window's end for the frame drawn at wall time `nowMs` (AC-HR2JAG.2):
  * one batch interval (`lagMs`) behind the newest sample when its batch arrived at
  * `arrivedAtMs`, moving on with the wall clock until the next batch. It never passes

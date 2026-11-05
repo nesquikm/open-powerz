@@ -30,6 +30,7 @@
     pixelSnappedRange,
     smoothingActive,
     smoothLiveEnd,
+    smoothLiveRange,
     steppedRange,
     toAlignedData,
     type ChartFrame,
@@ -878,7 +879,7 @@
         liveEnd = null;
       } else if (newestArrivedAt !== null) {
         liveEnd = smoothLiveEnd(liveEnd, range[1], newestArrivedAt, performance.now());
-        smooth = [liveEnd.endMs - (range[1] - range[0]), liveEnd.endMs];
+        smooth = smoothLiveRange(liveEnd.endMs, ms, buffer.firstMs ?? range[0]);
         liveEndDrawn = liveEnd.endMs;
       }
       return pixelSnappedRange(smooth, ms, plot?.bbox.width ?? 0, buffer.firstMs ?? range[0]);

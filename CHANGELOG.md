@@ -26,7 +26,7 @@ All notable changes to open-powerz are documented here. The format follows
 - Settings writes read the settings block twice and refuse when the reads differ, an unplug that surfaces as a timeout is caught, and a replugged meter is matched more carefully (AXHK2J)
 - Several meters: notices for every tile show, and connecting a second meter keeps an opened PD file (AXHK2K)
 - Trigger panel: a charger unplugged with no contract is noticed and the page says so, and the PD analyzer says why Detect stopped its capture (TFA5N7, WFSNZD, JQ971R)
-- Charts: a hidden chart no longer hangs the window, dashed series move with their line, and a click on the overview strip right after connect counts (C6VR9K, SX1VTC, B5XBTA)
+- Charts: a hidden chart no longer hangs the window, dashed series move with their line, a click on the overview strip right after connect counts, and a filling live window keeps its start on the first sample instead of wobbling before it (C6VR9K, SX1VTC, B5XBTA, 9QTPNP)
 - Window and layout: a window left on a removed display opens on screen, and the tabs, chart options and settings fit at 375, 900 and 1280 px (EWQ6FQ)
 - Tests and CI: the MSRV job covers the desktop crate, the Device select tooltip is tested under Hide serial numbers, and a timing-sensitive worker test holds at a fixed poll (AXHK2H, NKAD6S, DS89PS)
 
