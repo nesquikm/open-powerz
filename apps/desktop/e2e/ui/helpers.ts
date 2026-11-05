@@ -371,3 +371,36 @@ export async function holdClock(page: Page): Promise<void> {
     }
   }
 }
+
+/** The tag of the frame-rate tests: CI runs them once per OS in a one-worker step,
+ * outside the shards (FR 9QTPNR). */
+export const PERF_TAG = "@perf";
+
+/** rAF frames a second over the next `ms`, counted from a frame boundary. */
+export async function framesPerSecond(page: Page, ms: number): Promise<number> {
+  return page.evaluate(
+    (windowMs) =>
+      new Promise<number>((resolve) => {
+        let frames = 0;
+        let t0 = -1;
+        const tick = (t: number): void => {
+          if (t0 < 0) t0 = t;
+          else frames++;
+          if (t - t0 < windowMs) requestAnimationFrame(tick);
+          else resolve(frames / ((t - t0) / 1000));
+        };
+        requestAnimationFrame(tick);
+      }),
+    ms,
+  );
+}
+
+/** How long the idle frame-rate baseline is measured, ms (AC-9QTPNQ.3: at least 2 s). */
+export const IDLE_FPS_WINDOW_MS = 2_000;
+
+/** The page's own idle frame rate, measured in this page before it streams: the
+ * machine's baseline for the frame-rate tests (AC-9QTPNQ.3, .4). A CI runner without a
+ * GPU paces frames well below 60 Hz even with nothing to draw. */
+export async function idleFramesPerSecond(page: Page): Promise<number> {
+  return framesPerSecond(page, IDLE_FPS_WINDOW_MS);
+}

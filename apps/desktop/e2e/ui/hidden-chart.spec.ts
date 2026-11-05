@@ -14,7 +14,14 @@
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { HOOK } from "../hook";
-import { chartSeriesLengths, expectHook, open, streamDemo } from "./helpers";
+import {
+  chartSeriesLengths,
+  expectHook,
+  idleFramesPerSecond,
+  open,
+  PERF_TAG,
+  streamDemo,
+} from "./helpers";
 import { capture, showPd, stopCapture } from "./pd";
 
 test.use({ viewport: { width: 1600, height: 900 } });
@@ -80,9 +87,20 @@ async function measure(page: Page): Promise<Sample> {
   );
 }
 
-function expectSmooth(s: Sample, where: string): void {
-  const text = `${where}: ${Math.round(s.callsPerS)} path calls/s, ${s.fps.toFixed(1)} fps`;
+/** The path-call bound always; the frame-rate bound only where the idle page itself
+ * reaches {@link MIN_FPS}. A CI runner without a GPU can pace an idle page below it, and
+ * then only the frame-rate half is skipped, with an annotation giving the idle rate
+ * (AC-9QTPNQ.4). */
+function expectSmooth(s: Sample, where: string, idleFps: number): void {
+  const text = `${where}: ${Math.round(s.callsPerS)} path calls/s, ${s.fps.toFixed(1)} fps (idle ${idleFps.toFixed(1)})`;
   expect(s.callsPerS, text).toBeLessThanOrEqual(MAX_PATH_CALLS_PER_S);
+  if (idleFps < MIN_FPS) {
+    test.info().annotations.push({
+      type: "fps-skipped",
+      description: `${where}: frame-rate half skipped, the idle page ran at ${idleFps.toFixed(1)} fps (< ${MIN_FPS})`,
+    });
+    return;
+  }
   expect(s.fps, text).toBeGreaterThanOrEqual(MIN_FPS);
 }
 
@@ -101,37 +119,45 @@ async function waitUntil(page: Page, since: number, ms: number): Promise<void> {
   if (left > 0) await page.waitForTimeout(left);
 }
 
-test("the PD analyzer tab stays smooth for a minute of streaming (AC-C6VR9K.1)", async ({
-  page,
-}) => {
-  test.setTimeout(150_000);
-  await countPathCalls(page);
-  await open(page);
-  await streamDemo(page);
-  await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(50);
-  await showPd(page);
-  const shown = Date.now();
-
-  // Early, and again a minute in: the cost grew with the session's length.
-  await waitUntil(page, shown, 8_000);
-  expectSmooth(await measure(page), "PD tab at ~10 s");
-  await waitUntil(page, shown, 58_000);
-  expectSmooth(await measure(page), "PD tab at ~60 s");
-});
-
-test("the Records and Trigger tabs stay smooth while streaming (AC-C6VR9K.1)", async ({ page }) => {
-  test.setTimeout(90_000);
-  await countPathCalls(page);
-  await open(page);
-  await streamDemo(page);
-  await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(50);
-  for (const name of ["Records", "Trigger"]) {
-    await showTab(page, name);
+test(
+  "the PD analyzer tab stays smooth for a minute of streaming (AC-C6VR9K.1)",
+  { tag: PERF_TAG },
+  async ({ page }) => {
+    test.setTimeout(150_000);
+    await countPathCalls(page);
+    await open(page);
+    const idle = await idleFramesPerSecond(page);
+    await streamDemo(page);
+    await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(50);
+    await showPd(page);
     const shown = Date.now();
+
+    // Early, and again a minute in: the cost grew with the session's length.
     await waitUntil(page, shown, 8_000);
-    expectSmooth(await measure(page), `${name} tab at ~10 s`);
-  }
-});
+    expectSmooth(await measure(page), "PD tab at ~10 s", idle);
+    await waitUntil(page, shown, 58_000);
+    expectSmooth(await measure(page), "PD tab at ~60 s", idle);
+  },
+);
+
+test(
+  "the Records and Trigger tabs stay smooth while streaming (AC-C6VR9K.1)",
+  { tag: PERF_TAG },
+  async ({ page }) => {
+    test.setTimeout(90_000);
+    await countPathCalls(page);
+    await open(page);
+    const idle = await idleFramesPerSecond(page);
+    await streamDemo(page);
+    await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(50);
+    for (const name of ["Records", "Trigger"]) {
+      await showTab(page, name);
+      const shown = Date.now();
+      await waitUntil(page, shown, 8_000);
+      expectSmooth(await measure(page), `${name} tab at ~10 s`, idle);
+    }
+  },
+);
 
 interface PdMarkerDraw {
   leftPx: number;

@@ -103,8 +103,12 @@ function topBarItems(page: Page): Promise<BarItem[]> {
     const bar = document.querySelector(".top-bar");
     if (!bar) return [];
     const selector = ".brand, select, button, .badge, .rate-note, .rec-indicator, .export-progress";
+    // With Export in the menu the progress is a thin line along the bar's bottom edge,
+    // out of the flow by design (AC-SX3EDV.2), so it is not a row item.
+    const lineProgress = bar.classList.contains("export-in-menu");
     return [...bar.querySelectorAll<HTMLElement>(selector)]
       .filter((el) => !el.closest(".menu"))
+      .filter((el) => !(lineProgress && el.classList.contains("export-progress")))
       .filter((el) => el.getClientRects().length > 0 && el.offsetWidth > 0)
       .map((el) => {
         const r = el.getBoundingClientRect();
@@ -156,6 +160,21 @@ async function startRecording(page: Page): Promise<void> {
   await expect(page.getByRole("timer")).toContainText(/[1-9][\d,]* rows/);
 }
 
+/** Start an export from the bar's Export button, or from the "⋯" menu where a short
+ * bar (900 px with a wide font, as on CI Linux) has moved it (AC-9QTPNQ.1). */
+async function startExport(page: Page): Promise<void> {
+  const inline = page.locator(".top-bar").getByRole("button", { name: "Export", exact: true });
+  if (await inline.isVisible()) {
+    await inline.click();
+    return;
+  }
+  await page.getByRole("button", { name: /^More:/ }).click();
+  await page
+    .locator("#top-bar-menu")
+    .getByRole("menuitem", { name: "Export", exact: true })
+    .click();
+}
+
 const BAR_STATES = {
   disconnected: async () => {},
   streaming: async (page: Page) => {
@@ -168,7 +187,7 @@ const BAR_STATES = {
   "recording and exporting with progress": async (page: Page) => {
     await streamDemo(page);
     await startRecording(page);
-    await page.getByRole("button", { name: "Export", exact: true }).click();
+    await startExport(page);
     await expect(page.getByLabel("Export progress")).toBeVisible();
   },
   "rate-locked notice while recording": async (page: Page) => {

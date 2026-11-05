@@ -8,8 +8,8 @@
  *   must line up within 1 px. Before the fix the pattern restarted at the first point in
  *   view, so the edges slid by up to half a pattern. The frames go to
  *   `../qa-runs/DASH-visual/` (outside the repo) for review.
- * - AC .5: at 1000 SPS the Meter tab keeps its frame rate within 5% of the build before
- *   the fix ({@link BASELINE_FPS}).
+ * - AC .5: at 1000 SPS the Meter tab keeps its frame rate within 5% of the same page's
+ *   idle frame rate, measured right before streaming (amended by FR 9QTPNQ).
  *
  * Both run at DPR 1 so a canvas px is a CSS px.
  */
@@ -19,7 +19,17 @@ import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { THEME_COLORS } from "../../src/lib/theme";
 import { HOOK } from "../hook";
-import { blur, chartDraws, chartSeriesLengths, open, streamDemo, useTheme } from "./helpers";
+import {
+  blur,
+  chartDraws,
+  chartSeriesLengths,
+  framesPerSecond,
+  idleFramesPerSecond,
+  open,
+  PERF_TAG,
+  streamDemo,
+  useTheme,
+} from "./helpers";
 
 test.use({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1 });
 
@@ -27,36 +37,17 @@ test.use({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1 });
 const QA_DIR = fileURLToPath(new URL("../../../../../qa-runs/DASH-visual/", import.meta.url));
 
 /**
- * AC-SX1VTC.5: frames a second on the Meter tab at 1000 SPS, WebKit, measured on the
- * build before this fix: 60.1 fps (HEAD eb534f8, 2026-11-03, this Mac, headless WebKit,
- * 5 s window, 1600 × 900 at DPR 1; WebKit caps rAF at 60). The fix may cost at most 5%.
+ * AC-SX1VTC.5 (amended by FR 9QTPNQ): streaming at 1000 SPS may cost at most 5% of the
+ * machine's idle frame rate, measured in the same page right before streaming. It was a
+ * fixed 60 fps baseline (this Mac, headless WebKit), which CI runners without a GPU miss
+ * even when idle.
  */
-const BASELINE_FPS = 60;
 const FPS_TOLERANCE = 0.05;
 /** One frame-rate window, ms. */
 const FPS_WINDOW_MS = 5_000;
 
 /** Largest mismatch, px, between the two frames' dash edges at the same data time. */
 const MAX_EDGE_SHIFT_PX = 1;
-
-/** rAF frames a second over the next `ms`. */
-async function framesPerSecond(page: Page, ms: number): Promise<number> {
-  return page.evaluate(
-    (windowMs) =>
-      new Promise<number>((resolve) => {
-        let frames = 0;
-        let t0 = -1;
-        const tick = (t: number): void => {
-          if (t0 < 0) t0 = t;
-          else frames++;
-          if (t - t0 < windowMs) requestAnimationFrame(tick);
-          else resolve(frames / ((t - t0) / 1000));
-        };
-        requestAnimationFrame(tick);
-      }),
-    ms,
-  );
-}
 
 interface Shot {
   /** The draw's x range, session ms. */
@@ -211,18 +202,27 @@ test("AC-SX1VTC.6: IBUS dashes stay on the same data time from one live frame to
   ).toBeLessThanOrEqual(MAX_EDGE_SHIFT_PX);
 });
 
-test("AC-SX1VTC.5: the Meter tab at 1000 SPS keeps its frame rate", async ({ page }) => {
-  test.setTimeout(90_000);
-  await open(page);
-  await streamDemo(page);
-  await blur(page);
-  await page.keyboard.press("4");
-  await expect(page.getByLabel("Sample rate")).toHaveValue("1000");
-  await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(1000);
-  const fps = await framesPerSecond(page, FPS_WINDOW_MS);
-  const floor = BASELINE_FPS * (1 - FPS_TOLERANCE);
-  console.log(
-    `AC-SX1VTC.5: ${fps.toFixed(1)} fps (baseline ${BASELINE_FPS}, floor ${floor.toFixed(1)})`,
-  );
-  expect(fps, `${fps.toFixed(1)} fps at 1000 SPS`).toBeGreaterThanOrEqual(floor);
-});
+test(
+  "AC-SX1VTC.5: the Meter tab at 1000 SPS keeps its frame rate",
+  { tag: PERF_TAG },
+  async ({ page }) => {
+    test.setTimeout(90_000);
+    await open(page);
+    const idle = await idleFramesPerSecond(page);
+    await streamDemo(page);
+    await blur(page);
+    await page.keyboard.press("4");
+    await expect(page.getByLabel("Sample rate")).toHaveValue("1000");
+    await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(1000);
+    const fps = await framesPerSecond(page, FPS_WINDOW_MS);
+    const floor = idle * (1 - FPS_TOLERANCE);
+    console.log(
+      `AC-SX1VTC.5: ${fps.toFixed(1)} fps (idle baseline ${idle.toFixed(1)}, floor ${floor.toFixed(1)})`,
+    );
+    test.info().annotations.push({
+      type: "fps",
+      description: `${fps.toFixed(1)} fps streaming, idle ${idle.toFixed(1)}`,
+    });
+    expect(fps, `${fps.toFixed(1)} fps at 1000 SPS`).toBeGreaterThanOrEqual(floor);
+  },
+);
