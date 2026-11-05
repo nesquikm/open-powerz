@@ -44,6 +44,12 @@ const QA_DIR = fileURLToPath(new URL("../../../../../qa-runs/DASH-visual/", impo
  */
 const FPS_TOLERANCE = 0.05;
 
+/** AC-SX1VTC.5: Linux WebKit records the frame-rate result instead of failing on it
+ * (FR 9QTPNQ); every other OS and engine fails on it. */
+function recordOnly(browserName: string): boolean {
+  return browserName === "webkit" && process.platform === "linux";
+}
+
 /** Largest mismatch, px, between the two frames' dash edges at the same data time. */
 const MAX_EDGE_SHIFT_PX = 1;
 
@@ -203,7 +209,7 @@ test("AC-SX1VTC.6: IBUS dashes stay on the same data time from one live frame to
 test(
   "AC-SX1VTC.5: the Meter tab at 1000 SPS keeps its frame rate",
   { tag: PERF_TAG },
-  async ({ page }) => {
+  async ({ page, browserName }) => {
     test.setTimeout(90_000);
     await open(page);
     await streamDemo(page);
@@ -217,9 +223,21 @@ test(
       type: "fps",
       description: `stream median ${m.streamMedian.toFixed(1)} fps, idle median ${m.idleMedian.toFixed(1)}, floor ${floor.toFixed(1)}`,
     });
-    expect(
-      m.streamMedian,
-      `${m.streamMedian.toFixed(1)} fps at 1000 SPS against an idle ${m.idleMedian.toFixed(1)}`,
-    ).toBeGreaterThanOrEqual(floor);
+    const verdict = `${m.streamMedian.toFixed(1)} fps at 1000 SPS against an idle ${m.idleMedian.toFixed(1)}`;
+    if (recordOnly(browserName)) {
+      // Linux WebKit stands in for WebKitGTK, which renders on the CPU: on a runner short
+      // of CPU this chart costs it about 30% of its frames on main as on this build
+      // (SX1VTC Notes), so the result is recorded, not failed (FR 9QTPNQ).
+      const met = m.streamMedian >= floor;
+      test.info().annotations.push({
+        type: "fps-recorded",
+        description: `Linux WebKit, recorded only: ${verdict}, floor ${floor.toFixed(1)}, ${met ? "met" : "missed"}`,
+      });
+      console.log(
+        `AC-SX1VTC.5 fps-recorded (Linux WebKit): ${verdict}, floor ${floor.toFixed(1)}, ${met ? "met" : "missed"}`,
+      );
+      return;
+    }
+    expect(m.streamMedian, verdict).toBeGreaterThanOrEqual(floor);
   },
 );

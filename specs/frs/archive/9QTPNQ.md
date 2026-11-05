@@ -37,6 +37,7 @@ PR 12 CI on 017c826: the exporting-with-progress top-bar test waits 60 s for an 
 - AC-9QTPNQ.3: The frame-rate tests measure through one shared helper: at least three idle and three streaming windows of about 2 s each, interleaved and idle first, idle meaning the same page with the mock's stream held. The 1000 SPS test requires the streaming median to be at least 95% of the idle median. AC-SX1VTC.5 is amended to say so.
 - AC-9QTPNQ.4: The hidden-tab smoothness tests keep the 50 fps and 100 000 path calls a second bounds. When the idle median is under 50 fps, only the frame-rate half is skipped, with a test annotation and a log line giving the idle median; the path-call half always runs. C6VR9K's Notes record this.
 - AC-9QTPNQ.5: Every measurement prints its idle and streaming medians and raw windows to the log. On a developer Mac both frame-rate tests run unskipped and pass in Chromium and WebKit five times in a row with no retries.
+- AC-9QTPNQ.6: On Linux WebKit the 1000 SPS test records its result, met or missed, in an annotation and a log line instead of failing, because the same cost shows on the build before (SX1VTC Notes); Chromium on every OS and WebKit on macOS still fail on it.
 
 ## Technical Design
 
