@@ -1379,12 +1379,18 @@ fn a_checkpointed_wal_database_opens_and_leaves_nothing_beside_it() {
 
 #[test]
 fn a_path_with_uri_characters_opens_as_a_database() {
+    // Windows forbids '?' in a file name, so there the name carries the URI
+    // characters Windows allows: '%', '#', a space, '&' and '='.
+    #[cfg(not(windows))]
+    const NAME: &str = "100% a#b?c.db";
+    #[cfg(windows)]
+    const NAME: &str = "100% a#b&c=d.db";
     let dir = scratch("db-uri-path");
-    let path = dir.join("100% a#b?c.db");
+    let path = dir.join(NAME);
     vendor_db(&path, TABLE, &three_rows());
     let s = opened(recording_file::open_db(&path, &mut silent())).summary();
     assert_eq!(s.rows, 3);
-    assert_eq!(names_in(&dir), ["100% a#b?c.db"]);
+    assert_eq!(names_in(&dir), [NAME]);
 }
 
 #[test]

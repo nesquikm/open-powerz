@@ -3892,7 +3892,9 @@ mod tests {
         let c = w.control();
         let before = sim.writes().len();
         reads(&vbus, 0.0);
-        std::thread::sleep(Duration::from_millis(450));
+        // Wait for the watcher to flag the collapse instead of racing its
+        // 300 ms window with a fixed sleep (a loaded runner sees it late).
+        gone_within_a_second(&c);
         c.request(pd(2), false).expect_err("the charger went away");
         assert_eq!(writes_after(&sim, before), Vec::<String>::new());
         let _ = w.close();
@@ -5102,6 +5104,8 @@ mod tests {
             .collect();
         let script = CcScript::watch(&w, &records);
         script.read_out();
+        // Wait for the line itself, then give a second one time to show up.
+        wait_for_line(&lines, CC_GONE_PREFIX);
         std::thread::sleep(THREE_CHECKS);
         let gone = lines_with(&lines, CC_GONE_PREFIX);
         assert_eq!(gone.len(), 1, "{:?}", lines.lock().unwrap());
