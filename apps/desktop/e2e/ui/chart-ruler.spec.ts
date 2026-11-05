@@ -44,6 +44,7 @@ import {
   expectHook,
   lastDraw,
   open,
+  settled,
   streamDemo,
 } from "./helpers";
 
@@ -471,11 +472,18 @@ test("the sub-chart follows the main plot's range, cursor and zoom (AC-AXHK2T.6)
   await expect(sub).toBeVisible();
   await expect(sub.locator("canvas").first()).toBeVisible();
 
-  // Below the main plot.
-  const mainBox = await c.locator(".plot").first().boundingBox();
-  const subBox = await sub.boundingBox();
-  if (mainBox === null || subBox === null) throw new Error("no plots");
-  expect(subBox.y).toBeGreaterThanOrEqual(mainBox.y + mainBox.height - 1);
+  // Below the main plot. The plot shrinks over a few frames to make room (its resize
+  // waits for the next frame), so both boxes are read in one go once they have settled;
+  // two reads frames apart could pair the old plot with the new sub-chart (FR 82AH25).
+  const boxes = await settled(page, () =>
+    page.evaluate(() => {
+      const plot = document.querySelector(".plot")?.getBoundingClientRect();
+      const sub = document.querySelector('[aria-label="Sub-chart"]')?.getBoundingClientRect();
+      return plot && sub ? { plotBottom: plot.bottom, subTop: sub.top } : null;
+    }),
+  );
+  if (boxes === null) throw new Error("no plots");
+  expect(boxes.subTop).toBeGreaterThanOrEqual(boxes.plotBottom - 1);
 
   // The same time range.
   await expect
