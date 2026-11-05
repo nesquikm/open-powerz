@@ -263,6 +263,66 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # FR 9QTPNR: Linux's Playwright system packages, fetched once per runner image. This job
+  # alone lists what the image lacks (Playwright's own dry run), downloads those .deb files
+  # from the Ubuntu mirror when the cache has none for this image yet, and saves them; the
+  # Linux UI jobs only restore and install offline. The mirror can be slow, so the cost is
+  # paid here once, with a generous limit, instead of by every shard at the same time.
+  playwright-linux-deps:
+    name: playwright-linux-deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      missing: ${{ steps.packages.outputs.missing }}
+      key: ${{ steps.packages.outputs.key }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: JS install
+        run: bun install --frozen-lockfile
+
+      - name: Playwright system packages
+        id: packages
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh list >> "$GITHUB_OUTPUT"
+
+      - name: Playwright system package cache
+        id: package-cache
+        if: steps.packages.outputs.missing == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ steps.packages.outputs.key }}
+          lookup-only: true
+
+      - name: Playwright system package download
+        id: package-download
+        if: steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 20
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh download
+
+      # A killed apt leaves its locks and half-configured packages: cleared first.
+      - name: Playwright system package download (retry)
+        if: steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true' && steps.package-download.outcome == 'failure'
+        timeout-minutes: 15
+        working-directory: apps/desktop
+        run: |
+          ../../.github/scripts/playwright-deps.sh unlock
+          ../../.github/scripts/playwright-deps.sh download
+
+      - name: Playwright system package cache save
+        if: steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ steps.packages.outputs.key }}
+
   # UI suite (Playwright): the mock-backend web build in Playwright's bundled Chromium and
   # WebKit on all three OSes. No Rust needed; the config builds and serves the web UI.
   # FR 9QTPNR: four shards per OS, so each job fits its limit with headroom (a macOS
@@ -274,6 +334,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-latest, windows-latest]
         shard: [1, 2, 3, 4]
+    needs: playwright-linux-deps
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -317,53 +378,34 @@ jobs:
         working-directory: apps/desktop
         run: bunx playwright install chromium webkit
 
-      # Linux's system packages (FR 9QTPNR): Playwright's dry run lists what this runner
-      # image lacks; their .deb files are cached per image, Playwright version and list,
-      # and installed offline, so the Ubuntu mirror is asked once per image, not per run.
-      - name: Playwright system packages (Linux)
-        id: packages
-        if: runner.os == 'Linux'
-        working-directory: apps/desktop
-        run: ../../.github/scripts/playwright-deps.sh list >> "$GITHUB_OUTPUT"
-
+      # Linux's system packages (FR 9QTPNR): the .deb files the playwright-linux-deps job
+      # cached for this runner image, installed offline; this job never asks the mirror.
       - name: Playwright system package cache (Linux)
         id: package-cache
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true'
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/playwright-debs
-          key: ${{ steps.packages.outputs.key }}
+          key: ${{ needs.playwright-linux-deps.outputs.key }}
 
-      - name: Playwright system package download (Linux)
-        id: package-download
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        timeout-minutes: 8
-        working-directory: apps/desktop
-        run: ../../.github/scripts/playwright-deps.sh download
-
-      # A killed apt leaves its locks and half-configured packages: cleared first.
-      - name: Playwright system package download (retry)
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true' && steps.package-download.outcome == 'failure'
-        timeout-minutes: 8
-        working-directory: apps/desktop
+      - name: Playwright system package cache miss (Linux)
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
         run: |
-          ../../.github/scripts/playwright-deps.sh unlock
-          ../../.github/scripts/playwright-deps.sh download
-
-      # Saved right away, so a later failing test cannot lose a download that worked.
-      - name: Playwright system package cache save (Linux)
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.cache/playwright-debs
-          key: ${{ steps.packages.outputs.key }}
+          echo "::error::No cached .deb files for key ${{ needs.playwright-linux-deps.outputs.key }}: the playwright-linux-deps job did not save them. Re-run that job, then this one."
+          exit 1
 
       - name: Playwright system package install (Linux)
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true'
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true'
         timeout-minutes: 5
         working-directory: apps/desktop
         run: ../../.github/scripts/playwright-deps.sh install
+
+      # Checked on every Linux job, also when the prep job found nothing missing: this
+      # runner may be on a different image than the prep job's.
+      - name: Playwright system package check (Linux)
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh check
 
       # Only after a setup that worked: a later step that runs on !cancelled() must not
       # meet half-installed browsers.
@@ -401,6 +443,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest, windows-latest]
+    needs: playwright-linux-deps
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -444,53 +487,34 @@ jobs:
         working-directory: apps/desktop
         run: bunx playwright install chromium webkit
 
-      # Linux's system packages (FR 9QTPNR): Playwright's dry run lists what this runner
-      # image lacks; their .deb files are cached per image, Playwright version and list,
-      # and installed offline, so the Ubuntu mirror is asked once per image, not per run.
-      - name: Playwright system packages (Linux)
-        id: packages
-        if: runner.os == 'Linux'
-        working-directory: apps/desktop
-        run: ../../.github/scripts/playwright-deps.sh list >> "$GITHUB_OUTPUT"
-
+      # Linux's system packages (FR 9QTPNR): the .deb files the playwright-linux-deps job
+      # cached for this runner image, installed offline; this job never asks the mirror.
       - name: Playwright system package cache (Linux)
         id: package-cache
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true'
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/playwright-debs
-          key: ${{ steps.packages.outputs.key }}
+          key: ${{ needs.playwright-linux-deps.outputs.key }}
 
-      - name: Playwright system package download (Linux)
-        id: package-download
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        timeout-minutes: 8
-        working-directory: apps/desktop
-        run: ../../.github/scripts/playwright-deps.sh download
-
-      # A killed apt leaves its locks and half-configured packages: cleared first.
-      - name: Playwright system package download (retry)
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true' && steps.package-download.outcome == 'failure'
-        timeout-minutes: 8
-        working-directory: apps/desktop
+      - name: Playwright system package cache miss (Linux)
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
         run: |
-          ../../.github/scripts/playwright-deps.sh unlock
-          ../../.github/scripts/playwright-deps.sh download
-
-      # Saved right away, so a later failing test cannot lose a download that worked.
-      - name: Playwright system package cache save (Linux)
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.cache/playwright-debs
-          key: ${{ steps.packages.outputs.key }}
+          echo "::error::No cached .deb files for key ${{ needs.playwright-linux-deps.outputs.key }}: the playwright-linux-deps job did not save them. Re-run that job, then this one."
+          exit 1
 
       - name: Playwright system package install (Linux)
-        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true'
+        if: runner.os == 'Linux' && needs.playwright-linux-deps.outputs.missing == 'true'
         timeout-minutes: 5
         working-directory: apps/desktop
         run: ../../.github/scripts/playwright-deps.sh install
+
+      # Checked on every Linux job, also when the prep job found nothing missing: this
+      # runner may be on a different image than the prep job's.
+      - name: Playwright system package check (Linux)
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh check
 
       # Only after a setup that worked: a later step that runs on !cancelled() must not
       # meet half-installed browsers.

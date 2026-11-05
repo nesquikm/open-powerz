@@ -187,41 +187,26 @@ describe("CI: the browsers are cached and their download bounded (AC-9QTPNR.7)",
       expect(retry).toContain("timeout-minutes: 8");
     });
 
-    it(`${name} installs Linux's system packages offline from a per-image .deb cache`, () => {
+    it(`${name} waits for the prep job and installs its .deb files offline`, () => {
+      expect(lines).toContain("    needs: playwright-linux-deps");
       expect(lines.join("\n")).not.toContain("--with-deps");
-      expect(runOf(lines, "Playwright system packages (Linux)")).toBe(
-        'run: ../../.github/scripts/playwright-deps.sh list >> "$GITHUB_OUTPUT"',
-      );
+      expect(lines.join("\n")).not.toContain("playwright-deps.sh download");
       const restore = stepOf(lines, "Playwright system package cache (Linux)");
-      const save = stepOf(lines, "Playwright system package cache save (Linux)");
       expect(restore.some((l) => /^uses: actions\/cache\/restore@[0-9a-f]{40} # v4/.test(l))).toBe(
         true,
       );
-      expect(save.some((l) => /^uses: actions\/cache\/save@[0-9a-f]{40} # v4/.test(l))).toBe(true);
-      for (const step of [restore, save]) {
-        expect(step).toContain("path: ~/.cache/playwright-debs");
-        expect(step).toContain("key: ${{ steps.packages.outputs.key }}");
-      }
-      const download = stepOf(lines, "Playwright system package download (Linux)");
-      expect(download).toContain("continue-on-error: true");
-      expect(download).toContain("timeout-minutes: 8");
-      expect(download).toContain("run: ../../.github/scripts/playwright-deps.sh download");
+      expect(restore).toContain("path: ~/.cache/playwright-debs");
+      expect(restore).toContain("key: ${{ needs.playwright-linux-deps.outputs.key }}");
+      const miss = stepOf(lines, "Playwright system package cache miss (Linux)").join("\n");
+      expect(miss).toContain("steps.package-cache.outputs.cache-hit != 'true'");
+      expect(miss).toContain("playwright-linux-deps job");
+      expect(miss).toContain("exit 1");
       expect(stepOf(lines, "Playwright system package install (Linux)")).toContain(
         "run: ../../.github/scripts/playwright-deps.sh install",
       );
-    });
-
-    it(`${name} clears a killed apt's locks before its one retry`, () => {
-      const retry = stepOf(lines, "Playwright system package download (retry)");
-      expect(retry).toContain("timeout-minutes: 8");
-      expect(retry.find((l) => l.startsWith("if:"))).toContain(
-        "steps.package-download.outcome == 'failure'",
-      );
-      const script = retry.join("\n");
-      expect(script.indexOf("playwright-deps.sh unlock")).toBeGreaterThan(-1);
-      expect(script.indexOf("playwright-deps.sh unlock")).toBeLessThan(
-        script.indexOf("playwright-deps.sh download"),
-      );
+      const check = stepOf(lines, "Playwright system package check (Linux)");
+      expect(check).toContain("if: runner.os == 'Linux'");
+      expect(check).toContain("run: ../../.github/scripts/playwright-deps.sh check");
     });
 
     it(`${name} marks the browsers ready only after a setup that worked`, () => {
@@ -233,6 +218,43 @@ describe("CI: the browsers are cached and their download bounded (AC-9QTPNR.7)",
       ).toBe(false);
     });
   }
+});
+
+describe("CI: one job fetches Linux's system packages (AC-9QTPNR.7)", () => {
+  const prep = job("playwright-linux-deps");
+
+  it("runs once, on Linux, with a generous limit, and hands its key on", () => {
+    expect(prep).toContain("    runs-on: ubuntu-24.04");
+    expect(prep).toContain("    timeout-minutes: 40");
+    expect(prep).toContain("      missing: ${{ steps.packages.outputs.missing }}");
+    expect(prep).toContain("      key: ${{ steps.packages.outputs.key }}");
+    expect(prep.join("\n")).not.toContain("strategy:");
+  });
+
+  it("lists, looks the cache up, downloads on a miss and saves", () => {
+    expect(runOf(prep, "Playwright system packages")).toBe(
+      'run: ../../.github/scripts/playwright-deps.sh list >> "$GITHUB_OUTPUT"',
+    );
+    const lookup = stepOf(prep, "Playwright system package cache");
+    expect(lookup).toContain("lookup-only: true");
+    expect(lookup).toContain("key: ${{ steps.packages.outputs.key }}");
+    const download = stepOf(prep, "Playwright system package download");
+    expect(download).toContain("continue-on-error: true");
+    expect(download).toContain("timeout-minutes: 20");
+    const save = stepOf(prep, "Playwright system package cache save");
+    expect(save.some((l) => /^uses: actions\/cache\/save@[0-9a-f]{40} # v4/.test(l))).toBe(true);
+    expect(save).toContain("key: ${{ steps.packages.outputs.key }}");
+  });
+
+  it("clears a killed apt's locks before its one retry", () => {
+    const retry = stepOf(prep, "Playwright system package download (retry)");
+    expect(retry).toContain("timeout-minutes: 15");
+    const script = retry.join("\n");
+    expect(script.indexOf("playwright-deps.sh unlock")).toBeGreaterThan(-1);
+    expect(script.indexOf("playwright-deps.sh unlock")).toBeLessThan(
+      script.indexOf("playwright-deps.sh download"),
+    );
+  });
 });
 
 const DEPS_SCRIPT = fileURLToPath(

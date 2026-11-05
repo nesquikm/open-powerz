@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Playwright's Linux system packages for the UI jobs, without a mirror on every run
-# (FR 9QTPNR). Run from apps/desktop on a GitHub-hosted Ubuntu runner.
+# (FR 9QTPNR). Run from apps/desktop on a GitHub-hosted Ubuntu runner. The CI job
+# playwright-linux-deps lists and downloads once; the UI jobs restore and install.
 #
 #   parse     prints the packages a dry run's output on stdin reports missing
 #   list      prints `missing=<true|false>` and `key=<cache key>` for $GITHUB_OUTPUT: the
@@ -9,7 +10,8 @@
 #   download  fetches those packages' .deb files into the cache folder (the mirror is
 #             asked only here, so once per runner image and Playwright version)
 #   unlock    clears what a killed apt leaves behind, before a retry
-#   install   installs the cached .deb files offline, then checks nothing is missing
+#   install   installs the cached .deb files offline, then runs `check`
+#   check     fails unless Playwright's dry run finds nothing missing
 set -euo pipefail
 
 DEBS="${HOME}/.cache/playwright-debs"
@@ -72,6 +74,9 @@ case "${1:-}" in
     ;;
   install)
     sudo dpkg -i "${DEBS}"/*.deb
+    "$0" check
+    ;;
+  check)
     left="$(missing_packages)"
     if [ -n "${left}" ]; then
       echo "still missing after the offline install:" >&2
@@ -81,7 +86,7 @@ case "${1:-}" in
     echo "all Playwright system dependencies are installed"
     ;;
   *)
-    echo "usage: $0 parse|list|download|unlock|install" >&2
+    echo "usage: $0 parse|list|download|unlock|install|check" >&2
     exit 2
     ;;
 esac
