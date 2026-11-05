@@ -4116,6 +4116,11 @@ mod tests {
         next: std::collections::VecDeque<Look>,
         last: Option<Look>,
         first_low: Option<Instant>,
+        /// Once the looks run out: a stream that goes on (a new record of the
+        /// last volts each look), not one that stopped (FR XR0RKS).
+        goes_on: bool,
+        /// When each look was handed out, and its volts.
+        handed: Vec<(Instant, f64)>,
     }
 
     /// The VBUS watcher's looks, one per look, the last one repeated: the
@@ -4133,6 +4138,31 @@ mod tests {
             Script::looks(w, &looks)
         }
 
+        /// [`Script::watch`], but the stream goes on at the last reading once
+        /// `readings` run out, as a meter keeps streaming after an unplug: a
+        /// look the session makes late (a loaded runner) restarts the spell on
+        /// later records instead of on a stopped stream (FR XR0RKS).
+        fn stream(w: &TriggerWorker, readings: &[f64]) -> Script {
+            let script = Script::watch(w, readings);
+            script.0.lock().unwrap().goes_on = true;
+            script
+        }
+
+        /// The longest wait between two looks the session made.
+        fn longest_gap(&self) -> Duration {
+            let s = self.0.lock().unwrap();
+            s.handed
+                .windows(2)
+                .map(|p| p[1].0.duration_since(p[0].0))
+                .max()
+                .unwrap_or_default()
+        }
+
+        /// The volts of every look handed out, in order.
+        fn handed_volts(&self) -> Vec<f64> {
+            self.0.lock().unwrap().handed.iter().map(|h| h.1).collect()
+        }
+
         /// `w` gets `looks` from now on.
         fn looks(w: &TriggerWorker, looks: &[Look]) -> Script {
             let script = Script::default();
@@ -4146,6 +4176,10 @@ mod tests {
             let mut s = self.0.lock().unwrap();
             if let Some(look) = s.next.pop_front() {
                 s.last = Some(look);
+            } else if s.goes_on
+                && let Some(Look::Record(volts, time_ms)) = s.last
+            {
+                s.last = Some(Look::Record(volts, time_ms + 100));
             }
             let Some(Look::Record(volts, time_ms)) = s.last else {
                 return None;
@@ -4153,6 +4187,7 @@ mod tests {
             if volts < VBUS_GONE_V && s.first_low.is_none() {
                 s.first_low = Some(Instant::now());
             }
+            s.handed.push((Instant::now(), volts));
             Some(VbusReading {
                 volts,
                 cc1_v: 1.5,
@@ -4256,7 +4291,7 @@ mod tests {
         let (sim, w, _vbus, lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         let before = sim.writes().len();
-        let script = Script::watch(&w, &UNPLUG);
+        let script = Script::stream(&w, &UNPLUG);
         let deadline = Instant::now() + Duration::from_secs(5);
         // Only the log is watched: nothing here gives the session a turn.
         while !ended_lines(&lines).iter().any(|l| l == GONE_LINE) {
@@ -4440,7 +4475,7 @@ mod tests {
     fn a_collapse_logs_the_readings_that_ended_it() {
         let (_sim, w, _vbus, lines) = watched_contract(SimCharger::Epr140W);
         let c = w.control();
-        Script::watch(&w, &UNPLUG);
+        let script = Script::stream(&w, &UNPLUG);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !c.charger_gone().expect("charger gone") {
             assert!(Instant::now() < deadline, "the unplug was never noticed");
@@ -4449,14 +4484,40 @@ mod tests {
         wait_for_line(&lines, COLLAPSE_PREFIX);
         let collapse = lines_with(&lines, COLLAPSE_PREFIX);
         assert_eq!(collapse.len(), 1, "{collapse:?}");
-        for reading in ["1.95", "1.85", "1.73"] {
-            assert!(
-                collapse[0].contains(reading),
-                "{reading} missing: {}",
-                collapse[0]
-            );
+        let logged: Vec<&str> = collapse[0][COLLAPSE_PREFIX.len()..].split(", ").collect();
+        // The spell's readings: a run of looks below 2 V in the order they were
+        // handed out, 300 ms of them at least (FR XR0RKS).
+        let lows: Vec<String> = script
+            .handed_volts()
+            .into_iter()
+            .filter(|&v| v < VBUS_GONE_V)
+            .map(|v| format!("{v:.2} V"))
+            .collect();
+        assert!(logged.len() >= 4, "{logged:?}");
+        assert!(
+            lows.windows(logged.len())
+                .any(|run| run.iter().zip(&logged).all(|(a, b)| a == b)),
+            "{logged:?} is no run of the looks below 2 V {lows:?}"
+        );
+        // Unless a late look restarted the spell, it is the unplug's first lows
+        // and no dip was logged; a late look logs the readings it cut short as
+        // a dip, and those are looks below 2 V too.
+        if script.longest_gap() < Duration::from_millis(350) {
+            for reading in ["1.95", "1.85", "1.73"] {
+                assert!(
+                    collapse[0].contains(reading),
+                    "{reading} missing: {}",
+                    collapse[0]
+                );
+            }
+            assert_eq!(lines_with(&lines, DIP_PREFIX), Vec::<String>::new());
+        } else {
+            for dip in lines_with(&lines, DIP_PREFIX) {
+                for reading in dip[DIP_PREFIX.len()..].split(", ") {
+                    assert!(lows.iter().any(|l| l == reading), "{dip}");
+                }
+            }
         }
-        assert_eq!(lines_with(&lines, DIP_PREFIX), Vec::<String>::new());
         w.close().expect("close");
     }
 
@@ -4854,6 +4915,9 @@ mod tests {
     struct CcState {
         next: std::collections::VecDeque<CcRecord>,
         last: Option<CcRecord>,
+        /// Once the records run out: a stream that goes on (a new record of
+        /// the last values each look), not one that stopped (FR XR0RKS).
+        goes_on: bool,
     }
 
     /// The watcher's records, one per look, the last one repeated (the same
@@ -4870,10 +4934,28 @@ mod tests {
             script
         }
 
+        /// [`CcScript::watch`], but the stream goes on with the last record's
+        /// values once `records` run out, as a meter keeps streaming after an
+        /// unplug: a look the session makes late (a loaded runner) restarts
+        /// the spell on later records instead of on a stopped stream (FR
+        /// XR0RKS).
+        fn stream(w: &TriggerWorker, records: &[CcRecord]) -> CcScript {
+            let script = CcScript::watch(w, records);
+            script.0.lock().unwrap().goes_on = true;
+            script
+        }
+
         fn read(&self) -> Option<VbusReading> {
             let mut s = self.0.lock().unwrap();
             if let Some(r) = s.next.pop_front() {
                 s.last = Some(r);
+            } else if s.goes_on
+                && let Some(r) = s.last
+            {
+                s.last = Some(CcRecord {
+                    time_ms: r.time_ms + 100,
+                    ..r
+                });
             }
             s.last.map(|r| VbusReading {
                 volts: r.volts,
@@ -4917,7 +4999,7 @@ mod tests {
         let c = w.control();
         c.list(TriggerProtocol::Pd).expect("list pd");
         let before = sim.writes().len();
-        let script = CcScript::watch(
+        let script = CcScript::stream(
             &w,
             &[
                 attached(0),
@@ -4958,7 +5040,7 @@ mod tests {
         let records: Vec<CcRecord> = std::iter::once(cc(9.0, 1.6, 0.0, 0))
             .chain((1..=6).map(|i| cc(4.0, 0.05, 0.02, 100 * i)))
             .collect();
-        CcScript::watch(&w, &records);
+        CcScript::stream(&w, &records);
         wait_for_line(&lines, CC_GONE_PREFIX);
         assert!(c.charger_gone().expect("charger gone"));
         assert!(!c.armed().expect("armed"), "don't ask again ends");
@@ -4980,7 +5062,7 @@ mod tests {
         let c = w.control();
         c.list(TriggerProtocol::Pd).expect("list pd");
         let records: Vec<CcRecord> = (0..=6).map(|i| cc(0.0, 0.29, 0.29, 100 * i)).collect();
-        CcScript::watch(&w, &records);
+        CcScript::stream(&w, &records);
         wait_for_line(&lines, CC_GONE_PREFIX);
         assert!(c.charger_gone().expect("charger gone"));
         w.close().expect("close");
@@ -5102,7 +5184,7 @@ mod tests {
         let records: Vec<CcRecord> = std::iter::once(attached(0))
             .chain((1..=8).map(|i| cc(0.0, 0.12, 0.04, 100 * i)))
             .collect();
-        let script = CcScript::watch(&w, &records);
+        let script = CcScript::stream(&w, &records);
         script.read_out();
         // Wait for the line itself, then give a second one time to show up.
         wait_for_line(&lines, CC_GONE_PREFIX);
