@@ -55,3 +55,7 @@ A pure dash-clip test, plot-insets unit tests with an unlaid plot, the WebKit e2
 ## Notes
 
 Found in r3 on build 3d2ae16 and reproduced on the demo device. Bisect: the first bad commit is 0f0b9a1. The meter probe was one read-only CLI stream. The Detect sequence's reset is the PDM text command (protocol doc, PDM text session), not binary RESET.
+
+## Hardware evidence (r4 to r6)
+
+- [x] AC-C6VR9K.7: r4 (334d005, 2026-11-04) part C2. Ten minutes on the PD analyzer tab with the real meter at 50 SPS: web content CPU max 6.6 %, mean 1.82 % (61 samples), and 20 tab clicks answered in 48 ms at most. The window was visible and never covered, but not the frontmost app.

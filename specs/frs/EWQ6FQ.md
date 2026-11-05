@@ -60,3 +60,8 @@ Rust unit tests for frame fit, WebKit layout specs at 375, 900 and 1280 px, the 
 ## Notes
 
 Stale-test causes: flows since commit 6769a1d (Recorder options) and 9d71d0a (Open recording); keyboard since 9d71d0a (Export .db in the menu). Choices are the user's: actions wrap below the tabs; a tight pair with a gap per chart option. The user added AC .8 after the screenshot review.
+
+## Hardware evidence (r4 to r6)
+
+- [x] AC-EWQ6FQ.7, the tester half: r4 (334d005, 2026-11-04) part E. The window was moved onto the external display and the app quit; with the display removed, the relaunch opened it at (264, 95), 1200 × 800, fully inside the main screen's work area with its title bar visible.
+- [x] AC-EWQ6FQ.7, the WebKit half: the M7b final gate (2026-11-05) ran the whole WebKit suite with one worker, the layout, flows, keyboard, info-popover and chart specs among it: 532 passed, 9 skipped, 0 failed.

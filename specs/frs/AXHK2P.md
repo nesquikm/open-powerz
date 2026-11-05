@@ -52,6 +52,13 @@ Rust unit tests with the simulator cable, including no-answer; Vitest and Playwr
 
 The classifier exception is deliberately narrow: it covers one message to the cable, which cannot raise VBUS. The first real send runs through the tester's runbook, with nothing on the meter's output and the user's OK.
 
+## Hardware evidence (r4 to r6)
+
+- [x] AC-AXHK2P.4 and AC-AXHK2P.14: r4 (334d005, 2026-11-04) P5. One Read cable press sent exactly one `trigger sent: pd data=018F1001A800FF`, with no dialog and no retry, and the card read word for word "No answer. The cable may have no e-marker. A cable answers only the port that powers it (VCONN). In this wiring the meter may not be the VCONN source."
+- [x] AC-AXHK2P.10: while Detect ran, Read cable was disabled with "Detect is running; read the cable once it ends." (r4 (334d005, 2026-11-04) P3); with the charger gone, disabled with "No charger to ask: press Detect to read the cable." (r6 (20e4bb1, 2026-11-05) T2). r4 P10 and r5 T2 did not show the gone reason; TFA5N7 and WFSNZD fixed that.
+- [x] AC-AXHK2P.11 and AC-AXHK2P.12: a capture start after a trigger session was refused at the sign-in read in r4 P8, r5 D1 and D3, and r6 D3. Each time the banner read "The meter refused to start the PD capture. Replug the meter and try again.", with no firmware advice, and app.log read `pd capture start refused (request 0x44)`. A refusal at 0x10 was never seen on the meter; the simulator test covers it.
+- AC-AXHK2P.1 stays unticked: it cannot be provoked on demand, since no cable has answered the meter's SOP' send (see the implementation notes). Its evidence is automated: `crates/powerz-sim/tests/pdm_message.rs` › `the_emarked_cable_answers_discover_identity_with_its_details`, `apps/desktop/src/lib/backend.trigger.test.ts` › "AC-AXHK2P.1, .6: the Cable card's commands", and `apps/desktop/e2e/ui/trigger.spec.ts` › "Read cable sends one message and shows the whole e-marker (AC-AXHK2P.1, .2)".
+
 ## Implementation notes
 
 - An open PD session means the session has entered PD. With another protocol entered, or none, the read is refused and sends nothing, since the button never enters anything.

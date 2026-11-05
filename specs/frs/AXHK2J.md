@@ -59,6 +59,14 @@ Unit tests with fake transports and the simulator. The tester re-runs a settings
 
 Source: the M7a settings CRC follow-ups. Timer-sensitive test timings stay as they are.
 
+## Hardware evidence (r4 to r6)
+
+- [x] AC-AXHK2J.3, the unplug half: the AXHK2J run (ec17ae3, 2026-11-02, qa-runs/AXHK2J-20261102-0015) ended 4 of 4 unplugs as an unplug within 1 s (13 to 28 ms from the node going to "Waiting for meter"). r4 P9 logged `unplugged`, `replug`, `connected` with no timeout. A cancelled transfer with the meter still present was not exercised on hardware.
+- [x] AC-AXHK2J.4: the same run moved the replug from `usb:02:1` to `usb:01:1`, and it stayed the same session, one tile.
+- [x] AC-AXHK2J.7, the held-port half: in the same run `powerz detect` on a held port said the port "is in use by another program" (exit 5). A vanished port was not tried on hardware.
+- AC-AXHK2J.5 stays unticked: it cannot be provoked on demand, since OS errors 6 and 19 at open never occurred on the meter and are not to be forced. Its evidence is automated: `crates/powerz-protocol/tests/open_errors.rs` › `os_errors_6_and_19_at_open_mean_the_meter_is_gone`, and `transport/cdc.rs` › `enxio_and_enodev_at_open_are_the_meter_gone` and `another_unknown_open_failure_stays_an_io_error`.
+- AC-AXHK2J.9 stays unticked: hardware check carried to the M7c sitting. No settings write has run from the desktop app on a real meter yet. The CLI printed the same note in the AXHK2J run, and the user confirmed the behaviour it describes; a Playwright test pins the app's text.
+
 ## Implementation notes
 
 - A vanished port on Windows is told from a held one by a fresh listing, because the OS text is localized.

@@ -54,6 +54,11 @@ Rust unit tests per disarm path and limit, Vitest for the panel, Playwright for 
 
 User decision 2026-10-26. Triggering at or below 20 V is approved in the wall-charger setup only.
 
+## Hardware evidence (r4 to r6)
+
+- AC-AXHK2N.9 stays unticked: hardware check carried to the M7c sitting (unplug the charger under a contract). What r4 to r6 show is the no-false-end half: none in r4 (334d005) P6, where no VBUS reading fell below 4 V in the 10 s after the cable read and the session held, and none in any Detect at 0 V before a contract (r5 and r6 T1). No charger was unplugged under a contract, so the collapse itself was never seen on the meter.
+- AC-AXHK2N.10 stays unticked: hardware check carried to the M7c sitting, the same unplug under a contract. The shared gone state's page side (offers gone, the message, Detect restoring the offers) was seen through the CC path in r6 T2 and T3 (TFA5N7, WFSNZD).
+
 ## Implementation notes
 
 - Scope calls, all toward asking more: PD offers only, since "fixed, PPS or AVS" names PD offer kinds. QC, FCP and the rest always ask. EPR always asks, even at 18 V on an EPR AVS, per the 2026-10-26 decision.

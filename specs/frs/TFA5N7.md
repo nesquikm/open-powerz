@@ -54,3 +54,9 @@ Unit tests in the trigger module with a fed reader, and a simulator scenario tha
 ## Notes
 
 Source: M7b r4 hardware run, part P4. The 0 V reading with no charger is inferred; the r5 runbook checks it. Related: AXHK2N AC.9 (VBUS collapse) and AXHK2P AC.10.
+
+## Hardware evidence (r4 to r6)
+
+- [x] AC-TFA5N7.1: r6 (20e4bb1, 2026-11-05) part T2, as in WFSNZD AC.1: the gone state on the page with no contract, Read cable disabled with its reason. r5 (cf64002, 2026-11-04) T2 had the backend side (the log line) but not the view.
+- [x] AC-TFA5N7.3: one `trigger cc gone:` line per unplug with four CC1/CC2 readings and no serial, in r5 T2 and r6 T2.
+- AC-TFA5N7.2 stays unticked: its edge cases cannot be provoked on demand. What the runs show: no false gone during any Detect with the charger attached (r5 and r6 T1, r6 D2), and CC1 reads 3.17 V once the charger is back (r5 T3). Its evidence is automated, in `apps/desktop/src-tauri/src/trigger.rs`: `a_single_low_cc_record_never_counts`, `one_cc_line_at_0_3_v_ends_the_spell`, `a_charger_with_one_cc_line_pulled_up_is_never_gone`, `a_low_cc_spell_spanning_detect_is_ignored` and `a_stream_that_stops_ends_the_cc_spell`.

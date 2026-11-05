@@ -53,3 +53,8 @@ Vitest on the trigger store with a fed API, a mock-backend test for the new mode
 ## Notes
 
 Source: M7b r5 hardware run, part T2. Related: TFA5N7 (backend CC watch) and AXHK2N AC.9.
+
+## Hardware evidence (r4 to r6)
+
+- [x] AC-WFSNZD.1: r6 (20e4bb1, 2026-11-05) part T2. After Detect, with no offer pressed, the charger was unplugged. Within 3 s the view said "The charger went away. Press Detect.", every offer card read "Not listed yet.", and Read cable was disabled with "No charger to ask: press Detect to read the cable." app.log had one `trigger cc gone:` line (CC1 and CC2 0.00 V). The same step failed in r5 T2, which is what this FR fixed.
+- AC-WFSNZD.2, guard "none once the charger is known gone": in r6 T3 the message stayed after the replug until Detect, and Detect brought the same offers back and cleared it. The other guards are covered by Vitest only.

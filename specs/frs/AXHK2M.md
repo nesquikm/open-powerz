@@ -68,6 +68,12 @@ Unit tests per item in the owning crate or module, and a Vitest test per UI stat
 
 Source: M7a Implementation notes marked for M7b. The plan lists items deferred with reasons.
 
+## Hardware evidence (r4 to r6)
+
+- [x] AC-AXHK2M.15, the done ending: the app connected again to the same meter with no replug once it was back in application mode, in r4 (334d005, 2026-11-04) M4 (`connected` 0.17 s after `bootloader to application`, streaming resumed), r5 F1 and r6 F1. No update was stopped on the meter, so the stopped ending is simulator-only.
+- [x] AC-AXHK2M.17: r6 (20e4bb1, 2026-11-05) parts F3 and F5. Over an 8 s update the meter's listing went application → bootloader → application (`mode` lines 06:16:25Z and 06:16:31Z), and the Device list line, built from the closed select's own label for each listing, read plain → "(bootloader mode)" → plain. Caveat: the device select was not read while the meter was in bootloader mode, and the 1 s bound was not timed. The meter stays in its bootloader only about 6 s (r4 M2 was not run); the backend hotplug test and the UI test cover both.
+- AC-AXHK2M.14 stays unticked: it cannot be provoked on demand, since we do not press Cancel on the real meter. Its bootloader-label half is the AC.17 evidence above. Its evidence is automated: `apps/desktop/src/lib/firmwareUpdate.stop.svelte.test.ts` › "the next step after a stop (AC-AXHK2M.14)" (a plain replug first; hold the button only if the replug does not bring the meter back; a meter in bootloader mode listed as such).
+
 ## Implementation notes
 
 AC.17 and .18 come from the f4abf09 hardware run, step B4. The Firmware tab's Mode row said Bootloader, read from the same listing, but the device select still showed the plain name. The listing likely changed under the same entry and the closed select kept its old text. The run could not tell when the listing flipped, so .18 logs each change.

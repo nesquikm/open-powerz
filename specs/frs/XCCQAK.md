@@ -41,3 +41,8 @@ Vitest on the store's history with fed listings, and a WebKit test on the mock's
 ## Notes
 
 Source: M7b r4 hardware run, part M. It makes AXHK2M's bootloader label checkable on hardware; the r5 runbook reads the line after the update.
+
+## Hardware evidence (r4 to r6)
+
+- [x] AC-XCCQAK.1 and .2: r6 (20e4bb1, 2026-11-05) parts F3 and F4, the three labels in order, the middle one "(bootloader mode)", and "Hidden" for every serial with the switch on (see PGY704).
+- [x] AC-XCCQAK.3, the done ending and Close: the line stayed after the update was done until Close removed it (r6 F3, F4). Failed and stopped endings and a fresh start are covered by Vitest only.
