@@ -1,8 +1,8 @@
 ---
 milestone: M_7PKVA6
 id: fr_01M69QVAS60M21YPGYA47PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 kickoff_branch: null
 frozen_at: null
 migration: none
@@ -27,34 +27,34 @@ codename: Fine Print
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [AXHK2F](../frs/AXHK2F.md) | A firmware update never ends a recording unasked | n/a |
-| [AXHK2G](../frs/AXHK2G.md) | The app log records errors and firmware updates | n/a |
-| [AXHK2H](../frs/AXHK2H.md) | The MSRV job covers the desktop crate | n/a |
-| [AXHK2J](../frs/AXHK2J.md) | Settings writes and unplugs are detected reliably | n/a |
-| [AXHK2K](../frs/AXHK2K.md) | Notices and opened captures survive other meters' actions | n/a |
-| [AXHK2M](../frs/AXHK2M.md) | Firmware, trigger and release review leftovers | n/a |
-| [AXHK2N](../frs/AXHK2N.md) | Trigger panel "don't ask again" | n/a |
-| [AXHK2P](../frs/AXHK2P.md) | One-click cable e-marker panel | n/a |
-| [AXHK2Q](../frs/AXHK2Q.md) | Hide serial numbers | n/a |
-| [AXHK2R](../frs/AXHK2R.md) | Recorder pause, auto-stop and limits | n/a |
-| [AXHK2S](../frs/AXHK2S.md) | Import recordings and vendor database files | n/a |
-| [AXHK2T](../frs/AXHK2T.md) | Chart ruler, segment marks and energy share | n/a |
-| [AXHK2V](../frs/AXHK2V.md) | Chart appearance and image export | n/a |
-| [AXHK2W](../frs/AXHK2W.md) | Memory trim at 1000 SPS | n/a |
-| [C6VR9K](../frs/C6VR9K.md) | A hidden chart's draw loop hangs the window | n/a |
-| [SX1VTC](../frs/SX1VTC.md) | Dashed series crawl while the chart scrolls | n/a |
-| [CW66T1](../frs/CW66T1.md) | Info popovers for features and abbreviations | n/a |
-| [EWQ6FQ](../frs/EWQ6FQ.md) | Window opens off screen and some layout rough edges | n/a |
-| [B5XBTA](../frs/B5XBTA.md) | A click on the overview strip right after connect is ignored | n/a |
-| [NKAD6S](../frs/NKAD6S.md) | The Device select's tooltip is tested under Hide serial numbers | n/a |
-| [XCCQAK](../frs/XCCQAK.md) | The firmware update keeps the device list's labels | n/a |
-| [TFA5N7](../frs/TFA5N7.md) | A charger unplugged with no contract is noticed | n/a |
-| [JQ971R](../frs/JQ971R.md) | Detect stopping a PD capture says so | n/a |
-| [HR2JAG](../frs/HR2JAG.md) | Live batches at 20 Hz keep the web view's memory down | n/a |
-| [WFSNZD](../frs/WFSNZD.md) | The page hears a charger gone with no contract | n/a |
-| [DS89PS](../frs/DS89PS.md) | The fallback-clear worker test holds the worker at a fixed poll | n/a |
-| [PGY704](../frs/PGY704.md) | The firmware Device list line keeps noting the meter after the update ends | n/a |
-| [VQCKC6](../frs/VQCKC6.md) | The firmware Writing stage explains the bytes the file stores past its image | n/a |
+| [AXHK2F](../frs/archive/AXHK2F.md) | A firmware update never ends a recording unasked | n/a |
+| [AXHK2G](../frs/archive/AXHK2G.md) | The app log records errors and firmware updates | n/a |
+| [AXHK2H](../frs/archive/AXHK2H.md) | The MSRV job covers the desktop crate | n/a |
+| [AXHK2J](../frs/archive/AXHK2J.md) | Settings writes and unplugs are detected reliably | n/a |
+| [AXHK2K](../frs/archive/AXHK2K.md) | Notices and opened captures survive other meters' actions | n/a |
+| [AXHK2M](../frs/archive/AXHK2M.md) | Firmware, trigger and release review leftovers | n/a |
+| [AXHK2N](../frs/archive/AXHK2N.md) | Trigger panel "don't ask again" | n/a |
+| [AXHK2P](../frs/archive/AXHK2P.md) | One-click cable e-marker panel | n/a |
+| [AXHK2Q](../frs/archive/AXHK2Q.md) | Hide serial numbers | n/a |
+| [AXHK2R](../frs/archive/AXHK2R.md) | Recorder pause, auto-stop and limits | n/a |
+| [AXHK2S](../frs/archive/AXHK2S.md) | Import recordings and vendor database files | n/a |
+| [AXHK2T](../frs/archive/AXHK2T.md) | Chart ruler, segment marks and energy share | n/a |
+| [AXHK2V](../frs/archive/AXHK2V.md) | Chart appearance and image export | n/a |
+| [AXHK2W](../frs/archive/AXHK2W.md) | Memory trim at 1000 SPS | n/a |
+| [C6VR9K](../frs/archive/C6VR9K.md) | A hidden chart's draw loop hangs the window | n/a |
+| [SX1VTC](../frs/archive/SX1VTC.md) | Dashed series crawl while the chart scrolls | n/a |
+| [CW66T1](../frs/archive/CW66T1.md) | Info popovers for features and abbreviations | n/a |
+| [EWQ6FQ](../frs/archive/EWQ6FQ.md) | Window opens off screen and some layout rough edges | n/a |
+| [B5XBTA](../frs/archive/B5XBTA.md) | A click on the overview strip right after connect is ignored | n/a |
+| [NKAD6S](../frs/archive/NKAD6S.md) | The Device select's tooltip is tested under Hide serial numbers | n/a |
+| [XCCQAK](../frs/archive/XCCQAK.md) | The firmware update keeps the device list's labels | n/a |
+| [TFA5N7](../frs/archive/TFA5N7.md) | A charger unplugged with no contract is noticed | n/a |
+| [JQ971R](../frs/archive/JQ971R.md) | Detect stopping a PD capture says so | n/a |
+| [HR2JAG](../frs/archive/HR2JAG.md) | Live batches at 20 Hz keep the web view's memory down | n/a |
+| [WFSNZD](../frs/archive/WFSNZD.md) | The page hears a charger gone with no contract | n/a |
+| [DS89PS](../frs/archive/DS89PS.md) | The fallback-clear worker test holds the worker at a fixed poll | n/a |
+| [PGY704](../frs/archive/PGY704.md) | The firmware Device list line keeps noting the meter after the update ends | n/a |
+| [VQCKC6](../frs/archive/VQCKC6.md) | The firmware Writing stage explains the bytes the file stores past its image | n/a |
 
 Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (added 2026-11-03 at the user's request) is built while the AXHK2W hardware run waits, before the final gate.
 

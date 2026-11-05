@@ -1,8 +1,8 @@
 ---
 title: A hidden chart's draw loop hangs the window
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6G7RV20PSJZJH8C7VC6VR9K
 created_at: 2026-11-03T08:17:51.168Z
 changelog_category: Fixed

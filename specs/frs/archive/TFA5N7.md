@@ -1,8 +1,8 @@
 ---
 title: A charger unplugged with no contract is noticed
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6K0WPZHSM78REDKCWTFA5N7
 created_at: 2026-11-04T10:15:21.330Z
 changelog_category: Fixed

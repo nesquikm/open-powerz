@@ -1,8 +1,8 @@
 ---
 title: Dashed series crawl while the chart scrolls
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6GAZQF63V7RGRP7MWSX1VTC
 created_at: 2026-11-03T09:14:02.598Z
 changelog_category: Fixed

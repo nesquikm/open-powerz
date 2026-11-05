@@ -1,8 +1,8 @@
 ---
 title: The Device select's tooltip is tested under Hide serial numbers
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6JZC11NJJG1Y82GFPNKAD6S
 created_at: 2026-11-04T09:48:46.005Z
 changelog_category: Fixed

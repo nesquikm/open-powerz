@@ -1,8 +1,8 @@
 ---
 title: Window opens off screen and some layout rough edges
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6H9Z5C26Q2ZNPNFKREWQ6FQ
 created_at: 2026-11-03T18:15:29.923Z
 changelog_category: Fixed

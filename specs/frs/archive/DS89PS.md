@@ -1,8 +1,8 @@
 ---
 title: The fallback-clear worker test holds the worker at a fixed poll
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6KZXX3VZT75RFAJ4GDS89PS
 created_at: 2026-11-04T19:18:11.944Z
 changelog_category: Fixed

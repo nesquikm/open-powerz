@@ -1,8 +1,8 @@
 ---
 title: The page hears a charger gone with no contract
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6KQ0MKCCDJ6ZYTBJ9WFSNZD
 created_at: 2026-11-04T16:41:58.636Z
 changelog_category: Fixed

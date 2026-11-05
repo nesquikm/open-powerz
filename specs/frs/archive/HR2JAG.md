@@ -1,8 +1,8 @@
 ---
 title: Live batches at 20 Hz keep the web view's memory down
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6K1N6S1TNQRWKAKH7HR2JAG
 created_at: 2026-11-04T10:28:43.937Z
 changelog_category: Fixed

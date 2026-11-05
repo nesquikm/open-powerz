@@ -1,8 +1,8 @@
 ---
 title: The firmware update keeps the device list's labels
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6K0WPYG7T8QWY9VAJXCCQAK
 created_at: 2026-11-04T10:15:21.296Z
 changelog_category: Added

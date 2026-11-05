@@ -1,8 +1,8 @@
 ---
 title: A click on the overview strip right after connect is ignored
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6HJDD77ZZP4KBG32WB5XBTA
 created_at: 2026-11-03T20:43:05.320Z
 changelog_category: Fixed

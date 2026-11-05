@@ -1,8 +1,8 @@
 ---
 title: The MSRV job covers the desktop crate
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M69QVAS7BY12FMV0Y1AXHK2H
 created_at: 2026-10-31T19:48:09.149Z
 changelog_category: Fixed

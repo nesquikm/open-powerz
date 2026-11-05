@@ -1,8 +1,8 @@
 ---
 title: The firmware Writing stage explains the bytes the file stores past its image
 milestone: M_7PKVA6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-05T07:00:44Z
 id: fr_01M6N685F4SQPGGSXWRCVQCKC6
 created_at: 2026-11-05T06:27:28.356Z
 changelog_category: Fixed
