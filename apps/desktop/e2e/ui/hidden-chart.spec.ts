@@ -109,10 +109,11 @@ async function expectSmooth(page: Page, where: string): Promise<void> {
   }
   const verdict = `${where}: stream median ${m.streamMedian.toFixed(1)} fps, idle median ${m.idleMedian.toFixed(1)}`;
   if (fpsRecordedOnly(test.info().project.name)) {
-    // WebKit on a GPU-less CI runner draws on the CPU: the frame-rate half is recorded,
-    // not failed; the path-call bound above always holds (FR 9QTPNQ).
+    // On a CI runner whose frame rate is not measurable (helpers.ts fpsRecordedOnly) the
+    // frame-rate half is recorded, not failed; the path-call bound above always holds
+    // (FR 9QTPNQ).
     const met = m.streamMedian >= MIN_FPS;
-    const description = `WebKit on a CI runner, recorded only: ${verdict}, bound ${MIN_FPS}, ${met ? "met" : "missed"}`;
+    const description = `Recorded only on this CI runner: ${verdict}, bound ${MIN_FPS}, ${met ? "met" : "missed"}`;
     test.info().annotations.push({ type: "fps-recorded", description });
     console.log(`AC-C6VR9K.1 fps-recorded: ${description}`);
     return;

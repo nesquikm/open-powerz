@@ -394,12 +394,17 @@ export async function holdClock(page: Page): Promise<void> {
   }
 }
 
-/** The frame-rate tests' rule for WebKit on a CI runner (FR 9QTPNQ): the runners have no
- * GPU, so WebKit draws on the CPU there, on Linux and macOS alike, and the build before
- * shows the same cost (SX1VTC Notes). There a frame-rate result is recorded, not failed;
- * Chromium everywhere, and WebKit on a developer machine, still fail on it. */
+/** The frame-rate tests' rule for CI runners (FR 9QTPNQ), where a frame-rate result is
+ * recorded, not failed:
+ * - WebKit on any runner: the runners have no GPU, so WebKit draws on the CPU, on Linux and
+ *   macOS alike, and the build before shows the same cost (SX1VTC Notes);
+ * - both browsers on the macOS runner, a GPU-less VM whose frame pacing swings more than
+ *   any 5% bound (idle medians from 26.8 to 55.4 fps within one job).
+ * Chromium on the Linux and Windows runners (a steady 60/60), and every browser on a
+ * developer machine, still fail on it. Path-call bounds are never relaxed. */
 export function fpsRecordedOnly(browserName: string): boolean {
-  return browserName === "webkit" && !!process.env.CI;
+  if (!process.env.CI) return false;
+  return browserName === "webkit" || process.platform === "darwin";
 }
 
 /** The tag of the frame-rate tests: CI runs them once per OS in a one-worker step,

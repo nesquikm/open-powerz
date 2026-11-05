@@ -220,16 +220,16 @@ test(
     });
     const verdict = `${m.streamMedian.toFixed(1)} fps at 1000 SPS against an idle ${m.idleMedian.toFixed(1)}`;
     if (fpsRecordedOnly(browserName)) {
-      // WebKit on a GPU-less CI runner renders on the CPU (as WebKitGTK does): short of
-      // CPU, this chart costs it about 30% of its frames on main as on this build (SX1VTC
-      // Notes), so the result is recorded, not failed (FR 9QTPNQ).
+      // On a CI runner whose frame rate is not measurable to 5% (WebKit drawing on the CPU,
+      // or the macOS runner's frame pacing), the result is recorded, not failed (FR 9QTPNQ,
+      // helpers.ts fpsRecordedOnly).
       const met = m.streamMedian >= floor;
       test.info().annotations.push({
         type: "fps-recorded",
-        description: `WebKit on a CI runner, recorded only: ${verdict}, floor ${floor.toFixed(1)}, ${met ? "met" : "missed"}`,
+        description: `Recorded only on this CI runner: ${verdict}, floor ${floor.toFixed(1)}, ${met ? "met" : "missed"}`,
       });
       console.log(
-        `AC-SX1VTC.5 fps-recorded (WebKit on a CI runner): ${verdict}, floor ${floor.toFixed(1)}, ${met ? "met" : "missed"}`,
+        `AC-SX1VTC.5 fps-recorded (CI runner): ${verdict}, floor ${floor.toFixed(1)}, ${met ? "met" : "missed"}`,
       );
       return;
     }

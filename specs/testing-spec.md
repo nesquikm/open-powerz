@@ -80,8 +80,13 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
   cannot reach the 50 fps bound only that half is skipped, with an annotation (FR 9QTPNQ).
   On WebKit on CI runners (no GPU, so CPU rendering, on Linux and macOS) the 1000 SPS Meter test
   and the hidden-tab tests' frame-rate half record their result rather than failing: the build
-  before shows the same cost under CPU pressure (SX1VTC Notes). The path-call bound always
-  holds, and on a developer machine both fail as before.
+  before shows the same cost under CPU pressure (SX1VTC Notes). On the macOS runner both
+  browsers record, because its frame pacing swings more than any 5% bound (idle medians from
+  26.8 to 55.4 fps within one job). Chromium on the Linux and Windows runners asserts, the
+  path-call bound always holds, and on a developer machine everything asserts.
+  Before each release, run the `@perf` specs on a developer Mac in both browsers
+  (`bun run e2e:ui --grep @perf --workers=1`): that is the only place macOS frame rates are
+  asserted.
 - **Required checks:** `e2e-app` and `e2e-ui` are separate from the `gate` job and have no
   `continue-on-error`, so a failure turns the pull request red. Branch protection on `main`
   must list every `gate (*)`, `e2e-app (*)` and `e2e-ui (*)` check as required; that is a repo
