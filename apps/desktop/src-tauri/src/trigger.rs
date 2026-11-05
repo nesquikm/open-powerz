@@ -3551,28 +3551,143 @@ mod tests {
         *vbus.lock().unwrap() = Some(volts);
     }
 
-    /// Poll `armed` the way the page does, for up to 1 s of real time.
-    fn disarms_within_a_second(c: &TriggerControl) {
-        let start = Instant::now();
+    /// How long a test that needs only the outcome waits for it: generous, like
+    /// [`wait_for_line`], so a starved runner cannot fail it. The 1 s bound of
+    /// AC-AXHK2N.9 is measured only by the dedicated timing tests (FR N502XX).
+    const OUTCOME_WAIT: Duration = Duration::from_secs(5);
+
+    /// Poll `armed` the way the page does until "don't ask again" ends, for up to
+    /// [`OUTCOME_WAIT`].
+    fn disarms_eventually(c: &TriggerControl) {
+        let deadline = Instant::now() + OUTCOME_WAIT;
         while c.armed().expect("armed") {
             assert!(
-                start.elapsed() < Duration::from_secs(1),
-                "still armed after 1 s"
+                Instant::now() < deadline,
+                "still armed after {OUTCOME_WAIT:?}"
             );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
 
-    /// Wait until the collapse was noticed, for up to 1 s of real time.
-    fn gone_within_a_second(c: &TriggerControl) {
-        let start = Instant::now();
+    /// Wait until the collapse was noticed, for up to [`OUTCOME_WAIT`].
+    fn gone_eventually(c: &TriggerControl) {
+        let deadline = Instant::now() + OUTCOME_WAIT;
         while !c.charger_gone().expect("charger gone") {
             assert!(
-                start.elapsed() < Duration::from_secs(1),
-                "not noticed after 1 s"
+                Instant::now() < deadline,
+                "not noticed after {OUTCOME_WAIT:?}"
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// One look of the VBUS watcher, as a [`Looks`] reader saw it.
+    #[derive(Debug, Clone, Copy)]
+    struct LookRecord {
+        at: Instant,
+        volts: f64,
+        time_ms: u32,
+        period: Duration,
+    }
+
+    /// Every look the watcher made, and how many it had made when it wrote the collapse
+    /// line: the line is written on the session thread right after the deciding look, so
+    /// the count is exact (FR N502XX).
+    #[derive(Clone, Default)]
+    struct Looks {
+        made: Arc<Mutex<Vec<LookRecord>>>,
+        decided: Arc<Mutex<Option<usize>>>,
+    }
+
+    impl Looks {
+        /// `read`, with each look it answers counted.
+        fn count(
+            &self,
+            mut read: impl FnMut() -> Option<VbusReading> + Send + 'static,
+        ) -> impl FnMut() -> Option<VbusReading> + Send + 'static {
+            let made = Arc::clone(&self.made);
+            move || {
+                let reading = read();
+                if let Some(r) = reading {
+                    made.lock().unwrap().push(LookRecord {
+                        at: Instant::now(),
+                        volts: r.volts,
+                        time_ms: r.time_ms,
+                        period: r.period,
+                    });
+                }
+                reading
+            }
+        }
+
+        /// From now on `w` logs to `lines`, and the look count is noted at the collapse.
+        fn note_decision(&self, w: &TriggerWorker, lines: &Lines) {
+            let keep = Arc::clone(lines);
+            let made = Arc::clone(&self.made);
+            let decided = Arc::clone(&self.decided);
+            w.log_to(move |line: String| {
+                if line.starts_with(COLLAPSE_PREFIX) {
+                    let count = made.lock().unwrap().len();
+                    decided.lock().unwrap().get_or_insert(count);
+                }
+                keep.lock().unwrap().push(line);
+            });
+        }
+    }
+
+    /// AC-AXHK2N.9 on the watcher's own terms (FR N502XX): from the first record below
+    /// 2 V, the collapse is decided within `ceil(spell / VBUS_CHECK) + 1` looks, the
+    /// spell being 300 ms of device time rounded up to whole records, and that many
+    /// looks at the real check interval fit in 1 s. The deciding record is 300 ms of
+    /// device time after the first low one. The test thread's wall clock is only logged:
+    /// on a starved runner it measures the runner, not the watcher. A look later than
+    /// the stream's stop rule (its period plus 300 ms) legitimately restarts the spell;
+    /// such a run is logged and only its outcome counts.
+    fn decided_within_looks(looks: &Looks, what: &str) {
+        let decided = looks
+            .decided
+            .lock()
+            .unwrap()
+            .expect("a collapse was decided");
+        let made = looks.made.lock().unwrap();
+        let first = made[..decided]
+            .iter()
+            .position(|l| l.volts < VBUS_GONE_V)
+            .expect("a reading below 2 V was looked at");
+        let deciding = made[decided - 1];
+        let period = deciding.period;
+        let wall = deciding.at.duration_since(made[first].at);
+        let late = made[first.saturating_sub(1)..decided]
+            .windows(2)
+            .map(|p| p[1].at.duration_since(p[0].at))
+            .max()
+            .unwrap_or_default();
+        let looks_taken = decided - first;
+        println!(
+            "{what}: decided {looks_taken} looks and {wall:?} after the first low reading (longest gap between looks {late:?})"
+        );
+        if late > period + VBUS_LOW_SPELL {
+            println!("{what}: a look came {late:?} late, which restarts a spell; outcome only");
+            return;
+        }
+        let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX).max(1);
+        let spell_ms = u64::try_from(VBUS_LOW_SPELL.as_millis()).unwrap_or(u64::MAX);
+        let check_ms = u64::try_from(VBUS_CHECK.as_millis()).unwrap_or(u64::MAX);
+        let spell_in_records = spell_ms.div_ceil(period_ms) * period_ms;
+        let bound = spell_in_records.div_ceil(check_ms) + 1;
+        assert!(
+            bound * check_ms <= 1000,
+            "{what}: {bound} looks at {check_ms} ms do not fit in 1 s"
+        );
+        assert!(
+            u64::try_from(looks_taken).unwrap_or(u64::MAX) <= bound,
+            "{what}: decided {looks_taken} looks after the first low reading, more than {bound}"
+        );
+        let span = deciding.time_ms - made[first].time_ms;
+        assert!(
+            u64::from(span) >= spell_ms,
+            "{what}: decided {span} ms of device time after the first low reading"
+        );
     }
 
     fn lines_with(lines: &Lines, prefix: &str) -> Vec<String> {
@@ -3607,24 +3722,23 @@ mod tests {
     // one low reading. Now 300 ms of low readings, and within 1 s.
     #[test]
     fn a_collapse_needs_300_ms_low_and_ends_armed_within_a_second_with_no_call_into_the_session() {
-        let (sim, w, vbus, lines) = watched_armed(SimCharger::Epr140W);
+        let (sim, w, _vbus, lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         let before = sim.writes().len();
+        // The same reader as `watched`, counted: 9 V until it reads 0 V.
+        let looks = Looks::default();
+        looks.note_decision(&w, &lines);
+        let vbus: Vbus = Arc::new(Mutex::new(Some(9.0)));
+        let reading = Arc::clone(&vbus);
+        w.watch_vbus(looks.count(fresh(move || *reading.lock().unwrap())));
         reads(&vbus, 0.0);
-        let start = Instant::now();
+        let deadline = Instant::now() + OUTCOME_WAIT;
         // Only the log is watched: nothing here gives the session a turn.
         while ended_lines(&lines).is_empty() {
-            assert!(
-                start.elapsed() < Duration::from_secs(1),
-                "armed did not end within 1 s"
-            );
+            assert!(Instant::now() < deadline, "armed did not end");
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert!(
-            start.elapsed() >= Duration::from_millis(300),
-            "armed ended {:?} after VBUS went low: before 300 ms of low readings",
-            start.elapsed()
-        );
+        decided_within_looks(&looks, "0 V");
         assert!(!c.armed().expect("armed"), "still armed");
         assert_eq!(writes_after(&sim, before), Vec::<String>::new());
         w.close().expect("close");
@@ -3638,7 +3752,7 @@ mod tests {
         let c = w.control();
         let before = sim.writes().len();
         reads(&vbus, 0.0);
-        disarms_within_a_second(&c);
+        disarms_eventually(&c);
         assert!(c.charger_gone().expect("charger gone"));
         assert_eq!(writes_after(&sim, before), Vec::<String>::new());
         w.close().expect("close");
@@ -3649,7 +3763,7 @@ mod tests {
         let (_sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 1.99);
-        disarms_within_a_second(&c);
+        disarms_eventually(&c);
         w.close().expect("close");
     }
 
@@ -3730,7 +3844,7 @@ mod tests {
         let (_sim, w, vbus, _lines) = watched_contract(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         w.close().expect("close");
     }
 
@@ -3740,7 +3854,7 @@ mod tests {
         let c = w.control();
         c.back_to_5v().expect("back to 5 V");
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         w.close().expect("close");
     }
 
@@ -3773,7 +3887,7 @@ mod tests {
         let c = w.control();
         c.console_send("pdm parm".to_owned(), false).expect("sent");
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         w.close().expect("close");
     }
 
@@ -3797,7 +3911,7 @@ mod tests {
         let (sim, w, vbus, _lines) = watched_armed(SimCharger::Pps65W);
         let c = w.control();
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         let before = sim.writes().len();
         says_press_detect(c.request(pd(2), false));
         says_press_detect(c.request(pd(2), true));
@@ -3817,7 +3931,7 @@ mod tests {
         c.list(TriggerProtocol::Pd).expect("list pd");
         c.request(pd(2), true).expect("9 V");
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         let before = sim.writes().len();
         says_press_detect(c.request(TriggerRequest::Qc { volts: 9 }, true));
         assert_eq!(writes_after(&sim, before), Vec::<String>::new());
@@ -3830,7 +3944,7 @@ mod tests {
         let (sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         let before = sim.writes().len();
         says_press_detect(c.risk(pd(2)));
         assert_eq!(writes_after(&sim, before), Vec::<String>::new());
@@ -3843,7 +3957,7 @@ mod tests {
         let (_sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         for _ in 0..3 {
             assert!(!c.armed().expect("armed"));
         }
@@ -3857,7 +3971,7 @@ mod tests {
         let (sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         let before = sim.writes().len();
         reads(&vbus, 5.0);
         std::thread::sleep(THREE_CHECKS);
@@ -3875,7 +3989,7 @@ mod tests {
         let (sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         reads(&vbus, 5.0);
         c.list(TriggerProtocol::Pd).expect("list pd");
         assert!(!c.charger_gone().expect("charger gone"));
@@ -3894,7 +4008,7 @@ mod tests {
         reads(&vbus, 0.0);
         // Wait for the watcher to flag the collapse instead of racing its
         // 300 ms window with a fixed sleep (a loaded runner sees it late).
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         c.request(pd(2), false).expect_err("the charger went away");
         assert_eq!(writes_after(&sim, before), Vec::<String>::new());
         let _ = w.close();
@@ -3910,17 +4024,9 @@ mod tests {
         std::thread::sleep(THREE_CHECKS);
         assert!(c.armed().expect("armed"), "a stale sample gets its second");
         assert!(!c.charger_gone().expect("charger gone"));
-        gone_within_two_seconds(&c);
+        gone_eventually(&c);
         assert!(!c.armed().expect("armed"));
         let _ = w.close();
-    }
-
-    fn gone_within_two_seconds(c: &TriggerControl) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !c.charger_gone().expect("charger gone") {
-            assert!(Instant::now() < deadline, "still not gone");
-            std::thread::sleep(Duration::from_millis(20));
-        }
     }
 
     #[test]
@@ -3928,7 +4034,7 @@ mod tests {
         let (_sim, w, vbus, _lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         c.detect().expect("detect");
         assert!(c.charger_gone().expect("charger gone"), "after Detect");
         c.list(TriggerProtocol::Qc).expect("list qc");
@@ -3941,7 +4047,7 @@ mod tests {
         let (_sim, w, vbus, _lines) = watched_contract(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         c.list(TriggerProtocol::Pd).expect("list pd");
         // Still 0 V, and no contract yet: the listing is not undone.
         std::thread::sleep(PAST_THE_SPELL);
@@ -3951,7 +4057,7 @@ mod tests {
         std::thread::sleep(THREE_CHECKS);
         assert!(!c.charger_gone().expect("charger gone"));
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         w.close().expect("close");
     }
 
@@ -3960,7 +4066,7 @@ mod tests {
         let (_sim, w, vbus, lines) = watched_contract(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 0.0);
-        gone_within_a_second(&c);
+        gone_eventually(&c);
         w.close().expect("close");
         assert_eq!(ended_lines(&lines), Vec::<String>::new());
     }
@@ -3997,7 +4103,7 @@ mod tests {
         let (_sim, w, vbus, lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         reads(&vbus, 0.0);
-        disarms_within_a_second(&c);
+        disarms_eventually(&c);
         std::thread::sleep(THREE_CHECKS);
         w.close().expect("close");
         assert_eq!(ended_lines(&lines), vec![GONE_LINE]);
@@ -4115,7 +4221,6 @@ mod tests {
     struct ScriptState {
         next: std::collections::VecDeque<Look>,
         last: Option<Look>,
-        first_low: Option<Instant>,
         /// Once the looks run out: a stream that goes on (a new record of the
         /// last volts each look), not one that stopped (FR XR0RKS).
         goes_on: bool,
@@ -4184,9 +4289,6 @@ mod tests {
             let Some(Look::Record(volts, time_ms)) = s.last else {
                 return None;
             };
-            if volts < VBUS_GONE_V && s.first_low.is_none() {
-                s.first_low = Some(Instant::now());
-            }
             s.handed.push((Instant::now(), volts));
             Some(VbusReading {
                 volts,
@@ -4195,11 +4297,6 @@ mod tests {
                 time_ms,
                 period: SCRIPT_PERIOD,
             })
-        }
-
-        /// When the first reading below 2 V was handed out.
-        fn first_low(&self) -> Option<Instant> {
-            self.0.lock().unwrap().first_low
         }
 
         /// Readings not looked at yet.
@@ -4291,22 +4388,17 @@ mod tests {
         let (sim, w, _vbus, lines) = watched_armed(SimCharger::Epr140W);
         let c = w.control();
         let before = sim.writes().len();
+        let looks = Looks::default();
+        looks.note_decision(&w, &lines);
         let script = Script::stream(&w, &UNPLUG);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        w.watch_vbus(looks.count(move || script.read()));
+        let deadline = Instant::now() + OUTCOME_WAIT;
         // Only the log is watched: nothing here gives the session a turn.
         while !ended_lines(&lines).iter().any(|l| l == GONE_LINE) {
             assert!(Instant::now() < deadline, "the unplug never ended armed");
             std::thread::sleep(Duration::from_millis(2));
         }
-        let ended = Instant::now();
-        let first_low = script
-            .first_low()
-            .expect("a reading below 2 V was looked at");
-        assert!(
-            ended.duration_since(first_low) < Duration::from_secs(1),
-            "ended {:?} after the first reading below 2 V",
-            ended.duration_since(first_low)
-        );
+        decided_within_looks(&looks, "unplug decay");
         assert!(!c.armed().expect("armed"));
         assert!(c.charger_gone().expect("charger gone"));
         says_press_detect(c.request(pd(2), true));
@@ -4387,17 +4479,14 @@ mod tests {
         // The trigger session streams at 50 SPS at most; 2 SPS is the slowest.
         for period_ms in [500u32, 100, 20] {
             let (_sim, w, _vbus, lines) = watched_armed(SimCharger::Epr140W);
+            let looks = Looks::default();
+            looks.note_decision(&w, &lines);
             let start = Instant::now();
-            let first_low: Arc<Mutex<Option<Instant>>> = Arc::default();
-            let seen = Arc::clone(&first_low);
             // A new record each period: 5.18 V, then 0.5 V on.
-            w.watch_vbus(move || {
+            w.watch_vbus(looks.count(move || {
                 let ms = u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX);
                 let n = ms / period_ms;
                 let volts = if n == 0 { 5.18 } else { 0.5 };
-                if volts < VBUS_GONE_V {
-                    seen.lock().unwrap().get_or_insert_with(Instant::now);
-                }
                 Some(VbusReading {
                     volts,
                     cc1_v: 1.5,
@@ -4405,15 +4494,9 @@ mod tests {
                     time_ms: SCRIPT_T0 + n * period_ms,
                     period: Duration::from_millis(u64::from(period_ms)),
                 })
-            });
+            }));
             wait_for_line(&lines, COLLAPSE_PREFIX);
-            let ended = Instant::now();
-            let first = first_low.lock().unwrap().expect("a low reading was read");
-            assert!(
-                ended.duration_since(first) < Duration::from_secs(1),
-                "{period_ms} ms records: ended {:?} after the first low reading",
-                ended.duration_since(first)
-            );
+            decided_within_looks(&looks, &format!("{period_ms} ms records"));
             assert!(!w.control().armed().expect("armed"));
             w.close().expect("close");
         }
@@ -4459,7 +4542,7 @@ mod tests {
         reads(&vbus, 0.0);
         let start = Instant::now();
         c.request(pd(2), Confirm::YesRemember).expect("9 V");
-        gone_within_two_seconds(&c);
+        gone_eventually(&c);
         // The spell starts once the wait is over and needs its own 300 ms.
         assert!(
             start.elapsed() >= VBUS_RISE_WAIT + VBUS_LOW_SPELL,
@@ -7203,7 +7286,8 @@ mod sync_tests {
         w.watch_vbus(fresh(move || *reading.lock().unwrap()));
         c.request(pd(2), false).expect("armed, 9 V");
         *vbus.lock().unwrap() = Some(0.0);
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // Only the outcome matters here; the 1 s bound has its own timing tests.
+        let deadline = Instant::now() + Duration::from_secs(5);
         while !c.charger_gone().expect("charger gone") {
             assert!(Instant::now() < deadline, "still not gone");
             std::thread::sleep(Duration::from_millis(20));

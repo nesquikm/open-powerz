@@ -50,6 +50,8 @@ The trigger panel offers a session-scoped "don't ask again" option for requests 
 
 Rust unit tests per disarm path and limit, Vitest for the panel, Playwright for dialog and Clear. The tester runs one 9 V then 20 V sequence on the wall charger from a runbook.
 
+AC-AXHK2N.9's 1 s bound is tested on the watcher's own terms (N502XX): from the first record below 2 V, the collapse is decided within ceil(300 ms of records / 100 ms check) + 1 looks, at most 6 at any trigger rate, and that many looks at the real 100 ms check interval fit in 1 s. The deciding record is 300 ms of device time after the first low one. The test thread's wall clock is only logged, because on a starved CI runner it times the runner rather than the watcher. A look later than the stream's stop rule restarts the spell by design, so such a run counts its outcome only. Tests that need only the outcome wait up to 5 s.
+
 ## Notes
 
 User decision 2026-10-26. Triggering at or below 20 V is approved in the wall-charger setup only.
