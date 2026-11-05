@@ -13,6 +13,7 @@
   "V9SK54": "firmware-update: firmware from the cli",
   "V9SK55": "firmware-update: advanced firmware switch",
   "V9SK56": null,
+  "XCCQAK": "firmware-update: read the device list labels",
   "PR41FT": "protocol-triggers: confirmation above 5 v",
   "AXHK2N": "protocol-triggers: don't ask again",
   "AXHK2P": "protocol-triggers: press read cable",

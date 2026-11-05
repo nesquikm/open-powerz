@@ -65,6 +65,7 @@ check the download and open the app past the macOS and Windows warnings.
 - See the meter's mode and firmware version, with a warning for old firmware ([CLI reference](docs/reference/cli.md))
 - Inspect a ChargerLAB firmware file before you use it ([update firmware](docs/how-to/update-firmware.md))
 - Update the meter's firmware from the CLI or behind the app's Advanced firmware switch, with recovery steps if it fails ([update firmware](docs/how-to/update-firmware.md))
+- After an update, read the device list labels the meter took, bootloader mode included ([update firmware](docs/how-to/update-firmware.md))
 
 ### Offline records
 
