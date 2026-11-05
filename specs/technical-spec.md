@@ -164,16 +164,20 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
   fact stays `[inferred]` until a device test confirms it; KM002C is untested.
 - **Device safety:** a wrong command can hang, reboot or brick the meter. A single guard in the
   transport layer refuses the never-send set before any byte is written, and HID only carries
-  the ADC snapshot (GET_DATA mask 0x001). The only writes past it are two narrow paths, each
-  checked frame by frame: the record table (SET_DATA 0x48, attribute 0x28) and the settings
-  write (type 0x0A, over CDC only).
+  the ADC snapshot (GET_DATA mask 0x001). The only writes past it are narrow paths, each
+  checked frame by frame: the record table (SET_DATA 0x48, attribute 0x28), the settings
+  write (type 0x0A, over CDC only) and, from M7c, the startup logo: 0x4A chunks of a
+  vendor-shaped logo blob inside flash 0x300000–0x31D4FF (checked on the plaintext before
+  encryption) and SET_DATA 0x48 attribute 0x1C with value 0 or 2. Logo read-back uses 0x44
+  reads in 0x98300000–0x9831FFFF, at most 256 bytes each. Every other 0x4A and 0x48 frame
+  stays refused.
 - **Meter writes:** deleting offline records rewrites the record table with one SET_DATA
   0x48 (attribute 0x28) carrying the kept entries in order, then re-reads the list; a
   mismatch is an error and nothing is retried. The desktop app first backs the affected
   records up as CSV (`open-powerz-backups/records-<time>` under Downloads) and needs the
   typed record name (or "all"). The settings write reads SETTINGS, sends one type 0x0A
-  write with the changed display / rate fields over the values just read (calibration,
-  startup logo and auto-rotate are never written), then reads SETTINGS back; a changed
+  write with the changed display / rate fields over the values just read (calibration
+  and auto-rotate are never written; the startup-screen duration becomes writable in M7c), then reads SETTINGS back; a changed
   field without its new value, or any other field that moved, is an error. [device]
   (single-record delete and settings write; delete-all is checked on the simulator only)
 - **WebKitGTK** on Linux is slower; chart decimation must happen in Rust.
