@@ -18,7 +18,7 @@ use open_powerz_desktop_lib::recording::{
     DEFAULT_MAX_ROWS, EndReason, Limits, RecordingEvent, RecordingSummary, folder_recording_path,
     recording_name_ok,
 };
-use open_powerz_desktop_lib::ui_error::{ErrorKind, UiError};
+use open_powerz_desktop_lib::ui_error::UiError;
 use open_powerz_desktop_lib::worker::{BackendEvent, GapKind, Step, Worker, WorkerConfig};
 use powerz_protocol::decode::Rate;
 use powerz_protocol::frame::{self, Attribute};
@@ -928,6 +928,7 @@ fn a_name_that_leaves_the_folder_is_refused() {
 #[cfg(unix)]
 #[test]
 fn an_unwritable_folder_is_refused_at_the_start() {
+    use open_powerz_desktop_lib::ui_error::ErrorKind;
     use std::os::unix::fs::PermissionsExt;
     let dir = fresh_dir("read-only");
     std::fs::create_dir_all(&dir).unwrap();
