@@ -1,7 +1,7 @@
 //! Inspecting a local firmware container for the UI (FR V9SK53, AC .3).
 //!
 //! Reads the file, parses its header with
-//! [`FirmwareContainer`](powerz_protocol::firmware::container::FirmwareContainer)
+//! [`FirmwareContainer`]
 //! and returns the metadata with the English release notes. No meter is
 //! involved and the image is never decrypted.
 

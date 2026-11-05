@@ -10,7 +10,7 @@
 //!
 //! Only the newest [`HISTORY_FULL_SAMPLES`] samples keep full resolution
 //! (FR AXHK2W, AC-AXHK2W.10): older whole chunks fold into blocks of at most
-//! [`FOLD_BLOCK`] records that keep, per series, min, max, sum and count,
+//! `FOLD_BLOCK` records that keep, per series, min, max, sum and count,
 //! plus their first and last record and their charge and energy. A block
 //! never spans a run break. Record indices keep counting folded records, so
 //! totals, the ruler at block edges, segment marks and E.D. stay exact there.

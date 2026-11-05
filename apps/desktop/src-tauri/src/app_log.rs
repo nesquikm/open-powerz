@@ -1,6 +1,6 @@
 //! `app.log`: the session events, one timestamped line each, as evidence of
 //! what happened during a run (AC-4PJRVM.5). Each run adds to the file, until
-//! it grows past [`MAX_LOG_BYTES`] and moves aside (AC-AXHK2G.6). A line names
+//! it grows past `MAX_LOG_BYTES` and moves aside (AC-AXHK2G.6). A line names
 //! a meter by its device id (a bus address or a demo scenario) and model, never
 //! by serial or UID.
 

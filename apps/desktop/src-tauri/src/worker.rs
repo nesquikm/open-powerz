@@ -2459,7 +2459,7 @@ impl WorkerControl {
     /// Discard the session history. The worker sends out the samples still
     /// waiting in its batcher first, so every sample recorded before the
     /// clear reaches the page before it; a worker that is gone or busy for
-    /// longer than [`CLEAR_WAIT`] leaves the clear to this thread.
+    /// longer than `CLEAR_WAIT` leaves the clear to this thread.
     pub fn clear_history(&self) -> Result<(), UiError> {
         let claimed = Arc::new(AtomicBool::new(false));
         let (reply, answer) = mpsc::channel();

@@ -28,7 +28,7 @@ pub enum SimCharger {
     Epr140W,
     /// 65 W PD 3.0 SPR-only charger (no EPR): 5/9/15 V 3 A, 20 V 3.25 A,
     /// PPS 3.3-21 V 3.25 A (slot 5). Only the SPR `pdo:` block follows
-    /// `entry pd` / `pd hrst`. [inferred]
+    /// `entry pd` / `pd hrst`. `[inferred]`
     Pps65W,
     /// Synthetic multi-protocol charger (FR DGSQ6Q): the 65 W PD offers,
     /// plus QC 2.0 / 3.0, FCP, AFC, SFCP, SCP, VFCP, TFCP and UFCS. Entries

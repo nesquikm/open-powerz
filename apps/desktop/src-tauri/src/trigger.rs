@@ -349,7 +349,7 @@ impl TriggerControl {
     /// BC 1.2, Apple and the automatic list; nothing above 5 V is asked.
     /// The stream's GET_DATA polling pauses meanwhile on the open bulk
     /// session (no reconnect: a bulk CONNECT silences the PDM session
-    /// [device]) and resumes however the list ends.
+    /// `[device]`) and resumes however the list ends.
     pub fn detect(&self) -> Result<Detection, UiError> {
         let _held = PollingHeld::hold(self.stream.as_ref());
         let hint = self
@@ -1922,7 +1922,7 @@ pub const VBUS_GONE_V: f64 = 2.0;
 const VBUS_LOW_SPELL: Duration = Duration::from_millis(300);
 /// Below this, V, on both CC lines nothing is attached: a source pulls one
 /// line up to 1.6 V or more with Rp, and an open line reads near 0 V
-/// [inferred].
+/// `[inferred]`.
 pub const CC_GONE_V: f64 = 0.3;
 /// Readings of one low spell kept for its log line.
 const LOW_READINGS_MAX: usize = 32;

@@ -2111,7 +2111,7 @@ where
 
     /// Hand the open session a trigger session (FR DGSQ6S): refused (and
     /// `worker` closed) without a connected meter or while one is open. The
-    /// queue is kept at 50 SPS or less while it is open. [inferred]
+    /// queue is kept at 50 SPS or less while it is open. `[inferred]`
     pub fn install_trigger(
         &mut self,
         worker: crate::trigger::TriggerWorker,

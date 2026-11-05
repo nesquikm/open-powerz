@@ -163,7 +163,7 @@ pub fn default_timeout(request: &[u8]) -> Duration {
 
 /// Build an [`Error::Permission`] for `target_os` (e.g. `"linux"`); on Linux
 /// the message names the udev rule `packaging/linux/60-powerz.rules`. A
-/// serial port's name in `detail` is dropped, see [`without_port_names`].
+/// serial port's name in `detail` is dropped, see `without_port_names`.
 pub fn permission_error(target_os: &str, detail: &str) -> Error {
     let detail = without_port_names(detail);
     if target_os == "linux" {

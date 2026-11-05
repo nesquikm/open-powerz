@@ -227,7 +227,7 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum SettingsAction {
     /// Write `<field>=<value>` changes (language=chinese|english,
-    /// brightness=1..100, dim_timeout=off|15|30|60, theme=<name>,
+    /// brightness=1..100, dim_timeout=off|15|30|60, theme=`<name>`,
     /// rotation=0|90|180|270, sample_rate=2|10|50|1000), then read the
     /// settings back and print them. Needs --i-understand.
     Set {

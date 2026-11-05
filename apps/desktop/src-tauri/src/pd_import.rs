@@ -1,7 +1,7 @@
 //! Read-only import of a vendor PD log database into the PD analyzer view
 //! (FR TGE83E, AC .6).
 //!
-//! The vendor app keeps a PD capture in an SQLite file [static]:
+//! The vendor app keeps a PD capture in an SQLite file `[static]`:
 //!
 //! - `pd_table(Time, Vbus, Ibus, Raw)`: one row per record, `Time` in s from
 //!   the log's start, VBUS in V, IBUS in A and `Raw` the record bytes as the
