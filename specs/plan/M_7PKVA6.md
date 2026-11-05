@@ -54,6 +54,7 @@ codename: Fine Print
 | [WFSNZD](../frs/WFSNZD.md) | The page hears a charger gone with no contract | n/a |
 | [DS89PS](../frs/DS89PS.md) | The fallback-clear worker test holds the worker at a fixed poll | n/a |
 | [PGY704](../frs/PGY704.md) | The firmware Device list line keeps noting the meter after the update ends | n/a |
+| [VQCKC6](../frs/VQCKC6.md) | The firmware Writing stage explains the bytes the file stores past its image | n/a |
 
 Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (added 2026-11-03 at the user's request) is built while the AXHK2W hardware run waits, before the final gate.
 
@@ -86,13 +87,13 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: SVG and PDF parse tests, visual check
 - [x] Memory trim at 1000 SPS — AXHK2W
   verify: element-count tests and a macOS demo measurement
-- [ ] A hidden chart's draw loop hangs the window — C6VR9K
+- [x] A hidden chart's draw loop hangs the window — C6VR9K
   verify: WebKit PD-tab e2e, pd-timeline spec, then a tester runbook
 - [x] Dashed series crawl while the chart scrolls — SX1VTC
   verify: two-frame dash test, WebKit pixel e2e, frame-rate check
 - [x] Info popovers for features and abbreviations — CW66T1
   verify: glossary completeness test, WebKit keyboard and 375 px e2e, visual set
-- [ ] Window opens off screen and some layout rough edges — EWQ6FQ
+- [x] Window opens off screen and some layout rough edges — EWQ6FQ
   verify: frame-fit unit tests, WebKit layout specs at 375/900/1280 px, flows and keyboard specs, tester runbook step
 - [x] A click on the overview strip right after connect is ignored — B5XBTA
   verify: Vitest click-mapping test, WebKit strip click right after connect, timeline test 20/20
@@ -112,6 +113,8 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
   verify: the worker test 20/20 under 24 `yes` loads, then the full workspace suite
 - [x] The firmware Device list line keeps noting the meter after the update ends — PGY704
   verify: Vitest store with a late relisting, WebKit late-relist mock with the switch off and on
+- [x] The firmware Writing stage explains the bytes the file stores past its image — VQCKC6
+  verify: firmware_file Rust test, Vitest file rows and progress line, WebKit mock update
 
 **Follow-ups for later (triaged from M7a, each kept out on purpose):**
 - Needs hardware we lack: rotation bits and bit 7 of 0x60, which total the record screen shows, QC 3.0 steps, FCP, AFC, SCP, VFCP, TFCP, SFCP and UFCS coverage, the EcoFlow no-reply question, the Apple battery curve, Windows `\\?\` paths, the root cause of the rejected stop after a queue overflow.
@@ -120,6 +123,11 @@ Build order: the table's order. AXHK2W measures the finished chart; CW66T1 (adde
 - Low value, no user effect: mock and simulator divergences, floor test gaps, duplicate asserts, `released` visibility, `limit()` being test-only, FirstSeen filter lists, the hard-coded AppImage name, release-note blank lines, plain string equality in checks, `[doc]` tags, stale wording in two comments, `claim_part` naming, the dead `startRecording` null branch, the `undecoded_diff` skipped words, `is_recording_in` accepting a subdirectory, `entry bc`/`apple` wait time.
 - Outside this repo: the toolkit's evidence renderer report, the syspolicyd reminder for the user.
 - Unchanged by rule: `a_sink_that_blocks_200_ms_per_event_loses_no_record_at_1000_sps` keeps its timing.
+
+**Deferred (hardware checks carried to the M7c sitting):**
+- AXHK2J AC.9: one settings write from the desktop app on the real meter, read back.
+- AXHK2N AC.9: unplug the charger under an accepted contract; the armed state ends within 1 s.
+- AXHK2N AC.10: the same unplug forgets the offers and says the charger went away; a same-charger replug sends nothing.
 
 **Device safety:** the double read adds SETTINGS reads only. AXHK2N and AXHK2P drive the bus and run only through the tester's runbooks, at or below 20 V in the wall-charger setup. No flash, delete or logo write on the real meter is planned.
 
