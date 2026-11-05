@@ -56,10 +56,32 @@ const WIDE_FONT_CSS = `html, body, button, select, input, progress {
   font-family: Verdana, "DejaVu Sans", sans-serif !important;
 }`;
 
+/** Puts `css` in the page as soon as it has a root element (an init script). */
+function installWideFont(css: string): void {
+  const add = (): void => {
+    const style = document.createElement("style");
+    style.textContent = css;
+    (document.head ?? document.documentElement).appendChild(style);
+  };
+  if (document.documentElement) {
+    add();
+    return;
+  }
+  const watch = new MutationObserver(() => {
+    if (!document.documentElement) return;
+    watch.disconnect();
+    add();
+  });
+  watch.observe(document, { childList: true });
+}
+
 /** Load the app and wait until the picker lists the demo devices. */
 export async function open(page: Page, query = ""): Promise<void> {
+  // Before the page's first frame, as a machine whose system font is wide (CI Linux)
+  // has it from the start: a font swapped in after load is a style change no layout
+  // code sees until it is measured again (FR QBSMHA).
+  if (process.env.E2E_WIDE_FONT === "1") await page.addInitScript(installWideFont, WIDE_FONT_CSS);
   await page.goto(`/${query}`);
-  if (process.env.E2E_WIDE_FONT === "1") await page.addStyleTag({ content: WIDE_FONT_CSS });
   await expect(page.getByLabel("Device", { exact: true })).toBeEnabled();
   await expect(
     page.getByLabel("Device", { exact: true }).locator(`option[value="${DEMO_LOAD}"]`),

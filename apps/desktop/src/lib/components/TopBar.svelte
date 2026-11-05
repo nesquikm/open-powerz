@@ -199,8 +199,18 @@
     });
     observer.observe(el);
     for (const group of el.querySelectorAll(".group")) observer.observe(group);
+    // The timeout above runs after the paint, so content that grows the bar (the meter
+    // list, settings, a label) would paint one frame overflowing. A mutation callback
+    // runs as a microtask, before the paint: check the fit there and refit only when the
+    // bar no longer fits. The bar's own class changes are not observed, so a fit cannot
+    // set this off again; a bar that shrank is still refit by the resize observer.
+    const mutations = new MutationObserver(() => {
+      if (!fitsOneRow(el)) fit();
+    });
+    mutations.observe(el, { childList: true, subtree: true, characterData: true });
     fit();
     return () => {
+      mutations.disconnect();
       observer.disconnect();
       if (frame) window.clearTimeout(frame);
     };

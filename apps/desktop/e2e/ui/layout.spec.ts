@@ -318,3 +318,131 @@ test("the top bar refits without waiting for an animation frame (1280×800, wide
     .poll(() => page.evaluate(() => document.documentElement.scrollWidth), { timeout: 1500 })
     .toBeLessThanOrEqual(1280);
 });
+
+/** One animation frame whose document was wider than the window, and what stuck out. */
+interface WideFrame {
+  at: number;
+  scrollWidth: number;
+  clientWidth: number;
+  sticksOut: string[];
+}
+
+interface FrameProbe {
+  frames: number;
+  wide: WideFrame[];
+}
+
+/**
+ * FR QBSMHA: checks every animation frame from the first one of the page load, before
+ * the app's own scripts run: is the document wider than the window, and if so, which
+ * top-bar items stick out past its right edge. Read back with {@link frameProbe}.
+ */
+async function probeEveryFrame(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const probe = { frames: 0, wide: [] as WideFrame[] };
+    (window as unknown as Record<string, unknown>).__frameProbe = probe;
+    const tick = (t: number): void => {
+      const root = document.documentElement;
+      if (root) {
+        probe.frames++;
+        const { scrollWidth, clientWidth } = root;
+        if (scrollWidth > clientWidth) {
+          const sticksOut = [
+            ...document.querySelectorAll<HTMLElement>(".top-bar *, .top-bar, body > *"),
+          ]
+            .filter((el) => el.getBoundingClientRect().right > clientWidth + 0.5)
+            .filter((el) => el.offsetWidth > 0)
+            .slice(0, 8)
+            .map((el) => {
+              const name = (el.getAttribute("aria-label") ?? el.innerText ?? "")
+                .replace(/\s+/g, " ")
+                .trim()
+                .slice(0, 40);
+              const right = el.getBoundingClientRect().right.toFixed(0);
+              return `${el.tagName.toLowerCase()}.${[...el.classList].join(".")} "${name}" right ${right}`;
+            });
+          probe.wide.push({ at: t, scrollWidth, clientWidth, sticksOut });
+        }
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+function frameProbe(page: Page): Promise<FrameProbe> {
+  return page.evaluate(
+    () => (window as unknown as Record<string, FrameProbe>).__frameProbe ?? { frames: 0, wide: [] },
+  );
+}
+
+/** Wait until the probe has seen frames for `ms` of page time from now. */
+async function framesFor(page: Page, ms: number): Promise<void> {
+  const until = (await page.evaluate(() => performance.now())) + ms;
+  await expect
+    .poll(() => page.evaluate(() => performance.now()), { timeout: ms + 10_000 })
+    .toBeGreaterThanOrEqual(until);
+  await expect.poll(async () => (await frameProbe(page)).frames).toBeGreaterThan(10);
+}
+
+function describeWide(wide: WideFrame[]): string {
+  return wide
+    .slice(0, 5)
+    .map(
+      (w) =>
+        `at ${w.at.toFixed(0)} ms: ${w.scrollWidth} px in a ${w.clientWidth} px window; sticking out: ${w.sticksOut.join("; ") || "(nothing found)"}`,
+    )
+    .join("\n");
+}
+
+// FR QBSMHA (CI on 2d3c4ca): the bar's content grows right after mount (meter list,
+// settings), and the refit used to wait until after that frame was painted.
+for (const theme of THEMES) {
+  for (const size of [
+    { width: 1280, height: 800 },
+    { width: 900, height: 600 },
+  ] as const) {
+    test(`no animation frame is wider than the window from the first one: ${theme}, ${size.width}×${size.height} (AC-QBSMHA.1)`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(size);
+      await useTheme(page, theme);
+      await probeEveryFrame(page);
+      await open(page);
+      await framesFor(page, 2_000);
+      const probe = await frameProbe(page);
+      expect(
+        probe.wide.length,
+        `${probe.wide.length} of ${probe.frames} frames wider than the window:\n${describeWide(probe.wide)}`,
+      ).toBe(0);
+    });
+  }
+}
+
+// AC-QBSMHA.2: a change of the bar's content (here the recording timer appearing at
+// 900 px) is refit before the next paint. AC-QBSMHA.3 (no WebKit ResizeObserver loop
+// error) is the polish spec's "WebKit logs no ResizeObserver loop error (AC-AKNVND.6)".
+// AC-QBSMHA.4 (layout reads and refits while recording and exporting) is a measured
+// figure, recorded in the FR's Notes.
+for (const theme of THEMES) {
+  test(`a bar that grows is refit before the next paint: recording timer, ${theme}, 900×600 (AC-QBSMHA.2)`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 900, height: 600 });
+    await useTheme(page, theme);
+    await probeEveryFrame(page);
+    await open(page, "?mock=slow-export");
+    await streamDemo(page);
+    await framesFor(page, 500);
+    const changeAt = await page.evaluate(() => performance.now());
+    await startRecording(page);
+    await startExport(page);
+    await expect(page.getByLabel("Export progress")).toBeVisible();
+    await framesFor(page, 1_000);
+    const after = (await frameProbe(page)).wide.filter((w) => w.at >= changeAt);
+    expect(
+      after.length,
+      `${after.length} frames after the bar grew were wider than the window:\n${describeWide(after)}`,
+    ).toBe(0);
+  });
+}
