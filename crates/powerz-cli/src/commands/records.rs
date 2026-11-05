@@ -171,6 +171,32 @@ pub fn records_get<T: Transport, C: Clock>(
     Ok(())
 }
 
+/// Ask for `expected` to be typed at the prompt (`Type "<expected>" to
+/// <what>: ` on `out`) and read one line from `input`; anything else is a
+/// usage error ending in `nothing` (e.g. "nothing was deleted").
+pub(crate) fn confirm_typed(
+    expected: &str,
+    what: &str,
+    nothing: &str,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    write!(out, "Type {expected:?} to {what}: ")?;
+    out.flush()?;
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
+        .map_err(|e| CliError::Usage(format!("no confirmation read: {e}")))?;
+    let typed = line.strip_suffix('\n').unwrap_or(&line);
+    let typed = typed.strip_suffix('\r').unwrap_or(typed);
+    if typed != expected {
+        return Err(CliError::Usage(format!(
+            "confirmation did not match {expected:?}; {nothing}"
+        )));
+    }
+    Ok(())
+}
+
 /// `h:mm:ss` of `secs`.
 fn format_duration(secs: u32) -> String {
     format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
@@ -226,19 +252,13 @@ pub fn records_delete<T: Transport, C: Clock>(
     }
     record_delete_table(&entries, &positions)?;
     if !opts.yes {
-        write!(out, "Type {expected:?} to delete it for good: ")?;
-        out.flush()?;
-        let mut line = String::new();
-        input
-            .read_line(&mut line)
-            .map_err(|e| CliError::Usage(format!("no confirmation read: {e}")))?;
-        let typed = line.strip_suffix('\n').unwrap_or(&line);
-        let typed = typed.strip_suffix('\r').unwrap_or(typed);
-        if typed != expected {
-            return Err(CliError::Usage(format!(
-                "confirmation did not match {expected:?}; nothing was deleted"
-            )));
-        }
+        confirm_typed(
+            expected,
+            "delete it for good",
+            "nothing was deleted",
+            input,
+            out,
+        )?;
     }
     for &p in &positions {
         let entry = &entries[p];

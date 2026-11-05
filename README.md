@@ -77,6 +77,10 @@ check the download and open the app past the macOS and Windows warnings.
 - View the meter's settings and calibration values ([read the settings](docs/how-to/read-the-meters-memory.md#read-the-settings))
 - Change the language, brightness, dim timeout, theme, rotation and sample rate, checked by reading them back ([change the settings](docs/how-to/read-the-meters-memory.md#change-the-settings))
 
+### Startup logo
+
+- Preview an image as the KM003C's startup logo, then write it, read it back or remove it from the CLI (`powerz logo preview`, `logo read`, `logo write`, `logo remove`), with a typed confirmation and a read-back check ([startup logo](docs/reference/cli.md#startup-logo))
+
 ### Serial stream
 
 - Stream at 50 or 1000 samples/s over the meter's virtual serial port, with no sign-in ([serial-port stream](docs/how-to/record-a-csv.md#record-the-serial-port-stream-instead))

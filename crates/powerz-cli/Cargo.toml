@@ -15,7 +15,10 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
-powerz-protocol.workspace = true
+# FR YCRQRQ: `powerz logo` loads PNG, JPEG, BMP and raw .bin logo files.
+powerz-protocol = { workspace = true, features = ["image-files"] }
+# FR YCRQRQ: `powerz logo preview -o` writes PNG files.
+image = { version = "0.25", default-features = false, features = ["png"] }
 powerz-record.workspace = true
 powerz-sim.workspace = true
 serde = "1.0.229"

@@ -291,8 +291,9 @@ impl<T: Transport, C: Clock> Session<T, C> {
     }
 
     /// Refuse a logo write unless this session authenticated, read SETTINGS
-    /// and read the model, and the model is a KM003C.
-    fn logo_preconditions(&self) -> Result<(), Error> {
+    /// and read the model, and the model is a KM003C. Sends nothing, so a
+    /// caller can check before asking the user to confirm.
+    pub fn logo_preconditions(&self) -> Result<(), Error> {
         let refusal = if self.auth_level == 0 {
             Some(LogoRefusal::NotAuthenticated)
         } else if self.settings_read.is_none() {

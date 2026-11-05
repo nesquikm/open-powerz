@@ -3173,6 +3173,7 @@ dependencies = [
  "clap",
  "csv",
  "ctrlc",
+ "image",
  "insta",
  "powerz-protocol",
  "powerz-record",

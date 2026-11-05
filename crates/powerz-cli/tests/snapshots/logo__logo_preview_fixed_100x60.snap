@@ -1,0 +1,10 @@
+---
+source: crates/powerz-cli/tests/logo.rs
+expression: stdout_of(&a)
+---
+Input:   100x60
+Size:    100x60
+Mode:    opaque (RGB565)
+Blob:    12016 bytes
+Padded:  12032 bytes
+Chunks:  47 (256 bytes each)

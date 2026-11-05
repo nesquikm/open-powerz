@@ -730,6 +730,31 @@ impl SimDevice {
         self
     }
 
+    /// Start with `bytes` in the logo flash at 0x300000 (FR YCRQRQ).
+    pub fn with_logo_bytes(mut self, bytes: &[u8]) -> SimDevice {
+        self.logo_flash
+            .write(powerz_protocol::transport::guard::LOGO_REGION_START, bytes);
+        self
+    }
+
+    /// Report startup-screen duration `code` (0..3: off, 1 s, 3 s, 5 s) in
+    /// the SETTINGS block, bits 14..15 of its first word (FR YCRQRQ).
+    /// Codes above 3 keep their low two bits.
+    pub fn with_startup_logo(self, code: u8) -> SimDevice {
+        {
+            let mut stored = self.stored();
+            let mut w0 = u32::from_le_bytes([
+                stored.settings[0],
+                stored.settings[1],
+                stored.settings[2],
+                stored.settings[3],
+            ]);
+            w0 = (w0 & !(0b11 << 14)) | (u32::from(code & 0b11) << 14);
+            stored.settings[..4].copy_from_slice(&w0.to_le_bytes());
+        }
+        self
+    }
+
     /// Inject `fault` into the 0x4A chunk writes (FR A2XTES).
     pub fn with_logo_fault(mut self, fault: LogoFault) -> SimDevice {
         self.set_logo_fault(fault);

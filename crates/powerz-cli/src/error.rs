@@ -51,6 +51,13 @@ impl From<session::Error> for CliError {
     fn from(e: session::Error) -> Self {
         match e {
             session::Error::Transport(t) => t.into(),
+            // The clear step writes one chunk, index 0: name it too.
+            session::Error::LogoRemove {
+                step: step @ session::LogoRemoveStep::Clear,
+                reason,
+            } => CliError::Device(format!(
+                "logo remove failed at the {step} step (chunk 0): {reason}"
+            )),
             other => CliError::Device(other.to_string()),
         }
     }

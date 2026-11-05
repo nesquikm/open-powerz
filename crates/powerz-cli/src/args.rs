@@ -221,6 +221,12 @@ pub enum Command {
         #[command(subcommand)]
         action: FirmwareAction,
     },
+    /// Work with the meter's startup logo (`preview` needs no meter).
+    Logo {
+        /// What to do.
+        #[command(subcommand)]
+        action: LogoAction,
+    },
 }
 
 /// `settings` actions.
@@ -336,6 +342,61 @@ pub enum FirmwareAction {
         /// measurements until it is jumped back or power-cycled.
         #[arg(long)]
         i_understand: bool,
+    },
+}
+
+/// `logo` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum LogoAction {
+    /// Show what an image file (PNG, JPEG, BMP or raw .bin) becomes as a
+    /// startup logo: final size, mode, blob size, padded size and chunk
+    /// count; no meter needed.
+    Preview {
+        /// Image file to preview.
+        #[arg(value_name = "IMG")]
+        file: PathBuf,
+        /// Keep transparency (RGB565 + alpha, at most 200×200) instead of
+        /// the opaque mode (RGB565, at most 240×240).
+        #[arg(long)]
+        alpha: bool,
+        /// Write the logo as the meter would show it to this PNG file.
+        #[arg(short = 'o', long = "output", value_name = "PNG")]
+        output: Option<PathBuf>,
+    },
+    /// Upload an image as the meter's startup logo, then read it back and
+    /// compare; needs --i-understand and "write" typed at the prompt.
+    Write {
+        /// Image file to upload (PNG, JPEG, BMP or raw .bin).
+        #[arg(value_name = "IMG")]
+        file: PathBuf,
+        /// Keep transparency (RGB565 + alpha, at most 200×200) instead of
+        /// the opaque mode (RGB565, at most 240×240).
+        #[arg(long)]
+        alpha: bool,
+        /// Acknowledge that the write rewrites the meter's flash.
+        #[arg(long)]
+        i_understand: bool,
+        /// Skip the typed confirmation (still needs --i-understand).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show what the meter's logo area holds (empty, the logo's size and
+    /// mode, or unrecognised); sends no write.
+    Read {
+        /// Read the whole logo and write it to this PNG file.
+        #[arg(short = 'o', long = "output", value_name = "PNG")]
+        output: Option<PathBuf>,
+    },
+    /// Remove the meter's startup logo (clear the logo area and the flag),
+    /// then read it back; needs --i-understand and "remove" typed at the
+    /// prompt.
+    Remove {
+        /// Acknowledge that removing rewrites the meter's flash.
+        #[arg(long)]
+        i_understand: bool,
+        /// Skip the typed confirmation (still needs --i-understand).
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -659,6 +720,7 @@ impl Command {
             Command::Detect { .. } => "detect",
             Command::Console { .. } => "console",
             Command::Firmware { .. } => "firmware",
+            Command::Logo { .. } => "logo",
         }
     }
 }
