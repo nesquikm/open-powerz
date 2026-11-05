@@ -6,6 +6,11 @@ export const DASH = "—";
 /** The true minus sign for displayed negatives; files and clipboard keep ASCII "-". */
 export const MINUS = "\u2212";
 
+/** A count with en-US thousands separators, whatever the page's locale. */
+export function formatCount(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
 /** Formats `value` with `decimals` places, or {@link DASH} when missing. Never renders "−0.000". */
 export function formatFixed(value: number | null | undefined, decimals: number): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return DASH;

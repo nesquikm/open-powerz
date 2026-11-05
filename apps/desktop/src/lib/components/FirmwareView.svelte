@@ -15,6 +15,7 @@
     firmwareMeterRows,
     replugPrompt,
     stageNameLabel,
+    storedBytesNote,
     type FirmwareMeter,
     type FirmwareUpdate,
   } from "../firmwareUpdate.svelte";
@@ -41,6 +42,10 @@
   /** The labels the updated meter took in the device list, joined by arrows (AC-XCCQAK.1). */
   const listedLine = $derived(
     firmware.listedHistory.map((l) => deviceOptionLabel(l, hideSerial)).join(" → "),
+  );
+  /** The stored-bytes line under the stages (AC-VQCKC6.3). */
+  const storedNote = $derived(
+    storedBytesNote(firmware.writeProgress?.total ?? null, firmware.info?.size ?? null),
   );
   const meterRows = $derived(shownMeter ? firmwareMeterRows(shownMeter) : []);
   const blocker = $derived(firmware.updateBlocker(meter));
@@ -164,6 +169,9 @@
         </li>
       {/each}
     </ol>
+    {#if storedNote !== null}
+      <p class="stored">{storedNote}</p>
+    {/if}
     {#if listedLine !== ""}
       <p class="listed">Device list: {listedLine}</p>
     {/if}
@@ -314,7 +322,8 @@
   li[data-state="failed"] {
     color: var(--danger);
   }
-  .listed {
+  .listed,
+  .stored {
     margin: 0 0 0.5rem;
   }
   progress {

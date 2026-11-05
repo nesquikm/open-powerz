@@ -932,6 +932,8 @@ export interface FirmwareFileInfo {
   date: string;
   crc: string;
   size: number;
+  /** Payload length the file stores, bytes; may exceed `size` (display only). */
+  stored_size: number;
   release_notes_en: string;
 }
 

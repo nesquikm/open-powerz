@@ -18,7 +18,7 @@ import type {
   UiError,
 } from "./backend";
 import cancelTooLate from "./cancel-too-late.txt?raw";
-import { deviceOptionLabel } from "./format";
+import { deviceOptionLabel, formatCount } from "./format";
 
 /** The meter an update would go to: the picked device, with its versions while connected. */
 export interface FirmwareMeter {
@@ -160,9 +160,6 @@ export const STOPPED_STEPS: readonly string[] = [
   "If that does not bring it back, unplug it again and hold Back while plugging it in.",
 ];
 
-/** Byte counts with thousands separators, whatever the page's locale. */
-const BYTES = new Intl.NumberFormat("en-US");
-
 /** A stage's name for the progress view (AC .4); the write stage with bytes done / total. */
 export function stageLabel(stage: FlashStage): string {
   switch (stage.stage) {
@@ -171,7 +168,7 @@ export function stageLabel(stage: FlashStage): string {
     case "erasing":
       return "Erasing the application area";
     case "writing":
-      return `Writing ${BYTES.format(stage.done)} / ${BYTES.format(stage.total)} bytes`;
+      return `Writing ${formatCount(stage.done)} / ${formatCount(stage.total)} bytes`;
     case "verifying":
       return "Verifying the image";
     case "finished":
@@ -179,6 +176,18 @@ export function stageLabel(stage: FlashStage): string {
     case "returning":
       return "Returning to the application";
   }
+}
+
+/** The line under the stages when the update sends more bytes than the chosen file's
+ * image size: the file stores bytes past its image (AC-VQCKC6.3). Null when it sends no
+ * more than the image or either is unknown. */
+export function storedBytesNote(
+  writeTotal: number | null,
+  imageSize: number | null,
+): string | null {
+  if (writeTotal === null || imageSize === null || writeTotal <= imageSize) return null;
+  const extra = writeTotal - imageSize;
+  return `The file stores ${formatCount(extra)} bytes past its ${formatCount(imageSize)}-byte image, and the update sends all ${formatCount(writeTotal)}.`;
 }
 
 /** The replug prompt: if the meter does not restart by itself after a jump, the user

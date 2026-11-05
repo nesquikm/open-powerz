@@ -24,6 +24,7 @@ const info: FirmwareFileInfo = {
   date: "2026.9.29",
   crc: "A175E4A0",
   size: 456896,
+  stored_size: 456896,
   release_notes_en: "1. Synthetic note.",
 };
 

@@ -41,6 +41,7 @@ function fileWith(release_notes_en: string): FirmwareFileInfo {
     date: "2026.9.29",
     crc: "A175E4A0",
     size: 1,
+    stored_size: 1,
     release_notes_en,
   };
 }

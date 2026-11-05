@@ -2385,6 +2385,7 @@ export class MockBackend {
       date: "2026.9.29",
       crc: "A175E4A0",
       size: 456896,
+      stored_size: 456912,
       release_notes_en: "1. Demo note: improved PD capture.\n2. Demo note: minor fixes.",
     };
   }
@@ -2487,7 +2488,7 @@ export class MockBackend {
           await sleep(MOCK_FLASH_MS.replug);
         }
       }
-      const total = info.size;
+      const total = info.stored_size;
       for (let k = 0; k <= MOCK_FLASH_WRITES; k++) {
         onStage({ stage: "writing", done: Math.round((total * k) / MOCK_FLASH_WRITES), total });
         if (failAt === "writing" && k === 3) throw fail("writing");

@@ -42,6 +42,7 @@ fn inspect_returns_the_metadata_with_english_notes() {
             "date": "2026.9.29",
             "crc": "A175E4A0",
             "size": 300,
+            "stored_size": 300,
             "release_notes_en": EN_NOTES,
         })
     );
@@ -56,6 +57,36 @@ fn crc_is_eight_uppercase_hex_digits() {
     let info = inspect_firmware_file(&path).expect("inspected");
     let v = serde_json::to_value(&info).expect("serialisable");
     assert_eq!(v["crc"], "0000BEEF");
+}
+
+// ---- AC-VQCKC6.1: the stored payload length beside the declared size ----
+
+#[test]
+fn inspect_reads_the_stored_payload_length_beside_the_declared_size() {
+    // Like the vendor 2.0.7 file: the container stores 16 bytes more than it declares.
+    let path = write_file(
+        "stored-past-image.bin",
+        &ContainerBuilder::new()
+            .payload(&[7u8; 316])
+            .field(SIZE, "300")
+            .build(),
+    );
+    let info = inspect_firmware_file(&path).expect("a valid container is inspected");
+    let v = serde_json::to_value(&info).expect("serialisable for IPC");
+    assert_eq!(v["size"], 300, "the declared image size");
+    assert_eq!(v["stored_size"], 316, "the payload length the file stores");
+}
+
+#[test]
+fn stored_size_equals_size_when_the_file_stores_only_its_image() {
+    let path = write_file(
+        "stored-exact.bin",
+        &ContainerBuilder::new().payload_sized(&[9u8; 128]).build(),
+    );
+    let info = inspect_firmware_file(&path).expect("inspected");
+    let v = serde_json::to_value(&info).expect("serialisable");
+    assert_eq!(v["size"], 128);
+    assert_eq!(v["stored_size"], 128);
 }
 
 // ---- AC-V9SK53.2: refusals reach the UI as plain language ----

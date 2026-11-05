@@ -364,6 +364,40 @@ test.describe("firmware update (FR V9SK55)", () => {
     expect(await flashLog(page)).toHaveLength(1);
   });
 
+  test("the file panel and the progress name the bytes the file stores past its image (AC-VQCKC6.2, .3, .5)", async ({
+    page,
+  }) => {
+    await useAdvancedFirmware(page);
+    await open(page);
+    await chooseAndConfirm(page);
+    const file = firmwarePanel(page).getByRole("region", { name: "Firmware file" });
+    // The Sent to the meter row follows Size.
+    const terms = file.locator("dt");
+    const labels = await terms.allTextContents();
+    const at = labels.map((l) => l.trim()).indexOf("Sent to the meter");
+    expect(at, `labels: ${labels.join(", ")}`).toBeGreaterThan(0);
+    expect(labels[at - 1]?.trim()).toBe("Size");
+    await expect(file.locator("dd").nth(at)).toHaveText(
+      "456,912 bytes (16 more than the image; the update sends all the file stores)",
+    );
+
+    await startUpdate(page);
+    const progress = firmwarePanel(page).getByRole("region", { name: "Update progress" });
+    await expect(progress).toBeVisible();
+    await expect(progress.getByText(/^Writing [\d,]+ \/ 456,912 bytes/)).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(
+      progress.getByText(
+        "The file stores 16 bytes past its 456,896-byte image, and the update sends all 456,912.",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    const done = firmwarePanel(page).getByRole("status").filter({ hasText: "2.0.7" });
+    await expect(done).toBeVisible({ timeout: 30_000 });
+    await expect(progress).toContainText("Writing 456,912 / 456,912 bytes");
+  });
+
   const FAILURES = [
     { stage: "switching", label: /bootloader/i },
     { stage: "erasing", label: /eras/i },

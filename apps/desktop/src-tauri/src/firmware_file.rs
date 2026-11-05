@@ -29,6 +29,8 @@ pub struct FirmwareFileInfo {
     pub crc: String,
     /// Declared image size, bytes.
     pub size: u32,
+    /// Payload length the file actually stores, bytes (display only; may exceed `size`).
+    pub stored_size: u32,
     /// English release notes.
     pub release_notes_en: String,
 }
@@ -47,6 +49,7 @@ pub fn inspect_firmware_file(path: &Path) -> Result<FirmwareFileInfo, UiError> {
         date: c.date().to_owned(),
         crc: c.crc_hex(),
         size: c.size(),
+        stored_size: u32::try_from(c.payload().len()).unwrap_or(u32::MAX),
         release_notes_en: c.release_notes_en().to_owned(),
     })
 }
