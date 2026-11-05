@@ -326,6 +326,41 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
             hint: Some("Read the settings again; nothing was retried.".to_owned()),
             sessions: Vec::new(),
         },
+        S::LogoRefused(why) => UiError {
+            kind: ErrorKind::Usage,
+            message: format!("The logo was not written: {why}."),
+            hint: Some("Replug the meter so the app reads it again, then retry.".to_owned()),
+            sessions: Vec::new(),
+        },
+        S::LogoChunk { index, reason } => UiError {
+            kind: ErrorKind::Protocol,
+            message: format!("Writing the logo stopped at chunk {index}: {reason}."),
+            hint: Some(
+                "The logo flag was not set, so the meter keeps its old screen. Try again."
+                    .to_owned(),
+            ),
+            sessions: Vec::new(),
+        },
+        S::LogoFlag { reason } => UiError {
+            kind: ErrorKind::Protocol,
+            message: format!("The logo was written but its flag write failed: {reason}."),
+            hint: Some("Try the upload again; nothing was retried.".to_owned()),
+            sessions: Vec::new(),
+        },
+        S::LogoMismatch { offset } => UiError {
+            kind: ErrorKind::Protocol,
+            message: format!(
+                "The logo read back from the meter differs from the one written, at offset {offset:#x}."
+            ),
+            hint: Some("Try the upload again; nothing was retried.".to_owned()),
+            sessions: Vec::new(),
+        },
+        S::LogoRemove { step, reason } => UiError {
+            kind: ErrorKind::Protocol,
+            message: format!("Removing the logo failed at the {step} step: {reason}."),
+            hint: Some("Try Remove again; nothing was retried.".to_owned()),
+            sessions: Vec::new(),
+        },
         S::BootloaderMidDownload => UiError {
             kind: ErrorKind::Protocol,
             message: "The meter's bootloader was left mid-download.".to_owned(),

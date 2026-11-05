@@ -449,6 +449,8 @@ pub struct SimDevice {
     head_field: u32,
     /// Application firmware version in the 0x4420 info block.
     app_version: String,
+    /// Model name in both info blocks (`KM003C` by default).
+    model: String,
     /// The simulated bootloader's flash state.
     boot: flash::Bootloader,
     /// Injected bootloader failure, if any.
@@ -571,6 +573,7 @@ impl SimDevice {
             mode: DeviceMode::Application,
             head_field: 0,
             app_version: memory::SIM_APP_VERSION.to_string(),
+            model: memory::SIM_MODEL.to_string(),
             boot: flash::Bootloader::default(),
             flash_fault: None,
             jump_at_power_up: false,
@@ -662,6 +665,17 @@ impl SimDevice {
     /// OTP block holds is cut to fit.
     pub fn with_serial(mut self, serial: &str) -> SimDevice {
         self.serial = serial.to_string();
+        self
+    }
+
+    /// Report `model` (e.g. `KM002C`) in both info blocks (FR TZK5K4).
+    /// The field is 12 bytes; a longer name is cut to fit.
+    pub fn with_model(mut self, model: &str) -> SimDevice {
+        let mut end = model.len().min(12);
+        while !model.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.model = model[..end].to_string();
         self
     }
 

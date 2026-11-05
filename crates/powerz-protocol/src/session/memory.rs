@@ -226,6 +226,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         let uid = Uid::decode(&self.read_block(UID)?)?;
         let model = block_model(&firmware, &hardware)
             .ok_or_else(|| Error::Protocol("both device-info blocks are empty".into()))?;
+        self.model = Some(model.clone());
         Ok(DeviceInfo {
             model,
             firmware_version: block_version(&firmware),

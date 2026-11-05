@@ -93,6 +93,7 @@ fn parse_value(field: WritableField, value: &str) -> Option<i32> {
             .ok()
             .and_then(|sps| Rate::ALL.into_iter().find(|r| r.sps() == sps))
             .map(|r| i32::from(r.code())),
+        WritableField::StartupDuration => pick(&["off", "1", "3", "5"]),
     }?;
     field.range().contains(&code).then_some(code)
 }
@@ -106,6 +107,7 @@ fn accepted(field: WritableField) -> &'static str {
         WritableField::Theme => "blue, green, pink, orange, yellow, dark-green or cyan",
         WritableField::Rotation => "0, 90, 180 or 270",
         WritableField::SampleRate => "2, 10, 50 or 1000",
+        WritableField::StartupDuration => "off, 1, 3 or 5",
     }
 }
 

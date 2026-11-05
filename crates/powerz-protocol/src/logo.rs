@@ -290,14 +290,14 @@ pub fn validate_header(info: u32, byte_count: u32) -> Result<LogoHeader, LogoErr
     })
 }
 
-/// Checks a whole (unpadded or padded) blob: header, duplicated info word,
-/// zero field, length, and the 120 016-byte ceiling.
-pub fn validate_blob(blob: &[u8]) -> Result<LogoHeader, LogoError> {
-    if blob.len() > padded_len(MAX_BLOB) {
-        return Err(LogoError::TooLarge(blob.len()));
-    }
+/// Parses and checks the 16-byte header at the start of `bytes`: info word,
+/// pixel byte count, zero field, duplicated info word, then every
+/// [`validate_header`] invariant. Bytes after the header are not looked at.
+/// A short slice, a non-zero third word or a second info word that differs
+/// is [`LogoError::Unrecognised`]. \[static\]
+pub fn parse_header(bytes: &[u8]) -> Result<LogoHeader, LogoError> {
     let word = |i: usize| -> Option<u32> {
-        let b = blob.get(i * 4..i * 4 + 4)?;
+        let b = bytes.get(i * 4..i * 4 + 4)?;
         Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     };
     let (Some(info), Some(count), Some(zero), Some(info2)) = (word(0), word(1), word(2), word(3))
@@ -307,7 +307,17 @@ pub fn validate_blob(blob: &[u8]) -> Result<LogoHeader, LogoError> {
     if zero != 0 || info2 != info {
         return Err(LogoError::Unrecognised);
     }
-    let header = validate_header(info, count)?;
+    validate_header(info, count)
+}
+
+/// Checks a whole (unpadded or padded) blob: header, duplicated info word,
+/// zero field, length, and the 120 016-byte ceiling.
+pub fn validate_blob(blob: &[u8]) -> Result<LogoHeader, LogoError> {
+    if blob.len() > padded_len(MAX_BLOB) {
+        return Err(LogoError::TooLarge(blob.len()));
+    }
+    let header = parse_header(blob)?;
+    let count = header.byte_count;
     let total = HEADER_LEN + count as usize;
     let tail_ok = blob
         .get(total..)

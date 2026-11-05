@@ -379,7 +379,7 @@ impl SimDevice {
         let record = (self.auth_level >= 1)
             .then(|| records::samples(&self.record_table, addr, len))
             .flatten();
-        let Some(block) = memory::block(addr, len, &self.app_version, &self.serial)
+        let Some(block) = memory::block(addr, len, &self.model, &self.app_version, &self.serial)
             .or(record)
             .or_else(|| self.logo_window(addr, len))
         else {

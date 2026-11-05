@@ -16,6 +16,7 @@
 
 mod adcnew;
 mod auth;
+mod logo;
 mod memory;
 mod pd;
 mod probe;
@@ -30,6 +31,10 @@ use crate::frame::{self, Attribute, FrameError, Reply, SequenceCounter};
 use crate::transport::{self, Transport};
 
 pub use auth::{auth_plaintext, auth_request};
+pub use logo::{
+    LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten,
+    logo_chunk_plaintext, logo_flag_request,
+};
 pub(crate) use memory::UID;
 pub use memory::{
     DeviceInfo, FirmwareProblem, FirmwareProblemKind, FirmwareStatus, memory_read_plaintext,
@@ -127,6 +132,38 @@ pub enum Error {
         expected: String,
         /// Value read back.
         actual: String,
+    },
+    /// A logo upload or Remove was refused before anything was sent.
+    #[error("logo write refused: {0}")]
+    LogoRefused(LogoRefusal),
+    /// A logo chunk was not FINISHED; the write stopped there, nothing was
+    /// retried and the flag was not written.
+    #[error("logo chunk {index} failed: {reason}")]
+    LogoChunk {
+        /// Index of the chunk that failed (0 is the chunk at 0x300000).
+        index: usize,
+        /// What happened instead of FINISHED.
+        reason: String,
+    },
+    /// The logo flag write after the chunks failed.
+    #[error("logo flag write failed: {reason}")]
+    LogoFlag {
+        /// What happened.
+        reason: String,
+    },
+    /// The logo read back differs from the blob written.
+    #[error("the logo read back differs from the one written at offset {offset:#x}")]
+    LogoMismatch {
+        /// First differing offset into the padded blob.
+        offset: usize,
+    },
+    /// A logo Remove failed at `step`.
+    #[error("logo remove failed at the {step} step: {reason}")]
+    LogoRemove {
+        /// The step that failed.
+        step: LogoRemoveStep,
+        /// What happened.
+        reason: String,
     },
     /// A reply could not be decoded.
     #[error(transparent)]
@@ -228,6 +265,10 @@ pub struct Session<T: Transport, C: Clock = SystemClock> {
     adcnew: Option<adcnew::AdcnewStream>,
     /// PD / UFCS (and other non-record) ADCNEW frames not yet taken.
     adcnew_raw: Vec<crate::adcnew::Frame>,
+    /// The SETTINGS block from the last successful read in this session.
+    settings_read: Option<Settings>,
+    /// The model from the last successful device-info read in this session.
+    model: Option<String>,
 }
 
 impl<T: Transport> Session<T, SystemClock> {
@@ -252,6 +293,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
             record_windows: Vec::new(),
             adcnew: None,
             adcnew_raw: Vec::new(),
+            settings_read: None,
+            model: None,
         }
     }
 
@@ -468,6 +511,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         if let Some(rate) = meter_rate_from_code(settings.rate_code()) {
             self.meter_rate = Some(rate);
         }
+        self.settings_read = Some(settings.clone());
         Ok(settings)
     }
 

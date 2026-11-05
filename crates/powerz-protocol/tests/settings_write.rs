@@ -147,6 +147,8 @@ fn ac1_writable_fields_carry_the_recovered_keys() {
             ("language", 0x01),
             ("brightness", 0x03),
             ("dim_timeout", 0x04),
+            // FR TZK5K4 (AC.8): the startup-screen duration became writable.
+            ("startup_duration", 0x06),
             ("theme", 0x07),
             ("sample_rate", 0x15),
             ("rotation", 0x14),
@@ -168,9 +170,9 @@ fn ac1_the_frame_carries_every_recovered_key_in_order_then_the_save_marker() {
 
 #[test]
 fn ac1_fields_without_a_recovered_key_are_not_writable() {
-    // Auto-rotate has no key; the startup logo is sent at its read value
-    // only; calibration and OTP are never written; key 0x08 is the factory
-    // reset.
+    // Auto-rotate has no key; the startup logo is written only as
+    // `startup_duration` (FR TZK5K4); calibration and OTP are never written;
+    // key 0x08 is the factory reset.
     for name in [
         "auto_rotate",
         "startup_logo",
@@ -187,7 +189,7 @@ fn ac1_fields_without_a_recovered_key_are_not_writable() {
     }
     for f in WritableField::ALL {
         assert!(
-            ![0x02, 0x05, 0x06, 0x08, 0x7FFF].contains(&f.key()),
+            ![0x02, 0x05, 0x08, 0x7FFF].contains(&f.key()),
             "{} has a key that is not editable",
             f.name()
         );
@@ -471,6 +473,7 @@ fn ac3_each_field_has_its_documented_range() {
             ("language", 0, 1),
             ("brightness", 1, 100),
             ("dim_timeout", 0, 3),
+            ("startup_duration", 0, 3),
             ("theme", 0, 6),
             ("sample_rate", 0, 3),
             ("rotation", 0, 3),
@@ -680,7 +683,13 @@ fn ac4_a_re_read_without_the_change_is_an_error_naming_the_field() {
 
 #[test]
 fn ac4_a_re_read_where_another_field_moved_is_an_error_naming_it() {
-    for (moved, code) in [("theme", 4u32), ("auto_rotate", 0), ("startup_logo", 1)] {
+    // The startup logo duration is checked as the writable field
+    // `startup_duration` since FR TZK5K4.
+    for (moved, code, named) in [
+        ("theme", 4u32, "theme"),
+        ("auto_rotate", 0, "auto_rotate"),
+        ("startup_logo", 1, "startup_duration"),
+    ] {
         let frame = expected_write(3, &captured_entries(&[(0x03, 80)]));
         let after = block(&[("brightness", 80), (moved, code)]);
         let mut s = session(
@@ -693,7 +702,7 @@ fn ac4_a_re_read_where_another_field_moved_is_an_error_naming_it() {
         let err = s
             .write_settings(&[(WritableField::Brightness, 80)])
             .expect_err(&format!("{moved} moved"));
-        assert!(err.to_string().contains(moved), "{moved}: {err}");
+        assert!(err.to_string().contains(named), "{moved}: {err}");
         assert_eq!(settings_writes(&s).len(), 1);
     }
 }

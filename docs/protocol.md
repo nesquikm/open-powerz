@@ -411,7 +411,7 @@ Message layout (all words little-endian):
 | 0x01 | language | 0 = Chinese, 1 = English | [static] |
 | 0x03 | brightness | 1..100 | [static] |
 | 0x04 | dim | 0..3 (off, 15 s, 30 s, 60 s) | [static] |
-| 0x06 | startup logo time | 0..3 (off, 1 s, 3 s, 5 s); sent at its read value, not editable here | [static] |
+| 0x06 | startup logo time | 0..3 (off, 1 s, 3 s, 5 s); writable as `startup_duration`, otherwise sent at its read value | [static] |
 | 0x07 | theme | 0..6 | [static] |
 | 0x14 | bits 0..1 of 0x60 (read as rotation) | 0..3 (0°, 90°, 180°, 270°) | [static] key; [device] bits; meaning of the codes [inferred] |
 | 0x15 | rate, bits 2..3 of 0x60 | 0..3 (2, 10, 50, 1000 SPS) | [static] key; [device] bits |

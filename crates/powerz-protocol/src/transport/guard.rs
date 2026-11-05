@@ -177,15 +177,10 @@ pub fn check_logo_chunk(plain: &[u8]) -> Result<(), Error> {
 /// The first 256-byte chunk must open with a valid logo header (the
 /// encoder's invariants) whose padded blob fits the logo region.
 fn first_chunk_ok(data: &[u8]) -> bool {
-    let word = |at: usize| le_word(data, at);
-    let (Some(info), Some(count), Some(zero), Some(info2)) = (word(0), word(4), word(8), word(12))
-    else {
+    let Ok(header) = crate::logo::parse_header(data) else {
         return false;
     };
-    if zero != 0 || info2 != info || crate::logo::validate_header(info, count).is_err() {
-        return false;
-    }
-    let padded = crate::logo::padded_len(crate::logo::HEADER_LEN + count as usize);
+    let padded = crate::logo::padded_len(crate::logo::HEADER_LEN + header.byte_count as usize);
     u32::try_from(padded)
         .ok()
         .and_then(|p| LOGO_REGION_START.checked_add(p))

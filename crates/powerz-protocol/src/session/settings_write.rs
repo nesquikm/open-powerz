@@ -32,13 +32,7 @@ impl SettingsWritten {
 }
 
 /// Fields that are never written; a write must leave them as read.
-const KEPT: [&str; 5] = [
-    "startup_logo",
-    "auto_rotate",
-    "voltage_cal",
-    "current_cal",
-    "offset_cal",
-];
+const KEPT: [&str; 4] = ["auto_rotate", "voltage_cal", "current_cal", "offset_cal"];
 
 impl<T: Transport, C: Clock> Session<T, C> {
     /// Read SETTINGS twice, send one settings write carrying `changes` over
