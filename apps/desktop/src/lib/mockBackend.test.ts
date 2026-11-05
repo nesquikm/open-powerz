@@ -45,6 +45,15 @@ describe("MockBackend (scripted demo backend for the browser build)", () => {
     expect(events.at(-1)).toEqual({ type: "status", data: { state: "disconnected", error: null } });
   });
 
+  it("counts saved chart images without copying them out (AC-X6VSFF.2)", async () => {
+    const backend = new MockBackend();
+    expect(backend.chartImageCount()).toBe(0);
+    await backend.saveChartImage("a.png", "png", new Uint8Array([1, 2, 3]));
+    await backend.saveChartImage("b.pdf", "pdf", new Uint8Array([4]));
+    expect(backend.chartImageCount()).toBe(2);
+    expect(backend.chartImages().map((i) => i.suggestedName)).toEqual(["a.png", "b.pdf"]);
+  });
+
   it("holds the stream: no batches while held, then on from where it stopped (AC-9QTPNQ.3)", async () => {
     const backend = new MockBackend();
     const events: BackendEvent[] = [];

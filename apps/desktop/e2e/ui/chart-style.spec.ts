@@ -133,6 +133,20 @@ async function savedImages(page: Page): Promise<SavedImage[]> {
   }, MOCK_HOOK);
 }
 
+/** How many images the backend has saved, without copying them out of the page. */
+async function savedImageCount(page: Page): Promise<number> {
+  return page.evaluate((key) => {
+    const mock = (window as unknown as Record<string, Record<string, unknown> | undefined>)[key];
+    const fn = mock?.chartImageCount;
+    if (typeof fn !== "function") throw new Error("the mock has no chartImageCount()");
+    return (fn as () => number).call(mock);
+  }, MOCK_HOOK);
+}
+
+/** The longest a save may take to reach the backend: a 7680 px render and encode on a
+ * slow runner keeps the page busy for seconds (FR X6VSFF). */
+const SAVE_DONE_MS = 30_000;
+
 function saveDialog(page: Page): Locator {
   return page.getByRole("dialog", { name: "Save image" });
 }
@@ -159,14 +173,18 @@ async function saveImage(
     white?: boolean;
   },
 ): Promise<SavedImage> {
-  const before = (await savedImages(page)).length;
+  const before = await savedImageCount(page);
   const dialog = await openSaveDialog(page);
   await dialog.getByRole("spinbutton", { name: "Width" }).fill(String(width));
   await dialog.getByRole("spinbutton", { name: "Height" }).fill(String(height));
   await dialog.getByLabel("Format", { exact: true }).selectOption(format);
   await dialog.getByRole("checkbox", { name: "White background" }).setChecked(white);
   await button(dialog, "Save").click();
-  await expect.poll(async () => (await savedImages(page)).length).toBe(before + 1);
+  // The image reaching the backend is the save's own end; the count is cheap to read
+  // while the page is still busy rendering and encoding.
+  await expect
+    .poll(() => savedImageCount(page), { timeout: SAVE_DONE_MS, message: "the image is saved" })
+    .toBe(before + 1);
   await expect(dialog).toBeHidden();
   const saved = (await savedImages(page)).at(-1);
   if (saved === undefined) throw new Error("no image saved");

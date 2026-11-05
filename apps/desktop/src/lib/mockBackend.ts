@@ -2584,6 +2584,12 @@ export class MockBackend {
     return suggestedName;
   }
 
+  /** How many chart images were saved: cheap to poll, where {@link chartImages} copies
+   * every image's bytes out of the page (FR X6VSFF). */
+  chartImageCount(): number {
+    return this.#chartImages.length;
+  }
+
   /** Every chart image saved, oldest first. */
   chartImages(): { suggestedName: string; format: string; data: number[] }[] {
     return this.#chartImages.map((i) => ({ ...i, data: [...i.data] }));
