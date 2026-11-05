@@ -12,7 +12,9 @@
  * the download with its own time limit and one retry.
  */
 
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const WORKFLOW = readFileSync(
@@ -185,19 +187,41 @@ describe("CI: the browsers are cached and their download bounded (AC-9QTPNR.7)",
       expect(retry).toContain("timeout-minutes: 8");
     });
 
-    it(`${name} still installs Linux's system libraries on a cache hit, bounded, with one retry`, () => {
-      const deps = stepOf(lines, "Playwright system libraries (Linux, cached browsers)");
-      const retry = stepOf(lines, "Playwright system libraries (retry)");
-      expect(deps).toContain(
-        "if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'",
+    it(`${name} installs Linux's system packages offline from a per-image .deb cache`, () => {
+      expect(lines.join("\n")).not.toContain("--with-deps");
+      expect(runOf(lines, "Playwright system packages (Linux)")).toBe(
+        'run: ../../.github/scripts/playwright-deps.sh list >> "$GITHUB_OUTPUT"',
       );
-      expect(deps).toContain("continue-on-error: true");
-      expect(deps).toContain("timeout-minutes: 8");
-      expect(deps).toContain("run: bunx playwright install-deps chromium webkit");
-      expect(retry).toContain(
-        "if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux' && steps.deps.outcome == 'failure'",
+      const restore = stepOf(lines, "Playwright system package cache (Linux)");
+      const save = stepOf(lines, "Playwright system package cache save (Linux)");
+      expect(restore.some((l) => /^uses: actions\/cache\/restore@[0-9a-f]{40} # v4/.test(l))).toBe(
+        true,
       );
+      expect(save.some((l) => /^uses: actions\/cache\/save@[0-9a-f]{40} # v4/.test(l))).toBe(true);
+      for (const step of [restore, save]) {
+        expect(step).toContain("path: ~/.cache/playwright-debs");
+        expect(step).toContain("key: ${{ steps.packages.outputs.key }}");
+      }
+      const download = stepOf(lines, "Playwright system package download (Linux)");
+      expect(download).toContain("continue-on-error: true");
+      expect(download).toContain("timeout-minutes: 8");
+      expect(download).toContain("run: ../../.github/scripts/playwright-deps.sh download");
+      expect(stepOf(lines, "Playwright system package install (Linux)")).toContain(
+        "run: ../../.github/scripts/playwright-deps.sh install",
+      );
+    });
+
+    it(`${name} clears a killed apt's locks before its one retry`, () => {
+      const retry = stepOf(lines, "Playwright system package download (retry)");
       expect(retry).toContain("timeout-minutes: 8");
+      expect(retry.find((l) => l.startsWith("if:"))).toContain(
+        "steps.package-download.outcome == 'failure'",
+      );
+      const script = retry.join("\n");
+      expect(script.indexOf("playwright-deps.sh unlock")).toBeGreaterThan(-1);
+      expect(script.indexOf("playwright-deps.sh unlock")).toBeLessThan(
+        script.indexOf("playwright-deps.sh download"),
+      );
     });
 
     it(`${name} marks the browsers ready only after a setup that worked`, () => {
@@ -210,3 +234,46 @@ describe("CI: the browsers are cached and their download bounded (AC-9QTPNR.7)",
     });
   }
 });
+
+const DEPS_SCRIPT = fileURLToPath(
+  new URL("../../../../.github/scripts/playwright-deps.sh", import.meta.url),
+);
+
+/** The script's `parse` on `input`: its stdout lines and exit status. */
+function parseDryRun(input: string): { lines: string[]; status: number } {
+  const r = spawnSync("bash", [DEPS_SCRIPT, "parse"], { input, encoding: "utf8" });
+  return { lines: r.stdout.split("\n").filter((l) => l !== ""), status: r.status ?? -1 };
+}
+
+describe.skipIf(process.platform === "win32")(
+  "CI: the system package list comes from Playwright's dry run (AC-9QTPNR.7)",
+  () => {
+    it("lists the missing packages, sorted", () => {
+      const out = parseDryRun(
+        "Missing system dependencies (3):\n  libwoff1\n  gstreamer1.0-libav\n  libavif16\n",
+      );
+      expect(out).toEqual({
+        lines: ["gstreamer1.0-libav", "libavif16", "libwoff1"],
+        status: 0,
+      });
+    });
+
+    it("lists nothing when everything is installed", () => {
+      expect(parseDryRun("All system dependencies are installed.\n")).toEqual({
+        lines: [],
+        status: 0,
+      });
+    });
+
+    it("refuses output it does not recognise", () => {
+      expect(parseDryRun("something else\n").status).not.toBe(0);
+    });
+
+    it("keeps the cache key per runner image, Playwright version and list", () => {
+      const text = readFileSync(DEPS_SCRIPT, "utf8");
+      expect(text).toContain("${ImageOS:-unknown}-${ImageVersion:-unknown}");
+      expect(text).toContain("bunx playwright --version");
+      expect(text).toContain('sha256sum "${LIST}"');
+    });
+  },
+);

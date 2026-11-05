@@ -303,36 +303,67 @@ jobs:
             ~/AppData/Local/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
 
-      # Linux needs the browsers' system libraries too (--with-deps); macOS and Windows do not.
       - name: Playwright browsers
         id: browsers
         if: steps.browser-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 8
         working-directory: apps/desktop
-        run: bunx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium webkit
+        run: bunx playwright install chromium webkit
 
       - name: Playwright browsers (retry)
         if: steps.browser-cache.outputs.cache-hit != 'true' && steps.browsers.outcome == 'failure'
         timeout-minutes: 8
         working-directory: apps/desktop
-        run: bunx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium webkit
+        run: bunx playwright install chromium webkit
 
-      # A cache hit brings the browsers, not Linux's system libraries: apt, which can be
-      # slow, so it gets the same time limit and one retry as the download.
-      - name: Playwright system libraries (Linux, cached browsers)
-        id: deps
-        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
+      # Linux's system packages (FR 9QTPNR): Playwright's dry run lists what this runner
+      # image lacks; their .deb files are cached per image, Playwright version and list,
+      # and installed offline, so the Ubuntu mirror is asked once per image, not per run.
+      - name: Playwright system packages (Linux)
+        id: packages
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh list >> "$GITHUB_OUTPUT"
+
+      - name: Playwright system package cache (Linux)
+        id: package-cache
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ steps.packages.outputs.key }}
+
+      - name: Playwright system package download (Linux)
+        id: package-download
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 8
         working-directory: apps/desktop
-        run: bunx playwright install-deps chromium webkit
+        run: ../../.github/scripts/playwright-deps.sh download
 
-      - name: Playwright system libraries (retry)
-        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux' && steps.deps.outcome == 'failure'
+      # A killed apt leaves its locks and half-configured packages: cleared first.
+      - name: Playwright system package download (retry)
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true' && steps.package-download.outcome == 'failure'
         timeout-minutes: 8
         working-directory: apps/desktop
-        run: bunx playwright install-deps chromium webkit
+        run: |
+          ../../.github/scripts/playwright-deps.sh unlock
+          ../../.github/scripts/playwright-deps.sh download
+
+      # Saved right away, so a later failing test cannot lose a download that worked.
+      - name: Playwright system package cache save (Linux)
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ steps.packages.outputs.key }}
+
+      - name: Playwright system package install (Linux)
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true'
+        timeout-minutes: 5
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh install
 
       # Only after a setup that worked: a later step that runs on !cancelled() must not
       # meet half-installed browsers.
@@ -399,36 +430,67 @@ jobs:
             ~/AppData/Local/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
 
-      # Linux needs the browsers' system libraries too (--with-deps); macOS and Windows do not.
       - name: Playwright browsers
         id: browsers
         if: steps.browser-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 8
         working-directory: apps/desktop
-        run: bunx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium webkit
+        run: bunx playwright install chromium webkit
 
       - name: Playwright browsers (retry)
         if: steps.browser-cache.outputs.cache-hit != 'true' && steps.browsers.outcome == 'failure'
         timeout-minutes: 8
         working-directory: apps/desktop
-        run: bunx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium webkit
+        run: bunx playwright install chromium webkit
 
-      # A cache hit brings the browsers, not Linux's system libraries: apt, which can be
-      # slow, so it gets the same time limit and one retry as the download.
-      - name: Playwright system libraries (Linux, cached browsers)
-        id: deps
-        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
+      # Linux's system packages (FR 9QTPNR): Playwright's dry run lists what this runner
+      # image lacks; their .deb files are cached per image, Playwright version and list,
+      # and installed offline, so the Ubuntu mirror is asked once per image, not per run.
+      - name: Playwright system packages (Linux)
+        id: packages
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh list >> "$GITHUB_OUTPUT"
+
+      - name: Playwright system package cache (Linux)
+        id: package-cache
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ steps.packages.outputs.key }}
+
+      - name: Playwright system package download (Linux)
+        id: package-download
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 8
         working-directory: apps/desktop
-        run: bunx playwright install-deps chromium webkit
+        run: ../../.github/scripts/playwright-deps.sh download
 
-      - name: Playwright system libraries (retry)
-        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux' && steps.deps.outcome == 'failure'
+      # A killed apt leaves its locks and half-configured packages: cleared first.
+      - name: Playwright system package download (retry)
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true' && steps.package-download.outcome == 'failure'
         timeout-minutes: 8
         working-directory: apps/desktop
-        run: bunx playwright install-deps chromium webkit
+        run: |
+          ../../.github/scripts/playwright-deps.sh unlock
+          ../../.github/scripts/playwright-deps.sh download
+
+      # Saved right away, so a later failing test cannot lose a download that worked.
+      - name: Playwright system package cache save (Linux)
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true' && steps.package-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/playwright-debs
+          key: ${{ steps.packages.outputs.key }}
+
+      - name: Playwright system package install (Linux)
+        if: runner.os == 'Linux' && steps.packages.outputs.missing == 'true'
+        timeout-minutes: 5
+        working-directory: apps/desktop
+        run: ../../.github/scripts/playwright-deps.sh install
 
       # Only after a setup that worked: a later step that runs on !cancelled() must not
       # meet half-installed browsers.
