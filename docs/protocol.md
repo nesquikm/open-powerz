@@ -1070,6 +1070,61 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
   the CDC interface report `BOOT` instead of `APP`, and there is no HID
   interface. [device]
 
+## Startup logo
+
+The meter can show a custom image at power-on. This section covers only the
+image format: how a picture becomes the byte blob the meter stores. How the
+blob is sent to the meter is described separately. All facts come from static
+analysis of the vendor app; none has been checked on our meter yet.
+
+### Scaling
+
+- There are two modes: opaque, and alpha (with transparency). The box limit is 240 px per side in opaque mode and 200 px per side in alpha mode. [static]
+- Each source side is first clamped to the range 48..limit, giving a target box; the picture is then scaled into that box with its aspect ratio kept, so small pictures are scaled up and large ones down. [static]
+- Because the aspect ratio is kept, one side can end up below 48 (a 1000×100 picture becomes 240×24); our preview warns when that happens. [static]
+- An odd width is rounded down to the next even width by a second rescale (aspect kept, so the height may move by one). [static] The even width keeps every RGB565 row a multiple of 4 bytes. [inferred]
+- The limits depend only on the mode, not on the model (KM002C or KM003C). [static] Whether the KM002C screen needs other limits is untested. [inferred]
+
+### Blob layout
+
+| offset | size | field | tag |
+|---|---|---|---|
+| 0x00 | u32 | info word | [static] |
+| 0x04 | u32 | pixel byte count, `2·w·h` (opaque) or `3·w·h` (alpha) | [static] |
+| 0x08 | u32 | zero | [static] |
+| 0x0C | u32 | the info word again | [static] |
+| 0x10 | … | pixel rows, top row first, each row left to right, no row padding | [static] |
+
+### Info word
+
+| bits | meaning | tag |
+|---|---|---|
+| 0–4 | pixel format code: 4 = RGB565 (opaque), 5 = RGB565 plus alpha | [static]; reading it as one 5-bit field [inferred] |
+| 5–9 | always zero | [static] |
+| 10–20 | width (11 bits) | [static] |
+| 21–31 | height (11 bits) | [static] |
+
+- Opaque 240×135 gives info word 0x10E3C004 and a 64 816-byte blob. [static]
+- Alpha 200×200 gives info word 0x19032005 and a 120 016-byte blob, the largest possible. [static]
+- Opaque 48×48 gives info word 0x0600C004 and a 4 624-byte blob. [static]
+
+### Pixel formats
+
+- Format 4 (RGB565): 2 bytes per pixel, a little-endian u16 with red in bits 11–15, green in bits 5–10 and blue in bits 0–4. [static]
+- Format 5 (alpha): 3 bytes per pixel, the same little-endian RGB565 u16 followed by one alpha byte (0 transparent, 255 opaque). [static]
+- In alpha mode the vendor's colour values are usually premultiplied by alpha, and how the firmware blends them is unknown; pixels with alpha 0 or 255 look the same either way. [inferred]
+- We convert every source picture to 8-bit RGBA ourselves before encoding, so palette images get a correct alpha byte. [inferred]
+
+### Raw .bin files
+
+- A `.bin` logo file is the info word followed directly by the pixel bytes, i.e. the blob from offset 0x0C onward, without the 12-byte prefix. [static]
+- The vendor app accepts only format codes 4 and 5 in a `.bin` and runs the pixels through the same scaling and encoding as any other picture. [static]
+
+### Padding
+
+- We pad the blob with 0xFF bytes to a multiple of 256 bytes before writing it; the header's pixel byte count stays the exact, unpadded value (the 48×48 opaque blob pads to 4 864 bytes). [inferred]
+- The firmware is expected to ignore the pad bytes, since the header count gives the true length. [inferred]
+
 ## Never-send commands
 
 Our library refuses to send these requests, so a bug or a CLI typo cannot
