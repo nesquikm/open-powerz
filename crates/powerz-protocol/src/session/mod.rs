@@ -32,7 +32,7 @@ use crate::transport::{self, Transport};
 
 pub use auth::{auth_plaintext, auth_request};
 pub use logo::{
-    LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten,
+    LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten, check_logo_dump,
     logo_chunk_plaintext, logo_flag_request,
 };
 pub(crate) use memory::UID;

@@ -887,3 +887,247 @@ fn ycrqrq_7_readme_and_cli_docs_describe_the_logo_commands() {
         );
     }
 }
+
+// ------------------------------------------------------------ AC-YCRQRQ.8
+//
+// `powerz logo read --dump ADDR LEN` prints a hex dump: each line starts
+// with an 8-hex-digit address (an optional `0x` prefix and trailing `:` are
+// fine) followed by the bytes as 2-digit hex tokens; anything after the
+// first non-byte token (an ASCII column, say) is ignored.
+//
+// The read pacing (>= 50 ms between reads) is not observable through the
+// CLI: the trace carries no timestamps and the fake clock is internal. The
+// session tests for `logo_read_back` cover it.
+
+/// Start of the logo read window.
+const WINDOW: u32 = 0x9830_0000;
+/// One past the end of the logo read window.
+const WINDOW_END: u32 = 0x9832_0000;
+
+/// The bytes a hex dump shows, keyed by address.
+fn dumped_bytes(out: &str) -> std::collections::BTreeMap<u32, u8> {
+    let mut map = std::collections::BTreeMap::new();
+    for line in out.lines() {
+        let mut tokens = line.split_whitespace();
+        let Some(first) = tokens.next() else { continue };
+        let a = first.trim_end_matches(':');
+        let a = a
+            .strip_prefix("0x")
+            .or_else(|| a.strip_prefix("0X"))
+            .unwrap_or(a);
+        if a.len() != 8 {
+            continue;
+        }
+        let Ok(addr) = u32::from_str_radix(a, 16) else {
+            continue;
+        };
+        for (i, t) in tokens.enumerate() {
+            if t.len() != 2 {
+                break;
+            }
+            let Ok(b) = u8::from_str_radix(t, 16) else {
+                break;
+            };
+            map.insert(addr + i as u32, b);
+        }
+    }
+    map
+}
+
+/// `(addr, len)` of every memory read the meter confirmed, from the
+/// plaintext confirmations (`c4 id 01 01 <addr le> <len le> ...`) in the
+/// trace.
+fn memory_reads(trace: &str) -> Vec<(u32, u32)> {
+    trace
+        .lines()
+        .filter(|l| l.starts_with("< ["))
+        .filter_map(|l| l.split_once("] ").map(|(_, b)| b))
+        .filter_map(|bytes| {
+            let b: Vec<u8> = bytes
+                .split(' ')
+                .filter_map(|t| u8::from_str_radix(t, 16).ok())
+                .collect();
+            (b.len() >= 12 && b[0] == 0xC4).then(|| {
+                (
+                    u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+                    u32::from_le_bytes([b[8], b[9], b[10], b[11]]),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Memory reads inside the logo window.
+fn window_reads(trace: &str) -> Vec<(u32, u32)> {
+    memory_reads(trace)
+        .into_iter()
+        .filter(|&(a, _)| (WINDOW..WINDOW_END).contains(&a))
+        .collect()
+}
+
+/// A seed file of `n` distinct-looking bytes.
+fn seed_pattern(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i * 7 + 3) as u8 ^ (i >> 8) as u8).collect()
+}
+
+#[test]
+fn ycrqrq_8_dump_of_an_empty_logo_area_shows_ff_bytes_with_addresses() {
+    let a = sim()
+        .args(["logo", "read", "--dump", "0x98300000", "16"])
+        .assert()
+        .success();
+    let out = stdout_of(&a);
+    assert!(
+        out.to_ascii_lowercase().contains("98300000"),
+        "the dump shows the address: {out}"
+    );
+    let bytes = dumped_bytes(&out);
+    let want: Vec<u32> = (WINDOW..WINDOW + 16).collect();
+    assert_eq!(
+        bytes.keys().copied().collect::<Vec<_>>(),
+        want,
+        "exactly the 16 bytes from 0x98300000 are dumped: {out}"
+    );
+    assert!(bytes.values().all(|&b| b == 0xFF), "erased flash: {out}");
+    let trace = stderr_of(&a);
+    assert_eq!(window_reads(&trace), vec![(WINDOW, 16)], "{trace}");
+    assert_no_write(&trace);
+    assert_private(&a);
+}
+
+#[test]
+fn ycrqrq_8_dump_of_600_bytes_shows_the_seeded_bytes_in_256_byte_reads() {
+    let dir = fresh_dir("dump-600");
+    let seed = seed_pattern(1024);
+    let flash = dir.join("flash.bin");
+    std::fs::write(&flash, &seed).unwrap();
+    let a = sim()
+        .env("POWERZ_SIM_LOGO_FILE", &flash)
+        .args(["logo", "read", "--dump", "0x98300000", "600"])
+        .assert()
+        .success();
+    let out = stdout_of(&a);
+    let bytes = dumped_bytes(&out);
+    let want: std::collections::BTreeMap<u32, u8> = seed[..600]
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| (WINDOW + i as u32, b))
+        .collect();
+    assert!(bytes == want, "the dump holds the 600 seeded bytes:\n{out}");
+    let trace = stderr_of(&a);
+    let reads = window_reads(&trace);
+    assert_eq!(reads.len(), 3, "600 bytes take 3 reads: {reads:x?}");
+    assert!(
+        reads.iter().all(|&(_, len)| len > 0 && len <= 256),
+        "every read is at most 256 bytes: {reads:x?}"
+    );
+    let mut next = WINDOW;
+    for &(addr, len) in &reads {
+        assert_eq!(addr, next, "the reads are contiguous: {reads:x?}");
+        next = addr + len;
+    }
+    assert_eq!(next, WINDOW + 600, "the reads cover 600 bytes: {reads:x?}");
+    assert_eq!(
+        sent_frames(&trace, "44").len(),
+        memory_reads(&trace).len(),
+        "every memory-read request was confirmed"
+    );
+    assert_no_write(&trace);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ycrqrq_8_dump_address_accepts_hex_and_decimal() {
+    let dir = fresh_dir("dump-dec");
+    let seed = seed_pattern(64);
+    let flash = dir.join("flash.bin");
+    std::fs::write(&flash, &seed).unwrap();
+    let addr = WINDOW + 0x10;
+    for arg in [format!("{addr:#x}"), addr.to_string()] {
+        let a = sim()
+            .env("POWERZ_SIM_LOGO_FILE", &flash)
+            .args(["logo", "read", "--dump", &arg, "16"])
+            .assert()
+            .success();
+        let out = stdout_of(&a);
+        let bytes = dumped_bytes(&out);
+        let want: std::collections::BTreeMap<u32, u8> = seed[0x10..0x20]
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| (addr + i as u32, b))
+            .collect();
+        assert!(bytes == want, "ADDR {arg}: 16 bytes from {addr:#x}:\n{out}");
+        let trace = stderr_of(&a);
+        assert_eq!(window_reads(&trace), vec![(addr, 16)], "ADDR {arg}");
+        assert_no_write(&trace);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ycrqrq_8_dump_ending_exactly_at_the_window_end_is_allowed() {
+    let a = sim()
+        .args(["logo", "read", "--dump", "0x9831FFF0", "16"])
+        .assert()
+        .success();
+    let out = stdout_of(&a);
+    let bytes = dumped_bytes(&out);
+    assert_eq!(bytes.len(), 16, "{out}");
+    assert_eq!(bytes.keys().next().copied(), Some(WINDOW_END - 16), "{out}");
+    let trace = stderr_of(&a);
+    assert_eq!(window_reads(&trace), vec![(WINDOW_END - 16, 16)]);
+    assert_no_write(&trace);
+}
+
+#[test]
+fn ycrqrq_8_dump_outside_the_window_is_refused_before_anything_is_sent() {
+    let cases: [(&str, &str, &str); 5] = [
+        ("below the window", "0x982FFFF0", "16"),
+        ("ends past the window", "0x9831FFF0", "32"),
+        ("starts at the window end", "0x98320000", "16"),
+        ("length zero", "0x98300000", "0"),
+        ("address overflow", "0xFFFFFFF0", "0x20"),
+    ];
+    for (what, addr, len) in cases {
+        let a = sim()
+            .args(["logo", "read", "--dump", addr, len])
+            .assert()
+            .failure();
+        assert_eq!(code_of(&a), 2, "{what}: usage error");
+        let err = stderr_of(&a);
+        assert!(
+            err.to_ascii_lowercase().contains("98300000")
+                || err.to_ascii_lowercase().contains("window"),
+            "{what}: the error names the allowed window:\n{err}"
+        );
+        assert!(
+            sent_frames(&err, "44").is_empty(),
+            "{what}: no memory read was sent:\n{err}"
+        );
+        assert!(
+            !err.lines().any(|l| l.starts_with("> [")),
+            "{what}: nothing at all was sent:\n{err}"
+        );
+        assert_no_write(&err);
+        assert!(stdout_of(&a).trim().is_empty(), "{what}: no dump printed");
+    }
+}
+
+#[test]
+fn ycrqrq_8_cli_docs_describe_dump() {
+    let cli = repo_file("docs/reference/cli.md");
+    let logo_part: String = cli
+        .lines()
+        .filter(|l| l.contains("logo "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        logo_part.contains("--dump"),
+        "the logo rows of cli.md describe `logo read --dump`"
+    );
+    let a = powerz().args(["logo", "read", "--help"]).assert().success();
+    assert!(
+        stdout_of(&a).contains("--dump"),
+        "`logo read --help` has --dump"
+    );
+}

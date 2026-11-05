@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use powerz_protocol::decode::settings::StartupLogo;
 use powerz_protocol::logo::{self, CHUNK, LogoBlob, LogoMode, MIN_SIDE};
-use powerz_protocol::session::{Clock, LogoProgress, LogoStatus, LogoStep, LogoWritten, Session};
+use powerz_protocol::session::{
+    Clock, LogoProgress, LogoStatus, LogoStep, LogoWritten, Session, check_logo_dump,
+};
 use powerz_protocol::transport::Transport;
 
 use super::records::confirm_typed;
@@ -84,6 +86,46 @@ pub fn logo_read<T: Transport, C: Clock>(
     if let Some(path) = output {
         save_png(path, &session.logo_read_full()?)?;
         writeln!(out, "Saved:   {}", path.display())?;
+    }
+    Ok(())
+}
+
+/// What `logo read --dump` allows.
+const DUMP_WINDOW: &str = "0x98300000–0x9831FFFF";
+
+/// Bytes per `logo read --dump` line.
+const DUMP_LINE: usize = 16;
+
+/// Refuse a `logo read --dump ADDR LEN` span outside the logo window
+/// (usage error); sends nothing, so it runs before a device is opened.
+pub fn logo_dump_check(span: &[u32]) -> Result<(), CliError> {
+    let [addr, len] = *span else {
+        return Err(CliError::Usage("--dump takes ADDR and LEN".into()));
+    };
+    check_logo_dump(addr, len).map_err(|_| {
+        CliError::Usage(format!(
+            "--dump {addr:#x} {len}: ADDR and ADDR + LEN must lie inside the logo window \
+             {DUMP_WINDOW}, with LEN at least 1"
+        ))
+    })
+}
+
+/// `powerz logo read --dump ADDR LEN`: authenticate, read LEN bytes of the
+/// logo window from ADDR (at most 256 bytes per read, at least 50 ms apart)
+/// and print them as `ADDRESS: bytes…` lines. Sends no write.
+pub fn logo_dump<T: Transport, C: Clock>(
+    session: &mut Session<T, C>,
+    span: &[u32],
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    logo_dump_check(span)?;
+    let (addr, len) = (span[0], span[1]);
+    ensure_auth(session)?;
+    let data = session.logo_dump(addr, len)?;
+    for (k, line) in data.chunks(DUMP_LINE).enumerate() {
+        let at = addr + (k * DUMP_LINE) as u32;
+        let bytes: Vec<String> = line.iter().map(|b| format!("{b:02x}")).collect();
+        writeln!(out, "{at:08x}: {}", bytes.join(" "))?;
     }
     Ok(())
 }

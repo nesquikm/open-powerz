@@ -30,6 +30,7 @@ powerz gains a logo subcommand group that wraps the session logo actions with co
 - AC-YCRQRQ.5: Ctrl-C during an upload's chunk phase does not stop the write; the tool says it will finish first, then exits.
 - AC-YCRQRQ.6: Every error names the failed step and chunk index, and the exit code is non-zero. Output never contains the meter serial or UID.
 - AC-YCRQRQ.7: CLI tests run each command against the simulator, including a failure at chunk k and a refused non-KM003C model; the README and the CLI docs describe the commands.
+- AC-YCRQRQ.8: powerz logo read --dump ADDR LEN hex-dumps LEN bytes from ADDR for the hardware stages; ADDR and ADDR + LEN must lie inside 0x98300000–0x9831FFFF, the tool reads at most 256 bytes per read and waits at least 50 ms between reads, anything outside the window is refused before anything is sent, and it sends no write.
 
 ## Technical Design
 

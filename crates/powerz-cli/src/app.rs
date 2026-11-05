@@ -36,11 +36,11 @@ use crate::commands::{
     LegacyRequestOptions, LogoConfirm, LogoWriteOptions, PdRequestOptions, PdSendOptions,
     PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions, console,
     detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
-    firmware_probe_unavailable, info_with, inspect_flash_file, list_with, logo_preview, logo_read,
-    logo_remove, logo_write, pd, pd_decode, pd_save, pd_send, read, records_delete, records_get,
-    records_list, select_device, select_device_with, settings, settings_set, stream, stream_cdc,
-    trigger_legacy_list, trigger_legacy_request, trigger_pd_list, trigger_pd_request,
-    trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
+    firmware_probe_unavailable, info_with, inspect_flash_file, list_with, logo_dump,
+    logo_dump_check, logo_preview, logo_read, logo_remove, logo_write, pd, pd_decode, pd_save,
+    pd_send, read, records_delete, records_get, records_list, select_device, select_device_with,
+    settings, settings_set, stream, stream_cdc, trigger_legacy_list, trigger_legacy_request,
+    trigger_pd_list, trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
 };
 use crate::error::CliError;
 use crate::trace::{TracePort, TraceTransport, TracedOpener};
@@ -119,6 +119,12 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
                     ..
                 },
         } => return Err(CliError::Usage(LOGO_REMOVE_RISK.into())),
+        // A dump outside the logo window opens no meter.
+        Command::Logo {
+            action: LogoAction::Read {
+                dump: Some(span), ..
+            },
+        } => logo_dump_check(span)?,
         _ => {}
     }
     if let Command::Firmware {
@@ -1391,7 +1397,12 @@ fn dispatch<T: Transport, C: Clock>(
         }
         Command::Firmware { .. } => unreachable!("firmware is handled before opening a device"),
         Command::Logo {
-            action: LogoAction::Read { output },
+            action: LogoAction::Read {
+                dump: Some(span), ..
+            },
+        } => logo_dump(&mut session, span, &mut out),
+        Command::Logo {
+            action: LogoAction::Read { output, dump: None },
         } => logo_read(&mut session, output.as_deref(), &mut out),
         Command::Logo {
             action:

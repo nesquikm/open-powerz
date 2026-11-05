@@ -386,6 +386,11 @@ pub enum LogoAction {
         /// Read the whole logo and write it to this PNG file.
         #[arg(short = 'o', long = "output", value_name = "PNG")]
         output: Option<PathBuf>,
+        /// Hex-dump LEN bytes from ADDR (hex 0x… or decimal) instead; ADDR
+        /// and ADDR + LEN must lie inside 0x98300000–0x9831FFFF.
+        #[arg(long, num_args = 2, value_names = ["ADDR", "LEN"],
+              value_parser = parse_u32_auto, conflicts_with = "output")]
+        dump: Option<Vec<u32>>,
     },
     /// Remove the meter's startup logo (clear the logo area and the flag),
     /// then read it back; needs --i-understand and "remove" typed at the
@@ -985,6 +990,16 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
 /// answers CONNECT, so only bulk (and the simulator's bulk persona) sends it.
 pub fn needs_connect(kind: TransportKind) -> bool {
     matches!(kind, TransportKind::Bulk | TransportKind::Sim)
+}
+
+/// Parse a `u32` written as hex (`0x…`) or decimal.
+fn parse_u32_auto(s: &str) -> Result<u32, String> {
+    let t = s.trim();
+    let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => t.parse(),
+    };
+    parsed.map_err(|_| format!("{s:?} is not a number (hex 0x… or decimal, at most 0xFFFFFFFF)"))
 }
 
 #[cfg(test)]

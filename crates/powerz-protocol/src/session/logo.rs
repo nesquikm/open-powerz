@@ -15,7 +15,7 @@ use crate::frame::{self, Reply};
 use crate::logo::{self, CHUNK, HEADER_LEN, LogoBlob, LogoMode, Rgba};
 use crate::transport::Transport;
 use crate::transport::guard::{
-    LOGO_CHUNK_TYPE, LOGO_FLAG_ATT, LOGO_REGION_START, LOGO_WINDOW_START,
+    LOGO_CHUNK_TYPE, LOGO_FLAG_ATT, LOGO_REGION_START, LOGO_WINDOW_END, LOGO_WINDOW_START,
 };
 
 /// Which part of a logo action a [`LogoProgress`] counts.
@@ -162,6 +162,23 @@ pub fn logo_flag_request(id: u8, value: u32) -> Vec<u8> {
     f
 }
 
+/// Check a logo-window dump of `len` bytes from `addr`: `Ok` only when
+/// `len > 0` and `addr..addr + len` lies wholly inside 0x98300000–0x9831FFFF,
+/// otherwise [`Error::Forbidden`]. Pure, so a caller can check before
+/// opening a device.
+pub fn check_logo_dump(addr: u32, len: u32) -> Result<(), Error> {
+    let inside = len > 0
+        && addr >= LOGO_WINDOW_START
+        && addr
+            .checked_add(len)
+            .is_some_and(|end| end <= LOGO_WINDOW_END);
+    if inside {
+        Ok(())
+    } else {
+        Err(Error::Forbidden { addr, len })
+    }
+}
+
 /// What 16 logo-area bytes say the area holds.
 fn logo_status(head: &[u8]) -> LogoStatus {
     if !head.is_empty() && head.iter().all(|&b| b == 0xFF) {
@@ -290,6 +307,16 @@ impl<T: Transport, C: Clock> Session<T, C> {
         logo::decode(&data).map_err(|e| Error::Protocol(format!("logo decode: {e}")))
     }
 
+    /// Read `len` bytes of the logo window from `addr` (a read-only hex
+    /// dump for the hardware stages): refused with [`Error::Forbidden`]
+    /// before anything is sent unless [`check_logo_dump`] allows it, then
+    /// read in reads of at most [`MEMORY_READ_MAX_LEN`] bytes, at least
+    /// 50 ms apart on the session clock. Sends no write.
+    pub fn logo_dump(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, Error> {
+        check_logo_dump(addr, len)?;
+        self.logo_read_paced(addr, len as usize, &mut |_| {})
+    }
+
     /// Refuse a logo write unless this session authenticated, read SETTINGS
     /// and read the model, and the model is a KM003C. Sends nothing, so a
     /// caller can check before asking the user to confirm.
@@ -338,11 +365,23 @@ impl<T: Transport, C: Clock> Session<T, C> {
         self.logo_read_back(HEADER_LEN, &mut |_| {})
     }
 
-    /// Read `len` bytes from the logo window start in reads of at most
-    /// [`MEMORY_READ_MAX_LEN`] bytes, at least [`READ_GAP`] apart on the
-    /// session clock.
+    /// Read `len` bytes from the logo window start (see
+    /// [`logo_read_paced`](Self::logo_read_paced)).
     fn logo_read_back(
         &mut self,
+        len: usize,
+        progress: &mut dyn FnMut(LogoProgress),
+    ) -> Result<Vec<u8>, Error> {
+        self.logo_read_paced(LOGO_WINDOW_START, len, progress)
+    }
+
+    /// Read `len` bytes from `start` in reads of at most
+    /// [`MEMORY_READ_MAX_LEN`] bytes, at least [`READ_GAP`] apart on the
+    /// session clock; every read goes through
+    /// [`logo_memory_read`](Self::logo_memory_read).
+    fn logo_read_paced(
+        &mut self,
+        start: u32,
         len: usize,
         progress: &mut dyn FnMut(LogoProgress),
     ) -> Result<Vec<u8>, Error> {
@@ -361,7 +400,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
                 }
             }
             last = Some(self.now_ms());
-            let data = self.logo_memory_read(LOGO_WINDOW_START + off as u32, n as u32)?;
+            let data = self.logo_memory_read(start + off as u32, n as u32)?;
             out.extend_from_slice(data.get(..n).unwrap_or(&data));
             progress(LogoProgress {
                 step: LogoStep::ReadBack,
@@ -534,6 +573,42 @@ mod tests {
         }
         let m = Error::LogoMismatch { offset: 0x123 };
         assert!(m.to_string().contains("0x123"), "{m}");
+    }
+
+    // ---- AC-YCRQRQ.8: logo window dump ----
+
+    #[test]
+    fn ycrqrq_8_dump_check_allows_only_spans_inside_the_window() {
+        assert_eq!(check_logo_dump(0x9830_0000, 16), Ok(()));
+        assert_eq!(check_logo_dump(0x9831_FFF0, 16), Ok(()));
+        assert_eq!(check_logo_dump(0x9830_0000, 0x2_0000), Ok(()));
+        for (addr, len) in [
+            (0x982F_FFF0, 16),
+            (0x9831_FFF0, 32),
+            (0x9832_0000, 16),
+            (0x9830_0000, 0),
+            (0xFFFF_FFF0, 0x20),
+        ] {
+            assert_eq!(
+                check_logo_dump(addr, len),
+                Err(Error::Forbidden { addr, len }),
+                "{addr:#x} + {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn ycrqrq_8_dump_outside_the_window_is_refused_without_sending() {
+        let mut s = Session::open(MockTransport::new(vec![]));
+        let r = s.logo_dump(0x9831_FFF0, 32);
+        assert_eq!(
+            r,
+            Err(Error::Forbidden {
+                addr: 0x9831_FFF0,
+                len: 32
+            })
+        );
+        assert!(s.transport().written().is_empty(), "nothing is sent");
     }
 
     // ---- AC-TZK5K4.8: startup duration is a writable field ----
