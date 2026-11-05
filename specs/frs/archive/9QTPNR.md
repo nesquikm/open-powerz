@@ -15,8 +15,9 @@ kind: bug
 
 The UI suite grew from about 650 to about 1080 tests and no longer fits its 30 minute CI job.
 Every OS was cut off before the end, so failures past that point went unseen.
-The suite now runs in two shards per OS, each well under the limit.
-The frame-rate and memory tests run once per OS in their own one-worker step.
+The suite now runs in four shards per OS, each well under the limit.
+The frame-rate and memory tests run once per OS in their own job, with one worker.
+Windows runs only Chromium, the engine its app ships with.
 When a job is cancelled the test report is still uploaded.
 
 ## Requirement
@@ -32,15 +33,16 @@ All three e2e-ui jobs were cancelled at 30 minutes on 017c826, and the report up
 
 ## Acceptance Criteria
 
-- AC-9QTPNR.1: The e2e-ui job runs the suite as two Playwright shards per OS (six jobs), each with a 30 minute limit.
-- AC-9QTPNR.2: The frame-rate tests run once per OS, outside the shards, in a step with one worker; the WebKit memory test stays once per OS (not on Windows), in the first shard's job.
+- AC-9QTPNR.1: The e2e-ui job runs the suite as four Playwright shards per OS (twelve jobs), each with a 30 minute limit.
+- AC-9QTPNR.2: The frame-rate tests run once per OS, outside the shards, in a job of their own with one worker; the WebKit memory test stays once per OS (not on Windows), in that job.
 - AC-9QTPNR.3: The Playwright report and test results are uploaded when the job fails or is cancelled, named by OS and shard.
 - AC-9QTPNR.4: A workflow test checks the shard matrix, the single run of the frame-rate and memory steps, and the upload condition.
 - AC-9QTPNR.5: On PR 12 each e2e-ui job finishes in about 20 minutes or less.
+- AC-9QTPNR.6: Each OS runs the Playwright projects that stand in for the engine the app ships there: macOS and Linux run Chromium and WebKit, and Windows, whose app renders with WebView2, runs Chromium only, in the shards and in the frame-rate job. The workflow and the testing spec say why.
 
 ## Technical Design
 
-A `shard: [1, 2]` matrix axis and `--shard=${{ matrix.shard }}/2`. Frame-rate specs carry a `@perf` tag; the shards run `--grep-invert @perf`, and shard 1 also runs `--grep @perf --workers=1` and the memory step. Upload condition: `failure() || cancelled()`.
+A `shard: [1, 2, 3, 4]` matrix axis and `--shard=${{ matrix.shard }}/4`; a macOS runner has one worker, so two shards would not fit. Frame-rate specs carry a `@perf` tag; the shards run `--grep-invert @perf`, and an `e2e-ui-perf` job per OS runs `--grep @perf --workers=1` and the memory step. On Windows both pass `--project=chromium`. Upload condition: `failure() || cancelled()`.
 
 ## Testing
 

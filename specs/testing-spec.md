@@ -60,14 +60,24 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
   failure the `e2e-app` job uploads the WebdriverIO and `tauri-driver` logs
   (`apps/desktop/e2e-app-logs/`).
 - **Desktop UI e2e:** Playwright runs the web build (`VITE_BACKEND=mock`, a scripted backend)
-  in Chromium and WebKit on all three OSes: UI flows and every shortcut; layout (no horizontal
+  in Chromium and WebKit: UI flows and every shortcut; layout (no horizontal
   scroll or readout overflow/overlap from 900×600 to 2560×1440, a one-row top bar at 900 px in
   every state); Tab order and visible focus rings; live chart scrolling, the hover readout and
   the zero-based axes toggle; a 100 ms pan bound over a 10M-sample history (Chromium only); and
   an axe scan (no serious or critical violations) in both themes at 900 and 1600 px. Runs in
   CI in the `e2e-ui` job on ubuntu-24.04, macos-latest and windows-latest with Playwright's bundled
-  browsers (`bunx playwright install [--with-deps] chromium webkit`, never `channel: chrome`);
-  the HTML report and traces are uploaded as an artifact when it fails.
+  browsers (`bunx playwright install [--with-deps] chromium webkit`, never `channel: chrome`), as
+  four shards per OS; the HTML report and traces are uploaded as an artifact when a job fails or
+  is cancelled (FR 9QTPNR).
+  Each OS's projects stand in for the engine the app ships there: on macOS the webkit project
+  stands in for WKWebView and on Linux for WebKitGTK, so both run both projects; on Windows the
+  app renders with WebView2, which is Chromium, so Windows runs the chromium project only.
+  Playwright's Windows WebKit (the WinCairo port) is an engine no user of the app gets, and its
+  font metrics and layout differ from the shipped engines (FR 9QTPNR).
+  The frame-rate tests (tagged `@perf`) run outside the shards, in the `e2e-ui-perf` job, once per
+  OS with one worker. Each compares the median of streaming windows against the median of the
+  same page's idle windows (the mock's stream held), interleaved in time; where the idle median
+  cannot reach the 50 fps bound only that half is skipped, with an annotation (FR 9QTPNQ).
 - **Required checks:** `e2e-app` and `e2e-ui` are separate from the `gate` job and have no
   `continue-on-error`, so a failure turns the pull request red. Branch protection on `main`
   must list every `gate (*)`, `e2e-app (*)` and `e2e-ui (*)` check as required; that is a repo
@@ -86,7 +96,7 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
   visible; the web content process RSS is noted after 2 minutes of warm-up and at the end, and
   must grow by less than 50 MB (FR 4NSVC9). A 10-minute 1000 SPS demo run uses the same
   measure. Both figures go in the PR's manual hardware checks.
-  In CI, the `e2e-ui` job runs the WebKit memory bound (`memory.spec.ts`, `MEMORY_TEST=1`) as a
+  In CI, the `e2e-ui-perf` job runs the WebKit memory bound (`memory.spec.ts`, `MEMORY_TEST=1`) as a
   step of its own with one worker, on Linux and macOS.
 - **Visual checks (blocking):** `/dev-process-toolkit:visual-check` screenshots for every UI
   FR — light and dark, ~900 and ~1600 px wide, demo device streaming and no device — read

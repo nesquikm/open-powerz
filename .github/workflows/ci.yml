@@ -291,8 +291,12 @@ jobs:
         working-directory: apps/desktop
         run: bunx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium webkit
 
+      # FR 9QTPNR: each OS runs the engine the app ships there. Windows renders with
+      # WebView2 (Chromium), so it runs the chromium project only; Playwright's Windows
+      # WebKit (the WinCairo port) is an engine no user of the app ever gets. macOS
+      # (WKWebView) and Linux (WebKitGTK) run both projects.
       - name: UI e2e
-        run: bun run e2e:ui --shard=${{ matrix.shard }}/4 --grep-invert @perf
+        run: bun run e2e:ui --shard=${{ matrix.shard }}/4 --grep-invert @perf ${{ runner.os == 'Windows' && '--project=chromium' || '' }}
 
       # A job cut off at its limit is cancelled, not failed: keep its report too.
       - name: Upload Playwright report
@@ -334,8 +338,9 @@ jobs:
         working-directory: apps/desktop
         run: bunx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium webkit
 
+      # Windows: the chromium project only, as in e2e-ui (WebView2 is Chromium).
       - name: UI frame rate
-        run: bun run e2e:ui --grep @perf --workers=1
+        run: bun run e2e:ui --grep @perf --workers=1 ${{ runner.os == 'Windows' && '--project=chromium' || '' }}
 
       # FR 4NSVC9: the WebKit memory bound, alone with one worker so no other page's
       # process is measured. It reads RSS with ps, so not on Windows.

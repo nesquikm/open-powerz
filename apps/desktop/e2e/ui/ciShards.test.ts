@@ -6,6 +6,8 @@
  * AC-9QTPNR.2: the @perf tests and the WebKit memory test run once per OS, outside the
  * shards, each with one worker; the shards leave @perf out.
  * AC-9QTPNR.3: every UI job uploads its report on failure or cancellation, named apart.
+ * AC-9QTPNR.6: Windows runs only the chromium project (the app's WebView2 is Chromium);
+ * macOS and Linux run both.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -23,6 +25,8 @@ const PERF_TAG = /export const PERF_TAG = "(@[\w-]+)";/.exec(
   readFileSync(new URL("./helpers.ts", import.meta.url), "utf8"),
 )?.[1];
 const OSES = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+/** AC-9QTPNR.6: Windows runs the engine the app ships there, WebView2 (Chromium). */
+const WINDOWS_CHROMIUM_ONLY = "${{ runner.os == 'Windows' && '--project=chromium' || '' }}";
 
 /** The lines of the top-level job `name` (two-space indent), up to the next job. */
 function job(name: string): string[] {
@@ -77,6 +81,10 @@ describe("CI: the UI suite in shards (AC-9QTPNR.1)", () => {
     expect(run).toContain(`--grep-invert ${PERF_TAG}`);
   });
 
+  it("runs only the chromium project on Windows, both projects elsewhere (AC-9QTPNR.6)", () => {
+    expect(runOf(shards, "UI e2e")).toContain(WINDOWS_CHROMIUM_ONLY);
+  });
+
   it("names each shard's job by OS and shard", () => {
     expect(shards.find((l) => /^\s+name:/.test(l))?.trim()).toBe(
       `name: e2e-ui (\${{ matrix.os }}, \${{ matrix.shard }}/${SHARDS})`,
@@ -92,8 +100,10 @@ describe("CI: the frame-rate and memory tests once per OS (AC-9QTPNR.2)", () => 
     expect(matrixList(perf, "shard")).toEqual([]);
   });
 
-  it("runs the @perf tests alone with one worker", () => {
-    expect(runOf(perf, "UI frame rate")).toBe(`run: bun run e2e:ui --grep ${PERF_TAG} --workers=1`);
+  it("runs the @perf tests alone with one worker, Chromium only on Windows", () => {
+    expect(runOf(perf, "UI frame rate")).toBe(
+      `run: bun run e2e:ui --grep ${PERF_TAG} --workers=1 ${WINDOWS_CHROMIUM_ONLY}`,
+    );
   });
 
   it("runs the WebKit memory test with one worker, not on Windows, and only there", () => {
