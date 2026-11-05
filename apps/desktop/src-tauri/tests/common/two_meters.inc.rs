@@ -2,7 +2,7 @@
 // FR 4PJRVM (same rig as multi_meter.rs). Every serial here is synthetic.
 
 #[allow(unused_imports)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[allow(unused_imports)]
 use std::sync::mpsc;
 #[allow(unused_imports)]
@@ -39,6 +39,18 @@ fn meter(serial: &str, bus: &str, address: u8) -> DeviceEntry {
 struct Plugged {
     sim: SimDevice,
     plugged: Arc<AtomicBool>,
+    /// Real time each pipe call takes, µs (0: none), so a test can make the
+    /// simulator produce at a believable rate instead of as fast as it polls.
+    pace_us: Arc<AtomicU64>,
+}
+
+impl Plugged {
+    fn pace(&self) {
+        let us = self.pace_us.load(Ordering::SeqCst);
+        if us > 0 {
+            std::thread::sleep(Duration::from_micros(us));
+        }
+    }
 }
 
 impl Transport for Plugged {
@@ -46,6 +58,7 @@ impl Transport for Plugged {
         if !self.plugged.load(Ordering::SeqCst) {
             return Err(transport::Error::Disconnected);
         }
+        self.pace();
         self.sim.transact(request, timeout)
     }
 
@@ -53,6 +66,7 @@ impl Transport for Plugged {
         if !self.plugged.load(Ordering::SeqCst) {
             return Err(transport::Error::Disconnected);
         }
+        self.pace();
         self.sim.read(timeout)
     }
 }
@@ -65,6 +79,7 @@ struct TwoMeterOpener {
     plug_a: Arc<AtomicBool>,
     plug_b: Arc<AtomicBool>,
     opened: Arc<Mutex<Vec<DeviceListing>>>,
+    pace_us: Arc<AtomicU64>,
 }
 
 impl Opener for TwoMeterOpener {
@@ -84,6 +99,7 @@ impl Opener for TwoMeterOpener {
                 .with_serial(serial)
                 .with_pd_scenario(PdScenario::Negotiation),
             plugged: Arc::clone(plug),
+            pace_us: Arc::clone(&self.pace_us),
         })
     }
 }
@@ -95,6 +111,7 @@ struct Rig {
     attached: Arc<Mutex<Vec<DeviceEntry>>>,
     plug_a: Arc<AtomicBool>,
     opened: Arc<Mutex<Vec<DeviceListing>>>,
+    pace_us: Arc<AtomicU64>,
 }
 
 impl Rig {
@@ -107,6 +124,7 @@ impl Rig {
         let plug_a = Arc::new(AtomicBool::new(true));
         let plug_b = Arc::new(AtomicBool::new(true));
         let opened = Arc::new(Mutex::new(Vec::new()));
+        let pace_us = Arc::new(AtomicU64::new(0));
         let listed = Arc::clone(&attached);
         let m = DeviceManager::new(
             move || Ok(listed.lock().unwrap().clone()),
@@ -115,6 +133,7 @@ impl Rig {
                 plug_a: Arc::clone(&plug_a),
                 plug_b,
                 opened: Arc::clone(&opened),
+                pace_us: Arc::clone(&pace_us),
             },
             clock.clone(),
         );
@@ -124,7 +143,14 @@ impl Rig {
             attached,
             plug_a,
             opened,
+            pace_us,
         }
+    }
+
+    /// Every pipe call of every meter takes `pace` of real time from now on.
+    fn pace_reads(&self, pace: Duration) {
+        let us = u64::try_from(pace.as_micros()).unwrap_or(u64::MAX);
+        self.pace_us.store(us, Ordering::SeqCst);
     }
 
     /// Pull meter A's cable: its pipe fails at once and the OS stops listing

@@ -23,6 +23,17 @@ include!("common/two_meters.inc.rs");
 /// Well past the worker's queue limit at one sample per batch.
 const ENOUGH_SAMPLES: usize = 2_000;
 
+/// Real time per pipe call in the keep-up run: 512 batches behind then
+/// needs the forwarder starved for well over half a second.
+const KEEP_UP_PACE: Duration = Duration::from_millis(1);
+
+/// Enough samples for the keep-up run to deliver well over the queue
+/// limit in batches (about five samples to a batch).
+const KEEP_UP_SAMPLES: usize = 5_000;
+
+/// The worker's queue limit for live batches (`MAX_QUEUED_BATCHES`).
+const QUEUE_LIMIT: usize = 512;
+
 const DROPPED: &str = "live batches dropped";
 const RESUMED: &str = "live batches resumed";
 const LOST: &str = "live batches lost at session end";
@@ -213,11 +224,21 @@ fn ac_axhk2w_8_a_session_that_ends_while_dropping_logs_its_totals() {
 fn ac_axhk2w_8_a_page_that_keeps_up_logs_no_drop_line() {
     let path = log_path("keeps-up");
     let mut rig = rig_logging_to(&path);
+    // A page keeps up with a meter, not with a simulator that produces as
+    // fast as it polls: unpaced, a starved forwarder thread on a loaded
+    // runner falls the queue limit behind although the page never blocks.
+    rig.pace_reads(KEEP_UP_PACE);
     let (rx, sink) = channel_sink();
     rig.m.connect(METER_A, 50, sink).expect("connect meter A");
-    wait_for_history(&rig, ENOUGH_SAMPLES);
-    recv_until(&rx, is_samples);
+    wait_for_history(&rig, KEEP_UP_SAMPLES);
+    let mut delivered = recv_until(&rx, is_samples);
     rig.m.disconnect_for(METER_A).unwrap();
+    delivered.extend(rx.try_iter());
+    let batches = delivered.iter().filter(|e| is_samples(e)).count();
+    assert!(
+        batches > QUEUE_LIMIT,
+        "only {batches} batches: the run must pass the queue limit to mean anything"
+    );
 
     let live: Vec<String> = lines_with(&path, "live batches");
     assert!(live.is_empty(), "a page that kept up: {live:#?}");
