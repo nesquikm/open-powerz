@@ -17,7 +17,8 @@ import { HOOK } from "../hook";
 import {
   chartSeriesLengths,
   expectHook,
-  idleFramesPerSecond,
+  interleavedFps,
+  type InterleavedFps,
   open,
   PERF_TAG,
   streamDemo,
@@ -87,21 +88,28 @@ async function measure(page: Page): Promise<Sample> {
   );
 }
 
-/** The path-call bound always; the frame-rate bound only where the idle page itself
- * reaches {@link MIN_FPS}. A CI runner without a GPU can pace an idle page below it, and
- * then only the frame-rate half is skipped, with an annotation giving the idle rate
+/** The path-call bound always, over a streaming window; the frame-rate bound on the
+ * median of interleaved streaming windows, only where the median of the same page's idle
+ * windows reaches {@link MIN_FPS}. A CI runner without a GPU can pace an idle page below
+ * it, and then only the frame-rate half is skipped, said in an annotation and in the log
  * (AC-9QTPNQ.4). */
-function expectSmooth(s: Sample, where: string, idleFps: number): void {
-  const text = `${where}: ${Math.round(s.callsPerS)} path calls/s, ${s.fps.toFixed(1)} fps (idle ${idleFps.toFixed(1)})`;
+async function expectSmooth(page: Page, where: string): Promise<void> {
+  const s = await measure(page);
+  const text = `${where}: ${Math.round(s.callsPerS)} path calls/s`;
+  console.log(`AC-C6VR9K.1 ${text}`);
   expect(s.callsPerS, text).toBeLessThanOrEqual(MAX_PATH_CALLS_PER_S);
-  if (idleFps < MIN_FPS) {
-    test.info().annotations.push({
-      type: "fps-skipped",
-      description: `${where}: frame-rate half skipped, the idle page ran at ${idleFps.toFixed(1)} fps (< ${MIN_FPS})`,
-    });
+  const m: InterleavedFps = await interleavedFps(page, `AC-C6VR9K.1 ${where}`);
+  if (m.idleMedian < MIN_FPS) {
+    const description = `${where}: frame-rate half skipped, the idle median was ${m.idleMedian.toFixed(1)} fps (< ${MIN_FPS})`;
+    test.info().annotations.push({ type: "fps-skipped", description });
+    // The list reporter prints no annotations: say it in the CI log too.
+    console.log(`AC-C6VR9K.1 fps-skipped: ${description}`);
     return;
   }
-  expect(s.fps, text).toBeGreaterThanOrEqual(MIN_FPS);
+  expect(
+    m.streamMedian,
+    `${where}: stream median ${m.streamMedian.toFixed(1)} fps, idle median ${m.idleMedian.toFixed(1)}`,
+  ).toBeGreaterThanOrEqual(MIN_FPS);
 }
 
 function tab(page: Page, name: string): Locator {
@@ -123,20 +131,21 @@ test(
   "the PD analyzer tab stays smooth for a minute of streaming (AC-C6VR9K.1)",
   { tag: PERF_TAG },
   async ({ page }) => {
-    test.setTimeout(150_000);
+    test.setTimeout(200_000);
     await countPathCalls(page);
     await open(page);
-    const idle = await idleFramesPerSecond(page);
     await streamDemo(page);
     await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(50);
     await showPd(page);
     const shown = Date.now();
 
-    // Early, and again a minute in: the cost grew with the session's length.
+    // Early, and again a minute of streaming in: the cost grew with the session's
+    // length. The idle windows hold the stream for about 6 s, so the second look waits
+    // that much longer.
     await waitUntil(page, shown, 8_000);
-    expectSmooth(await measure(page), "PD tab at ~10 s", idle);
-    await waitUntil(page, shown, 58_000);
-    expectSmooth(await measure(page), "PD tab at ~60 s", idle);
+    await expectSmooth(page, "PD tab at ~10 s");
+    await waitUntil(page, shown, 66_000);
+    await expectSmooth(page, "PD tab at ~60 s");
   },
 );
 
@@ -144,17 +153,16 @@ test(
   "the Records and Trigger tabs stay smooth while streaming (AC-C6VR9K.1)",
   { tag: PERF_TAG },
   async ({ page }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(120_000);
     await countPathCalls(page);
     await open(page);
-    const idle = await idleFramesPerSecond(page);
     await streamDemo(page);
     await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(50);
     for (const name of ["Records", "Trigger"]) {
       await showTab(page, name);
       const shown = Date.now();
       await waitUntil(page, shown, 8_000);
-      expectSmooth(await measure(page), `${name} tab at ~10 s`, idle);
+      await expectSmooth(page, `${name} tab at ~10 s`);
     }
   },
 );

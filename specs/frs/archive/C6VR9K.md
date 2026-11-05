@@ -56,7 +56,7 @@ A pure dash-clip test, plot-insets unit tests with an unlaid plot, the WebKit e2
 
 Found in r3 on build 3d2ae16 and reproduced on the demo device. Bisect: the first bad commit is 0f0b9a1. The meter probe was one read-only CLI stream. The Detect sequence's reset is the PDM text command (protocol doc, PDM text session), not binary RESET.
 
-CI caveat (9QTPNQ): CI runners without a GPU can pace frames below 50 fps even on an idle page. There the e2e skips only the frame-rate half of AC-C6VR9K.1, with an annotation giving the measured idle rate; the path-call bound always runs. A developer Mac runs both halves.
+CI caveat (9QTPNQ): CI runners without a GPU can pace frames below 50 fps even on an idle page. The e2e reads the frame rate as the median of at least three 2 s streaming windows, interleaved with as many idle windows of the same page (the stream held), idle first. Where the idle median is under 50 fps it skips only the frame-rate half of AC-C6VR9K.1, with an annotation and a log line giving the idle median; the path-call bound always runs. A developer Mac runs both halves.
 
 ## Hardware evidence (r4 to r6)
 

@@ -9,7 +9,8 @@
  *   view, so the edges slid by up to half a pattern. The frames go to
  *   `../qa-runs/DASH-visual/` (outside the repo) for review.
  * - AC .5: at 1000 SPS the Meter tab keeps its frame rate within 5% of the same page's
- *   idle frame rate, measured right before streaming (amended by FR 9QTPNQ).
+ *   idle frame rate: medians of interleaved idle and streaming windows (amended by FR
+ *   9QTPNQ).
  *
  * Both run at DPR 1 so a canvas px is a CSS px.
  */
@@ -23,8 +24,7 @@ import {
   blur,
   chartDraws,
   chartSeriesLengths,
-  framesPerSecond,
-  idleFramesPerSecond,
+  interleavedFps,
   open,
   PERF_TAG,
   streamDemo,
@@ -37,14 +37,12 @@ test.use({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1 });
 const QA_DIR = fileURLToPath(new URL("../../../../../qa-runs/DASH-visual/", import.meta.url));
 
 /**
- * AC-SX1VTC.5 (amended by FR 9QTPNQ): streaming at 1000 SPS may cost at most 5% of the
- * machine's idle frame rate, measured in the same page right before streaming. It was a
- * fixed 60 fps baseline (this Mac, headless WebKit), which CI runners without a GPU miss
- * even when idle.
+ * AC-SX1VTC.5 (amended by FR 9QTPNQ): the median frame rate of the streaming windows at
+ * 1000 SPS may be at most 5% below the median of the same page's idle windows,
+ * interleaved with them in time (helpers.ts `interleavedFps`). It was a fixed 60 fps
+ * baseline (this Mac, headless WebKit), which CI runners without a GPU miss even idle.
  */
 const FPS_TOLERANCE = 0.05;
-/** One frame-rate window, ms. */
-const FPS_WINDOW_MS = 5_000;
 
 /** Largest mismatch, px, between the two frames' dash edges at the same data time. */
 const MAX_EDGE_SHIFT_PX = 1;
@@ -208,21 +206,20 @@ test(
   async ({ page }) => {
     test.setTimeout(90_000);
     await open(page);
-    const idle = await idleFramesPerSecond(page);
     await streamDemo(page);
     await blur(page);
     await page.keyboard.press("4");
     await expect(page.getByLabel("Sample rate")).toHaveValue("1000");
     await expect.poll(async () => (await chartSeriesLengths(page)).vbus).toBeGreaterThan(1000);
-    const fps = await framesPerSecond(page, FPS_WINDOW_MS);
-    const floor = idle * (1 - FPS_TOLERANCE);
-    console.log(
-      `AC-SX1VTC.5: ${fps.toFixed(1)} fps (idle baseline ${idle.toFixed(1)}, floor ${floor.toFixed(1)})`,
-    );
+    const m = await interleavedFps(page, "AC-SX1VTC.5");
+    const floor = m.idleMedian * (1 - FPS_TOLERANCE);
     test.info().annotations.push({
       type: "fps",
-      description: `${fps.toFixed(1)} fps streaming, idle ${idle.toFixed(1)}`,
+      description: `stream median ${m.streamMedian.toFixed(1)} fps, idle median ${m.idleMedian.toFixed(1)}, floor ${floor.toFixed(1)}`,
     });
-    expect(fps, `${fps.toFixed(1)} fps at 1000 SPS`).toBeGreaterThanOrEqual(floor);
+    expect(
+      m.streamMedian,
+      `${m.streamMedian.toFixed(1)} fps at 1000 SPS against an idle ${m.idleMedian.toFixed(1)}`,
+    ).toBeGreaterThanOrEqual(floor);
   },
 );

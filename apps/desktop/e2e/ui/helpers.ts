@@ -395,12 +395,75 @@ export async function framesPerSecond(page: Page, ms: number): Promise<number> {
   );
 }
 
-/** How long the idle frame-rate baseline is measured, ms (AC-9QTPNQ.3: at least 2 s). */
-export const IDLE_FPS_WINDOW_MS = 2_000;
+/** The interleaved frame-rate windows (AC-9QTPNQ.3, .4): this many idle and this many
+ * streaming windows, each this long, idle first. */
+export const FPS_ROUNDS = 3;
+export const FPS_WINDOW_MS = 2_000;
 
-/** The page's own idle frame rate, measured in this page before it streams: the
- * machine's baseline for the frame-rate tests (AC-9QTPNQ.3, .4). A CI runner without a
- * GPU paces frames well below 60 Hz even with nothing to draw. */
-export async function idleFramesPerSecond(page: Page): Promise<number> {
-  return framesPerSecond(page, IDLE_FPS_WINDOW_MS);
+/** Idle and streaming frame rates of one page, interleaved in time. */
+export interface InterleavedFps {
+  idle: number[];
+  stream: number[];
+  idleMedian: number;
+  streamMedian: number;
+}
+
+export function median(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/** Holds the mock's stream (`true`) or lets it go on (`false`). */
+async function holdStream(page: Page, held: boolean): Promise<void> {
+  await page.evaluate(
+    ([hook, on]) =>
+      (window as unknown as Record<string, { holdStream(held: boolean): void }>)[
+        hook as string
+      ]!.holdStream(on as boolean),
+    ["__OPEN_POWERZ_MOCK__", held] as const,
+  );
+}
+
+/** How many batches the mock's streams have sent so far. */
+async function batchCount(page: Page): Promise<number> {
+  return page.evaluate(
+    (hook) => (window as unknown as Record<string, { batchCount(): number }>)[hook]!.batchCount(),
+    "__OPEN_POWERZ_MOCK__",
+  );
+}
+
+/**
+ * The page's frame rate idle and streaming, interleaved so a runner whose frame rate
+ * drifts is measured against itself (AC-9QTPNQ.3, .4): {@link FPS_ROUNDS} idle windows
+ * (the stream held, the session and its buffers kept) and as many streaming ones,
+ * {@link FPS_WINDOW_MS} each, idle first. The page must be streaming when called and is
+ * streaming again on return. Every window goes to the log under `label`.
+ */
+export async function interleavedFps(page: Page, label: string): Promise<InterleavedFps> {
+  const idle: number[] = [];
+  const stream: number[] = [];
+  try {
+    for (let round = 0; round < FPS_ROUNDS; round++) {
+      await holdStream(page, true);
+      // The chart has caught up with the last batch and has nothing left to draw.
+      await animationFrames(page, 10);
+      idle.push(await framesPerSecond(page, FPS_WINDOW_MS));
+      const sent = await batchCount(page);
+      await holdStream(page, false);
+      // The stream goes on again: a few batches have come, on whatever tab shows.
+      await expect
+        .poll(() => batchCount(page), { message: "the stream goes on" })
+        .toBeGreaterThanOrEqual(sent + 3);
+      stream.push(await framesPerSecond(page, FPS_WINDOW_MS));
+    }
+  } finally {
+    await holdStream(page, false);
+  }
+  const result = { idle, stream, idleMedian: median(idle), streamMedian: median(stream) };
+  const show = (v: readonly number[]) => v.map((f) => f.toFixed(1)).join(", ");
+  console.log(
+    `${label}: stream median ${result.streamMedian.toFixed(1)} fps [${show(stream)}], idle median ${result.idleMedian.toFixed(1)} fps [${show(idle)}]`,
+  );
+  return result;
 }

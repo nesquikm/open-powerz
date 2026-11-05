@@ -1350,6 +1350,11 @@ export class MockBackend {
   /** The demo meter's firmware: the flashed file's version after a done update
    * (AC-AXHK2M.16). */
   #firmwareVersion = "2.0.6";
+  /** The UI suite's frame-rate tests hold the stream to measure the same page idle:
+   * no batches and no samples while held, the sessions untouched (FR 9QTPNQ). */
+  #held = false;
+  /** Batches sent so far, all sessions (FR 9QTPNQ). */
+  #batchesSent = 0;
   /** A firmware update holds the meter (FR V9SK55, AC .4). */
   #flashing = false;
   /** The meter the running update holds; another one can connect (AC-4PJRVM.4). */
@@ -1716,6 +1721,7 @@ export class MockBackend {
   }
 
   #tick(s: Running): void {
+    if (this.#held) return;
     s.carry += (s.rateSps * BATCH_MS) / 1000;
     const n = Math.floor(s.carry);
     s.carry -= n;
@@ -1743,6 +1749,7 @@ export class MockBackend {
     // Like the backend: the CDC stream carries no temperature.
     const tempC = s.source === "cdc" ? null : 30.5 + 0.2 * Math.sin(s.nextMs / 60_000);
     s.onEvent({ type: "batch", data: { samples, temp_c: tempC, stats: s.stats.snapshot() } });
+    this.#batchesSent += 1;
     s.streamed += n;
     const rec = s.recording;
     if (rec) {
@@ -2580,6 +2587,19 @@ export class MockBackend {
   /** Every chart image saved, oldest first. */
   chartImages(): { suggestedName: string; format: string; data: number[] }[] {
     return this.#chartImages.map((i) => ({ ...i, data: [...i.data] }));
+  }
+
+  /** Holds every stream (`true`) or lets it go on (`false`): held, no batch is sent and
+   * no sample is made, and the stream goes on from where it stopped, with no gap. For
+   * the UI suite's idle frame-rate windows (FR 9QTPNQ). */
+  holdStream(held: boolean): void {
+    this.#held = held;
+  }
+
+  /** How many batches every stream has sent so far: the UI suite waits on it to know a
+   * held stream goes on again, whatever tab shows (FR 9QTPNQ). */
+  batchCount(): number {
+    return this.#batchesSent;
   }
 
   /** Every path `revealPath` was asked to show, oldest first. */

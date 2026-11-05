@@ -45,6 +45,32 @@ describe("MockBackend (scripted demo backend for the browser build)", () => {
     expect(events.at(-1)).toEqual({ type: "status", data: { state: "disconnected", error: null } });
   });
 
+  it("holds the stream: no batches while held, then on from where it stopped (AC-9QTPNQ.3)", async () => {
+    const backend = new MockBackend();
+    const events: BackendEvent[] = [];
+    await backend.connect("demo:load-5v-1a", 50, (e) => events.push(e));
+    vi.advanceTimersByTime(1000);
+    const before = batches(events).flatMap((b) => b.samples);
+    expect(before.length).toBe(50);
+    const sentBefore = backend.batchCount();
+    expect(sentBefore).toBe(batches(events).length);
+    backend.holdStream(true);
+    vi.advanceTimersByTime(1000);
+    expect(backend.batchCount(), "no batch counted while held").toBe(sentBefore);
+    expect(batches(events).flatMap((b) => b.samples).length).toBe(50);
+    const heldBatches = batches(events).length;
+    vi.advanceTimersByTime(500);
+    expect(batches(events).length, "no batch while held").toBe(heldBatches);
+    backend.holdStream(false);
+    vi.advanceTimersByTime(1000);
+    await backend.disconnect();
+    const after = batches(events).flatMap((b) => b.samples);
+    expect(after.length).toBe(100);
+    // Device time goes on with no gap: one sample every 20 ms.
+    const t = after.map((s) => s.t_ms);
+    for (let i = 1; i < t.length; i++) expect(t[i]! - t[i - 1]!).toBe(20);
+  });
+
   it("reports the snapshot temperature while streaming at 1000 SPS, like the worker (AC-X2SPDW.6)", async () => {
     const backend = new MockBackend();
     const events: BackendEvent[] = [];
