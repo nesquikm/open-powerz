@@ -318,12 +318,27 @@ jobs:
         working-directory: apps/desktop
         run: bunx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium webkit
 
-      # A cache hit brings the browsers, not Linux's system libraries.
+      # A cache hit brings the browsers, not Linux's system libraries: apt, which can be
+      # slow, so it gets the same time limit and one retry as the download.
       - name: Playwright system libraries (Linux, cached browsers)
+        id: deps
         if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
-        timeout-minutes: 10
+        continue-on-error: true
+        timeout-minutes: 8
         working-directory: apps/desktop
         run: bunx playwright install-deps chromium webkit
+
+      - name: Playwright system libraries (retry)
+        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux' && steps.deps.outcome == 'failure'
+        timeout-minutes: 8
+        working-directory: apps/desktop
+        run: bunx playwright install-deps chromium webkit
+
+      # Only after a setup that worked: a later step that runs on !cancelled() must not
+      # meet half-installed browsers.
+      - name: Browsers ready
+        id: ready
+        run: echo "browsers and system libraries are in place"
 
       # FR 9QTPNR: each OS runs the engine the app ships there. Windows renders with
       # WebView2 (Chromium), so it runs the chromium project only; Playwright's Windows
@@ -399,12 +414,27 @@ jobs:
         working-directory: apps/desktop
         run: bunx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium webkit
 
-      # A cache hit brings the browsers, not Linux's system libraries.
+      # A cache hit brings the browsers, not Linux's system libraries: apt, which can be
+      # slow, so it gets the same time limit and one retry as the download.
       - name: Playwright system libraries (Linux, cached browsers)
+        id: deps
         if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
-        timeout-minutes: 10
+        continue-on-error: true
+        timeout-minutes: 8
         working-directory: apps/desktop
         run: bunx playwright install-deps chromium webkit
+
+      - name: Playwright system libraries (retry)
+        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux' && steps.deps.outcome == 'failure'
+        timeout-minutes: 8
+        working-directory: apps/desktop
+        run: bunx playwright install-deps chromium webkit
+
+      # Only after a setup that worked: a later step that runs on !cancelled() must not
+      # meet half-installed browsers.
+      - name: Browsers ready
+        id: ready
+        run: echo "browsers and system libraries are in place"
 
       # Windows: the chromium project only, as in e2e-ui (WebView2 is Chromium).
       - name: UI frame rate
@@ -413,7 +443,7 @@ jobs:
       # FR 4NSVC9: the WebKit memory bound, alone with one worker so no other page's
       # process is measured. It reads RSS with ps, so not on Windows.
       - name: UI memory (WebKit)
-        if: ${{ !cancelled() && runner.os != 'Windows' }}
+        if: ${{ !cancelled() && runner.os != 'Windows' && steps.ready.outcome == 'success' }}
         env:
           MEMORY_TEST: "1"
         run: bun run e2e:ui memory.spec.ts --project=webkit --workers=1

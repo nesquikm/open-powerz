@@ -113,6 +113,8 @@ describe("CI: the frame-rate and memory tests once per OS (AC-9QTPNR.2)", () => 
       "run: bun run e2e:ui memory.spec.ts --project=webkit --workers=1",
     );
     expect(ifOf(perf, "UI memory (WebKit)")).toContain("runner.os != 'Windows'");
+    // Not on browsers whose setup failed (AC-9QTPNR.7).
+    expect(ifOf(perf, "UI memory (WebKit)")).toContain("steps.ready.outcome == 'success'");
     expect(job("e2e-ui").join("\n")).not.toContain("memory.spec.ts");
   });
 
@@ -183,12 +185,28 @@ describe("CI: the browsers are cached and their download bounded (AC-9QTPNR.7)",
       expect(retry).toContain("timeout-minutes: 8");
     });
 
-    it(`${name} still installs Linux's system libraries on a cache hit`, () => {
+    it(`${name} still installs Linux's system libraries on a cache hit, bounded, with one retry`, () => {
       const deps = stepOf(lines, "Playwright system libraries (Linux, cached browsers)");
+      const retry = stepOf(lines, "Playwright system libraries (retry)");
       expect(deps).toContain(
         "if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'",
       );
+      expect(deps).toContain("continue-on-error: true");
+      expect(deps).toContain("timeout-minutes: 8");
       expect(deps).toContain("run: bunx playwright install-deps chromium webkit");
+      expect(retry).toContain(
+        "if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux' && steps.deps.outcome == 'failure'",
+      );
+      expect(retry).toContain("timeout-minutes: 8");
+    });
+
+    it(`${name} marks the browsers ready only after a setup that worked`, () => {
+      const ready = stepOf(lines, "Browsers ready");
+      expect(ready).toContain("id: ready");
+      expect(
+        ready.some((l) => l.startsWith("if:")),
+        "runs only on success",
+      ).toBe(false);
     });
   }
 });

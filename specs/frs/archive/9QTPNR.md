@@ -39,7 +39,7 @@ All three e2e-ui jobs were cancelled at 30 minutes on 017c826, and the report up
 - AC-9QTPNR.4: A workflow test checks the shard matrix, the single run of the frame-rate and memory steps, and the upload condition.
 - AC-9QTPNR.5: On PR 12 each e2e-ui job finishes in about 20 minutes or less.
 - AC-9QTPNR.6: Each OS runs the Playwright projects that stand in for the engine the app ships there: macOS and Linux run Chromium and WebKit, and Windows, whose app renders with WebView2, runs Chromium only, in the shards and in the frame-rate job. The workflow and the testing spec say why.
-- AC-9QTPNR.7: Both UI jobs cache Playwright's browsers keyed on the OS and the exact Playwright version in the lock file; a miss downloads them in a step with its own 8 minute limit and one retry, and a Linux hit still installs the system libraries. A workflow test checks it.
+- AC-9QTPNR.7: Both UI jobs cache Playwright's browsers keyed on the OS and the exact Playwright version in the lock file; a miss downloads them in a step with its own 8 minute limit and one retry, and a Linux hit still installs the system libraries, with the same limit and retry. Steps that run after a failure, such as the memory test, run only once the browsers are ready. A workflow test checks it.
 
 ## Technical Design
 
