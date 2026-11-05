@@ -54,6 +54,7 @@
     onExportDb,
     controlsLabel,
     controlsInTiles,
+    held = false,
     views,
   }: {
     session: Session;
@@ -85,6 +86,9 @@
     controlsLabel: string | null;
     /** The meter grid shows: each tile carries its meter's controls, so none stay here. */
     controlsInTiles: boolean;
+    /** A logo write holds the meter (AC-MEHQC0.3): no rate change, no connect or
+     * disconnect until it ends. */
+    held?: boolean;
     /** The view tabs, in a strip just under the bar that stays in view with it. They are
      * out of the bar's row, so they never take its room (lib/topBarFit.ts). */
     views?: Snippet;
@@ -245,7 +249,7 @@
   <select
     aria-label="Sample rate"
     title={picker.label ?? undefined}
-    disabled={picker.disabled}
+    disabled={picker.disabled || held}
     value={rateSps}
     onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
   >
@@ -312,7 +316,7 @@
         <button
           type="button"
           class:primary={!session.active}
-          disabled={!session.canToggleConnect}
+          disabled={!session.canToggleConnect || held}
           onclick={onToggleConnect}
         >
           {session.active ? "Disconnect" : "Connect"}

@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::app_log::SessionLog;
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Records, Series, SeriesBuckets};
+use crate::logo::{LogoProgressView, LogoReadView, LogoWrittenView};
 use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
 use crate::recording::{
     self, EndReason, ExportProgress, Limits, Recorder, RecordingEvent, RecordingSummary,
@@ -35,6 +36,7 @@ use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, TempLog, temp_at};
 use crate::trigger::CableView;
 use crate::ui_error::{self, ErrorKind, UiError};
+use powerz_protocol::logo::LogoBlob;
 
 /// Where the live measurements come from (FR 1HHT02), named on the wire
 /// `queue` / `cdc`.
@@ -1237,6 +1239,19 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         }));
     }
 
+    /// Run `f` on the open queue session, timed as blocked meter I/O, its
+    /// error in plain words (the startup-logo commands, FR MEHQC0).
+    pub(crate) fn with_queue_session<R>(
+        &mut self,
+        f: impl FnOnce(&mut Session<GuardedTransport<T>, C>) -> Result<R, session::Error>,
+    ) -> Result<R, UiError> {
+        self.needs_queue_source()?;
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        blocked(self.meter.as_ref(), || f(session)).map_err(|e| session_error(&e))
+    }
+
     /// Records and the PD sniffer use requests that were never checked on
     /// the CDC pipe (memory reads, auth, 0x10), so a CDC session refuses them.
     fn needs_queue_source(&self) -> Result<(), UiError> {
@@ -1735,6 +1750,19 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::DeleteRecords(target, confirm, dir, reply) => {
                 let _ = reply.send(self.delete_records(target, &confirm, &dir));
             }
+            Command::LogoRead(full, reply) => {
+                let _ = reply.send(self.logo_read(full));
+            }
+            Command::LogoUpload(blob, mut send, reply) => {
+                let mut progress = crate::logo::gated(&mut send);
+                let answer = self.logo_upload(&blob, &mut progress);
+                let _ = reply.send(answer);
+            }
+            Command::LogoRemove(mut send, reply) => {
+                let mut progress = crate::logo::gated(&mut send);
+                let answer = self.logo_remove(&mut progress);
+                let _ = reply.send(answer);
+            }
             Command::ClearHistory(claimed, reply) => {
                 if !claimed.swap(true, Ordering::SeqCst) {
                     self.clear_history();
@@ -1803,6 +1831,19 @@ enum Command {
         PathBuf,
         mpsc::Sender<Result<RecordDeleteView, UiError>>,
     ),
+    /// Read the startup logo area (FR MEHQC0); `true` reads the image too.
+    LogoRead(bool, mpsc::Sender<Result<LogoReadView, UiError>>),
+    /// Upload a startup logo, progress batched to the sender (FR MEHQC0).
+    LogoUpload(
+        Box<LogoBlob>,
+        LogoProgressFn,
+        mpsc::Sender<Result<LogoWrittenView, UiError>>,
+    ),
+    /// Remove the startup logo, progress batched to the sender (FR MEHQC0).
+    LogoRemove(
+        LogoProgressFn,
+        mpsc::Sender<Result<LogoWrittenView, UiError>>,
+    ),
     /// Send out the batched samples, then discard the session history;
     /// whoever claims the flag first (the worker or the caller that gave up
     /// waiting) does the clear, so it happens exactly once.
@@ -1852,6 +1893,9 @@ impl std::fmt::Debug for Command {
                 .field(target)
                 .field(dir)
                 .finish(),
+            Command::LogoRead(full, _) => f.debug_tuple("LogoRead").field(full).finish(),
+            Command::LogoUpload(..) => f.write_str("LogoUpload"),
+            Command::LogoRemove(..) => f.write_str("LogoRemove"),
             Command::ClearHistory(..) => f.write_str("ClearHistory"),
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::PdCapturing(_) => f.write_str("PdCapturing"),
@@ -1862,6 +1906,9 @@ impl std::fmt::Debug for Command {
 }
 
 type ProgressFn = Box<dyn FnMut(ExportProgress) + Send>;
+
+/// Where a logo command's batched progress goes (FR MEHQC0).
+pub type LogoProgressFn = Box<dyn FnMut(LogoProgressView) + Send>;
 
 /// Where a command that starts an export answers.
 type ExportReply = mpsc::Sender<Result<ExportJob, UiError>>;
@@ -2175,6 +2222,10 @@ const RECORD_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// (up to the whole record area) before the table write.
 const RECORD_DELETE_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How long a logo upload may take: up to 469 chunks of up to a second
+/// each, then the full read-back (FR MEHQC0).
+const LOGO_WRITE_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Sends rate, recording and export requests to a running worker and
 /// answers history and statistics queries from its session store. It works
 /// without the [`WorkerHandle`], so a caller can wait for the answer without
@@ -2397,6 +2448,42 @@ impl WorkerControl {
         let (reply, answer) = mpsc::channel();
         let command = Command::WriteSettings(changes.clone(), reply);
         self.logged(self.ask(command, &answer).flatten())
+    }
+
+    /// What the meter's startup-logo area holds; with `full`, the image
+    /// too (FR MEHQC0).
+    pub fn logo_read(&self, full: bool) -> Result<LogoReadView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask_within(
+            Command::LogoRead(full, reply),
+            &answer,
+            RECORD_DOWNLOAD_TIMEOUT,
+        )?
+    }
+
+    /// Upload `blob` as the startup logo; batched progress goes to
+    /// `progress` (FR MEHQC0).
+    pub fn logo_upload(
+        &self,
+        blob: LogoBlob,
+        progress: LogoProgressFn,
+    ) -> Result<LogoWrittenView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        let command = Command::LogoUpload(Box::new(blob), progress, reply);
+        self.logged(
+            self.ask_within(command, &answer, LOGO_WRITE_TIMEOUT)
+                .flatten(),
+        )
+    }
+
+    /// Remove the startup logo; batched progress goes to `progress` (FR MEHQC0).
+    pub fn logo_remove(&self, progress: LogoProgressFn) -> Result<LogoWrittenView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        let command = Command::LogoRemove(progress, reply);
+        self.logged(
+            self.ask_within(command, &answer, LOGO_WRITE_TIMEOUT)
+                .flatten(),
+        )
     }
 
     /// List the meter's offline records.

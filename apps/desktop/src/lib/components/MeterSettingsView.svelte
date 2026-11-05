@@ -12,17 +12,20 @@
   let {
     panel,
     connected,
+    held = false,
   }: {
     panel: MeterSettingsPanel;
     /** A meter is connected, so its settings can be read. */
     connected: boolean;
+    /** A logo write holds the meter (AC-MEHQC0.3): nothing is read or applied until it ends. */
+    held?: boolean;
   } = $props();
 
   const rows = $derived(panel.settings ? meterSettingRows(panel.settings) : []);
   /** Fields whose typed value is not valid, so Apply stays disabled. */
   let invalid = $state<Record<string, boolean>>({});
   const canApply = $derived(
-    panel.summary.length > 0 && !panel.applying && !Object.values(invalid).some(Boolean),
+    !held && panel.summary.length > 0 && !panel.applying && !Object.values(invalid).some(Boolean),
   );
 
   function startEdit(): void {
@@ -50,7 +53,7 @@
         <button
           type="button"
           onclick={() => void panel.refresh()}
-          disabled={!connected || panel.loading}
+          disabled={!connected || panel.loading || held}
         >
           Refresh
         </button>

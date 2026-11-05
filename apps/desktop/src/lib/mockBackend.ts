@@ -7,6 +7,10 @@
  */
 
 import type {
+  LogoPreview,
+  LogoProgress,
+  LogoRead,
+  LogoWritten,
   AppInfo,
   AttachedSession,
   BackendEvent,
@@ -668,6 +672,85 @@ export const MOCK_RECORDING_FILE = {
 /** Readable rows past the limit in a `truncated` file. */
 const MOCK_LEFT_OUT = 2_500_000;
 
+/** A scripted logo picture (FR MEHQC0): `small` chooses one with a side below 48. */
+export type LogoFile = "small";
+
+/** `?logofile=small` in the page URL chooses the small logo picture (FR MEHQC0);
+ * anything else is ignored. */
+export function logoFileFromUrl(search: string | undefined): LogoFile | null {
+  return urlParam(search, "logofile") === "small" ? "small" : null;
+}
+
+/** The logo picture the mock chooses (FR MEHQC0): 100 × 60. */
+export const MOCK_LOGO_FILE = "/mock/logo.png";
+/** The small logo picture (`?logofile=small`): 240 × 24 once fitted, below 48 high. */
+export const MOCK_LOGO_SMALL_FILE = "/mock/logo-small.png";
+
+/** The size each mock logo picture encodes to. */
+const MOCK_LOGO_SIZES: Record<string, { width: number; height: number }> = {
+  [MOCK_LOGO_FILE]: { width: 100, height: 60 },
+  [MOCK_LOGO_SMALL_FILE]: { width: 240, height: 24 },
+};
+
+/** A gradient of `width × height` as RGBA8888, base64. */
+function mockLogoPixels(width: number, height: number): string {
+  let out = "";
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      out += String.fromCharCode((x * 2) & 0xff, (y * 4) & 0xff, ((x + y) * 3) & 0xff, 0xff);
+    }
+  }
+  return btoa(out);
+}
+
+/** The preview of mock logo picture `path` like the backend's (16-byte header, 2 bytes a
+ * pixel opaque or 3 with alpha, padded to 256-byte chunks). */
+function mockLogoPreview(path: string, alpha: boolean): LogoPreview | null {
+  const size = MOCK_LOGO_SIZES[path];
+  if (size === undefined) return null;
+  const { width, height } = size;
+  const blobSize = 16 + width * height * (alpha ? 3 : 2);
+  const chunks = Math.ceil(blobSize / 256);
+  return {
+    width,
+    height,
+    mode: alpha ? "alpha" : "opaque",
+    blob_size: blobSize,
+    padded_size: chunks * 256,
+    chunks,
+    small_side_warning: width < 48 || height < 48,
+    rgba: mockLogoPixels(width, height),
+  };
+}
+
+/** {@link mockLogoPreview}, refusing any other path like a file that is no picture. */
+function mockLogoPicture(path: string, alpha: boolean): LogoPreview {
+  const preview = mockLogoPreview(path, alpha);
+  if (preview === null) throw usage(`${path}: cannot load image file: not a picture`);
+  return preview;
+}
+
+/** `?logofault=<k>` in the page URL fails a logo upload at chunk `k` (0-based, FR
+ * MEHQC0); anything but a whole number ≥ 0 is ignored. */
+export function logoFaultFromUrl(search: string | undefined): number | null {
+  const raw = urlParam(search, "logofault");
+  if (raw === null || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+/** Least gap between two mock logo progress messages, ms: at most 20 a second. */
+const MOCK_LOGO_PROGRESS_MS = 50;
+
+/** Bytes per read-back read, as the backend reads the logo window. */
+const MOCK_LOGO_READ_BYTES = 2048;
+
+/** What the demo meter's logo area holds (FR MEHQC0). */
+type MockLogoArea =
+  | { status: "empty" }
+  | { status: "unrecognised" }
+  | { status: "logo"; width: number; height: number; mode: "opaque" | "alpha"; rgba: string };
+
 /** Options of a {@link MockBackend}. */
 export interface MockOptions {
   /** PD records to seed when the capture first starts. */
@@ -680,6 +763,10 @@ export interface MockOptions {
   recordingFileFault?: RecordingFileFault | null;
   /** The history's full-resolution limit (FR AXHK2W); none (the default) never folds. */
   historyFullSamples?: number | null;
+  /** The logo picture the open dialog chooses (FR MEHQC0). */
+  logoFile?: LogoFile | null;
+  /** A logo upload fails at this chunk (0-based) (FR MEHQC0); none (the default) never. */
+  logoFault?: number | null;
 }
 
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
@@ -769,6 +856,8 @@ interface Running {
   /** `pd-start-refused`: a trigger session ran on this connection, so the meter refuses
    * a PD capture Start until a replug [device]. */
   pdStartRefused?: boolean;
+  /** The settings were read on this connection, which a logo write needs (FR MEHQC0). */
+  settingsRead?: boolean;
 }
 
 interface MockRecording {
@@ -868,6 +957,7 @@ export const MOCK_MODES = [
   "firmware-other-model",
   "firmware-bad-file",
   "firmware-running",
+  "logo-other-model",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -958,12 +1048,13 @@ function connectedStatus(
   rateSps: number | null,
   sessionId = 1,
   firmwareVersion = "2.0.6",
+  model = "KM003C",
 ): BackendEvent {
   return {
     type: "status",
     data: {
       state: "connected",
-      model: "KM003C",
+      model,
       firmware_version: firmwareVersion,
       bootloader_version: "2.5",
       mode: "application",
@@ -1267,7 +1358,11 @@ const DEMO_WRITABLE_SETTINGS: Readonly<Record<string, readonly string[] | null>>
   theme: ["blue", "green", "pink", "orange", "yellow", "dark green", "cyan"],
   rotation: ["0°", "90°", "180°", "270°"],
   sample_rate: ["2 SPS", "10 SPS", "50 SPS", "1000 SPS"],
+  startup_duration: ["off", "1 s", "3 s", "5 s"],
 };
+
+/** The settings row a writable key changes, where it is not the key itself (FR MEHQC0). */
+const DEMO_SETTING_ROW: Readonly<Record<string, string>> = { startup_duration: "startup_logo" };
 
 /** How the demo meter shows `code` for writable `key`, or null when it is out of range. */
 function demoSettingText(key: string, code: number): string | null {
@@ -1395,6 +1490,8 @@ export class MockBackend {
   #meterSettings: MeterSettingField[] = DEMO_METER_SETTINGS.map((f) => ({ ...f }));
   /** Offline-record downloads so far (FR 1HHT00). */
   #recordDownloads = 0;
+  /** The demo meter's logo area, which upload and Remove change (FR MEHQC0). */
+  #logoArea: MockLogoArea = { status: "empty" };
   /** The demo meter's record table, which a delete changes (FR JKWT3V). */
   #records: DemoRecord[] = [...DEMO_RECORDS];
   /** Record backups written so far, for their folder names (FR JKWT3V). */
@@ -1417,6 +1514,8 @@ export class MockBackend {
       settingsFault: settingsFaultFromUrl(pageSearch()),
       recordingFileFault: recordingFileFaultFromUrl(pageSearch()),
       historyFullSamples: foldAtFromUrl(pageSearch()),
+      logoFile: logoFileFromUrl(pageSearch()),
+      logoFault: logoFaultFromUrl(pageSearch()),
     },
   ) {
     this.#mode = mode;
@@ -1607,7 +1706,15 @@ export class MockBackend {
     const serial = isMeter ? MOCK_REPLUG.serial : this.#freeDemoSerial();
     const sessionId = this.#nextSessionId++;
     // Like the worker: a locked session's rate is unknown until measured.
-    onEvent(connectedStatus(serial, locked ? null : rateSps, sessionId, this.#firmwareVersion));
+    onEvent(
+      connectedStatus(
+        serial,
+        locked ? null : rateSps,
+        sessionId,
+        this.#firmwareVersion,
+        this.#mode === "logo-other-model" ? "KM002C" : "KM003C",
+      ),
+    );
     if (locked) {
       onEvent({
         type: "status",
@@ -2212,7 +2319,7 @@ export class MockBackend {
   /** The demo meter's settings: the fields of the captured FW 2.0.6 block, all
    * tagged inferred (FR 1HHT01). */
   async meterSettings(): Promise<MeterSettings> {
-    this.#open();
+    this.#open().settingsRead = true;
     this.#meterSettingsReads += 1;
     return { fields: this.#meterSettings.map((f) => ({ ...f })) };
   }
@@ -2232,7 +2339,7 @@ export class MockBackend {
       }
       const text = demoSettingText(key, code);
       if (text === null) throw usage(`${key} = ${code} is out of range.`);
-      shown.set(key, text);
+      shown.set(DEMO_SETTING_ROW[key] ?? key, text);
     }
     this.#meterSettingsWrites += 1;
     const next = this.#meterSettings.map((f) => ({ ...f, value: shown.get(f.key) ?? f.value }));
@@ -2395,6 +2502,126 @@ export class MockBackend {
       stored_size: 456912,
       release_notes_en: "1. Demo note: improved PD capture.\n2. Demo note: minor fixes.",
     };
+  }
+
+  /** There is no open dialog: "chooses" a synthetic logo picture (FR MEHQC0), the small
+   * one with `?logofile=small`. */
+  async logoChoose(): Promise<string | null> {
+    return this.#options.logoFile === "small" ? MOCK_LOGO_SMALL_FILE : MOCK_LOGO_FILE;
+  }
+
+  /** Previews a mock logo picture like the backend (FR MEHQC0, AC .1); any other path is
+   * refused like a file that is no picture. */
+  async logoPreview(path: string, alpha: boolean): Promise<LogoPreview> {
+    return mockLogoPicture(path, alpha);
+  }
+
+  /** What the logo area of meter `deviceId` holds (FR MEHQC0, AC .7); with `full`, the
+   * stored image too. */
+  async logoRead(deviceId: string, full: boolean): Promise<LogoRead> {
+    this.#logoSession(deviceId);
+    const a = this.#logoArea;
+    if (a.status !== "logo") {
+      return { status: a.status, width: null, height: null, mode: null, image: null };
+    }
+    return {
+      status: "logo",
+      width: a.width,
+      height: a.height,
+      mode: a.mode,
+      image: full ? a.rgba : null,
+    };
+  }
+
+  /** Uploads mock picture `path` like the backend (FR MEHQC0, AC .3): chunk progress,
+   * then read-back progress, at least 50 ms apart; `logoFault` stops it at that chunk. */
+  async logoUpload(
+    deviceId: string,
+    path: string,
+    alpha: boolean,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten> {
+    const s = this.#logoSession(deviceId);
+    const preview = mockLogoPicture(path, alpha);
+    const written = this.#logoWritable(s);
+    const total = preview.chunks;
+    const fault = this.#options.logoFault ?? null;
+    const step = Math.max(1, Math.ceil(total / 8));
+    for (let done = 0; done < total;) {
+      const next = Math.min(total, done + step);
+      if (fault !== null && fault < next) {
+        if (fault > done) onProgress({ step: "chunks", done: fault, total });
+        // Chunk 0 carries the header, so chunks 0..k-1 landed read as the logo it describes.
+        if (fault > 0) {
+          this.#logoArea = {
+            status: "logo",
+            width: preview.width,
+            height: preview.height,
+            mode: preview.mode,
+            rgba: preview.rgba,
+          };
+        }
+        throw {
+          kind: "protocol",
+          message: `Writing the logo stopped at chunk ${fault}: REJECT.`,
+          hint: "The logo flag was not set, so the meter keeps its old screen. Try again.",
+        } satisfies UiError;
+      }
+      done = next;
+      await sleep(MOCK_LOGO_PROGRESS_MS);
+      onProgress({ step: "chunks", done, total });
+    }
+    await this.#logoReadBack(preview.padded_size, onProgress);
+    this.#logoArea = {
+      status: "logo",
+      width: preview.width,
+      height: preview.height,
+      mode: preview.mode,
+      rgba: preview.rgba,
+    };
+    return written;
+  }
+
+  /** Removes the demo meter's logo like the backend (FR MEHQC0, AC .4). */
+  async logoRemove(
+    deviceId: string,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten> {
+    const written = this.#logoWritable(this.#logoSession(deviceId));
+    await sleep(MOCK_LOGO_PROGRESS_MS);
+    onProgress({ step: "chunks", done: 1, total: 1 });
+    this.#logoArea = { status: "empty" };
+    await this.#logoReadBack(16, onProgress);
+    return written;
+  }
+
+  /** The session of meter `deviceId`; refused when it is not connected. */
+  #logoSession(deviceId: string): Running {
+    const s = this.#sessions.find((x) => x.id === deviceId || x.deviceId === deviceId);
+    if (!s) throw usage("No meter is connected.");
+    return s;
+  }
+
+  /** What a logo write on `s` will report; refused like the backend before the settings
+   * were read and on a KM002C. */
+  #logoWritable(s: Running): LogoWritten {
+    if (!s.settingsRead) {
+      throw usage("The logo was not written: SETTINGS was not read in this session.");
+    }
+    if (this.#mode === "logo-other-model") {
+      throw usage("The logo was not written: the meter is a KM002C, logo upload needs a KM003C.");
+    }
+    const duration = this.#meterSettings.find((f) => f.key === "startup_logo")?.value ?? "off";
+    return { startup_duration: duration, startup_screen_off: duration === "off" };
+  }
+
+  /** Read-back progress of `bytes`, one read every 50 ms. */
+  async #logoReadBack(bytes: number, onProgress: (progress: LogoProgress) => void): Promise<void> {
+    const total = Math.ceil(bytes / MOCK_LOGO_READ_BYTES);
+    for (let done = 1; done <= total; done++) {
+      await sleep(MOCK_LOGO_PROGRESS_MS);
+      onProgress({ step: "read_back", done, total });
+    }
   }
 
   /** There is no open dialog: "chooses" a synthetic firmware file (FR V9SK55). */

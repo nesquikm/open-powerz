@@ -17,6 +17,7 @@
   let {
     label,
     session,
+    held = false,
     recording,
     exportJob,
     notices,
@@ -33,6 +34,8 @@
   }: {
     label: string;
     session: Session;
+    /** A logo write holds the meter (AC-MEHQC0.3): no rate change, no disconnect. */
+    held?: boolean;
     recording: Recording;
     exportJob: ExportJob;
     /** This meter's notices. */
@@ -59,7 +62,7 @@
   <select
     aria-label="Sample rate"
     title={picker.label ?? undefined}
-    disabled={picker.disabled}
+    disabled={picker.disabled || held}
     value={rateSps}
     onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
   >
@@ -104,7 +107,12 @@
       value={exportJob.total > 0 ? exportJob.done : undefined}
     ></progress>
   {/if}
-  <button type="button" class="disconnect" disabled={session.flashing} onclick={onDisconnect}>
+  <button
+    type="button"
+    class="disconnect"
+    disabled={session.flashing || held}
+    onclick={onDisconnect}
+  >
     Disconnect
   </button>
 </div>

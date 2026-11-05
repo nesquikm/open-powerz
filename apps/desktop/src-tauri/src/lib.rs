@@ -8,6 +8,7 @@ pub mod e2e;
 pub mod firmware_file;
 pub mod firmware_flash;
 pub mod history;
+pub mod logo;
 pub mod pd_capture;
 pub mod pd_import;
 pub mod recording;
@@ -1066,6 +1067,81 @@ async fn firmware_inspect(path: String) -> Result<firmware_file::FirmwareFileInf
     blocking(move || firmware_file::inspect_firmware_file(std::path::Path::new(&path))).await
 }
 
+/// Ask for a picture to use as the startup logo (FR MEHQC0, AC .1): PNG,
+/// JPEG, BMP or a raw logo file; resolves to its path, or `null` when the
+/// dialog was cancelled.
+#[tauri::command]
+async fn logo_choose(app: tauri::AppHandle) -> Result<Option<String>, UiError> {
+    blocking(move || {
+        let path = choose_open_path(&app, "Logo image", &["png", "jpg", "jpeg", "bmp", "bin"])?;
+        Ok(path.map(|p| p.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
+/// The startup logo `path` encodes to, opaque or (`alpha`) transparent
+/// (FR MEHQC0, AC .1); needs no meter and sends nothing to one.
+#[tauri::command]
+async fn logo_preview(path: String, alpha: bool) -> Result<logo::LogoPreviewView, UiError> {
+    blocking(move || logo::preview_file(Path::new(&path), alpha)).await
+}
+
+/// What meter `device_id`'s startup-logo area holds (FR MEHQC0, AC .7):
+/// empty, a logo (its size and mode) or unrecognised data; with `full`, the
+/// stored image too. Only memory reads go out.
+#[tauri::command]
+async fn logo_read(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    full: bool,
+) -> Result<logo::LogoReadView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || control(&state, device_id.as_deref())?.logo_read(full)).await
+}
+
+/// Upload the picture at `path` (opaque or `alpha`) as meter `device_id`'s
+/// startup logo (FR MEHQC0, AC .3): chunks, flag, full read-back, with
+/// progress batched to at most 20 messages a second on `on_progress`.
+#[tauri::command]
+async fn logo_upload(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    path: String,
+    alpha: bool,
+    on_progress: Channel<logo::LogoProgressView>,
+) -> Result<logo::LogoWrittenView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let device = device_id.as_deref();
+        let blob = logo::blob_from_file(Path::new(&path), alpha)
+            .inspect_err(|error| log_failure(&state, device, error))?;
+        logged_control(&state, device)?.logo_upload(blob, logo_progress(on_progress))
+    })
+    .await
+}
+
+/// A logo write's batched progress, sent on `channel` (FR MEHQC0).
+fn logo_progress(channel: Channel<logo::LogoProgressView>) -> worker::LogoProgressFn {
+    Box::new(move |p| {
+        let _ = channel.send(p);
+    })
+}
+
+/// Remove meter `device_id`'s startup logo so the built-in one shows again
+/// (FR MEHQC0, AC .4), with progress batched like an upload's.
+#[tauri::command]
+async fn logo_remove(
+    state: Shared<'_>,
+    device_id: Option<String>,
+    on_progress: Channel<logo::LogoProgressView>,
+) -> Result<logo::LogoWrittenView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        logged_control(&state, device_id.as_deref())?.logo_remove(logo_progress(on_progress))
+    })
+    .await
+}
+
 /// Ask for a firmware container to update the meter with (FR V9SK55, AC .2);
 /// resolves to its path, or `null` when the dialog was cancelled.
 #[tauri::command]
@@ -1792,6 +1868,11 @@ pub fn run() {
             firmware_flash,
             firmware_cancel,
             firmware_flash_status,
+            logo_choose,
+            logo_preview,
+            logo_read,
+            logo_upload,
+            logo_remove,
             trigger_open,
             trigger_detect,
             trigger_list,

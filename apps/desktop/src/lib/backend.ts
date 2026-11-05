@@ -789,8 +789,9 @@ export async function meterSettings(): Promise<MeterSettings> {
 export type EditableSettingKey =
   "language" | "brightness" | "dim_timeout" | "theme" | "rotation" | "sample_rate";
 
-/** A settings change: the new wire code of each changed field (FR JKWT3W). */
-export type SettingChanges = Partial<Record<EditableSettingKey, number>>;
+/** A settings change: the new wire code of each changed field (FR JKWT3W); the Startup
+ * logo view also sets `startup_duration` (1..3 for 1, 3 or 5 s, FR MEHQC0, AC .5). */
+export type SettingChanges = Partial<Record<EditableSettingKey | "startup_duration", number>>;
 
 /** Writes `changes` to the connected meter (one settings write between two reads) and
  * resolves to the settings as read back; rejects with the backend's error, e.g. when
@@ -949,6 +950,97 @@ export async function firmwareInspect(path: string): Promise<FirmwareFileInfo> {
 export async function firmwareChoose(): Promise<string | null> {
   if (mock) return mock.firmwareChoose();
   return invoke<string | null>("firmware_choose");
+}
+
+/** The startup logo a picture encodes to (FR MEHQC0, AC .1): the exact pixels and
+ * numbers that would be written. */
+export interface LogoPreview {
+  width: number;
+  height: number;
+  mode: "opaque" | "alpha";
+  /** Unpadded blob size, bytes. */
+  blob_size: number;
+  /** Padded (written) size, bytes. */
+  padded_size: number;
+  /** 256-byte chunks written. */
+  chunks: number;
+  /** Either side is below 48. */
+  small_side_warning: boolean;
+  /** The blob decoded back to RGBA8888 (`width * height * 4` bytes), base64. */
+  rgba: string;
+}
+
+/** One batched progress message of a logo write (FR MEHQC0, AC .3). */
+export interface LogoProgress {
+  step: "chunks" | "read_back";
+  done: number;
+  total: number;
+}
+
+/** What a logo upload or Remove left on the meter (FR MEHQC0, AC .4, .5). */
+export interface LogoWritten {
+  startup_duration: string;
+  startup_screen_off: boolean;
+}
+
+/** What the meter's logo area holds (FR MEHQC0, AC .7). */
+export interface LogoRead {
+  status: "empty" | "logo" | "unrecognised";
+  width: number | null;
+  height: number | null;
+  mode: "opaque" | "alpha" | null;
+  /** The stored logo as RGBA8888, base64, when a full read was asked for. */
+  image: string | null;
+}
+
+/** Opens the open dialog filtered to logo pictures (PNG, JPEG, BMP, raw `.bin`) (FR
+ * MEHQC0, AC .1). Resolves to the chosen path, or `null` when the dialog was cancelled. */
+export async function logoChoose(): Promise<string | null> {
+  if (mock) return mock.logoChoose();
+  return invoke<string | null>("logo_choose");
+}
+
+/** The startup logo the picture at `path` encodes to, opaque or (`alpha`) transparent
+ * (FR MEHQC0, AC .1); needs no meter. A file that is no picture rejects with a usage
+ * error. */
+export async function logoPreview(path: string, alpha: boolean): Promise<LogoPreview> {
+  if (mock) return mock.logoPreview(path, alpha);
+  return invoke<LogoPreview>("logo_preview", { path, alpha });
+}
+
+/** What meter `deviceId`'s logo area holds (FR MEHQC0, AC .7); with `full`, the stored
+ * image too. Only memory reads go out. */
+export async function logoRead(deviceId: string, full: boolean): Promise<LogoRead> {
+  if (mock) return mock.logoRead(deviceId, full);
+  return invoke<LogoRead>("logo_read", { deviceId, full });
+}
+
+/** Uploads the picture at `path` (opaque or `alpha`) to meter `deviceId` as its startup
+ * logo (FR MEHQC0, AC .3): chunks, flag, then a full read-back. Batched progress (at most
+ * 20 a second) goes to `onProgress`; rejects with the backend's error, naming the chunk
+ * a failed write stopped at. Nothing is retried. */
+export async function logoUpload(
+  deviceId: string,
+  path: string,
+  alpha: boolean,
+  onProgress: (progress: LogoProgress) => void,
+): Promise<LogoWritten> {
+  if (mock) return mock.logoUpload(deviceId, path, alpha, onProgress);
+  const channel = new Channel<LogoProgress>();
+  channel.onmessage = onProgress;
+  return invoke<LogoWritten>("logo_upload", { deviceId, path, alpha, onProgress: channel });
+}
+
+/** Removes meter `deviceId`'s startup logo, so the built-in one shows again (FR MEHQC0,
+ * AC .4); progress goes to `onProgress` like an upload's. */
+export async function logoRemove(
+  deviceId: string,
+  onProgress: (progress: LogoProgress) => void,
+): Promise<LogoWritten> {
+  if (mock) return mock.logoRemove(deviceId, onProgress);
+  const channel = new Channel<LogoProgress>();
+  channel.onmessage = onProgress;
+  return invoke<LogoWritten>("logo_remove", { deviceId, onProgress: channel });
 }
 
 /** One stage of a firmware update as the backend reports it (FR V9SK55, AC .4); the

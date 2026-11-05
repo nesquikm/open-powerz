@@ -35,7 +35,7 @@ The desktop app offers preview, upload and remove of the startup logo, with type
 
 ## Technical Design
 
-Backend: `logo.rs` in `src-tauri` with `logo_preview`, `logo_read`, `logo_upload`, `logo_remove` commands run on the device worker, progress over `tauri::ipc::Channel`. UI: `StartupLogoView.svelte`, `LogoConfirmDialog.svelte`, `lib/logo.svelte.ts` store; `backend.ts` and `mockBackend.ts` gain the commands.
+Backend: `logo.rs` in `src-tauri` with `logo_choose`, `logo_preview`, `logo_read`, `logo_upload`, `logo_remove` commands run on the device worker, progress over `tauri::ipc::Channel`. UI: `StartupLogoView.svelte`, `LogoConfirmDialog.svelte`, `lib/logo.svelte.ts` store; `backend.ts` and `mockBackend.ts` gain the commands.
 
 ## Testing
 

@@ -9,6 +9,11 @@
     firmwareCancel,
     firmwareFlashStatus,
     firmwareChoose,
+    logoChoose,
+    logoPreview,
+    logoRead,
+    logoRemove,
+    logoUpload,
     firmwareFlash,
     firmwareInspect,
     pdImport,
@@ -71,6 +76,8 @@
   import RecordingFileView from "./lib/components/RecordingFileView.svelte";
   import { RecordingFile } from "./lib/recordingFile.svelte";
   import RecordsView from "./lib/components/RecordsView.svelte";
+  import StartupLogoView from "./lib/components/StartupLogoView.svelte";
+  import { StartupLogoState } from "./lib/logo.svelte";
   import { RecordsPanel } from "./lib/records.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
   import TriggerView from "./lib/components/TriggerView.svelte";
@@ -260,6 +267,7 @@
 
   /** The rate picker of a tile: acts on that meter only. */
   function selectMeterRate(entry: MeterEntry, sps: number): void {
+    if (meterHeld) return;
     const refused = (err: unknown): void => raiseError(entry.listing.id, err);
     if (entry.session === session) {
       void selectRate(sps, refused);
@@ -353,6 +361,7 @@
   /** "Disconnect" on a tile: ends that meter's session only. A tile whose meter is
    * unplugged (or whose session failed) stops waiting for it and leaves the grid. */
   function disconnectMeter(id: string): void {
+    if (meterHeld) return;
     const entry = meters.get(id);
     if (entry && !entry.session.active) {
       void commandsOf(id)
@@ -481,14 +490,15 @@
   /** The recording file in the File tab (FR AXHK2S). */
   const recordingFile = new RecordingFile();
   /** The view the tabs show. */
-  let view: "meter" | "pd" | "trigger" | "records" | "firmware" | "file" = $state("meter");
+  let view: "meter" | "pd" | "trigger" | "records" | "logo" | "firmware" | "file" = $state("meter");
   /** The grid shows, so each tile carries its meter's controls (AC-4PJRVM.1). */
   const controlsInTiles = $derived(view === "meter" && meters.showGrid);
-  const ALL_VIEWS = ["meter", "pd", "records", "trigger", "firmware", "file"] as const;
+  const ALL_VIEWS = ["meter", "pd", "records", "logo", "trigger", "firmware", "file"] as const;
   const ALL_VIEW_TABS = [
     { id: "meter", label: "Meter" },
     { id: "pd", label: "PD analyzer" },
     { id: "records", label: "Records" },
+    { id: "logo", label: "Startup logo" },
     { id: "trigger", label: "Trigger" },
     { id: "firmware", label: "Firmware" },
     { id: "file", label: "File" },
@@ -498,6 +508,8 @@
   /** The File tab exists only while a file is open (FR AXHK2S). */
   function tabShown(id: string): boolean {
     if (id === "firmware") return advancedFirmware;
+    // The Startup logo tab is for a connected meter (FR MEHQC0).
+    if (id === "logo") return meterConnected;
     return id !== "file" || recordingFile.summary !== null;
   }
   const VIEWS = $derived(ALL_VIEWS.filter(tabShown));
@@ -509,6 +521,38 @@
     saveAdvancedFirmware(on, browserStorage());
     if (!on && view === "firmware") view = "meter";
   }
+  /** The meter a logo write goes to: the one the full view shows. Named when the write
+   * starts, so the write keeps going to it whatever the view or meter list does next. */
+  function logoMeterId(): string {
+    const id = primaryId ?? session.selectedId;
+    if (id === null) throw toUiError({ kind: "usage", message: "No meter is connected." });
+    return id;
+  }
+  /** The Startup logo view's state (FR MEHQC0); the preview needs no meter. The write
+   * runs in this store, not in the view, so leaving the view does not stop it. */
+  const startupLogo = new StartupLogoState(
+    {
+      choose: () => logoChoose(),
+      preview: (path, alpha) => logoPreview(path, alpha),
+      read: (full) => logoRead(logoMeterId(), full),
+      upload: (path, alpha, onProgress) => logoUpload(logoMeterId(), path, alpha, onProgress),
+      remove: (onProgress) => logoRemove(logoMeterId(), onProgress),
+      writeSettings: async (changes) => {
+        // The block as read back, shown by the settings panel too, as its Apply does.
+        const after = await act().meterSettingsWrite(changes);
+        settingsPanel.settings = after;
+        return after;
+      },
+    },
+    () => ({ model: session.details?.model ?? null, settings: settingsPanel.settings }),
+  );
+  $effect(() => {
+    if (view === "logo" && !meterConnected) untrack(() => (view = "meter"));
+  });
+  /** A logo write holds every meter (AC-MEHQC0.3): nothing else is sent to one until it
+   * ends. The controls that send are disabled, and the PD analyzer, Trigger and Records
+   * tabs are held as during a firmware update. */
+  const meterHeld = $derived(startupLogo.busy);
   /** The recorder's options dialog (FR AXHK2R). */
   let recorderSettings = $state(loadRecorderSettings(browserStorage()));
   let recorderOptionsOpen = $state(false);
@@ -608,7 +652,7 @@
       firmware.busy && (!session.active || session.selectedId === firmware.updatingId);
   });
   function tabDisabled(id: string): boolean {
-    return firmware.busy && (id === "pd" || id === "trigger" || id === "records");
+    return (firmware.busy || meterHeld) && (id === "pd" || id === "trigger" || id === "records");
   }
   function selectView(id: string): void {
     if (tabDisabled(id)) return;
@@ -1058,7 +1102,7 @@
 
   async function toggleConnection(): Promise<void> {
     // A second press while a connect is still pending would race it.
-    if (!session.canToggleConnect) return;
+    if (!session.canToggleConnect || meterHeld) return;
     if (session.active) {
       if (disconnecting) return;
       disconnecting = true;
@@ -1091,6 +1135,7 @@
     sps: number,
     onFailed: (err: unknown) => void = (err) => session.reportError(toUiError(err)),
   ): Promise<void> {
+    if (meterHeld) return;
     // The picker is disabled while recording; the keys 1–4 follow the same lock.
     // A meter that set its own rate stays locked after the recording too: the backend's
     // own refusal says so instead.
@@ -1274,6 +1319,7 @@
     onExportDb={() => exportHistory(toDb)}
     controlsLabel={topBarControlsLabel}
     {controlsInTiles}
+    held={meterHeld}
     rateSps={session.rateSps ?? requestedRateSps}
     source={requestedSource}
     onSelectSource={(source) => (requestedSource = source)}
@@ -1405,7 +1451,7 @@
           deps={statsDeps}
           canReset={canRecord}
         >
-          <MeterSettingsView panel={settingsPanel} connected={meterConnected} />
+          <MeterSettingsView panel={settingsPanel} connected={meterConnected} held={meterHeld} />
         </StatsPanel>
       </div>
     </div>
@@ -1413,6 +1459,7 @@
       <MeterGrid
         {meters}
         {hideSerial}
+        held={meterHeld}
         onExpand={expandMeter}
         onDisconnect={disconnectMeter}
         {recordingOf}
@@ -1499,6 +1546,12 @@
           onClose={() => void closeRecording()}
           onError={(err) => session.reportError(toUiError(err))}
         />
+      </div>
+    {/if}
+    {#if view === "logo" && meterConnected}
+      <div class="logo-view" role="tabpanel" id="view-logo" aria-labelledby="tab-logo">
+        <h2>Startup logo</h2>
+        <StartupLogoView logo={startupLogo} />
       </div>
     {/if}
     {#if view === "firmware" && advancedFirmware}
@@ -1647,6 +1700,7 @@
     display: none;
   }
   .firmware-view,
+  .logo-view,
   .records-view,
   .file-view {
     padding: 1rem;

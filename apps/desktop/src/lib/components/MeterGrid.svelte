@@ -12,6 +12,7 @@
   let {
     meters,
     hideSerial,
+    held = false,
     onExpand,
     onDisconnect,
     recordingOf,
@@ -28,6 +29,8 @@
     meters: Meters;
     /** The Hide serial numbers switch (FR AXHK2Q). */
     hideSerial: boolean;
+    /** A logo write holds every meter (AC-MEHQC0.3): the tiles' sending controls are off. */
+    held?: boolean;
     /** "Expand": meter `id` in the full single-meter view. */
     onExpand: (id: string) => void;
     /** "Disconnect": ends meter `id`'s session only (AC-1HHT03.3). */
@@ -71,6 +74,7 @@
       <MeterControls
         label={controlsLabel(title)}
         session={entry.session}
+        {held}
         recording={recordingOf(entry)}
         exportJob={exportJobOf(entry)}
         notices={meters.notices.of(entry.listing.id)}
