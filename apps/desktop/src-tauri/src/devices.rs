@@ -255,6 +255,30 @@ impl Transport for AppTransport {
         }
     }
 
+    fn transact_logo_chunk(
+        &mut self,
+        plain: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        match self {
+            AppTransport::Demo(t) => t.transact_logo_chunk(plain, timeout),
+            AppTransport::Usb(t, _) => t.transact_logo_chunk(plain, timeout),
+            AppTransport::Cdc(t) => t.transact_logo_chunk(plain, timeout),
+        }
+    }
+
+    fn transact_logo_flag(
+        &mut self,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        match self {
+            AppTransport::Demo(t) => t.transact_logo_flag(frame, timeout),
+            AppTransport::Usb(t, _) => t.transact_logo_flag(frame, timeout),
+            AppTransport::Cdc(t) => t.transact_logo_flag(frame, timeout),
+        }
+    }
+
     /// The settings write goes over the meter's CDC port \[device\]: the
     /// demo device's CDC persona (sharing its settings), the real meter's
     /// serial port found by its USB serial number. A CDC pipe is that port

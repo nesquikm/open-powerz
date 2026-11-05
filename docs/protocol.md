@@ -1142,7 +1142,33 @@ exist: SET_DATA (0x48) with attribute 0x28 only, sent by the record delete
 (see Deleting records), and the settings write (type 0x0A) with the keys of
 Settings write only (see Settings write). Every other SET_DATA attribute
 and every other 0x0A key, factory reset (key 0x08) included, is refused.
-RESET and memory writes are never sent on any path. [static]
+The startup logo adds three more narrow paths, listed below. RESET is never
+sent on any path, and no memory write is sent outside the logo chunk path.
+[static]
+
+Startup logo paths (see Startup logo). Each has its own check in our library,
+and everything else on 0x4A and 0x48 stays refused. [inferred]
+
+- Logo chunk write (0x4A): the only memory write we send. The check runs on
+  the plaintext chunk, before it is encrypted with AES-128-ECB under key slot
+  0. A chunk is 256 bytes at `0x300000 + 256·k`, or 16 bytes, and must lie
+  wholly inside the logo region 0x300000..0x31D4FF (end 0x31D500, exclusive).
+  A 16-byte chunk is allowed only as sixteen 0xFF bytes at 0x300000 (Remove).
+  The first 256-byte chunk, at 0x300000, must start with a valid logo blob
+  header (see Blob layout). Every other address, length or content is refused.
+  [inferred] The frame is the vendor's: main header with bit 16 (encrypted
+  payload) set and `obj` = chunk length + 16, then a 16-byte block header
+  {flash address, `len2` = chunk length, 0xFFFFFFFF, CRC-32 of the first 12
+  bytes}, then the chunk data, both encrypted. [static] That the firmware
+  erases on write and ignores the 0xFF pad after the blob is [inferred].
+- Logo flag (SET_DATA 0x48, attribute 0x1C): a 4-byte u32 whose value is
+  0 or 2 only; any other value or size is refused. [static] The vendor sends 2 after
+  a successful upload and 0 after Remove; reading 2 as "show the custom logo"
+  and 0 as "show the built-in logo" is [inferred].
+- Logo read (0x44): reads in the window 0x98300000..0x9831FFFF only, at most
+  256 bytes each and wholly inside the window; it changes nothing on the meter.
+  [inferred] That this window maps the logo region of the flash, as
+  `0x98000000 + offset` does for offline records, is [inferred].
 
 | request | why | tag |
 |---|---|---|
@@ -1150,10 +1176,10 @@ RESET and memory writes are never sent on any path. [static]
 | type 0x08 JUMP_APROM | leaves firmware-update mode | [doc] [static] |
 | type 0x09 JUMP_DFU | enters firmware-update mode | [doc] [static] |
 | type 0x42 | firmware download descriptor (starts an erase) | [static] |
-| type 0x48 SET_DATA, any attribute other than 0x28 from the delete path | writes settings and calibration | [static] |
+| type 0x48 SET_DATA, any attribute other than 0x28 from the delete path or 0x1C from the logo path | writes settings and calibration | [static] |
 | type 0x0A with a key outside Settings write, or from any path but the settings write | factory reset and unknown settings | [static] |
-| type 0x4A | memory / SPI-flash write | [static] |
-| memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` or the offline record window of a listed entry | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
+| type 0x4A, any frame other than a checked logo chunk | memory / SPI-flash write | [static] |
+| memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450`, the offline record window of a listed entry, or the logo read window | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
 | any HID request other than the ADC snapshot (GET_DATA mask 0x001) | replies over 64 bytes hang and reboot the meter; control commands are ignored | [device] (firmware 2.0.6) |
 
 HEAD (0x40) is not on this list: it only reads a status word, so the

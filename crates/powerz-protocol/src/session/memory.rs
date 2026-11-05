@@ -28,6 +28,11 @@ const HEAD_DELAY: Duration = Duration::from_millis(50);
 /// The only memory blocks [`Session::memory_read`] may read.
 const MEMORY_READ_ALLOWED: [(u32, u32); 4] = [HARDWARE_INFO, FIRMWARE_INFO, OTP, UID];
 
+/// Start of the startup-logo read window `[inferred]` (FR R1ST8Z).
+const LOGO_WINDOW_START: u32 = 0x9830_0000;
+/// One past the last byte of the startup-logo read window (0x9831FFFF).
+const LOGO_WINDOW_END: u32 = 0x9832_0000;
+
 /// Length of the plaintext confirmation frame: header + first 16 bytes of
 /// the request plaintext.
 const CONFIRMATION_LEN: usize = 20;
@@ -150,6 +155,24 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// anything is sent.
     pub fn memory_read(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, Error> {
         if !MEMORY_READ_ALLOWED.contains(&(addr, len)) {
+            return Err(Error::Forbidden { addr, len });
+        }
+        self.memory_read_unchecked(addr, len)
+    }
+
+    /// Read part of the startup-logo window (FR R1ST8Z).
+    ///
+    /// Only 1..=[`MEMORY_READ_MAX_LEN`] bytes lying wholly inside
+    /// 0x98300000..=0x9831FFFF are allowed; anything else fails with
+    /// [`Error::Forbidden`] before anything is sent.
+    pub fn logo_memory_read(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, Error> {
+        let inside = len > 0
+            && len <= MEMORY_READ_MAX_LEN
+            && addr >= LOGO_WINDOW_START
+            && addr
+                .checked_add(len)
+                .is_some_and(|end| end <= LOGO_WINDOW_END);
+        if !inside {
             return Err(Error::Forbidden { addr, len });
         }
         self.memory_read_unchecked(addr, len)
@@ -500,4 +523,96 @@ fn head_flag(field: u32, reply: &[u8], problems: &mut Vec<FirmwareProblem>) -> O
         ),
     ));
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::mock::{MockTransport, Step};
+
+    // ---- AC-R1ST8Z.5 / .7: the logo read window ----
+    //
+    // Window 0x98300000..=0x9831FFFF (the SPI-flash read window over the
+    // logo area), at most 256 bytes per read, the whole read inside it.
+
+    const WINDOW: u32 = 0x9830_0000;
+    const WINDOW_END: u32 = 0x9832_0000;
+
+    fn session(script: Vec<Step>) -> Session<MockTransport> {
+        Session::open(MockTransport::new(script))
+    }
+
+    /// Scripted memory read (id 1) of `len` bytes at `addr`, data = `fill`.
+    fn read_steps(addr: u32, len: u32, fill: u8) -> (Vec<Step>, Vec<u8>) {
+        let mut confirm = vec![0xC4, 0x01, 0x01, 0x01];
+        confirm.extend(&memory_read_plaintext(addr, len)[..16]);
+        let want = (len as usize).div_ceil(crypto::BLOCK_LEN) * crypto::BLOCK_LEN;
+        let data: Vec<u8> = (0..want).map(|i| fill.wrapping_add(i as u8)).collect();
+        let steps = vec![
+            Step::transact(memory_read_request(1, addr, len), confirm),
+            Step::read(crypto::encrypt(&crypto::KEYS[0], &data)),
+        ];
+        (steps, data[..len as usize].to_vec())
+    }
+
+    #[test]
+    fn r1st8z_logo_read_accepts_reads_inside_the_window() {
+        for (addr, len) in [
+            (WINDOW, 16),
+            (WINDOW, 256),
+            (WINDOW, 1),
+            (WINDOW + 0x1_D400, 256),
+            (WINDOW_END - 256, 256), // last full read
+            (WINDOW_END - 16, 16),
+            (WINDOW_END - 1, 1), // the window reaches 0x9831FFFF
+        ] {
+            let (steps, want) = read_steps(addr, len, 0x5A);
+            let mut s = session(steps);
+            assert_eq!(
+                s.logo_memory_read(addr, len),
+                Ok(want),
+                "{len} bytes at {addr:#x}"
+            );
+            assert_eq!(s.transport().remaining(), 0);
+        }
+    }
+
+    #[test]
+    fn r1st8z_logo_read_refuses_everything_else_before_sending() {
+        for (addr, len) in [
+            (WINDOW, 257),           // one byte too long
+            (WINDOW, 512),           // far too long
+            (WINDOW, 0),             // empty read
+            (WINDOW - 1, 16),        // one byte low
+            (WINDOW - 16, 32),       // straddles the start
+            (WINDOW_END - 255, 256), // straddles the end by one byte
+            (WINDOW_END - 1, 2),     // straddles the end
+            (WINDOW_END, 1),         // one past the end
+            (WINDOW_END, 256),       // past the end
+            (0x9810_0000, 256),      // the record window
+            (0x0030_0000, 256),      // the raw flash address
+            (u32::MAX - 15, 256),    // addr + len overflows
+            (u32::MAX, u32::MAX),    // both at the limit
+        ] {
+            let mut s = session(vec![]);
+            assert_eq!(
+                s.logo_memory_read(addr, len),
+                Err(Error::Forbidden { addr, len }),
+                "{len} bytes at {addr:#x}"
+            );
+            assert!(s.transport().written().is_empty(), "{addr:#x}+{len}");
+        }
+    }
+
+    #[test]
+    fn r1st8z_plain_memory_read_still_refuses_the_logo_window() {
+        for (addr, len) in [(WINDOW, 16), (WINDOW, 256), (WINDOW_END - 256, 256)] {
+            let mut s = session(vec![]);
+            assert_eq!(
+                s.memory_read(addr, len),
+                Err(Error::Forbidden { addr, len })
+            );
+            assert!(s.transport().written().is_empty());
+        }
+    }
 }

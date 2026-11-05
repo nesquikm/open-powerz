@@ -256,6 +256,22 @@ impl Transport for LazyBulk {
         self.pipe()?.transact_settings(request, timeout)
     }
 
+    fn transact_logo_chunk(
+        &mut self,
+        plain: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact_logo_chunk(plain, timeout)
+    }
+
+    fn transact_logo_flag(
+        &mut self,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact_logo_flag(frame, timeout)
+    }
+
     fn recover(&mut self) -> Result<(), transport::Error> {
         self.pipe()?.recover()
     }
@@ -530,6 +546,22 @@ impl<P: Transport> Transport for CountingPipe<P> {
         timeout: Duration,
     ) -> Result<Vec<u8>, transport::Error> {
         self.inner.transact_settings(request, timeout)
+    }
+
+    fn transact_logo_chunk(
+        &mut self,
+        plain: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_logo_chunk(plain, timeout)
+    }
+
+    fn transact_logo_flag(
+        &mut self,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_logo_flag(frame, timeout)
     }
 }
 
@@ -1160,6 +1192,22 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
         self.inner.transact_settings(request, timeout)
     }
 
+    fn transact_logo_chunk(
+        &mut self,
+        plain: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_logo_chunk(plain, timeout)
+    }
+
+    fn transact_logo_flag(
+        &mut self,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_logo_flag(frame, timeout)
+    }
+
     fn adcnew_send(
         &mut self,
         request: powerz_protocol::adcnew::Request,
@@ -1458,5 +1506,93 @@ mod tests {
         f.write_all(b"x").unwrap();
         assert!(path.exists());
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- AC-R1ST8Z.6: wrappers forward the two logo paths ----
+
+    /// Records which path each frame arrived on.
+    #[derive(Default)]
+    struct LogoProbe {
+        calls: Vec<(&'static str, Vec<u8>)>,
+    }
+
+    impl Transport for LogoProbe {
+        fn transact(&mut self, request: &[u8], _t: Duration) -> Result<Vec<u8>, transport::Error> {
+            self.calls.push(("transact", request.to_vec()));
+            Ok(vec![0x07, 0x00, 0x00, 0x00])
+        }
+        fn read(&mut self, _t: Duration) -> Result<Vec<u8>, transport::Error> {
+            Err(transport::Error::Timeout)
+        }
+        fn transact_logo_chunk(
+            &mut self,
+            plain: &[u8],
+            _t: Duration,
+        ) -> Result<Vec<u8>, transport::Error> {
+            self.calls.push(("logo_chunk", plain.to_vec()));
+            Ok(vec![0x07, 0x00, 0x00, 0x00])
+        }
+        fn transact_logo_flag(
+            &mut self,
+            frame: &[u8],
+            _t: Duration,
+        ) -> Result<Vec<u8>, transport::Error> {
+            self.calls.push(("logo_flag", frame.to_vec()));
+            Ok(vec![0x05, 0x00, 0x00, 0x00])
+        }
+    }
+
+    /// A valid plaintext logo chunk (256 bytes at 0x300100, id 1).
+    fn logo_chunk_plain() -> Vec<u8> {
+        let mut f = vec![0x4A, 0x01, 0x01, 0x44];
+        let mut h = [0x0030_0100u32, 256, 0xFFFF_FFFF]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<u8>>();
+        let crc = powerz_protocol::crypto::crc32(&h);
+        h.extend(crc.to_le_bytes());
+        f.extend(h);
+        f.extend((0..=255u8).collect::<Vec<u8>>());
+        f
+    }
+
+    const LOGO_FLAG: [u8; 12] = [
+        0x48, 0x01, 0xC0, 0x00, 0x1C, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00,
+    ];
+
+    fn logo_calls() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("logo_chunk", logo_chunk_plain()),
+            ("logo_flag", LOGO_FLAG.to_vec()),
+        ]
+    }
+
+    const LT: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn r1st8z_counting_pipe_forwards_the_logo_paths() {
+        let mut p = CountingPipe {
+            inner: LogoProbe::default(),
+            counter: Arc::new(WriteCounter {
+                after: None,
+                long_writes: std::sync::atomic::AtomicUsize::new(0),
+                stop: Arc::new(AtomicBool::new(false)),
+            }),
+        };
+        p.transact_logo_chunk(&logo_chunk_plain(), LT).unwrap();
+        p.transact_logo_flag(&LOGO_FLAG, LT).unwrap();
+        assert_eq!(p.inner.calls, logo_calls());
+    }
+
+    #[test]
+    fn r1st8z_ctrl_c_after_forwards_the_logo_paths() {
+        let mut t = CtrlCAfter {
+            inner: LogoProbe::default(),
+            remaining: 5,
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        t.transact_logo_chunk(&logo_chunk_plain(), LT).unwrap();
+        t.transact_logo_flag(&LOGO_FLAG, LT).unwrap();
+        assert_eq!(t.inner.calls, logo_calls());
     }
 }

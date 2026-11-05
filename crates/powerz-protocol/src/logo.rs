@@ -91,7 +91,7 @@ fn info_sides(info: u32) -> (u32, u32) {
 }
 
 /// `len` rounded up to a multiple of [`CHUNK`].
-fn padded_len(len: usize) -> usize {
+pub(crate) const fn padded_len(len: usize) -> usize {
     len.div_ceil(CHUNK) * CHUNK
 }
 
