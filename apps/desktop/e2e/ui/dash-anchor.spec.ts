@@ -23,6 +23,7 @@ import { HOOK } from "../hook";
 import {
   blur,
   chartDraws,
+  fpsRecordedOnly,
   chartSeriesLengths,
   interleavedFps,
   open,
@@ -43,13 +44,6 @@ const QA_DIR = fileURLToPath(new URL("../../../../../qa-runs/DASH-visual/", impo
  * baseline (this Mac, headless WebKit), which CI runners without a GPU miss even idle.
  */
 const FPS_TOLERANCE = 0.05;
-
-/** AC-SX1VTC.5: WebKit on a CI runner records the frame-rate result instead of failing
- * on it (FR 9QTPNQ): the runners have no GPU, so WebKit draws on the CPU there, on Linux
- * and macOS alike. Chromium everywhere, and WebKit on a developer machine, fail on it. */
-function recordOnly(browserName: string): boolean {
-  return browserName === "webkit" && !!process.env.CI;
-}
 
 /** Largest mismatch, px, between the two frames' dash edges at the same data time. */
 const MAX_EDGE_SHIFT_PX = 1;
@@ -225,7 +219,7 @@ test(
       description: `stream median ${m.streamMedian.toFixed(1)} fps, idle median ${m.idleMedian.toFixed(1)}, floor ${floor.toFixed(1)}`,
     });
     const verdict = `${m.streamMedian.toFixed(1)} fps at 1000 SPS against an idle ${m.idleMedian.toFixed(1)}`;
-    if (recordOnly(browserName)) {
+    if (fpsRecordedOnly(browserName)) {
       // WebKit on a GPU-less CI runner renders on the CPU (as WebKitGTK does): short of
       // CPU, this chart costs it about 30% of its frames on main as on this build (SX1VTC
       // Notes), so the result is recorded, not failed (FR 9QTPNQ).

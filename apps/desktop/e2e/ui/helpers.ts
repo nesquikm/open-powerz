@@ -394,6 +394,14 @@ export async function holdClock(page: Page): Promise<void> {
   }
 }
 
+/** The frame-rate tests' rule for WebKit on a CI runner (FR 9QTPNQ): the runners have no
+ * GPU, so WebKit draws on the CPU there, on Linux and macOS alike, and the build before
+ * shows the same cost (SX1VTC Notes). There a frame-rate result is recorded, not failed;
+ * Chromium everywhere, and WebKit on a developer machine, still fail on it. */
+export function fpsRecordedOnly(browserName: string): boolean {
+  return browserName === "webkit" && !!process.env.CI;
+}
+
 /** The tag of the frame-rate tests: CI runs them once per OS in a one-worker step,
  * outside the shards (FR 9QTPNR). */
 export const PERF_TAG = "@perf";

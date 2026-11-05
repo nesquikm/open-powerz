@@ -17,6 +17,7 @@ import { HOOK } from "../hook";
 import {
   chartSeriesLengths,
   expectHook,
+  fpsRecordedOnly,
   interleavedFps,
   type InterleavedFps,
   open,
@@ -106,10 +107,17 @@ async function expectSmooth(page: Page, where: string): Promise<void> {
     console.log(`AC-C6VR9K.1 fps-skipped: ${description}`);
     return;
   }
-  expect(
-    m.streamMedian,
-    `${where}: stream median ${m.streamMedian.toFixed(1)} fps, idle median ${m.idleMedian.toFixed(1)}`,
-  ).toBeGreaterThanOrEqual(MIN_FPS);
+  const verdict = `${where}: stream median ${m.streamMedian.toFixed(1)} fps, idle median ${m.idleMedian.toFixed(1)}`;
+  if (fpsRecordedOnly(test.info().project.name)) {
+    // WebKit on a GPU-less CI runner draws on the CPU: the frame-rate half is recorded,
+    // not failed; the path-call bound above always holds (FR 9QTPNQ).
+    const met = m.streamMedian >= MIN_FPS;
+    const description = `WebKit on a CI runner, recorded only: ${verdict}, bound ${MIN_FPS}, ${met ? "met" : "missed"}`;
+    test.info().annotations.push({ type: "fps-recorded", description });
+    console.log(`AC-C6VR9K.1 fps-recorded: ${description}`);
+    return;
+  }
+  expect(m.streamMedian, verdict).toBeGreaterThanOrEqual(MIN_FPS);
 }
 
 function tab(page: Page, name: string): Locator {
