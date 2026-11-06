@@ -33,8 +33,10 @@ codename: First Impression
 | [TZK5K4](../frs/TZK5K4.md) | Logo upload, remove and read-back in the session | n/a |
 | [YCRQRQ](../frs/YCRQRQ.md) | Command line logo commands | n/a |
 | [MEHQC0](../frs/MEHQC0.md) | Desktop startup logo view | n/a |
+| [Z39H24](../frs/Z39H24.md) | Logo writes change the startup duration and leave the settings check stale (bug) | n/a |
+| [QG6RNY](../frs/QG6RNY.md) | Desktop logo view guides the menu save after a logo write (bug) | n/a |
 
-Build order: the table's order. The guards need the encoder's header check; the session flows are tested on the simulator; the CLI and the desktop wrap the session.
+Build order: the table's order. The two bug FRs come from the stage 2 and 3 device runs (2026-11-06): SET_DATA 0x1C is the startup duration and leaves the settings CRC A stale. The guards need the encoder's header check; the session flows are tested on the simulator; the CLI and the desktop wrap the session.
 
 **Tasks:**
 - [x] Logo image encoder and decoder — PVFHM7
@@ -48,6 +50,10 @@ Build order: the table's order. The guards need the encoder's header check; the 
 - [x] Command line logo commands — YCRQRQ
   verify: CLI integration tests against the simulator
 - [x] Desktop startup logo view — MEHQC0
+  verify: Rust command tests, Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
+- [ ] Startup duration and stale settings check in the library, simulator and CLI — Z39H24
+  verify: sim tests for the stale block and menu save, CLI tests for the wait and exit codes
+- [ ] Desktop menu-save panel and settings guidance — QG6RNY
   verify: Rust command tests, Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
 - [x] Hardware runbooks for stages 1–4 and the M7b carry-overs, in `../qa-runs/m7c/runbooks/` (outside the repo)
   verify: each runbook has its approval gate, stop rules, photos, read-back and settings diffs, and the recovery ladder
