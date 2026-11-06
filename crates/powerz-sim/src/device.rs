@@ -198,6 +198,7 @@ impl SimDevice {
             self.sign_in_lost = true;
         }
         self.auto_menu_save_due();
+        self.queue_reset_due();
         if self.persona == Persona::Cdc && matches!(b0 & 0x7F, 0x01..=0x03) {
             // ADCNEW framing on CDC: out of scope, no reply.
             return Vec::new();
@@ -499,7 +500,14 @@ impl SimDevice {
         ]);
         stored.rate_code = ((w60 >> 2) & 0b11) as u8;
         let rate = (stored.rate_code != old_rate).then_some(stored.rate_code);
+        if self.faults.settings_write_resets_queue_rate {
+            // FR JV54SN `[inferred]`: the running queue goes back to the
+            // stored rate on every pipe of this meter.
+            stored.queue_resets += 1;
+            stored.queue_reset_to = (stored.rate_code, self.uptime_ms());
+        }
         drop(stored);
+        self.queue_reset_due();
         if let Some(code) = rate
             && !self.streaming
         {
@@ -507,6 +515,19 @@ impl SimDevice {
             self.queue.set_rate(code, now);
         }
         self.control(msg::FINISHED, id)
+    }
+
+    /// Apply a queue rate reset a settings write left in the shared state
+    /// (`settings-write-resets-queue-rate`) that this pipe has not seen yet.
+    fn queue_reset_due(&mut self) {
+        let (resets, (code, at)) = {
+            let stored = self.stored();
+            (stored.queue_resets, stored.queue_reset_to)
+        };
+        if resets != self.queue_resets_seen {
+            self.queue_resets_seen = resets;
+            self.queue.set_rate(code, at);
+        }
     }
 
     /// 0x4C: grant level 1 for the UID, 2 for the OTP credential, else 0.

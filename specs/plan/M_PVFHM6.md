@@ -67,11 +67,11 @@ Build order: the table's order. The two bug FRs come from the stage 2 and 3 devi
   verify: Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
 - [x] Hidden serials read as the model, and *** where a value must show — CCF47K
   verify: Vitest helpers, CLI hide-serial tests, Playwright hide-serial on Chromium and WebKit with E2E_WIDE_FONT=1
-- [ ] The chart stops drawing after a meter settings write — JV54SN
+- [x] The chart stops drawing after a meter settings write — JV54SN
   verify: sim settings-write rate test, protocol interval tests, worker restart and log tests, Playwright chart before and after Apply
-- [ ] The settings-write hint says when the meter's screen really changes — JV54SP
+- [x] The settings-write hint says when the meter's screen really changes — JV54SP
   verify: Vitest, Playwright and CLI tests pin the new note
-- [ ] The trigger view after the charger went away — JV54SQ
+- [x] The trigger view after the charger went away — JV54SQ
   verify: Rust trigger tests on the simulated charger, Vitest, Playwright on the mock
 - [x] Hardware runbooks for stages 1–4 and the M7b carry-overs, in `../qa-runs/m7c/runbooks/` (outside the repo)
   verify: each runbook has its approval gate, stop rules, photos, read-back and settings diffs, and the recovery ladder

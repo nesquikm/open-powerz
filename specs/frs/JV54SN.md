@@ -45,7 +45,7 @@ Device run, 2026-11-06, build 46f79cb: a gray band covered the plot from the App
 ## Technical Design
 
 ### Root cause
-[inferred] A settings write sends every key, rate included, at its read value; the queue runs at the meter's own rate [device]. The session's rate stays at the started stream's, so the gap check flags every record. Each gap goes to the chart, which breaks the line before every sample and shades back-to-back gap bands.
+[inferred] A settings write resends key 0x15 at its read value. That likely puts the meter's own rate back on the running queue. This was not seen on the device, and v0.9.0 has the same write path. The session still expects the started stream's rate, so the gap check flags every record. The chart then breaks the line before each sample and shades back-to-back gap bands.
 
 ### Fix
 The worker restarts the queue at the session rate after a successful write on a queue source. The protocol session re-derives its interval when consecutive gaps share one steady longer step, and reports that change on the poll. The worker logs writes, restarts and interval changes.

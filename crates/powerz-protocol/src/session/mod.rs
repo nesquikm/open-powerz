@@ -46,7 +46,7 @@ pub use records::{
     RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_delete_table, record_table_request,
 };
 pub use settings_write::SettingsWritten;
-pub use stream::{Gap, SnapshotCadence, StreamPoll, Streamer};
+pub use stream::{Gap, RATE_SWITCH_RUN, SnapshotCadence, StreamPoll, Streamer};
 
 /// Text of [`Error::RecordTableMismatch`]: a matching count alone would read
 /// as no mismatch at all, so that case says the entries differ.
@@ -278,6 +278,9 @@ pub struct Session<T: Transport, C: Clock = SystemClock> {
     meter_rate: Option<Rate>,
     /// Device time of the last record returned by `poll_stream`.
     last_record_ms: Option<u32>,
+    /// Records in a row at one steady slower interval, for the queue's rate
+    /// switch in `poll_stream`.
+    rate_run: stream::RateRun,
     /// Read windows of the records in the last decoded RecordList: the only
     /// record-area reads [`Session::download_record`] may send.
     record_windows: Vec<(u32, u32)>,
@@ -310,6 +313,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
             stream: None,
             meter_rate: None,
             last_record_ms: None,
+            rate_run: stream::RateRun::default(),
             record_windows: Vec::new(),
             adcnew: None,
             adcnew_raw: Vec::new(),

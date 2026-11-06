@@ -459,6 +459,15 @@ Message layout (all words little-endian):
   what bit 7 means (perhaps a "changed on the meter" flag [inferred]).
   Writes send no key for it and leave it as it is.
 
+- [inferred] On 2026-11-06 (KM003C, build 46f79cb, meter's own rate 10 SPS,
+  app streaming 50 SPS) the app's chart filled with back-to-back gaps after a
+  settings Apply [device]. The likely cause: a settings write, which resends
+  key 0x15 at its read value, re-applies the meter's own rate to the running
+  queue. This is not seen on the device; v0.9.0 has the same write path. So
+  after a successful write the app restarts the queue at the session rate,
+  and it switches its expected interval after five records at another known
+  rate's steady interval.
+
 ## Memory read and device info
 
 [device] On firmware 2.0.6, memory read (type 0x44) works without auth: all

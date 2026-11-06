@@ -252,6 +252,9 @@ pub struct FaultPlan {
     settings_saved_before_reboot: bool,
     /// Every second SETTINGS read shows another brightness.
     flaky_settings_read: bool,
+    /// An accepted settings write puts the running ADC queue back to the
+    /// stored rate (FR JV54SN) `[inferred]`.
+    settings_write_resets_queue_rate: bool,
     /// Pad the record table to this many entries.
     record_count: Option<usize>,
 }
@@ -357,6 +360,15 @@ impl FaultPlan {
         self
     }
 
+    /// An accepted settings write (type 0x0A) re-applies the stored rate to
+    /// the meter's running ADC queue, even while a stream started with 0x0E
+    /// runs and even when the rate key did not change (FR JV54SN)
+    /// `[inferred]`. A write the meter ignores leaves the queue alone.
+    pub fn settings_write_resets_queue_rate(mut self) -> FaultPlan {
+        self.settings_write_resets_queue_rate = true;
+        self
+    }
+
     /// The record table is padded to `count` entries with synthetic records
     /// that have no samples (a shorter table is left alone).
     pub fn record_count(mut self, count: usize) -> FaultPlan {
@@ -367,7 +379,7 @@ impl FaultPlan {
     /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`,
     /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`,
     /// `stir-undecoded-settings`, `settings-saved-before-reboot`,
-    /// `flaky-settings-read`.
+    /// `flaky-settings-read`, `settings-write-resets-queue-rate`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -394,13 +406,16 @@ impl FaultPlan {
                 ("stir-undecoded-settings", None) => plan.stir_undecoded_settings(),
                 ("settings-saved-before-reboot", None) => plan.settings_saved_before_reboot(),
                 ("flaky-settings-read", None) => plan.flaky_settings_read(),
+                ("settings-write-resets-queue-rate", None) => {
+                    plan.settings_write_resets_queue_rate()
+                }
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
                          disconnect@N, wrong-id@N, permission, corrupt-adcnew@N, echo-start, \
                          reject-record-reads, ignore-table-write, ignore-settings-write, \
-                         stir-undecoded-settings, settings-saved-before-reboot or \
-                         flaky-settings-read)"
+                         stir-undecoded-settings, settings-saved-before-reboot, \
+                         flaky-settings-read or settings-write-resets-queue-rate)"
                     ));
                 }
             };
@@ -504,6 +519,8 @@ pub struct SimDevice {
     /// Uptime of the 0x1C write that left block A stale, for the
     /// automatic menu save.
     stale_since_ms: Option<u64>,
+    /// Queue rate resets in `stored` this pipe's queue has applied.
+    queue_resets_seen: u64,
 }
 
 /// Put startup-duration `code` (`code & 3`: off, 1 s, 3 s, 5 s) into bits
@@ -527,6 +544,11 @@ struct Stored {
     /// Block A's CRC from before a startup-duration write (0x1C): served
     /// instead of a fresh one until a save in the meter's menu `[device]`.
     frozen_crc_a: Option<[u8; 4]>,
+    /// Queue rate resets from settings writes so far
+    /// (`settings-write-resets-queue-rate`), and the last one's rate code
+    /// and uptime: every pipe's queue applies each one once.
+    queue_resets: u64,
+    queue_reset_to: (u8, u64),
 }
 
 impl SimDevice {
@@ -550,6 +572,7 @@ impl SimDevice {
     pub fn cdc_twin(&self) -> SimDevice {
         let mut twin = SimDevice::open(Persona::Cdc, self.scenario, self.time.clone());
         twin.stored = Arc::clone(&self.stored);
+        twin.queue_resets_seen = self.stored().queue_resets;
         twin.faults = self.faults.clone();
         twin.mode = self.mode;
         twin.serial = self.serial.clone();
@@ -607,6 +630,8 @@ impl SimDevice {
                 rate_code: 2,
                 settings_reads: 0,
                 frozen_crc_a: None,
+                queue_resets: 0,
+                queue_reset_to: (2, 0),
             })),
             sign_in_drop: Arc::new(AtomicBool::new(false)),
             sign_in_lost: false,
@@ -617,6 +642,7 @@ impl SimDevice {
             logo_flag: 0,
             auto_menu_save: None,
             stale_since_ms: None,
+            queue_resets_seen: 0,
         }
     }
 
