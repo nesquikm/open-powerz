@@ -11,10 +11,12 @@
     firmwareChoose,
     logoChoose,
     logoPreview,
+    logoPreviewBuiltin,
     logoRead,
     logoRemove,
     logoSettingsCheck,
     logoUpload,
+    logoUploadBuiltin,
     firmwareFlash,
     firmwareInspect,
     pdImport,
@@ -537,6 +539,8 @@
       preview: (path, alpha) => logoPreview(path, alpha),
       read: (full) => logoRead(logoMeterId(), full),
       upload: (path, alpha, onProgress) => logoUpload(logoMeterId(), path, alpha, onProgress),
+      previewBuiltin: (name) => logoPreviewBuiltin(name),
+      uploadBuiltin: (name, onProgress) => logoUploadBuiltin(logoMeterId(), name, onProgress),
       remove: (onProgress) => logoRemove(logoMeterId(), onProgress),
       writeSettings: async (changes) => {
         // The block as read back, shown by the settings panel too, as its Apply does.

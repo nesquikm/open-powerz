@@ -1024,6 +1024,17 @@ export async function logoPreview(path: string, alpha: boolean): Promise<LogoPre
   return invoke<LogoPreview>("logo_preview", { path, alpha });
 }
 
+/** A built-in open-powerz startup logo (FR 70X5YX): the mascot, or the mascot with the
+ * lettering. */
+export type BuiltinLogoName = "surf" | "surf-wordmark";
+
+/** The startup logo built-in logo `name` encodes to, always transparent (FR 70X5YX);
+ * needs no meter. */
+export async function logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPreview> {
+  if (mock) return mock.logoPreviewBuiltin(name);
+  return invoke<LogoPreview>("logo_preview", { builtin: name, alpha: true });
+}
+
 /** What meter `deviceId`'s logo area holds (FR MEHQC0, AC .7); with `full`, the stored
  * image too. Only memory reads go out. */
 export async function logoRead(deviceId: string, full: boolean): Promise<LogoRead> {
@@ -1045,6 +1056,24 @@ export async function logoUpload(
   const channel = new Channel<LogoProgress>();
   channel.onmessage = onProgress;
   return invoke<LogoWritten>("logo_upload", { deviceId, path, alpha, onProgress: channel });
+}
+
+/** Uploads built-in logo `name` (always transparent) as meter `deviceId`'s startup logo
+ * (FR 70X5YX), like {@link logoUpload} does a picture. */
+export async function logoUploadBuiltin(
+  deviceId: string,
+  name: BuiltinLogoName,
+  onProgress: (progress: LogoProgress) => void,
+): Promise<LogoWritten> {
+  if (mock) return mock.logoUploadBuiltin(deviceId, name, onProgress);
+  const channel = new Channel<LogoProgress>();
+  channel.onmessage = onProgress;
+  return invoke<LogoWritten>("logo_upload", {
+    deviceId,
+    builtin: name,
+    alpha: true,
+    onProgress: channel,
+  });
 }
 
 /** Removes meter `deviceId`'s startup logo, so the built-in one shows again (FR MEHQC0,

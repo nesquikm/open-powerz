@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use powerz_protocol::decode::settings::MENU_SAVE_STEPS;
+use powerz_protocol::logo::builtin::BuiltinLogo;
 use powerz_protocol::logo::{self, CHUNK, LogoBlob, LogoMode, MIN_SIDE};
 use powerz_protocol::session::{
     Clock, LogoProgress, LogoStatus, LogoStep, LogoWritten, SETTINGS_SAVE_POLL_GAP, Session,
@@ -25,19 +26,60 @@ pub const LOGO_WRITE_RISK: &str = "writing the startup logo rewrites the meter's
 pub const LOGO_REMOVE_RISK: &str = "removing the startup logo rewrites the meter's flash; \
      pass --i-understand to remove it";
 
+/// Where a logo image comes from: a file or a built-in logo (FR 70X5YX).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogoSource<'a> {
+    /// An image file (PNG, JPEG, BMP or raw .bin).
+    File(&'a Path),
+    /// One of the embedded brand logos, always in the transparent mode.
+    Builtin(BuiltinLogo),
+}
+
+impl<'a> LogoSource<'a> {
+    /// The source an `IMG` argument and a `--builtin NAME` option give
+    /// (clap keeps them exclusive); neither is a usage error for `command`.
+    pub fn from_args(
+        file: Option<&'a Path>,
+        builtin: Option<BuiltinLogo>,
+        command: &str,
+    ) -> Result<Self, CliError> {
+        match (builtin, file) {
+            (Some(b), _) => Ok(LogoSource::Builtin(b)),
+            (None, Some(f)) => Ok(LogoSource::File(f)),
+            (None, None) => Err(CliError::Usage(format!(
+                "logo {command} needs IMG or --builtin"
+            ))),
+        }
+    }
+
+    /// The source's name for messages, its image and its blob: a file in
+    /// the opaque or (`alpha`) alpha mode, a built-in logo always in its own.
+    fn encode(self, alpha: bool) -> Result<(String, logo::Rgba, LogoBlob), CliError> {
+        match self {
+            LogoSource::File(file) => {
+                let (img, blob) = encode_file(file, alpha)?;
+                Ok((file.display().to_string(), img, blob))
+            }
+            LogoSource::Builtin(b) => {
+                let (img, blob) = encode_builtin(b)?;
+                Ok((b.name().to_owned(), img, blob))
+            }
+        }
+    }
+}
+
 /// `powerz logo preview IMG`: encode the image as the meter would store it
 /// and print the final size, mode, blob size, padded size and chunk count;
 /// warn on `warn` when a side ends up below [`MIN_SIDE`]. With `output`,
 /// the decoded logo is written there as a PNG. Opens no device.
 pub fn logo_preview(
-    file: &Path,
+    source: LogoSource<'_>,
     alpha: bool,
     output: Option<&Path>,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let name = file.display();
-    let (img, blob) = encode_file(file, alpha)?;
+    let (name, img, blob) = source.encode(alpha)?;
     let p = blob.preview();
     writeln!(out, "Input:   {}x{}", img.w, img.h)?;
     writeln!(out, "Size:    {}x{}", p.width, p.height)?;
@@ -157,12 +199,13 @@ pub struct LogoConfirm {
     pub yes: bool,
 }
 
-/// `powerz logo write IMG`: refused without `--i-understand`; encode the
-/// image, authenticate, read SETTINGS and the model (the upload's
-/// preconditions), ask for "write" to be typed unless `--yes`, then upload
-/// with per-chunk and read-back progress on `progress` (refreshed in place
-/// with `\r` when `opts.progress_tty`, one line per update otherwise, so a
-/// `--trace` on the same stream stays line by line). Ends with the
+/// `powerz logo write IMG|--builtin NAME`: refused without `--i-understand`;
+/// encode the image (a built-in logo in its transparent mode), authenticate,
+/// read SETTINGS and the model (the upload's preconditions), ask for
+/// "write" to be typed unless `--yes`, then upload with per-chunk and
+/// read-back progress on `progress` (refreshed in place with `\r` when
+/// `opts.progress_tty`, one line per update otherwise, so a `--trace` on
+/// the same stream stays line by line). Ends with the
 /// verified logo and the startup duration from a fresh SETTINGS read on
 /// `out`; when the meter left its settings unsaved, the menu-save steps go
 /// to `progress` and the tool waits up to `opts.menu_save_timeout` for the
@@ -175,7 +218,7 @@ pub struct LogoConfirm {
 /// exits when it is done. A Ctrl-C also stops the wait for the menu save.
 pub fn logo_write<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
-    file: &Path,
+    source: LogoSource<'_>,
     opts: &LogoWriteOptions,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
@@ -185,7 +228,7 @@ pub fn logo_write<T: Transport, C: Clock>(
     if !opts.confirm.i_understand {
         return Err(CliError::Usage(LOGO_WRITE_RISK.into()));
     }
-    let (_, blob) = encode_file(file, opts.alpha)?;
+    let (_, _, blob) = source.encode(opts.alpha)?;
     let p = blob.preview();
     prepare_write(
         session,
@@ -390,6 +433,14 @@ fn encode_file(file: &Path, alpha: bool) -> Result<(logo::Rgba, LogoBlob), CliEr
         LogoMode::Opaque
     };
     let blob = logo::encode(&img, mode).map_err(|e| CliError::Usage(format!("{name}: {e}")))?;
+    Ok((img, blob))
+}
+
+/// Decode built-in logo `b` and encode it in its own (transparent) mode.
+fn encode_builtin(b: BuiltinLogo) -> Result<(logo::Rgba, LogoBlob), CliError> {
+    let failed = |e: logo::LogoError| CliError::Device(format!("built-in logo {b}: {e}"));
+    let img = b.load().map_err(failed)?;
+    let blob = logo::encode(&img, b.mode()).map_err(failed)?;
     Ok((img, blob))
 }
 

@@ -7,6 +7,7 @@
  */
 
 import type {
+  BuiltinLogoName,
   LogoPreview,
   LogoProgress,
   LogoRead,
@@ -693,15 +694,36 @@ const MOCK_LOGO_SIZES: Record<string, { width: number; height: number }> = {
   [MOCK_LOGO_SMALL_FILE]: { width: 240, height: 24 },
 };
 
-/** A gradient of `width × height` as RGBA8888, base64. */
-function mockLogoPixels(width: number, height: number): string {
+/** A gradient of `width × height` as RGBA8888, base64; `variant` shifts its colours. */
+function mockLogoPixels(width: number, height: number, variant = 0): string {
   let out = "";
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      out += String.fromCharCode((x * 2) & 0xff, (y * 4) & 0xff, ((x + y) * 3) & 0xff, 0xff);
+      out += String.fromCharCode(
+        (x * 2 + variant) & 0xff,
+        (y * 4) & 0xff,
+        ((x + y) * 3) & 0xff,
+        0xff,
+      );
     }
   }
   return btoa(out);
+}
+
+/** The built-in logos' colour variants (FR 70X5YX): both are 200 × 200. */
+const MOCK_BUILTIN_VARIANTS: Record<BuiltinLogoName, number> = {
+  surf: 64,
+  "surf-wordmark": 128,
+};
+
+/** The preview of built-in logo `name` like the backend's: 200 × 200, transparent; any
+ * other name is refused naming the two. */
+function mockBuiltinPreview(name: BuiltinLogoName): LogoPreview {
+  const variant = MOCK_BUILTIN_VARIANTS[name];
+  if (variant === undefined) {
+    throw usage(`unknown built-in logo "${name}"; expected one of: surf, surf-wordmark`);
+  }
+  return mockLogoSized(200, 200, true, variant);
 }
 
 /** The preview of mock logo picture `path` like the backend's (16-byte header, 2 bytes a
@@ -709,7 +731,11 @@ function mockLogoPixels(width: number, height: number): string {
 function mockLogoPreview(path: string, alpha: boolean): LogoPreview | null {
   const size = MOCK_LOGO_SIZES[path];
   if (size === undefined) return null;
-  const { width, height } = size;
+  return mockLogoSized(size.width, size.height, alpha);
+}
+
+/** A mock preview of a `width × height` logo in the given mode. */
+function mockLogoSized(width: number, height: number, alpha: boolean, variant = 0): LogoPreview {
   const blobSize = 16 + width * height * (alpha ? 3 : 2);
   const chunks = Math.ceil(blobSize / 256);
   return {
@@ -720,7 +746,7 @@ function mockLogoPreview(path: string, alpha: boolean): LogoPreview | null {
     padded_size: chunks * 256,
     chunks,
     small_side_warning: width < 48 || height < 48,
-    rgba: mockLogoPixels(width, height),
+    rgba: mockLogoPixels(width, height, variant),
   };
 }
 
@@ -2570,7 +2596,31 @@ export class MockBackend {
     onProgress: (progress: LogoProgress) => void,
   ): Promise<LogoWritten> {
     const s = this.#logoSession(deviceId);
-    const preview = mockLogoPicture(path, alpha);
+    return this.#logoWrite(s, mockLogoPicture(path, alpha), onProgress);
+  }
+
+  /** Previews built-in logo `name` like the backend (FR 70X5YX). */
+  async logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPreview> {
+    return mockBuiltinPreview(name);
+  }
+
+  /** Uploads built-in logo `name` like a picture (FR 70X5YX). */
+  async logoUploadBuiltin(
+    deviceId: string,
+    name: BuiltinLogoName,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten> {
+    const s = this.#logoSession(deviceId);
+    return this.#logoWrite(s, mockBuiltinPreview(name), onProgress);
+  }
+
+  /** Writes the logo `preview` describes on `s`: chunk progress, then read-back
+   * progress, at least 50 ms apart; `logoFault` stops it at that chunk. */
+  async #logoWrite(
+    s: Running,
+    preview: LogoPreview,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten> {
     const before = this.#logoWritable(s);
     const total = preview.chunks;
     const fault = this.#options.logoFault ?? null;

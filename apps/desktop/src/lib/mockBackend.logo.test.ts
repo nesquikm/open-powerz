@@ -269,3 +269,83 @@ describe("logo URL options", () => {
     expect(mockModeFromUrl("?mock=logo-other-model")).toBe("logo-other-model");
   });
 });
+
+describe("MockBackend built-in logos (AC-70X5YX.7)", () => {
+  it("AC-70X5YX.7: previews each built-in at 200 × 200 in the transparent mode", async () => {
+    const b = new MockBackend(null, {});
+    for (const name of ["surf", "surf-wordmark"] as const) {
+      const p = await b.logoPreviewBuiltin(name);
+      expect(p).toMatchObject({
+        width: 200,
+        height: 200,
+        mode: "alpha",
+        blob_size: 120_016,
+        padded_size: 120_064,
+        chunks: 469,
+        small_side_warning: false,
+      });
+      expect(b64Length(p.rgba)).toBe(200 * 200 * 4);
+    }
+  });
+
+  it("AC-70X5YX.7: the two built-ins are different pictures", async () => {
+    const b = new MockBackend(null, {});
+    const surf = await b.logoPreviewBuiltin("surf");
+    const wordmark = await b.logoPreviewBuiltin("surf-wordmark");
+    expect(surf.rgba).not.toBe(wordmark.rgba);
+  });
+
+  it("AC-70X5YX.7: an unknown name is refused naming the two built-ins", async () => {
+    const b = new MockBackend(null, {});
+    const err = await b.logoPreviewBuiltin("nope" as never).catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      kind: "usage",
+      message: expect.stringMatching(/surf-wordmark/),
+    });
+  });
+
+  describe("writes", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("AC-70X5YX.7: a built-in upload reports chunks then read-back, then Read shows it", async () => {
+      const b = await ready();
+      const seen: LogoProgress[] = [];
+      const written = await settle(b.logoUploadBuiltin(DEMO, "surf", (p) => seen.push(p)));
+      expect(written).toEqual({
+        duration_before: "off",
+        duration_set: "3 s",
+        settings: "needs_menu_save",
+        startup_duration: null,
+      });
+      const chunks = seen.filter((p) => p.step === "chunks");
+      expect(chunks.length).toBeGreaterThan(1);
+      expect(chunks.every((p) => p.total === 469)).toBe(true);
+      expect(chunks.at(-1)).toMatchObject({ done: 469, total: 469 });
+      const lastChunk = seen.length - 1 - [...seen].reverse().findIndex((p) => p.step === "chunks");
+      expect(seen.findIndex((p) => p.step === "read_back")).toBeGreaterThan(lastChunk);
+      const area = await b.logoRead(DEMO, true);
+      expect(area).toMatchObject({ status: "logo", width: 200, height: 200, mode: "alpha" });
+      expect(area.image).toBe((await b.logoPreviewBuiltin("surf")).rgba);
+      await b.disconnect();
+    });
+
+    it("AC-70X5YX.7: a built-in upload is refused before the settings were read, like a file", async () => {
+      const b = await connected();
+      const up = await settle(b.logoUploadBuiltin(DEMO, "surf-wordmark", () => {})).catch(
+        (e: unknown) => e,
+      );
+      expect(up).toMatchObject({ kind: "usage", message: expect.stringMatching(/settings/i) });
+      await b.disconnect();
+    });
+
+    it("AC-70X5YX.7: ?logofault=<k> fails a built-in upload at chunk k too", async () => {
+      const b = await ready(null, { logoFault: 7 });
+      const err = await settle(b.logoUploadBuiltin(DEMO, "surf", () => {})).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toMatchObject({ message: expect.stringContaining("chunk 7") });
+      await b.disconnect();
+    });
+  });
+});

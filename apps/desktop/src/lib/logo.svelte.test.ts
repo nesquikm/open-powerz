@@ -5,6 +5,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type {
+  BuiltinLogoName,
   LogoPreview,
   LogoProgress,
   LogoRead,
@@ -15,6 +16,7 @@ import type {
   UiError,
 } from "./backend";
 import {
+  BUILTIN_LOGOS,
   REMOVE_WORD,
   StartupLogoState,
   UPLOAD_WORD,
@@ -39,6 +41,18 @@ const PREVIEW: LogoPreview = {
   blob_size: 12_016,
   padded_size: 12_032,
   chunks: 47,
+  small_side_warning: false,
+  rgba: "AAAA",
+};
+
+/** A built-in logo's preview: 200 × 200, transparent (FR 70X5YX). */
+const BUILTIN_PREVIEW: LogoPreview = {
+  width: 200,
+  height: 200,
+  mode: "alpha",
+  blob_size: 120_016,
+  padded_size: 120_064,
+  chunks: 469,
   small_side_warning: false,
   rgba: "AAAA",
 };
@@ -85,6 +99,13 @@ function harness(meter: LogoMeter = { model: "KM003C", settings: settings("off")
       image: full ? "AAAA" : null,
     })),
     upload: vi.fn((_p: string, _a: boolean, cb: (p: LogoProgress) => void) => {
+      onProgress = cb;
+      return write.promise;
+    }),
+    previewBuiltin: vi.fn(async (name: BuiltinLogoName): Promise<LogoPreview> =>
+      name === "surf" ? BUILTIN_PREVIEW : { ...BUILTIN_PREVIEW, rgba: "BBBB" },
+    ),
+    uploadBuiltin: vi.fn((_name: BuiltinLogoName, cb: (p: LogoProgress) => void) => {
       onProgress = cb;
       return write.promise;
     }),
@@ -426,5 +447,172 @@ describe("Read (AC-MEHQC0.7)", () => {
     });
     await h.state.read();
     expect(h.state.area?.status).toBe("unrecognised");
+  });
+});
+
+describe("built-in open-powerz logos (FR 70X5YX)", () => {
+  it("AC-70X5YX.5: offers the mascot and the mascot with lettering", () => {
+    expect(BUILTIN_LOGOS.map((b) => b.name)).toEqual(["surf", "surf-wordmark"]);
+    const [surf, wordmark] = BUILTIN_LOGOS;
+    expect(surf!.label).toMatch(/mascot/i);
+    expect(wordmark!.label).toMatch(/mascot/i);
+    expect(wordmark!.label).toMatch(/letter/i);
+    expect(surf!.label).not.toBe(wordmark!.label);
+  });
+
+  it("AC-70X5YX.5: picking a built-in previews it as a chosen file does", async () => {
+    const h = harness();
+    await h.state.useBuiltin("surf");
+    expect(h.deps.previewBuiltin).toHaveBeenCalledWith("surf");
+    expect(h.deps.preview).not.toHaveBeenCalled();
+    expect(h.deps.choose).not.toHaveBeenCalled();
+    expect(h.state.builtin).toBe("surf");
+    expect(h.state.path).toBeNull();
+    expect(h.state.preview).toEqual(BUILTIN_PREVIEW);
+    expect(h.state.phase).toBe("previewed");
+    expect(h.state.uploadDisabledReason).toBeNull();
+  });
+
+  it("AC-70X5YX.5: an upload of a built-in never turns into a Remove, even with no uploadBuiltin wired", async () => {
+    const h = harness();
+    await h.state.useBuiltin("surf");
+    delete (h.deps as Partial<typeof h.deps>).uploadBuiltin;
+    h.state.askUpload();
+    await h.state.confirm("upload");
+    await Promise.resolve();
+    expect(h.deps.remove).not.toHaveBeenCalled();
+    expect(h.deps.upload).not.toHaveBeenCalled();
+    expect(h.state.phase).toBe("failed");
+  });
+
+  it("AC-70X5YX.5: switching between the two built-ins previews the other one", async () => {
+    const h = harness();
+    await h.state.useBuiltin("surf");
+    await h.state.useBuiltin("surf-wordmark");
+    expect(h.deps.previewBuiltin).toHaveBeenLastCalledWith("surf-wordmark");
+    expect(h.state.builtin).toBe("surf-wordmark");
+    expect(h.state.preview?.rgba).toBe("BBBB");
+  });
+
+  it("AC-70X5YX.5: a refused built-in preview shows the error and no preview", async () => {
+    const h = harness();
+    h.deps.previewBuiltin.mockRejectedValueOnce({
+      kind: "usage",
+      message: "unknown built-in logo",
+      hint: null,
+    });
+    await h.state.useBuiltin("surf");
+    expect(h.state.preview).toBeNull();
+    expect(h.state.error?.message).toMatch(/built-in/);
+    expect(h.state.uploadDisabledReason).not.toBeNull();
+  });
+
+  it("AC-70X5YX.5: Upload of a built-in goes through the typed confirmation", async () => {
+    const h = harness();
+    await h.state.useBuiltin("surf-wordmark");
+    h.state.askUpload();
+    expect(h.state.confirming).toBe("upload");
+    expect(h.state.uploadConfirmText).toBe("The startup duration goes from off to 3 s.");
+    await h.state.confirm("Upload");
+    expect(h.deps.uploadBuiltin).not.toHaveBeenCalled();
+    await h.state.confirm(UPLOAD_WORD);
+    expect(h.deps.uploadBuiltin).toHaveBeenCalledTimes(1);
+    expect(h.deps.uploadBuiltin.mock.calls[0]![0]).toBe("surf-wordmark");
+    expect(h.deps.upload).not.toHaveBeenCalled();
+  });
+
+  it("AC-70X5YX.5: a built-in upload shows progress, ends done and runs the settings check", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      await h.state.useBuiltin("surf");
+      h.state.askUpload();
+      void h.state.confirm(UPLOAD_WORD);
+      await Promise.resolve();
+      expect(h.state.phase).toBe("writing");
+      expect(h.state.busy).toBe(true);
+      h.progress({ step: "chunks", done: 100, total: 469 });
+      expect(h.state.progress).toEqual({ step: "chunks", done: 100, total: 469 });
+      h.progress({ step: "read_back", done: 469, total: 469 });
+      expect(h.state.progress).toEqual({ step: "read_back", done: 469, total: 469 });
+      h.write.resolve({ ...WRITTEN, settings: "needs_menu_save", startup_duration: null });
+      await vi.waitFor(() => expect(h.state.phase).toBe("saving"));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(h.deps.checkSettings).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(h.state.phase).toBe("done"));
+      expect(h.state.written?.startup_duration).toBe("3 s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AC-70X5YX.5: a failed built-in upload names the chunk like a file upload", async () => {
+    const h = harness();
+    await h.state.useBuiltin("surf");
+    h.state.askUpload();
+    void h.state.confirm(UPLOAD_WORD);
+    h.write.reject(CHUNK_FAIL);
+    await vi.waitFor(() => expect(h.state.phase).toBe("failed"));
+    expect(h.state.failure).toMatchObject({ step: "Writing a chunk", chunk: 7 });
+  });
+
+  it("AC-70X5YX.5: a built-in cannot be picked while a write runs", async () => {
+    const h = await previewed();
+    h.state.askUpload();
+    void h.state.confirm(UPLOAD_WORD);
+    await Promise.resolve();
+    await h.state.useBuiltin("surf");
+    expect(h.deps.previewBuiltin).not.toHaveBeenCalled();
+    expect(h.state.builtin).toBeNull();
+    h.write.resolve(WRITTEN);
+    await vi.waitFor(() => expect(h.state.phase).toBe("done"));
+  });
+
+  it("AC-70X5YX.6: a built-in uses the transparent mode and disables opaque with a reason", async () => {
+    const h = harness();
+    expect(h.state.opaqueDisabledReason).toBeNull();
+    await h.state.useBuiltin("surf");
+    expect(h.state.alpha).toBe(true);
+    expect(h.state.opaqueDisabledReason).toMatch(/transparent/i);
+    await h.state.setAlpha(false);
+    expect(h.state.alpha).toBe(true);
+    expect(h.deps.preview).not.toHaveBeenCalled();
+    expect(h.state.preview).toEqual(BUILTIN_PREVIEW);
+  });
+
+  it("AC-70X5YX.6: choosing a file after a built-in brings both modes back", async () => {
+    const h = harness();
+    await h.state.useBuiltin("surf");
+    await h.state.choose();
+    expect(h.state.builtin).toBeNull();
+    expect(h.state.path).toBe("/pics/logo.png");
+    expect(h.state.opaqueDisabledReason).toBeNull();
+    await h.state.setAlpha(false);
+    expect(h.state.alpha).toBe(false);
+    expect(h.deps.preview).toHaveBeenLastCalledWith("/pics/logo.png", false);
+    expect(h.state.preview).toEqual(PREVIEW);
+    await h.state.setAlpha(true);
+    expect(h.deps.preview).toHaveBeenLastCalledWith("/pics/logo.png", true);
+  });
+
+  it("AC-70X5YX.6: a cancelled file dialog keeps the built-in and its mode lock", async () => {
+    const h = harness();
+    await h.state.useBuiltin("surf");
+    h.deps.choose.mockResolvedValueOnce(null);
+    await h.state.choose();
+    expect(h.state.builtin).toBe("surf");
+    expect(h.state.opaqueDisabledReason).not.toBeNull();
+    expect(h.state.preview).toEqual(BUILTIN_PREVIEW);
+  });
+
+  it("AC-70X5YX.6: a file upload after a built-in sends the file", async () => {
+    const h = harness();
+    await h.state.useBuiltin("surf");
+    await h.state.choose();
+    h.state.askUpload();
+    await h.state.confirm(UPLOAD_WORD);
+    expect(h.deps.upload).toHaveBeenCalledTimes(1);
+    expect(h.deps.upload.mock.calls[0]![0]).toBe("/pics/logo.png");
+    expect(h.deps.uploadBuiltin).not.toHaveBeenCalled();
   });
 });

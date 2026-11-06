@@ -33,9 +33,9 @@ use crate::args::{
 };
 use crate::commands::{
     DeleteOptions, DetectOptions, FLASH_RISK, JUMP_RISK, LOGO_REMOVE_RISK, LOGO_WRITE_RISK,
-    LegacyRequestOptions, LogoConfirm, LogoWriteOptions, PdRequestOptions, PdSendOptions,
-    PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions, console,
-    detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
+    LegacyRequestOptions, LogoConfirm, LogoSource, LogoWriteOptions, PdRequestOptions,
+    PdSendOptions, PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions,
+    console, detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
     firmware_probe_unavailable, info_with, inspect_flash_file, list_with, logo_dump,
     logo_dump_check, logo_preview, logo_read, logo_remove, logo_write, pd, pd_decode, pd_save,
     pd_send, read, records_delete, records_get, records_list, select_device, select_device_with,
@@ -89,14 +89,17 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
         action:
             LogoAction::Preview {
                 file,
+                builtin,
                 alpha,
                 output,
             },
     } = &cli.command
     {
-        // Reads a local file; no device is opened, whatever `--transport` says.
+        // Reads a local file or a built-in logo; no device is opened,
+        // whatever `--transport` says.
+        let source = LogoSource::from_args(file.as_deref(), *builtin, "preview")?;
         return logo_preview(
-            file,
+            source,
             *alpha,
             output.as_deref(),
             &mut std::io::stdout().lock(),
@@ -1421,12 +1424,14 @@ fn dispatch<T: Transport, C: Clock>(
             action:
                 LogoAction::Write {
                     file,
+                    builtin,
                     alpha,
                     i_understand,
                     yes,
                     menu_save_timeout,
                 },
         } => {
+            let source = LogoSource::from_args(file.as_deref(), *builtin, "write")?;
             let opts = LogoWriteOptions {
                 alpha: *alpha,
                 confirm: LogoConfirm {
@@ -1439,7 +1444,7 @@ fn dispatch<T: Transport, C: Clock>(
             };
             logo_write(
                 &mut session,
-                file,
+                source,
                 &opts,
                 &mut std::io::stdin().lock(),
                 &mut out,

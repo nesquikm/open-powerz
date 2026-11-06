@@ -82,6 +82,7 @@ check the download and open the app past the macOS and Windows warnings.
 ### Startup logo
 
 - Preview an image as the KM003C's startup logo, then write it, read it back or remove it from the CLI (`powerz logo preview`, `logo read`, `logo write`, `logo remove`), with a typed confirmation and a read-back check ([startup logo](docs/reference/cli.md#startup-logo))
+- Use a built-in open-powerz logo instead of a picture: the mascot, or the mascot with "open-powerz" lettering (`--builtin surf`, `--builtin surf-wordmark`); in the desktop app's logo view, pick it under "Or use the open-powerz logo" ([built-in logos](docs/reference/cli.md#startup-logo))
 
 ### Serial stream
 

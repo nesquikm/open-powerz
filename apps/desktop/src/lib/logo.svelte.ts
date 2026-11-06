@@ -3,6 +3,7 @@
  */
 
 import type {
+  BuiltinLogoName,
   LogoPreview,
   LogoProgress,
   LogoRead,
@@ -17,6 +18,12 @@ import type {
 export const UPLOAD_WORD = "upload";
 /** The word the Remove confirmation asks for. */
 export const REMOVE_WORD = "remove";
+
+/** The built-in open-powerz logos the view offers (FR 70X5YX), in listing order. */
+export const BUILTIN_LOGOS: readonly { name: BuiltinLogoName; label: string }[] = [
+  { name: "surf", label: "Mascot" },
+  { name: "surf-wordmark", label: "Mascot with lettering" },
+];
 
 /** Least gap between two settings checks while the meter's settings wait for a menu
  * save (FR QG6RNY). */
@@ -46,6 +53,14 @@ export interface LogoDeps {
   preview(path: string, alpha: boolean): Promise<LogoPreview>;
   read(full: boolean): Promise<LogoRead>;
   upload(path: string, alpha: boolean, onProgress: (p: LogoProgress) => void): Promise<LogoWritten>;
+  /** The preview of a built-in logo, always transparent (FR 70X5YX); without it no
+   * built-in can be picked. */
+  previewBuiltin?(name: BuiltinLogoName): Promise<LogoPreview>;
+  /** Uploads a built-in logo, always transparent (FR 70X5YX). */
+  uploadBuiltin?(
+    name: BuiltinLogoName,
+    onProgress: (p: LogoProgress) => void,
+  ): Promise<LogoWritten>;
   remove(onProgress: (p: LogoProgress) => void): Promise<LogoWritten>;
   writeSettings(changes: SettingChanges): Promise<MeterSettings>;
   /** One read-only check of the settings after a write that needs a menu save. */
@@ -101,6 +116,8 @@ export function logoFailure(error: UiError, action: LogoAction): LogoFailure {
 export class StartupLogoState {
   phase = $state<LogoPhase>("idle");
   path = $state<string | null>(null);
+  /** The built-in logo picked in place of a file (FR 70X5YX). */
+  builtin = $state<BuiltinLogoName | null>(null);
   alpha = $state(false);
   preview = $state<LogoPreview | null>(null);
   confirming = $state<LogoAction | null>(null);
@@ -199,11 +216,28 @@ export class StartupLogoState {
     const path = await this.#deps.choose();
     if (path === null) return;
     this.path = path;
+    this.builtin = null;
     await this.#loadPreview();
   }
 
+  /** Picks built-in logo `name` in place of a file and previews it (FR 70X5YX); a
+   * built-in is always transparent. */
+  async useBuiltin(name: BuiltinLogoName): Promise<void> {
+    const previewBuiltin = this.#deps.previewBuiltin;
+    if (this.busy || previewBuiltin === undefined) return;
+    this.builtin = name;
+    this.path = null;
+    this.alpha = true;
+    await this.#show(() => previewBuiltin(name));
+  }
+
+  /** Why the opaque mode is off: a built-in logo is always transparent (AC-70X5YX.6). */
+  get opaqueDisabledReason(): string | null {
+    return this.builtin === null ? null : "A built-in logo always uses the transparent mode.";
+  }
+
   async setAlpha(alpha: boolean): Promise<void> {
-    if (this.busy) return;
+    if (this.busy || (!alpha && this.opaqueDisabledReason !== null)) return;
     this.alpha = alpha;
     if (this.path !== null) await this.#loadPreview();
   }
@@ -212,9 +246,14 @@ export class StartupLogoState {
   async #loadPreview(): Promise<void> {
     const path = this.path;
     if (path === null) return;
+    await this.#show(() => this.#deps.preview(path, this.alpha));
+  }
+
+  /** Shows the preview `load` resolves to; a refused one shows its error. */
+  async #show(load: () => Promise<LogoPreview>): Promise<void> {
     this.error = null;
     try {
-      this.preview = await this.#deps.preview(path, this.alpha);
+      this.preview = await load();
       this.phase = "previewed";
     } catch (e) {
       this.preview = null;
@@ -250,7 +289,7 @@ export class StartupLogoState {
   async confirm(typed: string): Promise<void> {
     const action = this.confirming;
     if (this.busy || action === null || typed !== confirmWord(action)) return;
-    if (action === "upload" && this.path === null) return;
+    if (action === "upload" && this.path === null && this.builtin === null) return;
     this.confirming = null;
     void this.#write(action);
   }
@@ -266,10 +305,7 @@ export class StartupLogoState {
     this.error = null;
     const onProgress = (p: LogoProgress) => (this.progress = p);
     try {
-      this.written =
-        action === "upload" && this.path !== null
-          ? await this.#deps.upload(this.path, this.alpha, onProgress)
-          : await this.#deps.remove(onProgress);
+      this.written = await this.#send(action, onProgress);
       this.#afterWritten(this.written);
     } catch (e) {
       this.error = e as UiError;
@@ -277,6 +313,18 @@ export class StartupLogoState {
       this.phase = "failed";
     }
   }
+  /** Sends `action`: an upload of the chosen file or built-in logo, or Remove. */
+  #send(action: LogoAction, onProgress: (p: LogoProgress) => void): Promise<LogoWritten> {
+    if (action === "upload" && this.path !== null)
+      return this.#deps.upload(this.path, this.alpha, onProgress);
+    if (action === "upload" && this.builtin !== null && this.#deps.uploadBuiltin)
+      return this.#deps.uploadBuiltin(this.builtin, onProgress);
+    if (action === "remove") return this.#deps.remove(onProgress);
+    // An upload with no source it can send must never fall through to a Remove.
+    const error: UiError = { kind: "usage", message: "No logo to upload.", hint: null };
+    return Promise.reject(error);
+  }
+
   /** Where a finished write goes by its fresh settings read (FR QG6RNY). */
   #afterWritten(written: LogoWritten): void {
     if (written.settings === "saved") {

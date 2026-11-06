@@ -1503,3 +1503,519 @@ fn z39h24_11_cli_docs_describe_the_menu_save_and_exit_code_6() {
         "the test knob is listed"
     );
 }
+
+// ================================================= FR 70X5YX: built-in logos
+//
+// `logo preview` and `logo write` take `--builtin NAME` (surf or
+// surf-wordmark) in place of the IMG file; exactly one of the two is
+// required. A built-in logo is always encoded in the transparent (alpha)
+// mode, so `--alpha` changes nothing for it.
+
+use powerz_protocol::logo::builtin::BuiltinLogo;
+
+/// The repository's brand meter logo PNG of built-in `name`.
+fn brand_png(name: &str) -> PathBuf {
+    let file = match name {
+        "surf" => "meter-logo.png",
+        "surf-wordmark" => "meter-logo-wordmark.png",
+        other => panic!("no brand PNG for {other}"),
+    };
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/brand")
+        .join(file)
+}
+
+/// The blob built-in `b` encodes to.
+fn builtin_blob(b: BuiltinLogo) -> LogoBlob {
+    b.encode().expect("the built-in logo encodes")
+}
+
+/// The logo bytes carried by the 0x4A chunk frames on the trace, in order:
+/// each frame is a 4-byte header, a 16-byte extended part, then 256 bytes.
+fn sent_logo_bytes(trace: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in sent_frames(trace, "4a") {
+        let (_, hex) = line.split_once("] ").expect("a frame line");
+        let bytes: Vec<u8> = hex
+            .split_whitespace()
+            .map(|h| u8::from_str_radix(h, 16).expect("hex byte"))
+            .collect();
+        assert_eq!(bytes.len(), 20 + 256, "a whole chunk frame: {line}");
+        out.extend_from_slice(&bytes[20..]);
+    }
+    out
+}
+
+/// No frame at all went out or came back.
+fn assert_no_frames(trace: &str) {
+    assert!(
+        !trace
+            .lines()
+            .any(|l| l.starts_with("> [") || l.starts_with("< [")),
+        "frames were exchanged:\n{trace}"
+    );
+}
+
+// ------------------------------------------------------------ AC-70X5YX.2
+
+#[test]
+fn _70x5yx_2_preview_of_a_builtin_prints_the_same_report_as_its_file_in_alpha() {
+    for name in ["surf", "surf-wordmark"] {
+        let file = sim_quiet()
+            .args(["logo", "preview", "--alpha"])
+            .arg(brand_png(name))
+            .assert()
+            .success();
+        let file_out = stdout_of(&file);
+        let a = sim_quiet()
+            .args(["logo", "preview", "--builtin", name])
+            .assert()
+            .success();
+        let out = stdout_of(&a);
+        for line in file_out.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(
+                out.lines().any(|l| l == line),
+                "{name}: the file report line {line:?} is missing:\n{out}"
+            );
+        }
+        assert!(contains_size(&out, 200, 200), "{name}: {out}");
+        assert!(
+            line_with(&out, "mode")
+                .to_ascii_lowercase()
+                .contains("alpha"),
+            "{name}: transparent mode without --alpha: {out}"
+        );
+        assert!(line_with(&out, "blob").contains("120016"), "{out}");
+        assert!(line_with(&out, "padded").contains("120064"), "{out}");
+        assert!(line_with(&out, "chunk").contains("469"), "{out}");
+    }
+}
+
+#[test]
+fn _70x5yx_2_preview_of_a_builtin_writes_the_preview_png() {
+    let dir = fresh_dir("70x5yx-preview-out");
+    for (name, b) in [
+        ("surf", BuiltinLogo::Surf),
+        ("surf-wordmark", BuiltinLogo::SurfWordmark),
+    ] {
+        let out_png = dir.join(format!("{name}.png"));
+        sim_quiet()
+            .args(["logo", "preview", "--builtin", name, "-o"])
+            .arg(&out_png)
+            .assert()
+            .success();
+        let expected = logo::decode(&builtin_blob(b).bytes).unwrap();
+        let got = png_pixels(&out_png);
+        assert_eq!((got.w, got.h), (200, 200), "{name}");
+        assert!(
+            got.px == expected.px,
+            "{name}: the PNG holds what would be written"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn _70x5yx_2_preview_of_a_builtin_opens_no_meter() {
+    let a = sim()
+        .args(["logo", "preview", "--builtin", "surf"])
+        .assert()
+        .success();
+    assert_no_frames(&stderr_of(&a));
+    powerz()
+        .args([
+            "--device",
+            "no-such-meter-70X5YX",
+            "logo",
+            "preview",
+            "--builtin",
+            "surf-wordmark",
+        ])
+        .assert()
+        .success();
+}
+
+// ------------------------------------------------------------ AC-70X5YX.3
+
+#[test]
+fn _70x5yx_3_write_of_a_builtin_without_i_understand_is_refused_and_opens_no_meter() {
+    for extra in [&[][..], &["--yes"][..]] {
+        let a = sim()
+            .args(["logo", "write", "--builtin", "surf"])
+            .args(extra)
+            .write_stdin("write\n")
+            .assert()
+            .failure();
+        assert_eq!(code_of(&a), 2, "usage error, args {extra:?}");
+        let err = stderr_of(&a);
+        assert!(err.contains("--i-understand"), "{err}");
+        assert_no_frames(&err);
+    }
+    let a = powerz()
+        .args([
+            "--device",
+            "no-such-meter-70X5YX",
+            "logo",
+            "write",
+            "--builtin",
+            "surf",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 2, "refused before the meter is looked up");
+}
+
+#[test]
+fn _70x5yx_3_write_of_a_builtin_with_a_wrong_confirmation_sends_nothing() {
+    let a = sim()
+        .args(["logo", "write", "--i-understand", "--builtin", "surf"])
+        .write_stdin("nope\n")
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 2);
+    let out = stdout_of(&a);
+    assert!(out.contains("write"), "the prompt names the word: {out}");
+    assert!(
+        out.contains("Startup: now off; the upload sets it to 3 s"),
+        "the duration change before the prompt: {out}"
+    );
+    assert_no_write(&stderr_of(&a));
+}
+
+#[test]
+fn _70x5yx_3_write_of_a_builtin_sends_its_encoding_and_verifies() {
+    for (name, b) in [
+        ("surf", BuiltinLogo::Surf),
+        ("surf-wordmark", BuiltinLogo::SurfWordmark),
+    ] {
+        let blob = builtin_blob(b);
+        let a = sim()
+            .env("POWERZ_SIM_MENU_SAVE", "3@0")
+            .args(["logo", "write", "--i-understand", "--builtin", name])
+            .write_stdin("write\n")
+            .assert()
+            .success();
+        let trace = stderr_of(&a);
+        assert_eq!(sent_frames(&trace, "4a").len(), 469, "{name}: 469 chunks");
+        assert_eq!(sent_frames(&trace, "48").len(), 1, "{name}: one 0x1C write");
+        assert!(
+            sent_logo_bytes(&trace) == blob.padded(),
+            "{name}: the blob sent is the built-in logo's encoding"
+        );
+        let out = stdout_of(&a);
+        assert!(out.contains("written and verified"), "{name}: {out}");
+        assert!(contains_size(&out, 200, 200), "{name}: {out}");
+        assert!(
+            out.lines().any(|l| l.trim() == "Startup: 3 s"),
+            "{name}: the fresh settings read: {out}"
+        );
+        assert_private(&a);
+    }
+}
+
+#[test]
+fn _70x5yx_3_write_of_a_builtin_shows_chunk_and_read_back_progress() {
+    let a = sim_quiet()
+        .env("POWERZ_SIM_MENU_SAVE", "3@0")
+        .args([
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+            "--builtin",
+            "surf",
+        ])
+        .assert()
+        .success();
+    let err = stderr_of(&a);
+    let segs = segments(&err);
+    for k in [1, 234, 469] {
+        assert!(err.contains(&format!("{k}/469")), "{k}/469:\n{err}");
+    }
+    assert!(
+        segs.iter()
+            .any(|s| s.to_ascii_lowercase().contains("chunk") && s.contains("469/469")),
+        "chunk progress:\n{err}"
+    );
+    assert!(
+        segs.iter()
+            .any(|s| s.to_ascii_lowercase().contains("read") && s.contains("469/469")),
+        "read-back progress:\n{err}"
+    );
+    let out = stdout_of(&a);
+    assert!(!out.contains("1/469"), "progress stays off stdout:\n{out}");
+    assert!(
+        out.contains("Startup: now off; the upload sets it to 3 s"),
+        "also with --yes: {out}"
+    );
+    assert!(out.contains("written and verified"), "{out}");
+}
+
+#[test]
+fn _70x5yx_3_write_of_a_builtin_waits_for_the_menu_save() {
+    let a = sim()
+        .env("POWERZ_SIM_STARTUP_LOGO", "5")
+        .env("POWERZ_SIM_MENU_SAVE", "5@40000") // after the ~23 s of sim time a 469-chunk read-back takes
+        .args([
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+            "--builtin",
+            "surf-wordmark",
+        ])
+        .assert()
+        .success();
+    let err = stderr_of(&a);
+    assert!(
+        err.contains("The meter changed its startup duration but left its settings unsaved."),
+        "{err}"
+    );
+    assert!(err.contains(MENU_SAVE_STEPS), "{err}");
+    assert!(err.contains("Waiting up to 300 s"), "{err}");
+    let out = stdout_of(&a);
+    assert!(
+        out.contains("Startup: now 5 s; the upload sets it to 3 s"),
+        "{out}"
+    );
+    assert!(out.contains("written and verified"), "{out}");
+    assert!(out.lines().any(|l| l.trim() == "Startup: 5 s"), "{out}");
+}
+
+#[test]
+fn _70x5yx_3_write_of_a_builtin_exits_6_when_the_menu_save_wait_times_out() {
+    let a = sim()
+        .env("POWERZ_SIM_MENU_SAVE", "5@60000")
+        .args([
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+            "--builtin",
+            "surf",
+            "--menu-save-timeout",
+            "4",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 6, "{}", stderr_of(&a));
+}
+
+// ------------------------------------------------------------ AC-70X5YX.4
+
+#[test]
+fn _70x5yx_4_a_builtin_and_a_file_together_is_a_usage_error() {
+    let file = brand_png("surf");
+    let a = sim()
+        .args(["logo", "preview", "--builtin", "surf"])
+        .arg(&file)
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 2, "preview: {}", stderr_of(&a));
+    assert_no_frames(&stderr_of(&a));
+
+    let a = sim()
+        .args([
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+            "--builtin",
+            "surf",
+        ])
+        .arg(&file)
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 2, "write: {}", stderr_of(&a));
+    assert_no_frames(&stderr_of(&a));
+
+    // Before any meter is looked up, too.
+    let a = powerz()
+        .args([
+            "--device",
+            "no-such-meter-70X5YX",
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+            "--builtin",
+            "surf",
+        ])
+        .arg(&file)
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 2, "{}", stderr_of(&a));
+}
+
+#[test]
+fn _70x5yx_4_neither_a_builtin_nor_a_file_is_a_usage_error() {
+    let a = sim().args(["logo", "preview"]).assert().failure();
+    assert_eq!(code_of(&a), 2, "preview: {}", stderr_of(&a));
+    assert_no_frames(&stderr_of(&a));
+
+    let a = sim()
+        .args(["logo", "write", "--i-understand", "--yes"])
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 2, "write: {}", stderr_of(&a));
+    assert_no_frames(&stderr_of(&a));
+
+    let a = powerz()
+        .args([
+            "--device",
+            "no-such-meter-70X5YX",
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 2, "{}", stderr_of(&a));
+}
+
+#[test]
+fn _70x5yx_4_an_unknown_builtin_is_a_usage_error_listing_the_names() {
+    for args in [
+        &["logo", "preview", "--builtin", "nope"][..],
+        &[
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+            "--builtin",
+            "nope",
+        ][..],
+    ] {
+        let a = sim().args(args).assert().failure();
+        assert_eq!(code_of(&a), 2, "{args:?}: {}", stderr_of(&a));
+        let err = stderr_of(&a);
+        assert!(
+            err.contains("surf-wordmark"),
+            "{args:?} lists surf-wordmark:\n{err}"
+        );
+        assert!(
+            err.replace("surf-wordmark", "").contains("surf"),
+            "{args:?} lists surf:\n{err}"
+        );
+        assert_no_frames(&err);
+    }
+}
+
+#[test]
+fn _70x5yx_4_the_alpha_flag_changes_nothing_for_a_builtin() {
+    for name in ["surf", "surf-wordmark"] {
+        let plain = sim_quiet()
+            .args(["logo", "preview", "--builtin", name])
+            .assert()
+            .success();
+        let alpha = sim_quiet()
+            .args(["logo", "preview", "--builtin", name, "--alpha"])
+            .assert()
+            .success();
+        assert_eq!(stdout_of(&plain), stdout_of(&alpha), "{name}");
+        assert!(
+            line_with(&stdout_of(&plain), "mode")
+                .to_ascii_lowercase()
+                .contains("alpha"),
+            "{name}: never opaque"
+        );
+    }
+    let write = |alpha: bool| {
+        let mut c = sim();
+        c.env("POWERZ_SIM_MENU_SAVE", "3@0").args([
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+            "--builtin",
+            "surf",
+        ]);
+        if alpha {
+            c.arg("--alpha");
+        }
+        let a = c.assert().success();
+        sent_logo_bytes(&stderr_of(&a))
+    };
+    let (plain, alpha) = (write(false), write(true));
+    assert!(plain == alpha, "--alpha changed the blob sent");
+    assert!(
+        plain == builtin_blob(BuiltinLogo::Surf).padded(),
+        "always the transparent encoding"
+    );
+}
+
+#[test]
+fn _70x5yx_4_help_shows_the_builtin_option() {
+    for cmd in ["preview", "write"] {
+        let a = powerz().args(["logo", cmd, "--help"]).assert().success();
+        let out = stdout_of(&a);
+        assert!(out.contains("--builtin"), "logo {cmd} --help:\n{out}");
+        assert!(out.contains("surf-wordmark"), "logo {cmd} --help:\n{out}");
+    }
+}
+
+// ------------------------------------------------------------ AC-70X5YX.8
+
+#[test]
+fn _70x5yx_8_cli_reference_describes_the_builtin_option() {
+    let cli = repo_file("docs/reference/cli.md");
+    for cmd in ["`logo preview`", "`logo write`"] {
+        let row = cli
+            .lines()
+            .find(|l| l.starts_with(&format!("| {cmd} |")))
+            .unwrap_or_else(|| panic!("no {cmd} row"));
+        assert!(row.contains("--builtin"), "{cmd} row: {row}");
+        assert!(row.contains("surf-wordmark"), "{cmd} row: {row}");
+        assert!(
+            row.replace("surf-wordmark", "").contains("surf"),
+            "{cmd} row: {row}"
+        );
+    }
+    let section = cli
+        .split("## Startup logo")
+        .nth(1)
+        .expect("a Startup logo section");
+    let section = section.split("\n## ").next().unwrap_or(section);
+    assert!(
+        section.contains("--builtin"),
+        "the Startup logo section names --builtin:\n{section}"
+    );
+    assert!(
+        section.to_lowercase().contains("transparent"),
+        "it says built-ins use the transparent mode:\n{section}"
+    );
+}
+
+#[test]
+fn _70x5yx_8_readme_startup_logo_section_mentions_the_builtin_logos() {
+    let readme = repo_file("README.md");
+    let section = readme
+        .split("### Startup logo")
+        .nth(1)
+        .expect("a Startup logo section in README.md");
+    let section = section.split("\n#").next().unwrap_or(section);
+    assert!(
+        section.contains("--builtin") || section.to_lowercase().contains("built-in"),
+        "README's Startup logo section names the built-in logos:\n{section}"
+    );
+    assert!(
+        section.to_lowercase().contains("open-powerz logo"),
+        "and the desktop's open-powerz logo choice:\n{section}"
+    );
+}
+
+#[test]
+fn _70x5yx_8_desktop_backend_reference_describes_the_builtin_argument() {
+    let doc = repo_file("docs/reference/desktop-backend.md");
+    for cmd in ["logo_preview", "logo_upload"] {
+        let lines: Vec<&str> = doc.lines().filter(|l| l.contains(cmd)).collect();
+        assert!(!lines.is_empty(), "{cmd} is documented");
+        assert!(
+            lines.iter().any(|l| l.contains("builtin")),
+            "{cmd} documents the builtin argument:\n{}",
+            lines.join("\n")
+        );
+    }
+    assert!(doc.contains("surf-wordmark"), "the built-in names");
+}

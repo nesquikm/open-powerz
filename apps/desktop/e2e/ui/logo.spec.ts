@@ -632,3 +632,136 @@ test.describe("after a logo write, the menu save (FR QG6RNY)", () => {
     expect((await checks(page)).length, "no check after the disconnect").toBe(n);
   });
 });
+
+/**
+ * FR 70X5YX: the built-in open-powerz logos. The view offers "Use the open-powerz logo"
+ * as a group of two buttons, "Mascot" and "Mascot with lettering"; picking one previews
+ * it (200 × 200, transparent, 469 chunks), locks the mode to Transparent with the reason
+ * in `logo-mode-reason`, and Upload writes it on the demo meter.
+ */
+test.describe("built-in open-powerz logos (FR 70X5YX)", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+  });
+
+  function builtins(v: Locator): Locator {
+    return v.getByRole("group", { name: /open-powerz logo/i });
+  }
+
+  async function pick(v: Locator, name: RegExp): Promise<void> {
+    await builtins(v).getByRole("button", { name }).click();
+    await expect(v.getByTestId("logo-preview")).toBeVisible();
+  }
+
+  test("AC-70X5YX.5: offers the mascot and the mascot with lettering, each previewed at 200 × 200", async ({
+    page,
+  }) => {
+    const v = await openLogo(page);
+    const group = builtins(v);
+    await expect(group).toBeVisible();
+    await expect(group.getByRole("button", { name: /^mascot$/i })).toBeEnabled();
+    await expect(group.getByRole("button", { name: /mascot with lettering/i })).toBeEnabled();
+
+    await pick(v, /^mascot$/i);
+    const preview = v.getByTestId("logo-preview");
+    await expect(preview).toHaveAttribute("width", "200");
+    await expect(preview).toHaveAttribute("height", "200");
+    const box = await preview.boundingBox();
+    expect(box, "the preview is laid out").toBeTruthy();
+    expect(Math.round(box!.width)).toBe(200);
+    expect(Math.round(box!.height)).toBe(200);
+    expect(await digits(v.getByTestId("logo-size"))).toBe("200200");
+    expect(await digits(v.getByTestId("logo-blob-size"))).toBe("120016");
+    expect(await digits(v.getByTestId("logo-chunks"))).toBe("469");
+    const mascot = await preview.evaluate((c) => (c as HTMLCanvasElement).toDataURL());
+
+    await pick(v, /mascot with lettering/i);
+    await expect
+      .poll(() => preview.evaluate((c) => (c as HTMLCanvasElement).toDataURL()))
+      .not.toBe(mascot);
+    await expect(preview).toHaveAttribute("width", "200");
+    expect(await digits(v.getByTestId("logo-chunks"))).toBe("469");
+  });
+
+  test("AC-70X5YX.6: a built-in locks the mode to transparent; a file brings opaque back", async ({
+    page,
+  }) => {
+    const v = await openLogo(page);
+    const opaque = v.getByRole("radio", { name: /opaque/i });
+    const transparent = v.getByRole("radio", { name: /transparent/i });
+    await expect(opaque).toBeEnabled();
+    await expect(v.getByTestId("logo-mode-reason")).toHaveCount(0);
+
+    await pick(v, /^mascot$/i);
+    await expect(transparent).toBeChecked();
+    await expect(opaque).toBeDisabled();
+    const reason = v.getByTestId("logo-mode-reason");
+    await expect(reason).toBeVisible();
+    await expect(reason).toContainText(/transparent/i);
+
+    await choose(v);
+    await expect(opaque).toBeEnabled();
+    await expect(transparent).toBeEnabled();
+    await expect(v.getByTestId("logo-mode-reason")).toHaveCount(0);
+    await opaque.check();
+    await expect(v.getByTestId("logo-preview")).toHaveAttribute("width", "100");
+    await expect.poll(() => digits(v.getByTestId("logo-blob-size"))).toBe("12016");
+  });
+
+  test("AC-70X5YX.5, AC-70X5YX.7: Upload writes a built-in on the demo meter with confirmation, progress, read-back and the settings guidance", async ({
+    page,
+  }) => {
+    const v = await openLogo(page);
+    await pick(v, /mascot with lettering/i);
+    await v.getByRole("button", { name: /^upload$/i }).click();
+    const d = confirmDialog(page, /upload/i);
+    await expect(d).toBeVisible();
+    await expect(d.getByTestId("logo-confirm-duration")).toHaveText(
+      "The startup duration goes from off to 3 s.",
+    );
+    await d.getByRole("textbox").fill("upload");
+    await d.getByRole("button", { name: /^upload$/i }).click();
+    await expect(d).toHaveCount(0);
+
+    await expect(v.getByRole("progressbar")).toBeVisible();
+    await expect(v).toContainText(/chunk \d+ of 469/i);
+    await expect(v).toContainText(/read.?back/i, { timeout: 30_000 });
+    await expect(v.getByRole("status")).toContainText(/verified/i, { timeout: 30_000 });
+    await expect(v.getByTestId("logo-menu-save")).toBeVisible({ timeout: 30_000 });
+
+    await v.getByRole("button", { name: /^read$/i }).click();
+    await expect(v.getByTestId("logo-area")).toContainText(/200\s*×\s*200/);
+    await expect(v.getByTestId("logo-area")).toContainText(/transparent/i);
+  });
+
+  test("AC-70X5YX.5: the built-in buttons are disabled during a write", async ({ page }) => {
+    const v = await openLogo(page);
+    await pick(v, /^mascot$/i);
+    await confirmUpload(page, v);
+    await expect(v.getByRole("progressbar")).toBeVisible();
+    await expect(builtins(v).getByRole("button", { name: /^mascot$/i })).toBeDisabled();
+    await expect(
+      builtins(v).getByRole("button", { name: /mascot with lettering/i }),
+    ).toBeDisabled();
+    await expect(v.getByRole("status")).toContainText(/verified/i, { timeout: 30_000 });
+  });
+
+  test("AC-70X5YX.5: the picker fits at 375 px wide", async ({ page }) => {
+    await page.setViewportSize(NARROW);
+    const v = await openLogo(page);
+    await pick(v, /mascot with lettering/i);
+    const scroll = await page.evaluate(() => ({
+      documentWidth: document.documentElement.scrollWidth,
+      windowWidth: document.documentElement.clientWidth,
+    }));
+    expect(scroll.documentWidth, "no horizontal scroll").toBeLessThanOrEqual(scroll.windowWidth);
+    for (const name of [/^mascot$/i, /mascot with lettering/i]) {
+      const b = builtins(v).getByRole("button", { name });
+      await b.scrollIntoViewIfNeeded();
+      const box = await b.boundingBox();
+      expect(box, "laid out").toBeTruthy();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(NARROW.width);
+    }
+  });
+});

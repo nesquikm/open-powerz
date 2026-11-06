@@ -291,10 +291,17 @@ after that setting is opened in its menu) until the next edit or disconnect.
 |---|---|
 | `logoChoose(): Promise<string \| null>` | Opens the open dialog filtered to logo pictures (Tauri command `logo_choose`); `null` when it is cancelled. |
 | `logoPreview(path, alpha): Promise<LogoPreview>` | The startup logo the picture encodes to, opaque or transparent (Tauri command `logo_preview`). Needs no meter. |
+| `logoPreviewBuiltin(name): Promise<LogoPreview>` | The startup logo a built-in logo encodes to, always transparent (Tauri command `logo_preview` with `builtin`). `name` is a `BuiltinLogoName`: `"surf"` (the mascot) or `"surf-wordmark"` (the mascot with the lettering). Needs no meter. |
 | `logoRead(deviceId, full): Promise<LogoRead>` | What the meter's logo area holds, with the stored image when `full` (Tauri command `logo_read`). Only memory reads go out. |
 | `logoUpload(deviceId, path, alpha, onProgress): Promise<LogoWritten>` | Writes the picture as the startup logo (Tauri command `logo_upload`): chunks, flag, a full read-back, then the startup duration is set to 3 s and the settings are read again. Batched progress goes to `onProgress`. Nothing is retried. |
+| `logoUploadBuiltin(deviceId, name, onProgress): Promise<LogoWritten>` | Writes a built-in logo (`"surf"` or `"surf-wordmark"`) as the startup logo, always transparent, the same way as `logoUpload` (Tauri command `logo_upload` with `builtin`). |
 | `logoRemove(deviceId, onProgress): Promise<LogoWritten>` | Removes the startup logo (Tauri command `logo_remove`) and turns the startup screen off (duration `off`), then reads the settings again. |
 | `logoSettingsCheck(deviceId): Promise<LogoSettingsCheck>` | One read-only check after a logo write whose settings wait for a menu save (Tauri command `logo_settings_check`): it reads the settings once and nothing is written. It compares the calibration bytes with the ones kept from that write. `saved` or `calibration_changed` ends the wait; `needs_menu_save` keeps it. Rejects with `usage` when no logo write is waiting; a disconnect drops the wait. |
+
+The Tauri commands `logo_preview` and `logo_upload` take `path: Option<String>`
+and `builtin: Option<String>` (`surf` or `surf-wordmark`). Exactly one must
+be given, else they reject with `usage`. A built-in is always transparent
+(alpha).
 
 Types:
 

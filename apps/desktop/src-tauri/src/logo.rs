@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use powerz_protocol::decode::settings::StartupLogo;
+use powerz_protocol::logo::builtin::BuiltinLogo;
 use powerz_protocol::logo::{self, LogoBlob, LogoMode};
 use powerz_protocol::session::{
     Clock, LogoProgress, LogoStatus, LogoStep, LogoWritten, Session, SettingsSave,
@@ -150,6 +151,65 @@ pub fn preview_file(path: &Path, alpha: bool) -> Result<LogoPreviewView, UiError
     let p = blob.preview();
     let pixels = logo::decode(&blob.bytes)
         .map_err(|e| UiError::usage(format!("{}: {e}", path.display())))?;
+    Ok(LogoPreviewView {
+        width: p.width,
+        height: p.height,
+        mode: mode_name(p.mode).to_owned(),
+        blob_size: p.blob_size,
+        padded_size: p.padded_size,
+        chunks: p.chunks,
+        small_side_warning: p.small_side_warning,
+        rgba: base64(&pixels.px),
+    })
+}
+
+/// The blob a logo source encodes to: exactly one of a file `path` (opaque, or
+/// transparent with `alpha`) and a `builtin` logo name (always transparent,
+/// FR 70X5YX).
+pub fn blob_from_source(
+    path: Option<&str>,
+    builtin: Option<&str>,
+    alpha: bool,
+) -> Result<LogoBlob, UiError> {
+    match (path, builtin) {
+        (Some(path), None) => blob_from_file(Path::new(path), alpha),
+        (None, Some(name)) => blob_from_builtin(name),
+        _ => Err(one_source_error()),
+    }
+}
+
+/// The preview of the blob [`blob_from_source`] makes.
+pub fn preview_source(
+    path: Option<&str>,
+    builtin: Option<&str>,
+    alpha: bool,
+) -> Result<LogoPreviewView, UiError> {
+    match (path, builtin) {
+        (Some(path), None) => preview_file(Path::new(path), alpha),
+        (None, Some(name)) => preview_blob(&blob_from_builtin(name)?)
+            .map_err(|e| UiError::usage(format!("{name}: {e}"))),
+        _ => Err(one_source_error()),
+    }
+}
+
+/// The blob of built-in logo `name` (always transparent), or a usage error
+/// listing the names.
+fn blob_from_builtin(name: &str) -> Result<LogoBlob, UiError> {
+    let b = name
+        .parse::<BuiltinLogo>()
+        .map_err(|e| UiError::usage(e.to_string()))?;
+    b.encode().map_err(|e| UiError::usage(format!("{b}: {e}")))
+}
+
+/// The error for both or neither of a file and a built-in logo.
+fn one_source_error() -> UiError {
+    UiError::usage("give exactly one of a logo file and a built-in logo")
+}
+
+/// The preview view of `blob`, its pixels decoded back.
+fn preview_blob(blob: &LogoBlob) -> Result<LogoPreviewView, logo::LogoError> {
+    let p = blob.preview();
+    let pixels = logo::decode(&blob.bytes)?;
     Ok(LogoPreviewView {
         width: p.width,
         height: p.height,
@@ -1020,5 +1080,167 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(250));
         };
         assert_eq!(saved.startup_duration.as_deref(), Some("3 s"));
+    }
+
+    // ---- FR 70X5YX: the built-in open-powerz logos ----
+    //
+    // `preview_source(path, builtin, alpha)` and `blob_from_source(path,
+    // builtin, alpha)` take exactly one of a file path and a built-in name
+    // (`surf` or `surf-wordmark`); a built-in is always the transparent mode.
+
+    use powerz_protocol::logo::builtin::BuiltinLogo;
+
+    fn builtin_blob(b: BuiltinLogo) -> LogoBlob {
+        b.encode().expect("the built-in logo encodes")
+    }
+
+    // AC-70X5YX.5: picking a built-in shows its preview and sizes as a file does.
+    #[test]
+    fn _70x5yx_5_preview_of_a_builtin_reports_200x200_alpha_and_469_chunks() {
+        for (name, b) in [
+            ("surf", BuiltinLogo::Surf),
+            ("surf-wordmark", BuiltinLogo::SurfWordmark),
+        ] {
+            let p = preview_source(None, Some(name), false).expect("previews");
+            assert_eq!((p.width, p.height), (200, 200), "{name}");
+            assert_eq!(p.mode, "alpha", "{name}");
+            assert_eq!(p.blob_size, 120_016, "{name}");
+            assert_eq!(p.padded_size, 120_064, "{name}");
+            assert_eq!(p.chunks, 469, "{name}");
+            assert!(!p.small_side_warning, "{name}");
+            let px = b64_decode(&p.rgba);
+            assert_eq!(
+                px,
+                logo::decode(&builtin_blob(b).bytes).expect("decodes").px,
+                "{name}: the preview pixels are the blob that would be written"
+            );
+        }
+    }
+
+    #[test]
+    fn _70x5yx_5_a_file_source_previews_as_before() {
+        let dir = scratch("70x5yx-file");
+        let path = write_bmp(&dir, "logo.bmp", 100, 60);
+        let text = path.to_string_lossy().into_owned();
+        let p = preview_source(Some(text.as_str()), None, false).expect("previews");
+        assert_eq!(p, preview_file(&path, false).expect("previews"));
+        let blob = blob_from_source(Some(text.as_str()), None, true).expect("encodes");
+        assert_eq!(blob, blob_from_file(&path, true).expect("encodes"));
+    }
+
+    #[test]
+    fn _70x5yx_5_the_blob_of_a_builtin_is_its_encoding() {
+        for (name, b) in [
+            ("surf", BuiltinLogo::Surf),
+            ("surf-wordmark", BuiltinLogo::SurfWordmark),
+        ] {
+            let blob = blob_from_source(None, Some(name), false).expect("encodes");
+            assert_eq!(blob, builtin_blob(b), "{name}");
+        }
+    }
+
+    #[test]
+    fn _70x5yx_5_upload_of_a_builtin_on_the_worker_reports_progress_and_verifies() {
+        let mut worker = ready(|d| d);
+        let blob = blob_from_source(None, Some("surf"), false).expect("encodes");
+        let mut seen = Vec::new();
+        let written = worker
+            .logo_upload(&blob, &mut |p| seen.push(p))
+            .expect("the upload verifies");
+        let chunks: Vec<_> = seen.iter().filter(|p| p.step == LogoStep::Chunks).collect();
+        assert_eq!(chunks.last().map(|p| (p.done, p.total)), Some((469, 469)));
+        assert!(seen.iter().any(|p| p.step == LogoStep::ReadBack));
+        assert_eq!(written.duration_before, "off");
+        assert_eq!(written.duration_set, "3 s");
+        assert_eq!(json(&written)["settings"], "needs_menu_save");
+        let read = worker.logo_read(true).expect("reads");
+        assert_eq!(read.status, "logo");
+        assert_eq!((read.width, read.height), (Some(200), Some(200)));
+        assert_eq!(read.mode.as_deref(), Some("alpha"));
+    }
+
+    // AC-70X5YX.6: a built-in always uses the transparent mode.
+    #[test]
+    fn _70x5yx_6_the_alpha_flag_changes_nothing_for_a_builtin() {
+        for name in ["surf", "surf-wordmark"] {
+            assert_eq!(
+                preview_source(None, Some(name), false).expect("previews"),
+                preview_source(None, Some(name), true).expect("previews"),
+                "{name}"
+            );
+            assert_eq!(
+                blob_from_source(None, Some(name), false).expect("encodes"),
+                blob_from_source(None, Some(name), true).expect("encodes"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn _70x5yx_5_an_unknown_builtin_is_a_usage_error_listing_the_names() {
+        for result in [
+            preview_source(None, Some("nope"), true).map(|_| ()),
+            blob_from_source(None, Some("nope"), true).map(|_| ()),
+        ] {
+            let err = result.expect_err("refused");
+            assert_eq!(err.kind, ErrorKind::Usage);
+            assert!(err.message.contains("surf-wordmark"), "{}", err.message);
+            assert!(
+                err.message.replace("surf-wordmark", "").contains("surf"),
+                "{}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn _70x5yx_5_a_path_and_a_builtin_together_or_neither_is_a_usage_error() {
+        let dir = scratch("70x5yx-both");
+        let path = write_bmp(&dir, "logo.bmp", 100, 60);
+        let path = path.to_string_lossy();
+        for (p, b) in [(Some(&*path), Some("surf")), (None, None)] {
+            let err = preview_source(p, b, false).expect_err("refused");
+            assert_eq!(err.kind, ErrorKind::Usage, "{p:?} {b:?}");
+            assert_ne!(err.message, "not implemented");
+            let err = blob_from_source(p, b, false).expect_err("refused");
+            assert_eq!(err.kind, ErrorKind::Usage, "{p:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn _70x5yx_5_the_preview_and_upload_commands_take_an_optional_builtin() {
+        let source = include_str!("lib.rs");
+        for cmd in ["async fn logo_preview(", "async fn logo_upload("] {
+            let sig = source
+                .split(cmd)
+                .nth(1)
+                .and_then(|rest| rest.split(')').next())
+                .unwrap_or_else(|| panic!("no {cmd}"));
+            assert!(sig.contains("path: Option<String>"), "{cmd}{sig})");
+            assert!(sig.contains("builtin: Option<String>"), "{cmd}{sig})");
+        }
+    }
+
+    // AC-70X5YX.7: the app's demo meter takes a built-in upload like a file upload.
+    #[test]
+    fn _70x5yx_7_the_demo_meter_accepts_a_builtin_upload() {
+        use crate::devices::{AppOpener, Opener, list_devices_from};
+        use powerz_protocol::session::SystemClock;
+        let listing = list_devices_from(Ok(Vec::new()))
+            .into_iter()
+            .find(|d| d.demo_scenario.as_deref() == Some("load-5v-1a"))
+            .expect("the demo listing");
+        let transport = AppOpener.open(&listing).expect("the demo opens");
+        let config = WorkerConfig::new(Rate::Sps50, 1);
+        let mut worker = Worker::start(transport, SystemClock, config, |_e: BackendEvent| {})
+            .unwrap_or_else(|e| panic!("the worker did not start: {e:?}"));
+        worker.read_settings().expect("settings read");
+        let blob = blob_from_source(None, Some("surf-wordmark"), false).expect("encodes");
+        let written = worker.logo_upload(&blob, &mut |_| {}).expect("verifies");
+        assert_eq!(written.duration_set, "3 s");
+        let read = worker.logo_read(false).expect("reads");
+        assert_eq!(read.status, "logo");
+        assert_eq!((read.width, read.height), (Some(200), Some(200)));
+        assert_eq!(read.mode.as_deref(), Some("alpha"));
     }
 }

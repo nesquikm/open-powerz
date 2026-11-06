@@ -16,10 +16,12 @@ vi.mock("@tauri-apps/api/core", () => {
 import {
   logoChoose,
   logoPreview,
+  logoPreviewBuiltin,
   logoRead,
   logoRemove,
   logoSettingsCheck,
   logoUpload,
+  logoUploadBuiltin,
   type LogoPreview,
   type LogoProgress,
   type LogoWritten,
@@ -166,5 +168,42 @@ describe("the write result (FR QG6RNY, AC .1)", () => {
       settings: "needs_menu_save",
       startup_duration: null,
     });
+  });
+});
+
+describe("built-in logos over IPC (AC-70X5YX.5)", () => {
+  it("AC-70X5YX.5: previews a built-in by name in the transparent mode, with no path", async () => {
+    invoke.mockResolvedValue(PREVIEW);
+    await expect(logoPreviewBuiltin("surf")).resolves.toEqual(PREVIEW);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const [cmd, args] = invoke.mock.calls[0]! as [string, Record<string, unknown>];
+    expect(cmd).toBe("logo_preview");
+    expect(args).toMatchObject({ builtin: "surf", alpha: true });
+    expect(args["path"] ?? null).toBeNull();
+  });
+
+  it("AC-70X5YX.5: uploads a built-in by name with a progress channel", async () => {
+    const seen: LogoProgress[] = [];
+    invoke.mockImplementation(async (_cmd: string, args: Record<string, unknown>) => {
+      const channel = args["onProgress"] as { onmessage: (m: LogoProgress) => void };
+      channel.onmessage({ step: "chunks", done: 1, total: 469 });
+      channel.onmessage({ step: "read_back", done: 469, total: 469 });
+      return WRITTEN;
+    });
+    await expect(
+      logoUploadBuiltin("demo:load-5v-1a", "surf-wordmark", (p) => seen.push(p)),
+    ).resolves.toEqual(WRITTEN);
+    const [cmd, args] = invoke.mock.calls[0]! as [string, Record<string, unknown>];
+    expect(cmd).toBe("logo_upload");
+    expect(args).toMatchObject({
+      deviceId: "demo:load-5v-1a",
+      builtin: "surf-wordmark",
+      alpha: true,
+    });
+    expect(args["path"] ?? null).toBeNull();
+    expect(seen).toEqual([
+      { step: "chunks", done: 1, total: 469 },
+      { step: "read_back", done: 469, total: 469 },
+    ]);
   });
 });

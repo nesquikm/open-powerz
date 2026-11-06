@@ -5,6 +5,8 @@
 //! BMP, raw `.bin`) sits behind the optional `image-files` feature so the
 //! core builds for wasm32 without it. See `docs/protocol.md`, "Startup logo".
 
+pub mod builtin;
+
 /// Smallest side the box clamps up to \[static\].
 pub const MIN_SIDE: u32 = 48;
 /// Box limit per side in opaque (RGB565) mode \[static\].

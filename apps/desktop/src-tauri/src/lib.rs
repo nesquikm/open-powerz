@@ -1080,10 +1080,15 @@ async fn logo_choose(app: tauri::AppHandle) -> Result<Option<String>, UiError> {
 }
 
 /// The startup logo `path` encodes to, opaque or (`alpha`) transparent
-/// (FR MEHQC0, AC .1); needs no meter and sends nothing to one.
+/// (FR MEHQC0, AC .1), or the `builtin` open-powerz logo (FR 70X5YX, always
+/// transparent); exactly one of the two. Needs no meter and sends nothing to one.
 #[tauri::command]
-async fn logo_preview(path: String, alpha: bool) -> Result<logo::LogoPreviewView, UiError> {
-    blocking(move || logo::preview_file(Path::new(&path), alpha)).await
+async fn logo_preview(
+    path: Option<String>,
+    builtin: Option<String>,
+    alpha: bool,
+) -> Result<logo::LogoPreviewView, UiError> {
+    blocking(move || logo::preview_source(path.as_deref(), builtin.as_deref(), alpha)).await
 }
 
 /// What meter `device_id`'s startup-logo area holds (FR MEHQC0, AC .7):
@@ -1099,7 +1104,8 @@ async fn logo_read(
     blocking(move || control(&state, device_id.as_deref())?.logo_read(full)).await
 }
 
-/// Upload the picture at `path` (opaque or `alpha`) as meter `device_id`'s
+/// Upload the picture at `path` (opaque or `alpha`), or the `builtin`
+/// open-powerz logo (FR 70X5YX), as meter `device_id`'s
 /// startup logo (FR MEHQC0, AC .3): chunks, startup-duration write, full
 /// read-back, with progress batched to at most 20 messages a second on
 /// `on_progress`.
@@ -1107,14 +1113,15 @@ async fn logo_read(
 async fn logo_upload(
     state: Shared<'_>,
     device_id: Option<String>,
-    path: String,
+    path: Option<String>,
+    builtin: Option<String>,
     alpha: bool,
     on_progress: Channel<logo::LogoProgressView>,
 ) -> Result<logo::LogoWrittenView, UiError> {
     let state = Arc::clone(&state);
     blocking(move || {
         let device = device_id.as_deref();
-        let blob = logo::blob_from_file(Path::new(&path), alpha)
+        let blob = logo::blob_from_source(path.as_deref(), builtin.as_deref(), alpha)
             .inspect_err(|error| log_failure(&state, device, error))?;
         logged_control(&state, device)?.logo_upload(blob, logo_progress(on_progress))
     })

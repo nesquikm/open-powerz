@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Parser, Subcommand, ValueEnum};
 use powerz_protocol::decode::Rate;
+use powerz_protocol::logo::builtin::BuiltinLogo;
 use powerz_protocol::pdm::message::{Preset, SopTarget};
 use powerz_protocol::pdm::pd::{Emarker, PdType, SinkCaps};
 use powerz_sim::Scenario;
@@ -353,8 +354,12 @@ pub enum LogoAction {
     /// count; no meter needed.
     Preview {
         /// Image file to preview.
-        #[arg(value_name = "IMG")]
-        file: PathBuf,
+        #[arg(value_name = "IMG", required_unless_present = "builtin")]
+        file: Option<PathBuf>,
+        /// Preview a built-in logo (surf, surf-wordmark) instead of a file;
+        /// always in the transparent mode.
+        #[arg(long, value_name = "NAME", conflicts_with = "file")]
+        builtin: Option<BuiltinLogo>,
         /// Keep transparency (RGB565 + alpha, at most 200×200) instead of
         /// the opaque mode (RGB565, at most 240×240).
         #[arg(long)]
@@ -367,8 +372,12 @@ pub enum LogoAction {
     /// compare; needs --i-understand and "write" typed at the prompt.
     Write {
         /// Image file to upload (PNG, JPEG, BMP or raw .bin).
-        #[arg(value_name = "IMG")]
-        file: PathBuf,
+        #[arg(value_name = "IMG", required_unless_present = "builtin")]
+        file: Option<PathBuf>,
+        /// Upload a built-in logo (surf, surf-wordmark) instead of a file;
+        /// always in the transparent mode.
+        #[arg(long, value_name = "NAME", conflicts_with = "file")]
+        builtin: Option<BuiltinLogo>,
         /// Keep transparency (RGB565 + alpha, at most 200×200) instead of
         /// the opaque mode (RGB565, at most 240×240).
         #[arg(long)]

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import type { StartupLogoState } from "../logo.svelte";
+  import { BUILTIN_LOGOS, type StartupLogoState } from "../logo.svelte";
   import LogoConfirmDialog from "./LogoConfirmDialog.svelte";
 
   let { logo }: { logo: StartupLogoState } = $props();
@@ -87,6 +87,7 @@
           type="radio"
           name="logo-mode"
           checked={!logo.alpha}
+          disabled={logo.opaqueDisabledReason !== null}
           onchange={() => void logo.setAlpha(false)}
         />
         Opaque
@@ -102,7 +103,21 @@
       </label>
     </fieldset>
   </div>
+  {#if logo.opaqueDisabledReason !== null}
+    <p class="disabled-reason" data-testid="logo-mode-reason">{logo.opaqueDisabledReason}</p>
+  {/if}
   <p class="formats">PNG, JPEG, BMP or a raw logo file (.bin).</p>
+  <div class="builtins" role="group" aria-labelledby="logo-builtins-label">
+    <span id="logo-builtins-label">Or use the open-powerz logo:</span>
+    {#each BUILTIN_LOGOS as b (b.name)}
+      <button
+        type="button"
+        disabled={logo.busy}
+        aria-pressed={logo.builtin === b.name}
+        onclick={() => void logo.useBuiltin(b.name)}>{b.label}</button
+      >
+    {/each}
+  </div>
 
   <p class="duration">
     Startup screen: <span data-testid="logo-duration">{logo.startupDuration ?? "not read yet"}</span
@@ -368,6 +383,12 @@
   .duration-choices {
     display: flex;
     flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .builtins {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 0.5rem;
   }
   .formats {
