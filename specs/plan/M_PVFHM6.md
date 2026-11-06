@@ -35,6 +35,7 @@ codename: First Impression
 | [MEHQC0](../frs/MEHQC0.md) | Desktop startup logo view | n/a |
 | [Z39H24](../frs/Z39H24.md) | Logo writes change the startup duration and leave the settings check stale (bug) | n/a |
 | [QG6RNY](../frs/QG6RNY.md) | Desktop logo view guides the menu save after a logo write (bug) | n/a |
+| [CCF47K](../frs/CCF47K.md) | Hidden serials read as the model, and *** where a value must show | n/a |
 
 Build order: the table's order. The two bug FRs come from the stage 2 and 3 device runs (2026-11-06): SET_DATA 0x1C is the startup duration and leaves the settings CRC A stale. The last three come after stage 4 (2026-11-06): the user picked the electron-surf mascot as the project's art, and the stage 4 run found session actions enabled during a write. The guards need the encoder's header check; the session flows are tested on the simulator; the CLI and the desktop wrap the session.
 
@@ -61,6 +62,8 @@ Build order: the table's order. The two bug FRs come from the stage 2 and 3 devi
   verify: library and CLI tests on the simulator, Rust command tests, Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
 - [x] Session actions stay enabled during a logo write — 70X5YY
   verify: Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
+- [x] Hidden serials read as the model, and *** where a value must show — CCF47K
+  verify: Vitest helpers, CLI hide-serial tests, Playwright hide-serial on Chromium and WebKit with E2E_WIDE_FONT=1
 - [x] Hardware runbooks for stages 1–4 and the M7b carry-overs, in `../qa-runs/m7c/runbooks/` (outside the repo)
   verify: each runbook has its approval gate, stop rules, photos, read-back and settings diffs, and the recovery ladder
 

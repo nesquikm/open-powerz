@@ -97,7 +97,7 @@ pub enum Command {
         /// Also list the simulated demo device (`--transport sim`).
         #[arg(long)]
         include_demo: bool,
-        /// Print `hidden` instead of each meter's serial.
+        /// Print `***` instead of each meter's serial.
         #[arg(long)]
         hide_serial: bool,
     },
@@ -106,7 +106,7 @@ pub enum Command {
         /// Print one JSON object instead of labelled lines.
         #[arg(long)]
         json: bool,
-        /// Print `hidden` instead of the serial and the UID.
+        /// Print `***` instead of the serial and the UID.
         #[arg(long)]
         hide_serial: bool,
     },

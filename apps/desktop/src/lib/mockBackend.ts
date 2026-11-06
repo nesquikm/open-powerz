@@ -1006,6 +1006,7 @@ export const MOCK_MODES = [
   "firmware-bad-file",
   "firmware-running",
   "logo-other-model",
+  "two-meters",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -1056,6 +1057,25 @@ export const MOCK_MODE_FLIP = {
   appMs: 3_000,
   bootMs: 3_000,
 } as const;
+
+/** `two-meters` (FR CCF47K, AC .2): two real KM003C meters listed before the demo
+ * entries, `first` at USB address 5 and `second` at address 6; `second` holds the lower
+ * serial, so with the serials hidden it reads "KM003C (1)". Each connects as a 5 V 1 A
+ * load reporting its own serial. */
+export const MOCK_TWO_METERS = { first: "MOCK-PAIR-0002", second: "MOCK-PAIR-0001" } as const;
+
+/** The `two-meters` picker entries. */
+function twoMeterListings(): DeviceListing[] {
+  return [
+    scriptedMeter(MOCK_TWO_METERS.first, 5, "application"),
+    scriptedMeter(MOCK_TWO_METERS.second, 6, "application"),
+  ];
+}
+
+/** The `two-meters` entry with `deviceId`, or null. */
+function twoMeterListing(deviceId: string): DeviceListing | null {
+  return twoMeterListings().find((d) => d.id === deviceId) ?? null;
+}
 
 /** The picker entry of a scripted real KM003C (`serial`) on bus 1 at `address` in `mode`,
  * labelled the way the backend lists it. */
@@ -1593,7 +1613,7 @@ export class MockBackend {
 
   async listDevices(): Promise<DeviceListing[]> {
     const meter = this.#listedMeter();
-    const meters = meter ? [meter] : [];
+    const meters = this.#mode === "two-meters" ? twoMeterListings() : meter ? [meter] : [];
     const demos = SCENARIOS.map((name) => ({
       id: `demo:${name}`,
       label: `Demo device — ${name}`,
@@ -1740,7 +1760,8 @@ export class MockBackend {
     if (this.#sessions.some((x) => x.id === deviceId || x.deviceId === deviceId)) {
       throw usage("This meter is already connected. Disconnect it first.");
     }
-    const isMeter = this.#listedMeter()?.id === deviceId;
+    const pair = this.#mode === "two-meters" ? twoMeterListing(deviceId) : null;
+    const isMeter = pair !== null || this.#listedMeter()?.id === deviceId;
     // Like the backend: a connect by hand ends the wait for the unplugged meter, unless
     // it adds a meter beside running ones (FR 1HHT03); a connect of that meter itself
     // always does.
@@ -1755,7 +1776,7 @@ export class MockBackend {
     if (!scenario) throw usage("That meter is no longer attached.");
     if (this.#mode === "permission-denied") throw { ...LINUX_PERMISSION_DENIED };
     const locked = this.#mode === "rate-locked";
-    const serial = isMeter ? MOCK_REPLUG.serial : this.#freeDemoSerial();
+    const serial = pair?.serial ?? (isMeter ? MOCK_REPLUG.serial : this.#freeDemoSerial());
     const sessionId = this.#nextSessionId++;
     // Like the worker: a locked session's rate is unknown until measured.
     onEvent(

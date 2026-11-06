@@ -5,16 +5,22 @@
  * - AC .2: with it on, no serial appears in the page's text, attributes or labels. The
  *   scan below covers the markup (text and every attribute), the live form values and
  *   the document title; a control test with the switch off proves that it finds them;
- * - AC .3: hidden fields read "Hidden", and the switch restores them with no reconnect;
+ * - AC .3: hidden fields read "***" and labels name the model alone (FR CCF47K), and the
+ *   switch restores them with no reconnect;
  * - AC .4: tiles are titled by model and position;
  * - AC .5: recording and export names carry no serial, on or off.
  *
  * `?mock=replug` lists one real meter (`MOCK_REPLUG.serial`) beside the demo devices; it
  * drops out 3 s after connecting and comes back 3 s later, then stays.
+ *
+ * `?mock=two-meters` (FR CCF47K, AC .2, .5) lists two real KM003C meters beside the demo
+ * devices: `MOCK_TWO_METERS.first` (e.g. "MOCK-PAIR-0002") at USB address 5 and `.second`
+ * (e.g. "MOCK-PAIR-0001") at address 6. The one at address 6 has the lower serial, so it
+ * reads "KM003C (1)".
  */
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { MOCK_REPLUG } from "../../src/lib/mockBackend";
+import { MOCK_REPLUG, MOCK_TWO_METERS } from "../../src/lib/mockBackend";
 import { badge, open, streamDemo } from "./helpers";
 
 const HIDE_KEY = "open-powerz.hide-serial";
@@ -30,7 +36,12 @@ test.use({ viewport: { width: 1600, height: 900 } });
 
 /** The demo serials (a second demo meter counts up), whole and as a tile's suffix. */
 const DEMO_SERIALS = [/(?<![\d.])12345[67](?!\d)/, /…345[67]/];
-const REAL_SERIALS = [MOCK_REPLUG.serial, `…${MOCK_REPLUG.serial.slice(-4)}`];
+const REAL_SERIALS = [MOCK_REPLUG.serial, MOCK_TWO_METERS.first, MOCK_TWO_METERS.second].flatMap(
+  (serial) => [serial, `…${serial.slice(-4)}`],
+);
+/** The two-meter mock's ids: address 6 holds the lower serial (AC-CCF47K.2). */
+const PAIR_HIGHER = "usb:1:5";
+const PAIR_LOWER = "usb:1:6";
 
 async function hideBeforeLoad(page: Page): Promise<void> {
   await page.addInitScript((key) => localStorage.setItem(key, "true"), HIDE_KEY);
@@ -170,7 +181,7 @@ test.describe("Hide serial numbers (FR AXHK2Q)", () => {
     await hideBeforeLoad(page);
     await open(page, "?mock=replug");
     const picker = page.getByLabel("Device", { exact: true });
-    await expect(picker.locator('option[value^="usb:"]')).toHaveText("KM003C — Hidden");
+    await expect(picker.locator('option[value^="usb:"]')).toHaveText("KM003C");
     await expectNoSerial(page);
 
     await picker.selectOption(FIRST_ADDRESS);
@@ -217,7 +228,8 @@ test.describe("Hide serial numbers (FR AXHK2Q)", () => {
 
     const about = await openAbout(page);
     const details = about.getByRole("region", { name: "Device details" });
-    await expect(details).toContainText("Hidden");
+    await expect(details).toContainText("***");
+    await expect(details).not.toContainText("Hidden");
     await expectNoSerial(page);
   });
 
@@ -250,7 +262,9 @@ test.describe("Hide serial numbers (FR AXHK2Q)", () => {
     await streamRealMeterAfterReplug(page);
     await expectNoSerial(page);
     const prompt = await firmwareSessionPrompt(page);
-    await expect(prompt.getByRole("listitem")).toContainText("Hidden");
+    await expect(prompt.getByRole("listitem")).toContainText("KM003C");
+    await expect(prompt.getByRole("listitem")).not.toContainText("Hidden");
+    await expect(prompt.getByRole("listitem")).not.toContainText("—");
     await expectNoSerial(page);
   });
 
@@ -295,7 +309,7 @@ test.describe("Hide serial numbers (FR AXHK2Q)", () => {
     const before = await connectedIds(page);
 
     // AC .1: on, the tooltip names the model only.
-    await expect(picker).toHaveAttribute("title", "KM003C — Hidden");
+    await expect(picker).toHaveAttribute("title", "KM003C");
     expect(await picker.getAttribute("title")).not.toContain(MOCK_REPLUG.serial);
 
     // AC .2, .3: off, the tooltip is the selected option's full label, at once.
@@ -310,7 +324,7 @@ test.describe("Hide serial numbers (FR AXHK2Q)", () => {
     // AC .3: on again, hidden again, still no reconnect.
     await hideSwitch(await openAbout(page)).click();
     await page.keyboard.press("Escape");
-    await expect(picker).toHaveAttribute("title", "KM003C — Hidden");
+    await expect(picker).toHaveAttribute("title", "KM003C");
     await expect(picker).toHaveValue(FIRST_ADDRESS);
     expect(await connectedIds(page)).toEqual(before);
   });
@@ -340,5 +354,89 @@ test.describe("Hide serial numbers (FR AXHK2Q)", () => {
         expect(text).not.toContain("123456");
       }
     }
+  });
+});
+
+test.describe("Hidden serials read as the model (FR CCF47K)", () => {
+  test("no shown text reads Hidden, in the picker, the add dialog or About (AC-CCF47K.1, .3)", async ({
+    page,
+  }) => {
+    await hideBeforeLoad(page);
+    await open(page, "?mock=replug");
+    const picker = page.getByLabel("Device", { exact: true });
+    await expect(picker.locator('option[value^="usb:"]')).toHaveText("KM003C");
+    await streamDemo(page);
+    await page.getByRole("button", { name: "Add meter" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add a meter" });
+    await expect(dialog.locator('option[value^="usb:"]')).toHaveText("KM003C");
+    await page.keyboard.press("Escape");
+    const about = await openAbout(page);
+    const serialRow = about.getByRole("region", { name: "Device details" });
+    await expect(serialRow).toContainText("***");
+    expect(await page.locator("body").innerText()).not.toContain("Hidden");
+  });
+
+  test("two meters of one model are numbered by serial, with no serial on the page (AC-CCF47K.2, .5)", async ({
+    page,
+  }) => {
+    await hideBeforeLoad(page);
+    await open(page, "?mock=two-meters");
+    const picker = page.getByLabel("Device", { exact: true });
+    await expect(picker.locator(`option[value="${PAIR_LOWER}"]`)).toHaveText("KM003C (1)");
+    await expect(picker.locator(`option[value="${PAIR_HIGHER}"]`)).toHaveText("KM003C (2)");
+    await expectNoSerial(page);
+
+    await picker.selectOption(PAIR_HIGHER);
+    await expect(picker).toHaveAttribute("title", "KM003C (2)");
+    await expectNoSerial(page);
+
+    await picker.selectOption("demo:load-5v-1a");
+    await expect(picker.locator('option[value^="demo:"]').first()).toHaveText(/^Demo device — /);
+    await streamDemo(page);
+    await page.getByRole("button", { name: "Add meter" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add a meter" });
+    await expect(dialog.locator(`option[value="${PAIR_LOWER}"]`)).toHaveText("KM003C (1)");
+    await expect(dialog.locator(`option[value="${PAIR_HIGHER}"]`)).toHaveText("KM003C (2)");
+    await expectNoSerial(page);
+  });
+
+  test("a meter keeps its number in the add dialog while the other one is connected (AC-CCF47K.2)", async ({
+    page,
+  }) => {
+    await hideBeforeLoad(page);
+    await open(page, "?mock=two-meters");
+    await connectRealMeter(page, PAIR_LOWER);
+    await expectNoSerial(page);
+    await page.getByRole("button", { name: "Add meter" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add a meter" });
+    await expect(dialog.locator(`option[value="${PAIR_LOWER}"]`)).toHaveCount(0);
+    await expect(dialog.locator(`option[value="${PAIR_HIGHER}"]`)).toHaveText("KM003C (2)");
+    await expectNoSerial(page);
+  });
+
+  test("control: with the switch off the two-meter scan finds both serials (AC-CCF47K.4, .5)", async ({
+    page,
+  }) => {
+    await open(page, "?mock=two-meters");
+    const found = await serialsOnPage(page);
+    expect(found).toContain(MOCK_TWO_METERS.first);
+    expect(found).toContain(MOCK_TWO_METERS.second);
+    const picker = page.getByLabel("Device", { exact: true });
+    await expect(picker.locator(`option[value="${PAIR_HIGHER}"]`)).toHaveText(
+      `KM003C — ${MOCK_TWO_METERS.first}`,
+    );
+
+    // On at once, with no reconnect: numbered, no serial.
+    await hideSwitch(await openAbout(page)).click();
+    await page.keyboard.press("Escape");
+    await expect(picker.locator(`option[value="${PAIR_HIGHER}"]`)).toHaveText("KM003C (2)");
+    await expectNoSerial(page);
+
+    // Off again: the serials are back.
+    await hideSwitch(await openAbout(page)).click();
+    await page.keyboard.press("Escape");
+    await expect(picker.locator(`option[value="${PAIR_LOWER}"]`)).toHaveText(
+      `KM003C — ${MOCK_TWO_METERS.second}`,
+    );
   });
 });

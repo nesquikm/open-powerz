@@ -1597,6 +1597,7 @@
   {#if addMeterOpen}
     <AddMeterDialog
       devices={addableDevices}
+      listed={session.devices}
       {hideSerial}
       onCancel={() => (addMeterOpen = false)}
       onConnect={(id) => void addMeter(id)}

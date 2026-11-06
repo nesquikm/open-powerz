@@ -275,8 +275,8 @@ that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) 
 
 ## Hide serial numbers
 
-- `powerz list --hide-serial` prints `hidden` for each meter's serial.
-- `powerz info --hide-serial` prints `hidden` for the serial and the UID.
+- `powerz list --hide-serial` prints `***` for each meter's serial.
+- `powerz info --hide-serial` prints `***` for the serial and the UID.
 
 Both work in text and with `--json`. Other output does not change. With several
 meters attached and no `--device`, `info --hide-serial` stops with the number of

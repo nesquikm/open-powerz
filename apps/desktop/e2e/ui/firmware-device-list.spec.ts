@@ -26,7 +26,8 @@ const REAL_METER = "usb:1:7";
 const UPDATE_MS = 20_000;
 
 const SHOWN = `KM003C — ${MOCK_REPLUG.serial}`;
-const HIDDEN = "KM003C — Hidden";
+/** With Hide serial numbers on, the model alone (FR CCF47K, AC .1). */
+const HIDDEN = "KM003C";
 
 test.use({ viewport: { width: 1600, height: 900 } });
 

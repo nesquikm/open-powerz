@@ -227,7 +227,7 @@ describe("each label is the select's own text (AC-XCCQAK.2)", () => {
     const { fw } = await running(be.api);
     roundTrip(fw);
     const hidden = line(fw, true);
-    expect(hidden).toBe("KM003C — Hidden → KM003C — Hidden (bootloader mode) → KM003C — Hidden");
+    expect(hidden).toBe("KM003C → KM003C (bootloader mode) → KM003C");
     expect(hidden).not.toContain(SERIAL);
   });
 
@@ -338,9 +338,7 @@ describe("the line keeps noting the meter after the update ends (FR PGY704)", ()
     fw.noteListings([OTHER, DEMO]);
     fw.noteListings([meterAt(5, "application"), OTHER, DEMO]);
     expect(line(fw, false)).toBe(FULL);
-    expect(line(fw, true)).toBe(
-      "KM003C — Hidden → KM003C — Hidden (bootloader mode) → KM003C — Hidden",
-    );
+    expect(line(fw, true)).toBe("KM003C → KM003C (bootloader mode) → KM003C");
   });
 
   it("notes while the update runs and, once it is done, until a label in application mode closes the line (AC-PGY704.2)", async () => {

@@ -5,7 +5,7 @@ use std::io::Write;
 use powerz_protocol::transport::discovery::{DeviceEntry, Model};
 
 use crate::error::CliError;
-use crate::output::{HIDDEN, write_json};
+use crate::output::{MASK, write_json};
 
 /// Pick the device to use: the one whose serial is `serial`, or the only
 /// attached one. Several attached without `serial` is a usage error naming
@@ -68,7 +68,7 @@ pub fn list(
     list_with(devices, json, false, out, err)
 }
 
-/// [`list`], printing `hidden` for every serial when `hide_serial` is set.
+/// [`list`], printing `***` for every serial when `hide_serial` is set.
 pub fn list_with(
     devices: &[DeviceEntry],
     json: bool,
@@ -109,7 +109,7 @@ pub fn list_with(
 /// The serial `list` prints for `d`.
 fn shown_serial(d: &DeviceEntry, hide_serial: bool) -> Option<&str> {
     if hide_serial {
-        Some(HIDDEN)
+        Some(MASK)
     } else {
         d.serial.as_deref()
     }
