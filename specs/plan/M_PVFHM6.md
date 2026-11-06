@@ -39,6 +39,7 @@ codename: First Impression
 | [JV54SN](../frs/JV54SN.md) | The chart stops drawing after a meter settings write (bug) | n/a |
 | [JV54SP](../frs/JV54SP.md) | The settings-write hint says when the meter's screen really changes (bug) | n/a |
 | [JV54SQ](../frs/JV54SQ.md) | The trigger view after the charger went away (bug) | n/a |
+| [1DHPPW](../frs/1DHPPW.md) | The library docs build fails on links to feature-gated logo methods (bug) | n/a |
 
 Build order: the table's order. The two bug FRs come from the stage 2 and 3 device runs (2026-11-06): SET_DATA 0x1C is the startup duration and leaves the settings CRC A stale. The three bug FRs JV54SN, JV54SP and JV54SQ come from the M7c carry-over device run (2026-11-06, parts S and U). The last three before them come after stage 4 (2026-11-06): the user picked the electron-surf mascot as the project's art, and the stage 4 run found session actions enabled during a write. The guards need the encoder's header check; the session flows are tested on the simulator; the CLI and the desktop wrap the session.
 
@@ -73,6 +74,8 @@ Build order: the table's order. The two bug FRs come from the stage 2 and 3 devi
   verify: Vitest, Playwright and CLI tests pin the new note
 - [x] The trigger view after the charger went away — JV54SQ
   verify: Rust trigger tests on the simulated charger, Vitest, Playwright on the mock
+- [x] The library docs build fails on links to feature-gated logo methods — 1DHPPW
+  verify: `cargo doc -p powerz-protocol` with -D warnings, with and without image-files
 - [x] Hardware runbooks for stages 1–4 and the M7b carry-overs, in `../qa-runs/m7c/runbooks/` (outside the repo)
   verify: each runbook has its approval gate, stop rules, photos, read-back and settings diffs, and the recovery ladder
 

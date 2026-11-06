@@ -2,8 +2,12 @@
 //!
 //! The two brand meter logos ship embedded in the library, so a logo can be
 //! written without a file. Names, labels and the PNG bytes need no feature;
-//! [`BuiltinLogo::load`] and [`BuiltinLogo::encode`] decode the PNG and sit
+//! `BuiltinLogo::load` and `BuiltinLogo::encode` decode the PNG and sit
 //! behind `image-files` like every other image decode.
+#![cfg_attr(
+    feature = "image-files",
+    doc = "\nSee [`BuiltinLogo::load`] and [`BuiltinLogo::encode`]."
+)]
 
 use super::LogoMode;
 
