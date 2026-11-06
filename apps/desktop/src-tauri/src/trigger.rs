@@ -412,7 +412,8 @@ impl TriggerControl {
     }
 
     /// Back to 5 V: PD `pd req=1` (Hard Reset as the fallback), the other
-    /// protocols `reset`. The session stays open. Out of sync it still
+    /// protocols `reset`. With the charger gone no PD way back goes out
+    /// (FR JV54SQ). The session stays open. Out of sync it still
     /// works: `pd hrst` / `reset` go out blind, `pdm close` follows, and the
     /// answer is the out-of-sync error saying VBUS is not confirmed.
     pub fn back_to_5v(&self) -> Result<(), UiError> {
@@ -1015,10 +1016,11 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
     }
 
     /// Back to 5 V where the protocol allows it: PD `pd req=1` (Hard Reset
-    /// as the fallback), the others `reset`. Out of sync, the library's
-    /// safety path writes `pd hrst` / `reset` blind and `pdm close` follows.
-    /// Disarms before anything is written, so a failed way back ends "don't
-    /// ask again" too.
+    /// as the fallback), the others `reset`. With the charger gone the PD
+    /// way back is skipped (FR JV54SQ); `reset` still goes out. Out of sync,
+    /// the library's safety path writes `pd hrst` / `reset` blind and `pdm
+    /// close` follows. Disarms before anything is written, so a failed way
+    /// back ends "don't ask again" too.
     fn return_to_5v(&mut self) -> Result<(), UiError> {
         self.end_armed(ArmedEnd::BackTo5V);
         // Until it is accepted: a Hard Reset takes VBUS down on purpose.
@@ -1026,7 +1028,10 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
         if let Err(e) = self.pdm.check_in_step() {
             return Err(self.blind_return_to_5v(&e));
         }
-        let pd = if self.pd_contract || self.entered == Entered::Pd {
+        // With the charger gone (FR JV54SQ) there is no contract to end: a
+        // 5 V request and a Hard Reset would only wait for a charger that
+        // is not there. One plugged in later starts at 5 V on its own.
+        let pd = if !self.gone && (self.pd_contract || self.entered == Entered::Pd) {
             pd::return_to_5v(&mut self.pdm, &self.offers)
                 .map(|back| matches!(back, pd::BackTo5V::Requested))
                 .map_err(|e| pd_error(&e.hard_reset))
@@ -5327,6 +5332,334 @@ mod tests {
         assert_eq!(gone.len(), 1, "{log}");
         assert!(!gone[0].contains(powerz_sim::SIM_SERIAL), "{}", gone[0]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- FR JV54SQ: closing after the charger went away ----
+
+    /// What quitting waits for the session to close (`TRIGGER_SHUTDOWN_WAIT`
+    /// in devices.rs).
+    const QUIT_WAIT: Duration = Duration::from_secs(3);
+    /// "Well within" the quit wait: a close that sends only `pdm close`.
+    const WELL_WITHIN: Duration = Duration::from_secs(1);
+
+    /// The simulated meter until the charger is pulled: from then on `pd
+    /// req=…` and `pd hrst` get no answer, as the real meter gives none with
+    /// no charger, and each read waits 50 ms of real and meter time. Every
+    /// write is kept, answered or not.
+    struct ChargerLeaves {
+        port: powerz_sim::SimPdmPort,
+        clock: SimClock,
+        pulled: Arc<AtomicBool>,
+        muted: bool,
+        written: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Read for ChargerLeaves {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.muted {
+                std::thread::sleep(Duration::from_millis(50));
+                self.clock.advance(Duration::from_millis(50));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "no charger",
+                ));
+            }
+            self.port.read(buf)
+        }
+    }
+
+    impl Write for ChargerLeaves {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let text = String::from_utf8_lossy(buf).trim().to_owned();
+            self.written.lock().unwrap().push(text.clone());
+            if self.pulled.load(Ordering::SeqCst)
+                && (text.starts_with("pd req") || text.starts_with("pd hrst"))
+            {
+                self.muted = true;
+                return Ok(buf.len());
+            }
+            self.muted = false;
+            self.port.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.port.flush()
+        }
+    }
+
+    /// A watched session (VBUS 9 V, log lines kept) on a [`ChargerLeaves`]
+    /// port; `pulled` takes the charger away.
+    struct Pullable {
+        sim: SimPdm,
+        w: TriggerWorker,
+        vbus: Vbus,
+        lines: Lines,
+        pulled: Arc<AtomicBool>,
+        written: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn pullable(charger: SimCharger) -> Pullable {
+        let (sim, clock) = sim(charger);
+        let pulled = Arc::new(AtomicBool::new(false));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let port = ChargerLeaves {
+            port: sim.open_port(),
+            clock: clock.clone(),
+            pulled: Arc::clone(&pulled),
+            muted: false,
+            written: Arc::clone(&written),
+        };
+        let w = TriggerWorker::spawn(port, clock).expect("the session opens");
+        let vbus: Vbus = Arc::new(Mutex::new(Some(9.0)));
+        let reading = Arc::clone(&vbus);
+        w.watch_vbus(fresh(move || *reading.lock().unwrap()));
+        let lines: Lines = Arc::new(Mutex::new(Vec::new()));
+        let keep = Arc::clone(&lines);
+        w.log_to(move |line: String| keep.lock().unwrap().push(line));
+        Pullable {
+            sim,
+            w,
+            vbus,
+            lines,
+            pulled,
+            written,
+        }
+    }
+
+    fn written_since(written: &Arc<Mutex<Vec<String>>>, skip: usize) -> Vec<String> {
+        written.lock().unwrap().iter().skip(skip).cloned().collect()
+    }
+
+    /// No 5 V request and no Hard Reset among `writes`.
+    fn no_pd_way_back(writes: &[String]) {
+        assert!(
+            !writes
+                .iter()
+                .any(|w| w.starts_with("pd req") || w.starts_with("pd hrst")),
+            "a PD way back with the charger gone: {writes:?}"
+        );
+    }
+
+    /// Leave the view from another thread; its answer must come within
+    /// [`WELL_WITHIN`].
+    fn leave_within(c: TriggerControl) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(c.leave_view());
+        });
+        let answered = rx.recv_timeout(WELL_WITHIN);
+        assert!(
+            answered.is_ok(),
+            "leaving the view did not answer within {WELL_WITHIN:?}"
+        );
+    }
+
+    // AC-JV54SQ.2: gone after a PD contract: no 5 V request, no Hard Reset,
+    // the close goes out well within the quit wait.
+
+    #[test]
+    fn with_the_charger_gone_after_a_pd_contract_leaving_and_closing_send_only_the_close() {
+        let Pullable {
+            sim,
+            w,
+            vbus,
+            lines,
+            pulled,
+            written,
+        } = pullable(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), true).expect("9 V");
+        reads(&vbus, 0.0);
+        wait_for_line(&lines, COLLAPSE_PREFIX);
+        gone_eventually(&c);
+        pulled.store(true, Ordering::SeqCst);
+        let before = written.lock().unwrap().len();
+
+        leave_within(w.control());
+        no_pd_way_back(&written_since(&written, before));
+
+        let start = Instant::now();
+        let closed = w.close_within(QUIT_WAIT);
+        let took = start.elapsed();
+        let writes = written_since(&written, before);
+        no_pd_way_back(&writes);
+        assert_eq!(
+            writes.last().map(String::as_str),
+            Some("pdm close"),
+            "{writes:?}"
+        );
+        closed.expect("closed");
+        assert!(took < WELL_WITHIN, "closing took {took:?}");
+        assert!(!sim.pdm_active(), "pdm close was sent");
+    }
+
+    #[test]
+    fn with_the_charger_gone_after_a_pd_contract_closing_alone_sends_only_the_close() {
+        let Pullable {
+            sim,
+            w,
+            vbus,
+            lines,
+            pulled,
+            written,
+        } = pullable(SimCharger::Epr140W);
+        let c = w.control();
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(2), true).expect("9 V");
+        reads(&vbus, 0.0);
+        wait_for_line(&lines, COLLAPSE_PREFIX);
+        gone_eventually(&c);
+        pulled.store(true, Ordering::SeqCst);
+        let before = written.lock().unwrap().len();
+
+        let start = Instant::now();
+        let closed = w.close_within(QUIT_WAIT);
+        let took = start.elapsed();
+        let writes = written_since(&written, before);
+        no_pd_way_back(&writes);
+        assert_eq!(writes, vec!["pdm close".to_owned()]);
+        closed.expect("closed");
+        assert!(took < WELL_WITHIN, "closing took {took:?}");
+        assert!(!sim.pdm_active(), "pdm close was sent");
+    }
+
+    // AC-JV54SQ.3: gone after a legacy protocol: the reset still goes out
+    // before the close.
+
+    #[test]
+    fn with_the_charger_gone_after_a_legacy_protocol_closing_sends_reset_then_the_close() {
+        let Pullable {
+            sim,
+            w,
+            lines,
+            pulled,
+            written,
+            ..
+        } = pullable(SimCharger::MultiProtocol);
+        let c = w.control();
+        c.list(TriggerProtocol::Qc).expect("list qc");
+        c.request(TriggerRequest::Qc { volts: 12 }, true)
+            .expect("12 V");
+        let _script = CcScript::stream(
+            &w,
+            &[
+                attached(0),
+                unplugged(100),
+                unplugged(200),
+                unplugged(300),
+                unplugged(400),
+                unplugged(500),
+                unplugged(600),
+            ],
+        );
+        wait_for_line(&lines, CC_GONE_PREFIX);
+        gone_eventually(&c);
+        pulled.store(true, Ordering::SeqCst);
+        let before = written.lock().unwrap().len();
+
+        let start = Instant::now();
+        let closed = w.close_within(QUIT_WAIT);
+        let took = start.elapsed();
+        let writes = written_since(&written, before);
+        no_pd_way_back(&writes);
+        let reset = last_index(&writes, "reset").expect("reset");
+        let close = last_index(&writes, "pdm close").expect("pdm close");
+        assert!(reset < close, "{writes:?}");
+        closed.expect("closed");
+        assert!(took < WELL_WITHIN, "closing took {took:?}");
+        assert!(!sim.pdm_active(), "pdm close was sent");
+    }
+
+    // AC-JV54SQ.4: the close is in the app log on quit after the charger went
+    // away, and no PD way back is.
+
+    #[test]
+    fn quitting_after_the_charger_went_away_logs_the_close_and_no_way_back() {
+        let dir =
+            std::env::temp_dir().join(format!("open-powerz-jv54sq-{}-quit", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the log folder");
+        let path = dir.join("app.log");
+
+        let mut m = DeviceManager::new(|| Ok(Vec::new()), AppOpener, SystemClock);
+        m.set_app_log(crate::app_log::AppLog::open(&path).expect("open app.log"));
+        // The idle demo meter reads about 0 V: the contract never rises.
+        m.connect_with_stop(
+            "demo:idle",
+            50,
+            |_: BackendEvent| {},
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("the demo device connects");
+        m.open_trigger().expect("the demo PDM port");
+        let c = m.trigger_control().expect("open");
+        c.list(TriggerProtocol::Pd).expect("list pd");
+        c.request(pd(1), false).expect("5 V");
+        eventually("the charger gone", || {
+            c.charger_gone().expect("charger gone")
+        });
+        drop(c);
+        let start = Instant::now();
+        m.shutdown();
+        let took = start.elapsed();
+
+        let log = std::fs::read_to_string(&path).expect("read app.log");
+        let lines: Vec<&str> = log.lines().collect();
+        let gone = lines
+            .iter()
+            .position(|l| l.contains(COLLAPSE_PREFIX) || l.contains(CC_GONE_PREFIX))
+            .unwrap_or_else(|| panic!("no gone line: {log}"));
+        let after = &lines[gone..];
+        let close = format!("{SENT_PREFIX}pdm close ");
+        assert!(
+            after.iter().any(|l| l.contains(&close)),
+            "no {close:?} line after the charger went away: {log}"
+        );
+        for way_back in ["pd req", "pd hrst"] {
+            let sent = format!("{SENT_PREFIX}{way_back}");
+            assert!(
+                !after.iter().any(|l| l.contains(&sent)),
+                "{sent:?} after the charger went away: {log}"
+            );
+        }
+        assert!(took < QUIT_WAIT, "quitting took {took:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC-JV54SQ.5: with the charger still attached, leaving and closing are as
+    // before: the way back to 5 V, then the close.
+
+    #[test]
+    fn with_the_charger_attached_leaving_and_closing_return_to_5v_then_close() {
+        let (sim, w, _vbus, lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        let before = sim.writes().len();
+        c.leave_view().expect("leave the view");
+        w.close().expect("close");
+        let writes = writes_after(&sim, before);
+        assert_eq!(
+            writes,
+            vec!["pd req=1".to_owned(), "pdm close".to_owned()],
+            "{:?}",
+            lines.lock().unwrap()
+        );
+        assert!(!sim.pdm_active());
+    }
+
+    #[test]
+    fn with_the_charger_attached_closing_alone_returns_to_5v_then_closes() {
+        let (sim, w, _vbus, _lines) = watched_contract(SimCharger::Epr140W);
+        let c = w.control();
+        std::thread::sleep(THREE_CHECKS);
+        assert!(!c.charger_gone().expect("charger gone"));
+        let before = sim.writes().len();
+        w.close().expect("close");
+        let writes = writes_after(&sim, before);
+        let back = last_index(&writes, "pd req=1").expect("pd req=1");
+        let close = last_index(&writes, "pdm close").expect("pdm close");
+        assert!(back < close, "{writes:?}");
     }
 }
 
