@@ -148,10 +148,11 @@ pub fn parse_changes(args: &[String]) -> Result<Vec<(WritableField, i32)>, CliEr
 }
 
 /// Said after a write the meter read back as asked: the KM003C stores it
-/// at once but redraws a new brightness or theme only after that setting
-/// is opened in its own menu (2026-10-29) \[device\].
+/// at once but its screen shows a new brightness only after that value is
+/// changed in its own menu, for example one step up and back (2026-11-06)
+/// \[device\].
 pub const SETTINGS_SAVED_NOTE: &str = "The meter has saved the change; its screen shows it \
-     after you open that setting in the meter's menu.";
+     once you change that value in the meter's menu (for example one step up and back).";
 
 /// `powerz settings set <field>=<value> … --i-understand`: check every
 /// change, send one settings write between two SETTINGS reads, print the

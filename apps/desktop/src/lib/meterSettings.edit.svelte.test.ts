@@ -200,13 +200,13 @@ describe("MeterSettingsPanel edit (AC-JKWT3W.4, .5)", () => {
     expect(panel.applying).toBe(false);
   });
 
-  it("a successful Apply says the meter's screen shows it after its menu is opened", async () => {
+  it("a successful Apply says the meter's screen shows it once the value is changed in its menu (AC-JV54SP.1)", async () => {
     const { panel } = await editing();
     expect(panel.notice).toBeNull();
     panel.setDraft("brightness", 80);
     await panel.apply();
     expect(SAVED_NOTICE).toBe(
-      "The meter has saved the change; its screen shows it after you open that setting in the meter's menu.",
+      "The meter has saved the change; its screen shows it once you change that value in the meter's menu (for example one step up and back).",
     );
     expect(panel.notice).toBe(SAVED_NOTICE);
   });

@@ -444,9 +444,14 @@ Message layout (all words little-endian):
   redraw. On 2026-10-29 a new theme showed when the theme item of the
   meter's menu was opened; a new brightness once showed only after the
   value was changed in that menu, and after the restore write both showed
-  when their menu items were opened. So after a successful write the CLI
-  and the desktop app say the screen shows the change after that setting
-  is opened in the meter's menu.
+  when their menu items were opened.
+- [device] On 2026-11-06 (KM003C) the app wrote brightness 50 to 80 and
+  later 80 to 50. Both were stored at once, but the screen showed the new
+  brightness only after the value was changed in the meter's menu, one
+  step and back (80 to 81 to 80, 50 to 51 to 50); just opening the item
+  did nothing. So after a successful write the CLI and the desktop app say
+  the screen shows the change after you change that value in the meter's
+  menu, one step and back.
 - [device] Bit 7 of the u32 at 0x60 went from 0 to 1 (0x49 to 0xC9) while
   the user changed the brightness by hand in the meter's menu, between two
   settings writes; neither write changed it, and the CRC-32 at 0xB0 changed

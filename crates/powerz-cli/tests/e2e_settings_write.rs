@@ -287,17 +287,17 @@ fn two_settings_reads_that_differ_refuse_the_write_with_nothing_sent() {
     }
 }
 
-/// The KM003C stores the write at once but redraws a new brightness or
-/// theme only after that setting is opened in its menu (2026-10-29)
-/// `[device]`, so a successful write says so on stderr; stdout stays the
-/// settings read back.
+/// The KM003C stores the write at once but its screen shows a new
+/// brightness only after that value is changed in its menu, for example one
+/// step up and back (2026-11-06) `[device]`, so a successful write says so on
+/// stderr; stdout stays the settings read back (AC-JV54SP.2).
 #[test]
-fn a_successful_set_says_the_screen_shows_it_after_the_menu_is_opened() {
+fn a_successful_set_says_the_screen_shows_it_once_the_value_is_changed_in_the_menu() {
     let a = sim()
         .args(["settings", "set", "brightness=80", "--i-understand"])
         .assert()
         .success();
-    let note = "The meter has saved the change; its screen shows it after you open that setting in the meter's menu.";
+    let note = "The meter has saved the change; its screen shows it once you change that value in the meter's menu (for example one step up and back).";
     assert!(stderr_of(&a).contains(note), "{}", stderr_of(&a));
     assert!(!stdout_of(&a).contains("saved"), "{}", stdout_of(&a));
 }

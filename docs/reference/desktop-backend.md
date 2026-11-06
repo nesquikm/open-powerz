@@ -280,7 +280,8 @@ in the Meter tab's side card, under the stats. Edit mode gives the writable
 fields controls and lists the changes before Apply; Refresh is hidden, and a
 refresh while Apply is in flight is ignored. After a successful write the
 panel shows `SAVED_NOTICE` in one line (the meter's screen shows the change
-after that setting is opened in its menu) until the next edit or disconnect.
+after that value is changed in its menu, one step and back) until the next
+edit or disconnect.
 `MockBackend` answers the demo meter's fields, counts the reads
 (`meterSettingsReads()`) and writes (`meterSettingsWrites()`), and
 `?settingsfault=mismatch` makes its read-back differ.

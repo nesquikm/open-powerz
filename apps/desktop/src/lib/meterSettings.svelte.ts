@@ -119,10 +119,10 @@ export function changeSummary(settings: MeterSettings, changes: SettingChanges):
 }
 
 /** Shown after a write the meter read back as asked: the KM003C stores it at once but
- * redraws a new brightness or theme only after that setting is opened in its own menu
- * (2026-10-29) [device]. */
+ * its screen shows a new brightness only after that value is changed in its own menu,
+ * for example one step up and back (2026-11-06) [device]. */
 export const SAVED_NOTICE =
-  "The meter has saved the change; its screen shows it after you open that setting in the meter's menu.";
+  "The meter has saved the change; its screen shows it once you change that value in the meter's menu (for example one step up and back).";
 
 /** The panel's settings, read through `read` (the backend's `meterSettings`) and
  * changed through `write` (the backend's `meterSettingsWrite`). */

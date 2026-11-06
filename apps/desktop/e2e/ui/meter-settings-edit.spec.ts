@@ -87,7 +87,7 @@ test.describe("meter settings edit (FR JKWT3W)", () => {
     await expect(p.getByRole("button", { name: "Edit" })).toBeVisible();
   });
 
-  test("after a write the app says the meter saved it and where to see it (AC-AXHK2J.9)", async ({
+  test("after a write the app says the meter saved it and how to see it (AC-AXHK2J.9, AC-JV54SP.1)", async ({
     page,
   }) => {
     const p = await startEdit(page);
@@ -96,7 +96,7 @@ test.describe("meter settings edit (FR JKWT3W)", () => {
     await p.getByRole("button", { name: "Apply" }).click();
     await expect.poll(() => writes(page)).toBe(1);
     await expect(p.getByRole("status")).toHaveText(
-      "The meter has saved the change; its screen shows it after you open that setting in the meter's menu.",
+      "The meter has saved the change; its screen shows it once you change that value in the meter's menu (for example one step up and back).",
     );
   });
 
