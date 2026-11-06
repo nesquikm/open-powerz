@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::app_log::SessionLog;
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Records, Series, SeriesBuckets};
-use crate::logo::{LogoProgressView, LogoReadView, LogoWrittenView};
+use crate::logo::{LogoProgressView, LogoReadView, LogoSettingsCheckView, LogoWrittenView};
 use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
 use crate::recording::{
     self, EndReason, ExportProgress, Limits, Recorder, RecordingEvent, RecordingSummary,
@@ -628,6 +628,9 @@ pub struct Worker<T: Transport, C: Clock> {
     pd_faulted: bool,
     /// The last snapshot failed, and its error is already in the log.
     snapshot_faulted: bool,
+    /// The calibration snapshot of the last logo write while its settings
+    /// wait for a menu save on the meter (FR QG6RNY).
+    pub(crate) logo_pending: Option<powerz_protocol::decode::settings::CalibrationSnapshot>,
 }
 
 /// A running PD sniffer.
@@ -724,6 +727,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             queue_faulted: false,
             pd_faulted: false,
             snapshot_faulted: false,
+            logo_pending: None,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -1209,6 +1213,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// PD capture, then report the disconnect.
     fn lose_session(&mut self, e: &session::Error) -> Step {
         self.session = None;
+        self.logo_pending = None;
         self.close_recording(EndReason::Disconnected);
         self.flush_batch();
         if self.pd_run.take().is_some() {
@@ -1392,6 +1397,13 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
+        // After a logo write whose settings wait for a menu save, a stale
+        // SETTINGS block refuses the change before anything is written,
+        // whichever port carries the write (FR QG6RNY).
+        if self.logo_pending.is_some() && self.source != MeasurementSource::Cdc {
+            blocked(self.meter.as_ref(), || session.read_meter_settings())
+                .map_err(|e| session_error(&e))?;
+        }
         let written = if self.source == MeasurementSource::Cdc {
             blocked(self.meter.as_ref(), || {
                 session.write_settings_checked(&parsed)
@@ -1763,6 +1775,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 let answer = self.logo_remove(&mut progress);
                 let _ = reply.send(answer);
             }
+            Command::LogoSettingsCheck(reply) => {
+                let _ = reply.send(self.logo_settings_check());
+            }
             Command::ClearHistory(claimed, reply) => {
                 if !claimed.swap(true, Ordering::SeqCst) {
                     self.clear_history();
@@ -1844,6 +1859,8 @@ enum Command {
         LogoProgressFn,
         mpsc::Sender<Result<LogoWrittenView, UiError>>,
     ),
+    /// One read-only settings check after a logo write (FR QG6RNY).
+    LogoSettingsCheck(mpsc::Sender<Result<LogoSettingsCheckView, UiError>>),
     /// Send out the batched samples, then discard the session history;
     /// whoever claims the flag first (the worker or the caller that gave up
     /// waiting) does the clear, so it happens exactly once.
@@ -1896,6 +1913,7 @@ impl std::fmt::Debug for Command {
             Command::LogoRead(full, _) => f.debug_tuple("LogoRead").field(full).finish(),
             Command::LogoUpload(..) => f.write_str("LogoUpload"),
             Command::LogoRemove(..) => f.write_str("LogoRemove"),
+            Command::LogoSettingsCheck(_) => f.write_str("LogoSettingsCheck"),
             Command::ClearHistory(..) => f.write_str("ClearHistory"),
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::PdCapturing(_) => f.write_str("PdCapturing"),
@@ -2484,6 +2502,16 @@ impl WorkerControl {
             self.ask_within(command, &answer, LOGO_WRITE_TIMEOUT)
                 .flatten(),
         )
+    }
+
+    /// One read-only check of the settings after a logo write (FR QG6RNY).
+    pub fn logo_settings_check(&self) -> Result<LogoSettingsCheckView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask_within(
+            Command::LogoSettingsCheck(reply),
+            &answer,
+            RECORD_DOWNLOAD_TIMEOUT,
+        )?
     }
 
     /// List the meter's offline records.

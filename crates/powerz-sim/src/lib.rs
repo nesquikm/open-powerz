@@ -28,6 +28,7 @@ pub use flash::{FlashFault, SimMeter, SimMeterPipe};
 pub use logo::{BootScreen, ErasePolicy, LogoFault, LogoFlash, SECTOR_LEN, boot_render};
 pub use pd::PdScenario;
 pub use pdm::{SimCable, SimCharger, SimPdm, SimPdmPort};
+use powerz_protocol::crypto;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::Clock;
 use powerz_protocol::transport::discovery::{PID_KM003C, UsbIdentity, UsbInterface};
@@ -495,10 +496,22 @@ pub struct SimDevice {
     logo_fault: Option<LogoFault>,
     /// 0x4A frames seen since the fault was set (the fault's chunk index).
     logo_chunks: usize,
-    /// The startup-logo flag (SET_DATA 0x1C, FR A2XTES); 0 by default.
+    /// The last startup-duration value written (SET_DATA 0x1C, FR A2XTES);
+    /// 0 by default.
     logo_flag: u32,
-    /// SETTINGS block byte the logo flag is mirrored into, if any.
-    logo_flag_mirror: Option<usize>,
+    /// Automatic menu save (FR Z39H24): after this long, with this code.
+    auto_menu_save: Option<(Duration, u8)>,
+    /// Uptime of the 0x1C write that left block A stale, for the
+    /// automatic menu save.
+    stale_since_ms: Option<u64>,
+}
+
+/// Put startup-duration `code` (`code & 3`: off, 1 s, 3 s, 5 s) into bits
+/// 14..15 of the SETTINGS word at 0x00, leaving every other bit as it was.
+fn set_duration_code(settings: &mut [u8], code: u32) {
+    let mut w0 = u32::from_le_bytes([settings[0], settings[1], settings[2], settings[3]]);
+    w0 = (w0 & !(0b11 << 14)) | ((code & 0b11) << 14);
+    settings[..4].copy_from_slice(&w0.to_le_bytes());
 }
 
 /// The settings a meter keeps, whichever pipe changes them.
@@ -511,6 +524,9 @@ struct Stored {
     rate_code: u8,
     /// SETTINGS reads answered so far, on any pipe (`flaky-settings-read`).
     settings_reads: usize,
+    /// Block A's CRC from before a startup-duration write (0x1C): served
+    /// instead of a fresh one until a save in the meter's menu `[device]`.
+    frozen_crc_a: Option<[u8; 4]>,
 }
 
 impl SimDevice {
@@ -590,6 +606,7 @@ impl SimDevice {
                 settings: device::SETTINGS_206,
                 rate_code: 2,
                 settings_reads: 0,
+                frozen_crc_a: None,
             })),
             sign_in_drop: Arc::new(AtomicBool::new(false)),
             sign_in_lost: false,
@@ -598,7 +615,8 @@ impl SimDevice {
             logo_fault: None,
             logo_chunks: 0,
             logo_flag: 0,
-            logo_flag_mirror: None,
+            auto_menu_save: None,
+            stale_since_ms: None,
         }
     }
 
@@ -741,17 +759,7 @@ impl SimDevice {
     /// the SETTINGS block, bits 14..15 of its first word (FR YCRQRQ).
     /// Codes above 3 keep their low two bits.
     pub fn with_startup_logo(self, code: u8) -> SimDevice {
-        {
-            let mut stored = self.stored();
-            let mut w0 = u32::from_le_bytes([
-                stored.settings[0],
-                stored.settings[1],
-                stored.settings[2],
-                stored.settings[3],
-            ]);
-            w0 = (w0 & !(0b11 << 14)) | (u32::from(code & 0b11) << 14);
-            stored.settings[..4].copy_from_slice(&w0.to_le_bytes());
-        }
+        set_duration_code(&mut self.stored().settings, u32::from(code));
         self
     }
 
@@ -773,28 +781,61 @@ impl SimDevice {
         self
     }
 
-    /// Start with the startup-logo flag set to `flag` (default 0).
+    /// Start with the last startup-duration value set to `flag` (default
+    /// 0); the SETTINGS block is left as is.
     pub fn with_logo_flag(mut self, flag: u32) -> SimDevice {
-        self.set_logo_flag(flag);
-        self
-    }
-
-    /// Mirror the startup-logo flag into SETTINGS block byte `offset`.
-    /// The block CRCs are refreshed when the block is served.
-    pub fn with_logo_flag_mirror(mut self, offset: usize) -> SimDevice {
-        self.logo_flag_mirror = Some(offset);
-        self.set_logo_flag(self.logo_flag);
-        self
-    }
-
-    /// Store the logo flag and copy its low byte into the mirror byte.
-    pub(crate) fn set_logo_flag(&mut self, flag: u32) {
         self.logo_flag = flag;
-        if let Some(at) = self.logo_flag_mirror
-            && let Some(b) = self.stored().settings.get_mut(at)
-        {
-            *b = flag as u8;
+        self
+    }
+
+    /// A startup-duration write (SET_DATA 0x1C) of `value`: bits 14..15 of
+    /// the SETTINGS word at 0x00 take it, and block A keeps the CRC it had
+    /// before the first such write, as the KM003C does `[device]`.
+    pub(crate) fn write_startup_duration(&mut self, value: u32) {
+        self.logo_flag = value;
+        let now = self.uptime_ms();
+        if !self.settings_crc_a_stale() {
+            self.stale_since_ms = Some(now);
         }
+        let mut stored = self.stored();
+        if stored.frozen_crc_a.is_none() {
+            stored.frozen_crc_a = Some(crypto::crc32(&stored.settings[..0x5C]).to_le_bytes());
+        }
+        set_duration_code(&mut stored.settings, value);
+    }
+
+    /// Block A's served CRC is stale: a 0x1C write since the last menu save.
+    pub fn settings_crc_a_stale(&self) -> bool {
+        self.stored().frozen_crc_a.is_some()
+    }
+
+    /// A save in the meter's menu with startup-duration `code` (`code & 3`
+    /// into bits 14..15 of the word at 0x00): block A's CRC is valid again
+    /// and every other byte stays as it was `[device]`.
+    pub fn menu_save(&mut self, code: u8) {
+        self.stale_since_ms = None;
+        let mut stored = self.stored();
+        stored.frozen_crc_a = None;
+        set_duration_code(&mut stored.settings, u32::from(code));
+    }
+
+    /// Run the automatic menu save once its time after the stale-making
+    /// 0x1C write has come (checked as each request arrives).
+    pub(crate) fn auto_menu_save_due(&mut self) {
+        let (Some((after, code)), Some(since)) = (self.auto_menu_save, self.stale_since_ms) else {
+            return;
+        };
+        let after_ms = u64::try_from(after.as_millis()).unwrap_or(u64::MAX);
+        if self.uptime_ms() >= since.saturating_add(after_ms) && self.settings_crc_a_stale() {
+            self.menu_save(code);
+        }
+    }
+
+    /// Save in the menu by itself `after` a stale-making 0x1C write, with
+    /// startup-duration `code`.
+    pub fn with_auto_menu_save(mut self, after: Duration, code: u8) -> SimDevice {
+        self.auto_menu_save = Some((after, code));
+        self
     }
 
     /// The simulated logo flash.
@@ -802,7 +843,7 @@ impl SimDevice {
         &self.logo_flash
     }
 
-    /// The startup-logo flag (SET_DATA 0x1C).
+    /// The last startup-duration value written (SET_DATA 0x1C).
     pub fn logo_flag(&self) -> u32 {
         self.logo_flag
     }

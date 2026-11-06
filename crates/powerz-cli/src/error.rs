@@ -1,5 +1,6 @@
 //! [`CliError`]: a CLI failure and its process exit code.
 
+use powerz_protocol::decode::settings::MENU_SAVE_STEPS;
 use powerz_protocol::{pdm, session, transport};
 
 /// A CLI failure, carrying its exit code.
@@ -13,6 +14,9 @@ pub enum CliError {
     Permission(String),
     /// Device or protocol failure (exit code 5).
     Device(String),
+    /// The meter's settings block needs a save in its own menu (exit code
+    /// 6). The message always carries the menu-save steps. \[device\]
+    SettingsNotSaved(String),
     /// The reader of a streaming command's output went away, as
     /// `powerz watch | head` makes it do: the command ends, quietly and
     /// with exit code 0.
@@ -25,7 +29,8 @@ impl std::fmt::Display for CliError {
             CliError::Usage(m)
             | CliError::NoDevice(m)
             | CliError::Permission(m)
-            | CliError::Device(m) => f.write_str(m),
+            | CliError::Device(m)
+            | CliError::SettingsNotSaved(m) => f.write_str(m),
             CliError::OutputClosed => f.write_str("the output pipe closed"),
         }
     }
@@ -35,13 +40,14 @@ impl std::error::Error for CliError {}
 
 impl CliError {
     /// Process exit code: 2 usage, 3 no device, 4 permission, 5 device,
-    /// 0 for a closed output pipe.
+    /// 6 settings not saved, 0 for a closed output pipe.
     pub fn exit_code(&self) -> i32 {
         match self {
             CliError::Usage(_) => 2,
             CliError::NoDevice(_) => 3,
             CliError::Permission(_) => 4,
             CliError::Device(_) => 5,
+            CliError::SettingsNotSaved(_) => 6,
             CliError::OutputClosed => 0,
         }
     }
@@ -49,6 +55,9 @@ impl CliError {
 
 impl From<session::Error> for CliError {
     fn from(e: session::Error) -> Self {
+        if e.is_settings_not_saved() {
+            return CliError::SettingsNotSaved(format!("{e} {MENU_SAVE_STEPS}"));
+        }
         match e {
             session::Error::Transport(t) => t.into(),
             // The clear step writes one chunk, index 0: name it too.

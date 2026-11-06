@@ -14,6 +14,10 @@
 //!   logo flash at 0x300000 when the meter starts.
 //! - `POWERZ_SIM_CTRL_C_AFTER_CHUNKS=K`: stand in for Ctrl-C once K logo
 //!   chunks have been sent.
+//! - `POWERZ_SIM_MENU_SAVE=<off|1|3|5>@<ms>`: the demo meter's user saves
+//!   that startup duration in the meter's menu `<ms>` after a logo write
+//!   left its settings unsaved (FR Z39H24). Without it nobody saves, so a
+//!   logo write ends waiting for the save.
 //!
 //! The confirmation typed at the prompt is `write` for `logo write` and
 //! `remove` for `logo remove`.
@@ -30,7 +34,7 @@ const SECRET_SERIAL: &str = "SIMSER7Q4Z";
 /// The demo meter's synthetic UID, as `powerz info` prints it.
 const SIM_UID_HEX: &str = "5a17c30d9e426bf108a43ce5";
 
-const KNOBS: [&str; 10] = [
+const KNOBS: [&str; 11] = [
     "POWERZ_SIM_CLOCK",
     "POWERZ_SIM_FAULT",
     "POWERZ_SIM_CTRL_C_AFTER",
@@ -41,6 +45,7 @@ const KNOBS: [&str; 10] = [
     "POWERZ_SIM_LOGO_FILE",
     "POWERZ_SIM_CTRL_C_AFTER_CHUNKS",
     "POWERZ_SIM_MODE",
+    "POWERZ_SIM_MENU_SAVE",
 ];
 
 fn powerz() -> Command {
@@ -465,6 +470,7 @@ fn ycrqrq_3_write_with_the_typed_confirmation_uploads_and_verifies() {
     let path = png(&dir, "in.png", 64, 48);
     let p = encoded(&path, LogoMode::Opaque).preview();
     let a = sim()
+        .env("POWERZ_SIM_MENU_SAVE", "3@0")
         .args(["logo", "write", "--i-understand"])
         .arg(&path)
         .write_stdin("write\n")
@@ -488,6 +494,7 @@ fn ycrqrq_3_write_prints_progress_on_stderr_and_the_verified_result() {
     let p = encoded(&path, LogoMode::Opaque).preview();
     let n = p.chunks;
     let a = sim_quiet()
+        .env("POWERZ_SIM_MENU_SAVE", "3@0")
         .args(["logo", "write", "--i-understand", "--yes"])
         .arg(&path)
         .assert()
@@ -525,25 +532,25 @@ fn ycrqrq_3_write_prints_progress_on_stderr_and_the_verified_result() {
 }
 
 #[test]
-fn ycrqrq_3_write_with_the_startup_screen_off_adds_a_hint() {
+fn ycrqrq_3_write_with_the_startup_screen_off_shows_the_change_and_no_hint() {
+    // FR Z39H24: the old "turn it on" hint is gone; the upload itself sets
+    // 3 s, and the tool says so before the write.
     let dir = fresh_dir("write-off");
     let path = png(&dir, "in.png", 64, 48);
     let a = sim_quiet()
+        .env("POWERZ_SIM_MENU_SAVE", "3@0")
         .args(["logo", "write", "--i-understand", "--yes"])
         .arg(&path)
         .assert()
         .success();
-    let all = format!("{}{}", stdout_of(&a), stderr_of(&a));
+    let out = stdout_of(&a);
+    let all = format!("{out}{}", stderr_of(&a));
     assert!(
-        line_with(&stdout_of(&a), "startup")
-            .to_ascii_lowercase()
-            .contains("off"),
-        "the startup-screen duration: {all}"
+        out.contains("Startup: now off; the upload sets it to 3 s"),
+        "{all}"
     );
-    assert!(
-        all.contains("startup_duration"),
-        "the hint says how to turn the startup screen on: {all}"
-    );
+    assert!(!all.contains("startup_duration"), "no hint: {all}");
+    assert!(!all.to_ascii_lowercase().contains("hint"), "no hint: {all}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -553,14 +560,14 @@ fn ycrqrq_3_write_with_the_startup_screen_on_shows_the_duration_and_no_hint() {
     let path = png(&dir, "in.png", 64, 48);
     let a = sim_quiet()
         .env("POWERZ_SIM_STARTUP_LOGO", "3")
+        .env("POWERZ_SIM_MENU_SAVE", "3@0")
         .args(["logo", "write", "--i-understand", "--yes", "--alpha"])
         .arg(&path)
         .assert()
         .success();
     let out = stdout_of(&a);
     let all = format!("{out}{}", stderr_of(&a));
-    let line = line_with(&out, "startup");
-    assert!(line.contains("3 s") || line.contains("3s"), "{out}");
+    assert!(out.lines().any(|l| l.trim() == "Startup: 3 s"), "{out}");
     assert!(
         !all.contains("startup_duration"),
         "no hint when it shows: {all}"
@@ -605,6 +612,7 @@ fn ycrqrq_4_remove_with_a_wrong_confirmation_sends_nothing() {
 #[test]
 fn ycrqrq_4_remove_with_the_typed_confirmation_prints_the_verified_result() {
     let a = sim()
+        .env("POWERZ_SIM_MENU_SAVE", "off@0")
         .args(["logo", "remove", "--i-understand"])
         .write_stdin("remove\n")
         .assert()
@@ -621,17 +629,13 @@ fn ycrqrq_4_remove_with_the_typed_confirmation_prints_the_verified_result() {
 #[test]
 fn ycrqrq_4_remove_with_yes_skips_only_the_prompt() {
     let a = sim_quiet()
+        .env("POWERZ_SIM_MENU_SAVE", "off@0")
         .args(["logo", "remove", "--i-understand", "--yes"])
         .assert()
         .success();
     let out = stdout_of(&a);
     assert!(out.to_ascii_lowercase().contains("verified"), "{out}");
-    assert!(
-        line_with(&out, "startup")
-            .to_ascii_lowercase()
-            .contains("off"),
-        "{out}"
-    );
+    assert!(out.lines().any(|l| l.trim() == "Startup: off"), "{out}");
 }
 
 // ------------------------------------------------------------ AC-YCRQRQ.5
@@ -644,6 +648,7 @@ fn ycrqrq_5_ctrl_c_in_the_chunk_phase_finishes_the_write_first() {
     assert!(p.chunks > 3);
     let a = sim()
         .env("POWERZ_SIM_CTRL_C_AFTER_CHUNKS", "2")
+        .env("POWERZ_SIM_MENU_SAVE", "3@0")
         .args(["logo", "write", "--i-understand", "--yes"])
         .arg(&path)
         .assert();
@@ -1129,5 +1134,372 @@ fn ycrqrq_8_cli_docs_describe_dump() {
     assert!(
         stdout_of(&a).contains("--dump"),
         "`logo read --help` has --dump"
+    );
+}
+
+// ------------------------------------------------------------ FR Z39H24
+//
+// The 0x1C write sets the startup duration (3 s for an upload, off for a
+// Remove) and leaves the meter's settings unsaved until a save in its menu.
+
+use powerz_protocol::decode::settings::MENU_SAVE_STEPS;
+
+/// Trace lines of SETTINGS reads sent (`0c id 10 00`).
+fn settings_reads(trace: &str) -> Vec<&str> {
+    sent_frames(trace, "0c")
+        .into_iter()
+        .filter(|l| {
+            l.split_once("] ").is_some_and(|(_, b)| {
+                let t: Vec<&str> = b.split(' ').collect();
+                t.len() == 4 && t[2] == "10" && t[3] == "00"
+            })
+        })
+        .collect()
+}
+
+/// SETTINGS reads sent after the startup-duration (0x48) write.
+fn settings_reads_after_the_write(trace: &str) -> usize {
+    let sent: Vec<&str> = trace.lines().filter(|l| l.starts_with("> [")).collect();
+    let Some(at) = sent.iter().position(|l| {
+        l.split_once("] ")
+            .is_some_and(|(_, b)| b.split(' ').next() == Some("48"))
+    }) else {
+        panic!("no 0x48 write in:\n{trace}");
+    };
+    let reads = settings_reads(trace);
+    sent[at..].iter().filter(|l| reads.contains(l)).count()
+}
+
+fn no_settings_write(trace: &str) {
+    assert!(
+        sent_frames(trace, "0a").is_empty(),
+        "a settings write (0x0A) was sent:\n{trace}"
+    );
+}
+
+fn stdout_line_index(out: &str, needle: &str) -> usize {
+    out.lines()
+        .position(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no {needle:?} in:\n{out}"))
+}
+
+// ------------------------------------------------------------ AC-Z39H24.8
+
+#[test]
+fn z39h24_8_write_prints_the_duration_change_before_the_confirmation() {
+    let dir = fresh_dir("z39-8-write");
+    let path = png(&dir, "in.png", 64, 48);
+    // A wrong confirmation: the change was printed, nothing was written.
+    let a = sim()
+        .env("POWERZ_SIM_STARTUP_LOGO", "5")
+        .args(["logo", "write", "--i-understand"])
+        .arg(&path)
+        .write_stdin("nope\n")
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 2);
+    let out = stdout_of(&a);
+    assert!(
+        out.contains("Startup: now 5 s; the upload sets it to 3 s"),
+        "{out}"
+    );
+    assert_no_write(&stderr_of(&a));
+
+    // With --yes it is printed too, ahead of the result.
+    let a = sim_quiet()
+        .env("POWERZ_SIM_STARTUP_LOGO", "1")
+        .env("POWERZ_SIM_MENU_SAVE", "1@0")
+        .args(["logo", "write", "--i-understand", "--yes"])
+        .arg(&path)
+        .assert()
+        .success();
+    let out = stdout_of(&a);
+    let before = stdout_line_index(&out, "Startup: now 1 s; the upload sets it to 3 s");
+    let logo = stdout_line_index(&out, "written and verified");
+    assert!(before < logo, "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn z39h24_8_remove_prints_the_duration_change_before_the_confirmation() {
+    let a = sim()
+        .env("POWERZ_SIM_STARTUP_LOGO", "5")
+        .args(["logo", "remove", "--i-understand"])
+        .write_stdin("nope\n")
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 2);
+    let out = stdout_of(&a);
+    assert!(
+        out.contains("Startup: now 5 s; the remove turns the startup screen off"),
+        "{out}"
+    );
+    assert_no_write(&stderr_of(&a));
+
+    let a = sim_quiet()
+        .env("POWERZ_SIM_STARTUP_LOGO", "3")
+        .env("POWERZ_SIM_MENU_SAVE", "off@0")
+        .args(["logo", "remove", "--i-understand", "--yes"])
+        .assert()
+        .success();
+    let out = stdout_of(&a);
+    let before = stdout_line_index(
+        &out,
+        "Startup: now 3 s; the remove turns the startup screen off",
+    );
+    let logo = stdout_line_index(&out, "removed and verified");
+    assert!(before < logo, "{out}");
+}
+
+// ------------------------------------------------------------ AC-Z39H24.9
+
+#[test]
+fn z39h24_9_write_prints_the_duration_from_a_fresh_read() {
+    let dir = fresh_dir("z39-9-fresh");
+    let path = png(&dir, "in.png", 64, 48);
+    // Saved in the menu at 1 s before the re-read: neither the 5 s from
+    // before nor the 3 s the write set.
+    let a = sim()
+        .env("POWERZ_SIM_STARTUP_LOGO", "5")
+        .env("POWERZ_SIM_MENU_SAVE", "1@0")
+        .args(["logo", "write", "--i-understand", "--yes"])
+        .arg(&path)
+        .assert()
+        .success();
+    let out = stdout_of(&a);
+    assert!(out.lines().any(|l| l.trim() == "Startup: 1 s"), "{out}");
+    assert!(!out.lines().any(|l| l.trim() == "Startup: 5 s"), "{out}");
+    assert!(!out.lines().any(|l| l.trim() == "Startup: 3 s"), "{out}");
+    let err = stderr_of(&a);
+    assert!(!err.contains("Waiting"), "no wait when saved:\n{err}");
+    assert!(settings_reads_after_the_write(&err) >= 1, "{err}");
+    no_settings_write(&err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn z39h24_9_write_shows_the_steps_and_waits_for_the_menu_save() {
+    let dir = fresh_dir("z39-9-wait");
+    let path = png(&dir, "in.png", 64, 48);
+    let a = sim()
+        .env("POWERZ_SIM_STARTUP_LOGO", "5")
+        .env("POWERZ_SIM_MENU_SAVE", "5@10000")
+        .args(["logo", "write", "--i-understand", "--yes"])
+        .arg(&path)
+        .assert()
+        .success();
+    let err = stderr_of(&a);
+    assert!(
+        err.contains("The meter changed its startup duration but left its settings unsaved."),
+        "{err}"
+    );
+    assert!(err.contains(MENU_SAVE_STEPS), "{err}");
+    assert!(err.contains("Waiting up to 300 s"), "{err}");
+    assert!(!err.contains("Pick Disable"), "that is for Remove:\n{err}");
+    let out = stdout_of(&a);
+    assert!(out.to_ascii_lowercase().contains("verified"), "{out}");
+    assert!(out.lines().any(|l| l.trim() == "Startup: 5 s"), "{out}");
+    // A 10 s wait at 2 s gaps: several read-only checks, one 0x1C write.
+    let reads = settings_reads_after_the_write(&err);
+    assert!((4..=10).contains(&reads), "{reads} SETTINGS reads:\n{err}");
+    assert_eq!(sent_frames(&err, "48").len(), 1, "one 0x1C write");
+    no_settings_write(&err);
+    assert_private(&a);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn z39h24_9_write_exits_6_when_the_wait_times_out() {
+    let dir = fresh_dir("z39-9-timeout");
+    let path = png(&dir, "in.png", 64, 48);
+    let a = sim()
+        .env("POWERZ_SIM_MENU_SAVE", "5@60000")
+        .args([
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+            "--menu-save-timeout",
+            "4",
+        ])
+        .arg(&path)
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 6);
+    let err = stderr_of(&a);
+    assert!(err.contains("Waiting up to 4 s"), "{err}");
+    let msg = err
+        .lines()
+        .find(|l| l.starts_with("powerz:"))
+        .unwrap_or_else(|| panic!("an error line:\n{err}"));
+    assert!(msg.contains(MENU_SAVE_STEPS), "{msg}");
+    assert!(stdout_of(&a).to_ascii_lowercase().contains("verified"));
+    assert!(
+        !stdout_of(&a).lines().any(|l| l.trim() == "Startup: 5 s"),
+        "the save came after the timeout"
+    );
+    no_settings_write(&err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn z39h24_9_the_default_wait_is_300_s() {
+    let dir = fresh_dir("z39-9-default");
+    let path = png(&dir, "in.png", 64, 48);
+    // Nobody saves: the whole default wait runs on the fake clock.
+    let a = sim()
+        .args(["logo", "write", "--i-understand", "--yes"])
+        .arg(&path)
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 6);
+    let err = stderr_of(&a);
+    assert!(err.contains("Waiting up to 300 s"), "{err}");
+    let reads = settings_reads_after_the_write(&err);
+    assert!(
+        (140..=160).contains(&reads),
+        "300 s at 2 s gaps, {reads} reads"
+    );
+    no_settings_write(&err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn z39h24_9_timeout_0_does_not_wait() {
+    let dir = fresh_dir("z39-9-zero");
+    let path = png(&dir, "in.png", 64, 48);
+    let a = sim()
+        .env("POWERZ_SIM_MENU_SAVE", "5@0")
+        .env("POWERZ_SIM_STARTUP_LOGO", "5")
+        .args(["logo", "remove", "--i-understand", "--yes"])
+        .assert()
+        .success();
+    assert!(stdout_of(&a).lines().any(|l| l.trim() == "Startup: 5 s"));
+    let a = sim()
+        .args([
+            "logo",
+            "write",
+            "--i-understand",
+            "--yes",
+            "--menu-save-timeout",
+            "0",
+        ])
+        .arg(&path)
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 6);
+    let err = stderr_of(&a);
+    assert!(err.contains(MENU_SAVE_STEPS), "{err}");
+    let reads = settings_reads_after_the_write(&err);
+    assert!((1..=2).contains(&reads), "no wait, {reads} reads:\n{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn z39h24_9_remove_says_to_pick_disable_and_waits() {
+    let a = sim()
+        .env("POWERZ_SIM_STARTUP_LOGO", "5")
+        .env("POWERZ_SIM_MENU_SAVE", "off@6000")
+        .args(["logo", "remove", "--i-understand", "--yes"])
+        .assert()
+        .success();
+    let err = stderr_of(&a);
+    assert!(err.contains(MENU_SAVE_STEPS), "{err}");
+    assert!(
+        err.contains("Pick Disable to keep the startup screen off."),
+        "{err}"
+    );
+    assert!(err.contains("Waiting up to 300 s"), "{err}");
+    let out = stdout_of(&a);
+    assert!(out.contains("removed and verified"), "{out}");
+    assert!(out.lines().any(|l| l.trim() == "Startup: off"), "{out}");
+    no_settings_write(&err);
+
+    // From 5 s, so the remove really moves the duration: writing off over an
+    // already-off duration changes no byte and leaves the check value valid.
+    let a = sim()
+        .env("POWERZ_SIM_STARTUP_LOGO", "5")
+        .args([
+            "logo",
+            "remove",
+            "--i-understand",
+            "--yes",
+            "--menu-save-timeout",
+            "2",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 6);
+    assert!(stderr_of(&a).contains("Pick Disable"), "{}", stderr_of(&a));
+}
+
+#[test]
+fn z39h24_9_ctrl_c_during_the_wait_exits_6() {
+    let dir = fresh_dir("z39-9-ctrlc");
+    let path = png(&dir, "in.png", 64, 48);
+    // Ctrl-C (pressed during the chunks) is still set when the wait starts;
+    // the save would only come at 60 s.
+    let a = sim()
+        .env("POWERZ_SIM_CTRL_C_AFTER_CHUNKS", "2")
+        .env("POWERZ_SIM_MENU_SAVE", "3@60000")
+        .args(["logo", "write", "--i-understand", "--yes"])
+        .arg(&path)
+        .assert()
+        .failure();
+    assert_eq!(code_of(&a), 6);
+    let err = stderr_of(&a);
+    assert!(err.contains(MENU_SAVE_STEPS), "{err}");
+    assert!(
+        settings_reads_after_the_write(&err) <= 3,
+        "the wait stopped at once:\n{err}"
+    );
+    assert!(stdout_of(&a).to_ascii_lowercase().contains("verified"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn z39h24_9_help_shows_the_menu_save_timeout() {
+    for sub in ["write", "remove"] {
+        let a = powerz().args(["logo", sub, "--help"]).assert().success();
+        let out = stdout_of(&a);
+        assert!(out.contains("--menu-save-timeout"), "logo {sub}: {out}");
+        assert!(out.contains("300"), "logo {sub} names the default: {out}");
+    }
+}
+
+// ------------------------------------------------------------ AC-Z39H24.11
+
+#[test]
+fn z39h24_11_cli_docs_describe_the_menu_save_and_exit_code_6() {
+    let cli = repo_file("docs/reference/cli.md");
+    assert!(cli.contains("--menu-save-timeout"), "cli.md: the option");
+    let exit = cli
+        .split("## Exit codes")
+        .nth(1)
+        .expect("an Exit codes section");
+    let exit = exit.split("\n## ").next().unwrap_or(exit);
+    assert!(
+        exit.contains('6'),
+        "the Exit codes section lists 6:\n{exit}"
+    );
+    assert!(
+        exit.to_lowercase().contains("menu"),
+        "exit 6 is about the menu save:\n{exit}"
+    );
+    let logo_part: String = cli
+        .lines()
+        .filter(|l| l.contains("logo "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    assert!(logo_part.contains("startup duration"), "{logo_part}");
+    assert!(logo_part.contains("3 s"), "upload sets 3 s");
+    assert!(
+        !logo_part.contains("settings set startup_duration=3"),
+        "the old hint is gone"
+    );
+    assert!(
+        cli.contains("POWERZ_SIM_MENU_SAVE"),
+        "the test knob is listed"
     );
 }

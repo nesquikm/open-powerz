@@ -104,7 +104,12 @@ describe("MockBackend logo writes (AC-MEHQC0.3, .4, .6, .7, .8)", () => {
     const b = await ready();
     const seen: LogoProgress[] = [];
     const written = await settle(b.logoUpload(DEMO, MOCK_LOGO_FILE, false, (p) => seen.push(p)));
-    expect(written).toEqual({ startup_duration: "off", startup_screen_off: true });
+    expect(written).toEqual({
+      duration_before: "off",
+      duration_set: "3 s",
+      settings: "needs_menu_save",
+      startup_duration: null,
+    });
     const chunks = seen.filter((p) => p.step === "chunks");
     const reads = seen.filter((p) => p.step === "read_back");
     expect(chunks.length).toBeGreaterThan(1);
@@ -228,13 +233,18 @@ describe("MockBackend startup duration (AC-MEHQC0.5)", () => {
     await b.disconnect();
   });
 
-  it("an upload reports the duration the settings hold", async () => {
+  it("an upload reports the duration the settings held before", async () => {
     vi.useFakeTimers();
     try {
       const b = await ready();
       await b.meterSettingsWrite({ startup_duration: 2 });
       const written = await settle(b.logoUpload(DEMO, MOCK_LOGO_FILE, false, () => {}));
-      expect(written).toEqual({ startup_duration: "3 s", startup_screen_off: false });
+      expect(written).toEqual({
+        duration_before: "3 s",
+        duration_set: "3 s",
+        settings: "needs_menu_save",
+        startup_duration: null,
+      });
       await b.disconnect();
     } finally {
       vi.useRealTimers();

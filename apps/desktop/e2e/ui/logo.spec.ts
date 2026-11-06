@@ -191,7 +191,9 @@ test.describe("startup logo view (FR MEHQC0)", () => {
     const hint = v.getByTestId("logo-duration-hint");
     await expect(hint).toBeVisible();
     await expect(hint).toContainText(/off/i);
-    await expect(hint).toContainText(/will not show/i);
+    await expect(hint).toContainText(
+      "The startup screen is off. Upload turns it on at 3 s, or show it now for:",
+    );
     for (const s of ["1 s", "3 s", "5 s"]) {
       await expect(hint.getByRole("button", { name: s })).toBeEnabled();
     }
@@ -445,5 +447,188 @@ test.describe("a logo write holds every meter control (AC-MEHQC0.3)", () => {
     await expect(
       meterBar(page).getByRole("button", { name: "Disconnect", exact: true }),
     ).toBeEnabled();
+  });
+});
+
+/** Every settings check the mock got, with its page time. */
+async function spyChecks(page: Page): Promise<void> {
+  await page.evaluate((key) => {
+    const w = window as unknown as Record<string, unknown>;
+    const mock = w[key] as { logoSettingsCheck: (id: string) => Promise<unknown> };
+    const at: number[] = [];
+    w.__LOGO_CHECKS__ = at;
+    const real = mock.logoSettingsCheck.bind(mock);
+    mock.logoSettingsCheck = async (id: string) => {
+      at.push(Date.now());
+      return real(id);
+    };
+  }, MOCK_HOOK);
+}
+
+function checks(page: Page): Promise<number[]> {
+  return page.evaluate(() => (window as unknown as { __LOGO_CHECKS__: number[] }).__LOGO_CHECKS__);
+}
+
+function settingsReads(page: Page): Promise<number> {
+  return page.evaluate(
+    (key) =>
+      (window as unknown as Record<string, { meterSettingsReads(): number }>)[
+        key
+      ].meterSettingsReads(),
+    MOCK_HOOK,
+  );
+}
+
+test.describe("after a logo write, the menu save (FR QG6RNY)", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+  });
+
+  test("qg6rny: the off hint says Upload turns the startup screen on at 3 s (AC-QG6RNY.7)", async ({
+    page,
+  }) => {
+    const v = await openLogo(page);
+    const hint = v.getByTestId("logo-duration-hint");
+    await expect(hint).toContainText(
+      "The startup screen is off. Upload turns it on at 3 s, or show it now for:",
+    );
+    await expect(hint).not.toContainText(/will not show/i);
+    for (const s of ["1 s", "3 s", "5 s"]) {
+      await expect(hint.getByRole("button", { name: s })).toBeEnabled();
+    }
+  });
+
+  test("qg6rny: the confirmations say what happens to the startup duration (AC-QG6RNY.1)", async ({
+    page,
+  }) => {
+    const v = await openLogo(page);
+    await choose(v);
+    await v.getByRole("button", { name: /^upload$/i }).click();
+    const up = confirmDialog(page, /upload/i);
+    await expect(up.getByTestId("logo-confirm-duration")).toHaveText(
+      "The startup duration goes from off to 3 s.",
+    );
+    await up.getByRole("button", { name: /cancel/i }).click();
+    await v.getByRole("button", { name: /^remove$/i }).click();
+    const rm = confirmDialog(page, /remove/i);
+    await expect(rm.getByTestId("logo-confirm-duration")).toHaveText(
+      "The startup screen is turned off (startup duration off).",
+    );
+  });
+
+  test("qg6rny: the panel lists the steps, checks 2 s apart and ends saved (AC-QG6RNY.2, .3, .8)", async ({
+    page,
+  }) => {
+    const v = await openLogo(page);
+    await spyChecks(page);
+    await choose(v);
+    await confirmUpload(page, v);
+    const panel = v.getByTestId("logo-menu-save");
+    await expect(panel).toBeVisible({ timeout: 30_000 });
+    await expect(panel).toHaveAttribute("role", "status");
+    await expect(panel).toHaveAttribute("aria-live", "polite");
+    await expect(
+      panel.getByRole("heading", { name: "Save the settings on the meter" }),
+    ).toBeVisible();
+    await expect(panel.locator("ol > li")).toHaveText([
+      "On the meter, open Settings.",
+      "Choose the startup logo duration.",
+      "Pick a value and save it (Disable keeps the startup screen off).",
+    ]);
+    await expect(panel.getByTestId("logo-menu-save-unplug")).toHaveText(
+      "Don't unplug the meter until the app says the settings are saved.",
+    );
+    await expect(panel.getByTestId("logo-menu-save-status")).toContainText(
+      /Checking the settings… not saved yet \(check \d+\)/,
+    );
+    // No other logo write while it checks.
+    await expect(v.getByRole("button", { name: /^upload$/i })).toBeDisabled();
+    await expect(v.getByRole("button", { name: /^remove$/i })).toBeDisabled();
+    const readsBefore = await settingsReads(page);
+
+    // The mock saves by itself a few seconds after the write.
+    const done = v.getByTestId("logo-menu-save-done");
+    await expect(done).toHaveText("The meter saved its settings. Startup screen: 3 s.", {
+      timeout: 15_000,
+    });
+    await expect(panel).toHaveCount(0);
+    await expect(v.getByTestId("logo-duration")).toContainText("3 s");
+    // The meter's settings are read again.
+    await expect.poll(() => settingsReads(page)).toBeGreaterThan(readsBefore);
+    const at = await checks(page);
+    expect(at.length).toBeGreaterThanOrEqual(1);
+    for (let i = 1; i < at.length; i++) expect(at[i]! - at[i - 1]!).toBeGreaterThanOrEqual(1_990);
+    await expect(v.getByRole("button", { name: /^upload$/i })).toBeEnabled();
+  });
+
+  test("qg6rny: changed calibration ends the check as an error (AC-QG6RNY.3)", async ({ page }) => {
+    const v = await openLogo(page, "?menusave=calibration");
+    await spyChecks(page);
+    await choose(v);
+    await confirmUpload(page, v);
+    const alert = v.getByRole("alert");
+    await expect(alert).toContainText(/calibration/i, { timeout: 20_000 });
+    await expect(v.getByTestId("logo-menu-save")).toHaveCount(0);
+    const n = (await checks(page)).length;
+    await page.waitForTimeout(4_500);
+    expect((await checks(page)).length, "no more checks").toBe(n);
+  });
+
+  test("qg6rny: a fresh read already saved shows no panel (AC-QG6RNY.4)", async ({ page }) => {
+    const v = await openLogo(page, "?menusave=saved");
+    await spyChecks(page);
+    await choose(v);
+    await confirmUpload(page, v);
+    await expect(v.getByTestId("logo-duration")).toContainText("3 s", { timeout: 30_000 });
+    await expect(v.getByRole("button", { name: /^upload$/i })).toBeEnabled();
+    await expect(v.getByTestId("logo-menu-save")).toHaveCount(0);
+    expect(await checks(page)).toEqual([]);
+  });
+
+  test("qg6rny: leaving the view stops the check and coming back starts it (AC-QG6RNY.5)", async ({
+    page,
+  }) => {
+    const v = await openLogo(page, "?menusave=never");
+    await spyChecks(page);
+    await choose(v);
+    await confirmUpload(page, v);
+    await expect(v.getByTestId("logo-menu-save")).toBeVisible({ timeout: 30_000 });
+    await expect
+      .poll(() => checks(page).then((a) => a.length), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    await page.getByRole("tab", { name: "Meter", exact: true }).click();
+    await expect(view(page)).toHaveCount(0);
+    const n = (await checks(page)).length;
+    await page.waitForTimeout(4_500);
+    expect((await checks(page)).length, "no check while the view is closed").toBeLessThanOrEqual(
+      n + 1,
+    );
+    const m = (await checks(page)).length;
+    await page.waitForTimeout(4_500);
+    expect((await checks(page)).length, "stopped").toBe(m);
+    await page.getByRole("tab", { name: "Startup logo" }).click();
+    await expect(view(page).getByTestId("logo-menu-save")).toBeVisible();
+    await expect
+      .poll(() => checks(page).then((a) => a.length), { timeout: 10_000 })
+      .toBeGreaterThan(m);
+  });
+
+  test("qg6rny: disconnecting the meter stops the check (AC-QG6RNY.5)", async ({ page }) => {
+    const v = await openLogo(page, "?menusave=never");
+    await spyChecks(page);
+    await choose(v);
+    await confirmUpload(page, v);
+    await expect(v.getByTestId("logo-menu-save")).toBeVisible({ timeout: 30_000 });
+    await expect
+      .poll(() => checks(page).then((a) => a.length), { timeout: 10_000 })
+      .toBeGreaterThan(0);
+    await page
+      .getByRole("group", { name: /^Controls for / })
+      .getByRole("button", { name: "Disconnect", exact: true })
+      .click();
+    await expect(page.getByRole("tab", { name: "Startup logo" })).toHaveCount(0);
+    const n = (await checks(page)).length;
+    await page.waitForTimeout(4_500);
+    expect((await checks(page)).length, "no check after the disconnect").toBe(n);
   });
 });

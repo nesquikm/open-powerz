@@ -304,7 +304,7 @@ first 96 bytes; device overrides its "96 bytes" reading.
 | 0x10 | u32 | run-time overlay: 0xFFFFFFFF at first, later a Unix time near the last reboot. The stored block-A CRC covers what this word held when the meter last saved the block: 0xFFFFFFFF on a block not saved since, or the boot time of then (firmware 2.0.7: 0x6AE08E30 under the CRC while 0x10 showed 0x6AE59BA6 after a replug). So a decoder cannot check the CRC against the word it reads. It works out the one word that makes the CRC match the other bytes and accepts 0xFFFFFFFF, or a Unix time from 2020 on that is no later than the word at 0x10. Four free bytes can match any CRC, so a corrupt block A gets past this about one time in twenty, and about one in seven while 0x10 still reads 0xFFFFFFFF. A settings write sends every display key at its read value, so it reads the block twice and refuses to write when the 180 bytes differ, with no retry. A wrong display field that gets past the check and repeats in both reads is still written back, and the read-back cannot see it; calibration is never sent and values out of range are refused | [device]; meaning and the range [inferred] |
 | 0x1C | 5 x i32 | an array (5 equal values seen), not a single 1e6-scaled gain as static notes said; device overrides | [device] [inferred] |
 | 0x30 | 10 x i32 | an array of values near 1 000 000 (likely gains, 1e6 = 1.0) | [static] [device] [inferred] |
-| 0x5C | u32 | CRC-32 of bytes 0x00..0x5B | [static] [device] (firmware 2.0.6) |
+| 0x5C | u32 | CRC-32 of bytes 0x00..0x5B (CRC A). After a SET_DATA 0x1C write (startup duration) the meter keeps the old CRC A, so block A fails its check (stale) until a save in the meter's own menu writes a valid one; that save leaves the calibration bytes 0x1C..0x5B unchanged. A decoder that accepts a boot-time overlay word (see 0x10) could take a stale block for a good one, so ours counts block A as stale when its stored CRC matches the same block with another duration code in bits 14..15 and an overlay word of 0xFFFFFFFF or the word now at 0x10 | [static] [device] (firmware 2.0.6; the stale CRC after 0x1C and the menu save: 2026-11-06, firmware 2.0.7) |
 | 0x60..0xB3 | bytes | block B (84 bytes) | [static] [device] (firmware 2.0.6) |
 | 0x60 | u32 | flags; bits 2..3 = the meter's queue rate code; bit 7 seen set after a brightness change in the meter's menu, meaning unknown | [static] [device] |
 | 0x70 | ASCII | `POWER-Z`, probably the name shown on screen | [device] [inferred] |
@@ -327,7 +327,7 @@ not read by the dialog [static].
 | language | u32 at 0x00, bit 0 | 0 = Chinese, 1 = English | [static] map; [device] (screen check) |
 | brightness | u32 at 0x00, bits 3..9 | percent, 1..100 | [static] map; [device] (screen check) |
 | dim (screen dimming timeout) | u32 at 0x00, bits 10..11 | 0 = off, 1 = 15 s, 2 = 30 s, 3 = 60 s | [static] map; [device] (screen check of 0 = off); labels for 1..3 [static] |
-| startup logo | u32 at 0x00, bits 14..15 | 0 = off, 1 = 1 s, 2 = 3 s, 3 = 5 s (how long the logo shows) | [static] map; [device] (screen check of 0 = off); labels for 1..3 [static] |
+| startup logo (startup duration) | u32 at 0x00, bits 14..15 | 0 = off, 1 = 1 s, 2 = 3 s, 3 = 5 s (how long the logo shows); SET_DATA 0x48 attribute 0x1C writes this field (2 = 3 s, 0 = off) without refreshing the CRC A at 0x5C, until a save in the meter's menu | [static] map; [device] (screen check of 0 = off; the 0x1C write, 2026-11-06); labels for 1 and 3 [static] |
 | theme | u32 at 0x00, bits 16..18 (the low 3 bits of the u16 at 0x02) | 0 blue, 1 green, 2 pink, 3 orange, 4 yellow, 5 dark green, 6 cyan; 7 unknown | [static] map; [device] (screen check of 0 = blue); other colours [static] |
 | auto-rotate | u32 at 0x00, bit 27 | 1 = on | [static] map; [device] (screen check) |
 | rotation (default screen angle) | u32 at 0x60, bits 0..1 | 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270° | [static] map; meaning [inferred]: the screen showed 0° with auto-rotate on while these bits read 90° |
@@ -350,8 +350,11 @@ not read by the dialog [static].
 - The decoder checks both CRC-32 blocks first. On a CRC mismatch in either
   block it reports the mismatch as an error and decodes no field (our
   decoder's behaviour, pinned by its unit tests).
-- Fields change only through the settings write below; calibration is never
-  written, and SET_DATA (0x48) is never used for settings.
+- Fields change only through the settings write below, with one exception:
+  the startup-logo path's SET_DATA 0x48 attribute 0x1C write sets the startup
+  duration and leaves block A stale until a menu save (see Startup logo)
+  [device]. Calibration is never written, and SET_DATA (0x48) is used for no
+  other setting.
 - A field moves from [inferred] to [device] only after it has been compared
   with a photo or reading of the meter's screen; a field that does not match
   is fixed or stays [inferred].
@@ -1072,10 +1075,27 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
 
 ## Startup logo
 
-The meter can show a custom image at power-on. This section covers only the
+The meter can show a custom image at power-on. This section covers mostly the
 image format: how a picture becomes the byte blob the meter stores. How the
-blob is sent to the meter is described separately. All facts come from static
-analysis of the vendor app; none has been checked on our meter yet.
+blob is sent to the meter is described separately (see Never-send commands,
+Startup logo paths). The image-format facts come from static analysis of the
+vendor app.
+
+The write that follows an upload or Remove, SET_DATA 0x48 attribute 0x1C, sets
+the startup duration, the time the startup screen (and so the logo) shows:
+value 2 sets it to 3 s and value 0 turns the startup screen off. It lands in
+bits 14..15 of the settings word at 0x00 (see SETTINGS). [device] (2026-11-06,
+firmware 2.0.7, M7C stages 2 and 3)
+
+After a 0x1C write the meter changes those bits but keeps the old block A
+check value (the CRC A at 0x5C), so every SETTINGS reply after it fails the
+block A check: the block is stale. A save in the meter's own menu (Settings,
+startup logo duration, pick a value, save) writes the block again with a valid
+CRC A, and the calibration bytes 0x1C..0x5B stay as they were. Until that save
+our library treats the block as unreadable: it decodes no field, refuses every
+settings write and every logo write, and asks for the menu save. Nothing we
+send repairs the block. A replug while the block is stale was never tried, so
+nothing relies on one. [device] (2026-11-06)
 
 ### Scaling
 
@@ -1161,10 +1181,13 @@ and everything else on 0x4A and 0x48 stays refused. [inferred]
   {flash address, `len2` = chunk length, 0xFFFFFFFF, CRC-32 of the first 12
   bytes}, then the chunk data, both encrypted. [static] That the firmware
   erases on write and ignores the 0xFF pad after the blob is [inferred].
-- Logo flag (SET_DATA 0x48, attribute 0x1C): a 4-byte u32 whose value is
-  0 or 2 only; any other value or size is refused. [static] The vendor sends 2 after
-  a successful upload and 0 after Remove; reading 2 as "show the custom logo"
-  and 0 as "show the built-in logo" is [inferred].
+- Startup duration (SET_DATA 0x48, attribute 0x1C): a 4-byte u32 whose value
+  is 0 or 2 only; any other value or size is refused. [static] The vendor sends
+  2 after a successful upload and 0 after Remove. [static] The value is the
+  startup duration code (bits 14..15 of the SETTINGS word at 0x00): 2 sets
+  3 s, 0 turns the startup screen off. [device] (2026-11-06) The meter leaves
+  block A's old CRC in place after this write, so the SETTINGS block reads as
+  stale until a save in the meter's menu; see Startup logo. [device]
 - Logo read (0x44): reads in the window 0x98300000..0x9831FFFF only, at most
   256 bytes each and wholly inside the window; it changes nothing on the meter.
   [inferred] That this window maps the logo region of the flash, as

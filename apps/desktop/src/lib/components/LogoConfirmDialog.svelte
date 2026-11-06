@@ -9,11 +9,14 @@
 
   let {
     action,
+    durationText,
     onCancel,
     onConfirm,
   }: {
     /** The write to confirm. */
     action: LogoAction;
+    /** What the write does to the startup duration (AC-QG6RNY.1). */
+    durationText: string;
     onCancel: () => void;
     /** Called with the typed confirmation once it matches. */
     onConfirm: (typed: string) => void;
@@ -76,6 +79,7 @@
         : "The logo area on the meter's flash is cleared and read back to check it."}
       The write cannot be stopped once it starts.
     </p>
+    <p data-testid="logo-confirm-duration">{durationText}</p>
     <form onsubmit={submit}>
       <label>
         <span>Type <strong>{want}</strong> to confirm</span>

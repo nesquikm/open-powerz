@@ -5,8 +5,7 @@
 //!
 //! AC-A2XTES.1 decrypt + block-header check, FINISHED / REJECT;
 //! AC-A2XTES.2 erase policies after a large logo and Remove;
-//! AC-A2XTES.3 auth toggle; AC-A2XTES.4 faults; AC-A2XTES.5 flag 0x1C and
-//! its settings mirror; AC-A2XTES.6 reads of the 0x98300000 window;
+//! AC-A2XTES.3 auth toggle; AC-A2XTES.4 faults; AC-A2XTES.5 flag 0x1C; AC-A2XTES.6 reads of the 0x98300000 window;
 //! AC-A2XTES.7 boot render on what the meter holds.
 
 mod common;
@@ -460,49 +459,9 @@ fn a2xtes_any_other_flag_value_is_rejected_and_changes_nothing() {
     }
 }
 
-/// The 180-byte SETTINGS block the meter serves now.
-fn settings(d: &mut SimDevice, id: u8) -> Vec<u8> {
-    let reply = d.transact(&get_data(id, Attribute::SETTINGS), T).unwrap();
-    let secs = sections(&reply);
-    assert_eq!(secs.len(), 1);
-    assert_eq!(secs[0].1.len(), 180);
-    secs[0].1.clone()
-}
-
-#[test]
-fn a2xtes_flag_mirror_shows_the_flag_in_the_chosen_settings_byte() {
-    const AT: usize = 0x0C;
-    let mut d = connected_dev(|d| d.with_logo_flag_mirror(AT));
-    assert_eq!(settings(&mut d, 1)[AT], 0, "mirrors flag 0 from the start");
-    d.transact_logo_flag(&flag_frame(2, 2), T).unwrap();
-    let s = settings(&mut d, 3);
-    assert_eq!(s[AT], 2);
-    // Block A's CRC still matches what is served.
-    let crc = u32::from_le_bytes(s[0x5C..0x60].try_into().unwrap());
-    assert_eq!(crc, crypto::crc32(&s[..0x5C]));
-    let reply = d.transact(&flag_frame(4, 3), T).unwrap();
-    assert_reject(&reply, 4, "value 3");
-    assert_eq!(
-        settings(&mut d, 5)[AT],
-        2,
-        "a rejected value is not mirrored"
-    );
-    d.transact_logo_flag(&flag_frame(6, 0), T).unwrap();
-    assert_eq!(settings(&mut d, 7)[AT], 0);
-}
-
-#[test]
-fn a2xtes_without_a_mirror_the_settings_block_ignores_the_flag() {
-    let mut d = connected_dev(|d| d);
-    let before = settings(&mut d, 1);
-    assert_finished(
-        &d.transact_logo_flag(&flag_frame(2, 2), T).unwrap(),
-        2,
-        "flag 2",
-    );
-    assert_eq!(d.logo_flag(), 2);
-    assert_eq!(settings(&mut d, 3), before);
-}
+// The settings side of the 0x1C write (it sets the startup duration and
+// leaves block A's CRC stale, FR Z39H24) is in `z39h24_stale_settings.rs`;
+// the old "mirror" model is gone.
 
 // ---- AC-A2XTES.6: 0x44 reads of the logo window ----
 

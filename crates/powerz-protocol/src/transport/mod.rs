@@ -130,7 +130,8 @@ pub trait Transport {
         self.transact(&frame, timeout)
     }
 
-    /// Write the startup-logo flag (SET_DATA 0x48, attribute 0x1C).
+    /// Write the startup-screen duration the logo paths set (SET_DATA 0x48,
+    /// attribute 0x1C; 2 = 3 s, 0 = off) \[device\].
     /// Wrappers that sit outside a guard must forward this method.
     fn transact_logo_flag(&mut self, frame: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         guard::check_logo_flag_write(frame)?;

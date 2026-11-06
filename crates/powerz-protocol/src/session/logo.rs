@@ -2,7 +2,7 @@
 //! `docs/protocol.md` "Startup logo".
 //!
 //! Every write goes through one of the transport's narrow logo paths
-//! (chunk 0x4A, flag SET_DATA 0x48 att 0x1C) and every read through
+//! (chunk 0x4A, startup duration SET_DATA 0x48 att 0x1C) and every read through
 //! [`Session::logo_memory_read`]; nothing is retried. \[static\]
 
 use std::fmt;
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use super::{Clock, Error, Session};
 use crate::decode::records::MEMORY_READ_MAX_LEN;
-use crate::decode::settings::StartupLogo;
+use crate::decode::settings::{CalibrationSnapshot, StartupLogo};
 use crate::frame::{self, Reply};
 use crate::logo::{self, CHUNK, HEADER_LEN, LogoBlob, LogoMode, Rgba};
 use crate::transport::Transport;
@@ -38,13 +38,31 @@ pub struct LogoProgress {
     pub total: usize,
 }
 
+/// Gap between two read-only checks in [`Session::wait_settings_saved`].
+pub const SETTINGS_SAVE_POLL_GAP: Duration = Duration::from_secs(2);
+
+/// What a SETTINGS read shows after a startup-duration write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSave {
+    /// Both blocks valid, calibration unchanged; the startup duration now.
+    Saved(StartupLogo),
+    /// A block fails its check: the meter needs a save in its menu.
+    NeedsMenuSave,
+    /// Both blocks valid but the calibration bytes differ from the snapshot.
+    CalibrationChanged,
+}
+
 /// What a logo upload or Remove left on the meter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogoWritten {
-    /// The startup-screen duration from the session's SETTINGS read.
-    pub startup_duration: StartupLogo,
-    /// The startup screen is off, so the logo will not show. \[inferred\]
-    pub startup_screen_off: bool,
+    /// The startup duration from the session's SETTINGS read before the write.
+    pub duration_before: StartupLogo,
+    /// The startup duration the write set.
+    pub duration_set: StartupLogo,
+    /// One check of the SETTINGS block right after the write.
+    pub settings_after: SettingsSave,
+    /// Calibration bytes of the pre-write read.
+    pub calibration: CalibrationSnapshot,
 }
 
 /// What the logo area holds.
@@ -98,7 +116,7 @@ impl fmt::Display for LogoRefusal {
 pub enum LogoRemoveStep {
     /// The 16 bytes of 0xFF at 0x300000.
     Clear,
-    /// The flag write of 0.
+    /// The startup-duration write of 0 (off).
     Flag,
     /// The 16-byte read-back.
     ReadBack,
@@ -108,7 +126,7 @@ impl fmt::Display for LogoRemoveStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             LogoRemoveStep::Clear => "clear",
-            LogoRemoveStep::Flag => "flag",
+            LogoRemoveStep::Flag => "startup duration",
             LogoRemoveStep::ReadBack => "read-back",
         })
     }
@@ -120,11 +138,13 @@ const CHUNK_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Least gap between two read-back reads. \[inferred\]
 const READ_GAP: Duration = Duration::from_millis(50);
 
-/// Flag value written after a logo upload. \[static\]
-const FLAG_LOGO: u32 = 2;
+/// Startup-duration value (SET_DATA 0x1C) written after a logo upload:
+/// code 2 = 3 s. \[device\]
+const DURATION_UPLOAD: u32 = 2;
 
-/// Flag value written by a logo Remove. \[static\]
-const FLAG_NONE: u32 = 0;
+/// Startup-duration value (SET_DATA 0x1C) written by a logo Remove: code
+/// 0 = off. \[device\]
+const DURATION_REMOVE: u32 = 0;
 
 /// Bytes of 0xFF a Remove writes at the region start. \[static\]
 const REMOVE_LEN: usize = 16;
@@ -148,8 +168,8 @@ pub fn logo_chunk_plaintext(id: u8, addr: u32, data: &[u8]) -> Vec<u8> {
     f
 }
 
-/// The logo flag write (SET_DATA 0x48, attribute 0x1C) of `value`: 2 after
-/// an upload, 0 for a Remove.
+/// The startup-duration write (SET_DATA 0x48, attribute 0x1C) of `value`:
+/// 2 (3 s) after an upload, 0 (off) for a Remove \[device\].
 ///
 /// Main header `0x48 | id << 8 | 3 << 22`, one extended section header
 /// (`att` 0x1C, `size` 4), then `value` as a little-endian u32 \[static\].
@@ -208,12 +228,13 @@ fn write_outcome(reply: &[u8], accept_ok: bool) -> Result<(), String> {
 
 impl<T: Transport, C: Clock> Session<T, C> {
     /// Upload `blob`: every 256-byte chunk of the padded blob from 0x300000,
-    /// then flag 2, then a full read-back compared byte for byte.
+    /// then startup duration 2 (3 s), then a full read-back compared byte
+    /// for byte, then one fresh SETTINGS check.
     ///
     /// Refused with [`Error::LogoRefused`] before anything is sent unless
     /// this session authenticated, read SETTINGS and read a KM003C model.
     /// The first failed chunk stops the upload ([`Error::LogoChunk`], no
-    /// flag written); a failed flag is [`Error::LogoFlag`] and a read-back
+    /// duration written); a failed duration write is [`Error::LogoFlag`] and a read-back
     /// difference [`Error::LogoMismatch`]. Nothing is retried. `progress`
     /// sees each chunk, then each read-back read.
     pub fn logo_upload(
@@ -224,7 +245,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         self.logo_preconditions()?;
         // Decode the duration before any write, so a written meter is never
         // reported as a failure afterwards.
-        let written = self.logo_written()?;
+        let before = self.logo_before()?;
         let padded = blob.padded();
         let total = padded.len() / CHUNK;
         for (k, data) in padded.chunks(CHUNK).enumerate() {
@@ -237,7 +258,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
                 total,
             });
         }
-        self.logo_write_flag(FLAG_LOGO)
+        self.logo_write_flag(DURATION_UPLOAD)
             .map_err(|reason| Error::LogoFlag { reason })?;
         let read = self.logo_read_back(padded.len(), progress)?;
         if let Some(offset) = read.iter().zip(&padded).position(|(a, b)| a != b) {
@@ -248,10 +269,11 @@ impl<T: Transport, C: Clock> Session<T, C> {
                 offset: read.len().min(padded.len()),
             });
         }
-        Ok(written)
+        self.logo_written(before, StartupLogo::Secs3)
     }
 
-    /// Remove the logo: 16 bytes of 0xFF at 0x300000, flag 0, then a
+    /// Remove the logo: 16 bytes of 0xFF at 0x300000, startup duration 0
+    /// (off), then a
     /// 16-byte read-back that must be all 0xFF.
     ///
     /// Refused like [`logo_upload`](Self::logo_upload); a failure names its
@@ -264,7 +286,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         self.logo_preconditions()?;
         // Decode the duration before any write, so a written meter is never
         // reported as a failure afterwards.
-        let written = self.logo_written()?;
+        let before = self.logo_before()?;
         self.logo_write_chunk(LOGO_REGION_START, &[0xFF; REMOVE_LEN])
             .map_err(|r| fail(LogoRemoveStep::Clear, r))?;
         progress(LogoProgress {
@@ -272,7 +294,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
             done: 1,
             total: 1,
         });
-        self.logo_write_flag(FLAG_NONE)
+        self.logo_write_flag(DURATION_REMOVE)
             .map_err(|r| fail(LogoRemoveStep::Flag, r))?;
         let read = self
             .logo_read_back(REMOVE_LEN, progress)
@@ -283,7 +305,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
                 format!("expected {REMOVE_LEN} bytes of 0xFF, read {read:02X?}"),
             ));
         }
-        Ok(written)
+        self.logo_written(before, StartupLogo::Off)
     }
 
     /// What the logo area holds (one 16-byte read; no write, no
@@ -348,7 +370,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         write_outcome(&reply, false)
     }
 
-    /// Send the logo flag `value`; `Ok` on FINISHED or ACCEPT, otherwise
+    /// Send the startup-duration `value` (0x1C); `Ok` on FINISHED or ACCEPT, otherwise
     /// the reason.
     fn logo_write_flag(&mut self, value: u32) -> Result<(), String> {
         let frame = logo_flag_request(self.counter.next(), value);
@@ -411,16 +433,91 @@ impl<T: Transport, C: Clock> Session<T, C> {
         Ok(out)
     }
 
-    /// The startup-screen duration from this session's SETTINGS read.
-    fn logo_written(&self) -> Result<LogoWritten, Error> {
+    /// One SETTINGS read (GET_DATA, nothing written), checked against
+    /// `snapshot`: both blocks valid and calibration unchanged is
+    /// [`SettingsSave::Saved`] with the startup duration read; a block that
+    /// fails its check is [`SettingsSave::NeedsMenuSave`]; valid blocks with
+    /// other calibration bytes are [`SettingsSave::CalibrationChanged`].
+    pub fn check_settings_saved(
+        &mut self,
+        snapshot: &CalibrationSnapshot,
+    ) -> Result<SettingsSave, Error> {
+        let settings = self.read_settings()?;
+        if !settings.block_a_crc_ok() || !settings.block_b_crc_ok() {
+            return Ok(SettingsSave::NeedsMenuSave);
+        }
+        if settings.calibration_snapshot() != *snapshot {
+            return Ok(SettingsSave::CalibrationChanged);
+        }
+        Ok(SettingsSave::Saved(
+            settings.meter_settings()?.startup_logo.value,
+        ))
+    }
+
+    /// Read-only checks every [`SETTINGS_SAVE_POLL_GAP`] until the meter
+    /// saved its settings ([`SettingsSave::Saved`]) or its calibration bytes
+    /// changed ([`SettingsSave::CalibrationChanged`]), both returned at once.
+    /// Each check is one [`check_settings_saved`](Self::check_settings_saved)
+    /// (GET_DATA SETTINGS only, nothing written), handed to `on_check`; when
+    /// `on_check` returns false, or the session-clock time since the first
+    /// check reaches `timeout`, the last result is returned (a `timeout` of
+    /// zero makes exactly one check).
+    pub fn wait_settings_saved(
+        &mut self,
+        snapshot: &CalibrationSnapshot,
+        timeout: Duration,
+        on_check: &mut dyn FnMut(&SettingsSave) -> bool,
+    ) -> Result<SettingsSave, Error> {
+        let start = self.now_ms();
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let gap_ms = SETTINGS_SAVE_POLL_GAP.as_millis() as u64;
+        loop {
+            let at = self.now_ms();
+            let result = self.check_settings_saved(snapshot)?;
+            let go_on = on_check(&result);
+            if result != SettingsSave::NeedsMenuSave || !go_on {
+                return Ok(result);
+            }
+            if self.now_ms().saturating_sub(start) >= timeout_ms {
+                return Ok(result);
+            }
+            let due = at + gap_ms;
+            let now = self.now_ms();
+            if now < due {
+                self.sleep(Duration::from_millis(due - now));
+            }
+        }
+    }
+
+    /// The startup duration and calibration bytes from this session's
+    /// SETTINGS read, taken before any write (a block that fails its check
+    /// refuses the write here).
+    fn logo_before(&self) -> Result<(StartupLogo, CalibrationSnapshot), Error> {
         let settings = self
             .settings_read
             .as_ref()
             .ok_or(Error::LogoRefused(LogoRefusal::SettingsNotRead))?;
-        let startup_duration = settings.meter_settings()?.startup_logo.value;
+        let duration = settings.meter_settings()?.startup_logo.value;
+        Ok((duration, settings.calibration_snapshot()))
+    }
+
+    /// The result of a verified logo write: one fresh SETTINGS check after
+    /// it. A failed re-read is [`Error::LogoSettingsReread`].
+    fn logo_written(
+        &mut self,
+        (duration_before, calibration): (StartupLogo, CalibrationSnapshot),
+        duration_set: StartupLogo,
+    ) -> Result<LogoWritten, Error> {
+        let settings_after =
+            self.check_settings_saved(&calibration)
+                .map_err(|e| Error::LogoSettingsReread {
+                    reason: e.to_string(),
+                })?;
         Ok(LogoWritten {
-            startup_duration,
-            startup_screen_off: startup_duration == StartupLogo::Off,
+            duration_before,
+            duration_set,
+            settings_after,
+            calibration,
         })
     }
 }
@@ -562,7 +659,7 @@ mod tests {
         assert!(chunk.to_string().contains("chunk 7"), "{chunk}");
         for (step, word) in [
             (LogoRemoveStep::Clear, "clear"),
-            (LogoRemoveStep::Flag, "flag"),
+            (LogoRemoveStep::Flag, "startup duration"),
             (LogoRemoveStep::ReadBack, "read"),
         ] {
             let e = Error::LogoRemove {

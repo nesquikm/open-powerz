@@ -1100,8 +1100,9 @@ async fn logo_read(
 }
 
 /// Upload the picture at `path` (opaque or `alpha`) as meter `device_id`'s
-/// startup logo (FR MEHQC0, AC .3): chunks, flag, full read-back, with
-/// progress batched to at most 20 messages a second on `on_progress`.
+/// startup logo (FR MEHQC0, AC .3): chunks, startup-duration write, full
+/// read-back, with progress batched to at most 20 messages a second on
+/// `on_progress`.
 #[tauri::command]
 async fn logo_upload(
     state: Shared<'_>,
@@ -1140,6 +1141,18 @@ async fn logo_remove(
         logged_control(&state, device_id.as_deref())?.logo_remove(logo_progress(on_progress))
     })
     .await
+}
+
+/// One read-only check of meter `device_id`'s settings after a logo write
+/// whose settings wait for a menu save on the meter (FR QG6RNY): one
+/// SETTINGS read against the write's calibration snapshot.
+#[tauri::command]
+async fn logo_settings_check(
+    state: Shared<'_>,
+    device_id: Option<String>,
+) -> Result<logo::LogoSettingsCheckView, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || control(&state, device_id.as_deref())?.logo_settings_check()).await
 }
 
 /// Ask for a firmware container to update the meter with (FR V9SK55, AC .2);
@@ -1873,6 +1886,7 @@ pub fn run() {
             logo_read,
             logo_upload,
             logo_remove,
+            logo_settings_check,
             trigger_open,
             trigger_detect,
             trigger_list,

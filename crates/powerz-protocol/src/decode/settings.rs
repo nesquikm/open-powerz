@@ -10,6 +10,15 @@ use super::{DecodeError, Rate, c_str, need, u32_at};
 /// Length of the SETTINGS section payload.
 const LEN: usize = 180;
 
+/// What to do on the meter so that it saves its SETTINGS block again (a
+/// startup-duration write leaves block A's CRC stale). \[device\]
+pub const MENU_SAVE_STEPS: &str = "On the meter: Settings \u{2192} startup logo duration \u{2192} pick a value \u{2192} save. Don't unplug the meter first.";
+
+/// Bytes 0x1C..0x5C of a SETTINGS block (calibration), kept to check that a
+/// save in the meter's menu left them unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalibrationSnapshot(pub [u8; 64]);
+
 /// The 180-byte SETTINGS payload with its CRC verdicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -61,6 +70,22 @@ fn overlay_at_crc_time(b: &[u8]) -> u32 {
     crc_unstep(after, 32) ^ before
 }
 
+/// The stored block-A CRC matches the block with another startup-duration
+/// code (bits 14..15 of the word at 0x00) and an overlay word `exact`
+/// accepts: what a startup-duration write (SET_DATA 0x1C) leaves, since the
+/// meter does not refresh the CRC after it `[device]`.
+fn crc_fits_other_duration(raw: &[u8; LEN], exact: impl Fn(u32) -> bool) -> bool {
+    let w0 = u32_at(raw, 0);
+    (0..4u32)
+        .filter(|&code| code != (w0 >> 14) & 0b11)
+        .any(|code| {
+            let mut b = *raw;
+            let w = (w0 & !(0b11 << 14)) | (code << 14);
+            b[..4].copy_from_slice(&w.to_le_bytes());
+            exact(overlay_at_crc_time(&b))
+        })
+}
+
 impl Settings {
     /// Decode the 180-byte SETTINGS section payload.
     pub fn decode(payload: &[u8]) -> Result<Settings, DecodeError> {
@@ -74,13 +99,23 @@ impl Settings {
         // from a boot no later than the one the block shows now.
         let saved = overlay_at_crc_time(&raw);
         let shown = u32_at(&raw, OVERLAY.start);
+        let exact = |w: u32| w == 0xFFFF_FFFF || w == shown;
         Ok(Settings {
             block_a_crc_ok: crc_ok(&raw, 0x00..0x5C, 0x5C)
-                || saved == 0xFFFF_FFFF
-                || (OVERLAY_TIMES.contains(&saved) && saved <= shown),
+                || exact(saved)
+                || (OVERLAY_TIMES.contains(&saved)
+                    && saved <= shown
+                    && !crc_fits_other_duration(&raw, exact)),
             block_b_crc_ok: crc_ok(&raw, 0x60..0xB0, 0xB0),
             raw,
         })
+    }
+
+    /// Bytes 0x1C..0x5C (calibration).
+    pub fn calibration_snapshot(&self) -> CalibrationSnapshot {
+        let mut b = [0u8; 64];
+        b.copy_from_slice(&self.raw[0x1C..0x5C]);
+        CalibrationSnapshot(b)
     }
 
     /// Block A (0x00..0x5B) matches the CRC-32 at 0x5C.
@@ -285,6 +320,18 @@ pub enum StartupLogo {
     Secs5,
 }
 
+impl StartupLogo {
+    /// The duration as settings rows and `Startup:` lines show it.
+    pub fn label(self) -> &'static str {
+        match self {
+            StartupLogo::Off => "off",
+            StartupLogo::Secs1 => "1 s",
+            StartupLogo::Secs3 => "3 s",
+            StartupLogo::Secs5 => "5 s",
+        }
+    }
+}
+
 /// UI colour theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
@@ -417,13 +464,7 @@ impl MeterSettings {
                 "startup_logo",
                 "Startup logo",
                 &self.startup_logo,
-                match self.startup_logo.value {
-                    StartupLogo::Off => "off",
-                    StartupLogo::Secs1 => "1 s",
-                    StartupLogo::Secs3 => "3 s",
-                    StartupLogo::Secs5 => "5 s",
-                }
-                .to_string(),
+                self.startup_logo.value.label().to_string(),
             ),
             row(
                 "theme",

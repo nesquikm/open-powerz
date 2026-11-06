@@ -51,9 +51,9 @@ Build order: the table's order. The two bug FRs come from the stage 2 and 3 devi
   verify: CLI integration tests against the simulator
 - [x] Desktop startup logo view — MEHQC0
   verify: Rust command tests, Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
-- [ ] Startup duration and stale settings check in the library, simulator and CLI — Z39H24
+- [x] Startup duration and stale settings check in the library, simulator and CLI — Z39H24
   verify: sim tests for the stale block and menu save, CLI tests for the wait and exit codes
-- [ ] Desktop menu-save panel and settings guidance — QG6RNY
+- [x] Desktop menu-save panel and settings guidance — QG6RNY
   verify: Rust command tests, Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
 - [x] Hardware runbooks for stages 1–4 and the M7b carry-overs, in `../qa-runs/m7c/runbooks/` (outside the repo)
   verify: each runbook has its approval gate, stop rules, photos, read-back and settings diffs, and the recovery ladder

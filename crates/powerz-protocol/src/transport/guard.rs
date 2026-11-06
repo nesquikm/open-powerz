@@ -33,7 +33,8 @@ pub fn check(request: &[u8]) -> Result<(), Error> {
 /// \[static\]
 pub const RECORD_TABLE_ATT: u16 = 0x28;
 
-/// SET_DATA attribute of the startup-logo flag. \[static\]
+/// SET_DATA attribute the logo paths write: the startup-screen duration
+/// (settings u32@0x00 bits 14..15; 2 = 3 s, 0 = off). \[static\] \[device\]
 pub const LOGO_FLAG_ATT: u16 = 0x1C;
 
 /// Accept `request` only if it is the record-table write laid out as in
@@ -43,7 +44,7 @@ pub const LOGO_FLAG_ATT: u16 = 0x1C;
 /// `len` data bytes made of whole 48-byte entries and four zero bytes.
 ///
 /// Every other frame, including SET_DATA with any other attribute
-/// (calibration, reset buttons, the logo flag, ...), is refused with
+/// (calibration, reset buttons, the startup duration, ...), is refused with
 /// [`Error::Forbidden`]. The shared [`check`] still refuses every 0x48; this
 /// rule applies only on the record-table path
 /// ([`Transport::transact_record_table`]).
@@ -187,7 +188,8 @@ fn first_chunk_ok(data: &[u8]) -> bool {
         .is_some_and(|end| end <= LOGO_REGION_END)
 }
 
-/// Accept `frame` only if it is the startup-logo flag write (FR R1ST8Z).
+/// Accept `frame` only if it is the logo path's startup-duration write
+/// (SET_DATA 0x1C, value 0 or 2; FR R1ST8Z).
 ///
 /// Layout \[static\]: exactly 12 bytes, main header
 /// `0x48 | id << 8 | 3 << 22` (extend bit clear), one extended section header

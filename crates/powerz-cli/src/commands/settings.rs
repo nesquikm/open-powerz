@@ -23,7 +23,8 @@ pub enum SettingsOutput {
 }
 
 /// `powerz settings`: read the SETTINGS block with one GET_DATA (never a
-/// write) and print it. A CRC mismatch fails the text and JSON views.
+/// write) and print it. A CRC mismatch fails the text and JSON views with
+/// [`CliError::SettingsNotSaved`] (exit 6, the menu-save steps).
 pub fn settings<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     how: SettingsOutput,
@@ -39,7 +40,8 @@ pub fn settings<T: Transport, C: Clock>(
     }
     let rows = block
         .meter_settings()
-        .map_err(|e| CliError::Device(e.to_string()))?
+        // An invalid block (CRC A stale or B broken) needs a menu save: exit 6.
+        .map_err(|e| CliError::from(powerz_protocol::session::Error::Decode(e)))?
         .rows();
     if how == SettingsOutput::Json {
         return write_json(out, &serde_json::json!({ "fields": rows }));

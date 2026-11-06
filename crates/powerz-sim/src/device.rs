@@ -197,6 +197,7 @@ impl SimDevice {
             self.auth_level = 0;
             self.sign_in_lost = true;
         }
+        self.auto_menu_save_due();
         if self.persona == Persona::Cdc && matches!(b0 & 0x7F, 0x01..=0x03) {
             // ADCNEW framing on CDC: out of scope, no reply.
             return Vec::new();
@@ -278,7 +279,11 @@ impl SimDevice {
                     set_other_brightness(&mut block);
                     settings_payload(&block, stored.rate_code)
                 } else {
-                    settings_payload(&stored.settings, stored.rate_code)
+                    let mut p = settings_payload(&stored.settings, stored.rate_code);
+                    if let Some(crc) = stored.frozen_crc_a {
+                        p[0x5C..0x60].copy_from_slice(&crc);
+                    }
+                    p
                 }
             }));
         }
@@ -426,16 +431,16 @@ impl SimDevice {
         self.control(msg::FINISHED, id)
     }
 
-    /// SET_DATA 0x1C: the startup-logo flag. 0 and 2 are stored (and
-    /// mirrored into the SETTINGS block if a mirror is set) and answered
-    /// with FINISHED; any other frame is REJECTed and changes nothing
-    /// `[inferred]`.
+    /// SET_DATA 0x1C: the startup duration. 0 (off) and 2 (3 s) are written
+    /// into the SETTINGS block, leaving block A's CRC stale, and answered
+    /// with FINISHED `[device]`; any other frame is REJECTed and changes
+    /// nothing `[inferred]`.
     fn logo_flag_write(&mut self, req: &[u8], id: u8) -> Vec<u8> {
         if check_logo_flag_write(req).is_err() {
             return self.control(msg::REJECT, id);
         }
         let value = u32::from_le_bytes([req[8], req[9], req[10], req[11]]);
-        self.set_logo_flag(value);
+        self.write_startup_duration(value);
         self.control(msg::FINISHED, id)
     }
 

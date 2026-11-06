@@ -1,7 +1,7 @@
 //! Simulated startup-logo flash of the demo meter (FR A2XTES).
 //!
 //! A sparse model of the meter's SPI flash around the logo region, the
-//! startup-logo flag written by SET_DATA 0x1C, per-test faults for the 0x4A
+//! startup duration written by SET_DATA 0x1C (2 = 3 s, 0 = off), per-test faults for the 0x4A
 //! chunk writes and a helper that says what the screen would show at boot.
 //! How the real meter erases, checks chunks and picks its boot screen is
 //! not known yet; every rule here is ours `[inferred]`.

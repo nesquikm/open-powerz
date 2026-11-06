@@ -288,6 +288,7 @@ pub fn records_delete<T: Transport, C: Clock>(
             CliError::NoDevice(m) => CliError::NoDevice(m + &note),
             CliError::Permission(m) => CliError::Permission(m + &note),
             CliError::Device(m) => CliError::Device(m + &note),
+            CliError::SettingsNotSaved(m) => CliError::SettingsNotSaved(m + &note),
             closed @ CliError::OutputClosed => closed,
         }
     })?;

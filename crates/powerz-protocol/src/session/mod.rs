@@ -32,8 +32,8 @@ use crate::transport::{self, Transport};
 
 pub use auth::{auth_plaintext, auth_request};
 pub use logo::{
-    LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten, check_logo_dump,
-    logo_chunk_plaintext, logo_flag_request,
+    LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten,
+    SETTINGS_SAVE_POLL_GAP, SettingsSave, check_logo_dump, logo_chunk_plaintext, logo_flag_request,
 };
 pub(crate) use memory::UID;
 pub use memory::{
@@ -137,7 +137,7 @@ pub enum Error {
     #[error("logo write refused: {0}")]
     LogoRefused(LogoRefusal),
     /// A logo chunk was not FINISHED; the write stopped there, nothing was
-    /// retried and the flag was not written.
+    /// retried and the startup duration was not written.
     #[error("logo chunk {index} failed: {reason}")]
     LogoChunk {
         /// Index of the chunk that failed (0 is the chunk at 0x300000).
@@ -145,8 +145,8 @@ pub enum Error {
         /// What happened instead of FINISHED.
         reason: String,
     },
-    /// The logo flag write after the chunks failed.
-    #[error("logo flag write failed: {reason}")]
+    /// The startup-duration write (0x1C) after the chunks failed.
+    #[error("startup duration write (0x1C) failed: {reason}")]
     LogoFlag {
         /// What happened.
         reason: String,
@@ -171,6 +171,16 @@ pub enum Error {
     /// A reply frame was malformed.
     #[error(transparent)]
     Frame(#[from] FrameError),
+    /// The logo write succeeded and verified, but the SETTINGS re-read after
+    /// it failed.
+    #[error(
+        "the logo was written and verified, but reading the settings after it failed: {reason}. {}",
+        crate::decode::settings::MENU_SAVE_STEPS
+    )]
+    LogoSettingsReread {
+        /// Why the re-read failed.
+        reason: String,
+    },
 }
 
 impl Error {
@@ -180,6 +190,16 @@ impl Error {
         matches!(
             self,
             Error::Transport(transport::Error::Disconnected | transport::Error::Permission(_))
+        )
+    }
+
+    /// The meter's SETTINGS block failed a CRC check and needs a save in the
+    /// meter's own menu; callers attach
+    /// [`MENU_SAVE_STEPS`](crate::decode::settings::MENU_SAVE_STEPS). \[device\]
+    pub fn is_settings_not_saved(&self) -> bool {
+        matches!(
+            self,
+            Error::Decode(DecodeError::Crc { what }) if what.starts_with("SETTINGS block")
         )
     }
 }

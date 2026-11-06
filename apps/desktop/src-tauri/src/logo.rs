@@ -7,7 +7,9 @@ use std::time::Instant;
 
 use powerz_protocol::decode::settings::StartupLogo;
 use powerz_protocol::logo::{self, LogoBlob, LogoMode};
-use powerz_protocol::session::{Clock, LogoProgress, LogoStatus, LogoStep, LogoWritten, Session};
+use powerz_protocol::session::{
+    Clock, LogoProgress, LogoStatus, LogoStep, LogoWritten, Session, SettingsSave,
+};
 use powerz_protocol::transport::Transport;
 use powerz_protocol::transport::guard::GuardedTransport;
 use serde::Serialize;
@@ -47,13 +49,28 @@ pub struct LogoProgressView {
     pub total: usize,
 }
 
-/// What an upload or Remove left on the meter.
+/// What an upload or Remove left on the meter (FR QG6RNY).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogoWrittenView {
-    /// The startup-screen duration as the settings panel words it (`off`, `1 s`, …).
-    pub startup_duration: String,
-    /// The startup screen is off, so the logo will not show.
-    pub startup_screen_off: bool,
+    /// The startup-screen duration before the write, as the settings panel words it
+    /// (`off`, `1 s`, …).
+    pub duration_before: String,
+    /// The startup-screen duration the write set.
+    pub duration_set: String,
+    /// The fresh settings read after the write: `"saved"`, `"needs_menu_save"` or
+    /// `"calibration_changed"`.
+    pub settings: String,
+    /// The fresh read's duration when `settings` is `"saved"`, else null.
+    pub startup_duration: Option<String>,
+}
+
+/// One read-only check of the settings after a logo write (FR QG6RNY).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LogoSettingsCheckView {
+    /// `"saved"`, `"needs_menu_save"` or `"calibration_changed"`.
+    pub settings: String,
+    /// The duration read when `settings` is `"saved"`, else null.
+    pub startup_duration: Option<String>,
 }
 
 /// What the meter's logo area holds now.
@@ -173,17 +190,28 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// A duration as the settings panel words it.
+fn duration_name(d: StartupLogo) -> String {
+    d.label().to_owned()
+}
+
+/// The settings state as the UI names it, and the duration read when saved.
+fn settings_state(save: SettingsSave) -> (String, Option<String>) {
+    match save {
+        SettingsSave::Saved(d) => ("saved".to_owned(), Some(duration_name(d))),
+        SettingsSave::NeedsMenuSave => ("needs_menu_save".to_owned(), None),
+        SettingsSave::CalibrationChanged => ("calibration_changed".to_owned(), None),
+    }
+}
+
 impl From<LogoWritten> for LogoWrittenView {
     fn from(w: LogoWritten) -> Self {
+        let (settings, startup_duration) = settings_state(w.settings_after);
         LogoWrittenView {
-            startup_duration: match w.startup_duration {
-                StartupLogo::Off => "off",
-                StartupLogo::Secs1 => "1 s",
-                StartupLogo::Secs3 => "3 s",
-                StartupLogo::Secs5 => "5 s",
-            }
-            .to_owned(),
-            startup_screen_off: w.startup_screen_off,
+            duration_before: duration_name(w.duration_before),
+            duration_set: duration_name(w.duration_set),
+            settings,
+            startup_duration,
         }
     }
 }
@@ -211,17 +239,17 @@ fn prepare_write<T: Transport, C: Clock>(
 }
 
 impl<T: Transport, C: Clock + Clone> Worker<T, C> {
-    /// Upload `blob` (chunks, flag, full read-back).
+    /// Upload `blob` (chunks, startup-duration write, full read-back).
     pub fn logo_upload(
         &mut self,
         blob: &LogoBlob,
         progress: &mut dyn FnMut(LogoProgress),
     ) -> Result<LogoWrittenView, UiError> {
-        self.with_queue_session(|session| {
+        let written = self.with_queue_session(|session| {
             prepare_write(session)?;
             session.logo_upload(blob, progress)
-        })
-        .map(LogoWrittenView::from)
+        })?;
+        Ok(self.keep_pending(written))
     }
 
     /// Remove the logo (the built-in one shows again).
@@ -229,11 +257,41 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         &mut self,
         progress: &mut dyn FnMut(LogoProgress),
     ) -> Result<LogoWrittenView, UiError> {
-        self.with_queue_session(|session| {
+        let written = self.with_queue_session(|session| {
             prepare_write(session)?;
             session.logo_remove(progress)
+        })?;
+        Ok(self.keep_pending(written))
+    }
+
+    /// One read-only check of the settings against the last logo write's
+    /// calibration snapshot (FR QG6RNY).
+    /// `saved` and `calibration_changed` end the wait.
+    pub fn logo_settings_check(&mut self) -> Result<LogoSettingsCheckView, UiError> {
+        let Some(snapshot) = self.logo_pending else {
+            return Err(UiError::usage(
+                "No logo write is waiting for a settings save.",
+            ));
+        };
+        let save = self.with_queue_session(|session| session.check_settings_saved(&snapshot))?;
+        if save != SettingsSave::NeedsMenuSave {
+            self.logo_pending = None;
+        }
+        let (settings, startup_duration) = settings_state(save);
+        Ok(LogoSettingsCheckView {
+            settings,
+            startup_duration,
         })
-        .map(LogoWrittenView::from)
+    }
+
+    /// Keep the write's calibration snapshot while its settings wait for a
+    /// menu save, for [`Worker::logo_settings_check`].
+    fn keep_pending(&mut self, written: LogoWritten) -> LogoWrittenView {
+        self.logo_pending = match written.settings_after {
+            SettingsSave::NeedsMenuSave => Some(written.calibration),
+            _ => None,
+        };
+        LogoWrittenView::from(written)
     }
 
     /// What the logo area holds; with `full`, the stored image too.
@@ -501,8 +559,8 @@ mod tests {
                 .iter()
                 .all(|p| p.step == LogoStep::Chunks)
         );
-        assert_eq!(written.startup_duration, "off");
-        assert!(written.startup_screen_off);
+        assert_eq!(written.duration_before, "off");
+        assert_eq!(written.duration_set, "3 s");
 
         let read = worker.logo_read(false).expect("reads");
         assert_eq!(read.status, "logo");
@@ -517,8 +575,8 @@ mod tests {
         let written = worker
             .logo_upload(&blob_100x60(), &mut |_| {})
             .expect("verifies");
-        assert_eq!(written.startup_duration, "3 s");
-        assert!(!written.startup_screen_off);
+        assert_eq!(written.duration_before, "3 s");
+        assert_eq!(written.duration_set, "3 s");
     }
 
     #[test]
@@ -536,13 +594,15 @@ mod tests {
         );
         // Nothing past the failed chunk: no read-back ran (every progress
         // step above is a chunk). Chunks 0..6 did land, so a Read would
-        // honestly show their header; the flag is never sent on this path
+        // honestly show their header; the startup-duration write is never sent on this path
         // (covered by the session's sim tests).
     }
 
     #[test]
     fn mehqc0_remove_brings_back_the_empty_area() {
-        let mut worker = ready(|d| d);
+        // The upload leaves the settings unsaved until a menu save on the
+        // meter (FR Z39H24); the sim does it at once, so the Remove is allowed.
+        let mut worker = ready(|d| d.with_auto_menu_save(std::time::Duration::ZERO, 2));
         worker
             .logo_upload(&blob_100x60(), &mut |_| {})
             .expect("verifies");
@@ -720,5 +780,245 @@ mod tests {
                 "{name} is not registered"
             );
         }
+    }
+
+    // ---- FR QG6RNY: the write result, the settings check, the demo menu save ----
+
+    /// A worker on a sim with `clock`, its settings read, and a twin that
+    /// shares the sim's stored settings (for a menu save from the test).
+    fn ready_with_twin(
+        clock: &SimClock,
+        device: impl FnOnce(SimDevice) -> SimDevice,
+    ) -> (Worker<SimDevice, SimClock>, SimDevice) {
+        let dev = device(sim(clock));
+        let twin = dev.cdc_twin();
+        let mut worker = worker_on(dev, clock.clone());
+        worker.read_settings().expect("settings read");
+        (worker, twin)
+    }
+
+    fn json<T: Serialize>(v: &T) -> serde_json::Value {
+        serde_json::to_value(v).expect("json")
+    }
+
+    // AC-QG6RNY.1 (backend side): the result says the duration before and the one set.
+    #[test]
+    fn qg6rny_upload_reports_before_set_and_a_needed_menu_save() {
+        let mut worker = ready(|d| d);
+        let written = worker
+            .logo_upload(&blob_100x60(), &mut |_| {})
+            .expect("verifies");
+        assert_eq!(written.duration_before, "off");
+        assert_eq!(written.duration_set, "3 s");
+        assert_eq!(written.startup_duration, None);
+        let v = json(&written);
+        assert_eq!(v["settings"], "needs_menu_save");
+        assert_eq!(v["startup_duration"], serde_json::Value::Null);
+        let mut keys: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "duration_before",
+                "duration_set",
+                "settings",
+                "startup_duration"
+            ]
+        );
+    }
+
+    #[test]
+    fn qg6rny_remove_reports_the_startup_screen_off() {
+        let mut worker = ready(|d| d.with_startup_logo(3));
+        let written = worker.logo_remove(&mut |_| {}).expect("removes");
+        assert_eq!(written.duration_before, "5 s");
+        assert_eq!(written.duration_set, "off");
+        assert_eq!(json(&written)["settings"], "needs_menu_save");
+    }
+
+    // AC-QG6RNY.4 (backend side): a fresh read that is already saved carries its duration.
+    #[test]
+    fn qg6rny_a_saved_fresh_read_carries_its_duration() {
+        let w = LogoWritten {
+            duration_before: StartupLogo::Off,
+            duration_set: StartupLogo::Secs3,
+            settings_after: SettingsSave::Saved(StartupLogo::Secs5),
+            calibration: powerz_protocol::decode::settings::CalibrationSnapshot([0; 64]),
+        };
+        let view = LogoWrittenView::from(w);
+        assert_eq!(view.duration_before, "off");
+        assert_eq!(view.duration_set, "3 s");
+        assert_eq!(view.startup_duration.as_deref(), Some("5 s"));
+        assert_eq!(json(&view)["settings"], "saved");
+    }
+
+    #[test]
+    fn qg6rny_a_fresh_read_with_other_calibration_says_so() {
+        let w = LogoWritten {
+            duration_before: StartupLogo::Secs1,
+            duration_set: StartupLogo::Secs3,
+            settings_after: SettingsSave::CalibrationChanged,
+            calibration: powerz_protocol::decode::settings::CalibrationSnapshot([0; 64]),
+        };
+        let view = LogoWrittenView::from(w);
+        assert_eq!(view.duration_before, "1 s");
+        assert_eq!(view.startup_duration, None);
+        assert_eq!(json(&view)["settings"], "calibration_changed");
+    }
+
+    // AC-QG6RNY.2 / .3 (backend side): one read-only check per call against the snapshot.
+    #[test]
+    fn qg6rny_a_check_without_a_pending_logo_write_is_a_usage_error() {
+        let mut worker = ready(|d| d);
+        let err = worker.logo_settings_check().expect_err("nothing to check");
+        assert_eq!(err.kind, ErrorKind::Usage);
+        assert_eq!(err.message, "No logo write is waiting for a settings save.");
+    }
+
+    #[test]
+    fn qg6rny_the_check_says_not_saved_until_the_menu_save_then_saved() {
+        let clock = SimClock::new(1_790_000_000_000);
+        let (mut worker, mut twin) = ready_with_twin(&clock, |d| d);
+        worker
+            .logo_upload(&blob_100x60(), &mut |_| {})
+            .expect("verifies");
+        for _ in 0..3 {
+            let check = worker.logo_settings_check().expect("checks");
+            assert_eq!(json(&check)["settings"], "needs_menu_save");
+            assert_eq!(check.startup_duration, None);
+        }
+        // The checks are read-only: the block is still the stale one.
+        assert!(twin.settings_crc_a_stale());
+        twin.menu_save(3);
+        let check = worker.logo_settings_check().expect("checks");
+        assert_eq!(json(&check)["settings"], "saved");
+        assert_eq!(check.startup_duration.as_deref(), Some("5 s"));
+        // Saved clears the pending write.
+        let err = worker.logo_settings_check().expect_err("cleared");
+        assert_eq!(err.kind, ErrorKind::Usage);
+        // The meter's settings read again fine.
+        worker
+            .read_settings()
+            .expect("settings read after the save");
+    }
+
+    #[test]
+    fn qg6rny_the_check_follows_an_automatic_menu_save_on_the_sim() {
+        let clock = SimClock::new(1_790_000_000_000);
+        let (mut worker, _twin) = ready_with_twin(&clock, |d| {
+            d.with_auto_menu_save(std::time::Duration::from_secs(4), 2)
+        });
+        let written = worker
+            .logo_upload(&blob_100x60(), &mut |_| {})
+            .expect("verifies");
+        assert_eq!(json(&written)["settings"], "needs_menu_save");
+        assert_eq!(
+            json(&worker.logo_settings_check().expect("checks"))["settings"],
+            "needs_menu_save"
+        );
+        clock.advance(std::time::Duration::from_secs(5));
+        let check = worker.logo_settings_check().expect("checks");
+        assert_eq!(json(&check)["settings"], "saved");
+        assert_eq!(check.startup_duration.as_deref(), Some("3 s"));
+    }
+
+    #[test]
+    fn qg6rny_the_check_view_serializes_settings_and_duration() {
+        let clock = SimClock::new(1_790_000_000_000);
+        let (mut worker, _twin) = ready_with_twin(&clock, |d| d);
+        worker
+            .logo_upload(&blob_100x60(), &mut |_| {})
+            .expect("verifies");
+        let v = json(&worker.logo_settings_check().expect("checks"));
+        let mut keys: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["settings", "startup_duration"]);
+    }
+
+    // AC-QG6RNY.6 (backend side): reading or changing settings while stale.
+    #[test]
+    fn qg6rny_reading_settings_while_a_block_is_stale_gives_the_steps() {
+        use powerz_protocol::decode::settings::MENU_SAVE_STEPS;
+        let clock = SimClock::new(1_790_000_000_000);
+        let (mut worker, twin) = ready_with_twin(&clock, |d| d);
+        worker
+            .logo_upload(&blob_100x60(), &mut |_| {})
+            .expect("verifies");
+        let err = worker.read_settings().expect_err("stale");
+        assert_eq!(err.kind, ErrorKind::SettingsNotSaved);
+        assert_eq!(
+            err.message,
+            "The meter has not saved its settings since the last change."
+        );
+        assert_eq!(err.hint.as_deref(), Some(MENU_SAVE_STEPS));
+        assert_eq!(json(&err)["kind"], "settings_not_saved");
+        assert!(twin.settings_crc_a_stale());
+    }
+
+    #[test]
+    fn qg6rny_changing_settings_while_a_block_is_stale_is_refused_with_the_steps() {
+        use powerz_protocol::decode::settings::MENU_SAVE_STEPS;
+        let clock = SimClock::new(1_790_000_000_000);
+        let (mut worker, twin) = ready_with_twin(&clock, |d| d);
+        worker
+            .logo_upload(&blob_100x60(), &mut |_| {})
+            .expect("verifies");
+        let changes = std::collections::BTreeMap::from([("brightness".to_owned(), 3)]);
+        let err = worker.write_settings(&changes).expect_err("refused");
+        assert_eq!(err.kind, ErrorKind::SettingsNotSaved);
+        assert_eq!(err.hint.as_deref(), Some(MENU_SAVE_STEPS));
+        // Still the stale block: nothing was saved over it.
+        assert!(twin.settings_crc_a_stale());
+    }
+
+    // AC-QG6RNY.5 / registration: the check is a Tauri command like the other logo commands.
+    #[test]
+    fn qg6rny_the_settings_check_command_is_registered() {
+        let source = include_str!("lib.rs");
+        let handlers = source
+            .split("generate_handler![")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the handler list");
+        assert!(
+            handlers
+                .split(',')
+                .any(|h| h.trim() == "logo_settings_check"),
+            "logo_settings_check is not registered"
+        );
+    }
+
+    // AC-QG6RNY.8: the demo meter saves its settings by itself after a logo write.
+    #[test]
+    fn qg6rny_the_demo_meter_does_its_own_menu_save() {
+        use crate::devices::{AppOpener, Opener, list_devices_from};
+        use powerz_protocol::session::SystemClock;
+        let listing = list_devices_from(Ok(Vec::new()))
+            .into_iter()
+            .find(|d| d.demo_scenario.as_deref() == Some("load-5v-1a"))
+            .expect("the demo listing");
+        let transport = AppOpener.open(&listing).expect("the demo opens");
+        let config = WorkerConfig::new(Rate::Sps50, 1);
+        let mut worker = Worker::start(transport, SystemClock, config, |_e: BackendEvent| {})
+            .unwrap_or_else(|e| panic!("the worker did not start: {e:?}"));
+        worker.read_settings().expect("settings read");
+        let written = worker
+            .logo_upload(&blob_100x60(), &mut |_| {})
+            .expect("verifies");
+        assert_eq!(json(&written)["settings"], "needs_menu_save");
+        let started = std::time::Instant::now();
+        let saved = loop {
+            let check = worker.logo_settings_check().expect("checks");
+            if json(&check)["settings"] == "saved" {
+                break check;
+            }
+            assert_eq!(json(&check)["settings"], "needs_menu_save");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(15),
+                "the demo meter never saved its settings"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        };
+        assert_eq!(saved.startup_duration.as_deref(), Some("3 s"));
     }
 }

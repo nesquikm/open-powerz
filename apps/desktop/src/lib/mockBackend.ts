@@ -10,6 +10,7 @@ import type {
   LogoPreview,
   LogoProgress,
   LogoRead,
+  LogoSettingsCheck,
   LogoWritten,
   AppInfo,
   AttachedSession,
@@ -739,6 +740,24 @@ export function logoFaultFromUrl(search: string | undefined): number | null {
   return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
+/** The menu-save steps, the same text as the library's `MENU_SAVE_STEPS` (FR QG6RNY). */
+export const MENU_SAVE_STEPS =
+  "On the meter: Settings → startup logo duration → pick a value → save. Don't unplug the meter first.";
+
+/** How long after a logo write the demo meter does its own menu save, ms (FR QG6RNY). */
+export const MOCK_MENU_SAVE_MS = 3000;
+
+/** How the demo meter's settings get saved after a logo write (FR QG6RNY): `never`,
+ * `calibration` (the first check after the save time finds changed calibration) or
+ * `saved` (the write's own fresh read is already saved). */
+export type MenuSaveMode = "never" | "calibration" | "saved";
+
+/** `?menusave=` in the page URL (FR QG6RNY); anything else is ignored. */
+export function menuSaveFromUrl(search: string | undefined): MenuSaveMode | null {
+  const raw = urlParam(search, "menusave");
+  return raw === "never" || raw === "calibration" || raw === "saved" ? raw : null;
+}
+
 /** Least gap between two mock logo progress messages, ms: at most 20 a second. */
 const MOCK_LOGO_PROGRESS_MS = 50;
 
@@ -767,6 +786,9 @@ export interface MockOptions {
   logoFile?: LogoFile | null;
   /** A logo upload fails at this chunk (0-based) (FR MEHQC0); none (the default) never. */
   logoFault?: number | null;
+  /** How the settings get saved after a logo write (FR QG6RNY); none: after
+   * {@link MOCK_MENU_SAVE_MS}. */
+  menuSave?: MenuSaveMode | null;
 }
 
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
@@ -1492,6 +1514,9 @@ export class MockBackend {
   #recordDownloads = 0;
   /** The demo meter's logo area, which upload and Remove change (FR MEHQC0). */
   #logoArea: MockLogoArea = { status: "empty" };
+  /** When the demo meter saves its settings after the last logo write (`Date.now()`
+   * ms), null when no write waits for a menu save (FR QG6RNY). */
+  #menuSaveAt: number | null = null;
   /** The demo meter's record table, which a delete changes (FR JKWT3V). */
   #records: DemoRecord[] = [...DEMO_RECORDS];
   /** Record backups written so far, for their folder names (FR JKWT3V). */
@@ -1516,6 +1541,7 @@ export class MockBackend {
       historyFullSamples: foldAtFromUrl(pageSearch()),
       logoFile: logoFileFromUrl(pageSearch()),
       logoFault: logoFaultFromUrl(pageSearch()),
+      menuSave: menuSaveFromUrl(pageSearch()),
     },
   ) {
     this.#mode = mode;
@@ -2319,6 +2345,7 @@ export class MockBackend {
   /** The demo meter's settings: the fields of the captured FW 2.0.6 block, all
    * tagged inferred (FR 1HHT01). */
   async meterSettings(): Promise<MeterSettings> {
+    this.#refuseUnsavedSettings();
     this.#open().settingsRead = true;
     this.#meterSettingsReads += 1;
     return { fields: this.#meterSettings.map((f) => ({ ...f })) };
@@ -2330,6 +2357,7 @@ export class MockBackend {
    * names the first field that did not change. */
   async meterSettingsWrite(changes: SettingChanges): Promise<MeterSettings> {
     this.#open();
+    this.#refuseUnsavedSettings();
     const entries = Object.entries(changes) as [string, number][];
     if (entries.length === 0) throw usage("No setting was changed.");
     const shown = new Map<string, string>();
@@ -2543,7 +2571,7 @@ export class MockBackend {
   ): Promise<LogoWritten> {
     const s = this.#logoSession(deviceId);
     const preview = mockLogoPicture(path, alpha);
-    const written = this.#logoWritable(s);
+    const before = this.#logoWritable(s);
     const total = preview.chunks;
     const fault = this.#options.logoFault ?? null;
     const step = Math.max(1, Math.ceil(total / 8));
@@ -2564,7 +2592,7 @@ export class MockBackend {
         throw {
           kind: "protocol",
           message: `Writing the logo stopped at chunk ${fault}: REJECT.`,
-          hint: "The logo flag was not set, so the meter keeps its old screen. Try again.",
+          hint: "The startup duration was not changed, so the meter keeps its old screen. Try again.",
         } satisfies UiError;
       }
       done = next;
@@ -2579,7 +2607,7 @@ export class MockBackend {
       mode: preview.mode,
       rgba: preview.rgba,
     };
-    return written;
+    return this.#logoWritten(before, "3 s");
   }
 
   /** Removes the demo meter's logo like the backend (FR MEHQC0, AC .4). */
@@ -2587,12 +2615,12 @@ export class MockBackend {
     deviceId: string,
     onProgress: (progress: LogoProgress) => void,
   ): Promise<LogoWritten> {
-    const written = this.#logoWritable(this.#logoSession(deviceId));
+    const before = this.#logoWritable(this.#logoSession(deviceId));
     await sleep(MOCK_LOGO_PROGRESS_MS);
     onProgress({ step: "chunks", done: 1, total: 1 });
     this.#logoArea = { status: "empty" };
     await this.#logoReadBack(16, onProgress);
-    return written;
+    return this.#logoWritten(before, "off");
   }
 
   /** The session of meter `deviceId`; refused when it is not connected. */
@@ -2602,17 +2630,74 @@ export class MockBackend {
     return s;
   }
 
-  /** What a logo write on `s` will report; refused like the backend before the settings
-   * were read and on a KM002C. */
-  #logoWritable(s: Running): LogoWritten {
+  /** The startup duration before a logo write on `s`; refused like the backend before
+   * the settings were read and on a KM002C. */
+  #logoWritable(s: Running): string {
     if (!s.settingsRead) {
       throw usage("The logo was not written: SETTINGS was not read in this session.");
     }
     if (this.#mode === "logo-other-model") {
       throw usage("The logo was not written: the meter is a KM002C, logo upload needs a KM003C.");
     }
-    const duration = this.#meterSettings.find((f) => f.key === "startup_logo")?.value ?? "off";
-    return { startup_duration: duration, startup_screen_off: duration === "off" };
+    return this.#startupRow();
+  }
+
+  /** The demo meter's startup duration row. */
+  #startupRow(): string {
+    return this.#meterSettings.find((f) => f.key === "startup_logo")?.value ?? "off";
+  }
+
+  /** Refuses a settings read or write while a logo write's settings wait for the
+   * mock's menu save, like the backend does with a stale SETTINGS block (FR QG6RNY). */
+  #refuseUnsavedSettings(): void {
+    const at = this.#menuSaveAt;
+    if (at === null) return;
+    if (this.#options.menuSave !== "never" && Date.now() >= at) return;
+    throw {
+      kind: "settings_not_saved",
+      message: "The meter has not saved its settings since the last change.",
+      hint: MENU_SAVE_STEPS,
+    } satisfies UiError;
+  }
+
+  /** A finished logo write that set the startup duration to `set` (FR QG6RNY): the
+   * settings wait for the mock's menu save unless `?menusave=saved`. */
+  #logoWritten(before: string, set: string): LogoWritten {
+    this.#meterSettings = this.#meterSettings.map((f) =>
+      f.key === "startup_logo" ? { ...f, value: set } : f,
+    );
+    if (this.#options.menuSave === "saved") {
+      this.#menuSaveAt = null;
+      return {
+        duration_before: before,
+        duration_set: set,
+        settings: "saved",
+        startup_duration: set,
+      };
+    }
+    this.#menuSaveAt = Date.now() + MOCK_MENU_SAVE_MS;
+    return {
+      duration_before: before,
+      duration_set: set,
+      settings: "needs_menu_save",
+      startup_duration: null,
+    };
+  }
+
+  /** One read-only check of the settings after a logo write, like the backend (FR
+   * QG6RNY): not saved until the mock's menu save, then saved with the row's value. */
+  async logoSettingsCheck(deviceId: string): Promise<LogoSettingsCheck> {
+    this.#logoSession(deviceId);
+    const at = this.#menuSaveAt;
+    if (at === null) throw usage("No logo write is waiting for a settings save.");
+    if (this.#options.menuSave === "never" || Date.now() < at) {
+      return { settings: "needs_menu_save", startup_duration: null };
+    }
+    this.#menuSaveAt = null;
+    if (this.#options.menuSave === "calibration") {
+      return { settings: "calibration_changed", startup_duration: null };
+    }
+    return { settings: "saved", startup_duration: this.#startupRow() };
   }
 
   /** Read-back progress of `bytes`, one read every 50 ms. */

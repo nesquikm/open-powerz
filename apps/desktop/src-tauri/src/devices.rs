@@ -354,6 +354,9 @@ impl Opener for AppOpener {
                 Some(serial) => sim.with_serial(serial),
                 None => sim,
             };
+            // The demo meter does its own menu save a few seconds after a logo
+            // write, so the logo panel finishes without a real meter (FR QG6RNY).
+            let sim = sim.with_auto_menu_save(Duration::from_secs(4), 2);
             return Ok(AppTransport::Demo(Box::new(sim)));
         }
         if source == MeasurementSource::Cdc {

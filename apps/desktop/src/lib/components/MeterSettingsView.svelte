@@ -22,6 +22,10 @@
   } = $props();
 
   const rows = $derived(panel.settings ? meterSettingRows(panel.settings) : []);
+  /** A settings block the meter has not saved yet is marked for the e2e checks (FR QG6RNY). */
+  const errorTestId = $derived(
+    panel.error?.kind === "settings_not_saved" ? "settings-not-saved" : undefined,
+  );
   /** Fields whose typed value is not valid, so Apply stays disabled. */
   let invalid = $state<Record<string, boolean>>({});
   const canApply = $derived(
@@ -120,7 +124,7 @@
         <p class="hint">Nothing changed yet.</p>
       {/if}
       {#if panel.error}
-        <p class="error" role="alert">
+        <p class="error" role="alert" data-testid={errorTestId}>
           {panel.error.message}
           <HintText hint={panel.error.hint} />
         </p>
@@ -135,7 +139,7 @@
       </div>
     </form>
   {:else if panel.error}
-    <p class="error" role="alert">
+    <p class="error" role="alert" data-testid={errorTestId}>
       {panel.error.message}
       <HintText hint={panel.error.hint} />
     </p>

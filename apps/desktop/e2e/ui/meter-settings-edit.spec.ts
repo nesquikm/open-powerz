@@ -125,3 +125,58 @@ test.describe("meter settings edit (FR JKWT3W)", () => {
     expect(await writes(page)).toBe(1);
   });
 });
+
+/** A logo upload straight on the mock (not through the logo view), leaving the meter's
+ * settings unsaved as a real KM003C does after it (FR QG6RNY). */
+async function staleSettings(page: Page): Promise<void> {
+  await page.evaluate(async (key) => {
+    const mock = (
+      window as unknown as Record<
+        string,
+        {
+          logoUpload(id: string, path: string, alpha: boolean, cb: () => void): Promise<unknown>;
+        }
+      >
+    )[key];
+    await mock.logoUpload("demo:load-5v-1a", "/mock/logo.png", false, () => {});
+  }, MOCK_HOOK);
+}
+
+const NOT_SAVED = "The meter has not saved its settings since the last change.";
+const STEPS = "On the meter: Settings → startup logo duration → pick a value → save.";
+
+test.describe("settings the meter has not saved (FR QG6RNY, AC .6)", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+  });
+
+  test("qg6rny: reading the settings shows the menu-save steps, not a protocol error", async ({
+    page,
+  }) => {
+    await open(page, "?menusave=never");
+    await streamDemo(page);
+    const p = panel(page);
+    await expect(p).toContainText("50%");
+    await staleSettings(page);
+    await p.getByRole("button", { name: "Refresh" }).click();
+    const err = p.getByTestId("settings-not-saved");
+    await expect(err).toBeVisible();
+    await expect(err).toContainText(NOT_SAVED);
+    await expect(err).toContainText(STEPS);
+    await expect(p).not.toContainText(/did not understand/i);
+    expect(await writes(page)).toBe(0);
+  });
+
+  test("qg6rny: changing the settings shows the steps and sends no write", async ({ page }) => {
+    const p = await startEdit(page, "?menusave=never");
+    await p.getByLabel("Brightness", { exact: true }).fill("80");
+    await staleSettings(page);
+    await p.getByRole("button", { name: "Apply" }).click();
+    const err = p.getByTestId("settings-not-saved");
+    await expect(err).toBeVisible();
+    await expect(err).toContainText(NOT_SAVED);
+    await expect(err).toContainText(STEPS);
+    await page.waitForTimeout(500);
+    expect(await writes(page)).toBe(0);
+  });
+});

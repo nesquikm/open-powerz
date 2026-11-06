@@ -47,6 +47,8 @@ export type ErrorKind =
   | "flash_needs_consent"
   /** The user stopped the firmware update; not a failure (AC-AXHK2M.13). */
   | "cancelled"
+  /** The meter has not saved its settings since the last change (FR QG6RNY). */
+  | "settings_not_saved"
   | "internal";
 
 /** A session a firmware update would release, as the prompt names it (FR AXHK2F); the
@@ -79,6 +81,7 @@ const ERROR_KINDS: readonly ErrorKind[] = [
   "out_of_sync",
   "flash_needs_consent",
   "cancelled",
+  "settings_not_saved",
   "internal",
 ];
 
@@ -977,10 +980,23 @@ export interface LogoProgress {
   total: number;
 }
 
-/** What a logo upload or Remove left on the meter (FR MEHQC0, AC .4, .5). */
+/** The meter's settings after a logo write: saved, waiting for a menu save on the meter,
+ * or with other calibration bytes (FR QG6RNY). */
+export type LogoSettingsState = "saved" | "needs_menu_save" | "calibration_changed";
+
+/** What a logo upload or Remove left on the meter (FR MEHQC0, FR QG6RNY): the startup
+ * durations before and set, the fresh settings read and, when saved, its duration. */
 export interface LogoWritten {
-  startup_duration: string;
-  startup_screen_off: boolean;
+  duration_before: string;
+  duration_set: string;
+  settings: LogoSettingsState;
+  startup_duration: string | null;
+}
+
+/** One check of the settings after a logo write (FR QG6RNY). */
+export interface LogoSettingsCheck {
+  settings: LogoSettingsState;
+  startup_duration: string | null;
 }
 
 /** What the meter's logo area holds (FR MEHQC0, AC .7). */
@@ -1016,9 +1032,9 @@ export async function logoRead(deviceId: string, full: boolean): Promise<LogoRea
 }
 
 /** Uploads the picture at `path` (opaque or `alpha`) to meter `deviceId` as its startup
- * logo (FR MEHQC0, AC .3): chunks, flag, then a full read-back. Batched progress (at most
- * 20 a second) goes to `onProgress`; rejects with the backend's error, naming the chunk
- * a failed write stopped at. Nothing is retried. */
+ * logo (FR MEHQC0, AC .3): chunks, the startup-duration write, then a full read-back.
+ * Batched progress (at most 20 a second) goes to `onProgress`; rejects with the
+ * backend's error, naming the chunk a failed write stopped at. Nothing is retried. */
 export async function logoUpload(
   deviceId: string,
   path: string,
@@ -1041,6 +1057,14 @@ export async function logoRemove(
   const channel = new Channel<LogoProgress>();
   channel.onmessage = onProgress;
   return invoke<LogoWritten>("logo_remove", { deviceId, onProgress: channel });
+}
+
+/** One read-only check of meter `deviceId`'s settings after a logo write whose settings
+ * wait for a menu save on the meter (FR QG6RNY); rejects with a usage error when no
+ * logo write is waiting. */
+export async function logoSettingsCheck(deviceId: string): Promise<LogoSettingsCheck> {
+  if (mock) return mock.logoSettingsCheck(deviceId);
+  return invoke<LogoSettingsCheck>("logo_settings_check", { deviceId });
 }
 
 /** One stage of a firmware update as the backend reports it (FR V9SK55, AC .4); the

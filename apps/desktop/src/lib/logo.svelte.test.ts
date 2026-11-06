@@ -8,6 +8,7 @@ import type {
   LogoPreview,
   LogoProgress,
   LogoRead,
+  LogoSettingsCheck,
   LogoWritten,
   MeterSettings,
   SettingChanges,
@@ -42,12 +43,17 @@ const PREVIEW: LogoPreview = {
   rgba: "AAAA",
 };
 
-const WRITTEN: LogoWritten = { startup_duration: "off", startup_screen_off: true };
+const WRITTEN: LogoWritten = {
+  duration_before: "off",
+  duration_set: "3 s",
+  settings: "saved",
+  startup_duration: "3 s",
+};
 
 const CHUNK_FAIL: UiError = {
   kind: "protocol",
   message: "Writing the logo stopped at chunk 7: REJECT.",
-  hint: "The logo flag was not set, so the meter keeps its old screen. Try again.",
+  hint: "The startup duration was not changed, so the meter keeps its old screen. Try again.",
 };
 
 /** A deferred promise the test settles. */
@@ -86,6 +92,11 @@ function harness(meter: LogoMeter = { model: "KM003C", settings: settings("off")
       onProgress = cb;
       return write.promise;
     }),
+    checkSettings: vi.fn(async (): Promise<LogoSettingsCheck> => ({
+      settings: "saved",
+      startup_duration: "3 s",
+    })),
+    refreshSettings: vi.fn(async (): Promise<void> => {}),
     writeSettings: vi.fn(async (changes: SettingChanges): Promise<MeterSettings> =>
       settings(
         ["off", "1 s", "3 s", "5 s"][(changes as Record<string, number>)["startup_duration"] ?? 0]!,
@@ -271,12 +282,12 @@ describe("after a write (AC-MEHQC0.4)", () => {
     const flag = logoFailure(
       {
         kind: "protocol",
-        message: "The logo was written but its flag write failed: REJECT.",
+        message: "The logo was written but its startup duration write (0x1C) failed: REJECT.",
         hint: null,
       },
       "upload",
     );
-    expect(flag.step).toMatch(/flag/i);
+    expect(flag.step).toMatch(/startup duration/i);
     expect(flag.chunk).toBeNull();
     const mismatch = logoFailure(
       {

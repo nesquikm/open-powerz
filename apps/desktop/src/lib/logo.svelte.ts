@@ -6,6 +6,7 @@ import type {
   LogoPreview,
   LogoProgress,
   LogoRead,
+  LogoSettingsCheck,
   LogoWritten,
   MeterSettings,
   SettingChanges,
@@ -17,6 +18,10 @@ export const UPLOAD_WORD = "upload";
 /** The word the Remove confirmation asks for. */
 export const REMOVE_WORD = "remove";
 
+/** Least gap between two settings checks while the meter's settings wait for a menu
+ * save (FR QG6RNY). */
+export const SETTINGS_CHECK_MS = 2000;
+
 /** The `startup_duration` code of each offered startup-screen duration. */
 const DURATION_CODES = { 1: 1, 3: 2, 5: 3 } as const;
 
@@ -24,7 +29,8 @@ const DURATION_CODES = { 1: 1, 3: 2, 5: 3 } as const;
 export type LogoAction = "upload" | "remove";
 
 /** Where the view is. */
-export type LogoPhase = "idle" | "previewed" | "confirming" | "writing" | "done" | "failed";
+export type LogoPhase =
+  "idle" | "previewed" | "confirming" | "writing" | "saving" | "done" | "failed";
 
 /** A failed write: the step that failed, the chunk index when a chunk failed, and what
  * to do next. */
@@ -42,6 +48,24 @@ export interface LogoDeps {
   upload(path: string, alpha: boolean, onProgress: (p: LogoProgress) => void): Promise<LogoWritten>;
   remove(onProgress: (p: LogoProgress) => void): Promise<LogoWritten>;
   writeSettings(changes: SettingChanges): Promise<MeterSettings>;
+  /** One read-only check of the settings after a write that needs a menu save. */
+  checkSettings(): Promise<LogoSettingsCheck>;
+  /** Reads the meter's settings again once they are saved. */
+  refreshSettings(): Promise<void>;
+}
+
+/** The step a failed settings check names. */
+const SETTINGS_CHECK_STEP = "Settings check";
+/** What to do when the meter's calibration bytes changed after a logo write. */
+const CALIBRATION_ADVICE =
+  "The meter's calibration bytes changed; do not write anything and report this.";
+
+/** The live settings check while a write waits for the menu save: checks so far, when
+ * the last one answered (`Date.now()` ms) and its error, if it failed. */
+export interface SaveCheck {
+  checks: number;
+  lastAt: number | null;
+  error: UiError | null;
 }
 
 /** The meter as the view sees it: its model and its settings as read, each null until
@@ -63,7 +87,7 @@ export function logoFailure(error: UiError, action: LogoAction): LogoFailure {
   const chunk = chunkMatch ? Number(chunkMatch[1]) : null;
   let step: string;
   if (chunk !== null) step = "Writing a chunk";
-  else if (/\bflag\b/i.test(msg)) step = "Setting the logo flag";
+  else if (/startup duration|\bflag\b/i.test(msg)) step = "Setting the startup duration";
   else if (/read.?back|read back/i.test(msg)) step = "Read-back check";
   else if (/\bclear\b/i.test(msg)) step = "Clearing the logo";
   else step = action === "upload" ? "Uploading the logo" : "Removing the logo";
@@ -87,6 +111,14 @@ export class StartupLogoState {
   error = $state<UiError | null>(null);
   area = $state<LogoRead | null>(null);
   reading = $state(false);
+  /** The settings check of the `saving` phase (FR QG6RNY). */
+  saveCheck = $state<SaveCheck>({ checks: 0, lastAt: null, error: null });
+  /** The next settings check, while checking. */
+  #checkTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A settings check is in flight. */
+  #checkInFlight = false;
+  /** stopChecking was called and startChecking not since. */
+  #stopped = false;
 
   /** A duration write in flight. */
   durationWriting = $state(false);
@@ -95,6 +127,9 @@ export class StartupLogoState {
   /** The settings a duration write read back, while the meter's settings are still the
    * block they replaced. */
   #afterWrite = $state<{ before: MeterSettings | null; after: MeterSettings } | null>(null);
+  /** The duration the last logo write's saved settings read, while the meter's settings
+   * are still the ones read before it (FR QG6RNY). */
+  #writtenDuration = $state<{ before: MeterSettings | null; value: string } | null>(null);
 
   #deps: LogoDeps;
   #meter: () => LogoMeter;
@@ -115,7 +150,7 @@ export class StartupLogoState {
   /** A write is running: it cannot be stopped, and every control that sends to the
    * meter is refused until it ends. */
   get busy(): boolean {
-    return this.phase === "writing";
+    return this.phase === "writing" || this.phase === "saving";
   }
   /** Why neither write is allowed on this meter yet: the model and the settings must be
    * read, and the logo is a KM003C feature. */
@@ -140,7 +175,19 @@ export class StartupLogoState {
   }
   /** The startup-screen duration as read, e.g. `off` or `3 s`; null until read. */
   get startupDuration(): string | null {
+    const w = this.written;
+    if (w !== null && this.phase === "saving") return w.duration_set;
+    const d = this.#writtenDuration;
+    if (d !== null && d.before === this.#meter().settings) return d.value;
     return this.#settings?.fields.find((f) => f.key === "startup_logo")?.value ?? null;
+  }
+  /** What the Upload confirmation says about the startup duration (AC-QG6RNY.1). */
+  get uploadConfirmText(): string {
+    return `The startup duration goes from ${this.startupDuration ?? "unknown"} to 3 s.`;
+  }
+  /** What the Remove confirmation says about the startup duration (AC-QG6RNY.1). */
+  get removeConfirmText(): string {
+    return "The startup screen is turned off (startup duration off).";
   }
   /** The startup screen is off, so an uploaded logo will not show. */
   get durationOff(): boolean {
@@ -214,6 +261,7 @@ export class StartupLogoState {
     this.phase = "writing";
     this.progress = null;
     this.written = null;
+    this.#writtenDuration = null;
     this.failure = null;
     this.error = null;
     const onProgress = (p: LogoProgress) => (this.progress = p);
@@ -222,13 +270,85 @@ export class StartupLogoState {
         action === "upload" && this.path !== null
           ? await this.#deps.upload(this.path, this.alpha, onProgress)
           : await this.#deps.remove(onProgress);
-      this.phase = "done";
+      this.#afterWritten(this.written);
     } catch (e) {
       this.error = e as UiError;
       this.failure = logoFailure(this.error, action);
       this.phase = "failed";
     }
   }
+  /** Where a finished write goes by its fresh settings read (FR QG6RNY). */
+  #afterWritten(written: LogoWritten): void {
+    if (written.settings === "saved") {
+      this.#keepDuration(written.startup_duration);
+      this.phase = "done";
+    } else if (written.settings === "calibration_changed") {
+      this.#calibrationChanged();
+    } else {
+      this.saveCheck = { checks: 0, lastAt: null, error: null };
+      this.phase = "saving";
+      this.startChecking();
+    }
+  }
+
+  #keepDuration(value: string | null): void {
+    this.#writtenDuration = value === null ? null : { before: this.#meter().settings, value };
+  }
+
+  #calibrationChanged(): void {
+    this.failure = { step: SETTINGS_CHECK_STEP, chunk: null, advice: CALIBRATION_ADVICE };
+    this.phase = "failed";
+  }
+
+  /** Starts (or resumes) the settings check while the phase is `saving`; one check at
+   * a time, at least {@link SETTINGS_CHECK_MS} apart. */
+  startChecking(): void {
+    if (this.phase !== "saving") return;
+    this.#stopped = false;
+    if (this.#checkTimer !== null || this.#checkInFlight) return;
+    this.#checkTimer = setTimeout(() => void this.#check(), SETTINGS_CHECK_MS);
+  }
+
+  /** Cancels the next settings check; the phase stays `saving`. */
+  stopChecking(): void {
+    this.#stopped = true;
+    if (this.#checkTimer !== null) clearTimeout(this.#checkTimer);
+    this.#checkTimer = null;
+  }
+
+  async #check(): Promise<void> {
+    this.#checkTimer = null;
+    if (this.phase !== "saving") return;
+    this.#checkInFlight = true;
+    let result: LogoSettingsCheck | null = null;
+    let error: UiError | null = null;
+    try {
+      result = await this.#deps.checkSettings();
+    } catch (e) {
+      error = e as UiError;
+    } finally {
+      this.#checkInFlight = false;
+    }
+    this.saveCheck = { checks: this.saveCheck.checks + 1, lastAt: Date.now(), error };
+    if (this.phase !== "saving") return;
+    if (result?.settings === "saved") {
+      if (this.written !== null) {
+        this.written = { ...this.written, startup_duration: result.startup_duration };
+      }
+      this.#keepDuration(result.startup_duration);
+      this.phase = "done";
+      void this.#deps.refreshSettings().catch(() => {});
+      return;
+    }
+    if (result?.settings === "calibration_changed") {
+      this.#calibrationChanged();
+      return;
+    }
+    // Stopped while the check was in flight: stay stopped until startChecking.
+    if (this.#stopped) return;
+    this.startChecking();
+  }
+
   /** Reads what the meter's logo area holds now; `full` also fetches the stored logo's
    * pixels so the view can show it. */
   async read(full = false): Promise<void> {
@@ -255,6 +375,7 @@ export class StartupLogoState {
     try {
       const after = await this.#deps.writeSettings({ startup_duration: code });
       this.#afterWrite = { before, after };
+      this.#writtenDuration = null;
     } catch (e) {
       this.error = e as UiError;
       this.durationError = this.error;

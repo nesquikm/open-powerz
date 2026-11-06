@@ -285,6 +285,37 @@ after that setting is opened in its menu) until the next edit or disconnect.
 (`meterSettingsReads()`) and writes (`meterSettingsWrites()`), and
 `?settingsfault=mismatch` makes its read-back differ.
 
+## Startup logo
+
+| function | what it does |
+|---|---|
+| `logoChoose(): Promise<string \| null>` | Opens the open dialog filtered to logo pictures (Tauri command `logo_choose`); `null` when it is cancelled. |
+| `logoPreview(path, alpha): Promise<LogoPreview>` | The startup logo the picture encodes to, opaque or transparent (Tauri command `logo_preview`). Needs no meter. |
+| `logoRead(deviceId, full): Promise<LogoRead>` | What the meter's logo area holds, with the stored image when `full` (Tauri command `logo_read`). Only memory reads go out. |
+| `logoUpload(deviceId, path, alpha, onProgress): Promise<LogoWritten>` | Writes the picture as the startup logo (Tauri command `logo_upload`): chunks, flag, a full read-back, then the startup duration is set to 3 s and the settings are read again. Batched progress goes to `onProgress`. Nothing is retried. |
+| `logoRemove(deviceId, onProgress): Promise<LogoWritten>` | Removes the startup logo (Tauri command `logo_remove`) and turns the startup screen off (duration `off`), then reads the settings again. |
+| `logoSettingsCheck(deviceId): Promise<LogoSettingsCheck>` | One read-only check after a logo write whose settings wait for a menu save (Tauri command `logo_settings_check`): it reads the settings once and nothing is written. It compares the calibration bytes with the ones kept from that write. `saved` or `calibration_changed` ends the wait; `needs_menu_save` keeps it. Rejects with `usage` when no logo write is waiting; a disconnect drops the wait. |
+
+Types:
+
+| type | fields |
+|---|---|
+| `LogoWritten` (Rust `LogoWrittenView`) | `duration_before` (the startup duration before the write), `duration_set` (the one written), `settings` (`LogoSettingsState` of the fresh settings read), `startup_duration` (that read's duration when `settings` is `saved`, else `null`). Durations are worded `off`, `1 s`, `3 s` or `5 s`. |
+| `LogoSettingsCheck` (Rust `LogoSettingsCheckView`) | `settings`, `startup_duration` (as in `LogoWritten`) |
+| `LogoSettingsState` | `"saved"` (the meter saved its settings, the duration is the new one), `"needs_menu_save"` (the meter has not saved its settings since the change; the user saves them in its menu), `"calibration_changed"` (the calibration bytes differ from the ones before the write; nothing more is written) |
+
+A meter that has not saved its settings since the last change refuses the
+settings read, a settings write and a logo write with error kind
+`settings_not_saved`: the message says the settings are not saved and the
+hint holds the menu-save steps (on the meter, Settings, startup logo
+duration, pick a value, save, and don't unplug it first). When the logo is
+written but the settings cannot be read again, the error kind is `protocol`
+with the same steps as its hint. The demo meter saves its settings in its
+own menu by itself about 4 s after a logo write (startup duration 3 s), so a
+demo upload finishes without help. `MockBackend` waits 3 s for its menu save;
+`?menusave=never|calibration|saved` scripts a meter that never saves, one
+whose calibration bytes changed, or one already saved by the write.
+
 ## Offline records
 
 | function | what it does |

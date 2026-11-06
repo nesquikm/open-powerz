@@ -19,7 +19,7 @@ use powerz_protocol::decode::settings::{StartupLogo, WritableField, settings_wri
 use powerz_protocol::logo::{self, LogoBlob, LogoMode, Rgba};
 use powerz_protocol::session::{
     Error, LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten,
-    logo_chunk_plaintext,
+    SettingsSave, logo_chunk_plaintext,
 };
 use powerz_protocol::transport::guard::LOGO_REGION_START;
 use powerz_protocol::transport::{Error as TError, GuardedTransport, Transport};
@@ -296,8 +296,12 @@ fn tzk5k4_upload_writes_every_chunk_then_the_flag_then_reads_back() {
 
 #[test]
 fn tzk5k4_a_read_back_difference_names_the_first_differing_offset() {
-    // Without erase, the second logo ANDs into the first.
-    let mut b = ready(|d| d.with_logo_erase(ErasePolicy::NoErase));
+    // Without erase, the second logo ANDs into the first. The menu save
+    // after the first upload lets the second one through (FR Z39H24).
+    let mut b = ready(|d| {
+        d.with_logo_erase(ErasePolicy::NoErase)
+            .with_auto_menu_save(Duration::ZERO, 2)
+    });
     upload(&mut b, &small_blob()).0.expect("first upload");
     let (a, c) = (small_blob().padded(), other_blob().padded());
     let expected = (0..c.len())
@@ -364,7 +368,10 @@ fn tzk5k4_unplug_after_chunk_k_stops_at_the_next_chunk() {
 
 #[test]
 fn tzk5k4_remove_after_a_logo_clears_then_flags_0_then_reads_16_bytes() {
-    let mut b = ready(|d| d.with_logo_erase(ErasePolicy::SectorOnFirstWrite));
+    let mut b = ready(|d| {
+        d.with_logo_erase(ErasePolicy::SectorOnFirstWrite)
+            .with_auto_menu_save(Duration::ZERO, 2)
+    });
     upload(&mut b, &small_blob()).0.expect("upload");
     b.start();
     let (r, reports) = remove(&mut b);
@@ -420,7 +427,10 @@ fn tzk5k4_remove_rejected_names_the_clear_step_and_sends_no_flag() {
 #[test]
 fn tzk5k4_remove_whose_read_back_is_not_erased_names_the_read_back_step() {
     // Without erase, 16 bytes of 0xFF change nothing over a logo.
-    let mut b = ready(|d| d.with_logo_erase(ErasePolicy::NoErase));
+    let mut b = ready(|d| {
+        d.with_logo_erase(ErasePolicy::NoErase)
+            .with_auto_menu_save(Duration::ZERO, 2)
+    });
     upload(&mut b, &small_blob()).0.expect("upload");
     let (r, _) = remove(&mut b);
     assert!(
@@ -621,19 +631,22 @@ fn tzk5k4_an_upload_runs_to_the_end_once_its_first_chunk_is_sent() {
     assert_eq!(flags_sent(&b.sent()), vec![2]);
 }
 
-// ---- AC-TZK5K4.7: the startup-screen duration in the result ----
+// ---- AC-TZK5K4.7 (as FR Z39H24 changed it): the startup duration in the
+// result is the one from before the write ----
 
 #[test]
 fn tzk5k4_the_result_carries_the_startup_duration_from_settings() {
-    let mut b = ready(|d| d);
+    // The meter's menu save after each write sets 1 s.
+    let mut b = ready(|d| d.with_auto_menu_save(Duration::ZERO, 1));
     let duration = b.s.read_meter_settings().unwrap().startup_logo.value;
     b.start();
     let up = upload(&mut b, &small_blob()).0.expect("upload");
-    assert_eq!(up.startup_duration, duration);
-    assert_eq!(up.startup_screen_off, duration == StartupLogo::Off);
+    assert_eq!(up.duration_before, duration);
+    assert_eq!(up.duration_set, StartupLogo::Secs3);
+    assert_eq!(up.settings_after, SettingsSave::Saved(StartupLogo::Secs1));
     let rm = remove(&mut b).0.expect("remove");
-    assert_eq!(rm.startup_duration, duration);
-    assert_eq!(rm.startup_screen_off, duration == StartupLogo::Off);
+    assert_eq!(rm.duration_before, StartupLogo::Secs1, "from the re-read");
+    assert_eq!(rm.duration_set, StartupLogo::Off);
 }
 
 /// CDC session (the settings write goes there), authenticated, with the
@@ -651,16 +664,16 @@ fn cdc_with_duration(code: i32) -> Bench {
 }
 
 #[test]
-fn tzk5k4_with_the_startup_screen_off_the_result_says_the_logo_wont_show() {
+fn tzk5k4_the_result_carries_the_duration_from_before_the_write() {
     let mut b = cdc_with_duration(0);
     let up = upload(&mut b, &small_blob()).0.expect("upload");
-    assert_eq!(up.startup_duration, StartupLogo::Off);
-    assert!(up.startup_screen_off);
+    assert_eq!(up.duration_before, StartupLogo::Off);
+    assert_eq!(up.duration_set, StartupLogo::Secs3);
 
     let mut b = cdc_with_duration(3);
     let up = upload(&mut b, &small_blob()).0.expect("upload");
-    assert_eq!(up.startup_duration, StartupLogo::Secs5);
-    assert!(!up.startup_screen_off);
+    assert_eq!(up.duration_before, StartupLogo::Secs5);
+    assert_eq!(up.duration_set, StartupLogo::Secs3);
 }
 
 // ---- AC-TZK5K4.8: the startup duration as a settings field ----

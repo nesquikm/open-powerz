@@ -379,6 +379,10 @@ pub enum LogoAction {
         /// Skip the typed confirmation (still needs --i-understand).
         #[arg(long)]
         yes: bool,
+        /// Seconds to wait for a save in the meter's menu when the write
+        /// leaves its settings unsaved (0: do not wait).
+        #[arg(long, value_name = "SECS", default_value_t = 300)]
+        menu_save_timeout: u64,
     },
     /// Show what the meter's logo area holds (empty, the logo's size and
     /// mode, or unrecognised); sends no write.
@@ -392,7 +396,7 @@ pub enum LogoAction {
               value_parser = parse_u32_auto, conflicts_with = "output")]
         dump: Option<Vec<u32>>,
     },
-    /// Remove the meter's startup logo (clear the logo area and the flag),
+    /// Remove the meter's startup logo (clear the logo area and turn the startup screen off),
     /// then read it back; needs --i-understand and "remove" typed at the
     /// prompt.
     Remove {
@@ -402,6 +406,10 @@ pub enum LogoAction {
         /// Skip the typed confirmation (still needs --i-understand).
         #[arg(long)]
         yes: bool,
+        /// Seconds to wait for a save in the meter's menu when the write
+        /// leaves its settings unsaved (0: do not wait).
+        #[arg(long, value_name = "SECS", default_value_t = 300)]
+        menu_save_timeout: u64,
     },
 }
 

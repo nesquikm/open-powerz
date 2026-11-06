@@ -1,8 +1,22 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import type { StartupLogoState } from "../logo.svelte";
   import LogoConfirmDialog from "./LogoConfirmDialog.svelte";
 
   let { logo }: { logo: StartupLogoState } = $props();
+
+  /** The settings check runs while the view is open (FR QG6RNY). */
+  $effect(() => {
+    untrack(() => logo.startChecking());
+    return () => logo.stopChecking();
+  });
+
+  /** What the finished write did, in words. */
+  const writtenLabel = $derived(
+    logo.action === "remove"
+      ? "Logo removed: read-back verified."
+      : "Logo uploaded: read-back verified.",
+  );
 
   let canvas = $state<HTMLCanvasElement | null>(null);
 
@@ -96,7 +110,7 @@
   </p>
   {#if logo.durationOff}
     <div class="duration-hint" data-testid="logo-duration-hint">
-      <p>The startup screen is off, so the logo will not show. Show it for:</p>
+      <p>The startup screen is off. Upload turns it on at 3 s, or show it now for:</p>
       <div class="duration-choices">
         {#each [1, 3, 5] as const as s (s)}
           <button
@@ -212,12 +226,31 @@
       ></progress>
       <p aria-live="polite">{progressLabel}. This cannot be stopped; keep the meter plugged in.</p>
     </div>
+  {:else if logo.phase === "saving"}
+    <div class="menu-save" data-testid="logo-menu-save" role="status" aria-live="polite">
+      <p class="done">{writtenLabel}</p>
+      <h3>Save the settings on the meter</h3>
+      <ol>
+        <li>On the meter, open Settings.</li>
+        <li>Choose the startup logo duration.</li>
+        <li>Pick a value and save it (Disable keeps the startup screen off).</li>
+      </ol>
+      <p class="unplug" data-testid="logo-menu-save-unplug">
+        Don't unplug the meter until the app says the settings are saved.
+      </p>
+      <p class="check" data-testid="logo-menu-save-status">
+        Checking the settings… not saved yet (check {logo.saveCheck.checks}){logo.saveCheck.error
+          ? `: ${logo.saveCheck.error.message}`
+          : ""}
+      </p>
+    </div>
   {:else if logo.phase === "done"}
-    <p class="done" role="status">
-      {logo.action === "remove"
-        ? "Logo removed: read-back verified."
-        : "Logo uploaded: read-back verified."}
-    </p>
+    <p class="done" role="status">{writtenLabel}</p>
+    {#if logo.written?.settings === "needs_menu_save" && logo.written.startup_duration !== null}
+      <p class="done" data-testid="logo-menu-save-done">
+        The meter saved its settings. Startup screen: {logo.written.startup_duration}.
+      </p>
+    {/if}
   {:else if logo.phase === "failed" && logo.failure}
     {@const f = logo.failure}
     <div class="error" role="alert">
@@ -232,6 +265,7 @@
 {#if logo.confirming}
   <LogoConfirmDialog
     action={logo.confirming}
+    durationText={logo.confirming === "upload" ? logo.uploadConfirmText : logo.removeConfirmText}
     onCancel={() => logo.cancelConfirm()}
     onConfirm={(typed) => void logo.confirm(typed)}
   />
@@ -293,6 +327,32 @@
   }
   .duration {
     margin: 0;
+  }
+  .menu-save {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .menu-save h3 {
+    margin: 0;
+    font-size: 1rem;
+  }
+  .menu-save ol {
+    margin: 0;
+    padding-left: 1.5rem;
+  }
+  .menu-save p {
+    margin: 0;
+  }
+  .menu-save .unplug {
+    font-weight: 600;
+  }
+  .menu-save .check {
+    color: var(--muted, var(--text));
+    font-variant-numeric: tabular-nums;
   }
   .duration-hint {
     display: flex;

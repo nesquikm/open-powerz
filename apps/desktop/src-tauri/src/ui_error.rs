@@ -32,6 +32,9 @@ pub enum ErrorKind {
     FlashNeedsConsent,
     /// The user stopped the firmware update; not a failure (AC-AXHK2M.13).
     Cancelled,
+    /// The meter has not saved its settings since the last change: a menu save
+    /// on the meter is needed first (FR QG6RNY).
+    SettingsNotSaved,
     /// Anything else.
     Internal,
 }
@@ -248,10 +251,26 @@ pub fn capture_start_refused() -> UiError {
 
 /// Map a session error to a plain-language UI error.
 pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
+    use powerz_protocol::decode::settings::MENU_SAVE_STEPS;
     use session::Error as S;
+    // A SETTINGS block the meter has not saved since the last change (FR QG6RNY).
+    if err.is_settings_not_saved() {
+        return UiError {
+            kind: ErrorKind::SettingsNotSaved,
+            message: "The meter has not saved its settings since the last change.".to_owned(),
+            hint: Some(MENU_SAVE_STEPS.to_owned()),
+            sessions: Vec::new(),
+        };
+    }
     match err {
         S::Transport(t) => from_transport(t, target_os),
         S::Protocol(_) | S::Decode(_) | S::Frame(_) => protocol(),
+        S::LogoSettingsReread { .. } => UiError {
+            kind: ErrorKind::Protocol,
+            message: "The logo was written, but the settings could not be read again.".to_owned(),
+            hint: Some(MENU_SAVE_STEPS.to_owned()),
+            sessions: Vec::new(),
+        },
         // The capture start (START_ANALYZER) is refused by meters that cannot
         // capture right now; a firmware update is not the fix there.
         S::Rejected { request_type }
@@ -336,7 +355,7 @@ pub fn from_session(err: &session::Error, target_os: &str) -> UiError {
             kind: ErrorKind::Protocol,
             message: format!("Writing the logo stopped at chunk {index}: {reason}."),
             hint: Some(
-                "The logo flag was not set, so the meter keeps its old screen. Try again."
+                "The startup duration was not changed, so the meter keeps its old screen. Try again."
                     .to_owned(),
             ),
             sessions: Vec::new(),
@@ -583,5 +602,54 @@ mod tests {
         keys.sort();
         assert_eq!(keys, ["hint", "kind", "message"]);
         assert_eq!(obj["kind"], "permission_denied");
+    }
+
+    // ---- FR QG6RNY: a block the meter has not saved since the last change ----
+
+    fn stale_block(which: &'static str) -> session::Error {
+        session::Error::Decode(powerz_protocol::decode::DecodeError::Crc { what: which })
+    }
+
+    #[test]
+    fn qg6rny_a_stale_settings_block_is_settings_not_saved_with_the_steps() {
+        use powerz_protocol::decode::settings::MENU_SAVE_STEPS;
+        for which in ["SETTINGS block A", "SETTINGS block B"] {
+            let e = from_session(&stale_block(which), "macos");
+            assert_eq!(e.kind, ErrorKind::SettingsNotSaved, "{which}");
+            assert_eq!(
+                e.message,
+                "The meter has not saved its settings since the last change."
+            );
+            assert_eq!(e.hint.as_deref(), Some(MENU_SAVE_STEPS));
+            assert_plain(&e);
+        }
+    }
+
+    #[test]
+    fn qg6rny_settings_not_saved_serializes_snake_case() {
+        let e = from_session(&stale_block("SETTINGS block A"), "linux");
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["kind"], "settings_not_saved");
+    }
+
+    #[test]
+    fn qg6rny_another_crc_failure_stays_a_protocol_error() {
+        let e = from_session(&stale_block("record table"), "macos");
+        assert_eq!(e.kind, ErrorKind::Protocol);
+    }
+
+    #[test]
+    fn qg6rny_a_failed_settings_reread_after_a_logo_write_gives_the_steps() {
+        use powerz_protocol::decode::settings::MENU_SAVE_STEPS;
+        let err = session::Error::LogoSettingsReread {
+            reason: "timeout".to_owned(),
+        };
+        let e = from_session(&err, "macos");
+        assert_eq!(e.kind, ErrorKind::Protocol);
+        assert_eq!(
+            e.message,
+            "The logo was written, but the settings could not be read again."
+        );
+        assert_eq!(e.hint.as_deref(), Some(MENU_SAVE_STEPS));
     }
 }

@@ -106,7 +106,7 @@ impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
         self.log_exchange(plain, result)
     }
 
-    /// The logo flag write, traced like [`transact`](Self::transact).
+    /// The startup-duration write (SET_DATA 0x1C) of the logo paths, traced like [`transact`](Self::transact).
     fn transact_logo_flag(&mut self, frame: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         let result = self.inner.transact_logo_flag(frame, timeout);
         self.log_exchange(frame, result)

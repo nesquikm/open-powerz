@@ -4,11 +4,13 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use powerz_protocol::decode::settings::StartupLogo;
+use powerz_protocol::decode::settings::MENU_SAVE_STEPS;
 use powerz_protocol::logo::{self, CHUNK, LogoBlob, LogoMode, MIN_SIDE};
 use powerz_protocol::session::{
-    Clock, LogoProgress, LogoStatus, LogoStep, LogoWritten, Session, check_logo_dump,
+    Clock, LogoProgress, LogoStatus, LogoStep, LogoWritten, SETTINGS_SAVE_POLL_GAP, Session,
+    SettingsSave, check_logo_dump,
 };
 use powerz_protocol::transport::Transport;
 
@@ -141,6 +143,9 @@ pub struct LogoWriteOptions {
     pub progress_tty: bool,
     /// Test-only: set the Ctrl-C flag once this many chunks have been sent.
     pub ctrl_c_after_chunks: Option<usize>,
+    /// `--menu-save-timeout`: how long to wait for a save in the meter's
+    /// menu when the write leaves its settings unsaved (zero: no wait).
+    pub menu_save_timeout: Duration,
 }
 
 /// The acknowledgement flags shared by `logo write` and `logo remove`.
@@ -158,14 +163,16 @@ pub struct LogoConfirm {
 /// with per-chunk and read-back progress on `progress` (refreshed in place
 /// with `\r` when `opts.progress_tty`, one line per update otherwise, so a
 /// `--trace` on the same stream stays line by line). Ends with the
-/// verified logo and the startup-screen duration on `out`, plus a hint on
-/// `progress` when the startup screen is off.
+/// verified logo and the startup duration from a fresh SETTINGS read on
+/// `out`; when the meter left its settings unsaved, the menu-save steps go
+/// to `progress` and the tool waits up to `opts.menu_save_timeout` for the
+/// save (see `finish_written`).
 ///
 /// `arm_ctrl_c` is called once the write is confirmed, just before the
 /// first chunk, and returns the Ctrl-C flag. A Ctrl-C during the chunk
 /// phase does not stop the write (a half-written logo is worse than a
 /// finished one): one note says the write finishes first, and the tool
-/// exits when it is done.
+/// exits when it is done. A Ctrl-C also stops the wait for the menu save.
 pub fn logo_write<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     file: &Path,
@@ -184,6 +191,7 @@ pub fn logo_write<T: Transport, C: Clock>(
         session,
         "write",
         "overwrite the meter's logo",
+        "the upload sets it to 3 s",
         opts.confirm.yes,
         input,
         out,
@@ -214,19 +222,32 @@ pub fn logo_write<T: Transport, C: Clock>(
         p.height,
         mode_label(p.mode)
     )?;
-    print_written(written, out, progress)
+    finish_written(
+        session,
+        written,
+        false,
+        opts.menu_save_timeout,
+        &stop,
+        out,
+        progress,
+    )
 }
 
 /// `powerz logo remove`: the same rules as [`logo_write`] (refused without
 /// `--i-understand`, "remove" typed unless `--yes`), then clear the logo
-/// area, reset the flag and read it back, ending with the verified result.
+/// area, turn the startup screen off and read it back, ending with the
+/// verified result and the same menu-save wait (`menu_save_timeout`,
+/// stopped by the Ctrl-C flag `arm_ctrl_c` returns).
+#[allow(clippy::too_many_arguments)]
 pub fn logo_remove<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     confirm: LogoConfirm,
     progress_tty: bool,
+    menu_save_timeout: Duration,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
     progress: &mut dyn Write,
+    arm_ctrl_c: &mut dyn FnMut() -> Result<Arc<AtomicBool>, CliError>,
 ) -> Result<(), CliError> {
     if !confirm.i_understand {
         return Err(CliError::Usage(LOGO_REMOVE_RISK.into()));
@@ -235,13 +256,23 @@ pub fn logo_remove<T: Transport, C: Clock>(
         session,
         "remove",
         "remove the meter's logo",
+        "the remove turns the startup screen off",
         confirm.yes,
         input,
         out,
     )?;
+    let stop = arm_ctrl_c()?;
     let written = session.logo_remove(&mut |pr| show_progress(progress, progress_tty, pr))?;
     writeln!(out, "Logo:    removed and verified (logo area empty)")?;
-    print_written(written, out, progress)
+    finish_written(
+        session,
+        written,
+        true,
+        menu_save_timeout,
+        &stop,
+        out,
+        progress,
+    )
 }
 
 /// Authenticate at level 1 unless the session already is.
@@ -266,42 +297,87 @@ fn save_png(path: &Path, img: &logo::Rgba) -> Result<(), CliError> {
 }
 
 /// Authenticate, read SETTINGS and the model (a logo write's
-/// preconditions), then ask for `word` to be typed unless `yes`.
+/// preconditions), print the startup duration now and `change` (what the
+/// write sets it to), then ask for `word` to be typed unless `yes`.
 fn prepare_write<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     word: &str,
     action: &str,
+    change: &str,
     yes: bool,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     ensure_auth(session)?;
-    session.read_settings()?;
+    let settings = session.read_settings()?;
     session.device_info()?;
     // A wrong model or a missing step is refused before the prompt.
     session.logo_preconditions()?;
+    let now = settings
+        .meter_settings()
+        .map_err(powerz_protocol::session::Error::from)?
+        .startup_logo
+        .value;
+    writeln!(out, "Startup: now {}; {change}", now.label())?;
     if !yes {
         confirm_typed(word, action, "nothing was written", input, out)?;
     }
     Ok(())
 }
 
-/// The startup-screen duration on `out`, plus a hint on `progress` when
-/// the startup screen is off.
-fn print_written(
+/// After a verified write: the startup duration from the fresh SETTINGS
+/// read on `out` when the meter saved it. When the meter left its settings
+/// unsaved, print the menu-save steps on `progress` (plus "Pick Disable"
+/// for a `remove`) and wait up to `timeout` with read-only checks, stopped
+/// early by `stop` (Ctrl-C); still unsaved is [`CliError::SettingsNotSaved`]
+/// (exit 6), changed calibration bytes are [`CliError::Device`] (exit 5).
+fn finish_written<T: Transport, C: Clock>(
+    session: &mut Session<T, C>,
     written: LogoWritten,
+    remove: bool,
+    timeout: Duration,
+    stop: &AtomicBool,
     out: &mut dyn Write,
     progress: &mut dyn Write,
 ) -> Result<(), CliError> {
-    writeln!(out, "Startup: {}", startup_label(written.startup_duration))?;
-    if written.startup_screen_off {
+    let pick = if remove {
+        " Pick Disable to keep the startup screen off."
+    } else {
+        ""
+    };
+    let mut result = written.settings_after;
+    if result == SettingsSave::NeedsMenuSave {
         writeln!(
             progress,
-            "hint: the startup screen is off, so the logo will not show; turn it on with \
-             `powerz settings set startup_duration=3 --i-understand`"
+            "The meter changed its startup duration but left its settings unsaved."
         )?;
+        writeln!(progress, "{MENU_SAVE_STEPS}{pick}")?;
+        writeln!(
+            progress,
+            "Waiting up to {} s for the save (read-only checks every {} s)…",
+            timeout.as_secs(),
+            SETTINGS_SAVE_POLL_GAP.as_secs()
+        )?;
+        let _ = progress.flush();
+        result = session.wait_settings_saved(&written.calibration, timeout, &mut |_| {
+            !stop.load(Ordering::SeqCst)
+        })?;
     }
-    Ok(())
+    match result {
+        SettingsSave::Saved(d) => {
+            writeln!(out, "Startup: {}", d.label())?;
+            Ok(())
+        }
+        SettingsSave::NeedsMenuSave => Err(CliError::SettingsNotSaved(format!(
+            "the logo was written and verified, but the meter's settings are still unsaved. \
+             {MENU_SAVE_STEPS}{pick}"
+        ))),
+        SettingsSave::CalibrationChanged => Err(CliError::Device(
+            "the meter's calibration bytes changed after the logo write; check the meter's \
+             readings before relying on them"
+                .into(),
+        )),
+    }
 }
 
 /// Load `file` and encode it in the opaque or (`alpha`) alpha mode.
@@ -331,15 +407,6 @@ fn show_progress(w: &mut dyn Write, tty: bool, p: LogoProgress) {
     };
     let _ = write!(w, "{start}{step} {}/{}{end}", p.done, p.total);
     let _ = w.flush();
-}
-
-fn startup_label(d: StartupLogo) -> &'static str {
-    match d {
-        StartupLogo::Off => "off (the logo will not show)",
-        StartupLogo::Secs1 => "1 s",
-        StartupLogo::Secs3 => "3 s",
-        StartupLogo::Secs5 => "5 s",
-    }
 }
 
 fn mode_label(mode: LogoMode) -> &'static str {

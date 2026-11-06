@@ -1123,6 +1123,9 @@ fn run_sim(cli: &Cli) -> Result<(), CliError> {
 /// - `POWERZ_SIM_LOGO_FAULT=reject@K|no-reply@K|unplug@K`: the logo flash
 ///   rejects chunk K, leaves it unanswered, or unplugs after it.
 /// - `POWERZ_SIM_MODEL=<m>`: the device info block reports model `m`.
+/// - `POWERZ_SIM_MENU_SAVE=<off|1|3|5>@<ms>`: `<ms>` after a logo write
+///   leaves the settings unsaved, the meter's user saves that startup
+///   duration in its menu.
 fn sim_firmware_knobs(mut sim: SimDevice) -> Result<SimDevice, CliError> {
     if let Ok(n) = std::env::var("POWERZ_SIM_HEAD") {
         let field = n
@@ -1151,6 +1154,16 @@ fn sim_firmware_knobs(mut sim: SimDevice) -> Result<SimDevice, CliError> {
     }
     if let Ok(model) = std::env::var("POWERZ_SIM_MODEL") {
         sim = sim.with_model(&model);
+    }
+    if let Ok(spec) = std::env::var("POWERZ_SIM_MENU_SAVE") {
+        let bad = || {
+            CliError::Usage(format!(
+                "invalid POWERZ_SIM_MENU_SAVE {spec:?}: expected <off|1|3|5>@<ms>"
+            ))
+        };
+        let (code, ms) = spec.split_once('@').ok_or_else(bad)?;
+        let ms = ms.parse::<u64>().map_err(|_| bad())?;
+        sim = sim.with_auto_menu_save(Duration::from_millis(ms), parse_startup_logo(code)?);
     }
     Ok(sim)
 }
@@ -1411,6 +1424,7 @@ fn dispatch<T: Transport, C: Clock>(
                     alpha,
                     i_understand,
                     yes,
+                    menu_save_timeout,
                 },
         } => {
             let opts = LogoWriteOptions {
@@ -1421,6 +1435,7 @@ fn dispatch<T: Transport, C: Clock>(
                 },
                 progress_tty: std::io::stderr().is_terminal(),
                 ctrl_c_after_chunks: sim_ctrl_c_after_chunks(cli)?,
+                menu_save_timeout: Duration::from_secs(*menu_save_timeout),
             };
             logo_write(
                 &mut session,
@@ -1433,7 +1448,12 @@ fn dispatch<T: Transport, C: Clock>(
             )
         }
         Command::Logo {
-            action: LogoAction::Remove { i_understand, yes },
+            action:
+                LogoAction::Remove {
+                    i_understand,
+                    yes,
+                    menu_save_timeout,
+                },
         } => logo_remove(
             &mut session,
             LogoConfirm {
@@ -1441,9 +1461,11 @@ fn dispatch<T: Transport, C: Clock>(
                 yes: *yes,
             },
             std::io::stderr().is_terminal(),
+            Duration::from_secs(*menu_save_timeout),
             &mut std::io::stdin().lock(),
             &mut out,
             &mut std::io::stderr(),
+            &mut ctrl_c_flag,
         ),
         Command::Logo { .. } => unreachable!("logo preview is handled before opening a device"),
         Command::Info { json, hide_serial } => {

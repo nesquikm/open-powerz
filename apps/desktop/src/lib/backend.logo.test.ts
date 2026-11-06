@@ -18,6 +18,7 @@ import {
   logoPreview,
   logoRead,
   logoRemove,
+  logoSettingsCheck,
   logoUpload,
   type LogoPreview,
   type LogoProgress,
@@ -39,7 +40,12 @@ const PREVIEW: LogoPreview = {
   rgba: "AAAA",
 };
 
-const WRITTEN: LogoWritten = { startup_duration: "off", startup_screen_off: true };
+const WRITTEN: LogoWritten = {
+  duration_before: "off",
+  duration_set: "3 s",
+  settings: "needs_menu_save",
+  startup_duration: null,
+};
 
 describe("logo preview (AC-MEHQC0.1)", () => {
   it("chooses a file with the backend's open dialog", async () => {
@@ -120,5 +126,45 @@ describe("logo writes (AC-MEHQC0.3, .8)", () => {
     };
     invoke.mockRejectedValue(err);
     await expect(logoUpload("demo:load-5v-1a", "/x.png", false, () => {})).rejects.toEqual(err);
+  });
+});
+
+describe("logo settings check (FR QG6RNY, AC .2, .3)", () => {
+  it("qg6rny: asks the backend for one check of meter deviceId's settings", async () => {
+    invoke.mockResolvedValue({ settings: "needs_menu_save", startup_duration: null });
+    await expect(logoSettingsCheck("demo:load-5v-1a")).resolves.toEqual({
+      settings: "needs_menu_save",
+      startup_duration: null,
+    });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("logo_settings_check", { deviceId: "demo:load-5v-1a" });
+  });
+
+  it("qg6rny: passes the saved duration and a refusal through", async () => {
+    invoke.mockResolvedValueOnce({ settings: "saved", startup_duration: "3 s" });
+    await expect(logoSettingsCheck("demo:load-5v-1a")).resolves.toEqual({
+      settings: "saved",
+      startup_duration: "3 s",
+    });
+    const err = {
+      kind: "usage",
+      message: "No logo write is waiting for a settings save.",
+      hint: null,
+    };
+    invoke.mockRejectedValueOnce(err);
+    await expect(logoSettingsCheck("demo:load-5v-1a")).rejects.toEqual(err);
+  });
+});
+
+describe("the write result (FR QG6RNY, AC .1)", () => {
+  it("qg6rny: upload resolves to the durations before and set and the settings state", async () => {
+    invoke.mockResolvedValue(WRITTEN);
+    const w = await logoUpload("demo:load-5v-1a", "/pics/logo.png", false, () => {});
+    expect(w).toEqual({
+      duration_before: "off",
+      duration_set: "3 s",
+      settings: "needs_menu_save",
+      startup_duration: null,
+    });
   });
 });

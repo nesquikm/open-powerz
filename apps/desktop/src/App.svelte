@@ -13,6 +13,7 @@
     logoPreview,
     logoRead,
     logoRemove,
+    logoSettingsCheck,
     logoUpload,
     firmwareFlash,
     firmwareInspect,
@@ -543,16 +544,23 @@
         settingsPanel.settings = after;
         return after;
       },
+      checkSettings: () => logoSettingsCheck(logoMeterId()),
+      refreshSettings: () => settingsPanel.refresh(),
     },
     () => ({ model: session.details?.model ?? null, settings: settingsPanel.settings }),
   );
   $effect(() => {
     if (view === "logo" && !meterConnected) untrack(() => (view = "meter"));
   });
+  /** The settings check after a logo write stops when the meter goes away (FR QG6RNY). */
+  $effect(() => {
+    if (!meterConnected) untrack(() => startupLogo.stopChecking());
+  });
   /** A logo write holds every meter (AC-MEHQC0.3): nothing else is sent to one until it
    * ends. The controls that send are disabled, and the PD analyzer, Trigger and Records
-   * tabs are held as during a firmware update. */
-  const meterHeld = $derived(startupLogo.busy);
+   * tabs are held as during a firmware update. The settings check after it (FR QG6RNY)
+   * holds only the logo writes, not the meter. */
+  const meterHeld = $derived(startupLogo.phase === "writing");
   /** The recorder's options dialog (FR AXHK2R). */
   let recorderSettings = $state(loadRecorderSettings(browserStorage()));
   let recorderOptionsOpen = $state(false);
