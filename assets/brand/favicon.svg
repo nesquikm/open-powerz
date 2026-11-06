@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- open-powerz favicon: the mascot's head, simplified. Original art, MIT. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <clipPath id="t"><rect width="32" height="32" rx="7"/></clipPath>
+  <rect width="32" height="32" rx="7" fill="#1a1f4a"/>
+  <path clip-path="url(#t)" d="M-2,26 C1,23 4,23 7,26 C10,29 13,29 16,26 C19,23 22,23 25,26 C28,29 31,29 34,26 V34 H-2 Z" fill="#2f6bff" stroke="#111" stroke-width="1.6"/>
+  <g stroke="#111" stroke-linejoin="round" stroke-linecap="round">
+    <circle cx="16" cy="14.5" r="11" fill="#ffd23f" stroke-width="2"/>
+    <path d="M5.5,12 H26.5" stroke-width="2"/>
+    <rect x="7.5" y="10" width="7.5" height="6" rx="2.4" fill="#111" stroke-width="0.8"/>
+    <rect x="17" y="10" width="7.5" height="6" rx="2.4" fill="#111" stroke-width="0.8"/>
+    <path d="M11,19.5 Q16,23.5 21,19.5" fill="none" stroke-width="2"/>
+  </g>
+</svg>

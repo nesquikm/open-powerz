@@ -55,7 +55,7 @@ Build order: the table's order. The two bug FRs come from the stage 2 and 3 devi
   verify: sim tests for the stale block and menu save, CLI tests for the wait and exit codes
 - [x] Desktop menu-save panel and settings guidance — QG6RNY
   verify: Rust command tests, Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
-- [ ] open-powerz brand art, app icon and README banner — 492Z4N
+- [x] open-powerz brand art, app icon and README banner — 492Z4N
   verify: Vitest brand checks plus the existing icon tests
 - [ ] Built-in open-powerz startup logos — 70X5YX
   verify: library and CLI tests on the simulator, Rust command tests, Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1

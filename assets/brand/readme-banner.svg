@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- README banner 1280x400; own navy card with rounded corners, works on light and dark. Original art for open-powerz, MIT. Lettering: hand-drawn stroke glyphs, no font. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400">
+  <defs>
+    <symbol id="l-o" overflow="visible"><g fill="none"><circle cx="5" cy="5" r="4.5"/></g></symbol>
+    <symbol id="l-p" overflow="visible"><g fill="none"><path d="M0.5,0.5 V15"/><circle cx="5" cy="5" r="4.5"/></g></symbol>
+    <symbol id="l-e" overflow="visible"><g fill="none"><path d="M1,5 H9.5 A4.5,4.5 0 1,0 8.2,8.2"/></g></symbol>
+    <symbol id="l-n" overflow="visible"><g fill="none"><path d="M0.5,10 V0.5 M0.5,4.5 A4,4 0 0,1 8.5,4.5 V10"/></g></symbol>
+    <symbol id="l-w" overflow="visible"><g fill="none"><path d="M0,0.5 L2.6,10 L5.25,3 L7.9,10 L10.5,0.5"/></g></symbol>
+    <symbol id="l-r" overflow="visible"><g fill="none"><path d="M0.5,10 V0.5 M0.5,5 A5,5 0 0,1 7,1"/></g></symbol>
+    <symbol id="l-z" overflow="visible"><g fill="none"><path d="M0.5,0.5 H9 L0.5,10 H9.5"/></g></symbol>
+    <symbol id="l-s" overflow="visible"><g fill="none"><path d="M8.5,1.6 C7,0 1.6,0 1.6,2.6 C1.6,5.2 8.8,4.4 8.8,7.4 C8.8,10.4 2.5,10.6 0.8,8.4"/></g></symbol>
+    <symbol id="l-u" overflow="visible"><g fill="none"><path d="M0.5,0.5 V5.5 A4,4 0 0,0 8.5,5.5 M8.5,0.5 V10"/></g></symbol>
+    <symbol id="l-c" overflow="visible"><g fill="none"><path d="M8.6,2.3 A4.5,4.5 0 1,0 8.6,7.7"/></g></symbol>
+    <symbol id="l-a" overflow="visible"><g fill="none"><circle cx="4.5" cy="5" r="4.5"/><path d="M9,0.5 V10"/></g></symbol>
+    <symbol id="l-f" overflow="visible"><g fill="none"><path d="M7.5,-2.6 C6,-4.4 2.5,-4 2.5,-0.5 V10 M0,1 H6.5"/></g></symbol>
+    <symbol id="l-t" overflow="visible"><g fill="none"><path d="M2.5,-3 V7.5 Q2.5,10 6.5,9.6 M0,1 H6.5"/></g></symbol>
+    <symbol id="l-h" overflow="visible"><g fill="none"><path d="M0.5,-3.5 V10 M0.5,4.5 A4,4 0 0,1 8.5,4.5 V10"/></g></symbol>
+    <symbol id="l-m" overflow="visible"><g fill="none"><path d="M0.5,10 V0.5 M0.5,4 A3.5,3.5 0 0,1 7.5,4 V10 M7.5,4 A3.5,3.5 0 0,1 14.5,4 V10"/></g></symbol>
+    <symbol id="s-dash" overflow="visible"><g fill="none"><path d="M1,4 H7"/></g></symbol>
+    <symbol id="s-slash" overflow="visible"><g fill="none"><path d="M8,-3.5 L1,10"/></g></symbol>
+    <symbol id="u-O" overflow="visible"><g fill="none"><ellipse cx="6" cy="3.25" rx="5.5" ry="6.75"/></g></symbol>
+    <symbol id="u-P" overflow="visible"><g fill="none"><path d="M0.5,10 V-3.5 H5 A3.5,3.5 0 0,1 5,3.5 H0.5"/></g></symbol>
+    <symbol id="u-W" overflow="visible"><g fill="none"><path d="M0,-3.5 L3,10 L6.5,0 L10,10 L13,-3.5"/></g></symbol>
+    <symbol id="u-E" overflow="visible"><g fill="none"><path d="M8.5,-3.5 H0.5 V10 H8.5 M0.5,3.2 H7"/></g></symbol>
+    <symbol id="u-R" overflow="visible"><g fill="none"><path d="M0.5,10 V-3.5 H5 A3.5,3.5 0 0,1 5,3.5 H0.5 M4.5,3.5 L9,10"/></g></symbol>
+    <symbol id="u-Z" overflow="visible"><g fill="none"><path d="M0.5,-3.5 H9.5 L0.5,10 H9.5"/></g></symbol>
+    <symbol id="u-K" overflow="visible"><g fill="none"><path d="M0.5,-3.5 V10 M9,-3.5 L0.5,4.5 M3.6,1.6 L9.5,10"/></g></symbol>
+    <symbol id="u-M" overflow="visible"><g fill="none"><path d="M0.5,10 V-3.5 L6.5,5 L12.5,-3.5 V10"/></g></symbol>
+    <symbol id="u-C" overflow="visible"><g fill="none"><path d="M10.2,-1 A5.5,6.75 0 1,0 10.2,7.5"/></g></symbol>
+    <symbol id="u-U" overflow="visible"><g fill="none"><path d="M0.5,-3.5 V5.5 A4.5,4.5 0 0,0 9.5,5.5 V-3.5"/></g></symbol>
+    <symbol id="u-S" overflow="visible"><g fill="none"><path d="M9,-1.6 C8,-4.2 1,-4.6 1,-0.6 C1,3.4 9.5,2.4 9.5,6.4 C9.5,10.6 2,10.8 0.5,7.6"/></g></symbol>
+    <symbol id="u-B" overflow="visible"><g fill="none"><path d="M0.5,10 V-3.5 H5 A3.2,3.2 0 0,1 5,2.9 H0.5 M5,2.9 H5.6 A3.55,3.55 0 0,1 5.6,10 H0.5"/></g></symbol>
+    <symbol id="d-0" overflow="visible"><g fill="none"><ellipse cx="5" cy="3.25" rx="4.5" ry="6.75"/><path d="M7.4,-1.4 L2.6,7.9"/></g></symbol>
+    <symbol id="d-2" overflow="visible"><g fill="none"><path d="M1,-1 C2,-4.6 9,-4.6 9,-0.6 C9,3 4,5 0.5,10 H9.5"/></g></symbol>
+    <symbol id="d-3" overflow="visible"><g fill="none"><path d="M1,-2.2 C3,-4.6 9,-4.2 8.6,-0.6 C8.3,2 6,3 4,3 C7,3 9.5,4 9.5,6.6 C9.5,10.6 2.5,10.6 0.5,8"/></g></symbol>
+    <path id="spark" d="M0,-8 L2,-2 L8,0 L2,2 L0,8 L-2,2 L-8,0 L-2,-2 Z"/>
+    <clipPath id="sea-b"><path d="M-462.5,130 C-437.5,165 -412.5,165 -387.5,130 C-362.5,95 -337.5,95 -312.5,130 C-287.5,165 -262.5,165 -237.5,130 C-212.5,95 -187.5,95 -162.5,130 C-137.5,165 -112.5,165 -87.5,130 C-62.5,95 -37.5,95 -12.5,130 C12.5,165 37.5,165 62.5,130 C87.5,95 112.5,95 137.5,130 C162.5,165 187.5,165 212.5,130 C237.5,95 262.5,95 287.5,130 L287.5,205 L-462.5,205 Z"/></clipPath>
+  </defs>
+<clipPath id="card"><rect width="1280" height="400" rx="32"/></clipPath><g clip-path="url(#card)"><rect width="1280" height="400" fill="#1a1f4a"/><use href="#spark" transform="translate(1210,70) scale(1.6)" fill="#fff" stroke="#111" stroke-width="2.5" stroke-linejoin="round"/><use href="#spark" transform="translate(640,52) scale(1.1)" fill="#ffd23f" stroke="#111" stroke-width="3" stroke-linejoin="round"/><use href="#spark" transform="translate(1220,200) scale(1.2)" fill="#3ff0ff" stroke="#111" stroke-width="3" stroke-linejoin="round"/><use href="#spark" transform="translate(560,236) scale(0.9)" fill="#ff5ca8" stroke="#111" stroke-width="3" stroke-linejoin="round"/><g transform="translate(800,52) scale(2.0)">
+  <g stroke="#111" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M-462.5,130 C-437.5,165 -412.5,165 -387.5,130 C-362.5,95 -337.5,95 -312.5,130 C-287.5,165 -262.5,165 -237.5,130 C-212.5,95 -187.5,95 -162.5,130 C-137.5,165 -112.5,165 -87.5,130 C-62.5,95 -37.5,95 -12.5,130 C12.5,165 37.5,165 62.5,130 C87.5,95 112.5,95 137.5,130 C162.5,165 187.5,165 212.5,130 C237.5,95 262.5,95 287.5,130 L287.5,205 L-462.5,205 Z" fill="#2f6bff" stroke-width="6"/>
+    <g clip-path="url(#sea-b)" fill="none">
+      <path d="M-462.5,150 C-437.5,185 -412.5,185 -387.5,150 C-362.5,115 -337.5,115 -312.5,150 C-287.5,185 -262.5,185 -237.5,150 C-212.5,115 -187.5,115 -162.5,150 C-137.5,185 -112.5,185 -87.5,150 C-62.5,115 -37.5,115 -12.5,150 C12.5,185 37.5,185 62.5,150 C87.5,115 112.5,115 137.5,150 C162.5,185 187.5,185 212.5,150 C237.5,115 262.5,115 287.5,150" stroke="#7fd4ff" stroke-width="6"/>
+      <path d="M-462.5,174 C-437.5,209 -412.5,209 -387.5,174 C-362.5,139 -337.5,139 -312.5,174 C-287.5,209 -262.5,209 -237.5,174 C-212.5,139 -187.5,139 -162.5,174 C-137.5,209 -112.5,209 -87.5,174 C-62.5,139 -37.5,139 -12.5,174 C12.5,209 37.5,209 62.5,174 C87.5,139 112.5,139 137.5,174 C162.5,209 187.5,209 212.5,174 C237.5,139 262.5,139 287.5,174" stroke="#1d47c9" stroke-width="10"/>
+    </g>
+    <path d="M-462.5,130 C-437.5,165 -412.5,165 -387.5,130 C-362.5,95 -337.5,95 -312.5,130 C-287.5,165 -262.5,165 -237.5,130 C-212.5,95 -187.5,95 -162.5,130 C-137.5,165 -112.5,165 -87.5,130 C-62.5,95 -37.5,95 -12.5,130 C12.5,165 37.5,165 62.5,130 C87.5,95 112.5,95 137.5,130 C162.5,165 187.5,165 212.5,130 C237.5,95 262.5,95 287.5,130 L287.5,205 L-462.5,205 Z" fill="none" stroke-width="6"/>
+    <path d="M70,121 C88,99 112,99 130,121" fill="none" stroke="#fff" stroke-width="5"/>
+    <circle cx="146" cy="110" r="4" fill="#fff" stroke-width="2.5"/>
+    <circle cx="156" cy="100" r="3" fill="#fff" stroke-width="2.5"/>
+    <circle cx="150" cy="92" r="2.2" fill="#fff" stroke-width="2"/>
+  </g>
+  <g stroke="#111" stroke-linejoin="round" stroke-linecap="round">
+    <ellipse cx="100" cy="102" rx="40" ry="8" transform="rotate(-8,100,102)" fill="#ff5ca8" stroke-width="5"/>
+    <path d="M66,106 L134,96" stroke="#fff" stroke-width="2.5"/>
+    <path d="M92,80 L88,101 M108,80 L113,98" stroke-width="6"/>
+    <path d="M80,62 L58,52 M120,62 L144,56" stroke-width="6"/>
+    <circle cx="56" cy="51" r="6" fill="#ffd23f" stroke-width="4"/>
+    <circle cx="146" cy="55" r="6" fill="#ffd23f" stroke-width="4"/>
+    <circle cx="100" cy="62" r="25" fill="#ffd23f" stroke-width="6"/>
+    <path d="M80,55 H120" stroke-width="4"/>
+    <rect x="81" y="53" width="16" height="11" rx="5" fill="#111" stroke-width="2"/>
+    <rect x="103" y="53" width="16" height="11" rx="5" fill="#111" stroke-width="2"/>
+    <path d="M85,56 L89,56 M107,56 L111,56" stroke="#7fd4ff" stroke-width="2"/>
+    <path d="M88,72 Q100,84 112,72" fill="none" stroke-width="4"/>
+    <g transform="translate(86,14) scale(1.6)" fill="none">
+      <use href="#l-e" stroke="#111" stroke-width="5"/><use href="#l-e" stroke="#3ff0ff" stroke-width="3"/>
+      <path d="M13,1 H19" stroke="#111" stroke-width="5"/><path d="M13,1 H19" stroke="#3ff0ff" stroke-width="3"/>
+    </g>
+  </g></g><g transform="translate(72,74) scale(5.6)" fill="none" stroke-linecap="round" stroke-linejoin="round"><g stroke="#111" stroke-width="5.2"><use href="#l-o" x="0"/><use href="#l-p" x="13"/><use href="#l-e" x="26"/><use href="#l-n" x="39"/><use href="#s-dash" x="51"/><use href="#l-p" x="61"/><use href="#l-o" x="74"/><use href="#l-w" x="87"/><use href="#l-e" x="101"/><use href="#l-r" x="114"/><use href="#l-z" x="125"/></g><g stroke="#ffd23f" stroke-width="3"><use href="#l-o" x="0"/><use href="#l-p" x="13"/><use href="#l-e" x="26"/><use href="#l-n" x="39"/><use href="#s-dash" x="51"/><use href="#l-p" x="61"/><use href="#l-o" x="74"/><use href="#l-w" x="87"/><use href="#l-e" x="101"/><use href="#l-r" x="114"/><use href="#l-z" x="125"/></g></g><g transform="translate(78,192) scale(2.4)" fill="none" stroke-linecap="round" stroke-linejoin="round"><g stroke="#111" stroke-width="4.6"><use href="#l-f" x="0"/><use href="#l-o" x="10"/><use href="#l-r" x="23"/><use href="#u-K" x="40"/><use href="#u-M" x="52.5"/><use href="#d-0" x="68.5"/><use href="#d-0" x="81.5"/><use href="#d-3" x="94.5"/><use href="#u-C" x="107.5"/><use href="#s-slash" x="127.5"/><use href="#u-K" x="144.5"/><use href="#u-M" x="157"/><use href="#d-0" x="173"/><use href="#d-0" x="186"/><use href="#d-2" x="199"/><use href="#u-C" x="212"/></g><g stroke="#ffffff" stroke-width="2.4"><use href="#l-f" x="0"/><use href="#l-o" x="10"/><use href="#l-r" x="23"/><use href="#u-K" x="40"/><use href="#u-M" x="52.5"/><use href="#d-0" x="68.5"/><use href="#d-0" x="81.5"/><use href="#d-3" x="94.5"/><use href="#u-C" x="107.5"/><use href="#s-slash" x="127.5"/><use href="#u-K" x="144.5"/><use href="#u-M" x="157"/><use href="#d-0" x="173"/><use href="#d-0" x="186"/><use href="#d-2" x="199"/><use href="#u-C" x="212"/></g></g></g>
+</svg>

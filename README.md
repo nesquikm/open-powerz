@@ -1,3 +1,5 @@
+![open-powerz: open-source app for the POWER-Z KM003C / KM002C USB-C meter](assets/brand/readme-banner.png)
+
 # open-powerz
 
 An open-source, cross-platform (macOS, Linux, Windows) desktop app and CLI for the
