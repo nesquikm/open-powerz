@@ -469,6 +469,43 @@ mod pdm_pd {
         // The session's capabilities follow the re-offer too.
         assert_eq!(pd::offers(s.capabilities()), n.offers);
     }
+
+    // ---- FR ZRJ8W6: the way back to 5 V before a close ----
+
+    #[test]
+    fn the_closing_way_back_stops_at_an_answered_5v_request() {
+        let port = epr_port();
+        let mut s = open(&port);
+        let offers = pd::enter(&mut s).unwrap().offers;
+        let written = port.writes().len();
+        let back = pd::return_to_5v_closing(&mut s, &offers).expect("back at 5 V");
+        assert!(matches!(back, pd::BackTo5V::Requested), "{back:?}");
+        assert_eq!(&port.writes()[written..], ["pd req=1"]);
+    }
+
+    #[test]
+    fn the_closing_way_back_does_not_wait_for_the_hard_resets_offers() {
+        // After another protocol was entered the meter refuses `pd req=1`
+        // and gives `pd hrst` no answer at all. [device] 2026-11-06
+        let port = FakePort::default()
+            .on("pdm open", OPEN_REPLY)
+            .on("entry pd", &epr_offers_reply(b"ok\ncc1 attach\n"))
+            .on("pd req=1", b"req error 252\n")
+            .on("pdm close", b"ok\n");
+        let clock = Rc::new(Cell::new(T0));
+        let mut s = PdmSession::open_with_clock(port.clone(), FakeClock(Rc::clone(&clock)))
+            .expect("pdm open");
+        let offers = pd::enter(&mut s).unwrap().offers;
+        let written = port.writes().len();
+        let start = clock.get();
+        let back = pd::return_to_5v_closing(&mut s, &offers).expect("Hard Reset sent");
+        assert!(matches!(back, pd::BackTo5V::HardReset { .. }), "{back:?}");
+        assert_eq!(&port.writes()[written..], ["pd req=1", "pd hrst"]);
+        let spent = Duration::from_millis(clock.get() - start);
+        assert!(spent < pd::ENTRY_TIMEOUT, "waited {spent:?} for offers");
+        s.close().expect("pdm close");
+        assert_eq!(port.writes().last().map(String::as_str), Some("pdm close"));
+    }
 }
 
 /// FR DGSQ6S (AC .9, .10): error replies and a meter whose replies lag one

@@ -2307,11 +2307,26 @@ where
         // the app (the PD contract continues after the port closes
         // [device]), so returning to 5 V is worth more than the 1 s quit
         // budget here.
+        let trigger_deadline = std::time::Instant::now() + TRIGGER_SHUTDOWN_WAIT;
         for m in &mut self.meters {
             if let Some(trigger) = take(&m.trigger) {
                 m.rate_before_trigger = None;
                 let _ = trigger.close_within(TRIGGER_SHUTDOWN_WAIT);
             }
+        }
+        // A session taken out to close elsewhere (a left Trigger tab) still
+        // holds its meter's PDM count: wait for it, within the same wait, so
+        // `pdm close` is sent and logged before the meters go (AC-ZRJ8W6.3).
+        // Polled without blocking on the session, so this cannot deadlock.
+        while self
+            .meters
+            .iter()
+            .any(|m| m.pdm_holds.load(Ordering::SeqCst) > 0)
+            && std::time::Instant::now() < trigger_deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for m in &self.meters {
             m.stop.store(true, Ordering::SeqCst);
         }
         // Called on the main thread at quit: never hold it past the AC's 1 s,
@@ -3639,5 +3654,106 @@ mod tests {
         drop(lease);
         rig.assert_no_update(&[AT_4, AT_5]);
         let _again = rig.stream(AT_4);
+    }
+
+    // ---- FR ZRJ8W6: quitting while a left Trigger tab's close is under way ----
+
+    /// The simulated meter, slow to take `pdm close`: `closing` is set when it
+    /// starts, and the write returns `wait` later.
+    struct SlowClose {
+        port: powerz_sim::SimPdmPort,
+        wait: Duration,
+        closing: Arc<AtomicBool>,
+    }
+
+    impl std::io::Read for SlowClose {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.port.read(buf)
+        }
+    }
+
+    impl std::io::Write for SlowClose {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.trim_ascii().starts_with(b"pdm close") {
+                self.closing.store(true, Ordering::SeqCst);
+                std::thread::sleep(self.wait);
+            }
+            self.port.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.port.flush()
+        }
+    }
+
+    // AC-ZRJ8W6.3: quitting waits, within the quit wait, for the close of a
+    // left Trigger tab, so `pdm close` is sent and in the app log first.
+    #[test]
+    fn quitting_during_the_close_of_a_left_trigger_tab_waits_for_the_close() {
+        let dir = std::env::temp_dir().join(format!(
+            "open-powerz-zrj8w6-{}-quit-during-close",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the log folder");
+        let path = dir.join("app.log");
+
+        let mut m = DeviceManager::new(
+            || Ok(Vec::new()),
+            AppOpener,
+            powerz_protocol::session::SystemClock,
+        );
+        m.set_app_log(AppLog::open(&path).expect("open app.log"));
+        // The 9 V demo meter: the charger stays attached.
+        m.connect_with_stop(
+            "demo:pd-9v-2a",
+            50,
+            |_: BackendEvent| {},
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("the demo device connects");
+        let clock = powerz_sim::SimClock::new(1_760_000_000_000);
+        let sim = powerz_sim::SimPdm::new(powerz_sim::SimCharger::MultiProtocol, clock.clone());
+        let closing = Arc::new(AtomicBool::new(false));
+        let port = SlowClose {
+            port: sim.open_port(),
+            // Well within the 3 s quit wait, longer than the rest of quitting.
+            wait: Duration::from_millis(2000),
+            closing: Arc::clone(&closing),
+        };
+        let worker = crate::trigger::TriggerWorker::spawn(port, clock).expect("the session opens");
+        m.install_trigger(worker).expect("installed");
+        let c = m.trigger_control().expect("open");
+        c.list(crate::trigger::TriggerProtocol::Pd)
+            .expect("list pd");
+        // The page leaves the tab, then `trigger_close` takes the session and
+        // closes it outside the manager lock, on another thread.
+        let _ = c.leave_view();
+        drop(c);
+        let trigger = m.take_trigger().expect("the session is open");
+        let close = std::thread::spawn(move || trigger.close());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !closing.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the close never reached pdm close"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let start = std::time::Instant::now();
+        m.shutdown();
+        let took = start.elapsed();
+
+        let log = std::fs::read_to_string(&path).expect("read app.log");
+        assert!(
+            log.lines().any(|l| l.contains("trigger sent: pdm close")),
+            "the app exited before the close was sent: {log}"
+        );
+        assert!(
+            took < TRIGGER_SHUTDOWN_WAIT + SHUTDOWN_WAIT,
+            "quitting took {took:?}"
+        );
+        let _ = close.join();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

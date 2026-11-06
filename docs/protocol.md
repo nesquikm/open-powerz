@@ -931,6 +931,13 @@ How our library sends them safely:
   `pd data` line that cannot be read is refused too. PD role swaps (DR,
   PR, VCONN and FR_Swap) count as above 5 V. [inferred]
 - `pdm close` is always sent before the port is released.
+- The way back to 5 V before `pdm close`: `pd req=1`; if that fails, `pd
+  hrst` is written and its new offers are not waited for, since nothing
+  reads them before the close. After another protocol was entered since PD,
+  `pd req=1` gets `req error 252` and `pd hrst` gets no answer at all
+  [device] (2026-11-06: nothing for 3 s); waiting for the offers there would
+  outlast an app's quit wait. A Hard Reset ends any PD contract at 5 V on
+  its own [inferred].
 - Out of sync: a lagging meter was seen answering each command with the
   previous command's reply [device] (2026-10-23). A line that only another
   command gets (`pdm mode entry`, `type=`, `req:` / `req error`, a bare `ok`

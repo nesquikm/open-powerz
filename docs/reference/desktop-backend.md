@@ -163,7 +163,11 @@ Behaviour:
 - **Back to 5 V on every way out.** Disconnecting the meter, closing the
   window or `triggerClose` returns the charger to 5 V where the protocol
   allows it and sends `pdm close`. The UI calls `triggerClose` when the user
-  leaves the Trigger tab.
+  leaves the Trigger tab. On these ways out the Hard Reset fallback is sent
+  without waiting for the charger's new offers, and a way back that leaving
+  the tab already sent is not sent again. Quitting waits, within its 3 s, for
+  a close that is still under way, so `pdm close` reaches the meter and the
+  app log first.
 - **`out_of_sync` errors.** `ErrorKind` has an `out_of_sync` kind. The
   backend uses it when the meter answers a command with a reply that belongs
   to another command. The message says no more requests are sent; the hint

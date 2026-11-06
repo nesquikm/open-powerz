@@ -597,14 +597,7 @@ pub fn return_to_5v<P: Read + Write, C: Clock>(
             hard_reset: Error::Pdm(hard_reset),
         });
     }
-    let to_5v = Request::Fixed {
-        position: 1,
-        current_ma: None,
-    };
-    // No `entry pd` on the way back: the request (or the Hard Reset
-    // fallback) is sent as it is.
-    let sent = validate(offers, &to_5v).and_then(|command| send_request(session, command, None));
-    let Err(request_error) = sent else {
+    let Err(request_error) = request_5v(session, offers) else {
         return Ok(BackTo5V::Requested);
     };
     match hard_reset(session) {
@@ -612,6 +605,45 @@ pub fn return_to_5v<P: Read + Write, C: Clock>(
         Err(hard_reset) => Err(ReturnTo5VError {
             request: request_error,
             hard_reset,
+        }),
+    }
+}
+
+/// `pd req=1`, the first step of every way back to 5 V. No `entry pd` on
+/// the way back: the request is sent as it is.
+fn request_5v<P: Read + Write, C: Clock>(
+    session: &mut PdmSession<P, C>,
+    offers: &[Offer],
+) -> Result<(), Error> {
+    let to_5v = Request::Fixed {
+        position: 1,
+        current_ma: None,
+    };
+    validate(offers, &to_5v)
+        .and_then(|command| send_request(session, command, None))
+        .map(|_| ())
+}
+
+/// [`return_to_5v`] for a session about to close: when `pd req=1` fails,
+/// `pd hrst` goes out on the safety path ([`PdmSession::send_safety`]) and
+/// its new offers are not waited for, as nothing reads them before the
+/// close. \[device\] after another protocol was entered, `pd hrst` gets no
+/// answer at all; with PD entered last its offers take about 3 s.
+pub fn return_to_5v_closing<P: Read + Write, C: Clock>(
+    session: &mut PdmSession<P, C>,
+    offers: &[Offer],
+) -> Result<BackTo5V, ReturnTo5VError> {
+    if session.check_in_step().is_err() {
+        return return_to_5v(session, offers);
+    }
+    let Err(request_error) = request_5v(session, offers) else {
+        return Ok(BackTo5V::Requested);
+    };
+    match session.send_safety(&Command::PdHardReset) {
+        Ok(()) => Ok(BackTo5V::HardReset { request_error }),
+        Err(hard_reset) => Err(ReturnTo5VError {
+            request: request_error,
+            hard_reset: Error::Pdm(hard_reset),
         }),
     }
 }

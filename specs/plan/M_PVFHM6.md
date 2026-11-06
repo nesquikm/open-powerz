@@ -77,7 +77,7 @@ Build order: the table's order. The two bug FRs come from the stage 2 and 3 devi
   verify: Rust trigger tests on the simulated charger, Vitest, Playwright on the mock
 - [x] The library docs build fails on links to feature-gated logo methods — 1DHPPW
   verify: `cargo doc -p powerz-protocol` with -D warnings, with and without image-files
-- [ ] The trigger session close is lost when the charger is attached — ZRJ8W6
+- [x] The trigger session close is lost when the charger is attached — ZRJ8W6
   verify: Rust trigger and device-manager tests on a port whose Hard Reset offers take 3 s
 - [x] Hardware runbooks for stages 1–4 and the M7b carry-overs, in `../qa-runs/m7c/runbooks/` (outside the repo)
   verify: each runbook has its approval gate, stop rules, photos, read-back and settings diffs, and the recovery ladder
