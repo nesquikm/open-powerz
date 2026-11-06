@@ -108,6 +108,10 @@ async function expectHeld(c: Locator, what: string): Promise<void> {
   await expect(c, `${what} is visible`).toBeVisible();
   await expect(c, `${what} is disabled during the logo write`).toBeDisabled();
   await expect(c, `${what} says why`).toHaveAttribute("title", HOLD_TITLE);
+  // And it looks disabled, as a disabled button does (the stage 4 run saw held
+  // controls that "looked enabled").
+  await expect(c, `${what} looks dimmed`).toHaveCSS("opacity", "0.55");
+  await expect(c, `${what} shows the not-allowed cursor`).toHaveCSS("cursor", "not-allowed");
 }
 
 async function expectFree(c: Locator, what: string): Promise<void> {
@@ -115,6 +119,7 @@ async function expectFree(c: Locator, what: string): Promise<void> {
   await expect(c, `${what} is enabled after the write`).toBeEnabled();
   const title = (await c.getAttribute("title")) ?? "";
   expect(title, `${what} no longer names the write`).not.toMatch(HOLD_TITLE);
+  await expect(c, `${what} no longer looks dimmed`).toHaveCSS("opacity", "1");
 }
 
 /** The full view's top-bar session actions, with a running recording's Pause. */

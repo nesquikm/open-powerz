@@ -1720,6 +1720,12 @@
     cursor: not-allowed;
     opacity: 0.6;
   }
+  /* A held strip action looks like a disabled button (FR 70X5YY): `aria-disabled` alone
+     left Open recording and Add meter looking usable during a logo write. */
+  .strip-action[aria-disabled="true"] {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
   .view-tabs [role="tab"][aria-selected="true"] {
     background: var(--surface);
     border-color: var(--border);
