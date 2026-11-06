@@ -59,7 +59,7 @@ Build order: the table's order. The two bug FRs come from the stage 2 and 3 devi
   verify: Vitest brand checks plus the existing icon tests
 - [x] Built-in open-powerz startup logos — 70X5YX
   verify: library and CLI tests on the simulator, Rust command tests, Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
-- [ ] Session actions stay enabled during a logo write — 70X5YY
+- [x] Session actions stay enabled during a logo write — 70X5YY
   verify: Vitest, Playwright on Chromium and WebKit with E2E_WIDE_FONT=1
 - [x] Hardware runbooks for stages 1–4 and the M7b carry-overs, in `../qa-runs/m7c/runbooks/` (outside the repo)
   verify: each runbook has its approval gate, stop rules, photos, read-back and settings diffs, and the recovery ladder

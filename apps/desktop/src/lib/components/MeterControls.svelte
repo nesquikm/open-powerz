@@ -12,6 +12,7 @@
   import type { Session } from "../session.svelte";
   import type { MeterNotice } from "../meterNotices.svelte";
   import MeterNoticeList from "./MeterNoticeList.svelte";
+  import { holdTitle, recordDisabled } from "../logoHold";
   import RecorderButtons from "./RecorderButtons.svelte";
 
   let {
@@ -72,26 +73,26 @@
   </select>
   <button
     type="button"
-    title="Record to CSV"
+    title={holdTitle(held, "Record to CSV")}
     aria-pressed={recording.phase === "recording"}
-    disabled={record.disabled}
+    disabled={recordDisabled(recording.phase, canRecord, held)}
     onclick={onToggleRecording}
   >
     {record.label}
   </button>
-  <RecorderButtons {recording} {onTogglePause} {onRecorderOptions} />
+  <RecorderButtons {recording} {held} {onTogglePause} {onRecorderOptions} />
   <button
     type="button"
-    title="Export the session so far to CSV"
-    disabled={exportJob.running || !canRecord || session.latest === null}
+    title={holdTitle(held, "Export the session so far to CSV")}
+    disabled={exportJob.running || !canRecord || session.latest === null || held}
     onclick={onExport}
   >
     Export
   </button>
   <button
     type="button"
-    title="Export the session so far to a vendor-layout .db file"
-    disabled={exportJob.running || !canRecord || session.latest === null}
+    title={holdTitle(held, "Export the session so far to a vendor-layout .db file")}
+    disabled={exportJob.running || !canRecord || session.latest === null || held}
     onclick={onExportDb}
   >
     Export .db

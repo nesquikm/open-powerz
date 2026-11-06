@@ -29,6 +29,7 @@
     type Fit,
   } from "../topBarFit";
   import DevicePicker from "./DevicePicker.svelte";
+  import { holdTitle, recordDisabled } from "../logoHold";
   import RecorderButtons from "./RecorderButtons.svelte";
   import ThemeControl from "./ThemeControl.svelte";
 
@@ -280,8 +281,8 @@
     class={inMenu ? undefined : "export"}
     role={inMenu ? "menuitem" : undefined}
     tabindex={inMenu ? -1 : undefined}
-    title="Export the session so far to CSV"
-    disabled={exportJob.running || !canExport}
+    title={holdTitle(held, "Export the session so far to CSV")}
+    disabled={exportJob.running || !canExport || held}
     onclick={() => (inMenu ? pick(onExport) : onExport())}
   >
     Export
@@ -294,8 +295,8 @@
     class={inMenu ? undefined : "export-db"}
     role={inMenu ? "menuitem" : undefined}
     tabindex={inMenu ? -1 : undefined}
-    title="Export the session so far to a vendor-layout .db file"
-    disabled={exportJob.running || !canExport}
+    title={holdTitle(held, "Export the session so far to a vendor-layout .db file")}
+    disabled={exportJob.running || !canExport || held}
     onclick={() => (inMenu ? pick(onExportDb) : onExportDb())}
   >
     Export .db
@@ -351,14 +352,14 @@
         {/if}
         <button
           type="button"
-          title="Record to CSV (Space)"
+          title={holdTitle(held, "Record to CSV (Space)")}
           aria-pressed={recording.phase === "recording"}
-          disabled={record.disabled}
+          disabled={recordDisabled(recording.phase, canRecord, held)}
           onclick={onToggleRecording}
         >
           {record.label}
         </button>
-        <RecorderButtons {recording} {onTogglePause} {onRecorderOptions} />
+        <RecorderButtons {recording} {held} {onTogglePause} {onRecorderOptions} />
         <!-- The progress fills the disabled Export button's own box, so starting an export
          moves no item and adds nothing to the row's width (lib/topBarFit.ts). -->
         <span class="export-slot" class:exporting={exportJob.running}>

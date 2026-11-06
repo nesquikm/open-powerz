@@ -108,6 +108,7 @@
   import RecorderOptions from "./lib/components/RecorderOptions.svelte";
   import { canConnectTo } from "./lib/deviceDetails";
   import { StatsControls } from "./lib/stats.svelte";
+  import { holdTitle, logoHolds, shortcutHeld, tabHeld } from "./lib/logoHold";
   import { shortcutFor, type ShortcutAction } from "./lib/shortcuts";
   import {
     applyTheme,
@@ -293,6 +294,7 @@
 
   /** Record on a tile: starts or stops that meter's recording only. */
   function toggleMeterRecording(entry: MeterEntry): void {
+    if (meterHeld) return;
     if (entry.session === session) {
       toggleRecording();
       return;
@@ -305,6 +307,7 @@
 
   /** Pause on a tile: pauses or resumes that meter's recording only. */
   function toggleMeterPause(entry: MeterEntry): void {
+    if (meterHeld) return;
     if (entry.session === session) {
       togglePause();
       return;
@@ -342,6 +345,7 @@
 
   /** Export on a tile: that meter's session so far. */
   function exportMeter(entry: MeterEntry, format: ExportFormat): void {
+    if (meterHeld) return;
     if (entry.session === session) {
       exportHistory(format);
       return;
@@ -387,6 +391,10 @@
   }
 
   let addMeterOpen = $state(false);
+  /** "Add meter": not while a logo write holds the session (FR 70X5YY). */
+  function openAddMeter(): void {
+    if (!meterHeld) addMeterOpen = true;
+  }
 
   /** Enter and Space press a control of the tab strip, as on a button. */
   function pressOnKey(e: KeyboardEvent, press: () => void): void {
@@ -564,13 +572,14 @@
    * ends. The controls that send are disabled, and the PD analyzer, Trigger and Records
    * tabs are held as during a firmware update. The settings check after it (FR QG6RNY)
    * holds only the logo writes, not the meter. */
-  const meterHeld = $derived(startupLogo.phase === "writing");
+  const meterHeld = $derived(logoHolds(startupLogo.phase));
   /** The recorder's options dialog (FR AXHK2R). */
   let recorderSettings = $state(loadRecorderSettings(browserStorage()));
   let recorderOptionsOpen = $state(false);
   /** The tile whose Options opened the dialog; null for the top bar's. */
   let recorderOptionsEntry = $state<MeterEntry | null>(null);
   function openRecorderOptions(entry: MeterEntry | null): void {
+    if (meterHeld) return;
     recorderOptionsEntry = entry;
     recorderOptionsOpen = true;
   }
@@ -664,7 +673,7 @@
       firmware.busy && (!session.active || session.selectedId === firmware.updatingId);
   });
   function tabDisabled(id: string): boolean {
-    return (firmware.busy || meterHeld) && (id === "pd" || id === "trigger" || id === "records");
+    return tabHeld(id, { firmwareBusy: firmware.busy, logoHeld: meterHeld });
   }
   function selectView(id: string): void {
     if (tabDisabled(id)) return;
@@ -776,6 +785,7 @@
    * never touches a meter. A running firmware update stays too: its progress is never
    * hidden. */
   async function openRecording(): Promise<void> {
+    if (meterHeld) return;
     const opened = await recordingFile.open();
     if (opened && view !== "trigger" && !firmware.busy) view = "file";
   }
@@ -1168,7 +1178,7 @@
 
   /** Export button: save dialog, then the session history so far, off the UI thread. */
   function exportHistory(format: ExportFormat): void {
-    if (!canExport || noticesId === null) return;
+    if (!canExport || meterHeld || noticesId === null) return;
     void runExport(noticesId, exportJob, {
       exportSession: (name, onProgress) => format(act(), name, onProgress),
       now: () => new Date(),
@@ -1203,6 +1213,7 @@
 
   /** Record button / Space: start at once, or stop and ask where to save the CSV file. */
   function toggleRecording(): void {
+    if (meterHeld) return;
     void onShownMeter(() =>
       recording.toggle({
         ...recordingDeps(),
@@ -1213,6 +1224,7 @@
 
   /** Pause button: holds the rows back, or writes them again. */
   function togglePause(): void {
+    if (meterHeld) return;
     void onShownMeter(() => recording.togglePause(act()));
   }
 
@@ -1295,6 +1307,8 @@
     });
     if (action === null) return;
     e.preventDefault();
+    // A startup logo write holds the session's shortcuts (FR 70X5YY).
+    if (shortcutHeld(action, meterHeld)) return;
     dispatchShortcut(action);
   }
 </script>
@@ -1359,6 +1373,8 @@
         role="button"
         class="strip-action open-recording"
         tabindex="0"
+        aria-disabled={meterHeld ? "true" : undefined}
+        title={holdTitle(meterHeld, undefined)}
         onclick={() => void openRecording()}
         onkeydown={(e) => pressOnKey(e, () => void openRecording())}
       >
@@ -1369,8 +1385,10 @@
           role="button"
           class="strip-action"
           tabindex="0"
-          onclick={() => (addMeterOpen = true)}
-          onkeydown={(e) => pressOnKey(e, () => (addMeterOpen = true))}
+          aria-disabled={meterHeld ? "true" : undefined}
+          title={holdTitle(meterHeld, undefined)}
+          onclick={openAddMeter}
+          onkeydown={(e) => pressOnKey(e, openAddMeter)}
         >
           Add meter
         </div>
