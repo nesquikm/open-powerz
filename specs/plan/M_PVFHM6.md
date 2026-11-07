@@ -7,6 +7,7 @@ kickoff_branch: null
 frozen_at: null
 migration: none
 codename: First Impression
+shipped_in: v0.10.0
 ---
 
 # Implementation Plan

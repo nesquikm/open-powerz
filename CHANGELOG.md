@@ -4,6 +4,30 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-11-07 — "First Impression"
+
+### Added
+- Startup logo preview: see any image as the KM003C's startup logo, opaque or with transparent pixels, before anything is written (PVFHM7)
+- Guarded logo writes: only the logo's own flash window, its on/off flag and reads inside that window get through; every other flash write stays refused (R1ST8Z)
+- Demo device: a simulated logo flash, so upload, remove and read-back can be tried without a meter (A2XTES)
+- Logo upload, remove and read-back in the session, each write checked by reading it back (TZK5K4)
+- CLI logo commands: `powerz logo preview`, `logo read`, `logo write` and `logo remove`, with a typed confirmation (YCRQRQ)
+- Desktop logo view: preview, write, read back or remove the startup logo from the app (MEHQC0)
+- Built-in open-powerz logos: the mascot, or the mascot with "open-powerz" lettering, with no image to make first (70X5YX)
+- Brand art: the electron-surf mascot as the app icon and the README banner (492Z4N)
+
+### Changed
+- Hide serial numbers: a hidden meter reads as its model, numbered when two of the same model are listed, and *** where a value must show (CCF47K)
+
+### Fixed
+- Logo writes: the tool says up front that Upload sets a 3 s startup screen and Remove turns it off, then guides the menu save the meter needs afterwards, in the CLI and the desktop app (Z39H24, QG6RNY)
+- Session actions such as Record and Export stay dimmed while a logo write runs (70X5YY)
+- Settings writes: the chart keeps drawing after a write, and the hint says the meter's screen shows the change once the value is changed in its menu (JV54SN, JV54SP)
+- Trigger panel: Back to 5 V hides while the charger is gone, and leaving the view or quitting always sends the session close, with the charger attached or not (JV54SQ, ZRJ8W6)
+- Docs builds: the library and workspace API docs build with warnings denied again (1DHPPW, TJNB54)
+
+Total test count at release: 6011 tests, 0 failures, 0 errors.
+
 ## [0.9.0] — 2026-11-05 — "Fine Print"
 
 ### Added
