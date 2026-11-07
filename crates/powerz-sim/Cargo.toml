@@ -9,7 +9,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# Featureless (FR QFTCWX), so the simulator builds for wasm32-unknown-unknown.
 powerz-protocol.workspace = true
+
+# Off the web, the native transports: the HID persona as a raw HID device,
+# the bootloader flash pipe and the USB identity.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+powerz-protocol = { workspace = true, features = ["bulk", "hid", "cdc"] }
 
 [lints]
 workspace = true

@@ -78,12 +78,15 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      # FR TGE83B (AC .9): the PD decoder does no I/O and builds for the web edition.
+      # FR TGE83B (AC .9), FR QFTCWX (AC .5): the PD decoder, the featureless protocol
+      # library and the simulator do no native I/O and build for the web edition.
       - name: PD decoder wasm32 build
         if: runner.os == 'Linux'
         run: |
           rustup target add wasm32-unknown-unknown
           cargo build -p powerz-pd --target wasm32-unknown-unknown --locked
+          cargo build -p powerz-protocol --no-default-features --target wasm32-unknown-unknown --locked
+          cargo build -p powerz-sim --target wasm32-unknown-unknown --locked
 
   # FR 4PJRVN (AC .6), FR AXHK2H: hold the whole workspace to the MSRV that Cargo.toml
   # declares as `rust-version`. The job builds and tests the default members (the library

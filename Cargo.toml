@@ -20,7 +20,8 @@ authors = ["Mikhail Drapoliuk"]
 
 [workspace.dependencies]
 powerz-pd = { path = "crates/powerz-pd", version = "0.10.0" }
-powerz-protocol = { path = "crates/powerz-protocol", version = "0.10.0" }
+# Featureless by default (FR QFTCWX): members opt into the native transports.
+powerz-protocol = { path = "crates/powerz-protocol", version = "0.10.0", default-features = false }
 powerz-sim = { path = "crates/powerz-sim", version = "0.10.0" }
 powerz-record = { path = "crates/powerz-record", version = "0.10.0" }
 

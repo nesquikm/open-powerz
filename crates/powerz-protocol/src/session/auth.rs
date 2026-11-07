@@ -120,6 +120,37 @@ mod tests {
         );
     }
 
+    /// AC-QFTCWX.3: the random value is injected, not drawn inside the
+    /// builder, so the browser's crypto source (or a test) can supply it.
+    #[test]
+    fn auth_plaintext_carries_the_injected_random_value() {
+        let uid = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
+        ];
+        let random = 0x0123_4567_89AB_CDEF_u64;
+        let p = auth_plaintext(1_790_000_000_000, &uid, random);
+        let mut want = [0xFF_u8; 32];
+        want[0..8].copy_from_slice(&1_790_000_000_000_u64.to_le_bytes());
+        want[8..20].copy_from_slice(&uid);
+        want[20..28].copy_from_slice(&random.to_le_bytes());
+        assert_eq!(p, want);
+        assert_ne!(
+            auth_plaintext(1_790_000_000_000, &uid, random ^ 1),
+            p,
+            "a different random gives a different plaintext"
+        );
+    }
+
+    /// AC-QFTCWX.3: a session draws the auth random from its clock; on
+    /// wasm32 the system clock reads it from getrandom's web backend.
+    #[test]
+    fn system_clock_random_values_differ() {
+        let mut c = crate::session::SystemClock;
+        let a = c.random_u64();
+        let b = c.random_u64();
+        assert_ne!(a, b, "two OS random draws");
+    }
+
     #[test]
     fn auth_plaintext_with_an_overlong_credential_does_not_panic() {
         let p = auth_plaintext(1, &[0xAB; 20], 2);

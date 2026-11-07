@@ -35,6 +35,7 @@ pub use logo::{
     LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten,
     SETTINGS_SAVE_POLL_GAP, SettingsSave, check_logo_dump, logo_chunk_plaintext, logo_flag_request,
 };
+#[cfg(feature = "bulk")]
 pub(crate) use memory::UID;
 pub use memory::{
     DeviceInfo, FirmwareProblem, FirmwareProblemKind, FirmwareStatus, memory_read_plaintext,

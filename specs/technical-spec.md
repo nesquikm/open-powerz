@@ -190,3 +190,4 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | GUI toolkit | egui/eframe, Iced, Tauri 2 + web UI, PySide6, Qt6 C++, Electron | Tauri 2 + Svelte 5 | User decision; better tables/trees/i18n than egui, small bundles vs. Electron |
 | Prior-art reuse | Depend on km003c-lib, fork laPower, build new | Build new | User decision; prior art is a test oracle and reference only |
 | Key policy | Ship keys, user-supplied key file, drop auth features | Ship keys | User decision |
+| Web edition I/O | Sync Rust session in a Worker over Atomics (needs COOP/COEP), JSPI-suspended sync session, sans-IO wasm binding + TS driver | Sans-IO wasm binding (`powerz-wasm`) + TS session driver | GitHub Pages cannot send COOP/COEP headers; JSPI support in wasm-bindgen is experimental. Pure builders/decoders run sync in wasm, WebUSB/WebHID stay async in JS (M_QFTCWW) |

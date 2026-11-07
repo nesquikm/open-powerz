@@ -16,7 +16,7 @@ path = "src/main.rs"
 clap = { version = "4.6.7", features = ["derive"] }
 ctrlc = { version = "3.5.2", features = ["termination"] }
 # FR YCRQRQ: `powerz logo` loads PNG, JPEG, BMP and raw .bin logo files.
-powerz-protocol = { workspace = true, features = ["image-files"] }
+powerz-protocol = { workspace = true, features = ["bulk", "hid", "cdc", "image-files"] }
 # FR YCRQRQ: `powerz logo preview -o` writes PNG files.
 image = { version = "0.25", default-features = false, features = ["png"] }
 powerz-record.workspace = true

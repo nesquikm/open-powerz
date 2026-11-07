@@ -24,13 +24,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use flash::{FlashFault, SimMeter, SimMeterPipe};
+pub use flash::FlashFault;
+#[cfg(not(target_arch = "wasm32"))]
+pub use flash::{SimMeter, SimMeterPipe};
 pub use logo::{BootScreen, ErasePolicy, LogoFault, LogoFlash, SECTOR_LEN, boot_render};
 pub use pd::PdScenario;
 pub use pdm::{SimCable, SimCharger, SimPdm, SimPdmPort};
 use powerz_protocol::crypto;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::Clock;
+#[cfg(not(target_arch = "wasm32"))]
 use powerz_protocol::transport::discovery::{PID_KM003C, UsbIdentity, UsbInterface};
 use powerz_protocol::transport::{Error, Transport};
 
@@ -564,6 +567,24 @@ impl SimDevice {
         SimDevice::open(persona, scenario, TimeSource::Sim { clock, start })
     }
 
+    /// A freshly opened meter on a caller-driven clock (FR QFTCWX): uptime
+    /// starts at 0 and moves only by [`advance`](SimDevice::advance), so
+    /// nothing on this path reads the system clock or sleeps (the browser
+    /// has neither).
+    pub fn manual(persona: Persona, scenario: Scenario) -> SimDevice {
+        SimDevice::with_clock(persona, scenario, SimClock::new(0))
+    }
+
+    /// Move this meter's simulated time forward by `ms` milliseconds. On a
+    /// [`manual`](SimDevice::manual) or [`with_clock`](SimDevice::with_clock)
+    /// meter this advances its clock (and every clone of it); a real-time
+    /// meter ignores it.
+    pub fn advance(&self, ms: u64) {
+        if let TimeSource::Sim { clock, .. } = &self.time {
+            clock.advance(Duration::from_millis(ms));
+        }
+    }
+
     /// This meter's CDC persona, opened beside this one on the same time
     /// source: it shares the stored settings, so a settings write sent there
     /// is what this one serves afterwards, and it has the same faults,
@@ -742,6 +763,7 @@ impl SimDevice {
     /// application mode the KM003C's four interfaces (vendor 0xFF and CDC
     /// 0x02 named `APP`, CDC data 0x0A, HID 0x03) `[device]`; in bootloader
     /// mode a single vendor interface named `BOOT`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn usb_identity(&self) -> UsbIdentity {
         let iface = |number: u8, class: u8, string: Option<&str>| UsbInterface {
             number,
@@ -1090,6 +1112,7 @@ impl Transport for SimDevice {
 
 /// The HID persona as a raw HID device, so the library's `HidTransport`
 /// (and its guard) can sit on top of the simulator.
+#[cfg(not(target_arch = "wasm32"))]
 impl powerz_protocol::transport::hid::HidIo for SimDevice {
     /// One output report (report ID first): handled as one request; its
     /// reply, if any, waits for the next input-report read.

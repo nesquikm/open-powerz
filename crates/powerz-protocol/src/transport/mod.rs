@@ -6,8 +6,12 @@
 
 use std::time::Duration;
 
+#[cfg(feature = "bulk")]
 pub mod bulk;
+#[cfg(feature = "cdc")]
 pub mod cdc;
+pub mod cdc_frame;
+#[cfg(feature = "bulk")]
 pub mod discovery;
 pub mod guard;
 #[cfg(feature = "hid")]

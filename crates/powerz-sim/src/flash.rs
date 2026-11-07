@@ -6,12 +6,19 @@
 //!
 //! Test infrastructure only: it implements the library's flash traits so
 //! the engine can be driven without a real device.
+//!
+//! The flash traits are native-only, so on wasm32 (the web edition's demo
+//! meter, FR QFTCWX) only the request side is built and the jump helpers
+//! sit unused.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use powerz_protocol::firmware::DeviceMode;
+#[cfg(not(target_arch = "wasm32"))]
 use powerz_protocol::firmware::flash::{FlashTransport, Meter, MeterOpener};
+#[cfg(not(target_arch = "wasm32"))]
 use powerz_protocol::transport::discovery::{Model, PID_KM003C};
 use powerz_protocol::transport::{Error, Transport};
 
@@ -271,6 +278,7 @@ impl SimDevice {
 }
 
 /// Whether `data` is a write-only jump of type `ty`.
+#[cfg(not(target_arch = "wasm32"))]
 fn is_jump(data: &[u8], ty: u8) -> bool {
     data.len() == 4 && data[0] == ty && data[2..4] == [0, 0]
 }
@@ -278,6 +286,7 @@ fn is_jump(data: &[u8], ty: u8) -> bool {
 /// Raw writes: the jumps switch modes; in the bootloader's data phase each
 /// write is payload, acknowledged with SYNC; before it, a 0x42 descriptor
 /// starts the erase.
+#[cfg(not(target_arch = "wasm32"))]
 impl FlashTransport for SimDevice {
     fn write_raw(&mut self, data: &[u8], _timeout: Duration) -> Result<(), Error> {
         if let Some(e) = self.blocked() {
@@ -338,11 +347,13 @@ impl FlashTransport for SimDevice {
 /// A simulated meter as the flash engine's [`MeterOpener`]: every open is a
 /// re-enumeration of the same [`SimDevice`]. Clones share the meter. Every
 /// frame and raw write sent through its pipes is recorded.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct SimMeter {
     shared: Arc<Mutex<Shared>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct Shared {
     device: SimDevice,
@@ -354,6 +365,7 @@ struct Shared {
     opens_waiting: usize,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SimMeter {
     /// Wrap `device`.
     pub fn new(device: SimDevice) -> SimMeter {
@@ -414,6 +426,7 @@ impl SimMeter {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl MeterOpener for SimMeter {
     type Pipe = SimMeterPipe;
 
@@ -446,11 +459,13 @@ impl MeterOpener for SimMeter {
 }
 
 /// The vendor bulk pipe of an opened [`SimMeter`].
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct SimMeterPipe {
     meter: SimMeter,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Transport for SimMeterPipe {
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         let mut s = self.meter.lock();
@@ -463,6 +478,7 @@ impl Transport for SimMeterPipe {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl FlashTransport for SimMeterPipe {
     fn write_raw(&mut self, data: &[u8], timeout: Duration) -> Result<(), Error> {
         let mut s = self.meter.lock();
