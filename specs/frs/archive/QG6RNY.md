@@ -54,6 +54,8 @@ The write result carries the before and set durations and the fresh-read outcome
 
 Rust command tests on the simulator; Vitest for the store's phases and polling with fake timers; Playwright for the panel and the settings view on Chromium and WebKit, also with the wide font.
 
+AC-QG6RNY.8's demo-meter test uses real time, so a slow runner can finish the upload after the demo has already saved (30GN6B). The test accepts that save only when the upload took at least the demo's delay; the exact timing is tested on the simulator clock.
+
 ## Notes
 
 Depends on Z39H24. Same device source, 2026-11-06.

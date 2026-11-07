@@ -1051,7 +1051,7 @@ mod tests {
     // AC-QG6RNY.8: the demo meter saves its settings by itself after a logo write.
     #[test]
     fn qg6rny_the_demo_meter_does_its_own_menu_save() {
-        use crate::devices::{AppOpener, Opener, list_devices_from};
+        use crate::devices::{AppOpener, DEMO_MENU_SAVE_AFTER, Opener, list_devices_from};
         use powerz_protocol::session::SystemClock;
         let listing = list_devices_from(Ok(Vec::new()))
             .into_iter()
@@ -1062,24 +1062,41 @@ mod tests {
         let mut worker = Worker::start(transport, SystemClock, config, |_e: BackendEvent| {})
             .unwrap_or_else(|e| panic!("the worker did not start: {e:?}"));
         worker.read_settings().expect("settings read");
+        let upload_started = std::time::Instant::now();
         let written = worker
             .logo_upload(&blob_100x60(), &mut |_| {})
             .expect("verifies");
-        assert_eq!(json(&written)["settings"], "needs_menu_save");
-        let started = std::time::Instant::now();
-        let saved = loop {
-            let check = worker.logo_settings_check().expect("checks");
-            if json(&check)["settings"] == "saved" {
-                break check;
+        let upload_took = upload_started.elapsed();
+        // The save timer starts at the 0x1C write, inside the upload. A slow
+        // runner can spend longer than the delay on the chunks and read-back,
+        // so "saved" right after the upload is fine, but never sooner than the
+        // delay (FR 30GN6B).
+        let duration = match json(&written)["settings"].as_str() {
+            Some("saved") => {
+                assert!(
+                    upload_took >= DEMO_MENU_SAVE_AFTER,
+                    "saved {upload_took:?} after the upload began, before the demo's delay"
+                );
+                written.startup_duration
             }
-            assert_eq!(json(&check)["settings"], "needs_menu_save");
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(15),
-                "the demo meter never saved its settings"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            Some("needs_menu_save") => {
+                let started = std::time::Instant::now();
+                loop {
+                    let check = worker.logo_settings_check().expect("checks");
+                    if json(&check)["settings"] == "saved" {
+                        break check.startup_duration;
+                    }
+                    assert_eq!(json(&check)["settings"], "needs_menu_save");
+                    assert!(
+                        started.elapsed() < std::time::Duration::from_secs(15),
+                        "the demo meter never saved its settings"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }
+            other => panic!("unexpected settings state after the upload: {other:?}"),
         };
-        assert_eq!(saved.startup_duration.as_deref(), Some("3 s"));
+        assert_eq!(duration.as_deref(), Some("3 s"));
     }
 
     // ---- FR 70X5YX: the built-in open-powerz logos ----

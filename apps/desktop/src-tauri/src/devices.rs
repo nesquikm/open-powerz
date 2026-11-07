@@ -34,6 +34,10 @@ use crate::worker::{
     WorkerConfig, WorkerHandle,
 };
 
+/// How long after a stale-making logo write the demo meter does its own
+/// menu save (FR QG6RNY).
+pub(crate) const DEMO_MENU_SAVE_AFTER: Duration = Duration::from_secs(4);
+
 /// One entry of the device picker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeviceListing {
@@ -356,7 +360,7 @@ impl Opener for AppOpener {
             };
             // The demo meter does its own menu save a few seconds after a logo
             // write, so the logo panel finishes without a real meter (FR QG6RNY).
-            let sim = sim.with_auto_menu_save(Duration::from_secs(4), 2);
+            let sim = sim.with_auto_menu_save(DEMO_MENU_SAVE_AFTER, 2);
             return Ok(AppTransport::Demo(Box::new(sim)));
         }
         if source == MeasurementSource::Cdc {
