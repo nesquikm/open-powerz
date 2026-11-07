@@ -1,8 +1,8 @@
 ---
 milestone: M_PVFHM6
 id: fr_01M6P7JAK35X1G53WNATPVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:31:10Z
 kickoff_branch: null
 frozen_at: null
 migration: none
