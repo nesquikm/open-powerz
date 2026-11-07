@@ -4,11 +4,19 @@
  * not seen on the device, and says v0.9.0 has the same write path; the FR's
  * root cause is tagged `[inferred]` and says so too. */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const read = (path: string) =>
   readFileSync(new URL(`../../../../${path}`, import.meta.url), "utf8");
+
+/** The FR moves to specs/frs/archive/ when its milestone is archived. */
+const readFr = (id: string) => {
+  const live = `specs/frs/${id}.md`;
+  return existsSync(new URL(`../../../../${live}`, import.meta.url))
+    ? read(live)
+    : read(`specs/frs/archive/${id}.md`);
+};
 
 /** Joins wrapped Markdown lines so a phrase split across lines still matches. */
 const flat = (doc: string) => doc.replace(/\s*\n\s*/g, " ");
@@ -51,7 +59,7 @@ describe("settings write and the queue rate in the docs (AC-JV54SN.6)", () => {
   });
 
   it("jv54sn: the FR's root cause is tagged [inferred] and names v0.9.0's write path", () => {
-    const fr = read("specs/frs/JV54SN.md");
+    const fr = readFr("JV54SN");
     const root = flat(section(fr, /Root cause/i));
     expect(root).toContain("[inferred]");
     expect(root).toMatch(/not (?:yet )?(?:seen|confirmed|observed) on the (?:device|meter)/i);
