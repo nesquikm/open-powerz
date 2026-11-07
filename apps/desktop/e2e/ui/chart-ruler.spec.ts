@@ -44,6 +44,7 @@ import {
   expectHook,
   lastDraw,
   open,
+  plotAreas,
   settled,
   streamDemo,
 } from "./helpers";
@@ -628,7 +629,17 @@ test("an empty total says why nothing is drawn (AC-AXHK2T.4, .5)", async ({ page
   expect((await extras(page)).edPoints).toBe(0);
 });
 
-test("the sub-chart's time axis lines up with the main plot's (AC-AXHK2T.6)", async ({ page }) => {
+/** How far the sub-chart's plot area is from the main plot's, in px, at each edge. */
+function offsets(areas: Awaited<ReturnType<typeof plotAreas>>): { left: number; right: number } {
+  if (areas === null) throw new Error("no plot areas");
+  return {
+    left: Math.abs(areas.sub.left - areas.main.left),
+    right: Math.abs(areas.sub.right - areas.main.right),
+  };
+}
+
+/** The sub-chart on, VBUS off in it: different axes on the left of the two plots. */
+async function subChartWithoutVbus(page: Page): Promise<void> {
   await streamAndPause(page);
   const c = chart(page);
   await turnOn(c, "Sub-chart");
@@ -640,11 +651,22 @@ test("the sub-chart's time axis lines up with the main plot's (AC-AXHK2T.6)", as
     .getByRole("button", { name: /^VBUS/ });
   if ((await subVbus.getAttribute("aria-pressed")) === "true") await subVbus.click();
   await expect(subVbus).toHaveAttribute("aria-pressed", "false");
+}
 
-  const over = c.locator(".plot .u-over").first();
-  const box = await over.boundingBox();
-  if (box === null) throw new Error("no plot area");
-  await page.mouse.click(box.x + box.width * 0.3, box.y + box.height / 2);
+test("the sub-chart's time axis lines up with the main plot's (AC-AXHK2T.6)", async ({ page }) => {
+  await subChartWithoutVbus(page);
+
+  // AC-CWQ8NJ.1/.2: both plot areas come from one page read, once two reads a couple of
+  // frames apart agree. VBUS off rebuilds the sub-chart and the main plot is padded back
+  // to match a frame later, so a main box read before that frame and a sub-chart box
+  // read after it would differ by the ~10 px the padding adds.
+  const before = await settled(page, () => plotAreas(page));
+  if (before === null) throw new Error("no plot areas");
+  const width = before.main.right - before.main.left;
+  await page.mouse.click(
+    before.main.left + width * 0.3,
+    (before.main.top + before.main.bottom) / 2,
+  );
   await expect.poll(() => chartPlayhead(page)).not.toBeNull();
   await expect
     .poll(async () => {
@@ -655,10 +677,26 @@ test("the sub-chart's time axis lines up with the main plot's (AC-AXHK2T.6)", as
     })
     .toBeLessThanOrEqual(1);
   // And the plot areas themselves start and end together.
-  const subOver = await sub.locator(".u-over").first().boundingBox();
-  if (subOver === null) throw new Error("no sub-chart plot area");
-  expect(Math.abs(subOver.x - box.x)).toBeLessThanOrEqual(1);
-  expect(Math.abs(subOver.x + subOver.width - (box.x + box.width))).toBeLessThanOrEqual(1);
+  const after = offsets(await settled(page, () => plotAreas(page)));
+  expect(after.left).toBeLessThanOrEqual(1);
+  expect(after.right).toBeLessThanOrEqual(1);
+});
+
+test("a sub-chart offset by 10 px fails the alignment check (AC-CWQ8NJ.3)", async ({ page }) => {
+  await subChartWithoutVbus(page);
+  const aligned = offsets(await settled(page, () => plotAreas(page)));
+  expect(aligned.left).toBeLessThanOrEqual(1);
+  expect(aligned.right).toBeLessThanOrEqual(1);
+
+  // A real misalignment: the sub-chart's plot area moved 10 px right by a style.
+  await page.addStyleTag({
+    content: '[aria-label="Sub-chart"] .u-over { transform: translateX(10px) !important; }',
+  });
+  const shifted = offsets(await settled(page, () => plotAreas(page)));
+  expect(shifted.left).toBeGreaterThan(1);
+  expect(shifted.right).toBeGreaterThan(1);
+  expect(shifted.left).toBeCloseTo(10, 0);
+  expect(shifted.right).toBeCloseTo(10, 0);
 });
 
 test("every tool works on an opened recording (AC-AXHK2T.4–.7)", async ({ page }) => {
