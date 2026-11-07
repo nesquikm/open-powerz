@@ -1,8 +1,8 @@
 ---
 title: Simulated logo flash
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6P7JAKBFGMXAZ8P61A2XTES
 created_at: 2026-11-05T16:11:37.285Z
 changelog_category: Added

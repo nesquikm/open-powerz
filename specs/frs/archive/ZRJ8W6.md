@@ -1,8 +1,8 @@
 ---
 title: The trigger session close is lost when the charger is attached
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6S7XXDRWR64YNHE4DZRJ8W6
 created_at: 2026-11-06T20:13:47.321Z
 changelog_category: Fixed
@@ -13,11 +13,9 @@ kind: bug
 
 ## Summary
 
-With the charger attached, leaving the Trigger tab and quitting never closed the trigger session.
-The way back to 5 V ended in a Hard Reset that waited three seconds for new offers.
-Closing then ran the whole way back a second time, and quitting did not wait for a close already under way.
-So the app exited before the session close went out.
-Now a closing session sends the Hard Reset without waiting for offers, never repeats the way back, and quitting waits for the close.
+With the charger attached, leaving the Trigger tab or quitting lost the trigger session close.
+The way back to 5 V waited three seconds for offers, ran twice, and quitting did not wait for it.
+Now closing sends the Hard Reset without waiting, never repeats the way back, and quitting waits for the close.
 
 ## Requirement
 
@@ -52,6 +50,12 @@ On leave and close the Hard Reset fallback is written on the safety path, with n
 ## Testing
 
 Rust trigger tests on a port whose Hard Reset offers take three seconds, for leave, close and quit with the charger attached and gone; a device-manager test for quit during a close.
+
+## Hardware evidence
+
+- [x] AC-ZRJ8W6.1: the M7C pdm-close run (8ea9bee, 2026-11-07, qa-runs/M7C.verify-pdm-20261107-0109, B2) left the Trigger tab after a 9 V contract and a second Detect; `pd req=1`, `pd hrst`, `reset` and `pdm close` were logged once each, in the same second.
+- [x] AC-ZRJ8W6.2: the same run (B3) quit from the tab with a 9 V contract; `pd req=1` and `pdm close` were logged before `disconnected`, and the process was gone 0.43 s after the click.
+- [x] AC-ZRJ8W6.3, as far as that run covers it: every quit (B3, B4) logged `pdm close` before the disconnect. A quit timed to land inside a close still under way was not provoked on hardware; the race itself is pinned by the device-manager tests.
 
 ## Notes
 

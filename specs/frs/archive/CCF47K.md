@@ -1,8 +1,8 @@
 ---
 title: Hidden serials read as the model, and *** where a value must show
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6RFJY4Y160W7PPWV9CCF47K
 created_at: 2026-11-06T13:08:33.000Z
 changelog_category: Changed

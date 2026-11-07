@@ -1,8 +1,8 @@
 ---
 title: The settings-write hint says when the meter's screen really changes
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6RMDMJEZ927P9DCDGJV54SP
 created_at: 2026-11-06T14:32:51.022Z
 changelog_category: Fixed
@@ -47,6 +47,10 @@ One new sentence in the desktop panel's note and the command line note, the docs
 ## Testing
 
 Vitest and Playwright pin the desktop note; the command line settings test pins the stderr note.
+
+## Hardware evidence
+
+- [x] AC-JV54SP.1, the device half: the M7C verify run (d52c275, 2026-11-06, qa-runs/M7C.verify-20261106-2044, C2) showed the new hint word for word after a brightness write, and it matches the meter: the screen changes only once the value is changed in the menu (also seen twice in qa-runs/M7C.carryover-20261106-1703, part S).
 
 ## Notes
 

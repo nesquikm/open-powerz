@@ -58,8 +58,8 @@ User decision 2026-10-26. Triggering at or below 20 V is approved in the wall-ch
 
 ## Hardware evidence (r4 to r6)
 
-- AC-AXHK2N.9 stays unticked: hardware check carried to the M7c sitting (unplug the charger under a contract). What r4 to r6 show is the no-false-end half: none in r4 (334d005) P6, where no VBUS reading fell below 4 V in the 10 s after the cable read and the session held, and none in any Detect at 0 V before a contract (r5 and r6 T1). No charger was unplugged under a contract, so the collapse itself was never seen on the meter.
-- AC-AXHK2N.10 stays unticked: hardware check carried to the M7c sitting, the same unplug under a contract. The shared gone state's page side (offers gone, the message, Detect restoring the offers) was seen through the CC path in r6 T2 and T3 (TFA5N7, WFSNZD).
+- [x] AC-AXHK2N.9: the M7C verify run (d52c275, 2026-11-07, qa-runs/M7C.verify-20261106-2044, part A) unplugged the charger under an armed ("don't ask again") 9 V contract; the armed state was gone from the page 0.5 s later with no press, and `trigger armed ended: charger gone` was logged in the same second. The end came through the CC check, so the VBUS-collapse path itself was not the one that fired.
+- [x] AC-AXHK2N.10: the M7C carry-over run (46f79cb, 2026-11-06, qa-runs/M7C.carryover-20261106-1703, part U) unplugged the charger under an accepted 9 V contract; the offers went from the backend and the page, which said "The charger went away. Press Detect.", and a same-charger replug sent nothing until Detect. The d52c275 verify run (part A) repeated it under the armed state.
 
 ## Implementation notes
 

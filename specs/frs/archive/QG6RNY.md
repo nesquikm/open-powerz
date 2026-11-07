@@ -1,8 +1,8 @@
 ---
 title: Desktop logo view guides the menu save after a logo write
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6QQ9WX7T31XWS5NVJQG6RNY
 created_at: 2026-11-06T06:03:59.782Z
 changelog_category: Fixed

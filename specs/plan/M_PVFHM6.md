@@ -27,21 +27,21 @@ codename: First Impression
 
 | FR | Title | Tracker |
 |----|-------|---------|
-| [PVFHM7](../frs/PVFHM7.md) | Logo image encoder and decoder | n/a |
-| [R1ST8Z](../frs/R1ST8Z.md) | Guarded logo write, flag and read paths | n/a |
-| [A2XTES](../frs/A2XTES.md) | Simulated logo flash | n/a |
-| [TZK5K4](../frs/TZK5K4.md) | Logo upload, remove and read-back in the session | n/a |
-| [YCRQRQ](../frs/YCRQRQ.md) | Command line logo commands | n/a |
-| [MEHQC0](../frs/MEHQC0.md) | Desktop startup logo view | n/a |
-| [Z39H24](../frs/Z39H24.md) | Logo writes change the startup duration and leave the settings check stale (bug) | n/a |
-| [QG6RNY](../frs/QG6RNY.md) | Desktop logo view guides the menu save after a logo write (bug) | n/a |
-| [CCF47K](../frs/CCF47K.md) | Hidden serials read as the model, and *** where a value must show | n/a |
-| [JV54SN](../frs/JV54SN.md) | The chart stops drawing after a meter settings write (bug) | n/a |
-| [JV54SP](../frs/JV54SP.md) | The settings-write hint says when the meter's screen really changes (bug) | n/a |
-| [JV54SQ](../frs/JV54SQ.md) | The trigger view after the charger went away (bug) | n/a |
-| [1DHPPW](../frs/1DHPPW.md) | The library docs build fails on links to feature-gated logo methods (bug) | n/a |
-| [ZRJ8W6](../frs/ZRJ8W6.md) | The trigger session close is lost when the charger is attached (bug) | n/a |
-| [TJNB54](../frs/TJNB54.md) | The workspace docs build fails on a private link in the desktop crate (bug) | n/a |
+| [PVFHM7](../frs/archive/PVFHM7.md) | Logo image encoder and decoder | n/a |
+| [R1ST8Z](../frs/archive/R1ST8Z.md) | Guarded logo write, flag and read paths | n/a |
+| [A2XTES](../frs/archive/A2XTES.md) | Simulated logo flash | n/a |
+| [TZK5K4](../frs/archive/TZK5K4.md) | Logo upload, remove and read-back in the session | n/a |
+| [YCRQRQ](../frs/archive/YCRQRQ.md) | Command line logo commands | n/a |
+| [MEHQC0](../frs/archive/MEHQC0.md) | Desktop startup logo view | n/a |
+| [Z39H24](../frs/archive/Z39H24.md) | Logo writes change the startup duration and leave the settings check stale (bug) | n/a |
+| [QG6RNY](../frs/archive/QG6RNY.md) | Desktop logo view guides the menu save after a logo write (bug) | n/a |
+| [CCF47K](../frs/archive/CCF47K.md) | Hidden serials read as the model, and *** where a value must show | n/a |
+| [JV54SN](../frs/archive/JV54SN.md) | The chart stops drawing after a meter settings write (bug) | n/a |
+| [JV54SP](../frs/archive/JV54SP.md) | The settings-write hint says when the meter's screen really changes (bug) | n/a |
+| [JV54SQ](../frs/archive/JV54SQ.md) | The trigger view after the charger went away (bug) | n/a |
+| [1DHPPW](../frs/archive/1DHPPW.md) | The library docs build fails on links to feature-gated logo methods (bug) | n/a |
+| [ZRJ8W6](../frs/archive/ZRJ8W6.md) | The trigger session close is lost when the charger is attached (bug) | n/a |
+| [TJNB54](../frs/archive/TJNB54.md) | The workspace docs build fails on a private link in the desktop crate (bug) | n/a |
 
 Build order: the table's order. The two bug FRs come from the stage 2 and 3 device runs (2026-11-06): SET_DATA 0x1C is the startup duration and leaves the settings CRC A stale. The three bug FRs JV54SN, JV54SP and JV54SQ come from the M7c carry-over device run (2026-11-06, parts S and U). The last three before them come after stage 4 (2026-11-06): the user picked the electron-surf mascot as the project's art, and the stage 4 run found session actions enabled during a write. The guards need the encoder's header check; the session flows are tested on the simulator; the CLI and the desktop wrap the session.
 
@@ -86,18 +86,19 @@ Build order: the table's order. The two bug FRs come from the stage 2 and 3 devi
   verify: each runbook has its approval gate, stop rules, photos, read-back and settings diffs, and the recovery ladder
 
 **Hardware stages (separate test agents, each write stage with the user's explicit OK in that agent's tab):**
-- Stage 1, read-only: SETTINGS, 16 B and 256 B at 0x98300000, 256 B at 0x9831D400, startup-screen photo.
-- Stage 2, tiny logo (OK #1): 48×48 opaque solid, read-back, SETTINGS diff around the flag, erase granularity, boot photo.
-- Stage 3, Remove (OK #2): read-back 0xFF, erase extent, built-in logo at boot.
-- Stage 4, real image (OK #3, then OK #4 for alpha 0/255): full read-back, neighbourhood reads before and after, boot photo.
+- [x] Stage 1, read-only (PASS, qa-runs/M7C.stage1-20261106-0829): SETTINGS, 16 B and 256 B at 0x98300000, 256 B at 0x9831D400, startup-screen photo.
+- [x] Stage 2, tiny logo (written and verified, shows at boot; found Z39H24; qa-runs/M7C.stage2-20261106-0920) (OK #1): 48×48 opaque solid, read-back, SETTINGS diff around the flag, erase granularity, boot photo.
+- [x] Stage 3, Remove (PASS, qa-runs/M7C.stage3-20261106-0953) (OK #2): read-back 0xFF, erase extent, built-in logo at boot.
+- [x] Stage 4, real image (PASS for both parts, Remove skipped by the user; found 70X5YY; qa-runs/M7C.stage4-20261106-1248) (OK #3, then OK #4 for alpha 0/255): full read-back, neighbourhood reads before and after, boot photo.
+- [x] Final: the built-in mascot logo on the real meter (PASS, qa-runs/M7C.final-20261106-1633).
 
 **Deferred (hardware checks carried from M7b to this sitting, wall-charger setup, nothing on the output):**
-- AXHK2J AC.9: one settings write from the desktop app on the real meter, read back.
-- AXHK2N AC.9: unplug the charger under an accepted contract; the armed state ends within 1 s.
-- AXHK2N AC.10: the same unplug forgets the offers and says the charger went away; a same-charger replug sends nothing.
+- [x] AXHK2J AC.9 (qa-runs/M7C.carryover-20261106-1703, part S): one settings write from the desktop app on the real meter, read back.
+- [x] AXHK2N AC.9 (qa-runs/M7C.verify-20261106-2044, part A): unplug the charger under an accepted contract; the armed state ends within 1 s.
+- [x] AXHK2N AC.10 (qa-runs/M7C.carryover-20261106-1703, part U): the same unplug forgets the offers and says the charger went away; a same-charger replug sends nothing.
 
 **Release checklist:**
-- Run the @perf specs on a developer Mac in both browsers before the release: `bun run e2e:ui --grep @perf --workers=1`.
+- [x] Run the @perf specs on a developer Mac in both browsers before the release: `bun run e2e:ui --grep @perf --workers=1`. Done on a developer Mac at b4bd624: 6 of 6 passed (qa-runs/m7c/perf-release-check-b4bd624.log).
 
 **Device safety:** stage 0 never opens the real meter. The only new device paths are the three guarded ones in R1ST8Z; the shared guard keeps refusing every other 0x4A and 0x48 frame. Upload is KM003C-only.
 

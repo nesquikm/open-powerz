@@ -1,8 +1,8 @@
 ---
 title: The trigger view after the charger went away
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6RMDMJEZ927P9DCDGJV54SQ
 created_at: 2026-11-06T14:32:51.022Z
 changelog_category: Fixed
@@ -52,6 +52,12 @@ The backend's way back skips the PD steps when the charger is marked gone, keepi
 ## Testing
 
 Rust trigger tests on the simulated charger for the gone, legacy and attached cases with written lines and log lines; Vitest for the button condition; Playwright on the mock.
+
+## Hardware evidence
+
+- [x] AC-JV54SQ.1: the M7C verify run (d52c275, 2026-11-07, qa-runs/M7C.verify-20261106-2044, part A) showed no Back to 5 V after an armed 9 V contract's charger was unplugged; it came back with the next Detect's offers.
+- [x] AC-JV54SQ.4, the close-logging half: the pdm-close run (8ea9bee, 2026-11-07, qa-runs/M7C.verify-pdm-20261107-0109) logged `pdm close` on leaving (B2) and on both quits (B3, B4). Those quits had the charger attached; a quit with the charger gone was not run on hardware.
+- [x] AC-JV54SQ.5: the same run (B2) left the view with the charger attached and logged the way back to 5 V, then `pdm close`; VBUS ended at 5.18 V. The d52c275 run (part A, finding A-1) had no close line; 8ea9bee fixed that.
 
 ## Notes
 

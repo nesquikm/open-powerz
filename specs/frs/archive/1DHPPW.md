@@ -1,8 +1,8 @@
 ---
 title: The library docs build fails on links to feature-gated logo methods
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6RVY8F3435N7N8PWY1DHPPW
 created_at: 2026-11-06T12:00:00.000Z
 changelog_category: Fixed

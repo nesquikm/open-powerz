@@ -1,8 +1,8 @@
 ---
 title: Command line logo commands
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6P7JAKHTQS4VT76ZXYCRQRQ
 created_at: 2026-11-05T16:11:37.285Z
 changelog_category: Added

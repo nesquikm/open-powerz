@@ -1,8 +1,8 @@
 ---
 title: The workspace docs build fails on a private link in the desktop crate
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6SD1PDBCG107MV4ZHTJNB54
 created_at: 2026-11-06T21:43:14.091Z
 changelog_category: Fixed

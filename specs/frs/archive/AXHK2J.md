@@ -65,7 +65,7 @@ Source: the M7a settings CRC follow-ups. Timer-sensitive test timings stay as th
 - [x] AC-AXHK2J.4: the same run moved the replug from `usb:02:1` to `usb:01:1`, and it stayed the same session, one tile.
 - [x] AC-AXHK2J.7, the held-port half: in the same run `powerz detect` on a held port said the port "is in use by another program" (exit 5). A vanished port was not tried on hardware.
 - AC-AXHK2J.5 stays unticked: it cannot be provoked on demand, since OS errors 6 and 19 at open never occurred on the meter and are not to be forced. Its evidence is automated: `crates/powerz-protocol/tests/open_errors.rs` › `os_errors_6_and_19_at_open_mean_the_meter_is_gone`, and `transport/cdc.rs` › `enxio_and_enodev_at_open_are_the_meter_gone` and `another_unknown_open_failure_stays_an_io_error`.
-- AC-AXHK2J.9 stays unticked: hardware check carried to the M7c sitting. No settings write has run from the desktop app on a real meter yet. The CLI printed the same note in the AXHK2J run, and the user confirmed the behaviour it describes; a Playwright test pins the app's text.
+- [x] AC-AXHK2J.9: the M7C carry-over run (46f79cb, 2026-11-06, qa-runs/M7C.carryover-20261106-1703, part S) made one settings write from the desktop app over CDC, brightness 50 → 80 and back; the app and the meter's menu read it back, and the app showed the AC.9 message. The hint's wording was later corrected by JV54SP.
 
 ## Implementation notes
 

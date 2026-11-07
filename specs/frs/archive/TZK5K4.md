@@ -1,8 +1,8 @@
 ---
 title: Logo upload, remove and read-back in the session
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6P7JAKE21ME37PTA8TZK5K4
 created_at: 2026-11-05T16:11:37.285Z
 changelog_category: Added

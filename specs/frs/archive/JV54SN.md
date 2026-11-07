@@ -1,8 +1,8 @@
 ---
 title: The chart stops drawing after a meter settings write
 milestone: M_PVFHM6
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-07T07:23:18Z
 id: fr_01M6RMDMJEZ927P9DCDGJV54SN
 created_at: 2026-11-06T14:32:51.022Z
 changelog_category: Fixed
@@ -53,6 +53,12 @@ The worker restarts the queue at the session rate after a successful write on a 
 ## Testing
 
 Simulator: a settings write applies the written rate to the simulated queue. Protocol tests for the interval switch and real gaps; worker tests for restart, no restart on failure, and the log lines; Playwright chart check before and after an Apply on the mock.
+
+## Hardware evidence
+
+- [x] AC-JV54SN.1, the device half: the M7C verify run (d52c275, 2026-11-06, qa-runs/M7C.verify-20261106-2044, part C) wrote brightness 50 → 80 → 50 from the desktop app at 50 SPS on a meter storing 10 SPS; the chart kept drawing, with one short closed gap and no gray band.
+- [x] AC-JV54SN.3, the device half: after both writes `powerz settings` still read 10 SPS stored.
+- [x] AC-JV54SN.5, the device half: the app log had one `settings written` and one `queue restarted after settings write` line per write, no serial. No `queue interval switched` line appeared, so the cause stays inferred (AC-JV54SN.6).
 
 ## Notes
 
