@@ -351,6 +351,32 @@ export async function settled<T>(page: Page, read: () => Promise<T>, timeout = 1
   return value;
 }
 
+/** A plot area's edges in page px. */
+export interface PlotEdges {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/**
+ * AC-CWQ8NJ.1: the main chart's and the sub-chart's plot areas (their `.u-over`
+ * boxes), read in one page call so both come from the same layout; null while either
+ * is missing. Pair it with `settled` to wait for the layout to stop changing.
+ */
+export function plotAreas(page: Page): Promise<{ main: PlotEdges; sub: PlotEdges } | null> {
+  return page.evaluate(() => {
+    const edges = (el: Element | null | undefined): PlotEdges | null => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+    };
+    const main = edges(document.querySelector('[aria-label="Chart"] .plot .u-over'));
+    const sub = edges(document.querySelector('[aria-label="Sub-chart"] .u-over'));
+    return main && sub ? { main, sub } : null;
+  });
+}
+
 /** AC-KQF5GM.11: waits until the chart has drawn `count` times after this call, so the
  * app has redrawn with whatever just changed. */
 export async function chartDrawsAfterNow(page: Page, count = 2): Promise<void> {
