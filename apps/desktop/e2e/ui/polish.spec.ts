@@ -9,6 +9,9 @@
  * - AC-AKNVND.6: WebKit logs no ResizeObserver loop error at 600 px.
  * - AC-AKNVND.7: at 600 px the device picker has its full label as a tooltip, and the
  *   hover readout stays on one line.
+ * - AC-AKNVND.8: a saved-recording notice leaves after 15 s, but not while hovered.
+ *   FR 16FRNA keeps that test fast: its hover/leave clock steps jump the clock
+ *   instead of replaying the demo stream.
  *
  * AC-AKNVND.4 (the readout's single value) is covered by `chartData.test.ts`.
  */
@@ -241,15 +244,28 @@ test.describe("notices leave by themselves (AC-AKNVND.8)", () => {
     await page.getByRole("button", { name: "Stop", exact: true }).click();
     const notice = page.locator(".notice-stack .notice").filter({ hasText: "Recording saved" });
     await expect(notice).toBeVisible();
+    // AC-16FRNA.1: jump the clock (fastForward) for the hover and leave steps.
+    // Replaying the demo stream (40 batches + chart frames per simulated second)
+    // took ~30 s of real time in WebKit and timed out on slow CI runners.
+    let clockSpentMs = 0;
+    const advance = async (ms: number) => {
+      const started = performance.now();
+      await page.clock.fastForward(ms);
+      clockSpentMs += performance.now() - started;
+    };
     // Hovered: it stays however long the pointer rests on it.
     await notice.hover();
-    await page.clock.runFor(20_000);
+    await advance(20_000);
     await expect(notice).toBeVisible();
     // Pointer away: the full 15 s again, then it goes.
     await page.mouse.move(10, 400);
-    await page.clock.runFor(14_000);
+    await advance(14_000);
     await expect(notice).toBeVisible();
-    await page.clock.runFor(2_000);
+    await advance(2_000);
     await expect(notice).toHaveCount(0);
+    expect(
+      clockSpentMs,
+      "hover/leave clock steps replayed the demo stream instead of jumping the clock",
+    ).toBeLessThan(3_000);
   });
 });
