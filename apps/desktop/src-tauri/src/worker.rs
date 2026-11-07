@@ -1388,7 +1388,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// opened for them alone (no CONNECT there) while the stream waits.
     /// A write that took is logged with its changes, and a queue stream is
     /// then restarted at the session's rate (FR JV54SN `[inferred]`, see
-    /// [`restart_after_settings_write`](Self::restart_after_settings_write)).
+    /// `restart_after_settings_write`).
     pub fn write_settings(
         &mut self,
         changes: &BTreeMap<String, i32>,
