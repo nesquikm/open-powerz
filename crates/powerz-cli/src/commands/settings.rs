@@ -23,7 +23,8 @@ pub enum SettingsOutput {
 }
 
 /// `powerz settings`: read the SETTINGS block with one GET_DATA (never a
-/// write) and print it. A CRC mismatch fails the text and JSON views.
+/// write) and print it. A CRC mismatch fails the text and JSON views with
+/// [`CliError::SettingsNotSaved`] (exit 6, the menu-save steps).
 pub fn settings<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     how: SettingsOutput,
@@ -39,7 +40,8 @@ pub fn settings<T: Transport, C: Clock>(
     }
     let rows = block
         .meter_settings()
-        .map_err(|e| CliError::Device(e.to_string()))?
+        // An invalid block (CRC A stale or B broken) needs a menu save: exit 6.
+        .map_err(|e| CliError::from(powerz_protocol::session::Error::Decode(e)))?
         .rows();
     if how == SettingsOutput::Json {
         return write_json(out, &serde_json::json!({ "fields": rows }));
@@ -93,6 +95,7 @@ fn parse_value(field: WritableField, value: &str) -> Option<i32> {
             .ok()
             .and_then(|sps| Rate::ALL.into_iter().find(|r| r.sps() == sps))
             .map(|r| i32::from(r.code())),
+        WritableField::StartupDuration => pick(&["off", "1", "3", "5"]),
     }?;
     field.range().contains(&code).then_some(code)
 }
@@ -106,6 +109,7 @@ fn accepted(field: WritableField) -> &'static str {
         WritableField::Theme => "blue, green, pink, orange, yellow, dark-green or cyan",
         WritableField::Rotation => "0, 90, 180 or 270",
         WritableField::SampleRate => "2, 10, 50 or 1000",
+        WritableField::StartupDuration => "off, 1, 3 or 5",
     }
 }
 
@@ -144,10 +148,11 @@ pub fn parse_changes(args: &[String]) -> Result<Vec<(WritableField, i32)>, CliEr
 }
 
 /// Said after a write the meter read back as asked: the KM003C stores it
-/// at once but redraws a new brightness or theme only after that setting
-/// is opened in its own menu (2026-10-29) \[device\].
+/// at once but its screen shows a new brightness only after that value is
+/// changed in its own menu, for example one step up and back (2026-11-06)
+/// \[device\].
 pub const SETTINGS_SAVED_NOTE: &str = "The meter has saved the change; its screen shows it \
-     after you open that setting in the meter's menu.";
+     once you change that value in the meter's menu (for example one step up and back).";
 
 /// `powerz settings set <field>=<value> … --i-understand`: check every
 /// change, send one settings write between two SETTINGS reads, print the

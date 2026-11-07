@@ -27,13 +27,13 @@ fn put_str(block: &mut [u8], off: usize, s: &str) {
 }
 
 /// A 64-byte info block with the four string fields at 0x10/0x1C/0x28/0x34.
-fn info_block(head: [u32; 3], version: &str, date: &str) -> Vec<u8> {
+fn info_block(head: [u32; 3], model: &str, version: &str, date: &str) -> Vec<u8> {
     let mut b = vec![0xFF; 64];
     for (i, w) in head.iter().enumerate() {
         b[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
     }
     b[12..16].fill(0);
-    put_str(&mut b, 0x10, "KM003C");
+    put_str(&mut b, 0x10, model);
     put_str(&mut b, 0x1C, version);
     put_str(&mut b, 0x28, date);
     put_str(&mut b, 0x34, "SIM");
@@ -53,14 +53,30 @@ fn otp_block(serial: &str) -> Vec<u8> {
 /// Default application firmware version in the 0x4420 info block.
 pub(crate) const SIM_APP_VERSION: &str = "2.0.6";
 
+/// Default model name in both info blocks.
+pub(crate) const SIM_MODEL: &str = "KM003C";
+
 /// Plain contents of `(addr, len)`, or `None` for anything not allowed.
-/// `app_version` is the application firmware version the 0x4420 block
-/// reports, `serial` the serial the OTP block carries.
-pub(crate) fn block(addr: u32, len: u32, app_version: &str, serial: &str) -> Option<Vec<u8>> {
+/// `model` is the model name both info blocks report, `app_version` the
+/// application firmware version the 0x4420 block reports, `serial` the
+/// serial the OTP block carries.
+pub(crate) fn block(
+    addr: u32,
+    len: u32,
+    model: &str,
+    app_version: &str,
+    serial: &str,
+) -> Option<Vec<u8>> {
     match (addr, len) {
-        HARDWARE_INFO => Some(info_block([0x0000_0000, 0x4000, 0], "2.5", "2024.01.01")),
+        HARDWARE_INFO => Some(info_block(
+            [0x0000_0000, 0x4000, 0],
+            model,
+            "2.5",
+            "2024.01.01",
+        )),
         FIRMWARE_INFO => Some(info_block(
             [0x4000, 0x0002_0000, 0x1234_5678],
+            model,
             app_version,
             "2025.06.01",
         )),

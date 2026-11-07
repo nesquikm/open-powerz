@@ -93,30 +93,56 @@ export function readoutView(
 }
 
 /** What the page shows for `serial`: every place that shows one comes through here, so
- * the Hide serial numbers switch covers them all (FR AXHK2Q, AC .2, .3). */
+ * the Hide serial numbers switch covers them all (FR AXHK2Q, AC .2, .3); with the switch
+ * on it reads "***" (AC-CCF47K.3). */
 export function displaySerial(serial: string, hidden: boolean): string {
-  return hidden ? "Hidden" : serial;
+  return hidden ? "***" : serial;
 }
 
 /** A backend-made "<model> — <serial>" label as the page shows it: the backend sends it
- * whole, so with the option on only the name before the dash stays (AC-AXHK2Q.2). */
+ * whole, so with the option on only the model before the dash stays, and a label with no
+ * model part reads "***" (AC-AXHK2Q.2, AC-CCF47K.3). */
 export function displayMeterLabel(label: string, hidden: boolean): string {
   if (!hidden) return label;
   const dash = label.indexOf(" — ");
-  const masked = displaySerial(label, hidden);
-  return dash < 0 ? masked : `${label.slice(0, dash)} — ${masked}`;
+  return dash < 0 ? displaySerial(label, hidden) : label.slice(0, dash);
 }
 
 /** Picker label: "Demo device — <scenario>" for demo entries, "<model> — <serial>" for
- * meters, with "(bootloader mode)" after a meter in bootloader mode. With `hidden`,
- * "Hidden" stands for the serial. */
-export function deviceOptionLabel(device: DeviceListing, hidden: boolean): string {
+ * meters, with "(bootloader mode)" after a meter in bootloader mode. With `hidden`, a
+ * meter is named by its model alone (FR CCF47K, AC .1); when `among` lists more than one
+ * real meter of its model, " (n)" follows the model (AC .2). */
+export function deviceOptionLabel(
+  device: DeviceListing,
+  hidden: boolean,
+  among: readonly DeviceListing[] = [],
+): string {
   if (device.demo_scenario !== null) return `Demo device — ${device.demo_scenario}`;
-  const name = device.serial
-    ? `${device.model} — ${displaySerial(device.serial, hidden)}`
-    : device.model;
+  let name = device.serial && !hidden ? `${device.model} — ${device.serial}` : device.model;
+  if (hidden) {
+    const n = sameModelNumber(device, among);
+    if (n !== null) name = `${name} (${n})`;
+  }
   // A meter in bootloader mode is listed as such (FR V9SK52, AC .5).
   return device.mode === "bootloader" ? `${name} (bootloader mode)` : name;
+}
+
+/** `device`'s 1-based place among the real meters of its model in `among`: by serial
+ * (numeric collation), meters without one after them by id. Null when the model is
+ * listed once (AC-CCF47K.2). */
+function sameModelNumber(device: DeviceListing, among: readonly DeviceListing[]): number | null {
+  const peers = among.filter((d) => d.demo_scenario === null && d.model === device.model);
+  if (!peers.some((d) => d.id === device.id)) peers.push(device);
+  if (peers.length < 2) return null;
+  const collator = new Intl.Collator("en", { numeric: true });
+  peers.sort((a, b) => {
+    if (a.serial && b.serial)
+      return collator.compare(a.serial, b.serial) || collator.compare(a.id, b.id);
+    if (a.serial) return -1;
+    if (b.serial) return 1;
+    return collator.compare(a.id, b.id);
+  });
+  return peers.findIndex((d) => d.id === device.id) + 1;
 }
 
 /** Real meters first, then demo devices; order within each group is kept. */

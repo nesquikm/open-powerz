@@ -22,20 +22,22 @@ use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
 use powerz_sim::{
-    FaultPlan, FlashFault, PdScenario, Persona, SIM_SERIAL, Scenario, SimCable, SimCharger,
-    SimClock, SimDevice, SimMeter, SimPdm,
+    FaultPlan, FlashFault, LogoFault, PdScenario, Persona, SIM_SERIAL, Scenario, SimCable,
+    SimCharger, SimClock, SimDevice, SimMeter, SimPdm,
 };
 
 use crate::args::{
-    Cli, Command, FirmwareAction, FixedAction, JumpTo, LimitsAction, PdAction, PdDecode, Qc3Action,
-    QcAction, RecordsAction, RequestFlags, SettingsAction, TransportKind, TriggerProtocol,
-    UfcsAction, WatchSource, needs_connect, rate_from_sps, validate,
+    Cli, Command, FirmwareAction, FixedAction, JumpTo, LimitsAction, LogoAction, PdAction,
+    PdDecode, Qc3Action, QcAction, RecordsAction, RequestFlags, SettingsAction, TransportKind,
+    TriggerProtocol, UfcsAction, WatchSource, needs_connect, rate_from_sps, validate,
 };
 use crate::commands::{
-    DeleteOptions, DetectOptions, FLASH_RISK, JUMP_RISK, LegacyRequestOptions, PdRequestOptions,
+    DeleteOptions, DetectOptions, FLASH_RISK, JUMP_RISK, LOGO_REMOVE_RISK, LOGO_WRITE_RISK,
+    LegacyRequestOptions, LogoConfirm, LogoSource, LogoWriteOptions, PdRequestOptions,
     PdSendOptions, PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions,
     console, detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
-    firmware_probe_unavailable, info_with, inspect_flash_file, list_with, pd, pd_decode, pd_save,
+    firmware_probe_unavailable, info_with, inspect_flash_file, list_with, logo_dump,
+    logo_dump_check, logo_preview, logo_read, logo_remove, logo_write, pd, pd_decode, pd_save,
     pd_send, read, records_delete, records_get, records_list, select_device, select_device_with,
     settings, settings_set, stream, stream_cdc, trigger_legacy_list, trigger_legacy_request,
     trigger_pd_list, trigger_pd_request, trigger_pd_reset, trigger_pd_settings, watch, watch_cdc,
@@ -82,6 +84,51 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
     {
         // Reads a local file; no device is opened, whatever `--transport` says.
         return firmware_info_file(file, *json);
+    }
+    if let Command::Logo {
+        action:
+            LogoAction::Preview {
+                file,
+                builtin,
+                alpha,
+                output,
+            },
+    } = &cli.command
+    {
+        // Reads a local file or a built-in logo; no device is opened,
+        // whatever `--transport` says.
+        let source = LogoSource::from_args(file.as_deref(), *builtin, "preview")?;
+        return logo_preview(
+            source,
+            *alpha,
+            output.as_deref(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        );
+    }
+    // A logo write or remove without --i-understand opens no meter.
+    match &cli.command {
+        Command::Logo {
+            action:
+                LogoAction::Write {
+                    i_understand: false,
+                    ..
+                },
+        } => return Err(CliError::Usage(LOGO_WRITE_RISK.into())),
+        Command::Logo {
+            action:
+                LogoAction::Remove {
+                    i_understand: false,
+                    ..
+                },
+        } => return Err(CliError::Usage(LOGO_REMOVE_RISK.into())),
+        // A dump outside the logo window opens no meter.
+        Command::Logo {
+            action: LogoAction::Read {
+                dump: Some(span), ..
+            },
+        } => logo_dump_check(span)?,
+        _ => {}
     }
     if let Command::Firmware {
         action: FirmwareAction::Flash { file, i_understand },
@@ -254,6 +301,22 @@ impl Transport for LazyBulk {
         timeout: Duration,
     ) -> Result<Vec<u8>, transport::Error> {
         self.pipe()?.transact_settings(request, timeout)
+    }
+
+    fn transact_logo_chunk(
+        &mut self,
+        plain: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact_logo_chunk(plain, timeout)
+    }
+
+    fn transact_logo_flag(
+        &mut self,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.pipe()?.transact_logo_flag(frame, timeout)
     }
 
     fn recover(&mut self) -> Result<(), transport::Error> {
@@ -457,6 +520,21 @@ fn sim_ctrl_c_after_writes() -> Result<Option<usize>, CliError> {
     }
 }
 
+/// Honour `POWERZ_SIM_CTRL_C_AFTER_CHUNKS=K` for `logo write` with
+/// `--transport sim` (test-only): stand in for Ctrl-C once K logo chunks
+/// have been sent.
+fn sim_ctrl_c_after_chunks(cli: &Cli) -> Result<Option<usize>, CliError> {
+    if cli.transport != TransportKind::Sim {
+        return Ok(None);
+    }
+    match std::env::var("POWERZ_SIM_CTRL_C_AFTER_CHUNKS") {
+        Ok(n) => n.parse::<usize>().map(Some).map_err(|e| {
+            CliError::Usage(format!("invalid POWERZ_SIM_CTRL_C_AFTER_CHUNKS {n:?}: {e}"))
+        }),
+        Err(_) => Ok(None),
+    }
+}
+
 /// [`MeterOpener`] wrapper that sets the stop flag once `after` payload
 /// writes have been sent through its pipes (`None`: never). A payload write
 /// is a raw write longer than a 4-byte jump that follows the descriptor
@@ -530,6 +608,22 @@ impl<P: Transport> Transport for CountingPipe<P> {
         timeout: Duration,
     ) -> Result<Vec<u8>, transport::Error> {
         self.inner.transact_settings(request, timeout)
+    }
+
+    fn transact_logo_chunk(
+        &mut self,
+        plain: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_logo_chunk(plain, timeout)
+    }
+
+    fn transact_logo_flag(
+        &mut self,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_logo_flag(frame, timeout)
     }
 }
 
@@ -1025,6 +1119,16 @@ fn run_sim(cli: &Cli) -> Result<(), CliError> {
 ///
 /// - `POWERZ_SIM_HEAD=<n>`: HEAD answers with old-firmware field `n`.
 /// - `POWERZ_SIM_APP_VERSION=<v>`: the application info block reports `v`.
+/// - `POWERZ_SIM_LOGO_FILE=<path>`: the file's bytes sit in the logo flash
+///   at 0x300000 when the meter starts.
+/// - `POWERZ_SIM_STARTUP_LOGO=off|1|3|5`: the startup-screen duration in the
+///   SETTINGS block (the demo meter's own is `off`).
+/// - `POWERZ_SIM_LOGO_FAULT=reject@K|no-reply@K|unplug@K`: the logo flash
+///   rejects chunk K, leaves it unanswered, or unplugs after it.
+/// - `POWERZ_SIM_MODEL=<m>`: the device info block reports model `m`.
+/// - `POWERZ_SIM_MENU_SAVE=<off|1|3|5>@<ms>`: `<ms>` after a logo write
+///   leaves the settings unsaved, the meter's user saves that startup
+///   duration in its menu.
 fn sim_firmware_knobs(mut sim: SimDevice) -> Result<SimDevice, CliError> {
     if let Ok(n) = std::env::var("POWERZ_SIM_HEAD") {
         let field = n
@@ -1035,7 +1139,67 @@ fn sim_firmware_knobs(mut sim: SimDevice) -> Result<SimDevice, CliError> {
     if let Ok(v) = std::env::var("POWERZ_SIM_APP_VERSION") {
         sim = sim.with_app_version(&v);
     }
+    if let Some(path) = std::env::var_os("POWERZ_SIM_LOGO_FILE") {
+        let path = std::path::PathBuf::from(path);
+        let bytes = std::fs::read(&path).map_err(|e| {
+            CliError::Usage(format!(
+                "invalid POWERZ_SIM_LOGO_FILE {}: {e}",
+                path.display()
+            ))
+        })?;
+        sim = sim.with_logo_bytes(&bytes);
+    }
+    if let Ok(v) = std::env::var("POWERZ_SIM_STARTUP_LOGO") {
+        sim = sim.with_startup_logo(parse_startup_logo(&v)?);
+    }
+    if let Ok(spec) = std::env::var("POWERZ_SIM_LOGO_FAULT") {
+        sim = sim.with_logo_fault(parse_logo_fault(&spec)?);
+    }
+    if let Ok(model) = std::env::var("POWERZ_SIM_MODEL") {
+        sim = sim.with_model(&model);
+    }
+    if let Ok(spec) = std::env::var("POWERZ_SIM_MENU_SAVE") {
+        let bad = || {
+            CliError::Usage(format!(
+                "invalid POWERZ_SIM_MENU_SAVE {spec:?}: expected <off|1|3|5>@<ms>"
+            ))
+        };
+        let (code, ms) = spec.split_once('@').ok_or_else(bad)?;
+        let ms = ms.parse::<u64>().map_err(|_| bad())?;
+        sim = sim.with_auto_menu_save(Duration::from_millis(ms), parse_startup_logo(code)?);
+    }
     Ok(sim)
+}
+
+/// Parse `POWERZ_SIM_STARTUP_LOGO=off|1|3|5` (test-only) into the
+/// SETTINGS startup-screen code.
+fn parse_startup_logo(v: &str) -> Result<u8, CliError> {
+    match v {
+        "off" => Ok(0),
+        "1" => Ok(1),
+        "3" => Ok(2),
+        "5" => Ok(3),
+        other => Err(CliError::Usage(format!(
+            "invalid POWERZ_SIM_STARTUP_LOGO {other:?}: expected off, 1, 3 or 5"
+        ))),
+    }
+}
+
+/// Parse `POWERZ_SIM_LOGO_FAULT=reject@K|no-reply@K|unplug@K` (test-only).
+fn parse_logo_fault(spec: &str) -> Result<LogoFault, CliError> {
+    let bad = || {
+        CliError::Usage(format!(
+            "invalid POWERZ_SIM_LOGO_FAULT {spec:?}: expected reject@K, no-reply@K or unplug@K"
+        ))
+    };
+    let (kind, k) = spec.split_once('@').ok_or_else(bad)?;
+    let k = k.parse::<usize>().map_err(|_| bad())?;
+    match kind {
+        "reject" => Ok(LogoFault::RejectAt(k)),
+        "no-reply" => Ok(LogoFault::NoReplyAt(k)),
+        "unplug" => Ok(LogoFault::UnplugAfter(k)),
+        _ => Err(bad()),
+    }
 }
 
 /// Honour `POWERZ_SIM_FLASH_FAULT=<fault>` (test-only, read by `firmware
@@ -1160,6 +1324,22 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
         self.inner.transact_settings(request, timeout)
     }
 
+    fn transact_logo_chunk(
+        &mut self,
+        plain: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_logo_chunk(plain, timeout)
+    }
+
+    fn transact_logo_flag(
+        &mut self,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.inner.transact_logo_flag(frame, timeout)
+    }
+
     fn adcnew_send(
         &mut self,
         request: powerz_protocol::adcnew::Request,
@@ -1232,6 +1412,67 @@ fn dispatch<T: Transport, C: Clock>(
             unreachable!("trigger, detect and console are handled before opening a device")
         }
         Command::Firmware { .. } => unreachable!("firmware is handled before opening a device"),
+        Command::Logo {
+            action: LogoAction::Read {
+                dump: Some(span), ..
+            },
+        } => logo_dump(&mut session, span, &mut out),
+        Command::Logo {
+            action: LogoAction::Read { output, dump: None },
+        } => logo_read(&mut session, output.as_deref(), &mut out),
+        Command::Logo {
+            action:
+                LogoAction::Write {
+                    file,
+                    builtin,
+                    alpha,
+                    i_understand,
+                    yes,
+                    menu_save_timeout,
+                },
+        } => {
+            let source = LogoSource::from_args(file.as_deref(), *builtin, "write")?;
+            let opts = LogoWriteOptions {
+                alpha: *alpha,
+                confirm: LogoConfirm {
+                    i_understand: *i_understand,
+                    yes: *yes,
+                },
+                progress_tty: std::io::stderr().is_terminal(),
+                ctrl_c_after_chunks: sim_ctrl_c_after_chunks(cli)?,
+                menu_save_timeout: Duration::from_secs(*menu_save_timeout),
+            };
+            logo_write(
+                &mut session,
+                source,
+                &opts,
+                &mut std::io::stdin().lock(),
+                &mut out,
+                &mut std::io::stderr(),
+                &mut ctrl_c_flag,
+            )
+        }
+        Command::Logo {
+            action:
+                LogoAction::Remove {
+                    i_understand,
+                    yes,
+                    menu_save_timeout,
+                },
+        } => logo_remove(
+            &mut session,
+            LogoConfirm {
+                i_understand: *i_understand,
+                yes: *yes,
+            },
+            std::io::stderr().is_terminal(),
+            Duration::from_secs(*menu_save_timeout),
+            &mut std::io::stdin().lock(),
+            &mut out,
+            &mut std::io::stderr(),
+            &mut ctrl_c_flag,
+        ),
+        Command::Logo { .. } => unreachable!("logo preview is handled before opening a device"),
         Command::Info { json, hide_serial } => {
             info_with(&mut session, mode, *json, *hide_serial, &mut out)
         }
@@ -1458,5 +1699,93 @@ mod tests {
         f.write_all(b"x").unwrap();
         assert!(path.exists());
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- AC-R1ST8Z.6: wrappers forward the two logo paths ----
+
+    /// Records which path each frame arrived on.
+    #[derive(Default)]
+    struct LogoProbe {
+        calls: Vec<(&'static str, Vec<u8>)>,
+    }
+
+    impl Transport for LogoProbe {
+        fn transact(&mut self, request: &[u8], _t: Duration) -> Result<Vec<u8>, transport::Error> {
+            self.calls.push(("transact", request.to_vec()));
+            Ok(vec![0x07, 0x00, 0x00, 0x00])
+        }
+        fn read(&mut self, _t: Duration) -> Result<Vec<u8>, transport::Error> {
+            Err(transport::Error::Timeout)
+        }
+        fn transact_logo_chunk(
+            &mut self,
+            plain: &[u8],
+            _t: Duration,
+        ) -> Result<Vec<u8>, transport::Error> {
+            self.calls.push(("logo_chunk", plain.to_vec()));
+            Ok(vec![0x07, 0x00, 0x00, 0x00])
+        }
+        fn transact_logo_flag(
+            &mut self,
+            frame: &[u8],
+            _t: Duration,
+        ) -> Result<Vec<u8>, transport::Error> {
+            self.calls.push(("logo_flag", frame.to_vec()));
+            Ok(vec![0x05, 0x00, 0x00, 0x00])
+        }
+    }
+
+    /// A valid plaintext logo chunk (256 bytes at 0x300100, id 1).
+    fn logo_chunk_plain() -> Vec<u8> {
+        let mut f = vec![0x4A, 0x01, 0x01, 0x44];
+        let mut h = [0x0030_0100u32, 256, 0xFFFF_FFFF]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<u8>>();
+        let crc = powerz_protocol::crypto::crc32(&h);
+        h.extend(crc.to_le_bytes());
+        f.extend(h);
+        f.extend((0..=255u8).collect::<Vec<u8>>());
+        f
+    }
+
+    const LOGO_FLAG: [u8; 12] = [
+        0x48, 0x01, 0xC0, 0x00, 0x1C, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00,
+    ];
+
+    fn logo_calls() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("logo_chunk", logo_chunk_plain()),
+            ("logo_flag", LOGO_FLAG.to_vec()),
+        ]
+    }
+
+    const LT: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn r1st8z_counting_pipe_forwards_the_logo_paths() {
+        let mut p = CountingPipe {
+            inner: LogoProbe::default(),
+            counter: Arc::new(WriteCounter {
+                after: None,
+                long_writes: std::sync::atomic::AtomicUsize::new(0),
+                stop: Arc::new(AtomicBool::new(false)),
+            }),
+        };
+        p.transact_logo_chunk(&logo_chunk_plain(), LT).unwrap();
+        p.transact_logo_flag(&LOGO_FLAG, LT).unwrap();
+        assert_eq!(p.inner.calls, logo_calls());
+    }
+
+    #[test]
+    fn r1st8z_ctrl_c_after_forwards_the_logo_paths() {
+        let mut t = CtrlCAfter {
+            inner: LogoProbe::default(),
+            remaining: 5,
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        t.transact_logo_chunk(&logo_chunk_plain(), LT).unwrap();
+        t.transact_logo_flag(&LOGO_FLAG, LT).unwrap();
+        assert_eq!(t.inner.calls, logo_calls());
     }
 }

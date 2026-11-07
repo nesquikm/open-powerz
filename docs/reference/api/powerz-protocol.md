@@ -16,11 +16,12 @@ This page is a map of the public modules.
 | `frame` | Pure framing over byte slices: `MainHeader`, `ControlHeader`, `DataHeader`, `SectionHeader`, `Attribute`, `Section`, `Reply`; `classify_reply`, `parse_put_data`; request builders `get_data`, `connect`, `start_queue`, `stop_queue`, `start_pd_sniffer`, `stop_analyzer`; `Attribute::PD_PACKET`; `SequenceCounter`; `FrameError` |
 | `decode` | Payload decoders: `AdcSnapshot`, `QueueRecord` (also built from raw units with `QueueRecord::from_raw`), `Rate`, `Settings`, `DeviceInfoBlock`, `OtpBlock`, `Uid`; `DecodeError`; the `pd_packet` module (see below); the `head` module (`HeadReply`, the old-firmware check); the `records` and `settings` modules (offline records and the settings block, see below) |
 | `adcnew` | The ADCNEW stream the meter pushes on its CDC serial port: `Request` (start / stop / keep-alive bytes), `Content`, `Frame` and `decode_frame`, `crc8`, `CdcDemux` (splits ADCNEW frames from PDM text on one port, `CdcItem`), `AdcnewCounters`, `AdcnewError`; `KEEP_ALIVE_PERIOD`, `START_ECHO_QUIET` (12 s), `MAX_RAW_FRAMES` (see below) |
-| `transport` | The `Transport` trait and its pipes: `bulk` (`nusb`), `cdc` (`serialport`; `cdc::without_tty_twins` drops the macOS `/dev/tty.*` twin of each `/dev/cu.*` port; `cdc::open_listed` opens the listed port for a serial and reports a port another program holds as `Error::PortHeld`), `hid` (`hidapi`, ADC snapshot only); `discovery` and `select` for finding meters; `GuardedTransport` (refuses commands outside the safe set before they are sent; the record-table write and the settings write pass it only through `Transport::transact_record_table` and `Transport::transact_settings`, checked by `guard::check_record_table_write` and `guard::check_settings_write`); `Transport::settings_pipe` (the CDC twin a bulk pipe opens for the settings write); `MockTransport` for tests; `FIRST_CONNECT_TIMEOUT` (wait for the first ACCEPT before `Transport::recover` and a retry); `gone_at_open` (whether an OS error from an open means the meter left); `Error` |
+| `transport` | The `Transport` trait and its pipes: `bulk` (`nusb`), `cdc` (`serialport`; `cdc::without_tty_twins` drops the macOS `/dev/tty.*` twin of each `/dev/cu.*` port; `cdc::open_listed` opens the listed port for a serial and reports a port another program holds as `Error::PortHeld`), `hid` (`hidapi`, ADC snapshot only); `discovery` and `select` for finding meters; `GuardedTransport` (refuses commands outside the safe set before they are sent; the record-table write and the settings write pass it only through `Transport::transact_record_table` and `Transport::transact_settings`, checked by `guard::check_record_table_write` and `guard::check_settings_write`); `Transport::settings_pipe` (the CDC twin a bulk pipe opens for the settings write); the startup-logo pipes `Transport::transact_logo_chunk` and `Transport::transact_logo_flag`, checked by `guard::check_logo_chunk` and `guard::check_logo_flag_write` (see [Startup logo](#startup-logo)); `MockTransport` for tests; `FIRST_CONNECT_TIMEOUT` (wait for the first ACCEPT before `Transport::recover` and a retry); `gone_at_open` (whether an OS error from an open means the meter left); `Error` |
 | `session` | `Session` over a transport: CONNECT, memory read (`DeviceInfo`; `read_device_info_and_status` reads the info blocks, HEAD, OTP and UID once each and turns a failed block into a problem), authentication, and ADC-queue streaming (`Streamer`, `StreamPoll`, `Gap`, and `SnapshotCadence` for the side snapshot that refreshes temperature at 1000 SPS); PD capture (`PdSniffer`, `PdOptions`, `PdPoll`, `CapturedRecord`, and the `Session` methods `start_pd_sniffer`, `stop_pd_sniffer`, `poll_pd_sniffer`; see below); `Clock` / `SystemClock`; `OwnedSection`; `Error` |
 | `pdcap` | The [pdcap](../pdcap.md) capture file format: `Header`, `Entry`, `Writer`, `Reader`, `load` / `Loaded`, `Error` / `ErrorKind`, `FORMAT_VERSION`, `MAX_LINE_BYTES` (see below) |
 | `pdm` | The PDM text session on the virtual serial port, for protocol triggering: `PdmSession`, `HighVoltageConfirmation`, `Command`, `Protocol`, `Risk` and `classify`, `ReplyReader`, `Capabilities`, `find_port` / `open_found` (opens the found port; a held port is `Error::PortHeld`) / `open_port`, `Error`; submodules `pd`, `legacy`, `detect`, `message`, `console` (see below) |
 | `firmware` | Mode detection, firmware versions, firmware container inspection and the flash engine: `DeviceMode`; submodules `version`, `container` and `flash` (see below) |
+| `logo` | The startup-logo image codec, pure and wasm-friendly: `LogoMode`, `Rgba`, `LogoHeader`, `LogoBlob`, `Preview`, `LogoError`, `encode` / `decode`, the `builtin` logos; `load_file` / `load_image_bytes` with the `image-files` feature (see [Startup logo](#startup-logo)) |
 | `crypto` | AES-128-ECB with 0xFF padding (`pad_ff`, `encrypt`, `decrypt`), `crc32`, and the shipped `KEYS` |
 
 Decoders and framing are pure functions (`&[u8] → Result<T, _>`), so they can
@@ -153,6 +154,48 @@ port.
 
 The text protocol itself is described in
 [docs/protocol.md](../../protocol.md#pdm-text-session-protocol-triggering).
+
+## Startup logo
+
+`logo` turns an image into the blob the KM003C shows at boot, and back. It is
+pure (no I/O); only `load_file` and `load_image_bytes` need the `image-files`
+feature. The session methods below are the only way a blob reaches the meter,
+through the three guarded paths in `docs/protocol.md`.
+
+### `logo`
+
+| item | signature or contents |
+|---|---|
+| limits | `MIN_SIDE` (48), `OPAQUE_LIMIT` (240), `ALPHA_LIMIT` (200), `MAX_BLOB` (120 016), `HEADER_LEN` (16), `CHUNK` (256); `padded_len(len: usize) -> usize` |
+| `LogoMode` | `Opaque` (RGB565) or `Alpha` (RGB565 plus an alpha byte); `from_code(code: u32) -> Option<LogoMode>`, `format_code`, `limit`, `bytes_per_pixel` |
+| `Rgba` | `w: u32`, `h: u32`, `px: Vec<u8>` (RGBA8888, row-major, top row first) |
+| `LogoHeader` | The parsed header: `mode`, `width`, `height`, `byte_count` |
+| `LogoBlob` | `info: u32`, `bytes: Vec<u8>` (header then pixel rows); `padded(&self) -> Vec<u8>` (0xFF up to a multiple of `CHUNK`); `preview(&self) -> Preview` |
+| `Preview` | `width`, `height`, `mode`, `blob_size`, `padded_size`, `chunks`, `small_side_warning` |
+| encode | `encode(img: &Rgba, mode: LogoMode) -> Result<LogoBlob, LogoError>` (scales, then `assemble`); `target_size(w: u32, h: u32, mode: LogoMode) -> (u32, u32)`; `scale_to_box(img: &Rgba, mode: LogoMode) -> Rgba`; `assemble(format: u32, width: u32, height: u32, pixels: Vec<u8>) -> Result<LogoBlob, LogoError>`; `info_word(format: u32, width: u32, height: u32) -> u32` |
+| decode and checks | `decode(data: &[u8]) -> Result<Rgba, LogoError>` (a blob or a vendor-style raw file); `parse_header(bytes: &[u8]) -> Result<LogoHeader, LogoError>`; `validate_header(info: u32, byte_count: u32) -> Result<LogoHeader, LogoError>` (shared with the transport guard); `validate_blob(blob: &[u8]) -> Result<LogoHeader, LogoError>` |
+| files | `load_file(path: &std::path::Path) -> Result<Rgba, LogoError>` (PNG, JPEG, BMP or raw `.bin`); `load_image_bytes(bytes: &[u8]) -> Result<Rgba, LogoError>`; both need `image-files` |
+| `LogoError` | `BadFormat`, `BadSide`, `OddWidth`, `ByteCount`, `ReservedBits`, `TooLarge`, `BadImage`, `Unrecognised`, `Load` |
+
+### `logo::builtin`
+
+| item | signature or contents |
+|---|---|
+| `BuiltinLogo` | `Surf` and `SurfWordmark`; `ALL`; `name(self) -> &'static str` (the CLI and IPC name), `label`, `png`, `mode` (always transparent), `load(self) -> Result<Rgba, LogoError>`, `encode(self) -> Result<LogoBlob, LogoError>` |
+| `UnknownBuiltin` | A name that is not a built-in logo (`pub String`) |
+
+### `session` logo methods
+
+| item | signature or contents |
+|---|---|
+| `logo_preconditions` | `logo_preconditions(&self) -> Result<(), Error>`: refuses unless the session authenticated, read SETTINGS and read a KM003C model; sends nothing |
+| `logo_upload` | `logo_upload(&mut self, blob: &LogoBlob, progress: &mut dyn FnMut(LogoProgress)) -> Result<LogoWritten, Error>`: every chunk from 0x300000, startup duration 2 (3 s), a full read-back, then one SETTINGS check; nothing is retried |
+| `logo_remove` | `logo_remove(&mut self, progress: &mut dyn FnMut(LogoProgress)) -> Result<LogoWritten, Error>`: writes 0xFF over the logo area and turns the startup screen off; a failure names its `LogoRemoveStep` |
+| reads | `logo_read(&mut self) -> Result<LogoStatus, Error>` (one 16-byte read); `logo_read_full(&mut self) -> Result<Rgba, Error>`; `logo_dump(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, Error>` (refused unless `check_logo_dump` allows it, reads at least 50 ms apart); `logo_memory_read(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, Error>` (inside 0x98300000..=0x9831FFFF only) |
+| menu save | `check_settings_saved(&mut self, snapshot: &CalibrationSnapshot) -> Result<SettingsSave, Error>` (one SETTINGS read); `wait_settings_saved(&mut self, snapshot: &CalibrationSnapshot, timeout: Duration, on_check: &mut dyn FnMut(&SettingsSave) -> bool) -> Result<SettingsSave, Error>`, one check every `SETTINGS_SAVE_POLL_GAP` (2 s) |
+| types | `LogoStep` (`Chunks`, `ReadBack`), `LogoProgress`, `LogoWritten` (`duration_before`, `duration_set`, `settings_after`, `calibration`), `LogoStatus` (`Empty`, `Logo { width, height, mode }`, `Unrecognised`), `SettingsSave` (`Saved(StartupLogo)`, `NeedsMenuSave`, `CalibrationChanged`), `LogoRefusal` (`NotAuthenticated`, `SettingsNotRead`, `ModelNotRead`, `WrongModel`), `LogoRemoveStep` (`Clear`, `Flag`, `ReadBack`) |
+| frame builders | `logo_chunk_plaintext(id: u8, addr: u32, data: &[u8]) -> Vec<u8>`; `logo_flag_request(id: u8, value: u32) -> Vec<u8>`; `check_logo_dump(addr: u32, len: u32) -> Result<(), Error>` (pure) |
+| errors | `Error::LogoRefused`, `Error::LogoChunk`, `Error::LogoFlag`, `Error::LogoMismatch`, `Error::LogoRemove` |
 
 ## Firmware update
 

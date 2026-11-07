@@ -29,6 +29,7 @@
     type Fit,
   } from "../topBarFit";
   import DevicePicker from "./DevicePicker.svelte";
+  import { holdTitle, recordDisabled } from "../logoHold";
   import RecorderButtons from "./RecorderButtons.svelte";
   import ThemeControl from "./ThemeControl.svelte";
 
@@ -54,6 +55,7 @@
     onExportDb,
     controlsLabel,
     controlsInTiles,
+    held = false,
     views,
   }: {
     session: Session;
@@ -85,6 +87,9 @@
     controlsLabel: string | null;
     /** The meter grid shows: each tile carries its meter's controls, so none stay here. */
     controlsInTiles: boolean;
+    /** A logo write holds the meter (AC-MEHQC0.3): no rate change, no connect or
+     * disconnect until it ends. */
+    held?: boolean;
     /** The view tabs, in a strip just under the bar that stays in view with it. They are
      * out of the bar's row, so they never take its room (lib/topBarFit.ts). */
     views?: Snippet;
@@ -245,7 +250,7 @@
   <select
     aria-label="Sample rate"
     title={picker.label ?? undefined}
-    disabled={picker.disabled}
+    disabled={picker.disabled || held}
     value={rateSps}
     onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
   >
@@ -276,8 +281,8 @@
     class={inMenu ? undefined : "export"}
     role={inMenu ? "menuitem" : undefined}
     tabindex={inMenu ? -1 : undefined}
-    title="Export the session so far to CSV"
-    disabled={exportJob.running || !canExport}
+    title={holdTitle(held, "Export the session so far to CSV")}
+    disabled={exportJob.running || !canExport || held}
     onclick={() => (inMenu ? pick(onExport) : onExport())}
   >
     Export
@@ -290,8 +295,8 @@
     class={inMenu ? undefined : "export-db"}
     role={inMenu ? "menuitem" : undefined}
     tabindex={inMenu ? -1 : undefined}
-    title="Export the session so far to a vendor-layout .db file"
-    disabled={exportJob.running || !canExport}
+    title={holdTitle(held, "Export the session so far to a vendor-layout .db file")}
+    disabled={exportJob.running || !canExport || held}
     onclick={() => (inMenu ? pick(onExportDb) : onExportDb())}
   >
     Export .db
@@ -312,7 +317,7 @@
         <button
           type="button"
           class:primary={!session.active}
-          disabled={!session.canToggleConnect}
+          disabled={!session.canToggleConnect || held}
           onclick={onToggleConnect}
         >
           {session.active ? "Disconnect" : "Connect"}
@@ -347,14 +352,14 @@
         {/if}
         <button
           type="button"
-          title="Record to CSV (Space)"
+          title={holdTitle(held, "Record to CSV (Space)")}
           aria-pressed={recording.phase === "recording"}
-          disabled={record.disabled}
+          disabled={recordDisabled(recording.phase, canRecord, held)}
           onclick={onToggleRecording}
         >
           {record.label}
         </button>
-        <RecorderButtons {recording} {onTogglePause} {onRecorderOptions} />
+        <RecorderButtons {recording} {held} {onTogglePause} {onRecorderOptions} />
         <!-- The progress fills the disabled Export button's own box, so starting an export
          moves no item and adds nothing to the row's width (lib/topBarFit.ts). -->
         <span class="export-slot" class:exporting={exportJob.running}>

@@ -9,7 +9,7 @@
   /** The selected entry's full label, as a tooltip in case the select is cut short. */
   const selectedLabel = $derived.by(() => {
     const device = session.devices.find((d) => d.id === session.selectedId);
-    return device ? deviceOptionLabel(device, hideSerial) : undefined;
+    return device ? deviceOptionLabel(device, hideSerial, session.devices) : undefined;
   });
 
   onMount(() => {
@@ -47,7 +47,7 @@
     <!-- Keyed by mode too: a meter that turns to or from its bootloader under the same
          entry gets a new option, which WebKit needs to repaint the closed select. -->
     {#each session.devices as device (`${device.id}|${device.mode}`)}
-      <option value={device.id}>{deviceOptionLabel(device, hideSerial)}</option>
+      <option value={device.id}>{deviceOptionLabel(device, hideSerial, session.devices)}</option>
     {:else}
       <option value="">No device</option>
     {/each}

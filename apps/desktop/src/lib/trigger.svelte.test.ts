@@ -2679,3 +2679,41 @@ describe("AC-WFSNZD.3: the contract case works as before", () => {
     expect(api.goneAsked).toBe(0);
   });
 });
+
+describe("AC-JV54SQ.1: no Back to 5 V while the charger is gone", () => {
+  it("hides once the view says the charger went away, the session still open", async () => {
+    const { panel } = await collapsed();
+    expect(panel.chargerGone).toBe(true);
+    expect(panel.sessionOpen).toBe(true);
+    expect(panel.showBackTo5v).toBe(false);
+  });
+
+  it("hides too when both CC lines went low with no contract", async () => {
+    const { api, panel } = await detected();
+    expect(panel.showBackTo5v).toBe(true);
+    api.goneNow = true;
+    panel.handleEvent(ccLow());
+    await settled();
+    expect(panel.chargerGone).toBe(true);
+    expect(panel.showBackTo5v).toBe(false);
+  });
+
+  it("comes back with the next Detect that lists offers", async () => {
+    const { api, panel } = await collapsed();
+    expect(panel.showBackTo5v).toBe(false);
+    api.goneNow = false;
+    await panel.detect();
+    expect(panel.sections[0]?.state).toBe("supported");
+    expect(panel.showBackTo5v).toBe(true);
+  });
+
+  it("comes back with a new session after the view was left", async () => {
+    const { api, panel } = await collapsed();
+    await panel.leave();
+    expect(panel.showBackTo5v).toBe(false);
+    api.goneNow = false;
+    await panel.detect();
+    expect(panel.sessionOpen).toBe(true);
+    expect(panel.showBackTo5v).toBe(true);
+  });
+});

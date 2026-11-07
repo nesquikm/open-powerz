@@ -304,7 +304,7 @@ first 96 bytes; device overrides its "96 bytes" reading.
 | 0x10 | u32 | run-time overlay: 0xFFFFFFFF at first, later a Unix time near the last reboot. The stored block-A CRC covers what this word held when the meter last saved the block: 0xFFFFFFFF on a block not saved since, or the boot time of then (firmware 2.0.7: 0x6AE08E30 under the CRC while 0x10 showed 0x6AE59BA6 after a replug). So a decoder cannot check the CRC against the word it reads. It works out the one word that makes the CRC match the other bytes and accepts 0xFFFFFFFF, or a Unix time from 2020 on that is no later than the word at 0x10. Four free bytes can match any CRC, so a corrupt block A gets past this about one time in twenty, and about one in seven while 0x10 still reads 0xFFFFFFFF. A settings write sends every display key at its read value, so it reads the block twice and refuses to write when the 180 bytes differ, with no retry. A wrong display field that gets past the check and repeats in both reads is still written back, and the read-back cannot see it; calibration is never sent and values out of range are refused | [device]; meaning and the range [inferred] |
 | 0x1C | 5 x i32 | an array (5 equal values seen), not a single 1e6-scaled gain as static notes said; device overrides | [device] [inferred] |
 | 0x30 | 10 x i32 | an array of values near 1 000 000 (likely gains, 1e6 = 1.0) | [static] [device] [inferred] |
-| 0x5C | u32 | CRC-32 of bytes 0x00..0x5B | [static] [device] (firmware 2.0.6) |
+| 0x5C | u32 | CRC-32 of bytes 0x00..0x5B (CRC A). After a SET_DATA 0x1C write (startup duration) the meter keeps the old CRC A, so block A fails its check (stale) until a save in the meter's own menu writes a valid one; that save leaves the calibration bytes 0x1C..0x5B unchanged. A decoder that accepts a boot-time overlay word (see 0x10) could take a stale block for a good one, so ours counts block A as stale when its stored CRC matches the same block with another duration code in bits 14..15 and an overlay word of 0xFFFFFFFF or the word now at 0x10 | [static] [device] (firmware 2.0.6; the stale CRC after 0x1C and the menu save: 2026-11-06, firmware 2.0.7) |
 | 0x60..0xB3 | bytes | block B (84 bytes) | [static] [device] (firmware 2.0.6) |
 | 0x60 | u32 | flags; bits 2..3 = the meter's queue rate code; bit 7 seen set after a brightness change in the meter's menu, meaning unknown | [static] [device] |
 | 0x70 | ASCII | `POWER-Z`, probably the name shown on screen | [device] [inferred] |
@@ -327,7 +327,7 @@ not read by the dialog [static].
 | language | u32 at 0x00, bit 0 | 0 = Chinese, 1 = English | [static] map; [device] (screen check) |
 | brightness | u32 at 0x00, bits 3..9 | percent, 1..100 | [static] map; [device] (screen check) |
 | dim (screen dimming timeout) | u32 at 0x00, bits 10..11 | 0 = off, 1 = 15 s, 2 = 30 s, 3 = 60 s | [static] map; [device] (screen check of 0 = off); labels for 1..3 [static] |
-| startup logo | u32 at 0x00, bits 14..15 | 0 = off, 1 = 1 s, 2 = 3 s, 3 = 5 s (how long the logo shows) | [static] map; [device] (screen check of 0 = off); labels for 1..3 [static] |
+| startup logo (startup duration) | u32 at 0x00, bits 14..15 | 0 = off, 1 = 1 s, 2 = 3 s, 3 = 5 s (how long the logo shows); SET_DATA 0x48 attribute 0x1C writes this field (2 = 3 s, 0 = off) without refreshing the CRC A at 0x5C, until a save in the meter's menu | [static] map; [device] (screen check of 0 = off; the 0x1C write, 2026-11-06); labels for 1 and 3 [static] |
 | theme | u32 at 0x00, bits 16..18 (the low 3 bits of the u16 at 0x02) | 0 blue, 1 green, 2 pink, 3 orange, 4 yellow, 5 dark green, 6 cyan; 7 unknown | [static] map; [device] (screen check of 0 = blue); other colours [static] |
 | auto-rotate | u32 at 0x00, bit 27 | 1 = on | [static] map; [device] (screen check) |
 | rotation (default screen angle) | u32 at 0x60, bits 0..1 | 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270° | [static] map; meaning [inferred]: the screen showed 0° with auto-rotate on while these bits read 90° |
@@ -350,8 +350,11 @@ not read by the dialog [static].
 - The decoder checks both CRC-32 blocks first. On a CRC mismatch in either
   block it reports the mismatch as an error and decodes no field (our
   decoder's behaviour, pinned by its unit tests).
-- Fields change only through the settings write below; calibration is never
-  written, and SET_DATA (0x48) is never used for settings.
+- Fields change only through the settings write below, with one exception:
+  the startup-logo path's SET_DATA 0x48 attribute 0x1C write sets the startup
+  duration and leaves block A stale until a menu save (see Startup logo)
+  [device]. Calibration is never written, and SET_DATA (0x48) is used for no
+  other setting.
 - A field moves from [inferred] to [device] only after it has been compared
   with a photo or reading of the meter's screen; a field that does not match
   is fixed or stays [inferred].
@@ -411,7 +414,7 @@ Message layout (all words little-endian):
 | 0x01 | language | 0 = Chinese, 1 = English | [static] |
 | 0x03 | brightness | 1..100 | [static] |
 | 0x04 | dim | 0..3 (off, 15 s, 30 s, 60 s) | [static] |
-| 0x06 | startup logo time | 0..3 (off, 1 s, 3 s, 5 s); sent at its read value, not editable here | [static] |
+| 0x06 | startup logo time | 0..3 (off, 1 s, 3 s, 5 s); writable as `startup_duration`, otherwise sent at its read value | [static] |
 | 0x07 | theme | 0..6 | [static] |
 | 0x14 | bits 0..1 of 0x60 (read as rotation) | 0..3 (0°, 90°, 180°, 270°) | [static] key; [device] bits; meaning of the codes [inferred] |
 | 0x15 | rate, bits 2..3 of 0x60 | 0..3 (2, 10, 50, 1000 SPS) | [static] key; [device] bits |
@@ -441,15 +444,29 @@ Message layout (all words little-endian):
   redraw. On 2026-10-29 a new theme showed when the theme item of the
   meter's menu was opened; a new brightness once showed only after the
   value was changed in that menu, and after the restore write both showed
-  when their menu items were opened. So after a successful write the CLI
-  and the desktop app say the screen shows the change after that setting
-  is opened in the meter's menu.
+  when their menu items were opened.
+- [device] On 2026-11-06 (KM003C) the app wrote brightness 50 to 80 and
+  later 80 to 50. Both were stored at once, but the screen showed the new
+  brightness only after the value was changed in the meter's menu, one
+  step and back (80 to 81 to 80, 50 to 51 to 50); just opening the item
+  did nothing. So after a successful write the CLI and the desktop app say
+  the screen shows the change after you change that value in the meter's
+  menu, one step and back.
 - [device] Bit 7 of the u32 at 0x60 went from 0 to 1 (0x49 to 0xC9) while
   the user changed the brightness by hand in the meter's menu, between two
   settings writes; neither write changed it, and the CRC-32 at 0xB0 changed
   with it (it matched bytes 0x60..0xAF before and after). Open question:
   what bit 7 means (perhaps a "changed on the meter" flag [inferred]).
   Writes send no key for it and leave it as it is.
+
+- [inferred] On 2026-11-06 (KM003C, build 46f79cb, meter's own rate 10 SPS,
+  app streaming 50 SPS) the app's chart filled with back-to-back gaps after a
+  settings Apply [device]. The likely cause: a settings write, which resends
+  key 0x15 at its read value, re-applies the meter's own rate to the running
+  queue. This is not seen on the device; v0.9.0 has the same write path. So
+  after a successful write the app restarts the queue at the session rate,
+  and it switches its expected interval after five records at another known
+  rate's steady interval.
 
 ## Memory read and device info
 
@@ -914,6 +931,13 @@ How our library sends them safely:
   `pd data` line that cannot be read is refused too. PD role swaps (DR,
   PR, VCONN and FR_Swap) count as above 5 V. [inferred]
 - `pdm close` is always sent before the port is released.
+- The way back to 5 V before `pdm close`: `pd req=1`; if that fails, `pd
+  hrst` is written and its new offers are not waited for, since nothing
+  reads them before the close. After another protocol was entered since PD,
+  `pd req=1` gets `req error 252` and `pd hrst` gets no answer at all
+  [device] (2026-11-06: nothing for 3 s); waiting for the offers there would
+  outlast an app's quit wait. A Hard Reset ends any PD contract at 5 V on
+  its own [inferred].
 - Out of sync: a lagging meter was seen answering each command with the
   previous command's reply [device] (2026-10-23). A line that only another
   command gets (`pdm mode entry`, `type=`, `req:` / `req error`, a bare `ok`
@@ -1070,6 +1094,78 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
   the CDC interface report `BOOT` instead of `APP`, and there is no HID
   interface. [device]
 
+## Startup logo
+
+The meter can show a custom image at power-on. This section covers mostly the
+image format: how a picture becomes the byte blob the meter stores. How the
+blob is sent to the meter is described separately (see Never-send commands,
+Startup logo paths). The image-format facts come from static analysis of the
+vendor app.
+
+The write that follows an upload or Remove, SET_DATA 0x48 attribute 0x1C, sets
+the startup duration, the time the startup screen (and so the logo) shows:
+value 2 sets it to 3 s and value 0 turns the startup screen off. It lands in
+bits 14..15 of the settings word at 0x00 (see SETTINGS). [device] (2026-11-06,
+firmware 2.0.7, M7C stages 2 and 3)
+
+After a 0x1C write the meter changes those bits but keeps the old block A
+check value (the CRC A at 0x5C), so every SETTINGS reply after it fails the
+block A check: the block is stale. A save in the meter's own menu (Settings,
+startup logo duration, pick a value, save) writes the block again with a valid
+CRC A, and the calibration bytes 0x1C..0x5B stay as they were. Until that save
+our library treats the block as unreadable: it decodes no field, refuses every
+settings write and every logo write, and asks for the menu save. Nothing we
+send repairs the block. A replug while the block is stale was never tried, so
+nothing relies on one. [device] (2026-11-06)
+
+### Scaling
+
+- There are two modes: opaque, and alpha (with transparency). The box limit is 240 px per side in opaque mode and 200 px per side in alpha mode. [static]
+- Each source side is first clamped to the range 48..limit, giving a target box; the picture is then scaled into that box with its aspect ratio kept, so small pictures are scaled up and large ones down. [static]
+- Because the aspect ratio is kept, one side can end up below 48 (a 1000×100 picture becomes 240×24); our preview warns when that happens. [static]
+- An odd width is rounded down to the next even width by a second rescale (aspect kept, so the height may move by one). [static] The even width keeps every RGB565 row a multiple of 4 bytes. [inferred]
+- The limits depend only on the mode, not on the model (KM002C or KM003C). [static] Whether the KM002C screen needs other limits is untested. [inferred]
+
+### Blob layout
+
+| offset | size | field | tag |
+|---|---|---|---|
+| 0x00 | u32 | info word | [static] |
+| 0x04 | u32 | pixel byte count, `2·w·h` (opaque) or `3·w·h` (alpha) | [static] |
+| 0x08 | u32 | zero | [static] |
+| 0x0C | u32 | the info word again | [static] |
+| 0x10 | … | pixel rows, top row first, each row left to right, no row padding | [static] |
+
+### Info word
+
+| bits | meaning | tag |
+|---|---|---|
+| 0–4 | pixel format code: 4 = RGB565 (opaque), 5 = RGB565 plus alpha | [static]; reading it as one 5-bit field [inferred] |
+| 5–9 | always zero | [static] |
+| 10–20 | width (11 bits) | [static] |
+| 21–31 | height (11 bits) | [static] |
+
+- Opaque 240×135 gives info word 0x10E3C004 and a 64 816-byte blob. [static]
+- Alpha 200×200 gives info word 0x19032005 and a 120 016-byte blob, the largest possible. [static]
+- Opaque 48×48 gives info word 0x0600C004 and a 4 624-byte blob. [static]
+
+### Pixel formats
+
+- Format 4 (RGB565): 2 bytes per pixel, a little-endian u16 with red in bits 11–15, green in bits 5–10 and blue in bits 0–4. [static]
+- Format 5 (alpha): 3 bytes per pixel, the same little-endian RGB565 u16 followed by one alpha byte (0 transparent, 255 opaque). [static]
+- In alpha mode the vendor's colour values are usually premultiplied by alpha, and how the firmware blends them is unknown; pixels with alpha 0 or 255 look the same either way. [inferred]
+- We convert every source picture to 8-bit RGBA ourselves before encoding, so palette images get a correct alpha byte. [inferred]
+
+### Raw .bin files
+
+- A `.bin` logo file is the info word followed directly by the pixel bytes, i.e. the blob from offset 0x0C onward, without the 12-byte prefix. [static]
+- The vendor app accepts only format codes 4 and 5 in a `.bin` and runs the pixels through the same scaling and encoding as any other picture. [static]
+
+### Padding
+
+- We pad the blob with 0xFF bytes to a multiple of 256 bytes before writing it; the header's pixel byte count stays the exact, unpadded value (the 48×48 opaque blob pads to 4 864 bytes). [inferred]
+- The firmware is expected to ignore the pad bytes, since the header count gives the true length. [inferred]
+
 ## Never-send commands
 
 Our library refuses to send these requests, so a bug or a CLI typo cannot
@@ -1087,7 +1183,36 @@ exist: SET_DATA (0x48) with attribute 0x28 only, sent by the record delete
 (see Deleting records), and the settings write (type 0x0A) with the keys of
 Settings write only (see Settings write). Every other SET_DATA attribute
 and every other 0x0A key, factory reset (key 0x08) included, is refused.
-RESET and memory writes are never sent on any path. [static]
+The startup logo adds three more narrow paths, listed below. RESET is never
+sent on any path, and no memory write is sent outside the logo chunk path.
+[static]
+
+Startup logo paths (see Startup logo). Each has its own check in our library,
+and everything else on 0x4A and 0x48 stays refused. [inferred]
+
+- Logo chunk write (0x4A): the only memory write we send. The check runs on
+  the plaintext chunk, before it is encrypted with AES-128-ECB under key slot
+  0. A chunk is 256 bytes at `0x300000 + 256·k`, or 16 bytes, and must lie
+  wholly inside the logo region 0x300000..0x31D4FF (end 0x31D500, exclusive).
+  A 16-byte chunk is allowed only as sixteen 0xFF bytes at 0x300000 (Remove).
+  The first 256-byte chunk, at 0x300000, must start with a valid logo blob
+  header (see Blob layout). Every other address, length or content is refused.
+  [inferred] The frame is the vendor's: main header with bit 16 (encrypted
+  payload) set and `obj` = chunk length + 16, then a 16-byte block header
+  {flash address, `len2` = chunk length, 0xFFFFFFFF, CRC-32 of the first 12
+  bytes}, then the chunk data, both encrypted. [static] That the firmware
+  erases on write and ignores the 0xFF pad after the blob is [inferred].
+- Startup duration (SET_DATA 0x48, attribute 0x1C): a 4-byte u32 whose value
+  is 0 or 2 only; any other value or size is refused. [static] The vendor sends
+  2 after a successful upload and 0 after Remove. [static] The value is the
+  startup duration code (bits 14..15 of the SETTINGS word at 0x00): 2 sets
+  3 s, 0 turns the startup screen off. [device] (2026-11-06) The meter leaves
+  block A's old CRC in place after this write, so the SETTINGS block reads as
+  stale until a save in the meter's menu; see Startup logo. [device]
+- Logo read (0x44): reads in the window 0x98300000..0x9831FFFF only, at most
+  256 bytes each and wholly inside the window; it changes nothing on the meter.
+  [inferred] That this window maps the logo region of the flash, as
+  `0x98000000 + offset` does for offline records, is [inferred].
 
 | request | why | tag |
 |---|---|---|
@@ -1095,10 +1220,10 @@ RESET and memory writes are never sent on any path. [static]
 | type 0x08 JUMP_APROM | leaves firmware-update mode | [doc] [static] |
 | type 0x09 JUMP_DFU | enters firmware-update mode | [doc] [static] |
 | type 0x42 | firmware download descriptor (starts an erase) | [static] |
-| type 0x48 SET_DATA, any attribute other than 0x28 from the delete path | writes settings and calibration | [static] |
+| type 0x48 SET_DATA, any attribute other than 0x28 from the delete path or 0x1C from the logo path | writes settings and calibration | [static] |
 | type 0x0A with a key outside Settings write, or from any path but the settings write | factory reset and unknown settings | [static] |
-| type 0x4A | memory / SPI-flash write | [static] |
-| memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450` or the offline record window of a listed entry | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
+| type 0x4A, any frame other than a checked logo chunk | memory / SPI-flash write | [static] |
+| memory read (0x44) at any address other than `0x420`, `0x4420`, `0x03000C00`, `0x40010450`, the offline record window of a listed entry, or the logo read window | other addresses reportedly crash the meter | [inferred] (prior art) [device] |
 | any HID request other than the ADC snapshot (GET_DATA mask 0x001) | replies over 64 bytes hang and reboot the meter; control commands are ignored | [device] (firmware 2.0.6) |
 
 HEAD (0x40) is not on this list: it only reads a status word, so the

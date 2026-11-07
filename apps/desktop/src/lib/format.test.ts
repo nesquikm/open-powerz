@@ -161,11 +161,17 @@ describe("device picker labels (AC-AH2AEK.3)", () => {
     expect(deviceOptionLabel(demo, false)).toBe("Demo device — pd-negotiation");
   });
 
-  it("reads Hidden in place of the serial with the option on (AC-AXHK2Q.2, .3)", () => {
-    expect(deviceOptionLabel(real, true)).toBe("KM003C — Hidden");
+  it("names a real meter by its model alone with the option on (AC-CCF47K.1)", () => {
+    expect(deviceOptionLabel(real, true)).toBe("KM003C");
     expect(deviceOptionLabel({ ...real, mode: "bootloader" }, true)).toBe(
-      "KM003C — Hidden (bootloader mode)",
+      "KM003C (bootloader mode)",
     );
+    expect(deviceOptionLabel(real, true)).not.toContain("—");
+    expect(deviceOptionLabel(real, true)).not.toContain("Hidden");
+  });
+
+  it("names a meter with no serial by its model alone with the option on (AC-CCF47K.1)", () => {
+    expect(deviceOptionLabel({ ...real, serial: null }, true)).toBe("KM003C");
   });
 
   it("names real meters by their serial again with the option off (AC-AXHK2Q.3)", () => {
@@ -200,9 +206,9 @@ describe("current direction text (orchestrator visual review)", () => {
   });
 });
 
-describe("displaySerial (AC-AXHK2Q.2, .3)", () => {
-  it("reads Hidden with the option on", () => {
-    expect(displaySerial("FAKE-SERIAL-0001", true)).toBe("Hidden");
+describe("displaySerial (AC-AXHK2Q.2, .3, AC-CCF47K.3)", () => {
+  it("reads *** with the option on", () => {
+    expect(displaySerial("FAKE-SERIAL-0001", true)).toBe("***");
   });
 
   it("gives the serial back with the option off", () => {
@@ -211,15 +217,112 @@ describe("displaySerial (AC-AXHK2Q.2, .3)", () => {
 });
 
 describe("displayMeterLabel", () => {
-  it("keeps the model and hides what follows it (AC-AXHK2Q.2)", () => {
-    expect(displayMeterLabel("KM003C — FAKE-SERIAL", true)).toBe("KM003C — Hidden");
+  it("keeps the model alone and drops what follows it (AC-CCF47K.3)", () => {
+    expect(displayMeterLabel("KM003C — FAKE-SERIAL", true)).toBe("KM003C");
   });
 
-  it("hides a whole label it cannot read, not shows it", () => {
-    expect(displayMeterLabel("FAKE-SERIAL", true)).toBe("Hidden");
+  it("reads *** for a whole label it cannot read, not shows it (AC-CCF47K.3)", () => {
+    expect(displayMeterLabel("FAKE-SERIAL", true)).toBe("***");
   });
 
   it("leaves the label alone with the option off", () => {
     expect(displayMeterLabel("KM003C — FAKE-SERIAL", false)).toBe("KM003C — FAKE-SERIAL");
+  });
+});
+
+describe("same-model meters are numbered with the option on (AC-CCF47K.2)", () => {
+  const meter = (id: string, serial: string | null, model = "KM003C"): DeviceListing => ({
+    id,
+    label: serial ? `${model} — ${serial}` : model,
+    model,
+    serial,
+    bus: "1",
+    address: Number(id.split(":").pop()),
+    demo_scenario: null,
+    mode: "application",
+  });
+  const demo = (name: string): DeviceListing => ({
+    id: `demo:${name}`,
+    label: `Demo device — ${name}`,
+    model: "KM003C",
+    serial: "123456",
+    bus: null,
+    address: null,
+    demo_scenario: name,
+    mode: "application",
+  });
+  const labels = (list: readonly DeviceListing[], hidden = true) =>
+    list.map((d) => deviceOptionLabel(d, hidden, list));
+
+  it("numbers two meters of one model by ascending serial", () => {
+    const b = meter("usb:1:4", "SER-B-0002");
+    const a = meter("usb:1:5", "SER-A-0001");
+    expect(labels([b, a])).toEqual(["KM003C (2)", "KM003C (1)"]);
+  });
+
+  it("sorts serials with numeric collation", () => {
+    const ten = meter("usb:1:4", "SER-10");
+    const two = meter("usb:1:5", "SER-2");
+    expect(labels([ten, two])).toEqual(["KM003C (2)", "KM003C (1)"]);
+  });
+
+  it("puts meters without a serial after those with one, in device-id order", () => {
+    const noSerialB = meter("usb:1:9", null);
+    const noSerialA = meter("usb:1:3", null);
+    const withSerial = meter("usb:1:7", "SER-Z-9999");
+    expect(labels([noSerialB, withSerial, noSerialA])).toEqual([
+      "KM003C (3)",
+      "KM003C (1)",
+      "KM003C (2)",
+    ]);
+  });
+
+  it("keeps each meter's number however the list is ordered", () => {
+    const a = meter("usb:1:4", "SER-A-0001");
+    const b = meter("usb:1:5", "SER-B-0002");
+    const c = meter("usb:1:6", "SER-C-0003");
+    const forward = [a, b, c];
+    const shuffled = [c, a, b];
+    for (const d of forward) {
+      expect(deviceOptionLabel(d, true, shuffled)).toBe(deviceOptionLabel(d, true, forward));
+    }
+    expect(deviceOptionLabel(c, true, shuffled)).toBe("KM003C (3)");
+  });
+
+  it("adds the number before (bootloader mode)", () => {
+    const a = meter("usb:1:4", "SER-A-0001");
+    const b = { ...meter("usb:1:5", "SER-B-0002"), mode: "bootloader" as const };
+    expect(labels([a, b])).toEqual(["KM003C (1)", "KM003C (2) (bootloader mode)"]);
+  });
+
+  it("gives a model listed once no number, beside another model listed twice", () => {
+    const a = meter("usb:1:4", "SER-A-0001");
+    const b = meter("usb:1:5", "SER-B-0002");
+    const other = meter("usb:1:6", "SER-K-0001", "KM002C");
+    expect(labels([a, b, other])).toEqual(["KM003C (1)", "KM003C (2)", "KM002C"]);
+  });
+
+  it("never numbers demo devices, nor counts them toward a meter's model", () => {
+    const real = meter("usb:1:4", "SER-A-0001");
+    const list = [real, demo("load-5v-1a"), demo("pd-9v-2a")];
+    expect(labels(list)).toEqual(["KM003C", "Demo device — load-5v-1a", "Demo device — pd-9v-2a"]);
+  });
+
+  it("puts no serial in a numbered label", () => {
+    const a = meter("usb:1:4", "SER-A-0001");
+    const b = meter("usb:1:5", "SER-B-0002");
+    for (const text of labels([a, b])) {
+      expect(text).not.toMatch(/SER-|0001|0002|Hidden|—/);
+    }
+  });
+
+  it("numbers nothing and shows the serials with the option off (AC-CCF47K.4)", () => {
+    const a = meter("usb:1:4", "SER-A-0001");
+    const b = meter("usb:1:5", "SER-B-0002");
+    expect(labels([a, b], false)).toEqual(["KM003C — SER-A-0001", "KM003C — SER-B-0002"]);
+  });
+
+  it("leaves a lone meter unnumbered when no list is passed", () => {
+    expect(deviceOptionLabel(meter("usb:1:4", "SER-A-0001"), true)).toBe("KM003C");
   });
 });

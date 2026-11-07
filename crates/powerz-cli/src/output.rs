@@ -10,7 +10,7 @@ use serde_json::ser::{Formatter, PrettyFormatter};
 use crate::error::CliError;
 
 /// Printed for a serial or UID under `--hide-serial`.
-pub(crate) const HIDDEN: &str = "hidden";
+pub(crate) const MASK: &str = "***";
 
 /// Write `value` as pretty-printed JSON followed by a newline. Floats are
 /// written as plain decimals, never in exponent form.

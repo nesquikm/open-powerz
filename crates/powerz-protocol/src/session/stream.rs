@@ -31,6 +31,45 @@ pub struct StreamPoll {
     pub records: Vec<QueueRecord>,
     /// Gaps found before or between these records.
     pub gaps: Vec<Gap>,
+    /// The rate the session switched to during this poll, if any: after
+    /// [`RATE_SWITCH_RUN`] records in a row at the steady, longer interval
+    /// of another known rate `[inferred]` (a settings write re-applies the
+    /// meter's own rate to the running queue). Reported once; later records
+    /// decode, and gaps are measured, at that rate.
+    pub rate_switch: Option<Rate>,
+}
+
+/// Records in a row at another rate's interval before the session switches
+/// to that rate `[inferred]`.
+pub const RATE_SWITCH_RUN: u32 = 5;
+
+/// A run of consecutive records at one steady interval longer than the
+/// expected one.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct RateRun {
+    /// The known rate whose interval the run matches.
+    rate: Option<Rate>,
+    /// Records in the run so far.
+    count: u32,
+}
+
+/// Interval, ms, between two records at `rate`.
+fn interval_ms(rate: Rate) -> u32 {
+    1000 / rate.sps().max(1)
+}
+
+/// Allowed jitter around an interval: a tenth of it `[inferred]`.
+fn jitter_ms(interval: u32) -> u32 {
+    interval / 10
+}
+
+/// The known rate, slower than `interval`, whose interval `delta` matches
+/// within its jitter.
+fn slower_rate_of(delta: u32, interval: u32) -> Option<Rate> {
+    Rate::ALL.into_iter().find(|&r| {
+        let i = interval_ms(r);
+        i > interval && delta.abs_diff(i) <= jitter_ms(i)
+    })
 }
 
 /// When a streaming client reads an ADC snapshot ([`Session::read_adc`],
@@ -119,6 +158,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         self.expect_accept(&request, &format!("{:#04x}", request[0]))?;
         self.stream = Some(rate);
         self.last_record_ms = None;
+        self.rate_run = RateRun::default();
         Ok(())
     }
 
@@ -128,6 +168,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         self.expect_accept(&request, &format!("{:#04x}", request[0]))?;
         self.stream = None;
         self.last_record_ms = None;
+        self.rate_run = RateRun::default();
         Ok(())
     }
 
@@ -137,11 +178,17 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// The record rate is the started stream's, else the meter's own rate as
     /// last seen in an ADC snapshot or SETTINGS. With no known rate, records
     /// decode with 1 mV CC/D± units and no gaps are reported.
+    ///
+    /// When records keep arriving at the steady interval of a slower known
+    /// rate, the session switches to it after [`RATE_SWITCH_RUN`] in a row
+    /// and reports it in [`StreamPoll::rate_switch`] `[inferred]`; the run's
+    /// records in this poll and all later ones decode at the new rate.
     pub fn poll_stream(&mut self) -> Result<StreamPoll, Error> {
         let known = self.stream.or(self.meter_rate);
         let rate = known.unwrap_or(Rate::Sps10);
-        let mut records = Vec::new();
-        for section in self.get_data(Attribute::ADC_QUEUE)? {
+        let sections = self.get_data(Attribute::ADC_QUEUE)?;
+        let mut decoded = Vec::new();
+        for section in &sections {
             if section.att != Attribute::ADC_QUEUE {
                 continue;
             }
@@ -149,24 +196,85 @@ impl<T: Transport, C: Clock> Session<T, C> {
             // keep the whole records, drop a partial last one. The missing
             // samples surface as a gap on the next record that arrives.
             for chunk in section.payload.as_chunks::<RECORD_LEN>().0 {
-                records.push(QueueRecord::decode(chunk, rate)?);
+                decoded.push((QueueRecord::decode(chunk, rate)?, chunk));
             }
         }
-        records.sort_by_key(QueueRecord::time_ms);
-        let gaps = match known {
-            Some(rate) => self.track_gaps(&records, 1000 / rate.sps()),
+        decoded.sort_by_key(|(r, _)| r.time_ms());
+        let mut records: Vec<QueueRecord> = decoded.iter().map(|(r, _)| *r).collect();
+        let (gaps, rate_switch) = match known {
+            Some(rate) => {
+                let (gaps, switch) = self.track_queue(&records, rate);
+                if let Some((from, new_rate)) = switch {
+                    for (slot, (_, chunk)) in records.iter_mut().zip(&decoded).skip(from) {
+                        *slot = QueueRecord::decode(chunk.as_slice(), new_rate)?;
+                    }
+                    if self.stream.is_some() {
+                        self.stream = Some(new_rate);
+                    } else {
+                        self.meter_rate = Some(new_rate);
+                    }
+                }
+                (gaps, switch.map(|(_, r)| r))
+            }
             None => {
                 self.last_record_ms = records.last().map(QueueRecord::time_ms);
-                Vec::new()
+                (Vec::new(), None)
             }
         };
-        Ok(StreamPoll { records, gaps })
+        Ok(StreamPoll {
+            records,
+            gaps,
+            rate_switch,
+        })
     }
 
-    /// Gaps between the last record seen and `records`, which must be in
-    /// device-time order; advances the last-record time.
-    fn track_gaps(&mut self, records: &[QueueRecord], interval: u32) -> Vec<Gap> {
-        gaps_after(&mut self.last_record_ms, records, interval)
+    /// Gaps between the last record seen and `records` (in device-time
+    /// order) at `rate`, plus a rate switch: the index of the first record in
+    /// `records` of the run that made it and the new rate. Advances the
+    /// last-record time and the run.
+    fn track_queue(
+        &mut self,
+        records: &[QueueRecord],
+        rate: Rate,
+    ) -> (Vec<Gap>, Option<(usize, Rate)>) {
+        let mut interval = interval_ms(rate);
+        let mut gaps = Vec::new();
+        let mut switch = None;
+        let mut run_start = 0;
+        for (k, r) in records.iter().enumerate() {
+            let to_ms = r.time_ms();
+            if let Some(from_ms) = self.last_record_ms {
+                let delta = to_ms.saturating_sub(from_ms);
+                if delta > interval + jitter_ms(interval) {
+                    gaps.push(Gap {
+                        from_ms,
+                        to_ms,
+                        expected: delta / interval,
+                        received: 1,
+                    });
+                }
+                match slower_rate_of(delta, interval) {
+                    Some(r) if self.rate_run.rate == Some(r) => self.rate_run.count += 1,
+                    Some(r) => {
+                        self.rate_run = RateRun {
+                            rate: Some(r),
+                            count: 1,
+                        };
+                        run_start = k;
+                    }
+                    None => self.rate_run = RateRun::default(),
+                }
+                if let Some(new_rate) = self.rate_run.rate
+                    && self.rate_run.count >= RATE_SWITCH_RUN
+                {
+                    switch = Some((run_start, new_rate));
+                    interval = interval_ms(new_rate);
+                    self.rate_run = RateRun::default();
+                }
+            }
+            self.last_record_ms = Some(to_ms);
+        }
+        (gaps, switch)
     }
 }
 

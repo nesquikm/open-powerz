@@ -18,6 +18,7 @@ mod detect;
 mod firmware;
 mod info;
 mod list;
+mod logo;
 mod pd;
 mod pd_send;
 mod read;
@@ -35,6 +36,10 @@ pub use firmware::{
 };
 pub use info::{info, info_in_mode, info_with};
 pub use list::{list, list_with, select_device, select_device_with};
+pub use logo::{
+    LOGO_REMOVE_RISK, LOGO_WRITE_RISK, LogoConfirm, LogoSource, LogoWriteOptions, logo_dump,
+    logo_dump_check, logo_preview, logo_read, logo_remove, logo_write,
+};
 pub use pd::{pd, pd_decode, pd_save};
 pub use pd_send::{PdSendOptions, pd_send};
 pub use read::read;

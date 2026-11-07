@@ -1,3 +1,5 @@
+![open-powerz: open-source app for the POWER-Z KM003C / KM002C USB-C meter](assets/brand/readme-banner.png)
+
 # open-powerz
 
 An open-source, cross-platform (macOS, Linux, Windows) desktop app and CLI for the
@@ -76,6 +78,11 @@ check the download and open the app past the macOS and Windows warnings.
 
 - View the meter's settings and calibration values ([read the settings](docs/how-to/read-the-meters-memory.md#read-the-settings))
 - Change the language, brightness, dim timeout, theme, rotation and sample rate, checked by reading them back ([change the settings](docs/how-to/read-the-meters-memory.md#change-the-settings))
+
+### Startup logo
+
+- Preview an image as the KM003C's startup logo, then write it, read it back or remove it from the CLI (`powerz logo preview`, `logo read`, `logo write`, `logo remove`), with a typed confirmation and a read-back check ([startup logo](docs/reference/cli.md#startup-logo))
+- Use a built-in open-powerz logo instead of a picture: the mascot, or the mascot with "open-powerz" lettering (`--builtin surf`, `--builtin surf-wordmark`); in the desktop app's logo view, pick it under "Or use the open-powerz logo" ([built-in logos](docs/reference/cli.md#startup-logo))
 
 ### Serial stream
 

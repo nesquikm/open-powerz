@@ -100,6 +100,18 @@ impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
         self.log_exchange(request, result)
     }
 
+    /// A logo flash chunk, traced (plaintext) like [`transact`](Self::transact).
+    fn transact_logo_chunk(&mut self, plain: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        let result = self.inner.transact_logo_chunk(plain, timeout);
+        self.log_exchange(plain, result)
+    }
+
+    /// The startup-duration write (SET_DATA 0x1C) of the logo paths, traced like [`transact`](Self::transact).
+    fn transact_logo_flag(&mut self, frame: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        let result = self.inner.transact_logo_flag(frame, timeout);
+        self.log_exchange(frame, result)
+    }
+
     fn recover(&mut self) -> Result<(), Error> {
         self.inner.recover()
     }
@@ -319,5 +331,73 @@ mod tests {
         let mut t = TraceTransport::new(Pipe::default(), Vec::new());
         t.recover().unwrap();
         assert_eq!(t.inner().recovers, 1);
+    }
+
+    // ---- AC-R1ST8Z.6: wrappers forward the two logo paths ----
+
+    /// Records which path each frame arrived on.
+    #[derive(Default)]
+    struct LogoProbe {
+        calls: Vec<(&'static str, Vec<u8>)>,
+    }
+
+    impl Transport for LogoProbe {
+        fn transact(&mut self, request: &[u8], _t: Duration) -> Result<Vec<u8>, Error> {
+            self.calls.push(("transact", request.to_vec()));
+            Ok(vec![0x07, 0x00, 0x00, 0x00])
+        }
+        fn read(&mut self, _t: Duration) -> Result<Vec<u8>, Error> {
+            Err(Error::Timeout)
+        }
+        fn transact_logo_chunk(&mut self, plain: &[u8], _t: Duration) -> Result<Vec<u8>, Error> {
+            self.calls.push(("logo_chunk", plain.to_vec()));
+            Ok(vec![0x07, 0x00, 0x00, 0x00])
+        }
+        fn transact_logo_flag(&mut self, frame: &[u8], _t: Duration) -> Result<Vec<u8>, Error> {
+            self.calls.push(("logo_flag", frame.to_vec()));
+            Ok(vec![0x05, 0x00, 0x00, 0x00])
+        }
+    }
+
+    /// A valid plaintext logo chunk (256 bytes at 0x300100, id 1).
+    fn logo_chunk_plain() -> Vec<u8> {
+        let mut f = vec![0x4A, 0x01, 0x01, 0x44];
+        let mut h = [0x0030_0100u32, 256, 0xFFFF_FFFF]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<u8>>();
+        let crc = powerz_protocol::crypto::crc32(&h);
+        h.extend(crc.to_le_bytes());
+        f.extend(h);
+        f.extend((0..=255u8).collect::<Vec<u8>>());
+        f
+    }
+
+    const LOGO_FLAG: [u8; 12] = [
+        0x48, 0x01, 0xC0, 0x00, 0x1C, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00,
+    ];
+
+    fn logo_calls() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("logo_chunk", logo_chunk_plain()),
+            ("logo_flag", LOGO_FLAG.to_vec()),
+        ]
+    }
+
+    #[test]
+    fn r1st8z_trace_transport_forwards_the_logo_paths() {
+        let mut sink = Vec::new();
+        {
+            let mut t = TraceTransport::new(LogoProbe::default(), &mut sink);
+            t.transact_logo_chunk(&logo_chunk_plain(), T).unwrap();
+            t.transact_logo_flag(&LOGO_FLAG, T).unwrap();
+            assert_eq!(t.inner().calls, logo_calls());
+        }
+        let text = String::from_utf8(sink).unwrap();
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with('>')).count(),
+            2,
+            "{text}"
+        );
     }
 }

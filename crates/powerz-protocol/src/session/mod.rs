@@ -16,6 +16,7 @@
 
 mod adcnew;
 mod auth;
+mod logo;
 mod memory;
 mod pd;
 mod probe;
@@ -30,6 +31,10 @@ use crate::frame::{self, Attribute, FrameError, Reply, SequenceCounter};
 use crate::transport::{self, Transport};
 
 pub use auth::{auth_plaintext, auth_request};
+pub use logo::{
+    LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten,
+    SETTINGS_SAVE_POLL_GAP, SettingsSave, check_logo_dump, logo_chunk_plaintext, logo_flag_request,
+};
 pub(crate) use memory::UID;
 pub use memory::{
     DeviceInfo, FirmwareProblem, FirmwareProblemKind, FirmwareStatus, memory_read_plaintext,
@@ -41,7 +46,7 @@ pub use records::{
     RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_delete_table, record_table_request,
 };
 pub use settings_write::SettingsWritten;
-pub use stream::{Gap, SnapshotCadence, StreamPoll, Streamer};
+pub use stream::{Gap, RATE_SWITCH_RUN, SnapshotCadence, StreamPoll, Streamer};
 
 /// Text of [`Error::RecordTableMismatch`]: a matching count alone would read
 /// as no mismatch at all, so that case says the entries differ.
@@ -128,12 +133,54 @@ pub enum Error {
         /// Value read back.
         actual: String,
     },
+    /// A logo upload or Remove was refused before anything was sent.
+    #[error("logo write refused: {0}")]
+    LogoRefused(LogoRefusal),
+    /// A logo chunk was not FINISHED; the write stopped there, nothing was
+    /// retried and the startup duration was not written.
+    #[error("logo chunk {index} failed: {reason}")]
+    LogoChunk {
+        /// Index of the chunk that failed (0 is the chunk at 0x300000).
+        index: usize,
+        /// What happened instead of FINISHED.
+        reason: String,
+    },
+    /// The startup-duration write (0x1C) after the chunks failed.
+    #[error("startup duration write (0x1C) failed: {reason}")]
+    LogoFlag {
+        /// What happened.
+        reason: String,
+    },
+    /// The logo read back differs from the blob written.
+    #[error("the logo read back differs from the one written at offset {offset:#x}")]
+    LogoMismatch {
+        /// First differing offset into the padded blob.
+        offset: usize,
+    },
+    /// A logo Remove failed at `step`.
+    #[error("logo remove failed at the {step} step: {reason}")]
+    LogoRemove {
+        /// The step that failed.
+        step: LogoRemoveStep,
+        /// What happened.
+        reason: String,
+    },
     /// A reply could not be decoded.
     #[error(transparent)]
     Decode(#[from] DecodeError),
     /// A reply frame was malformed.
     #[error(transparent)]
     Frame(#[from] FrameError),
+    /// The logo write succeeded and verified, but the SETTINGS re-read after
+    /// it failed.
+    #[error(
+        "the logo was written and verified, but reading the settings after it failed: {reason}. {}",
+        crate::decode::settings::MENU_SAVE_STEPS
+    )]
+    LogoSettingsReread {
+        /// Why the re-read failed.
+        reason: String,
+    },
 }
 
 impl Error {
@@ -143,6 +190,16 @@ impl Error {
         matches!(
             self,
             Error::Transport(transport::Error::Disconnected | transport::Error::Permission(_))
+        )
+    }
+
+    /// The meter's SETTINGS block failed a CRC check and needs a save in the
+    /// meter's own menu; callers attach
+    /// [`MENU_SAVE_STEPS`](crate::decode::settings::MENU_SAVE_STEPS). \[device\]
+    pub fn is_settings_not_saved(&self) -> bool {
+        matches!(
+            self,
+            Error::Decode(DecodeError::Crc { what }) if what.starts_with("SETTINGS block")
         )
     }
 }
@@ -221,6 +278,9 @@ pub struct Session<T: Transport, C: Clock = SystemClock> {
     meter_rate: Option<Rate>,
     /// Device time of the last record returned by `poll_stream`.
     last_record_ms: Option<u32>,
+    /// Records in a row at one steady slower interval, for the queue's rate
+    /// switch in `poll_stream`.
+    rate_run: stream::RateRun,
     /// Read windows of the records in the last decoded RecordList: the only
     /// record-area reads [`Session::download_record`] may send.
     record_windows: Vec<(u32, u32)>,
@@ -228,6 +288,10 @@ pub struct Session<T: Transport, C: Clock = SystemClock> {
     adcnew: Option<adcnew::AdcnewStream>,
     /// PD / UFCS (and other non-record) ADCNEW frames not yet taken.
     adcnew_raw: Vec<crate::adcnew::Frame>,
+    /// The SETTINGS block from the last successful read in this session.
+    settings_read: Option<Settings>,
+    /// The model from the last successful device-info read in this session.
+    model: Option<String>,
 }
 
 impl<T: Transport> Session<T, SystemClock> {
@@ -249,9 +313,12 @@ impl<T: Transport, C: Clock> Session<T, C> {
             stream: None,
             meter_rate: None,
             last_record_ms: None,
+            rate_run: stream::RateRun::default(),
             record_windows: Vec::new(),
             adcnew: None,
             adcnew_raw: Vec::new(),
+            settings_read: None,
+            model: None,
         }
     }
 
@@ -468,6 +535,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         if let Some(rate) = meter_rate_from_code(settings.rate_code()) {
             self.meter_rate = Some(rate);
         }
+        self.settings_read = Some(settings.clone());
         Ok(settings)
     }
 

@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::app_log::SessionLog;
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Records, Series, SeriesBuckets};
+use crate::logo::{LogoProgressView, LogoReadView, LogoSettingsCheckView, LogoWrittenView};
 use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
 use crate::recording::{
     self, EndReason, ExportProgress, Limits, Recorder, RecordingEvent, RecordingSummary,
@@ -35,6 +36,7 @@ use crate::stats::StatsSnapshot;
 use crate::store::{SessionStore, TempLog, temp_at};
 use crate::trigger::CableView;
 use crate::ui_error::{self, ErrorKind, UiError};
+use powerz_protocol::logo::LogoBlob;
 
 /// Where the live measurements come from (FR 1HHT02), named on the wire
 /// `queue` / `cdc`.
@@ -463,6 +465,11 @@ fn is_rate_refusal(err: &session::Error) -> bool {
     )
 }
 
+/// A rate as the log names it, like `50 SPS`.
+fn rate_label(rate: Rate) -> String {
+    format!("{} SPS", rate.sps())
+}
+
 /// Samples per second implied by the spacing of the record times `times`
 /// (device-time order), when there are at least two of them.
 fn measured_sps(times: &[u32]) -> Option<u32> {
@@ -626,6 +633,9 @@ pub struct Worker<T: Transport, C: Clock> {
     pd_faulted: bool,
     /// The last snapshot failed, and its error is already in the log.
     snapshot_faulted: bool,
+    /// The calibration snapshot of the last logo write while its settings
+    /// wait for a menu save on the meter (FR QG6RNY).
+    pub(crate) logo_pending: Option<powerz_protocol::decode::settings::CalibrationSnapshot>,
 }
 
 /// A running PD sniffer.
@@ -722,6 +732,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             queue_faulted: false,
             pd_faulted: false,
             snapshot_faulted: false,
+            logo_pending: None,
         };
         worker.emit(BackendEvent::Status(Status::Connected(info)));
         worker
@@ -777,6 +788,15 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             batch.samples.retain(|s| s.t_ms > cleared);
         }
         self.emit(BackendEvent::Batch(batch));
+    }
+
+    /// After a stream restart: samples from before it go out first, and a
+    /// new run starts, since the interval across the restart was not
+    /// measured.
+    fn begin_run(&mut self) {
+        self.flush_batch();
+        let store = &self.store;
+        blocked(self.meter.as_ref(), || store.start_run());
     }
 
     /// Send pending samples out now.
@@ -1207,6 +1227,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// PD capture, then report the disconnect.
     fn lose_session(&mut self, e: &session::Error) -> Step {
         self.session = None;
+        self.logo_pending = None;
         self.close_recording(EndReason::Disconnected);
         self.flush_batch();
         if self.pd_run.take().is_some() {
@@ -1235,6 +1256,19 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             capturing: false,
             reason,
         }));
+    }
+
+    /// Run `f` on the open queue session, timed as blocked meter I/O, its
+    /// error in plain words (the startup-logo commands, FR MEHQC0).
+    pub(crate) fn with_queue_session<R>(
+        &mut self,
+        f: impl FnOnce(&mut Session<GuardedTransport<T>, C>) -> Result<R, session::Error>,
+    ) -> Result<R, UiError> {
+        self.needs_queue_source()?;
+        let Some(session) = self.session.as_mut() else {
+            return Err(not_connected());
+        };
+        blocked(self.meter.as_ref(), || f(session)).map_err(|e| session_error(&e))
     }
 
     /// Records and the PD sniffer use requests that were never checked on
@@ -1352,6 +1386,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
     /// The meter takes the write only on its CDC port \[device\]: a session
     /// on bulk sends the write and both reads over the meter's CDC pipe,
     /// opened for them alone (no CONNECT there) while the stream waits.
+    /// A write that took is logged with its changes, and a queue stream is
+    /// then restarted at the session's rate (FR JV54SN `[inferred]`, see
+    /// `restart_after_settings_write`).
     pub fn write_settings(
         &mut self,
         changes: &BTreeMap<String, i32>,
@@ -1377,6 +1414,13 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
         let Some(session) = self.session.as_mut() else {
             return Err(not_connected());
         };
+        // After a logo write whose settings wait for a menu save, a stale
+        // SETTINGS block refuses the change before anything is written,
+        // whichever port carries the write (FR QG6RNY).
+        if self.logo_pending.is_some() && self.source != MeasurementSource::Cdc {
+            blocked(self.meter.as_ref(), || session.read_meter_settings())
+                .map_err(|e| session_error(&e))?;
+        }
         let written = if self.source == MeasurementSource::Cdc {
             blocked(self.meter.as_ref(), || {
                 session.write_settings_checked(&parsed)
@@ -1395,10 +1439,57 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                     .map_err(|e| session_error(&e))
             })
         }?;
+        self.log_settings_written(changes);
+        self.restart_after_settings_write();
         Ok(MeterSettingsView {
             warnings: written.warnings(),
             ..MeterSettingsView::from(&written.settings)
         })
+    }
+
+    /// After a successful settings write the meter's running queue goes
+    /// back to its own rate `[inferred]` (FR JV54SN), so a queue stream is
+    /// stopped and started again at the session's rate, also while
+    /// recording. CDC sources and a locked rate are left alone. A failed
+    /// restart is logged; the write itself stands.
+    fn restart_after_settings_write(&mut self) {
+        if self.source != MeasurementSource::Queue || self.rate_locked {
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let rate = self.rate;
+        let restarted = session
+            .stop_stream()
+            .and_then(|()| session.start_stream(rate))
+            .map_err(|e| session_error(&e));
+        match restarted {
+            Ok(()) => {
+                self.begin_run();
+                self.log_event_with("queue restarted after settings write", rate_label(rate));
+            }
+            Err(error) => self.log_failure(error),
+        }
+    }
+
+    /// The line for a settings write that took (AC-JV54SN.5): each changed
+    /// field by its settings-panel key with its new value, like
+    /// `brightness=60, theme=2`.
+    fn log_settings_written(&mut self, changes: &BTreeMap<String, i32>) {
+        let detail = changes
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.log_event_with("settings written", detail);
+    }
+
+    /// Add an event line with its detail off this thread, like
+    /// [`log_failure`](Self::log_failure).
+    fn log_event_with(&mut self, event: &'static str, detail: String) {
+        let log = self.log.clone();
+        (self.in_order)(Box::new(move || log.event_with(event, &detail)));
     }
 
     /// List the meter's offline records (GET_DATA 0x200 only) for the
@@ -1588,6 +1679,9 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                         rate_locked: true,
                     }));
                 }
+                if let Some(rate) = poll.rate_switch {
+                    self.log_event_with("queue interval switched", rate_label(rate));
+                }
                 self.queue_records(&poll);
                 // A failed snapshot only costs the temperature reading; a
                 // dead pipe fails the next queue poll and ends the session.
@@ -1628,11 +1722,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             MeasurementSource::Cdc => session.start_adcnew(Content::Adc, rate),
         }
         .map_err(|e| session_error(&e))?;
-        // Samples at the old rate go out ahead of the rate change.
-        self.flush_batch();
-        // The interval across the restart was not measured.
-        let store = &self.store;
-        blocked(self.meter.as_ref(), || store.start_run());
+        self.begin_run();
         self.rate = rate;
         self.emit(BackendEvent::Status(Status::Rate {
             rate_sps: rate.sps(),
@@ -1735,6 +1825,22 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             Command::DeleteRecords(target, confirm, dir, reply) => {
                 let _ = reply.send(self.delete_records(target, &confirm, &dir));
             }
+            Command::LogoRead(full, reply) => {
+                let _ = reply.send(self.logo_read(full));
+            }
+            Command::LogoUpload(blob, mut send, reply) => {
+                let mut progress = crate::logo::gated(&mut send);
+                let answer = self.logo_upload(&blob, &mut progress);
+                let _ = reply.send(answer);
+            }
+            Command::LogoRemove(mut send, reply) => {
+                let mut progress = crate::logo::gated(&mut send);
+                let answer = self.logo_remove(&mut progress);
+                let _ = reply.send(answer);
+            }
+            Command::LogoSettingsCheck(reply) => {
+                let _ = reply.send(self.logo_settings_check());
+            }
             Command::ClearHistory(claimed, reply) => {
                 if !claimed.swap(true, Ordering::SeqCst) {
                     self.clear_history();
@@ -1803,6 +1909,21 @@ enum Command {
         PathBuf,
         mpsc::Sender<Result<RecordDeleteView, UiError>>,
     ),
+    /// Read the startup logo area (FR MEHQC0); `true` reads the image too.
+    LogoRead(bool, mpsc::Sender<Result<LogoReadView, UiError>>),
+    /// Upload a startup logo, progress batched to the sender (FR MEHQC0).
+    LogoUpload(
+        Box<LogoBlob>,
+        LogoProgressFn,
+        mpsc::Sender<Result<LogoWrittenView, UiError>>,
+    ),
+    /// Remove the startup logo, progress batched to the sender (FR MEHQC0).
+    LogoRemove(
+        LogoProgressFn,
+        mpsc::Sender<Result<LogoWrittenView, UiError>>,
+    ),
+    /// One read-only settings check after a logo write (FR QG6RNY).
+    LogoSettingsCheck(mpsc::Sender<Result<LogoSettingsCheckView, UiError>>),
     /// Send out the batched samples, then discard the session history;
     /// whoever claims the flag first (the worker or the caller that gave up
     /// waiting) does the clear, so it happens exactly once.
@@ -1852,6 +1973,10 @@ impl std::fmt::Debug for Command {
                 .field(target)
                 .field(dir)
                 .finish(),
+            Command::LogoRead(full, _) => f.debug_tuple("LogoRead").field(full).finish(),
+            Command::LogoUpload(..) => f.write_str("LogoUpload"),
+            Command::LogoRemove(..) => f.write_str("LogoRemove"),
+            Command::LogoSettingsCheck(_) => f.write_str("LogoSettingsCheck"),
             Command::ClearHistory(..) => f.write_str("ClearHistory"),
             Command::HoldPolling(hold, _) => f.debug_tuple("HoldPolling").field(hold).finish(),
             Command::PdCapturing(_) => f.write_str("PdCapturing"),
@@ -1862,6 +1987,9 @@ impl std::fmt::Debug for Command {
 }
 
 type ProgressFn = Box<dyn FnMut(ExportProgress) + Send>;
+
+/// Where a logo command's batched progress goes (FR MEHQC0).
+pub type LogoProgressFn = Box<dyn FnMut(LogoProgressView) + Send>;
 
 /// Where a command that starts an export answers.
 type ExportReply = mpsc::Sender<Result<ExportJob, UiError>>;
@@ -2175,6 +2303,10 @@ const RECORD_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// (up to the whole record area) before the table write.
 const RECORD_DELETE_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How long a logo upload may take: up to 469 chunks of up to a second
+/// each, then the full read-back (FR MEHQC0).
+const LOGO_WRITE_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Sends rate, recording and export requests to a running worker and
 /// answers history and statistics queries from its session store. It works
 /// without the [`WorkerHandle`], so a caller can wait for the answer without
@@ -2397,6 +2529,52 @@ impl WorkerControl {
         let (reply, answer) = mpsc::channel();
         let command = Command::WriteSettings(changes.clone(), reply);
         self.logged(self.ask(command, &answer).flatten())
+    }
+
+    /// What the meter's startup-logo area holds; with `full`, the image
+    /// too (FR MEHQC0).
+    pub fn logo_read(&self, full: bool) -> Result<LogoReadView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask_within(
+            Command::LogoRead(full, reply),
+            &answer,
+            RECORD_DOWNLOAD_TIMEOUT,
+        )?
+    }
+
+    /// Upload `blob` as the startup logo; batched progress goes to
+    /// `progress` (FR MEHQC0).
+    pub fn logo_upload(
+        &self,
+        blob: LogoBlob,
+        progress: LogoProgressFn,
+    ) -> Result<LogoWrittenView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        let command = Command::LogoUpload(Box::new(blob), progress, reply);
+        self.logged(
+            self.ask_within(command, &answer, LOGO_WRITE_TIMEOUT)
+                .flatten(),
+        )
+    }
+
+    /// Remove the startup logo; batched progress goes to `progress` (FR MEHQC0).
+    pub fn logo_remove(&self, progress: LogoProgressFn) -> Result<LogoWrittenView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        let command = Command::LogoRemove(progress, reply);
+        self.logged(
+            self.ask_within(command, &answer, LOGO_WRITE_TIMEOUT)
+                .flatten(),
+        )
+    }
+
+    /// One read-only check of the settings after a logo write (FR QG6RNY).
+    pub fn logo_settings_check(&self) -> Result<LogoSettingsCheckView, UiError> {
+        let (reply, answer) = mpsc::channel();
+        self.ask_within(
+            Command::LogoSettingsCheck(reply),
+            &answer,
+            RECORD_DOWNLOAD_TIMEOUT,
+        )?
     }
 
     /// List the meter's offline records.
@@ -3368,5 +3546,231 @@ mod tests {
 
         assert_eq!(worker.recording_id.load(Ordering::SeqCst), 0);
         assert!(!worker.is_recording());
+    }
+
+    // ---- FR JV54SN, AC .5: app.log lines for a settings write, the stream
+    // restart after it, and a switch to another queue interval ----
+
+    /// The demo meter on bulk, with its CDC persona as the settings pipe.
+    struct TwinPipe(powerz_sim::SimDevice);
+
+    impl Transport for TwinPipe {
+        fn transact(
+            &mut self,
+            request: &[u8],
+            timeout: Duration,
+        ) -> Result<Vec<u8>, transport::Error> {
+            self.0.transact(request, timeout)
+        }
+
+        fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
+            self.0.read(timeout)
+        }
+
+        fn settings_pipe(&mut self) -> Option<Result<Box<dyn Transport>, transport::Error>> {
+            Some(Ok(Box::new(self.0.cdc_twin())))
+        }
+    }
+
+    fn jv54sn_run_for<T: Transport>(
+        worker: &mut Worker<T, powerz_sim::SimClock>,
+        clock: &powerz_sim::SimClock,
+        ms: u64,
+    ) {
+        let start = clock.now_ms();
+        for _ in 0..1_000_000 {
+            if clock.now_ms() - start >= ms {
+                return;
+            }
+            if let Step::Ended = worker.step() {
+                panic!("the session ended");
+            }
+        }
+        panic!("worker.step() never advanced the clock");
+    }
+
+    fn jv54sn_lines(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .map(|s| s.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    type JvEvents = Arc<Mutex<Vec<BackendEvent>>>;
+
+    /// A worker streaming at 50 SPS from a demo meter whose own rate is
+    /// 10 SPS, under `faults`, logging to `<scratch>/app.log` as
+    /// `usb:1:7 (KM003C)`.
+    fn jv54sn_worker(
+        tag: &str,
+        faults: powerz_sim::FaultPlan,
+    ) -> (
+        Worker<TwinPipe, powerz_sim::SimClock>,
+        powerz_sim::SimClock,
+        PathBuf,
+        JvEvents,
+    ) {
+        use crate::app_log::AppLog;
+        use powerz_protocol::decode::settings::WritableField;
+        use powerz_sim::{Persona, Scenario, SimClock, SimDevice};
+
+        let clock = SimClock::new(1_790_000_000_000);
+        let device = SimDevice::with_clock(Persona::Bulk, Scenario::Load5v1a, clock.clone());
+        let mut twin = Session::with_clock(device.cdc_twin(), clock.clone());
+        twin.write_settings(&[(WritableField::SampleRate, 1)])
+            .expect("set the meter's own rate to 10 SPS");
+        let device = device.with_faults(faults);
+        let events: JvEvents = Arc::default();
+        let seen = Arc::clone(&events);
+        let mut worker = Worker::start(
+            TwinPipe(device),
+            clock.clone(),
+            WorkerConfig::new(Rate::Sps50, 1),
+            move |event: BackendEvent| seen.lock().unwrap().push(event),
+        )
+        .unwrap_or_else(|e| panic!("the worker did not start: {e:?}"));
+        let path = scratch(&format!("jv54sn-{tag}")).join("app.log");
+        worker.log = SessionLog::new(
+            AppLog::open(&path).expect("open app.log"),
+            "usb:1:7".into(),
+            "KM003C".into(),
+        );
+        jv54sn_run_for(&mut worker, &clock, 1_000);
+        (worker, clock, path, events)
+    }
+
+    fn jv54sn_assert_no_serial(lines: &[String]) {
+        for line in lines {
+            assert!(
+                !line.contains(powerz_sim::SIM_SERIAL),
+                "a serial in the log: {line}"
+            );
+        }
+    }
+
+    fn jv54sn_changes(pairs: &[(&str, i32)]) -> BTreeMap<String, i32> {
+        pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
+    }
+
+    #[test]
+    fn jv54sn_a_settings_write_logs_its_changes_and_the_restart_once_each() {
+        let faults = powerz_sim::FaultPlan::new().settings_write_resets_queue_rate();
+        let (mut worker, clock, path, _) = jv54sn_worker("write", faults);
+        assert!(jv54sn_lines(&path).is_empty(), "{:#?}", jv54sn_lines(&path));
+
+        worker
+            .write_settings(&jv54sn_changes(&[("brightness", 80)]))
+            .expect("write");
+        jv54sn_run_for(&mut worker, &clock, 1_000);
+
+        let lines = jv54sn_lines(&path);
+        assert_eq!(
+            lines.len(),
+            2,
+            "one line for the write, one for the restart: {lines:#?}"
+        );
+        let (write, other): (Vec<&String>, Vec<&String>) =
+            lines.iter().partition(|l| l.contains("brightness"));
+        assert_eq!(write.len(), 1, "{lines:#?}");
+        assert!(write[0].contains("80"), "the new value: {}", write[0]);
+        assert!(
+            write[0].contains("usb:1:7"),
+            "names the meter: {}",
+            write[0]
+        );
+        assert!(
+            other[0].contains("50"),
+            "the restart names the session's rate: {}",
+            other[0]
+        );
+        jv54sn_assert_no_serial(&lines);
+
+        // A second write with two fields: one more line of each.
+        worker
+            .write_settings(&jv54sn_changes(&[("brightness", 60), ("theme", 2)]))
+            .expect("write");
+        jv54sn_run_for(&mut worker, &clock, 500);
+        let lines = jv54sn_lines(&path);
+        assert_eq!(lines.len(), 4, "{lines:#?}");
+        let second = &lines[2..];
+        let write2: Vec<&String> = second.iter().filter(|l| l.contains("brightness")).collect();
+        assert_eq!(write2.len(), 1, "{lines:#?}");
+        assert!(
+            write2[0].contains("60") && write2[0].contains("theme"),
+            "both changed fields and their values: {}",
+            write2[0]
+        );
+        jv54sn_assert_no_serial(&lines);
+        worker.stop();
+    }
+
+    #[test]
+    fn jv54sn_a_failed_settings_write_logs_no_restart() {
+        let faults = powerz_sim::FaultPlan::new()
+            .settings_write_resets_queue_rate()
+            .ignore_settings_write();
+        let (mut worker, clock, path, _) = jv54sn_worker("failed", faults);
+        assert!(
+            worker
+                .write_settings(&jv54sn_changes(&[("brightness", 80)]))
+                .is_err()
+        );
+        jv54sn_run_for(&mut worker, &clock, 500);
+        let lines = jv54sn_lines(&path);
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("50 SPS") || l.contains("restart")),
+            "no restart after a failed write: {lines:#?}"
+        );
+        jv54sn_assert_no_serial(&lines);
+        worker.stop();
+    }
+
+    #[test]
+    fn jv54sn_a_switch_to_another_queue_interval_is_logged_once_and_draws_on() {
+        use powerz_protocol::frame;
+
+        let (mut worker, clock, path, events) =
+            jv54sn_worker("interval", powerz_sim::FaultPlan::new());
+        // Behind the session's back the meter's queue goes to 10 SPS, as
+        // after a settings write the worker did not follow with a restart.
+        let pipe = worker.session.as_mut().expect("session").transport_mut();
+        let stop = pipe
+            .transact(&frame::stop_queue(0x70), Duration::from_millis(500))
+            .expect("0x0F");
+        assert_eq!(stop[0] & 0x7F, 0x05, "ACCEPT: {stop:02x?}");
+        let start = pipe
+            .transact(&frame::start_queue(0x71, 1), Duration::from_millis(500))
+            .expect("0x0E");
+        assert_eq!(start[0] & 0x7F, 0x05, "ACCEPT: {start:02x?}");
+        let mark = events.lock().unwrap().len();
+
+        jv54sn_run_for(&mut worker, &clock, 3_000);
+
+        let lines = jv54sn_lines(&path);
+        assert_eq!(lines.len(), 1, "one line for the switch: {lines:#?}");
+        assert!(lines[0].contains("10"), "names the new rate: {}", lines[0]);
+        assert!(lines[0].contains("usb:1:7"), "{}", lines[0]);
+        jv54sn_assert_no_serial(&lines);
+
+        let events = events.lock().unwrap();
+        let gaps = events[mark..]
+            .iter()
+            .filter(|e| matches!(e, BackendEvent::Gap(_)))
+            .count();
+        let samples: usize = events[mark..]
+            .iter()
+            .map(|e| match e {
+                BackendEvent::Batch(b) => b.samples.len(),
+                _ => 0,
+            })
+            .sum();
+        assert!(
+            gaps <= 6,
+            "a gap for at most the records before the switch, got {gaps} for {samples} samples"
+        );
+        assert!(samples >= 25, "records keep coming at 10 SPS: {samples}");
+        drop(events);
+        worker.stop();
     }
 }

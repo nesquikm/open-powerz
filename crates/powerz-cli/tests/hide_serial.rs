@@ -1,6 +1,6 @@
-//! AC-AXHK2Q.6 and the last line of .8: `powerz list` and `powerz info` take
-//! `--hide-serial`, in text and JSON, and print `hidden` for the serial and
-//! the UID; nothing else in their output changes. Everything runs on the
+//! AC-AXHK2Q.6 and the last line of .8, reworded by AC-CCF47K.6: `powerz list`
+//! and `powerz info` take `--hide-serial`, in text and JSON, and print `***`
+//! for the serial and the UID; nothing else in their output changes. Everything runs on the
 //! simulator, whose serial and UID are synthetic.
 
 use std::time::Duration;
@@ -10,6 +10,8 @@ use predicates::prelude::*;
 
 const DEMO_SERIAL: &str = "123456";
 const OTHER_SERIAL: &str = "SIM-B-0002";
+/// What `--hide-serial` prints in place of a serial or a UID (AC-CCF47K.6).
+const MASK: &str = "***";
 
 fn powerz() -> Command {
     let mut c = Command::cargo_bin("powerz").expect("powerz binary is built");
@@ -56,7 +58,22 @@ fn both_commands_document_the_flag() {
 }
 
 #[test]
-fn list_text_prints_hidden_and_changes_nothing_else() {
+fn both_commands_say_the_flag_prints_three_stars() {
+    for command in ["list", "info"] {
+        let help = output(&[command, "--help"]);
+        let line = help
+            .lines()
+            .skip_while(|l| !l.contains("--hide-serial"))
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(line.contains(MASK), "{command}: {help}");
+        assert!(!line.contains("`hidden`"), "{command}: {help}");
+    }
+}
+
+#[test]
+fn list_text_prints_stars_and_changes_nothing_else() {
     let plain = output(&["list", "--include-demo"]);
     let hidden = output(&["list", "--include-demo", "--hide-serial"]);
     // Only the demo line: a real meter on the host joins both listings, and
@@ -68,14 +85,14 @@ fn list_text_prints_hidden_and_changes_nothing_else() {
             .to_owned()
     };
     assert!(demo(&plain).contains(DEMO_SERIAL));
-    assert_eq!(demo(&hidden), demo(&plain).replace(DEMO_SERIAL, "hidden"));
+    assert_eq!(demo(&hidden), demo(&plain).replace(DEMO_SERIAL, MASK));
     let lines: Vec<&str> = hidden.lines().collect();
     assert_eq!(lines.len(), plain.lines().count());
-    assert!(lines.iter().all(|l| l.contains("serial hidden")));
+    assert!(lines.iter().all(|l| l.contains("serial ***")));
 }
 
 #[test]
-fn list_json_prints_hidden_and_changes_nothing_else() {
+fn list_json_prints_stars_and_changes_nothing_else() {
     let plain = json(&output(&["list", "--include-demo", "--json"]));
     let hidden = json(&output(&[
         "list",
@@ -85,7 +102,7 @@ fn list_json_prints_hidden_and_changes_nothing_else() {
     ]));
     let mut expected = plain.clone();
     for entry in expected.as_array_mut().expect("an array") {
-        entry["serial"] = "hidden".into();
+        entry["serial"] = MASK.into();
     }
     assert_eq!(hidden, expected);
 }
@@ -115,28 +132,25 @@ fn list_with_the_flag_shows_no_port_name() {
 }
 
 #[test]
-fn info_text_prints_hidden_and_changes_nothing_else() {
+fn info_text_prints_stars_and_changes_nothing_else() {
     let plain = sim_output(&["info"]);
     let uid = field(&plain, "UID:").to_owned();
     let serial = field(&plain, "Serial:").to_owned();
     assert!(!uid.is_empty() && !serial.is_empty(), "{plain}");
 
     let hidden = sim_output(&["info", "--hide-serial"]);
-    assert_eq!(field(&hidden, "Serial:"), "hidden");
-    assert_eq!(field(&hidden, "UID:"), "hidden");
-    assert_eq!(
-        hidden,
-        plain.replace(&uid, "hidden").replace(&serial, "hidden")
-    );
+    assert_eq!(field(&hidden, "Serial:"), MASK);
+    assert_eq!(field(&hidden, "UID:"), MASK);
+    assert_eq!(hidden, plain.replace(&uid, MASK).replace(&serial, MASK));
 }
 
 #[test]
-fn info_json_prints_hidden_and_changes_nothing_else() {
+fn info_json_prints_stars_and_changes_nothing_else() {
     let plain = json(&sim_output(&["info", "--json"]));
     let hidden = json(&sim_output(&["info", "--json", "--hide-serial"]));
     let mut expected = plain.clone();
-    expected["serial"] = "hidden".into();
-    expected["uid"] = "hidden".into();
+    expected["serial"] = MASK.into();
+    expected["uid"] = MASK.into();
     assert_eq!(hidden, expected);
 }
 
@@ -145,5 +159,6 @@ fn without_the_flag_both_commands_still_show_the_values() {
     assert!(output(&["list", "--include-demo"]).contains(DEMO_SERIAL));
     let info = json(&sim_output(&["info", "--json"]));
     assert_eq!(info["serial"], DEMO_SERIAL);
+    assert_ne!(info["uid"], MASK);
     assert_ne!(info["uid"], "hidden");
 }

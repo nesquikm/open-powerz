@@ -1051,6 +1051,20 @@ test("a collapse leaves no offer to press until Detect (AC-AXHK2N.10)", async ({
   await asks15V(page);
 });
 
+test("Back to 5 V hides while the charger is gone and returns with Detect (AC-JV54SQ.1)", async ({
+  page,
+}) => {
+  await detected(page, "?mock=trigger-charger-gone");
+  await expect(backButton(page)).toBeVisible();
+  await request9V(page);
+  await expect(chargerGoneText(page)).toBeVisible();
+  await expect(backButton(page)).toHaveCount(0);
+
+  await detectButton(page).click();
+  await expect(offerButton(page, 9)).toBeVisible();
+  await expect(backButton(page)).toBeVisible();
+});
+
 test("leaving the tab leaves no offers and says to press Detect (AC-AXHK2N.11)", async ({
   page,
 }) => {

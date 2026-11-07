@@ -12,17 +12,24 @@
   let {
     panel,
     connected,
+    held = false,
   }: {
     panel: MeterSettingsPanel;
     /** A meter is connected, so its settings can be read. */
     connected: boolean;
+    /** A logo write holds the meter (AC-MEHQC0.3): nothing is read or applied until it ends. */
+    held?: boolean;
   } = $props();
 
   const rows = $derived(panel.settings ? meterSettingRows(panel.settings) : []);
+  /** A settings block the meter has not saved yet is marked for the e2e checks (FR QG6RNY). */
+  const errorTestId = $derived(
+    panel.error?.kind === "settings_not_saved" ? "settings-not-saved" : undefined,
+  );
   /** Fields whose typed value is not valid, so Apply stays disabled. */
   let invalid = $state<Record<string, boolean>>({});
   const canApply = $derived(
-    panel.summary.length > 0 && !panel.applying && !Object.values(invalid).some(Boolean),
+    !held && panel.summary.length > 0 && !panel.applying && !Object.values(invalid).some(Boolean),
   );
 
   function startEdit(): void {
@@ -50,7 +57,7 @@
         <button
           type="button"
           onclick={() => void panel.refresh()}
-          disabled={!connected || panel.loading}
+          disabled={!connected || panel.loading || held}
         >
           Refresh
         </button>
@@ -117,7 +124,7 @@
         <p class="hint">Nothing changed yet.</p>
       {/if}
       {#if panel.error}
-        <p class="error" role="alert">
+        <p class="error" role="alert" data-testid={errorTestId}>
           {panel.error.message}
           <HintText hint={panel.error.hint} />
         </p>
@@ -132,7 +139,7 @@
       </div>
     </form>
   {:else if panel.error}
-    <p class="error" role="alert">
+    <p class="error" role="alert" data-testid={errorTestId}>
       {panel.error.message}
       <HintText hint={panel.error.hint} />
     </p>

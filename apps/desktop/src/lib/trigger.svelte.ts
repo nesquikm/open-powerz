@@ -351,9 +351,9 @@ export class TriggerPanel {
     this.sections = unlistedSections();
   }
 
-  /** Back to 5 V is shown while a session is open. */
+  /** Back to 5 V is shown while a session is open and the charger is still there. */
   get showBackTo5v(): boolean {
-    return this.sessionOpen;
+    return this.sessionOpen && !this.chargerGone;
   }
 
   /** Opens the session if needed, detects, then lists every protocol. One at a time. */

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- open-powerz app icon: the electron-surf mascot's head. Original art, MIT. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 64 64">
+  <defs>
+    <clipPath id="tile"><rect x="6.25" y="6.25" width="51.5" height="51.5" rx="11.5"/></clipPath>
+  </defs>
+  <rect x="6.25" y="6.25" width="51.5" height="51.5" rx="11.5" fill="#1a1f4a"/>
+  <g clip-path="url(#tile)" stroke="#111" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M-2,50 C3,45 8,45 13,50 C18,55 23,55 28,50 C33,45 38,45 43,50 C48,55 53,55 58,50 C63,45 68,45 73,50 V70 H-2 Z" fill="#2f6bff" stroke-width="2.2"/>
+    <path d="M-2,55.5 C3,50.5 8,50.5 13,55.5 C18,60.5 23,60.5 28,55.5 C33,50.5 38,50.5 43,55.5 C48,60.5 53,60.5 58,55.5 C63,50.5 68,50.5 73,55.5" fill="none" stroke="#7fd4ff" stroke-width="2"/>
+  </g>
+  <g stroke="#111" stroke-linejoin="round" stroke-linecap="round">
+    <circle cx="32" cy="31" r="16" fill="#ffd23f" stroke-width="3"/>
+    <path d="M16.5,27 H47.5" stroke-width="2.6"/>
+    <rect x="18" y="24.5" width="12" height="9" rx="3.8" fill="#111" stroke-width="1"/>
+    <rect x="34" y="24.5" width="12" height="9" rx="3.8" fill="#111" stroke-width="1"/>
+    <path d="M21,27.2 H24 M37,27.2 H40" stroke="#7fd4ff" stroke-width="1.6"/>
+    <path d="M25.5,38.5 Q32,44 38.5,38.5" fill="none" stroke-width="2.6"/>
+  </g>
+</svg>

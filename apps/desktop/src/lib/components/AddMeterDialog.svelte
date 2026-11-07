@@ -10,12 +10,16 @@
 
   let {
     devices,
+    listed = devices,
     hideSerial,
     onCancel,
     onConnect,
   }: {
     /** The devices that can be added. */
     devices: readonly DeviceListing[];
+    /** Every listed device, connected ones too: a hidden meter's number counts them all,
+     * so it matches the Device select (AC-CCF47K.2). */
+    listed?: readonly DeviceListing[];
     /** The Hide serial numbers switch (FR AXHK2Q). */
     hideSerial: boolean;
     onCancel: () => void;
@@ -70,7 +74,7 @@
       use:focusOnMount
     >
       {#each devices as device (device.id)}
-        <option value={device.id}>{deviceOptionLabel(device, hideSerial)}</option>
+        <option value={device.id}>{deviceOptionLabel(device, hideSerial, listed)}</option>
       {:else}
         <option value="">No other device</option>
       {/each}

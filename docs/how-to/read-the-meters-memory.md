@@ -113,9 +113,10 @@ fields above get controls, and a summary lists each change ("Brightness: 50%
 panel then shows the settings as read back.
 
 The meter saves the change at once and its Settings menu shows the new value,
-but its live screen redraws a new brightness or theme only after you open
-that setting in the meter's own menu. Both the CLI and the app say so in one
-line after a write.
+but its live screen may not show it yet. To see a new brightness, change
+that value in the meter's own menu one step and back (for example
+80 → 81 → 80); just looking at it in the menu did not redraw it. Both
+the CLI and the app say so in one line after a write.
 
 ## Notes
 

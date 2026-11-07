@@ -114,6 +114,30 @@ pub trait Transport {
         self.transact(request, timeout)
     }
 
+    /// Write one startup-logo flash chunk (type 0x4A). `plain` is the
+    /// plaintext frame; checked with
+    /// [`check_logo_chunk`](guard::check_logo_chunk) before encryption.
+    /// Wrappers that sit outside a guard must forward this method.
+    fn transact_logo_chunk(&mut self, plain: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        guard::check_logo_chunk(plain)?;
+        let (Some(header), Some(payload)) = (plain.get(..4), plain.get(4..)) else {
+            return Err(Error::Forbidden {
+                ty: guard::LOGO_CHUNK_TYPE,
+            });
+        };
+        let mut frame = header.to_vec();
+        frame.extend(crate::crypto::encrypt(&crate::crypto::KEYS[0], payload));
+        self.transact(&frame, timeout)
+    }
+
+    /// Write the startup-screen duration the logo paths set (SET_DATA 0x48,
+    /// attribute 0x1C; 2 = 3 s, 0 = off) \[device\].
+    /// Wrappers that sit outside a guard must forward this method.
+    fn transact_logo_flag(&mut self, frame: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        guard::check_logo_flag_write(frame)?;
+        self.transact(frame, timeout)
+    }
+
     /// Open the pipe on which this meter takes the settings write (type
     /// 0x0A): its CDC port, since over bulk the KM003C ignored the write
     /// (2026-10-29) \[device\]. `None` when this pipe has no such twin, or
@@ -261,6 +285,14 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
 
     fn transact_settings(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         (**self).transact_settings(request, timeout)
+    }
+
+    fn transact_logo_chunk(&mut self, plain: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        (**self).transact_logo_chunk(plain, timeout)
+    }
+
+    fn transact_logo_flag(&mut self, frame: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        (**self).transact_logo_flag(frame, timeout)
     }
 
     fn settings_pipe(&mut self) -> Option<Result<Box<dyn Transport>, Error>> {

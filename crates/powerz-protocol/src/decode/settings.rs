@@ -10,6 +10,15 @@ use super::{DecodeError, Rate, c_str, need, u32_at};
 /// Length of the SETTINGS section payload.
 const LEN: usize = 180;
 
+/// What to do on the meter so that it saves its SETTINGS block again (a
+/// startup-duration write leaves block A's CRC stale). \[device\]
+pub const MENU_SAVE_STEPS: &str = "On the meter: Settings \u{2192} startup logo duration \u{2192} pick a value \u{2192} save. Don't unplug the meter first.";
+
+/// Bytes 0x1C..0x5C of a SETTINGS block (calibration), kept to check that a
+/// save in the meter's menu left them unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalibrationSnapshot(pub [u8; 64]);
+
 /// The 180-byte SETTINGS payload with its CRC verdicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -61,6 +70,22 @@ fn overlay_at_crc_time(b: &[u8]) -> u32 {
     crc_unstep(after, 32) ^ before
 }
 
+/// The stored block-A CRC matches the block with another startup-duration
+/// code (bits 14..15 of the word at 0x00) and an overlay word `exact`
+/// accepts: what a startup-duration write (SET_DATA 0x1C) leaves, since the
+/// meter does not refresh the CRC after it `[device]`.
+fn crc_fits_other_duration(raw: &[u8; LEN], exact: impl Fn(u32) -> bool) -> bool {
+    let w0 = u32_at(raw, 0);
+    (0..4u32)
+        .filter(|&code| code != (w0 >> 14) & 0b11)
+        .any(|code| {
+            let mut b = *raw;
+            let w = (w0 & !(0b11 << 14)) | (code << 14);
+            b[..4].copy_from_slice(&w.to_le_bytes());
+            exact(overlay_at_crc_time(&b))
+        })
+}
+
 impl Settings {
     /// Decode the 180-byte SETTINGS section payload.
     pub fn decode(payload: &[u8]) -> Result<Settings, DecodeError> {
@@ -74,13 +99,23 @@ impl Settings {
         // from a boot no later than the one the block shows now.
         let saved = overlay_at_crc_time(&raw);
         let shown = u32_at(&raw, OVERLAY.start);
+        let exact = |w: u32| w == 0xFFFF_FFFF || w == shown;
         Ok(Settings {
             block_a_crc_ok: crc_ok(&raw, 0x00..0x5C, 0x5C)
-                || saved == 0xFFFF_FFFF
-                || (OVERLAY_TIMES.contains(&saved) && saved <= shown),
+                || exact(saved)
+                || (OVERLAY_TIMES.contains(&saved)
+                    && saved <= shown
+                    && !crc_fits_other_duration(&raw, exact)),
             block_b_crc_ok: crc_ok(&raw, 0x60..0xB0, 0xB0),
             raw,
         })
+    }
+
+    /// Bytes 0x1C..0x5C (calibration).
+    pub fn calibration_snapshot(&self) -> CalibrationSnapshot {
+        let mut b = [0u8; 64];
+        b.copy_from_slice(&self.raw[0x1C..0x5C]);
+        CalibrationSnapshot(b)
     }
 
     /// Block A (0x00..0x5B) matches the CRC-32 at 0x5C.
@@ -285,6 +320,18 @@ pub enum StartupLogo {
     Secs5,
 }
 
+impl StartupLogo {
+    /// The duration as settings rows and `Startup:` lines show it.
+    pub fn label(self) -> &'static str {
+        match self {
+            StartupLogo::Off => "off",
+            StartupLogo::Secs1 => "1 s",
+            StartupLogo::Secs3 => "3 s",
+            StartupLogo::Secs5 => "5 s",
+        }
+    }
+}
+
 /// UI colour theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
@@ -417,13 +464,7 @@ impl MeterSettings {
                 "startup_logo",
                 "Startup logo",
                 &self.startup_logo,
-                match self.startup_logo.value {
-                    StartupLogo::Off => "off",
-                    StartupLogo::Secs1 => "1 s",
-                    StartupLogo::Secs3 => "3 s",
-                    StartupLogo::Secs5 => "5 s",
-                }
-                .to_string(),
+                self.startup_logo.value.label().to_string(),
             ),
             row(
                 "theme",
@@ -488,8 +529,7 @@ impl MeterSettings {
 
 // ---- Settings write (type 0x0A), see docs/protocol.md "Settings write" ----
 
-/// Key of the startup logo time: sent at its read value, never editable.
-/// \[static\]
+/// Key of the startup-screen duration (0..3: off, 1 s, 3 s, 5 s). \[static\]
 pub const STARTUP_LOGO_KEY: u16 = 0x06;
 
 /// Key of the trailing "save" entry. \[static\] (meaning \[inferred\])
@@ -599,9 +639,8 @@ pub fn apply_settings_write(block: &mut [u8], frame: &[u8]) -> bool {
     true
 }
 
-/// A settings field the app may change. Auto-rotate has no recovered key,
-/// the startup logo is sent only at its read value, and calibration is
-/// never written. \[static\]
+/// A settings field the app may change. Auto-rotate has no recovered key
+/// and calibration is never written. \[static\]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WritableField {
     /// Key 0x01: 0 = Chinese, 1 = English.
@@ -617,14 +656,17 @@ pub enum WritableField {
     /// Key 0x14: 0..3 (0°, 90°, 180°, 270°) \[device\] (key); the meaning
     /// of the codes stays \[inferred\].
     Rotation,
+    /// Key 0x06: startup-screen duration 0..3 (off, 1 s, 3 s, 5 s).
+    StartupDuration,
 }
 
 impl WritableField {
     /// Every writable field, in key order.
-    pub const ALL: [WritableField; 6] = [
+    pub const ALL: [WritableField; 7] = [
         WritableField::Language,
         WritableField::Brightness,
         WritableField::DimTimeout,
+        WritableField::StartupDuration,
         WritableField::Theme,
         WritableField::SampleRate,
         WritableField::Rotation,
@@ -639,6 +681,7 @@ impl WritableField {
             WritableField::Theme => "theme",
             WritableField::SampleRate => "sample_rate",
             WritableField::Rotation => "rotation",
+            WritableField::StartupDuration => "startup_duration",
         }
     }
 
@@ -647,8 +690,7 @@ impl WritableField {
         WritableField::ALL.into_iter().find(|f| f.name() == name)
     }
 
-    /// The field written under `key`; `None` for the startup logo, the save
-    /// marker and every key outside [`SETTINGS_WRITE_KEYS`].
+    /// The field written under `key`; `None` for the save marker and every key outside [`SETTINGS_WRITE_KEYS`].
     pub fn from_key(key: u16) -> Option<WritableField> {
         WritableField::ALL.into_iter().find(|f| f.key() == key)
     }
@@ -662,6 +704,7 @@ impl WritableField {
             WritableField::Theme => 0x07,
             WritableField::SampleRate => 0x15,
             WritableField::Rotation => 0x14,
+            WritableField::StartupDuration => STARTUP_LOGO_KEY,
         }
     }
 
@@ -670,9 +713,10 @@ impl WritableField {
         match self {
             WritableField::Language => 0..=1,
             WritableField::Brightness => 1..=100,
-            WritableField::DimTimeout | WritableField::SampleRate | WritableField::Rotation => {
-                0..=3
-            }
+            WritableField::DimTimeout
+            | WritableField::SampleRate
+            | WritableField::Rotation
+            | WritableField::StartupDuration => 0..=3,
             WritableField::Theme => 0..=6,
         }
     }
@@ -718,17 +762,13 @@ impl WritableField {
                 Rotation::Deg180 => 2,
                 Rotation::Deg270 => 3,
             },
+            WritableField::StartupDuration => match settings.startup_logo.value {
+                StartupLogo::Off => 0,
+                StartupLogo::Secs1 => 1,
+                StartupLogo::Secs3 => 2,
+                StartupLogo::Secs5 => 3,
+            },
         }
-    }
-}
-
-/// Startup logo wire code (0..3) in `settings`.
-fn startup_logo_code(settings: &MeterSettings) -> i32 {
-    match settings.startup_logo.value {
-        StartupLogo::Off => 0,
-        StartupLogo::Secs1 => 1,
-        StartupLogo::Secs3 => 2,
-        StartupLogo::Secs5 => 3,
     }
 }
 
@@ -736,7 +776,6 @@ fn startup_logo_code(settings: &MeterSettings) -> i32 {
 /// [`SETTINGS_WRITE_KEYS`]. \[static\]
 pub fn settings_key_range(key: u16) -> Option<RangeInclusive<i32>> {
     match key {
-        STARTUP_LOGO_KEY => Some(0..=3),
         SAVE_MARKER_KEY => Some(SAVE_MARKER..=SAVE_MARKER),
         _ => WritableField::from_key(key).map(WritableField::range),
     }
@@ -793,8 +832,7 @@ pub enum SettingsWriteError {
 /// just read): main header `0x0A | id << 8 | n << 23`, then one 8-byte entry
 /// per key of [`SETTINGS_WRITE_KEYS`] (key word `0x01008000 | key`, `next`
 /// clear on the last; i32 value). Changed fields go out at their new values,
-/// every other key at its read value, the startup logo always at its read
-/// value, and the save marker last. \[static\]
+/// every other key at its read value, and the save marker last. \[static\]
 ///
 /// A value outside its field's [`range`](WritableField::range) is refused,
 /// and so is a write over a field the meter holds out of range.
@@ -827,7 +865,6 @@ pub fn settings_write_request(
     }
     let value_of = |key: u16| -> i32 {
         match key {
-            STARTUP_LOGO_KEY => startup_logo_code(current),
             SAVE_MARKER_KEY => SAVE_MARKER,
             _ => WritableField::from_key(key).map_or(0, |f| f.code_after(current, changes)),
         }

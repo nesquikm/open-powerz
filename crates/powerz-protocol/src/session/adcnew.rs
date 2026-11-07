@@ -91,6 +91,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         let mut poll = StreamPoll {
             records: Vec::new(),
             gaps: Vec::new(),
+            rate_switch: None,
         };
         let result = frames.map(|frames| {
             for frame in frames {

@@ -215,10 +215,13 @@ visible span needs: one from 1 s up, two from 100 ms, three below that, so a
 Turn this on before a screenshot or a screen share. Open **About** and turn on
 **Hide serial numbers**. It is off by default and stays set after a restart.
 
-With it on, the app shows no serial number or UID anywhere. Those fields read
-"Hidden". Meter tiles are titled by model and position, for example
-"KM003C 2", so two meters stay easy to tell apart. Turn it off and the values
-come back with no reconnect.
+With it on, the app shows no serial number or UID anywhere. A meter's name
+shows only the model, for example "KM003C" in the Device select. When two
+meters of the same model are listed, each gets a number after the model:
+"KM003C (1)", "KM003C (2)". A field that has to show a value, such as the
+Serial row in About, reads "***". Meter tiles are titled by model and
+position, for example "KM003C 2", so two meters stay easy to tell apart. Turn
+it off and the values come back with no reconnect.
 
 The CLI has a matching flag: see
 [Hide serial numbers](../reference/cli.md#hide-serial-numbers) in the CLI

@@ -13,12 +13,15 @@ categories = ["hardware-support"]
 [features]
 default = ["hid"]
 hid = ["dep:hidapi"]
+# Startup logo file loading (PNG, JPEG, BMP, raw .bin) for FR PVFHM7.
+image-files = ["dep:image"]
 
 [dependencies]
 aes = "0.8.4"
 crc32fast = "1.5.3"
 getrandom = "0.4.3"
 hidapi = { version = "2.6.7", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"], optional = true }
 nusb = "0.2.8"
 powerz-pd.workspace = true
 # The pdcap capture file format (FR TGE83E).
@@ -31,5 +34,6 @@ thiserror = "2"
 workspace = true
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 proptest = "1.12.0"
 sha2 = "0.11.1"

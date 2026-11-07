@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Parser, Subcommand, ValueEnum};
 use powerz_protocol::decode::Rate;
+use powerz_protocol::logo::builtin::BuiltinLogo;
 use powerz_protocol::pdm::message::{Preset, SopTarget};
 use powerz_protocol::pdm::pd::{Emarker, PdType, SinkCaps};
 use powerz_sim::Scenario;
@@ -96,7 +97,7 @@ pub enum Command {
         /// Also list the simulated demo device (`--transport sim`).
         #[arg(long)]
         include_demo: bool,
-        /// Print `hidden` instead of each meter's serial.
+        /// Print `***` instead of each meter's serial.
         #[arg(long)]
         hide_serial: bool,
     },
@@ -105,7 +106,7 @@ pub enum Command {
         /// Print one JSON object instead of labelled lines.
         #[arg(long)]
         json: bool,
-        /// Print `hidden` instead of the serial and the UID.
+        /// Print `***` instead of the serial and the UID.
         #[arg(long)]
         hide_serial: bool,
     },
@@ -221,13 +222,20 @@ pub enum Command {
         #[command(subcommand)]
         action: FirmwareAction,
     },
+    /// Work with the meter's startup logo (`preview` needs no meter).
+    Logo {
+        /// What to do.
+        #[command(subcommand)]
+        action: LogoAction,
+    },
 }
 
 /// `settings` actions.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum SettingsAction {
     /// Write `<field>=<value>` changes (language=chinese|english,
-    /// brightness=1..100, dim_timeout=off|15|30|60, theme=`<name>`,
+    /// brightness=1..100, dim_timeout=off|15|30|60,
+    /// startup_duration=off|1|3|5, theme=`<name>`,
     /// rotation=0|90|180|270, sample_rate=2|10|50|1000), then read the
     /// settings back and print them. Needs --i-understand.
     Set {
@@ -335,6 +343,82 @@ pub enum FirmwareAction {
         /// measurements until it is jumped back or power-cycled.
         #[arg(long)]
         i_understand: bool,
+    },
+}
+
+/// `logo` actions.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum LogoAction {
+    /// Show what an image file (PNG, JPEG, BMP or raw .bin) becomes as a
+    /// startup logo: final size, mode, blob size, padded size and chunk
+    /// count; no meter needed.
+    Preview {
+        /// Image file to preview.
+        #[arg(value_name = "IMG", required_unless_present = "builtin")]
+        file: Option<PathBuf>,
+        /// Preview a built-in logo (surf, surf-wordmark) instead of a file;
+        /// always in the transparent mode.
+        #[arg(long, value_name = "NAME", conflicts_with = "file")]
+        builtin: Option<BuiltinLogo>,
+        /// Keep transparency (RGB565 + alpha, at most 200×200) instead of
+        /// the opaque mode (RGB565, at most 240×240).
+        #[arg(long)]
+        alpha: bool,
+        /// Write the logo as the meter would show it to this PNG file.
+        #[arg(short = 'o', long = "output", value_name = "PNG")]
+        output: Option<PathBuf>,
+    },
+    /// Upload an image as the meter's startup logo, then read it back and
+    /// compare; needs --i-understand and "write" typed at the prompt.
+    Write {
+        /// Image file to upload (PNG, JPEG, BMP or raw .bin).
+        #[arg(value_name = "IMG", required_unless_present = "builtin")]
+        file: Option<PathBuf>,
+        /// Upload a built-in logo (surf, surf-wordmark) instead of a file;
+        /// always in the transparent mode.
+        #[arg(long, value_name = "NAME", conflicts_with = "file")]
+        builtin: Option<BuiltinLogo>,
+        /// Keep transparency (RGB565 + alpha, at most 200×200) instead of
+        /// the opaque mode (RGB565, at most 240×240).
+        #[arg(long)]
+        alpha: bool,
+        /// Acknowledge that the write rewrites the meter's flash.
+        #[arg(long)]
+        i_understand: bool,
+        /// Skip the typed confirmation (still needs --i-understand).
+        #[arg(long)]
+        yes: bool,
+        /// Seconds to wait for a save in the meter's menu when the write
+        /// leaves its settings unsaved (0: do not wait).
+        #[arg(long, value_name = "SECS", default_value_t = 300)]
+        menu_save_timeout: u64,
+    },
+    /// Show what the meter's logo area holds (empty, the logo's size and
+    /// mode, or unrecognised); sends no write.
+    Read {
+        /// Read the whole logo and write it to this PNG file.
+        #[arg(short = 'o', long = "output", value_name = "PNG")]
+        output: Option<PathBuf>,
+        /// Hex-dump LEN bytes from ADDR (hex 0x… or decimal) instead; ADDR
+        /// and ADDR + LEN must lie inside 0x98300000–0x9831FFFF.
+        #[arg(long, num_args = 2, value_names = ["ADDR", "LEN"],
+              value_parser = parse_u32_auto, conflicts_with = "output")]
+        dump: Option<Vec<u32>>,
+    },
+    /// Remove the meter's startup logo (clear the logo area and turn the startup screen off),
+    /// then read it back; needs --i-understand and "remove" typed at the
+    /// prompt.
+    Remove {
+        /// Acknowledge that removing rewrites the meter's flash.
+        #[arg(long)]
+        i_understand: bool,
+        /// Skip the typed confirmation (still needs --i-understand).
+        #[arg(long)]
+        yes: bool,
+        /// Seconds to wait for a save in the meter's menu when the write
+        /// leaves its settings unsaved (0: do not wait).
+        #[arg(long, value_name = "SECS", default_value_t = 300)]
+        menu_save_timeout: u64,
     },
 }
 
@@ -658,6 +742,7 @@ impl Command {
             Command::Detect { .. } => "detect",
             Command::Console { .. } => "console",
             Command::Firmware { .. } => "firmware",
+            Command::Logo { .. } => "logo",
         }
     }
 }
@@ -922,6 +1007,16 @@ pub fn validate(cli: &Cli) -> Result<(), CliError> {
 /// answers CONNECT, so only bulk (and the simulator's bulk persona) sends it.
 pub fn needs_connect(kind: TransportKind) -> bool {
     matches!(kind, TransportKind::Bulk | TransportKind::Sim)
+}
+
+/// Parse a `u32` written as hex (`0x…`) or decimal.
+fn parse_u32_auto(s: &str) -> Result<u32, String> {
+    let t = s.trim();
+    let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => t.parse(),
+    };
+    parsed.map_err(|_| format!("{s:?} is not a number (hex 0x… or decimal, at most 0xFFFFFFFF)"))
 }
 
 #[cfg(test)]

@@ -7,6 +7,12 @@
  */
 
 import type {
+  BuiltinLogoName,
+  LogoPreview,
+  LogoProgress,
+  LogoRead,
+  LogoSettingsCheck,
+  LogoWritten,
   AppInfo,
   AttachedSession,
   BackendEvent,
@@ -668,6 +674,128 @@ export const MOCK_RECORDING_FILE = {
 /** Readable rows past the limit in a `truncated` file. */
 const MOCK_LEFT_OUT = 2_500_000;
 
+/** A scripted logo picture (FR MEHQC0): `small` chooses one with a side below 48. */
+export type LogoFile = "small";
+
+/** `?logofile=small` in the page URL chooses the small logo picture (FR MEHQC0);
+ * anything else is ignored. */
+export function logoFileFromUrl(search: string | undefined): LogoFile | null {
+  return urlParam(search, "logofile") === "small" ? "small" : null;
+}
+
+/** The logo picture the mock chooses (FR MEHQC0): 100 × 60. */
+export const MOCK_LOGO_FILE = "/mock/logo.png";
+/** The small logo picture (`?logofile=small`): 240 × 24 once fitted, below 48 high. */
+export const MOCK_LOGO_SMALL_FILE = "/mock/logo-small.png";
+
+/** The size each mock logo picture encodes to. */
+const MOCK_LOGO_SIZES: Record<string, { width: number; height: number }> = {
+  [MOCK_LOGO_FILE]: { width: 100, height: 60 },
+  [MOCK_LOGO_SMALL_FILE]: { width: 240, height: 24 },
+};
+
+/** A gradient of `width × height` as RGBA8888, base64; `variant` shifts its colours. */
+function mockLogoPixels(width: number, height: number, variant = 0): string {
+  let out = "";
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      out += String.fromCharCode(
+        (x * 2 + variant) & 0xff,
+        (y * 4) & 0xff,
+        ((x + y) * 3) & 0xff,
+        0xff,
+      );
+    }
+  }
+  return btoa(out);
+}
+
+/** The built-in logos' colour variants (FR 70X5YX): both are 200 × 200. */
+const MOCK_BUILTIN_VARIANTS: Record<BuiltinLogoName, number> = {
+  surf: 64,
+  "surf-wordmark": 128,
+};
+
+/** The preview of built-in logo `name` like the backend's: 200 × 200, transparent; any
+ * other name is refused naming the two. */
+function mockBuiltinPreview(name: BuiltinLogoName): LogoPreview {
+  const variant = MOCK_BUILTIN_VARIANTS[name];
+  if (variant === undefined) {
+    throw usage(`unknown built-in logo "${name}"; expected one of: surf, surf-wordmark`);
+  }
+  return mockLogoSized(200, 200, true, variant);
+}
+
+/** The preview of mock logo picture `path` like the backend's (16-byte header, 2 bytes a
+ * pixel opaque or 3 with alpha, padded to 256-byte chunks). */
+function mockLogoPreview(path: string, alpha: boolean): LogoPreview | null {
+  const size = MOCK_LOGO_SIZES[path];
+  if (size === undefined) return null;
+  return mockLogoSized(size.width, size.height, alpha);
+}
+
+/** A mock preview of a `width × height` logo in the given mode. */
+function mockLogoSized(width: number, height: number, alpha: boolean, variant = 0): LogoPreview {
+  const blobSize = 16 + width * height * (alpha ? 3 : 2);
+  const chunks = Math.ceil(blobSize / 256);
+  return {
+    width,
+    height,
+    mode: alpha ? "alpha" : "opaque",
+    blob_size: blobSize,
+    padded_size: chunks * 256,
+    chunks,
+    small_side_warning: width < 48 || height < 48,
+    rgba: mockLogoPixels(width, height, variant),
+  };
+}
+
+/** {@link mockLogoPreview}, refusing any other path like a file that is no picture. */
+function mockLogoPicture(path: string, alpha: boolean): LogoPreview {
+  const preview = mockLogoPreview(path, alpha);
+  if (preview === null) throw usage(`${path}: cannot load image file: not a picture`);
+  return preview;
+}
+
+/** `?logofault=<k>` in the page URL fails a logo upload at chunk `k` (0-based, FR
+ * MEHQC0); anything but a whole number ≥ 0 is ignored. */
+export function logoFaultFromUrl(search: string | undefined): number | null {
+  const raw = urlParam(search, "logofault");
+  if (raw === null || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+/** The menu-save steps, the same text as the library's `MENU_SAVE_STEPS` (FR QG6RNY). */
+export const MENU_SAVE_STEPS =
+  "On the meter: Settings → startup logo duration → pick a value → save. Don't unplug the meter first.";
+
+/** How long after a logo write the demo meter does its own menu save, ms (FR QG6RNY). */
+export const MOCK_MENU_SAVE_MS = 3000;
+
+/** How the demo meter's settings get saved after a logo write (FR QG6RNY): `never`,
+ * `calibration` (the first check after the save time finds changed calibration) or
+ * `saved` (the write's own fresh read is already saved). */
+export type MenuSaveMode = "never" | "calibration" | "saved";
+
+/** `?menusave=` in the page URL (FR QG6RNY); anything else is ignored. */
+export function menuSaveFromUrl(search: string | undefined): MenuSaveMode | null {
+  const raw = urlParam(search, "menusave");
+  return raw === "never" || raw === "calibration" || raw === "saved" ? raw : null;
+}
+
+/** Least gap between two mock logo progress messages, ms: at most 20 a second. */
+const MOCK_LOGO_PROGRESS_MS = 50;
+
+/** Bytes per read-back read, as the backend reads the logo window. */
+const MOCK_LOGO_READ_BYTES = 2048;
+
+/** What the demo meter's logo area holds (FR MEHQC0). */
+type MockLogoArea =
+  | { status: "empty" }
+  | { status: "unrecognised" }
+  | { status: "logo"; width: number; height: number; mode: "opaque" | "alpha"; rgba: string };
+
 /** Options of a {@link MockBackend}. */
 export interface MockOptions {
   /** PD records to seed when the capture first starts. */
@@ -680,6 +808,13 @@ export interface MockOptions {
   recordingFileFault?: RecordingFileFault | null;
   /** The history's full-resolution limit (FR AXHK2W); none (the default) never folds. */
   historyFullSamples?: number | null;
+  /** The logo picture the open dialog chooses (FR MEHQC0). */
+  logoFile?: LogoFile | null;
+  /** A logo upload fails at this chunk (0-based) (FR MEHQC0); none (the default) never. */
+  logoFault?: number | null;
+  /** How the settings get saved after a logo write (FR QG6RNY); none: after
+   * {@link MOCK_MENU_SAVE_MS}. */
+  menuSave?: MenuSaveMode | null;
 }
 
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
@@ -769,6 +904,8 @@ interface Running {
   /** `pd-start-refused`: a trigger session ran on this connection, so the meter refuses
    * a PD capture Start until a replug [device]. */
   pdStartRefused?: boolean;
+  /** The settings were read on this connection, which a logo write needs (FR MEHQC0). */
+  settingsRead?: boolean;
 }
 
 interface MockRecording {
@@ -868,6 +1005,8 @@ export const MOCK_MODES = [
   "firmware-other-model",
   "firmware-bad-file",
   "firmware-running",
+  "logo-other-model",
+  "two-meters",
 ] as const;
 export type MockMode = (typeof MOCK_MODES)[number];
 
@@ -919,6 +1058,25 @@ export const MOCK_MODE_FLIP = {
   bootMs: 3_000,
 } as const;
 
+/** `two-meters` (FR CCF47K, AC .2): two real KM003C meters listed before the demo
+ * entries, `first` at USB address 5 and `second` at address 6; `second` holds the lower
+ * serial, so with the serials hidden it reads "KM003C (1)". Each connects as a 5 V 1 A
+ * load reporting its own serial. */
+export const MOCK_TWO_METERS = { first: "MOCK-PAIR-0002", second: "MOCK-PAIR-0001" } as const;
+
+/** The `two-meters` picker entries. */
+function twoMeterListings(): DeviceListing[] {
+  return [
+    scriptedMeter(MOCK_TWO_METERS.first, 5, "application"),
+    scriptedMeter(MOCK_TWO_METERS.second, 6, "application"),
+  ];
+}
+
+/** The `two-meters` entry with `deviceId`, or null. */
+function twoMeterListing(deviceId: string): DeviceListing | null {
+  return twoMeterListings().find((d) => d.id === deviceId) ?? null;
+}
+
 /** The picker entry of a scripted real KM003C (`serial`) on bus 1 at `address` in `mode`,
  * labelled the way the backend lists it. */
 function scriptedMeter(
@@ -958,12 +1116,13 @@ function connectedStatus(
   rateSps: number | null,
   sessionId = 1,
   firmwareVersion = "2.0.6",
+  model = "KM003C",
 ): BackendEvent {
   return {
     type: "status",
     data: {
       state: "connected",
-      model: "KM003C",
+      model,
       firmware_version: firmwareVersion,
       bootloader_version: "2.5",
       mode: "application",
@@ -1267,7 +1426,11 @@ const DEMO_WRITABLE_SETTINGS: Readonly<Record<string, readonly string[] | null>>
   theme: ["blue", "green", "pink", "orange", "yellow", "dark green", "cyan"],
   rotation: ["0°", "90°", "180°", "270°"],
   sample_rate: ["2 SPS", "10 SPS", "50 SPS", "1000 SPS"],
+  startup_duration: ["off", "1 s", "3 s", "5 s"],
 };
+
+/** The settings row a writable key changes, where it is not the key itself (FR MEHQC0). */
+const DEMO_SETTING_ROW: Readonly<Record<string, string>> = { startup_duration: "startup_logo" };
 
 /** How the demo meter shows `code` for writable `key`, or null when it is out of range. */
 function demoSettingText(key: string, code: number): string | null {
@@ -1395,6 +1558,11 @@ export class MockBackend {
   #meterSettings: MeterSettingField[] = DEMO_METER_SETTINGS.map((f) => ({ ...f }));
   /** Offline-record downloads so far (FR 1HHT00). */
   #recordDownloads = 0;
+  /** The demo meter's logo area, which upload and Remove change (FR MEHQC0). */
+  #logoArea: MockLogoArea = { status: "empty" };
+  /** When the demo meter saves its settings after the last logo write (`Date.now()`
+   * ms), null when no write waits for a menu save (FR QG6RNY). */
+  #menuSaveAt: number | null = null;
   /** The demo meter's record table, which a delete changes (FR JKWT3V). */
   #records: DemoRecord[] = [...DEMO_RECORDS];
   /** Record backups written so far, for their folder names (FR JKWT3V). */
@@ -1417,6 +1585,9 @@ export class MockBackend {
       settingsFault: settingsFaultFromUrl(pageSearch()),
       recordingFileFault: recordingFileFaultFromUrl(pageSearch()),
       historyFullSamples: foldAtFromUrl(pageSearch()),
+      logoFile: logoFileFromUrl(pageSearch()),
+      logoFault: logoFaultFromUrl(pageSearch()),
+      menuSave: menuSaveFromUrl(pageSearch()),
     },
   ) {
     this.#mode = mode;
@@ -1442,7 +1613,7 @@ export class MockBackend {
 
   async listDevices(): Promise<DeviceListing[]> {
     const meter = this.#listedMeter();
-    const meters = meter ? [meter] : [];
+    const meters = this.#mode === "two-meters" ? twoMeterListings() : meter ? [meter] : [];
     const demos = SCENARIOS.map((name) => ({
       id: `demo:${name}`,
       label: `Demo device — ${name}`,
@@ -1589,7 +1760,8 @@ export class MockBackend {
     if (this.#sessions.some((x) => x.id === deviceId || x.deviceId === deviceId)) {
       throw usage("This meter is already connected. Disconnect it first.");
     }
-    const isMeter = this.#listedMeter()?.id === deviceId;
+    const pair = this.#mode === "two-meters" ? twoMeterListing(deviceId) : null;
+    const isMeter = pair !== null || this.#listedMeter()?.id === deviceId;
     // Like the backend: a connect by hand ends the wait for the unplugged meter, unless
     // it adds a meter beside running ones (FR 1HHT03); a connect of that meter itself
     // always does.
@@ -1604,10 +1776,18 @@ export class MockBackend {
     if (!scenario) throw usage("That meter is no longer attached.");
     if (this.#mode === "permission-denied") throw { ...LINUX_PERMISSION_DENIED };
     const locked = this.#mode === "rate-locked";
-    const serial = isMeter ? MOCK_REPLUG.serial : this.#freeDemoSerial();
+    const serial = pair?.serial ?? (isMeter ? MOCK_REPLUG.serial : this.#freeDemoSerial());
     const sessionId = this.#nextSessionId++;
     // Like the worker: a locked session's rate is unknown until measured.
-    onEvent(connectedStatus(serial, locked ? null : rateSps, sessionId, this.#firmwareVersion));
+    onEvent(
+      connectedStatus(
+        serial,
+        locked ? null : rateSps,
+        sessionId,
+        this.#firmwareVersion,
+        this.#mode === "logo-other-model" ? "KM002C" : "KM003C",
+      ),
+    );
     if (locked) {
       onEvent({
         type: "status",
@@ -2212,7 +2392,8 @@ export class MockBackend {
   /** The demo meter's settings: the fields of the captured FW 2.0.6 block, all
    * tagged inferred (FR 1HHT01). */
   async meterSettings(): Promise<MeterSettings> {
-    this.#open();
+    this.#refuseUnsavedSettings();
+    this.#open().settingsRead = true;
     this.#meterSettingsReads += 1;
     return { fields: this.#meterSettings.map((f) => ({ ...f })) };
   }
@@ -2223,6 +2404,7 @@ export class MockBackend {
    * names the first field that did not change. */
   async meterSettingsWrite(changes: SettingChanges): Promise<MeterSettings> {
     this.#open();
+    this.#refuseUnsavedSettings();
     const entries = Object.entries(changes) as [string, number][];
     if (entries.length === 0) throw usage("No setting was changed.");
     const shown = new Map<string, string>();
@@ -2232,7 +2414,7 @@ export class MockBackend {
       }
       const text = demoSettingText(key, code);
       if (text === null) throw usage(`${key} = ${code} is out of range.`);
-      shown.set(key, text);
+      shown.set(DEMO_SETTING_ROW[key] ?? key, text);
     }
     this.#meterSettingsWrites += 1;
     const next = this.#meterSettings.map((f) => ({ ...f, value: shown.get(f.key) ?? f.value }));
@@ -2395,6 +2577,207 @@ export class MockBackend {
       stored_size: 456912,
       release_notes_en: "1. Demo note: improved PD capture.\n2. Demo note: minor fixes.",
     };
+  }
+
+  /** There is no open dialog: "chooses" a synthetic logo picture (FR MEHQC0), the small
+   * one with `?logofile=small`. */
+  async logoChoose(): Promise<string | null> {
+    return this.#options.logoFile === "small" ? MOCK_LOGO_SMALL_FILE : MOCK_LOGO_FILE;
+  }
+
+  /** Previews a mock logo picture like the backend (FR MEHQC0, AC .1); any other path is
+   * refused like a file that is no picture. */
+  async logoPreview(path: string, alpha: boolean): Promise<LogoPreview> {
+    return mockLogoPicture(path, alpha);
+  }
+
+  /** What the logo area of meter `deviceId` holds (FR MEHQC0, AC .7); with `full`, the
+   * stored image too. */
+  async logoRead(deviceId: string, full: boolean): Promise<LogoRead> {
+    this.#logoSession(deviceId);
+    const a = this.#logoArea;
+    if (a.status !== "logo") {
+      return { status: a.status, width: null, height: null, mode: null, image: null };
+    }
+    return {
+      status: "logo",
+      width: a.width,
+      height: a.height,
+      mode: a.mode,
+      image: full ? a.rgba : null,
+    };
+  }
+
+  /** Uploads mock picture `path` like the backend (FR MEHQC0, AC .3): chunk progress,
+   * then read-back progress, at least 50 ms apart; `logoFault` stops it at that chunk. */
+  async logoUpload(
+    deviceId: string,
+    path: string,
+    alpha: boolean,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten> {
+    const s = this.#logoSession(deviceId);
+    return this.#logoWrite(s, mockLogoPicture(path, alpha), onProgress);
+  }
+
+  /** Previews built-in logo `name` like the backend (FR 70X5YX). */
+  async logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPreview> {
+    return mockBuiltinPreview(name);
+  }
+
+  /** Uploads built-in logo `name` like a picture (FR 70X5YX). */
+  async logoUploadBuiltin(
+    deviceId: string,
+    name: BuiltinLogoName,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten> {
+    const s = this.#logoSession(deviceId);
+    return this.#logoWrite(s, mockBuiltinPreview(name), onProgress);
+  }
+
+  /** Writes the logo `preview` describes on `s`: chunk progress, then read-back
+   * progress, at least 50 ms apart; `logoFault` stops it at that chunk. */
+  async #logoWrite(
+    s: Running,
+    preview: LogoPreview,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten> {
+    const before = this.#logoWritable(s);
+    const total = preview.chunks;
+    const fault = this.#options.logoFault ?? null;
+    const step = Math.max(1, Math.ceil(total / 8));
+    for (let done = 0; done < total;) {
+      const next = Math.min(total, done + step);
+      if (fault !== null && fault < next) {
+        if (fault > done) onProgress({ step: "chunks", done: fault, total });
+        // Chunk 0 carries the header, so chunks 0..k-1 landed read as the logo it describes.
+        if (fault > 0) {
+          this.#logoArea = {
+            status: "logo",
+            width: preview.width,
+            height: preview.height,
+            mode: preview.mode,
+            rgba: preview.rgba,
+          };
+        }
+        throw {
+          kind: "protocol",
+          message: `Writing the logo stopped at chunk ${fault}: REJECT.`,
+          hint: "The startup duration was not changed, so the meter keeps its old screen. Try again.",
+        } satisfies UiError;
+      }
+      done = next;
+      await sleep(MOCK_LOGO_PROGRESS_MS);
+      onProgress({ step: "chunks", done, total });
+    }
+    await this.#logoReadBack(preview.padded_size, onProgress);
+    this.#logoArea = {
+      status: "logo",
+      width: preview.width,
+      height: preview.height,
+      mode: preview.mode,
+      rgba: preview.rgba,
+    };
+    return this.#logoWritten(before, "3 s");
+  }
+
+  /** Removes the demo meter's logo like the backend (FR MEHQC0, AC .4). */
+  async logoRemove(
+    deviceId: string,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten> {
+    const before = this.#logoWritable(this.#logoSession(deviceId));
+    await sleep(MOCK_LOGO_PROGRESS_MS);
+    onProgress({ step: "chunks", done: 1, total: 1 });
+    this.#logoArea = { status: "empty" };
+    await this.#logoReadBack(16, onProgress);
+    return this.#logoWritten(before, "off");
+  }
+
+  /** The session of meter `deviceId`; refused when it is not connected. */
+  #logoSession(deviceId: string): Running {
+    const s = this.#sessions.find((x) => x.id === deviceId || x.deviceId === deviceId);
+    if (!s) throw usage("No meter is connected.");
+    return s;
+  }
+
+  /** The startup duration before a logo write on `s`; refused like the backend before
+   * the settings were read and on a KM002C. */
+  #logoWritable(s: Running): string {
+    if (!s.settingsRead) {
+      throw usage("The logo was not written: SETTINGS was not read in this session.");
+    }
+    if (this.#mode === "logo-other-model") {
+      throw usage("The logo was not written: the meter is a KM002C, logo upload needs a KM003C.");
+    }
+    return this.#startupRow();
+  }
+
+  /** The demo meter's startup duration row. */
+  #startupRow(): string {
+    return this.#meterSettings.find((f) => f.key === "startup_logo")?.value ?? "off";
+  }
+
+  /** Refuses a settings read or write while a logo write's settings wait for the
+   * mock's menu save, like the backend does with a stale SETTINGS block (FR QG6RNY). */
+  #refuseUnsavedSettings(): void {
+    const at = this.#menuSaveAt;
+    if (at === null) return;
+    if (this.#options.menuSave !== "never" && Date.now() >= at) return;
+    throw {
+      kind: "settings_not_saved",
+      message: "The meter has not saved its settings since the last change.",
+      hint: MENU_SAVE_STEPS,
+    } satisfies UiError;
+  }
+
+  /** A finished logo write that set the startup duration to `set` (FR QG6RNY): the
+   * settings wait for the mock's menu save unless `?menusave=saved`. */
+  #logoWritten(before: string, set: string): LogoWritten {
+    this.#meterSettings = this.#meterSettings.map((f) =>
+      f.key === "startup_logo" ? { ...f, value: set } : f,
+    );
+    if (this.#options.menuSave === "saved") {
+      this.#menuSaveAt = null;
+      return {
+        duration_before: before,
+        duration_set: set,
+        settings: "saved",
+        startup_duration: set,
+      };
+    }
+    this.#menuSaveAt = Date.now() + MOCK_MENU_SAVE_MS;
+    return {
+      duration_before: before,
+      duration_set: set,
+      settings: "needs_menu_save",
+      startup_duration: null,
+    };
+  }
+
+  /** One read-only check of the settings after a logo write, like the backend (FR
+   * QG6RNY): not saved until the mock's menu save, then saved with the row's value. */
+  async logoSettingsCheck(deviceId: string): Promise<LogoSettingsCheck> {
+    this.#logoSession(deviceId);
+    const at = this.#menuSaveAt;
+    if (at === null) throw usage("No logo write is waiting for a settings save.");
+    if (this.#options.menuSave === "never" || Date.now() < at) {
+      return { settings: "needs_menu_save", startup_duration: null };
+    }
+    this.#menuSaveAt = null;
+    if (this.#options.menuSave === "calibration") {
+      return { settings: "calibration_changed", startup_duration: null };
+    }
+    return { settings: "saved", startup_duration: this.#startupRow() };
+  }
+
+  /** Read-back progress of `bytes`, one read every 50 ms. */
+  async #logoReadBack(bytes: number, onProgress: (progress: LogoProgress) => void): Promise<void> {
+    const total = Math.ceil(bytes / MOCK_LOGO_READ_BYTES);
+    for (let done = 1; done <= total; done++) {
+      await sleep(MOCK_LOGO_PROGRESS_MS);
+      onProgress({ step: "read_back", done, total });
+    }
   }
 
   /** There is no open dialog: "chooses" a synthetic firmware file (FR V9SK55). */

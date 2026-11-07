@@ -12,11 +12,13 @@
   import type { Session } from "../session.svelte";
   import type { MeterNotice } from "../meterNotices.svelte";
   import MeterNoticeList from "./MeterNoticeList.svelte";
+  import { holdTitle, recordDisabled } from "../logoHold";
   import RecorderButtons from "./RecorderButtons.svelte";
 
   let {
     label,
     session,
+    held = false,
     recording,
     exportJob,
     notices,
@@ -33,6 +35,8 @@
   }: {
     label: string;
     session: Session;
+    /** A logo write holds the meter (AC-MEHQC0.3): no rate change, no disconnect. */
+    held?: boolean;
     recording: Recording;
     exportJob: ExportJob;
     /** This meter's notices. */
@@ -59,7 +63,7 @@
   <select
     aria-label="Sample rate"
     title={picker.label ?? undefined}
-    disabled={picker.disabled}
+    disabled={picker.disabled || held}
     value={rateSps}
     onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
   >
@@ -69,26 +73,26 @@
   </select>
   <button
     type="button"
-    title="Record to CSV"
+    title={holdTitle(held, "Record to CSV")}
     aria-pressed={recording.phase === "recording"}
-    disabled={record.disabled}
+    disabled={recordDisabled(recording.phase, canRecord, held)}
     onclick={onToggleRecording}
   >
     {record.label}
   </button>
-  <RecorderButtons {recording} {onTogglePause} {onRecorderOptions} />
+  <RecorderButtons {recording} {held} {onTogglePause} {onRecorderOptions} />
   <button
     type="button"
-    title="Export the session so far to CSV"
-    disabled={exportJob.running || !canRecord || session.latest === null}
+    title={holdTitle(held, "Export the session so far to CSV")}
+    disabled={exportJob.running || !canRecord || session.latest === null || held}
     onclick={onExport}
   >
     Export
   </button>
   <button
     type="button"
-    title="Export the session so far to a vendor-layout .db file"
-    disabled={exportJob.running || !canRecord || session.latest === null}
+    title={holdTitle(held, "Export the session so far to a vendor-layout .db file")}
+    disabled={exportJob.running || !canRecord || session.latest === null || held}
     onclick={onExportDb}
   >
     Export .db
@@ -104,7 +108,12 @@
       value={exportJob.total > 0 ? exportJob.done : undefined}
     ></progress>
   {/if}
-  <button type="button" class="disconnect" disabled={session.flashing} onclick={onDisconnect}>
+  <button
+    type="button"
+    class="disconnect"
+    disabled={session.flashing || held}
+    onclick={onDisconnect}
+  >
     Disconnect
   </button>
 </div>

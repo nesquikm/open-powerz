@@ -33,7 +33,7 @@ function updateCheckLabel(updateRequired: boolean | null): string {
 
 /** The device details rows of the connected meter; a missing value shows a dash,
  * and each firmware-status problem gets its own row. With `hidden`, the Serial row reads
- * "Hidden". */
+ * "***" (AC-CCF47K.3). */
 export function deviceDetailsRows(info: ConnectedInfo, hidden: boolean): DetailRow[] {
   const orDash = (s: string | undefined): string => (s === undefined || s.trim() === "" ? "—" : s);
   return [

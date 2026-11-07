@@ -8,12 +8,15 @@ use powerz_protocol::decode::records::MEMORY_READ_MAX_LEN;
 use powerz_protocol::decode::settings::apply_settings_write;
 use powerz_protocol::frame::{self, Attribute, DataHeader, SectionHeader};
 
-use powerz_protocol::transport::guard::check_settings_write;
+use powerz_protocol::transport::guard::{
+    LOGO_CHUNK_TYPE, LOGO_FLAG_ATT, LOGO_REGION_START, LOGO_WINDOW_END, LOGO_WINDOW_START,
+    check_logo_flag_write, check_settings_write,
+};
 
 use crate::memory;
 use crate::queue::RECORD_LEN;
 use crate::records;
-use crate::{Persona, Sample, SimDevice};
+use crate::{LogoFault, Persona, Sample, SimDevice};
 
 /// Message type codes the simulator understands.
 pub(crate) mod msg {
@@ -33,6 +36,7 @@ pub(crate) mod msg {
     pub const SETTINGS_WRITE: u8 = 0x0A;
     pub const SET_DATA: u8 = 0x48;
     pub const AUTH: u8 = 0x4C;
+    pub const LOGO_CHUNK: u8 = super::LOGO_CHUNK_TYPE;
 }
 
 /// The stale DISCONNECT that waits on the IN pipe right after open.
@@ -193,6 +197,8 @@ impl SimDevice {
             self.auth_level = 0;
             self.sign_in_lost = true;
         }
+        self.auto_menu_save_due();
+        self.queue_reset_due();
         if self.persona == Persona::Cdc && matches!(b0 & 0x7F, 0x01..=0x03) {
             // ADCNEW framing on CDC: out of scope, no reply.
             return Vec::new();
@@ -218,6 +224,7 @@ impl SimDevice {
             msg::MEM_READ => self.memory_read(req, id),
             msg::AUTH => vec![self.auth(req, id)],
             msg::SET_DATA => vec![self.set_data(req, id)],
+            msg::LOGO_CHUNK => self.logo_chunk(req, id),
             // Over bulk the KM003C neither answers nor applies a settings
             // write (2026-10-29) `[device]`.
             msg::SETTINGS_WRITE if self.persona != Persona::Cdc => Vec::new(),
@@ -273,7 +280,11 @@ impl SimDevice {
                     set_other_brightness(&mut block);
                     settings_payload(&block, stored.rate_code)
                 } else {
-                    settings_payload(&stored.settings, stored.rate_code)
+                    let mut p = settings_payload(&stored.settings, stored.rate_code);
+                    if let Some(crc) = stored.frozen_crc_a {
+                        p[0x5C..0x60].copy_from_slice(&crc);
+                    }
+                    p
                 }
             }));
         }
@@ -374,7 +385,9 @@ impl SimDevice {
         let record = (self.auth_level >= 1)
             .then(|| records::samples(&self.record_table, addr, len))
             .flatten();
-        let Some(block) = memory::block(addr, len, &self.app_version, &self.serial).or(record)
+        let Some(block) = memory::block(addr, len, &self.model, &self.app_version, &self.serial)
+            .or(record)
+            .or_else(|| self.logo_window(addr, len))
         else {
             return reject();
         };
@@ -383,6 +396,16 @@ impl SimDevice {
         let mut data = crypto::encrypt(&KEYS[0], &block);
         data.truncate(MEMORY_READ_MAX_LEN as usize);
         vec![confirm, data]
+    }
+
+    /// The 0x98300000..0x98320000 memory window maps onto the logo flash
+    /// (0x98300000 + n reads flash 0x300000 + n) `[inferred]`.
+    fn logo_window(&self, addr: u32, len: u32) -> Option<Vec<u8>> {
+        let end = addr.checked_add(len)?;
+        (addr >= LOGO_WINDOW_START && end <= LOGO_WINDOW_END).then(|| {
+            let flash = addr - LOGO_WINDOW_START + LOGO_REGION_START;
+            self.logo_flash.read(flash, len as usize)
+        })
     }
 
     /// 0x48: only the record-table write (attribute 0x28) is taken; it
@@ -394,6 +417,12 @@ impl SimDevice {
         if !self.link_open() {
             return self.control(msg::REJECT, id);
         }
+        let att = req
+            .get(4..6)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]) & 0x7FFF);
+        if att == Some(LOGO_FLAG_ATT) {
+            return self.logo_flag_write(req, id);
+        }
         let Some(table) = records::table_write(req) else {
             return self.control(msg::REJECT, id);
         };
@@ -401,6 +430,46 @@ impl SimDevice {
             self.record_table = table;
         }
         self.control(msg::FINISHED, id)
+    }
+
+    /// SET_DATA 0x1C: the startup duration. 0 (off) and 2 (3 s) are written
+    /// into the SETTINGS block, leaving block A's CRC stale, and answered
+    /// with FINISHED `[device]`; any other frame is REJECTed and changes
+    /// nothing `[inferred]`.
+    fn logo_flag_write(&mut self, req: &[u8], id: u8) -> Vec<u8> {
+        if check_logo_flag_write(req).is_err() {
+            return self.control(msg::REJECT, id);
+        }
+        let value = u32::from_le_bytes([req[8], req[9], req[10], req[11]]);
+        self.write_startup_duration(value);
+        self.control(msg::FINISHED, id)
+    }
+
+    /// 0x4A: a startup-logo chunk. The payload is decrypted with key slot
+    /// 0 and its block header checked (CRC, 0xFFFFFFFF, second length);
+    /// a good chunk is programmed into the logo flash and answered with
+    /// FINISHED carrying the request's id, a bad one is REJECTed and
+    /// changes no flash byte `[inferred]`. An injected [`LogoFault`]
+    /// drops, REJECTs or unplugs after the chunk it names.
+    fn logo_chunk(&mut self, req: &[u8], id: u8) -> Vec<Vec<u8>> {
+        let k = self.logo_chunks;
+        self.logo_chunks += 1;
+        match self.logo_fault {
+            Some(LogoFault::NoReplyAt(at)) if at == k => return Vec::new(),
+            Some(LogoFault::RejectAt(at)) if at == k => {
+                return vec![self.control(msg::REJECT, id)];
+            }
+            Some(LogoFault::UnplugAfter(at)) if at == k => self.unplugged = true,
+            _ => {}
+        }
+        if !self.link_open() || (self.logo_auth_required && self.auth_level < 1) {
+            return vec![self.control(msg::REJECT, id)];
+        }
+        let Some((addr, data)) = crate::logo::decode_chunk(req) else {
+            return vec![self.control(msg::REJECT, id)];
+        };
+        self.logo_flash.write(addr, &data);
+        vec![self.control(msg::FINISHED, id)]
     }
 
     /// 0x0A on CDC: a settings write laid out as `check_settings_write` demands
@@ -431,7 +500,14 @@ impl SimDevice {
         ]);
         stored.rate_code = ((w60 >> 2) & 0b11) as u8;
         let rate = (stored.rate_code != old_rate).then_some(stored.rate_code);
+        if self.faults.settings_write_resets_queue_rate {
+            // FR JV54SN `[inferred]`: the running queue goes back to the
+            // stored rate on every pipe of this meter.
+            stored.queue_resets += 1;
+            stored.queue_reset_to = (stored.rate_code, self.uptime_ms());
+        }
         drop(stored);
+        self.queue_reset_due();
         if let Some(code) = rate
             && !self.streaming
         {
@@ -439,6 +515,19 @@ impl SimDevice {
             self.queue.set_rate(code, now);
         }
         self.control(msg::FINISHED, id)
+    }
+
+    /// Apply a queue rate reset a settings write left in the shared state
+    /// (`settings-write-resets-queue-rate`) that this pipe has not seen yet.
+    fn queue_reset_due(&mut self) {
+        let (resets, (code, at)) = {
+            let stored = self.stored();
+            (stored.queue_resets, stored.queue_reset_to)
+        };
+        if resets != self.queue_resets_seen {
+            self.queue_resets_seen = resets;
+            self.queue.set_rate(code, at);
+        }
     }
 
     /// 0x4C: grant level 1 for the UID, 2 for the OTP credential, else 0.

@@ -62,6 +62,7 @@ fn also_unsaved(e: CliError, f: &std::io::Error) -> CliError {
         CliError::NoDevice(m) => CliError::NoDevice(note(m)),
         CliError::Permission(m) => CliError::Permission(note(m)),
         CliError::Device(m) => CliError::Device(note(m)),
+        CliError::SettingsNotSaved(m) => CliError::SettingsNotSaved(note(m)),
         // Harmless alone, but the file is not: that is the failure to tell.
         CliError::OutputClosed => {
             CliError::Device(format!("the capture file could not be finished: {f}"))

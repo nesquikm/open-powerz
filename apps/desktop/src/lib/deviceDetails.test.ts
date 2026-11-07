@@ -136,8 +136,13 @@ describe("device details with serial numbers hidden (AC-AXHK2Q.2, .3)", () => {
       (r) => r.label === "Serial",
     );
 
-  it("the Serial row reads Hidden with the option on", () => {
-    expect(serialRow(true)?.value).toBe("Hidden");
+  it("the Serial row reads *** with the option on (AC-CCF47K.3)", () => {
+    expect(serialRow(true)?.value).toBe("***");
+  });
+
+  it("no row reads Hidden with the option on (AC-CCF47K.3)", () => {
+    const rows = deviceDetailsRows(info({ serial: "FAKE-SERIAL-0001" }), true);
+    expect(rows.map((r) => r.value)).not.toContain("Hidden");
   });
 
   it("no row carries the serial with the option on", () => {

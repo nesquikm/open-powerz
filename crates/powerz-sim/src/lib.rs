@@ -12,6 +12,7 @@
 mod adcnew;
 mod device;
 mod flash;
+mod logo;
 mod memory;
 mod pd;
 mod pdm;
@@ -24,8 +25,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use flash::{FlashFault, SimMeter, SimMeterPipe};
+pub use logo::{BootScreen, ErasePolicy, LogoFault, LogoFlash, SECTOR_LEN, boot_render};
 pub use pd::PdScenario;
 pub use pdm::{SimCable, SimCharger, SimPdm, SimPdmPort};
+use powerz_protocol::crypto;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::Clock;
 use powerz_protocol::transport::discovery::{PID_KM003C, UsbIdentity, UsbInterface};
@@ -249,6 +252,9 @@ pub struct FaultPlan {
     settings_saved_before_reboot: bool,
     /// Every second SETTINGS read shows another brightness.
     flaky_settings_read: bool,
+    /// An accepted settings write puts the running ADC queue back to the
+    /// stored rate (FR JV54SN) `[inferred]`.
+    settings_write_resets_queue_rate: bool,
     /// Pad the record table to this many entries.
     record_count: Option<usize>,
 }
@@ -354,6 +360,15 @@ impl FaultPlan {
         self
     }
 
+    /// An accepted settings write (type 0x0A) re-applies the stored rate to
+    /// the meter's running ADC queue, even while a stream started with 0x0E
+    /// runs and even when the rate key did not change (FR JV54SN)
+    /// `[inferred]`. A write the meter ignores leaves the queue alone.
+    pub fn settings_write_resets_queue_rate(mut self) -> FaultPlan {
+        self.settings_write_resets_queue_rate = true;
+        self
+    }
+
     /// The record table is padded to `count` entries with synthetic records
     /// that have no samples (a shorter table is left alone).
     pub fn record_count(mut self, count: usize) -> FaultPlan {
@@ -364,7 +379,7 @@ impl FaultPlan {
     /// `permission`, `corrupt-adcnew@N` (ADCNEW frame N), `echo-start`,
     /// `reject-record-reads`, `ignore-table-write`, `ignore-settings-write`,
     /// `stir-undecoded-settings`, `settings-saved-before-reboot`,
-    /// `flaky-settings-read`.
+    /// `flaky-settings-read`, `settings-write-resets-queue-rate`.
     pub fn parse(spec: &str) -> Result<FaultPlan, String> {
         let mut plan = FaultPlan::new();
         for item in spec.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -391,13 +406,16 @@ impl FaultPlan {
                 ("stir-undecoded-settings", None) => plan.stir_undecoded_settings(),
                 ("settings-saved-before-reboot", None) => plan.settings_saved_before_reboot(),
                 ("flaky-settings-read", None) => plan.flaky_settings_read(),
+                ("settings-write-resets-queue-rate", None) => {
+                    plan.settings_write_resets_queue_rate()
+                }
                 _ => {
                     return Err(format!(
                         "unknown fault `{item}` (expected timeout, timeout@N, \
                          disconnect@N, wrong-id@N, permission, corrupt-adcnew@N, echo-start, \
                          reject-record-reads, ignore-table-write, ignore-settings-write, \
-                         stir-undecoded-settings, settings-saved-before-reboot or \
-                         flaky-settings-read)"
+                         stir-undecoded-settings, settings-saved-before-reboot, \
+                         flaky-settings-read or settings-write-resets-queue-rate)"
                     ));
                 }
             };
@@ -447,6 +465,8 @@ pub struct SimDevice {
     head_field: u32,
     /// Application firmware version in the 0x4420 info block.
     app_version: String,
+    /// Model name in both info blocks (`KM003C` by default).
+    model: String,
     /// The simulated bootloader's flash state.
     boot: flash::Bootloader,
     /// Injected bootloader failure, if any.
@@ -483,6 +503,32 @@ pub struct SimDevice {
     /// A PDM session dropped the sign-in: auth level 0, memory read
     /// (0x44) REJECTed until a CONNECT. [device] f4abf09
     sign_in_lost: bool,
+    /// The simulated startup-logo flash (FR A2XTES); 0x4A chunks land here.
+    logo_flash: LogoFlash,
+    /// REJECT 0x4A until the session has authenticated (FR A2XTES).
+    logo_auth_required: bool,
+    /// Injected 0x4A fault, if any (FR A2XTES).
+    logo_fault: Option<LogoFault>,
+    /// 0x4A frames seen since the fault was set (the fault's chunk index).
+    logo_chunks: usize,
+    /// The last startup-duration value written (SET_DATA 0x1C, FR A2XTES);
+    /// 0 by default.
+    logo_flag: u32,
+    /// Automatic menu save (FR Z39H24): after this long, with this code.
+    auto_menu_save: Option<(Duration, u8)>,
+    /// Uptime of the 0x1C write that left block A stale, for the
+    /// automatic menu save.
+    stale_since_ms: Option<u64>,
+    /// Queue rate resets in `stored` this pipe's queue has applied.
+    queue_resets_seen: u64,
+}
+
+/// Put startup-duration `code` (`code & 3`: off, 1 s, 3 s, 5 s) into bits
+/// 14..15 of the SETTINGS word at 0x00, leaving every other bit as it was.
+fn set_duration_code(settings: &mut [u8], code: u32) {
+    let mut w0 = u32::from_le_bytes([settings[0], settings[1], settings[2], settings[3]]);
+    w0 = (w0 & !(0b11 << 14)) | ((code & 0b11) << 14);
+    settings[..4].copy_from_slice(&w0.to_le_bytes());
 }
 
 /// The settings a meter keeps, whichever pipe changes them.
@@ -495,6 +541,14 @@ struct Stored {
     rate_code: u8,
     /// SETTINGS reads answered so far, on any pipe (`flaky-settings-read`).
     settings_reads: usize,
+    /// Block A's CRC from before a startup-duration write (0x1C): served
+    /// instead of a fresh one until a save in the meter's menu `[device]`.
+    frozen_crc_a: Option<[u8; 4]>,
+    /// Queue rate resets from settings writes so far
+    /// (`settings-write-resets-queue-rate`), and the last one's rate code
+    /// and uptime: every pipe's queue applies each one once.
+    queue_resets: u64,
+    queue_reset_to: (u8, u64),
 }
 
 impl SimDevice {
@@ -518,6 +572,7 @@ impl SimDevice {
     pub fn cdc_twin(&self) -> SimDevice {
         let mut twin = SimDevice::open(Persona::Cdc, self.scenario, self.time.clone());
         twin.stored = Arc::clone(&self.stored);
+        twin.queue_resets_seen = self.stored().queue_resets;
         twin.faults = self.faults.clone();
         twin.mode = self.mode;
         twin.serial = self.serial.clone();
@@ -557,6 +612,7 @@ impl SimDevice {
             mode: DeviceMode::Application,
             head_field: 0,
             app_version: memory::SIM_APP_VERSION.to_string(),
+            model: memory::SIM_MODEL.to_string(),
             boot: flash::Bootloader::default(),
             flash_fault: None,
             jump_at_power_up: false,
@@ -573,9 +629,20 @@ impl SimDevice {
                 settings: device::SETTINGS_206,
                 rate_code: 2,
                 settings_reads: 0,
+                frozen_crc_a: None,
+                queue_resets: 0,
+                queue_reset_to: (2, 0),
             })),
             sign_in_drop: Arc::new(AtomicBool::new(false)),
             sign_in_lost: false,
+            logo_flash: LogoFlash::new(ErasePolicy::SectorOnFirstWrite),
+            logo_auth_required: false,
+            logo_fault: None,
+            logo_chunks: 0,
+            logo_flag: 0,
+            auto_menu_save: None,
+            stale_since_ms: None,
+            queue_resets_seen: 0,
         }
     }
 
@@ -645,6 +712,17 @@ impl SimDevice {
         self
     }
 
+    /// Report `model` (e.g. `KM002C`) in both info blocks (FR TZK5K4).
+    /// The field is 12 bytes; a longer name is cut to fit.
+    pub fn with_model(mut self, model: &str) -> SimDevice {
+        let mut end = model.len().min(12);
+        while !model.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.model = model[..end].to_string();
+        self
+    }
+
     /// The USB iProduct string: the model name `[device]`.
     pub fn product_string(&self) -> &'static str {
         "POWER-Z KM003C"
@@ -688,6 +766,112 @@ impl SimDevice {
             product: Some(self.product_string().to_owned()),
             interfaces,
         }
+    }
+
+    /// Erase the simulated logo flash by `policy` (FR A2XTES).
+    pub fn with_logo_erase(mut self, policy: ErasePolicy) -> SimDevice {
+        self.logo_flash = LogoFlash::new(policy);
+        self
+    }
+
+    /// Start with `bytes` in the logo flash at 0x300000 (FR YCRQRQ).
+    pub fn with_logo_bytes(mut self, bytes: &[u8]) -> SimDevice {
+        self.logo_flash
+            .write(powerz_protocol::transport::guard::LOGO_REGION_START, bytes);
+        self
+    }
+
+    /// Report startup-screen duration `code` (0..3: off, 1 s, 3 s, 5 s) in
+    /// the SETTINGS block, bits 14..15 of its first word (FR YCRQRQ).
+    /// Codes above 3 keep their low two bits.
+    pub fn with_startup_logo(self, code: u8) -> SimDevice {
+        set_duration_code(&mut self.stored().settings, u32::from(code));
+        self
+    }
+
+    /// Inject `fault` into the 0x4A chunk writes (FR A2XTES).
+    pub fn with_logo_fault(mut self, fault: LogoFault) -> SimDevice {
+        self.set_logo_fault(fault);
+        self
+    }
+
+    /// Inject `fault` now; its chunk index counts from the next 0x4A.
+    pub fn set_logo_fault(&mut self, fault: LogoFault) {
+        self.logo_fault = Some(fault);
+        self.logo_chunks = 0;
+    }
+
+    /// REJECT 0x4A until the session has authenticated (off by default).
+    pub fn with_logo_auth_required(mut self, required: bool) -> SimDevice {
+        self.logo_auth_required = required;
+        self
+    }
+
+    /// Start with the last startup-duration value set to `flag` (default
+    /// 0); the SETTINGS block is left as is.
+    pub fn with_logo_flag(mut self, flag: u32) -> SimDevice {
+        self.logo_flag = flag;
+        self
+    }
+
+    /// A startup-duration write (SET_DATA 0x1C) of `value`: bits 14..15 of
+    /// the SETTINGS word at 0x00 take it, and block A keeps the CRC it had
+    /// before the first such write, as the KM003C does `[device]`.
+    pub(crate) fn write_startup_duration(&mut self, value: u32) {
+        self.logo_flag = value;
+        let now = self.uptime_ms();
+        if !self.settings_crc_a_stale() {
+            self.stale_since_ms = Some(now);
+        }
+        let mut stored = self.stored();
+        if stored.frozen_crc_a.is_none() {
+            stored.frozen_crc_a = Some(crypto::crc32(&stored.settings[..0x5C]).to_le_bytes());
+        }
+        set_duration_code(&mut stored.settings, value);
+    }
+
+    /// Block A's served CRC is stale: a 0x1C write since the last menu save.
+    pub fn settings_crc_a_stale(&self) -> bool {
+        self.stored().frozen_crc_a.is_some()
+    }
+
+    /// A save in the meter's menu with startup-duration `code` (`code & 3`
+    /// into bits 14..15 of the word at 0x00): block A's CRC is valid again
+    /// and every other byte stays as it was `[device]`.
+    pub fn menu_save(&mut self, code: u8) {
+        self.stale_since_ms = None;
+        let mut stored = self.stored();
+        stored.frozen_crc_a = None;
+        set_duration_code(&mut stored.settings, u32::from(code));
+    }
+
+    /// Run the automatic menu save once its time after the stale-making
+    /// 0x1C write has come (checked as each request arrives).
+    pub(crate) fn auto_menu_save_due(&mut self) {
+        let (Some((after, code)), Some(since)) = (self.auto_menu_save, self.stale_since_ms) else {
+            return;
+        };
+        let after_ms = u64::try_from(after.as_millis()).unwrap_or(u64::MAX);
+        if self.uptime_ms() >= since.saturating_add(after_ms) && self.settings_crc_a_stale() {
+            self.menu_save(code);
+        }
+    }
+
+    /// Save in the menu by itself `after` a stale-making 0x1C write, with
+    /// startup-duration `code`.
+    pub fn with_auto_menu_save(mut self, after: Duration, code: u8) -> SimDevice {
+        self.auto_menu_save = Some((after, code));
+        self
+    }
+
+    /// The simulated logo flash.
+    pub fn logo_flash(&self) -> &LogoFlash {
+        &self.logo_flash
+    }
+
+    /// The last startup-duration value written (SET_DATA 0x1C).
+    pub fn logo_flag(&self) -> u32 {
+        self.logo_flag
     }
 
     /// Inject `faults`.
