@@ -110,6 +110,24 @@ pub enum PdEvent {
     Unknown(u8),
 }
 
+impl PdEvent {
+    /// Display name of the event for capture tables, e.g. `Hard Reset` or
+    /// `Receive Error (Crc)`; an unknown byte shows as `Event 0x..`.
+    pub fn name(&self) -> String {
+        match self {
+            PdEvent::Attach(_) => "Attach".to_owned(),
+            PdEvent::Detach(_) => "Detach".to_owned(),
+            PdEvent::BadMessageId => "Bad Message ID".to_owned(),
+            PdEvent::HardReset => "Hard Reset".to_owned(),
+            PdEvent::CableReset => "Cable Reset".to_owned(),
+            PdEvent::ReceiveError(cause) => format!("Receive Error ({cause:?})"),
+            PdEvent::MonitorType(t) => format!("Monitor Type ({t:?})"),
+            PdEvent::BigMessage => "Big Message".to_owned(),
+            PdEvent::Unknown(b) => format!("Event {b:#04x}"),
+        }
+    }
+}
+
 /// A captured PD message: SOP, PD header and raw data objects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PdMessage {

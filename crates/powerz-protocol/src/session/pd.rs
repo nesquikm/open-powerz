@@ -16,6 +16,16 @@ pub struct PdOptions {
     pub with_adc: bool,
 }
 
+/// GET_DATA mask of one PD sniffer poll: PD_PACKET, plus ADC when
+/// `with_adc` asks for the snapshot too.
+pub fn pd_poll_mask(with_adc: bool) -> Attribute {
+    if with_adc {
+        Attribute::PD_PACKET | Attribute::ADC
+    } else {
+        Attribute::PD_PACKET
+    }
+}
+
 /// A captured PD record with its time since the capture start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedRecord {
@@ -123,10 +133,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         options: PdOptions,
         clock: &mut CaptureClock,
     ) -> Result<PdPoll, Error> {
-        let mut mask = Attribute::PD_PACKET;
-        if options.with_adc {
-            mask = mask | Attribute::ADC;
-        }
+        let mask = pd_poll_mask(options.with_adc);
         let mut poll = PdPoll {
             status: None,
             records: Vec::new(),

@@ -6,9 +6,10 @@ members = [
     "crates/powerz-sim",
     "crates/powerz-record",
     "crates/powerz-cli",
+    "crates/powerz-wasm",
     "apps/desktop/src-tauri",
 ]
-default-members = ["crates/powerz-pd", "crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-record", "crates/powerz-cli"]
+default-members = ["crates/powerz-pd", "crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-record", "crates/powerz-cli", "crates/powerz-wasm"]
 
 [workspace.package]
 version = "0.10.0"

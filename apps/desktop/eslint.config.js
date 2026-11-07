@@ -14,6 +14,7 @@ export default ts.config(
       "test-results/",
       "playwright-report/",
       "src-tauri/",
+      "src/wasm/",
     ],
   },
   js.configs.recommended,

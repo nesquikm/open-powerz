@@ -46,10 +46,32 @@ jobs:
       - name: JS install
         run: bun install --frozen-lockfile
 
+      # FR TGE83B (AC .9), FR QFTCWX (AC .5): the PD decoder, the featureless protocol
+      # library and the simulator do no native I/O and build for the web edition.
+      # FR QFTCWY (AC .4): the web edition's module is built before Vitest so its smoke test
+      # and size bound run on every OS. The CLI version equals the crate's wasm-bindgen pin.
+      - name: Cache the wasm-bindgen CLI
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/wasm-bindgen*
+          key: wasm-bindgen-cli-0.2.129-${{ runner.os }}
+
+      - name: wasm32 target, core crates for wasm32, wasm-bindgen CLI
+        run: |
+          rustup target add wasm32-unknown-unknown
+          # The compile checks are OS-independent, so only Linux runs them.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cargo build -p powerz-pd --target wasm32-unknown-unknown --locked
+            cargo build -p powerz-protocol --no-default-features --target wasm32-unknown-unknown --locked
+            cargo build -p powerz-sim --target wasm32-unknown-unknown --locked
+          fi
+          wasm-bindgen --version 2>/dev/null | grep -q ' 0.2.129' || cargo install wasm-bindgen-cli --version 0.2.129 --locked
+
       - name: JS lint, typecheck, test, build
         run: |
           bun run lint
           bun run check
+          bun run build:wasm
           bun run test
           bun run build:web
 
@@ -78,15 +100,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      # FR TGE83B (AC .9), FR QFTCWX (AC .5): the PD decoder, the featureless protocol
-      # library and the simulator do no native I/O and build for the web edition.
-      - name: PD decoder wasm32 build
-        if: runner.os == 'Linux'
-        run: |
-          rustup target add wasm32-unknown-unknown
-          cargo build -p powerz-pd --target wasm32-unknown-unknown --locked
-          cargo build -p powerz-protocol --no-default-features --target wasm32-unknown-unknown --locked
-          cargo build -p powerz-sim --target wasm32-unknown-unknown --locked
 
   # FR 4PJRVN (AC .6), FR AXHK2H: hold the whole workspace to the MSRV that Cargo.toml
   # declares as `rust-version`. The job builds and tests the default members (the library

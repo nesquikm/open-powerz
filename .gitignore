@@ -6,6 +6,8 @@ node_modules/
 apps/desktop/dist/
 apps/desktop/dist-e2e-ui/
 apps/desktop/dist-e2e-app/
+# wasm-bindgen output of `bun run build:wasm` (FR QFTCWY)
+apps/desktop/src/wasm/
 apps/desktop/e2e-app-logs/
 apps/desktop/test-results/
 apps/desktop/playwright-report/

@@ -6,3 +6,4 @@ dist-e2e-app/
 e2e-app-logs/
 test-results/
 playwright-report/
+src/wasm/

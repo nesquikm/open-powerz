@@ -2,8 +2,8 @@
 //! table rows, the field tree of one record on demand, and the batching of
 //! rows to the UI (at most 60 batches a second).
 
-use powerz_protocol::decode::pd_packet::{PdEvent, PdRecord, PdRecordKind, PdStatus};
-use powerz_protocol::pd::{self, Decoded, Field, PowerRole, Sop, SpecRevision};
+use powerz_protocol::decode::pd_packet::{PdRecord, PdRecordKind, PdStatus};
+use powerz_protocol::pd::{self, Decoded, Field, PowerRole};
 use powerz_protocol::pdcap;
 use powerz_protocol::pdm::message::cable_identity_from_message;
 use powerz_protocol::session::CapturedRecord;
@@ -267,43 +267,6 @@ fn on_session(device_ms: i64, offset_ms: i64) -> u64 {
     u64::try_from(device_ms.saturating_add(offset_ms)).unwrap_or(0)
 }
 
-fn sop_name(sop: Sop) -> String {
-    match sop {
-        Sop::Sop => "SOP".to_owned(),
-        Sop::SopPrime => "SOP'".to_owned(),
-        Sop::SopDoublePrime => "SOP''".to_owned(),
-        Sop::SopPrimeDebug => "SOP'_Debug".to_owned(),
-        Sop::SopDoublePrimeDebug => "SOP''_Debug".to_owned(),
-        Sop::Other(n) => format!("SOP {n}"),
-        _ => "SOP ?".to_owned(),
-    }
-}
-
-fn revision(rev: SpecRevision) -> String {
-    match rev {
-        SpecRevision::Rev1 => "1.0",
-        SpecRevision::Rev2 => "2.0",
-        SpecRevision::Rev3 => "3.x",
-        SpecRevision::Reserved => "Reserved",
-        _ => "Reserved",
-    }
-    .to_owned()
-}
-
-fn event_name(event: &PdEvent) -> String {
-    match event {
-        PdEvent::Attach(_) => "Attach".to_owned(),
-        PdEvent::Detach(_) => "Detach".to_owned(),
-        PdEvent::BadMessageId => "Bad Message ID".to_owned(),
-        PdEvent::HardReset => "Hard Reset".to_owned(),
-        PdEvent::CableReset => "Cable Reset".to_owned(),
-        PdEvent::ReceiveError(cause) => format!("Receive Error ({cause:?})"),
-        PdEvent::MonitorType(t) => format!("Monitor Type ({t:?})"),
-        PdEvent::BigMessage => "Big Message".to_owned(),
-        PdEvent::Unknown(b) => format!("Event {b:#04x}"),
-    }
-}
-
 /// Byte range of bits `hi..=lo` of the word at byte `word`.
 fn bit_bytes(word: usize, hi: u16, lo: u16) -> [usize; 2] {
     [word + usize::from(lo) / 8, word + usize::from(hi) / 8 + 1]
@@ -534,12 +497,12 @@ impl PdCapture {
                     elapsed_ms,
                     session_ms,
                     kind: RowKind::Message,
-                    sop: Some(sop_name(h.sop)),
+                    sop: Some(h.sop.name()),
                     name: h.message_type.name().to_owned(),
                     message_id: Some(h.message_id),
                     direction: Some(direction),
                     objects: Some(h.num_data_objects),
-                    spec_revision: Some(revision(h.spec_revision)),
+                    spec_revision: Some(h.spec_revision.short_label().to_owned()),
                     vbus_v,
                     ibus_a,
                     summary: d.summary(),
@@ -547,7 +510,7 @@ impl PdCapture {
             }
             (kind, _) => {
                 let name = match kind {
-                    PdRecordKind::Event(e) => event_name(e),
+                    PdRecordKind::Event(e) => e.name(),
                     _ => "Message".to_owned(),
                 };
                 self.entries.push_back(Entry {
