@@ -488,3 +488,120 @@ fn short_device_info_blocks_are_errors_with_a_kind() {
         assert_eq!(err.kind, "malformed", "{}", err.message);
     }
 }
+
+// ---- FR F3M587: empty and cut queue replies, as the native get_data ----
+
+/// Rate codes 0..3 (2, 10, 50 and 1000 SPS).
+const RATE_CODES: [u8; 4] = [0, 1, 2, 3];
+
+/// The meter's bare PUT_DATA (no section) at auth level `level`: `41 id (level << 1) 00`.
+fn empty_put_data(id: u8, level: u8) -> [u8; 4] {
+    [0x41, id, level << 1, 0x00]
+}
+
+/// The recorded 63-record queue reply's records, decoded natively at `rate`.
+fn native_queue_records(frame: &[u8], rate: Rate) -> Vec<QueueRecord> {
+    frame[8..]
+        .as_chunks::<20>()
+        .0
+        .iter()
+        .map(|c| QueueRecord::decode(c, rate).unwrap())
+        .collect()
+}
+
+#[test]
+fn ac_f3m587_1_a_bare_put_data_header_is_no_samples_at_every_auth_level() {
+    // The HIL reply that stopped the web stream: 41 08 02 00 at level 1.
+    let got = decode_queue(&[0x41, 0x08, 0x02, 0x00], 2)
+        .unwrap_or_else(|e| panic!("41 08 02 00: {} ({})", e.message, e.kind));
+    assert!(got.is_empty(), "{got:?}");
+    for level in 0..=2 {
+        for id in [0x00, 0x08, 0xff] {
+            let reply = empty_put_data(id, level);
+            for rate in RATE_CODES {
+                let got = decode_queue(&reply, rate).unwrap_or_else(|e| {
+                    panic!("{reply:02x?} at rate {rate}: {} ({})", e.message, e.kind)
+                });
+                assert!(got.is_empty(), "{reply:02x?} at rate {rate}: {got:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn ac_f3m587_1_a_disconnect_reply_is_no_samples() {
+    for reply in [[0x03, 0x08, 0x00, 0x00], [0x03, 0x2a, 0x02, 0x00]] {
+        for rate in RATE_CODES {
+            let got = decode_queue(&reply, rate).unwrap_or_else(|e| {
+                panic!("{reply:02x?} at rate {rate}: {} ({})", e.message, e.kind)
+            });
+            assert!(got.is_empty(), "{reply:02x?}: {got:?}");
+        }
+    }
+}
+
+#[test]
+fn ac_f3m587_1_the_auth_level_in_a_full_queue_reply_changes_nothing() {
+    let mut frame = vector("queue_1268.hex");
+    frame[2] |= 1 << 1; // level 1, as every reply after sign-in carries it
+    let native = native_queue_records(&frame, Rate::Sps50);
+    let got = json(&decode_queue(&frame, Rate::Sps50.code()).unwrap());
+    let got = got.as_array().expect("an array of samples");
+    assert_eq!(got.len(), native.len());
+    for (g, n) in got.iter().zip(&native) {
+        assert_queue_matches(g, n);
+    }
+}
+
+#[test]
+fn ac_f3m587_2_a_cut_last_queue_section_keeps_its_whole_records() {
+    let frame = vector("queue_1268.hex");
+    let native = native_queue_records(&frame, Rate::Sps50);
+    // [device] 1208 of 1268 bytes arrived: 60 whole records; then other cuts,
+    // including one that leaves only the section header.
+    for (len, whole) in [
+        (1208, 60),
+        (8 + 20 * 10 + 7, 10),
+        (8 + 20 * 62, 62),
+        (8, 0),
+        (9, 0),
+    ] {
+        let got = decode_queue(&frame[..len], Rate::Sps50.code())
+            .unwrap_or_else(|e| panic!("cut at {len}: {} ({})", e.message, e.kind));
+        let got = json(&got);
+        let got = got.as_array().expect("an array of samples");
+        assert_eq!(got.len(), whole, "cut at {len}");
+        for (g, n) in got.iter().zip(&native) {
+            assert_queue_matches(g, n);
+        }
+    }
+}
+
+#[test]
+fn ac_f3m587_2_a_cut_queue_section_followed_by_another_still_fails() {
+    let mut frame = vector("queue_1268.hex");
+    // Mark the queue section as not the last one (next, bit 15 of its header).
+    frame[5] |= 0x80;
+    for len in [1208, 8 + 20 * 10 + 7] {
+        let err = decode_queue(&frame[..len], Rate::Sps50.code()).unwrap_err();
+        assert_eq!(err.kind, "malformed", "cut at {len}: {}", err.message);
+    }
+}
+
+#[test]
+fn ac_f3m587_3_the_adc_snapshot_still_fails_without_an_adc_section() {
+    for reply in [
+        &[0x41, 0x08, 0x02, 0x00][..],
+        &empty_put_data(0x11, 0)[..],
+        &[0x03, 0x08, 0x00, 0x00][..],
+    ] {
+        let err = decode_adc(reply).unwrap_err();
+        assert!(!err.kind.is_empty(), "{reply:02x?}");
+        assert!(!err.message.is_empty(), "{reply:02x?}");
+    }
+    let err = decode_adc(&vector("settings_188.hex")).unwrap_err();
+    assert!(!err.kind.is_empty());
+    // A cut ADC section is not kept the way a cut queue section is.
+    let frame = vector("adc_52.hex");
+    assert!(decode_adc(&frame[..40]).is_err());
+}

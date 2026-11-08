@@ -1,6 +1,6 @@
 /**
  * FR QFTCX0: the web backend's live session, over the demo meter and over a fake
- * WebUSB meter answered by the wasm demo meter.
+ * WebUSB meter that answers like the real KM003C (`realMeter.test.ts`, AC-F3M587.5).
  *
  * - AC-QFTCX0.3: connect → status and batches (samples, temperature, stats) like the
  *   desktop backend; a rate change restarts the queue; history ranges, gaps, range
@@ -19,11 +19,11 @@ import type { BackendEvent, Batch, PdRow, Sample, Status } from "../backend";
 import { CSV_HEADER, CsvRecorder } from "./csv";
 import type { PowerzWasm } from "./driver";
 import type { FakeUsbDevice } from "./fakeDevices.test";
+import { realMeterDevice } from "./realMeter.test";
 import { loadWasm } from "./testWasm.test";
 import { createWebBackend } from "./webBackend";
 import {
   FakeUsbNavigator,
-  demoUsbDevice,
   downloadSink,
   sentNames,
   settle,
@@ -72,10 +72,11 @@ const samplesOf = (events: BackendEvent[]): Sample[] => batches(events).flatMap(
 const statuses = (events: BackendEvent[]): Status[] =>
   events.flatMap((e) => (e.type === "status" ? [e.data] : []));
 
-/** Connects to a fake WebUSB meter running `scenario` at `rateSps`. */
+/** Connects to a fake WebUSB meter that answers like the real one, running `scenario`
+ * at `rateSps`. */
 async function connectUsb(scenario = "load-5v-1a", rateSps = 50): Promise<Run> {
   const nav = new FakeUsbNavigator();
-  const dev = demoUsbDevice(w, "123456", scenario);
+  const dev = realMeterDevice(w, { serial: "123456", scenario });
   nav.devices = [dev];
   const sink = downloadSink();
   const backend = await settle(

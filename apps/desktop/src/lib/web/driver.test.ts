@@ -10,24 +10,25 @@
  * - AC-QFTCWZ.6: a transfer error ends the session as `disconnected`, a timeout as
  *   `timeout`, both as `UiError`s.
  *
- * Runs against the wasm demo meter on Vitest's fake clock (setTimeout and Date), so the
- * poll cadence is measured, not slept.
+ * Runs over WebUSB against the fake meter that answers like the real KM003C
+ * (`realMeter.test.ts`, AC-F3M587.5) on Vitest's fake clock (setTimeout and Date), so
+ * the poll cadence is measured, not slept.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UiError } from "../backend";
-import { DemoTransport } from "./demoTransport";
 import * as driverModule from "./driver";
 import { MeterDriver, openUsbOrOfferHid } from "./driver";
 import type { PowerzWasm } from "./driver";
 import { FakeUsbDevice } from "./fakeDevices.test";
+import { realMeterDevice } from "./realMeter.test";
 import { classify, loadWasm, type FrameName } from "./testWasm.test";
 import type { WebTransport } from "./transport";
 
 type DriverOptions = Parameters<typeof MeterDriver.connect>[0];
 type Sample = { time_ms: number; vbus_v: number; ibus_a: number };
 
-/** Wraps the demo transport: records every frame, can fail transfers on demand and can
+/** Wraps the meter's transport: records every frame, can fail transfers on demand and can
  * spoil auth replies. */
 class Recorder implements WebTransport {
   frames: Uint8Array[] = [];
@@ -106,12 +107,24 @@ interface Run {
   errors: UiError[];
 }
 
+/** The WebUSB transport of a fake meter that answers like the real KM003C. */
+async function realMeterTransport(scenario: string): Promise<WebTransport> {
+  const dev = realMeterDevice(w, { scenario });
+  const opened = await settle(
+    openUsbOrOfferHid(dev as unknown as Parameters<typeof openUsbOrOfferHid>[0], {
+      debug: false,
+    }),
+  );
+  if (!("transport" in opened)) throw new Error("expected the WebUSB transport");
+  return opened.transport;
+}
+
 async function start(
   scenario = "load-5v-1a",
   rateCode = 2,
   tweak: (rec: Recorder) => void = () => {},
 ): Promise<Run> {
-  const rec = new Recorder(w, new DemoTransport(w, scenario, () => Date.now()));
+  const rec = new Recorder(w, await realMeterTransport(scenario));
   tweak(rec);
   const batches: Sample[][] = [];
   const errors: UiError[] = [];
@@ -343,7 +356,7 @@ describe("session errors (AC-QFTCWZ.6)", () => {
   });
 
   it("a timeout during connect rejects connect with kind timeout", async () => {
-    const rec = new Recorder(w, new DemoTransport(w, "idle", () => Date.now()));
+    const rec = new Recorder(w, await realMeterTransport("idle"));
     rec.failWith = { kind: "timeout", message: "The meter did not answer.", hint: null };
     const options = {
       wasm: w,

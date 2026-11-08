@@ -45,6 +45,12 @@ codename: Open Tab
 | [G30K4R](../frs/G30K4R.md) | A failed WebUSB connect leaves the meter claimed (bug) | n/a |
 | [G30K4S](../frs/G30K4S.md) | build:wasm picks a Rust without the wasm target (bug) | n/a |
 | [AYR4W6](../frs/AYR4W6.md) | Connect a meter from the device menu | n/a |
+| [F3M587](../frs/F3M587.md) | The web stream stops on the meter's empty queue reply (bug) | n/a |
+| [XPT7PZ](../frs/XPT7PZ.md) | Connect a meter leaves the demo selected (bug) | n/a |
+| [7T1YGJ](../frs/7T1YGJ.md) | WebUSB connect gives up when recovery cancels the pending read (bug) | n/a |
+| [K1GZTR](../frs/K1GZTR.md) | Drop-down arrows sit against the right edge of the box (bug) | n/a |
+| [R13Y5V](../frs/R13Y5V.md) | A replugged meter leaves a dead entry in the device menu (bug) | n/a |
+| [R13Y5W](../frs/R13Y5W.md) | Desktop-only file action and old stats in the browser edition (bug) | n/a |
 
 Build order: QFTCWX → QFTCWY → QFTCWZ → QFTCX0 → QFTCX1 → QFTCX2.
 

@@ -204,7 +204,17 @@ pub fn decode_queue(reply: &[u8], rate_code: u8) -> Result<Vec<QueueSample>, Bin
     let rate = Rate::from_code(rate_code)
         .ok_or_else(|| BindError::invalid(format!("unknown rate code {rate_code} (0..3)")))?;
     let mut samples = Vec::new();
-    for section in put_data_sections(reply, "ADC queue data")? {
+    // A bare PUT_DATA header (any auth level) or a DISCONNECT carries no
+    // samples, and a last queue section shorter than it declares keeps its
+    // whole records and drops the partial one, as the native `get_data` does
+    // [device].
+    let sections = match frame::classify_reply(reply)? {
+        Reply::PutData(_) if reply.len() == frame::HEADER_LEN => Vec::new(),
+        Reply::PutData(_) => frame::parse_put_data_cut_queue(reply)?,
+        Reply::Disconnect(_) => Vec::new(),
+        other => return Err(unexpected(other, "ADC queue data")),
+    };
+    for section in sections {
         if section.att != Attribute::ADC_QUEUE {
             continue;
         }
@@ -419,7 +429,7 @@ impl PdDecoder {
             adc: None,
         };
         let sections = match frame::classify_reply(reply)? {
-            Reply::PutData(_) if reply.len() == 4 => Vec::new(),
+            Reply::PutData(_) if reply.len() == frame::HEADER_LEN => Vec::new(),
             Reply::PutData(_) => frame::parse_put_data(reply)?,
             Reply::Disconnect(_) => Vec::new(),
             other => return Err(unexpected(other, "PD data")),

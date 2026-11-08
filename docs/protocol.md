@@ -196,6 +196,10 @@ attribute, chained by `next`. [doc] [static] [device]
 - A DISCONNECT reply means "no data"; a PUT_DATA shorter than 5 bytes means
   "nothing new". [static] An empty PUT_DATA (`41 id 00 00`, no section) is
   what gated attributes return on their own. [device]
+- [device] (firmware 2.0.6, WebUSB HIL run 2026-11-08) The first ADC_QUEUE poll
+  after START or a rate change often comes back as the bare header
+  `41 id 02 00` (empty, auth level 1): no record is buffered yet. Treat it
+  as "no samples" and poll again; it is a whole reply, not a split one.
 - Prior art says level 0 masks requests to ADC, SETTINGS and PD_PACKET; on
   firmware 2.0.6 the queue, PD_STATUS and QC_PACKET are also served at level
   0, while TICK and RecordList are not. Device overrides. [inferred] (prior art)
@@ -730,7 +734,7 @@ Error handling:
 | REJECT (0x06) to 0x0E / 0x0F / 0x10 / 0x11 | auth level too low, or a stream already started | [device] (firmware 2.0.6) |
 | DISCONNECT (0x03) instead of PUT_DATA | no data; also seen stale at open | [static] [device] |
 | PUT_DATA shorter than 5 bytes | nothing new | [static] |
-| empty PUT_DATA (`41 id 00 00`) | attribute gated or empty | [device] |
+| empty PUT_DATA (`41 id 00 00`, or `41 id 02 00` / `41 id 04 00` with the auth level) | attribute gated or empty; the first queue poll after START | [device] |
 | no reply within ~1 s | timeout; the vendor app uses 1000 ms (2000 ms for CONNECT) | [static] |
 | reply type not 0x41 for GET_DATA | protocol error | [static] |
 
