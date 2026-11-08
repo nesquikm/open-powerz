@@ -23,6 +23,24 @@ Download the desktop app or the `powerz` CLI for macOS, Windows or Linux from th
 are not signed yet; [Install a release](docs/how-to/install-a-release.md) shows how to
 check the download and open the app past the macOS and Windows warnings.
 
+## Web edition
+
+You can also use open-powerz in the browser, with nothing to install:
+[nesquikm.github.io/open-powerz](https://nesquikm.github.io/open-powerz/). It runs in
+Chrome and Edge on desktop, which support WebUSB. Pick the demo meter to
+try the app without a meter.
+
+The web edition only reads and streams. These features are desktop-only, so use the
+[desktop app](https://github.com/nesquikm/open-powerz/releases/latest) for them:
+
+- firmware update
+- startup logo upload
+- settings writes (changing the meter settings)
+- deleting offline records
+- protocol triggering
+- reading the meter settings and the offline records
+- PDF export of the chart
+
 ## Features
 
 ### Live meter
@@ -112,13 +130,13 @@ check the download and open the app past the macOS and Windows warnings.
 
 ## Layout
 
-| path | what |
-|---|---|
+| path                     | what                                                                         |
+| ------------------------ | ---------------------------------------------------------------------------- |
 | `crates/powerz-protocol` | Rust protocol library: transports (vendor bulk, HID, CDC), framing, decoders |
-| `crates/powerz-record` | vendor-compatible CSV recorder shared by the CLI and the desktop app |
-| `crates/powerz-cli` | `powerz` command-line tool |
-| `apps/desktop` | Tauri 2 desktop app (Svelte 5 + TypeScript + Vite, uPlot charts) |
-| `specs/` | requirements, technical spec, plans |
+| `crates/powerz-record`   | vendor-compatible CSV recorder shared by the CLI and the desktop app         |
+| `crates/powerz-cli`      | `powerz` command-line tool                                                   |
+| `apps/desktop`           | Tauri 2 desktop app (Svelte 5 + TypeScript + Vite, uPlot charts)             |
+| `specs/`                 | requirements, technical spec, plans                                          |
 
 The USB protocol the meter speaks is documented in [docs/protocol.md](docs/protocol.md).
 

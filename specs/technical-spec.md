@@ -52,7 +52,9 @@ crates/powerz-cli/src/main.rs    # `powerz` binary
 crates/powerz-record/src/        # shared CSV recorder + reader + charge/energy integrator
 crates/powerz-pd/src/            # USB PD message decoder (no deps, no I/O, wasm32-clean)
 crates/powerz-sim/src/           # simulated KM003C (demo device, e2e double)
+crates/powerz-wasm/src/          # wasm-bindgen binding: sans-IO builders/decoders + demo meter (build:wasm)
 apps/desktop/src/                # App.svelte, main.ts, lib/*.ts (+ co-located *.test.ts)
+apps/desktop/src/lib/web/        # web backend: WebUSB/WebHID transports, driver, browser backend
 apps/desktop/src-tauri/          # Tauri crate: commands, devices, worker, batch, history, stats, recording, recording_file
 apps/desktop/e2e/app/            # WebdriverIO + tauri-driver suite (real app, Linux + Windows)
 apps/desktop/e2e/ui/             # Playwright + axe suite (web build, mocked backend, all OSes)
