@@ -38,6 +38,7 @@ codename: Open Tab
 | [QFTCX1](../frs/QFTCX1.md) | Static site and GitHub Pages deploy | n/a |
 | [QFTCX2](../frs/QFTCX2.md) | Web edition docs | n/a |
 | [Y6JFM3](../frs/Y6JFM3.md) | Gate typechecks the UI before the wasm module exists (bug) | n/a |
+| [HT1EMH](../frs/HT1EMH.md) | Serial lint misses its allowlist on Windows paths (bug) | n/a |
 
 Build order: QFTCWX → QFTCWY → QFTCWZ → QFTCX0 → QFTCX1 → QFTCX2.
 
