@@ -717,9 +717,12 @@
   .top-bar:global(.compact) .group {
     gap: 0.375rem;
   }
-  .top-bar:global(.compact) :global(button),
-  .top-bar:global(.compact) :global(select) {
+  .top-bar:global(.compact) :global(button) {
     padding-inline: 0.55rem;
+  }
+  /* The right padding stays the shared one: it holds the drop-down chevron (FR K1GZTR). */
+  .top-bar:global(.compact) :global(select) {
+    padding-left: 0.55rem;
   }
   .top-bar:global(.compact) .narrow-hidden {
     position: absolute;
