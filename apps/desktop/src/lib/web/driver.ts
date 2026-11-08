@@ -89,9 +89,13 @@ const UID = { addr: 0x4001_0450, len: 12 } as const;
 
 /** Reply timeouts, as `transport::default_timeout` (CONNECT 2 s, others 1 s). */
 const CONNECT_TIMEOUT_MS = 2_000;
+/** The first CONNECT's wait (native `FIRST_CONNECT_TIMEOUT`); a miss recovers once. */
+const FIRST_CONNECT_TIMEOUT_MS = 500;
 const REPLY_TIMEOUT_MS = 1_000;
 /** Mismatched-id replies discarded before a request fails (native `MAX_STALE_REPLIES`). */
 const MAX_STALE_REPLIES = 3;
+/** A memory read's confirmation, before its encrypted data. */
+const MEMORY_CONFIRMATION_LEN = 20;
 /** Rate code of 1000 SPS, polled faster (native `Streamer::poll_period`). */
 const RATE_1000_SPS = 3;
 /** ADC snapshot period without the queue `[inferred]`: the meter refreshes its ADC
@@ -233,6 +237,8 @@ export class MeterDriver {
     try {
       await driver.open();
     } catch (e) {
+      // A failed sign-in frees the meter: close the transport before rejecting.
+      await options.transport.close().catch(() => {});
       throw asUiError(e);
     }
     driver.schedulePoll(0);
@@ -277,18 +283,57 @@ export class MeterDriver {
     this.o.wasm.decodeAccept(await this.exchange(frame, timeoutMs));
   }
 
+  /** CONNECT as the native `connect_checked`: a 500 ms try; on no matching reply,
+   * recover the transport once and send one more CONNECT that waits 2000 ms. */
+  private async connectChecked(): Promise<void> {
+    const w = this.o.wasm;
+    const t = this.o.transport;
+    let reply: Uint8Array;
+    try {
+      reply = await this.exchange(w.connectRequest(this.nextId()), FIRST_CONNECT_TIMEOUT_MS);
+    } catch (e) {
+      // No reply, or only replies with another id: the pipe may be stuck.
+      const kind = asUiError(e).kind;
+      if (kind !== "timeout" && kind !== "protocol") throw e;
+      // A recovery that fails says less than the CONNECT that failed.
+      if (t.recover) await t.recover().catch(() => Promise.reject(e));
+      reply = await this.exchange(w.connectRequest(this.nextId()), CONNECT_TIMEOUT_MS);
+    }
+    w.decodeAccept(reply);
+  }
+
   private async readBlock(block: { addr: number; len: number }): Promise<Uint8Array> {
     const w = this.o.wasm;
     const reply = await this.exchange(
       w.memoryReadRequest(this.nextId(), block.addr, block.len),
       REPLY_TIMEOUT_MS,
     );
-    return w.decodeMemoryRead(reply, block.addr, block.len);
+    // The real meter sends the 20-byte confirmation alone and the encrypted data
+    // (rounded up to 16 bytes) in further IN transfers; the demo meter joins them.
+    // A shorter reply (a REJECT) goes straight to the decoder.
+    const want = MEMORY_CONFIRMATION_LEN + Math.ceil(block.len / 16) * 16;
+    if (reply.length < MEMORY_CONFIRMATION_LEN || reply.length >= want) {
+      return w.decodeMemoryRead(reply, block.addr, block.len);
+    }
+    const parts: Uint8Array[] = [reply];
+    let have = reply.length;
+    while (have < want) {
+      const part = await this.o.transport.read(REPLY_TIMEOUT_MS);
+      parts.push(part);
+      have += part.length;
+    }
+    const joined = new Uint8Array(have);
+    let at = 0;
+    for (const part of parts) {
+      joined.set(part, at);
+      at += part.length;
+    }
+    return w.decodeMemoryRead(joined, block.addr, block.len);
   }
 
   private async open(): Promise<void> {
     const w = this.o.wasm;
-    await this.expectAccept(w.connectRequest(this.nextId()), CONNECT_TIMEOUT_MS);
+    await this.connectChecked();
     const hardware = await this.readBlock(HARDWARE_INFO);
     const firmware = await this.readBlock(FIRMWARE_INFO);
     const otp = await this.readBlock(OTP);

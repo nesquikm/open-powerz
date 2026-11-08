@@ -12,6 +12,8 @@ export interface WebTransport {
   transact(frame: Uint8Array, timeoutMs: number): Promise<Uint8Array>;
   /** The next reply without writing anything; rejects `timeout` after `timeoutMs`. */
   read(timeoutMs: number): Promise<Uint8Array>;
+  /** Unstick the pipe (clear halts, discard stale IN data); optional per transport. */
+  recover?(): Promise<void>;
   /** Release the device; later transfers reject as `disconnected`. */
   close(): Promise<void>;
 }

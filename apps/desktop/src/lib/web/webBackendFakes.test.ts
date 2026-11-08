@@ -236,7 +236,7 @@ describe("web backend fakes", () => {
     const dev = demoUsbDevice(w);
     await dev.transferOut(1, new Uint8Array(w.connectRequest(1)));
     const reply = await dev.transferIn(1, 64);
-    expect(reply.data.byteLength).toBeGreaterThan(0);
+    expect(reply.data?.byteLength).toBeGreaterThan(0);
     expect(sentNames(w, dev)).toEqual(["connect"]);
   });
 });

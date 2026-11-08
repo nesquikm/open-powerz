@@ -72,10 +72,23 @@ export function meterConfiguration(): FakeConfiguration {
   };
 }
 
-export type Responder = (frame: Uint8Array) => Uint8Array | null;
+/** What one IN transfer yields: data, or a STALL handshake (`{ status: "stall" }`). */
+export type InItem = Uint8Array | "stall";
 
-/** A fake `USBDevice`. `respond` turns each OUT transfer into the next IN transfer
- * (null: nothing arrives). `inError` makes the next transferIn reject with it. */
+/** Turns one OUT transfer into the IN transfers that follow it (null: nothing arrives). */
+export type Responder = (frame: Uint8Array) => InItem | InItem[] | null;
+
+type InResult = { status: "ok" | "stall"; data?: DataView };
+
+/** A fake `USBDevice`. `respond` turns each OUT transfer into the next IN transfer(s)
+ * (null: nothing arrives). `inError` makes the next transferIn reject with it. A
+ * transferIn with nothing to read stays pending and takes the next IN data that
+ * arrives, like a submitted IN transfer on a real pipe. `queueIn` puts data on the IN
+ * pipe without a write (stale data waiting at open). `stallNextOut` makes the next
+ * non-empty transferOut end with status "stall". `clearHalt` is recorded in `calls`
+ * as `clearHalt:<direction>:<endpoint>`. `releaseInterface` unclaims the interface, and
+ * `close` ends every transferIn still waiting with an AbortError, as WebUSB does (FR
+ * G30K4R). `releaseError` / `closeError` make those calls reject (after recording). */
 export class FakeUsbDevice {
   vendorId = 0x5fc9;
   productId = 0x0063;
@@ -86,9 +99,15 @@ export class FakeUsbDevice {
   calls: string[] = [];
   outTransfers: { endpoint: number; data: Uint8Array }[] = [];
   inTransfers: { endpoint: number; length: number }[] = [];
+  /** Every IN transfer that completed, in order, with what it carried. */
+  inResults: InItem[] = [];
   claimError: Error | null = null;
   inError: Error | null = null;
-  private pending: Uint8Array[] = [];
+  stallNextOut = false;
+  releaseError: Error | null = null;
+  closeError: Error | null = null;
+  private pending: InItem[] = [];
+  private waiters: { take: (item: InItem) => void; abort: (e: Error) => void }[] = [];
 
   constructor(
     public respond: Responder = () => null,
@@ -97,13 +116,35 @@ export class FakeUsbDevice {
     this.configurations = [configuration];
   }
 
+  /** Put `item` on the IN pipe: the oldest waiting transferIn takes it, else it waits. */
+  queueIn(item: InItem): void {
+    const waiter = this.waiters.shift();
+    if (waiter) waiter.take(item);
+    else this.pending.push(item);
+  }
+
+  /** IN data nobody has read yet. */
+  get pendingIn(): number {
+    return this.pending.length;
+  }
+
   async open(): Promise<void> {
     this.calls.push("open");
     this.opened = true;
   }
+  /** transferIns still waiting for IN data. */
+  get waitingIn(): number {
+    return this.waiters.length;
+  }
+
   async close(): Promise<void> {
     this.calls.push("close");
+    if (this.closeError) throw this.closeError;
     this.opened = false;
+    for (const i of this.configuration?.interfaces ?? []) i.claimed = false;
+    const waiting = this.waiters;
+    this.waiters = [];
+    for (const w of waiting) w.abort(new DOMException("The transfer was cancelled.", "AbortError"));
   }
   async selectConfiguration(value: number): Promise<void> {
     this.calls.push(`selectConfiguration:${value}`);
@@ -118,12 +159,18 @@ export class FakeUsbDevice {
   }
   async releaseInterface(number: number): Promise<void> {
     this.calls.push(`releaseInterface:${number}`);
+    if (this.releaseError) throw this.releaseError;
+    const found = this.configuration?.interfaces.find((i) => i.interfaceNumber === number);
+    if (found) found.claimed = false;
+  }
+  async clearHalt(direction: "in" | "out", endpointNumber: number): Promise<void> {
+    this.calls.push(`clearHalt:${direction}:${endpointNumber}`);
   }
   async transferOut(
     endpoint: number,
     data: BufferSource,
   ): Promise<{
-    status: "ok";
+    status: "ok" | "stall";
     bytesWritten: number;
   }> {
     const bytes = new Uint8Array(
@@ -134,23 +181,37 @@ export class FakeUsbDevice {
             (data as ArrayBufferView).byteOffset + (data as ArrayBufferView).byteLength,
           ),
     );
+    this.calls.push(`transferOut:${endpoint}`);
     this.outTransfers.push({ endpoint, data: bytes });
+    if (bytes.length > 0 && this.stallNextOut) {
+      this.stallNextOut = false;
+      return { status: "stall", bytesWritten: 0 };
+    }
     if (bytes.length > 0) {
       const reply = this.respond(bytes);
-      if (reply) this.pending.push(reply);
+      if (reply) for (const item of Array.isArray(reply) ? reply : [reply]) this.queueIn(item);
     }
     return { status: "ok", bytesWritten: bytes.length };
   }
-  transferIn(endpoint: number, length: number): Promise<{ status: "ok"; data: DataView }> {
+  transferIn(endpoint: number, length: number): Promise<InResult> {
+    this.calls.push(`transferIn:${endpoint}`);
     this.inTransfers.push({ endpoint, length });
     if (this.inError) {
       const e = this.inError;
       return Promise.reject(e);
     }
+    const toResult = (item: InItem): InResult => {
+      this.inResults.push(item);
+      return item === "stall"
+        ? { status: "stall" }
+        : { status: "ok", data: new DataView(item.slice().buffer) };
+    };
     const next = this.pending.shift();
-    // Nothing to read: a real transferIn just stays pending.
-    if (!next) return new Promise(() => {});
-    return Promise.resolve({ status: "ok", data: new DataView(next.buffer.slice(0)) });
+    if (next) return Promise.resolve(toResult(next));
+    // Nothing to read: a real transferIn stays pending until data arrives.
+    return new Promise((resolve, reject) =>
+      this.waiters.push({ take: (item) => resolve(toResult(item)), abort: reject }),
+    );
   }
 }
 
