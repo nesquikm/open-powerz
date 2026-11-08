@@ -1,8 +1,8 @@
 ---
 title: Connect a meter leaves the demo selected
 milestone: M_QFTCWW
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-08T21:34:13Z
 id: fr_01M6YBWDNFBK8QTEB7F8XPT7PZ
 created_at: 2026-11-08T19:59:34.000Z
 changelog_category: Fixed

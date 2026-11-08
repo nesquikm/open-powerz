@@ -1,8 +1,8 @@
 ---
 title: Fold export test races the live demo stream
 milestone: M_QFTCWW
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-08T21:34:13Z
 id: fr_01M6XP1TS7XPMGJGNRQCB67EYP
 created_at: 2026-11-08T13:37:33.479Z
 changelog_category: Fixed

@@ -1,8 +1,8 @@
 ---
 title: Drop-down arrows sit against the right edge of the box
 milestone: M_QFTCWW
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-08T21:34:13Z
 id: fr_01M6YC8Q2P5QM5P68GASK1GZTR
 created_at: 2026-11-08T20:05:59.000Z
 changelog_category: Fixed

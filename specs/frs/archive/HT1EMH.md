@@ -1,8 +1,8 @@
 ---
 title: Serial lint misses its allowlist on Windows paths
 milestone: M_QFTCWW
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-08T21:34:13Z
 id: fr_01M6XKFBKRCVDYSTRQDRHT1EMH
 created_at: 2026-11-08T12:52:30.969Z
 changelog_category: Fixed

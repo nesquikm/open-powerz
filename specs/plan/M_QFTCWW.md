@@ -31,27 +31,27 @@ codename: Open Tab
 
 | FR | Title | Tracker |
 |---|---|---|
-| [QFTCWX](../frs/QFTCWX.md) | Protocol core builds for the browser | n/a |
-| [QFTCWY](../frs/QFTCWY.md) | WebAssembly binding for the protocol core | n/a |
-| [QFTCWZ](../frs/QFTCWZ.md) | Browser transports and session driver | n/a |
-| [QFTCX0](../frs/QFTCX0.md) | Web backend for the desktop UI | n/a |
-| [QFTCX1](../frs/QFTCX1.md) | Static site and GitHub Pages deploy | n/a |
-| [QFTCX2](../frs/QFTCX2.md) | Web edition docs | n/a |
-| [Y6JFM3](../frs/Y6JFM3.md) | Gate typechecks the UI before the wasm module exists (bug) | n/a |
-| [HT1EMH](../frs/HT1EMH.md) | Serial lint misses its allowlist on Windows paths (bug) | n/a |
-| [FFQVBQ](../frs/FFQVBQ.md) | Logo write tests stall after resuming the fake clock (bug) | n/a |
-| [B67EYP](../frs/B67EYP.md) | Fold export test races the live demo stream (bug) | n/a |
-| [VG37JA](../frs/VG37JA.md) | WebUSB sign-in to the real meter fails where the native bulk path works (bug) | n/a |
-| [G30K4R](../frs/G30K4R.md) | A failed WebUSB connect leaves the meter claimed (bug) | n/a |
-| [G30K4S](../frs/G30K4S.md) | build:wasm picks a Rust without the wasm target (bug) | n/a |
-| [AYR4W6](../frs/AYR4W6.md) | Connect a meter from the device menu | n/a |
-| [F3M587](../frs/F3M587.md) | The web stream stops on the meter's empty queue reply (bug) | n/a |
-| [XPT7PZ](../frs/XPT7PZ.md) | Connect a meter leaves the demo selected (bug) | n/a |
-| [7T1YGJ](../frs/7T1YGJ.md) | WebUSB connect gives up when recovery cancels the pending read (bug) | n/a |
-| [K1GZTR](../frs/K1GZTR.md) | Drop-down arrows sit against the right edge of the box (bug) | n/a |
-| [R13Y5V](../frs/R13Y5V.md) | A replugged meter leaves a dead entry in the device menu (bug) | n/a |
-| [R13Y5W](../frs/R13Y5W.md) | Desktop-only file action and old stats in the browser edition (bug) | n/a |
-| [350H0S](../frs/350H0S.md) | The device picker cuts its label short after the chevron change (bug) | n/a |
+| [QFTCWX](../frs/archive/QFTCWX.md) | Protocol core builds for the browser | n/a |
+| [QFTCWY](../frs/archive/QFTCWY.md) | WebAssembly binding for the protocol core | n/a |
+| [QFTCWZ](../frs/archive/QFTCWZ.md) | Browser transports and session driver | n/a |
+| [QFTCX0](../frs/archive/QFTCX0.md) | Web backend for the desktop UI | n/a |
+| [QFTCX1](../frs/archive/QFTCX1.md) | Static site and GitHub Pages deploy | n/a |
+| [QFTCX2](../frs/archive/QFTCX2.md) | Web edition docs | n/a |
+| [Y6JFM3](../frs/archive/Y6JFM3.md) | Gate typechecks the UI before the wasm module exists (bug) | n/a |
+| [HT1EMH](../frs/archive/HT1EMH.md) | Serial lint misses its allowlist on Windows paths (bug) | n/a |
+| [FFQVBQ](../frs/archive/FFQVBQ.md) | Logo write tests stall after resuming the fake clock (bug) | n/a |
+| [B67EYP](../frs/archive/B67EYP.md) | Fold export test races the live demo stream (bug) | n/a |
+| [VG37JA](../frs/archive/VG37JA.md) | WebUSB sign-in to the real meter fails where the native bulk path works (bug) | n/a |
+| [G30K4R](../frs/archive/G30K4R.md) | A failed WebUSB connect leaves the meter claimed (bug) | n/a |
+| [G30K4S](../frs/archive/G30K4S.md) | build:wasm picks a Rust without the wasm target (bug) | n/a |
+| [AYR4W6](../frs/archive/AYR4W6.md) | Connect a meter from the device menu | n/a |
+| [F3M587](../frs/archive/F3M587.md) | The web stream stops on the meter's empty queue reply (bug) | n/a |
+| [XPT7PZ](../frs/archive/XPT7PZ.md) | Connect a meter leaves the demo selected (bug) | n/a |
+| [7T1YGJ](../frs/archive/7T1YGJ.md) | WebUSB connect gives up when recovery cancels the pending read (bug) | n/a |
+| [K1GZTR](../frs/archive/K1GZTR.md) | Drop-down arrows sit against the right edge of the box (bug) | n/a |
+| [R13Y5V](../frs/archive/R13Y5V.md) | A replugged meter leaves a dead entry in the device menu (bug) | n/a |
+| [R13Y5W](../frs/archive/R13Y5W.md) | Desktop-only file action and old stats in the browser edition (bug) | n/a |
+| [350H0S](../frs/archive/350H0S.md) | The device picker cuts its label short after the chevron change (bug) | n/a |
 
 Build order: QFTCWX → QFTCWY → QFTCWZ → QFTCX0 → QFTCX1 → QFTCX2.
 

@@ -1,8 +1,8 @@
 ---
 title: Connect a meter from the device menu
 milestone: M_QFTCWW
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-08T21:34:13Z
 id: fr_01M6Y28R5BQYGD68XN0GAYR4W6
 created_at: 2026-11-08T17:11:43.719Z
 changelog_category: Changed

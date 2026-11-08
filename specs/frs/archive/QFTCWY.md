@@ -1,8 +1,8 @@
 ---
 title: WebAssembly binding for the protocol core
 milestone: M_QFTCWW
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-08T21:34:13Z
 id: fr_01M6VHDG2BG62PZDW7K4QFTCWY
 created_at: 2026-11-07T17:39:28.900Z
 changelog_category: Added

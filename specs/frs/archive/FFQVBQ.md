@@ -1,8 +1,8 @@
 ---
 title: Logo write tests stall after resuming the fake clock
 milestone: M_QFTCWW
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-08T21:34:13Z
 id: fr_01M6XP1TRDY8RSZMTCW0FFQVBQ
 created_at: 2026-11-08T13:37:33.453Z
 changelog_category: Fixed
