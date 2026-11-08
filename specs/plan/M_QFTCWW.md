@@ -51,6 +51,7 @@ codename: Open Tab
 | [K1GZTR](../frs/K1GZTR.md) | Drop-down arrows sit against the right edge of the box (bug) | n/a |
 | [R13Y5V](../frs/R13Y5V.md) | A replugged meter leaves a dead entry in the device menu (bug) | n/a |
 | [R13Y5W](../frs/R13Y5W.md) | Desktop-only file action and old stats in the browser edition (bug) | n/a |
+| [350H0S](../frs/350H0S.md) | The device picker cuts its label short after the chevron change (bug) | n/a |
 
 Build order: QFTCWX → QFTCWY → QFTCWZ → QFTCX0 → QFTCX1 → QFTCX2.
 
