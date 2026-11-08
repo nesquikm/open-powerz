@@ -16,6 +16,7 @@ import { MeterDriver, openUsbOrOfferHid, type PowerzWasm } from "./driver";
 import { WEB_FEATURES, desktopOnlyError, type Features } from "./features";
 import { SESSION_COMMANDS, WebSession, rateCodeOf, usage } from "./session";
 import type { WebTransport } from "./transport";
+import { openWebHid, type HidDeviceLike } from "./webhid";
 import { POWERZ_VENDOR_ID, type UsbDeviceLike, type UsbLike } from "./webusb";
 
 /** What the web backend runs on; each part defaults to the browser's own. */
@@ -24,6 +25,8 @@ export interface WebBackendOptions {
   wasm?: unknown;
   /** `navigator.usb`, or `null` without WebUSB. */
   usb?: unknown;
+  /** `navigator.hid`, or `null` without WebHID. */
+  hid?: unknown;
   /** Saves a file for the user (a Blob behind an anchor click). */
   download?: (name: string, data: Blob) => void;
 }
@@ -98,13 +101,44 @@ interface UsbNavigatorLike {
   removeEventListener(type: "connect" | "disconnect", fn: UsbEventListener): void;
 }
 
-/** The demo meter's scenario, listed first like the desktop app's demo entry. */
+/** The parts of a WebHID `HIDDevice` the device list reads. */
+interface HidDeviceInfo {
+  vendorId: number;
+  productName?: string | null;
+}
+
+/** The parts of `navigator.hid` the device list uses. */
+interface HidNavigatorLike {
+  getDevices(): Promise<HidDeviceInfo[]>;
+  requestDevice(options: { filters: { vendorId: number }[] }): Promise<HidDeviceInfo[]>;
+  addEventListener(type: "connect" | "disconnect", fn: UsbEventListener): void;
+  removeEventListener(type: "connect" | "disconnect", fn: UsbEventListener): void;
+}
+
+/** The demo meter's scenario, listed after the permitted meters (the picker sorts real
+ * meters first, like the desktop app's list). */
 const DEMO_SCENARIO = "load-5v-1a";
+
+/** The model a meter lists as when the browser gives no product name. */
+const DEFAULT_MODEL = "KM003C";
+
+/** The picker filter, for WebUSB and WebHID alike: POWER-Z meters only. */
+const METER_FILTERS = { filters: [{ vendorId: POWERZ_VENDOR_ID }] };
+
+/** A permitted device's model: its product name, else the default. */
+const modelOf = (device: { productName?: string | null }): string =>
+  device.productName || DEFAULT_MODEL;
+
+/** `navigator[name]`, or `null` outside a browser or without that API. */
+function browserApi(name: "usb" | "hid"): unknown {
+  if (typeof navigator === "undefined") return null;
+  return (navigator as { usb?: unknown; hid?: unknown })[name] ?? null;
+}
 
 const demoListing = (): DeviceListing => ({
   id: `demo:${DEMO_SCENARIO}`,
   label: `Demo device — ${DEMO_SCENARIO}`,
-  model: "KM003C",
+  model: DEFAULT_MODEL,
   serial: null,
   bus: null,
   address: null,
@@ -112,34 +146,58 @@ const demoListing = (): DeviceListing => ({
   mode: "application",
 });
 
-/** Permitted WebUSB meters, each under a stable id for as long as the page lives. */
-class UsbDeviceList {
-  private ids = new Map<UsbDeviceInfo, string>();
-  private next = 1;
+/** Permitted WebUSB (`webusb:N`) and WebHID (`webhid:N`) meters, each under a stable id
+ * for as long as the page lives. */
+class DeviceList {
+  private ids = new Map<object, string>();
+  private next = { webusb: 1, webhid: 1 };
 
-  constructor(private readonly usb: UsbNavigatorLike | null) {}
+  constructor(
+    private readonly usb: UsbNavigatorLike | null,
+    readonly hid: HidNavigatorLike | null,
+  ) {}
 
   /** The id of `device`, assigned on first sight. */
-  idOf(device: UsbDeviceInfo): string {
+  private idOf(device: object, prefix: "webusb" | "webhid"): string {
     let id = this.ids.get(device);
     if (!id) {
-      id = `webusb:${this.next++}`;
+      id = `${prefix}:${this.next[prefix]++}`;
       this.ids.set(device, id);
     }
     return id;
   }
 
   /** The device listed as `id`, if the page has seen one. */
-  deviceOf(id: string): UsbDeviceInfo | null {
+  deviceOf(id: string): object | null {
     for (const [device, known] of this.ids) if (known === id) return device;
     return null;
   }
 
+  /** The permitted WebHID meters (vendor 0x5FC9). */
+  async hidMeters(): Promise<HidDeviceInfo[]> {
+    const devices = this.hid ? await this.hid.getDevices() : [];
+    return devices.filter((d) => d.vendorId === POWERZ_VENDOR_ID);
+  }
+
+  hidListing(device: HidDeviceInfo): DeviceListing {
+    const model = modelOf(device);
+    return {
+      id: this.idOf(device, "webhid"),
+      label: `${model} (HID)`,
+      model,
+      serial: null,
+      bus: null,
+      address: null,
+      demo_scenario: null,
+      mode: "application",
+    };
+  }
+
   listing(device: UsbDeviceInfo): DeviceListing {
-    const model = device.productName || "KM003C";
+    const model = modelOf(device);
     const serial = device.serialNumber || null;
     return {
-      id: this.idOf(device),
+      id: this.idOf(device, "webusb"),
       label: serial ? `${model} — ${serial}` : model,
       model,
       serial,
@@ -152,22 +210,39 @@ class UsbDeviceList {
 
   async list(): Promise<DeviceListing[]> {
     const meters = this.usb ? await this.usb.getDevices() : [];
-    return [...meters.map((d) => this.listing(d)), demoListing()];
+    const hidMeters = await this.hidMeters();
+    return [
+      ...meters.map((d) => this.listing(d)),
+      ...hidMeters.map((d) => this.hidListing(d)),
+      demoListing(),
+    ];
   }
 
-  /** Opens the picker. `requestDevice` runs before any await, so the click's user
-   * activation still holds. */
+  /** Opens the picker: WebUSB's, or WebHID's in a browser without WebUSB.
+   * `requestDevice` runs before any await, so the click's user activation still holds. */
   request(): Promise<DeviceListing | null> {
-    if (!this.usb) return Promise.resolve(null);
-    return this.usb.requestDevice({ filters: [{ vendorId: POWERZ_VENDOR_ID }] }).then(
+    if (!this.usb) return this.requestHid();
+    return this.usb.requestDevice(METER_FILTERS).then(
       (device) => this.listing(device),
       () => null,
     );
   }
 
+  /** Opens the WebHID picker, before any await (AC-QFTCWZ.3). */
+  requestHid(): Promise<DeviceListing | null> {
+    if (!this.hid) return Promise.resolve(null);
+    return this.hid.requestDevice(METER_FILTERS).then(
+      (devices) => {
+        const meter = devices.find((d) => d.vendorId === POWERZ_VENDOR_ID);
+        return meter ? this.hidListing(meter) : null;
+      },
+      () => null,
+    );
+  }
+
   async watch(onChange: (devices: DeviceListing[]) => void): Promise<() => void> {
-    const usb = this.usb;
-    if (!usb) return () => {};
+    const sources = [this.usb, this.hid].filter((n) => n !== null);
+    if (sources.length === 0) return () => {};
     let live = true;
     const refresh = () => {
       void this.list().then(
@@ -177,12 +252,16 @@ class UsbDeviceList {
         () => {},
       );
     };
-    usb.addEventListener("connect", refresh);
-    usb.addEventListener("disconnect", refresh);
+    for (const nav of sources) {
+      nav.addEventListener("connect", refresh);
+      nav.addEventListener("disconnect", refresh);
+    }
     return () => {
       live = false;
-      usb.removeEventListener("connect", refresh);
-      usb.removeEventListener("disconnect", refresh);
+      for (const nav of sources) {
+        nav.removeEventListener("connect", refresh);
+        nav.removeEventListener("disconnect", refresh);
+      }
     };
   }
 }
@@ -210,6 +289,13 @@ function browserDownload(name: string, data: Blob): void {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+/** An opened meter: its transport, and whether it runs over WebHID. */
+interface OpenedMeter {
+  transport: WebTransport;
+  hid?: boolean;
+  model?: string;
+}
+
 /** The live sessions: one per meter, the newest being the current one. */
 class Sessions {
   private list: WebSession[] = [];
@@ -217,7 +303,7 @@ class Sessions {
   private wasm: PowerzWasm | null;
 
   constructor(
-    private readonly devices: UsbDeviceList,
+    private readonly devices: DeviceList,
     private readonly usb: UsbNavigatorLike | null,
     wasm: unknown,
     private readonly download: (name: string, data: Blob) => void,
@@ -243,17 +329,37 @@ class Sessions {
     return this.wasm;
   }
 
-  /** The transport to `deviceId`: the demo meter, or a permitted WebUSB meter. */
-  private async open(w: PowerzWasm, deviceId: string): Promise<WebTransport> {
+  /** The transport to `deviceId`: the demo meter, or a permitted WebUSB or WebHID
+   * meter. A WebUSB meter whose interface another driver holds falls back to an
+   * already-permitted HID meter (AC-QFTCWZ.3). */
+  private async open(w: PowerzWasm, deviceId: string): Promise<OpenedMeter> {
     if (deviceId.startsWith("demo:")) {
-      return new DemoTransport(w, deviceId.slice("demo:".length), () => Date.now());
+      return { transport: new DemoTransport(w, deviceId.slice("demo:".length), () => Date.now()) };
     }
     const device = this.devices.deviceOf(deviceId);
     if (!device) throw usage("This meter is no longer available. Pick it again.");
+    if (deviceId.startsWith("webhid:")) return this.openHid(device as HidDeviceInfo);
     const options = this.usb ? { usb: this.usb as unknown as UsbLike } : {};
     const opened = await openUsbOrOfferHid(device as unknown as UsbDeviceLike, options);
-    if ("offerHid" in opened) throw opened.error;
-    return opened.transport;
+    if (!("offerHid" in opened)) return { transport: opened.transport };
+    if (!this.devices.hid) throw opened.error;
+    const [hidMeter] = await this.devices.hidMeters();
+    if (!hidMeter) {
+      throw {
+        ...opened.error,
+        hint: "Click “Connect over HID…” for basic readings, or close the other app and connect again.",
+      } satisfies UiError;
+    }
+    try {
+      return await this.openHid(hidMeter);
+    } catch {
+      throw opened.error;
+    }
+  }
+
+  private async openHid(device: HidDeviceInfo): Promise<OpenedMeter> {
+    const transport = await openWebHid(device as unknown as HidDeviceLike);
+    return { transport, hid: true, model: modelOf(device) };
   }
 
   async connect(
@@ -264,7 +370,7 @@ class Sessions {
     const rateCode = rateCodeOf(rateSps);
     await this.of(deviceId)?.disconnect();
     const w = await this.module();
-    const transport = await this.open(w, deviceId);
+    const opened = await this.open(w, deviceId);
     const session = new WebSession({
       deviceId,
       sessionId: this.nextSessionId++,
@@ -277,8 +383,10 @@ class Sessions {
     });
     session.driver = await MeterDriver.connect({
       wasm: w,
-      transport,
+      transport: opened.transport,
       rateCode,
+      hid: opened.hid === true,
+      ...(opened.model ? { model: opened.model } : {}),
       onBatch: (samples) => session.onBatch(samples),
       onTemp: (t) => session.onTemp(t),
       onError: (e) => session.onError(e),
@@ -321,10 +429,13 @@ class Sessions {
 
 /** Creates the browser backend. */
 export async function createWebBackend(options: WebBackendOptions = {}): Promise<WebBackendApi> {
-  const browserUsb =
-    typeof navigator !== "undefined" ? ((navigator as { usb?: unknown }).usb ?? null) : null;
-  const usb = (options.usb === undefined ? browserUsb : options.usb) as UsbNavigatorLike | null;
-  const devices = new UsbDeviceList(usb);
+  const usb = (
+    options.usb === undefined ? browserApi("usb") : options.usb
+  ) as UsbNavigatorLike | null;
+  const hid = (
+    options.hid === undefined ? browserApi("hid") : options.hid
+  ) as HidNavigatorLike | null;
+  const devices = new DeviceList(usb, hid);
   const download = options.download ?? browserDownload;
   const sessions = new Sessions(devices, usb, options.wasm, download);
   const commands = sessions.commands(() => sessions.current);
@@ -338,6 +449,7 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
     listDevices: () => devices.list(),
     watchDevices: (onChange: (devices: DeviceListing[]) => void) => devices.watch(onChange),
     requestMeter: () => devices.request(),
+    requestHidMeter: () => devices.requestHid(),
     connect: (deviceId: string, rateSps: number, onEvent: (event: BackendEvent) => void) =>
       sessions.connect(deviceId, rateSps, onEvent),
     attach: async (onEvent: (event: BackendEvent) => void, deviceId?: string) =>

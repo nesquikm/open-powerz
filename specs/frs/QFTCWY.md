@@ -13,8 +13,9 @@ changelog_category: Added
 ## Summary
 
 A small binding crate exposes the protocol core to the web page.
-It builds the requests the meter understands and decodes the replies into plain objects the page can use.
-It also wraps the simulator, so the browser can talk to a demo meter that answers exactly as the desktop app's demo does.
+It builds the requests the meter understands and decodes the replies into plain objects.
+It also wraps the simulator, so the browser can talk to a demo meter.
+That demo answers exactly as the desktop app's demo does.
 Nothing in it performs input or output; the page moves the bytes.
 
 ## Requirement

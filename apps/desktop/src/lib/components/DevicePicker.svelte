@@ -5,6 +5,7 @@
     cancelWait,
     features,
     listDevices,
+    requestHidMeter,
     requestMeter,
     toUiError,
     watchDevices,
@@ -15,6 +16,15 @@
   import type { Session } from "../session.svelte";
 
   let { session, hideSerial }: { session: Session; hideSerial: boolean } = $props();
+
+  /** The WebUSB claim failed and the browser has WebHID: offer its picker
+   * (AC-QFTCWZ.3). */
+  const offerHid = $derived(
+    features === WEB_FEATURES &&
+      session.error?.kind === "device_busy" &&
+      typeof navigator !== "undefined" &&
+      "hid" in navigator,
+  );
 
   /** The selected entry's full label, as a tooltip in case the select is cut short. */
   const selectedLabel = $derived.by(() => {
@@ -64,6 +74,11 @@
   </select>
   {#if features === WEB_FEATURES}
     <button type="button" onclick={() => pickMeter(session, requestMeter)}>Connect a meter…</button>
+  {/if}
+  {#if offerHid}
+    <button type="button" onclick={() => pickMeter(session, requestHidMeter)}
+      >Connect over HID…</button
+    >
   {/if}
 </span>
 

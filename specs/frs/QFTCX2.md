@@ -13,7 +13,9 @@ changelog_category: Changed
 ## Summary
 
 Users learn that the web edition exists, where it lives, and which browsers it supports.
-A docs page explains the permissions the browser asks for, why some features stay in the desktop app, and how to fix the common access problems on each system.
+A docs page explains the permissions the browser asks for.
+It says why some features stay in the desktop app.
+It also shows how to fix the common access problems on each system.
 
 ## Requirement
 

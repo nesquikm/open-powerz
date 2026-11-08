@@ -29,6 +29,7 @@
     type Fit,
   } from "../topBarFit";
   import DevicePicker from "./DevicePicker.svelte";
+  import { HID_BASIC_NOTE } from "../web/features";
   import { holdTitle, recordDisabled } from "../logoHold";
   import RecorderButtons from "./RecorderButtons.svelte";
   import ThemeControl from "./ThemeControl.svelte";
@@ -222,8 +223,15 @@
   });
 
   const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
-  /** The locked rate is news worth showing; "stop to change" is only a tooltip. */
-  const rateNote = $derived(session.state === "rate_locked" ? picker.label : null);
+  /** The locked rate is news worth showing; "stop to change" is only a tooltip. A WebHID
+   * session says it gives basic readings only (AC-QFTCWZ.3). */
+  const rateNote = $derived(
+    session.details?.basic_readings_only
+      ? HID_BASIC_NOTE
+      : session.state === "rate_locked"
+        ? picker.label
+        : null,
+  );
   /** The name of the bar's controls; the grid's tiles name their own. */
   const scopeLabel = $derived(controlsInTiles ? null : controlsLabel);
   const record = $derived(recordButton(recording.phase, canRecord));

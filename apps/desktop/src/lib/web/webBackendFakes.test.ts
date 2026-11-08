@@ -5,6 +5,10 @@
  *   picker) and the "connect" / "disconnect" hotplug events.
  * - `demoUsbDevice`: a `FakeUsbDevice` answered by the wasm demo meter, its clock driven
  *   by `Date.now()` (Vitest's fake clock in the session tests).
+ * - `FakeHidNavigator`: a fake `navigator.hid` with `getDevices`, `requestDevice` (the
+ *   HID picker, resolving to an array as WebHID does) and "connect" / "disconnect".
+ * - `demoHidDevice`: a `FakeHidDevice` answered by the wasm demo meter (AC-QFTCWZ.3).
+ * - `hidSentNames`: the frames a fake HID device received, by safe-set name.
  * - `settle`: advance the fake clock until a promise settles.
  * - `sentNames`: the names of the frames a fake device received, via the safe-set
  *   classifier (`unknown` for anything outside it).
@@ -14,7 +18,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type { PowerzWasm } from "./driver";
-import { FakeUsbDevice } from "./fakeDevices.test";
+import { FakeHidDevice, FakeUsbDevice, toReports } from "./fakeDevices.test";
 import { classify, loadWasm, type FrameName } from "./testWasm.test";
 
 type Listener = (event: { device: unknown }) => void;
@@ -97,6 +101,73 @@ export function sentNames(w: PowerzWasm, dev: FakeUsbDevice): FrameName[] {
   return dev.outTransfers.filter((t) => t.data.length > 0).map((t) => classify(w, t.data));
 }
 
+/** A fake `navigator.hid`: permitted devices, the HID picker and hotplug events. */
+export class FakeHidNavigator {
+  /** Devices the page already has permission for (what `getDevices()` answers). */
+  devices: FakeHidDevice[] = [];
+  /** Every `requestDevice` call's options, in order. */
+  requests: unknown[] = [];
+  /** What the picker returns next; `null`: the user cancels it (an empty array). */
+  pick: FakeHidDevice | null = null;
+  private listeners: Record<string, Listener[]> = { connect: [], disconnect: [] };
+
+  async getDevices(): Promise<FakeHidDevice[]> {
+    return [...this.devices];
+  }
+
+  /** Records the call synchronously (the user-gesture check), then answers. */
+  requestDevice(options: unknown): Promise<FakeHidDevice[]> {
+    this.requests.push(options);
+    const picked = this.pick;
+    if (!picked) return Promise.resolve([]);
+    if (!this.devices.includes(picked)) this.devices.push(picked);
+    return Promise.resolve([picked]);
+  }
+
+  addEventListener(type: string, fn: Listener): void {
+    (this.listeners[type] ??= []).push(fn);
+  }
+
+  removeEventListener(type: string, fn: Listener): void {
+    this.listeners[type] = (this.listeners[type] ?? []).filter((l) => l !== fn);
+  }
+
+  plug(device: FakeHidDevice): void {
+    if (!this.devices.includes(device)) this.devices.push(device);
+    for (const l of [...(this.listeners.connect ?? [])]) l({ device });
+  }
+
+  unplug(device: FakeHidDevice): void {
+    this.devices = this.devices.filter((d) => d !== device);
+    for (const l of [...(this.listeners.disconnect ?? [])]) l({ device });
+  }
+}
+
+/** A fake WebHID meter answered by the wasm demo meter running `scenario`; the demo
+ * clock follows `Date.now()`. The meter reads the request from the front of the padded
+ * report (GET_DATA is 4 bytes); each reply goes back as 64-byte input reports. */
+export function demoHidDevice(w: PowerzWasm, scenario = "load-5v-1a"): FakeHidDevice {
+  const meter = new w.DemoMeter(scenario);
+  let last = Date.now();
+  return new FakeHidDevice((report) => {
+    const now = Date.now();
+    if (now > last) {
+      meter.advance(now - last);
+      last = now;
+    }
+    const reply = meter.transact(report.slice(0, 4));
+    return reply.length ? toReports(reply) : [];
+  });
+}
+
+/** The frames `dev` received, by safe-set name (the 4-byte front of each report; any
+ * non-zero byte after it makes the frame `unknown`). */
+export function hidSentNames(w: PowerzWasm, dev: FakeHidDevice): FrameName[] {
+  return dev.sent.map(({ data }) =>
+    data.slice(4).some((b) => b !== 0) ? "unknown" : classify(w, data.slice(0, 4)),
+  );
+}
+
 /** One captured download: its file name and contents. */
 export interface Download {
   name: string;
@@ -146,6 +217,18 @@ describe("web backend fakes", () => {
     expect(nav.requests).toEqual([{ filters: [{ vendorId: 0x5fc9 }] }]);
     expect(await p).toBe(dev);
     expect(await nav.getDevices()).toEqual([dev]);
+  });
+
+  it("the HID picker records its options synchronously and resolves to an array", async () => {
+    const nav = new FakeHidNavigator();
+    const w = await loadWasm();
+    const dev = demoHidDevice(w);
+    nav.pick = dev;
+    const p = nav.requestDevice({ filters: [{ vendorId: 0x5fc9 }] });
+    expect(nav.requests).toEqual([{ filters: [{ vendorId: 0x5fc9 }] }]);
+    expect(await p).toEqual([dev]);
+    nav.pick = null;
+    expect(await nav.requestDevice({ filters: [] })).toEqual([]);
   });
 
   it("the demo USB device answers CONNECT", async () => {

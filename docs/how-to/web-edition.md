@@ -30,12 +30,26 @@ address bar) and remove the device.
 The browser claims the meter's vendor (bulk) interface, picked by its class,
 not by its number. When another driver already holds that interface (an OS
 driver, or another app such as the desktop app or the `powerz` CLI), the page
-reports the device as busy. The protocol driver can then fall back to WebHID:
-the same commands over the meter's HID interface as 64-byte reports. It is
-slower than bulk but needs no driver on any OS. WebHID has its own browser
-picker and permission, separate from the USB one. Choosing the WebHID path
-from the page is not wired in yet, so for now free the vendor interface (see
-below) and connect again.
+falls back to WebHID: the meter's HID interface, which needs no driver on any
+OS. WebHID has its own browser picker and permission, separate from the USB
+one.
+
+- If the page already has permission for the meter over WebHID, it connects
+  over HID on its own.
+- Otherwise the error says the meter is busy and a **Connect over HID…**
+  button appears next to the device list. Click it, pick the meter in the
+  browser's HID picker, then connect again.
+- A browser with WebHID but no WebUSB uses the HID picker for **Connect a
+  meter…**. Meters granted over HID are listed as `webhid:N`.
+
+Over HID the meter only gives basic readings: ADC snapshots (voltage, current,
+D+/D-, CC1/CC2, temperature) about ten times a second. On the meter's current
+firmware any reply longer than one 64-byte report hangs and reboots it, and
+control commands get no answer, so a HID session never starts the sample
+queue, reads the device info or captures PD traffic. The top bar shows
+"HID: basic readings only", the rate is fixed, and PD capture is refused. For
+the full feature set, free the vendor interface (see below) and connect over
+WebUSB.
 
 Close any other app that has the meter open before you connect; only one
 program can hold the interface at a time.

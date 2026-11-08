@@ -43,6 +43,16 @@ export function requestMeter(): Promise<DeviceListing | null> {
   return Promise.resolve(null);
 }
 
+/** Asks the browser for a meter over WebHID (AC-QFTCWZ.3), for a meter whose USB
+ * interface another driver holds. Resolves `null` when none was picked or the build has
+ * no browser backend. */
+export function requestHidMeter(): Promise<DeviceListing | null> {
+  // Loaded: straight to navigator.hid.requestDevice, still inside the user gesture.
+  if (webReady) return webReady.requestHidMeter();
+  if (web) return web.then((b) => b.requestHidMeter());
+  return Promise.resolve(null);
+}
+
 // The mock build exposes itself so the UI suite can read what it recorded (reveal requests).
 if (mock && typeof window !== "undefined") {
   (window as unknown as Record<string, unknown>).__OPEN_POWERZ_MOCK__ = mock;
@@ -166,6 +176,9 @@ export interface ConnectedInfo {
   serial: string;
   rate_sps: number | null;
   rate_locked: boolean;
+  /** A WebHID session of the web build (AC-QFTCWZ.3): ADC snapshots only, no PD capture
+   * or queue rates. Absent elsewhere. */
+  basic_readings_only?: boolean | undefined;
   session_id: number;
   /** Oldest supported firmware, from the protocol library. */
   min_supported_firmware: string;
@@ -421,6 +434,8 @@ export interface AttachedSession {
   serial: string | null;
   rate_sps: number | null;
   rate_locked: boolean;
+  /** A WebHID session of the web build (AC-QFTCWZ.3). */
+  basic_readings_only?: boolean | undefined;
   session_id: number;
   recording: RecordingSnapshot | null;
   /** The PD capture runs (AC-AXHK2K.7). */
@@ -1731,6 +1746,9 @@ export interface WebBackendApi extends MeterCommands {
   listDevices(): Promise<DeviceListing[]>;
   watchDevices(onChange: (devices: DeviceListing[]) => void): Promise<() => void>;
   requestMeter(): Promise<DeviceListing | null>;
+  /** The browser's WebHID picker (AC-QFTCWZ.3); `null` when none was picked or there is
+   * no WebHID. */
+  requestHidMeter(): Promise<DeviceListing | null>;
   connect(
     deviceId: string,
     rateSps: number,

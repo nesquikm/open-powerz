@@ -12,9 +12,11 @@ changelog_category: Added
 
 ## Summary
 
-The existing app interface runs in a browser with a new web backend behind the same seam the test build already uses.
-The user picks a meter with the browser's device picker, or opens the built-in demo meter, and gets the live readings, the chart, statistics, the passive PD analyzer and recording to a downloadable spreadsheet file.
-Features that write to the meter, or that need the file system, show that they are available in the desktop app only.
+The existing app interface runs in a browser with a new web backend.
+It sits behind the same seam the test build already uses.
+The user picks a meter with the browser's device picker, or opens the built-in demo meter.
+They get live readings, the chart, statistics, the passive PD analyzer and spreadsheet recording.
+Features that write to the meter or need the file system say they are desktop-only.
 
 ## Requirement
 

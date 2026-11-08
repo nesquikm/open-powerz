@@ -206,10 +206,18 @@ export class FakeHidDevice {
         : new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
     this.sent.push({ reportId, data: bytes });
     const reports = this.respond(bytes);
-    // Reports arrive one by one after the write, like the real device.
-    reports.forEach((r, i) => {
-      setTimeout(() => this.emit(r), 1 + i);
-    });
+    // Reports arrive one by one after the write, like the real device. Each report's
+    // timer is armed only after the previous one fired, so they always arrive in order
+    // (separate timers of different delays may fire out of order under load).
+    const next = (i: number): void => {
+      const r = reports[i];
+      if (!r) return;
+      setTimeout(() => {
+        this.emit(r);
+        next(i + 1);
+      }, 1);
+    };
+    next(0);
   }
   emit(report: Uint8Array): void {
     const event = { reportId: 0, data: new DataView(report.buffer.slice(0)), device: this };

@@ -107,6 +107,19 @@ Planned: a `tests` directory inside the protocol crate holding integration tests
   measure. Both figures go in the PR's manual hardware checks.
   In CI, the `e2e-ui-perf` job runs the WebKit memory bound (`memory.spec.ts`, `MEMORY_TEST=1`) as a
   step of its own with one worker, on Linux and macOS.
+- **Web edition (wasm + browser):** `crates/powerz-wasm/tests/` checks the wasm builders and
+  decoders against the native session's frames and decodes (parity, byte vectors) and the demo
+  meter; `crates/powerz-protocol/tests/wasm_split.rs` and `crates/powerz-sim/tests/wasm_build.rs`
+  check the wasm32 builds and the transport-feature split. In Vitest, the browser backend, the
+  driver and the transports run against hand-written fake WebUSB / WebHID objects and the demo
+  transport; `wasm.smoke.test.ts` loads the built wasm in Node, so `bun run build:wasm` must run
+  before `bun run test` (the gate chain does). The driver's closed-command-set test records
+  every frame it sends.
+- **Pages build e2e (local only):** `bun run --cwd apps/desktop e2e:pages --workers=1` runs
+  Playwright (Chromium and WebKit) against `dist-pages` served under `/open-powerz/`: the site
+  loads, the demo meter streams, and browsers without WebUSB/WebHID get the not-supported
+  screen. Run `bun run build:pages` first. No CI job or deploy runs it yet; run it before a
+  release.
 - **Visual checks (blocking):** `/dev-process-toolkit:visual-check` screenshots for every UI
   FR — light and dark, ~900 and ~1600 px wide, demo device streaming and no device — read
   and fixed before the FR is done.

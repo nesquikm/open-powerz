@@ -13,9 +13,10 @@ changelog_category: Added
 ## Summary
 
 The protocol library, the PD decoder and the simulator compile for WebAssembly.
-The native USB, HID and serial code moves behind build switches that the desktop app and the command-line tool keep on.
-The simulator can run on a clock the caller drives, since a browser has no system clock it can block on.
-A new continuous-integration step builds all three for the browser target so the split cannot rot.
+The native USB, HID and serial code moves behind build switches.
+The desktop app and the command-line tool keep those switches on.
+The simulator can run on a clock the caller drives, because a browser cannot block on a system clock.
+A new CI step builds all three for the browser, so the split cannot rot.
 
 ## Requirement
 

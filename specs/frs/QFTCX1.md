@@ -12,8 +12,9 @@ changelog_category: Added
 
 ## Summary
 
-The web edition builds into a static site that works when served from the project's GitHub Pages address.
-It carries the project mascot as its icon and greets browsers without USB access with a clear page that says what is supported.
+The web edition builds into a static site served from the project's GitHub Pages address.
+It carries the project mascot as its icon.
+Browsers without USB access get a clear page that says what is supported.
 A release now also deploys the site, and a maintainer can deploy the main branch by hand.
 Browser end-to-end tests run against the built site with the demo meter.
 
@@ -32,7 +33,7 @@ Add a static Pages build with base path `/open-powerz/`, the brand favicon, a "n
 
 ## Technical Design
 
-A Vite mode `pages` sets `base: "/open-powerz/"`, `VITE_BACKEND=web` and an output folder `dist-pages`; brand icons are copied from the brand folder at build time, not duplicated. Support detection runs before the app mounts. The deploy steps live in a reusable workflow called from both workflows.
+A Vite mode `pages` sets `base: "/open-powerz/"`, `VITE_BACKEND=web` and an output folder `dist-pages`; brand icons are copied from the brand folder at build time, not duplicated. Support detection runs in `App.svelte` as it mounts, before any backend call. The deploy steps live in a reusable workflow called from both workflows.
 
 ## Testing
 

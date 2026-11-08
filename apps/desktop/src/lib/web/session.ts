@@ -161,6 +161,7 @@ export class WebSession {
         serial: info.serial,
         rate_sps: this.rateSps,
         rate_locked: this.rateLocked,
+        basic_readings_only: this.driver.hid,
         session_id: this.sessionId,
         min_supported_firmware: MIN_SUPPORTED_FIRMWARE,
         known_latest_firmware: KNOWN_LATEST_FIRMWARE,
@@ -395,6 +396,7 @@ export class WebSession {
       serial: info.serial,
       rate_sps: this.rateSps,
       rate_locked: this.rateLocked,
+      basic_readings_only: this.driver.hid,
       session_id: this.sessionId,
       recording: null,
     };

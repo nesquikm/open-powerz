@@ -60,7 +60,8 @@ function isUiError(e: unknown): e is UiError {
 /**
  * Open `device` over its vendor bulk interface. When the interface cannot be claimed
  * (an OS driver holds it), resolve with an offer to switch to the WebHID transport,
- * which sends the same commands as 64-byte reports. Other failures reject.
+ * which carries ADC snapshots only (GET_DATA 0x001; docs/protocol.md "HID limits").
+ * Other failures reject.
  */
 export async function openUsbOrOfferHid(
   device: UsbDeviceLike,
@@ -148,6 +149,11 @@ export interface MeterDriverOptions {
   onError: (error: UiError) => void;
   /** Random source for the auth nonce; defaults to `crypto.getRandomValues`. */
   random?: () => bigint;
+  /** A WebHID session (AC-QFTCWZ.3): ADC snapshots only, so no CONNECT, device info,
+   * auth, queue or PD sniffer; every frame is GET_DATA 0x001. */
+  hid?: boolean;
+  /** The model the device list shows, for a HID session (it reads no device info). */
+  model?: string;
 }
 
 /** Any failure as a `UiError`: transport errors pass through, wasm decode errors are
@@ -161,6 +167,15 @@ function asUiError(e: unknown): UiError {
   }
   if (isUiError(e)) return { kind: "protocol", message: String(e.message), hint: null };
   return { kind: "internal", message: "Something went wrong inside the app.", hint: null };
+}
+
+/** What a HID session refuses: anything beyond the ADC snapshot. */
+function hidOnlyBasic(what: string): UiError {
+  return {
+    kind: "usage",
+    message: `${what} is not available over HID: it gives basic readings only.`,
+    hint: "Free the meter's USB interface and connect over WebUSB for this.",
+  };
 }
 
 function defaultRandom(): bigint {
@@ -195,10 +210,26 @@ export class MeterDriver {
     return this.rate;
   }
 
+  /** A WebHID session: basic readings (ADC snapshots) only. */
+  get hid(): boolean {
+    return this.o.hid === true;
+  }
+
   /** Connect, read the device info, authenticate at level 1 and start the queue at
    * `rateCode`; when the meter refuses the auth or the queue, poll ADC snapshots. */
   static async connect(options: MeterDriverOptions): Promise<MeterDriver> {
     const driver = new MeterDriver(options);
+    if (options.hid) {
+      driver.info = {
+        model: options.model ?? "KM003C",
+        firmware_version: "",
+        hardware_version: "",
+        serial: "",
+        uid: "",
+      };
+      driver.schedulePoll(0);
+      return driver;
+    }
     try {
       await driver.open();
     } catch (e) {
@@ -390,6 +421,7 @@ export class MeterDriver {
    * without the queue (the meter declined the auth). */
   async setRate(rateCode: number): Promise<void> {
     if (this.ended) throw disconnectedError();
+    if (this.o.hid) throw hidOnlyBasic("Changing the rate");
     if (this.mode !== "queue") {
       throw {
         kind: "usage",
@@ -416,6 +448,7 @@ export class MeterDriver {
     onRows: (rows: PdRowView[]) => void,
     decoder?: PdDecoderLike,
   ): Promise<void> {
+    if (this.o.hid) throw hidOnlyBasic("PD capture");
     if (this.ended || this.pd) return;
     const w = this.o.wasm;
     try {

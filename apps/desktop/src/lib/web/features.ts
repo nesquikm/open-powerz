@@ -59,3 +59,7 @@ export function desktopOnlyError(): UiError {
     hint: null,
   };
 }
+
+/** What a WebHID session shows (AC-QFTCWZ.3): HID carries ADC snapshots only, so no PD
+ * capture and no queue rates. */
+export const HID_BASIC_NOTE = "HID: basic readings only";

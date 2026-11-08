@@ -1,7 +1,10 @@
 /**
- * FR QFTCWZ: the WebHID transport. A request goes out as one 64-byte output report
- * (report ID 0, the frame zero-padded); the reply comes back as 64-byte input reports,
- * assembled up to the length its headers declare.
+ * FR QFTCWZ, AC-QFTCWZ.3: the WebHID transport, ADC snapshots only (docs/protocol.md
+ * "HID limits", [device] firmware 2.0.6: a reply over 64 bytes hangs and reboots the
+ * meter, control commands get no reply). A guard lets through GET_DATA with attribute
+ * mask 0x001 and refuses every other frame before anything is sent. The request goes
+ * out as one 64-byte output report (report ID 0, the frame zero-padded); each 64-byte
+ * input report is one whole reply.
  */
 
 import type { UiError } from "../backend";
@@ -9,9 +12,20 @@ import { disconnectedError, timeoutError, transportError, type WebTransport } fr
 
 const REPORT_LEN = 64;
 const HEADER_LEN = 4;
-const PUT_DATA = 0x41;
-const ATT_ADC_QUEUE = 0x002;
-const ATT_PD_STATUS = 0x020;
+/** GET_DATA message type [static]. */
+const GET_DATA = 0x0c;
+/** ATT_ADC, the only attribute HID may ask for [device]. */
+const ATT_ADC = 0x001;
+
+/** Whether `frame` is a plain GET_DATA for the ADC snapshot (any transaction id): the
+ * one request HID carries. */
+function isAdcSnapshotRequest(frame: Uint8Array): boolean {
+  if (frame.length !== HEADER_LEN) return false;
+  const typeByte = frame[0] ?? 0;
+  // Bits 16..31 of the header: a reserved bit, then the 15-bit attribute mask.
+  const high = (frame[2] ?? 0) | ((frame[3] ?? 0) << 8);
+  return typeByte === GET_DATA && high === ATT_ADC << 1;
+}
 
 /** The parts of the WebHID `HIDDevice` the transport uses. */
 export interface HidDeviceLike {
@@ -21,29 +35,6 @@ export interface HidDeviceLike {
   sendReport(reportId: number, data: BufferSource): Promise<void>;
   addEventListener(type: "inputreport", fn: (event: { data: DataView }) => void): void;
   removeEventListener(type: "inputreport", fn: (event: { data: DataView }) => void): void;
-}
-
-function word(buf: Uint8Array, at: number): number | null {
-  if (at + 4 > buf.length) return null;
-  return (buf[at]! | (buf[at + 1]! << 8) | (buf[at + 2]! << 16) | (buf[at + 3]! << 24)) >>> 0;
-}
-
-/** Total bytes a reply's headers declare (main header plus every section). Non-PUT_DATA
- * replies declare only what arrived. */
-export function declaredLength(reply: Uint8Array): number {
-  if (((reply[0] ?? 0) & 0x7f) !== PUT_DATA) return reply.length;
-  let offset = HEADER_LEN;
-  for (;;) {
-    const w = word(reply, offset);
-    if (w === null) return offset + HEADER_LEN;
-    const att = w & 0x7fff;
-    const next = ((w >>> 15) & 1) === 1;
-    const chunk = (w >>> 16) & 0x3f;
-    const size = (w >>> 22) & 0x3ff;
-    const end = offset + HEADER_LEN + (att === ATT_ADC_QUEUE ? chunk * size : size);
-    if (att === ATT_PD_STATUS || !next) return end;
-    offset = end;
-  }
 }
 
 /** Open `device` as a meter over HID. */
@@ -95,31 +86,22 @@ class WebHidTransport implements WebTransport {
     return this.queue.shift() ?? null;
   }
 
+  /** The next input report as the whole reply (no multi-report assembly). */
   private async readReply(timeoutMs: number): Promise<Uint8Array> {
-    const deadline = Date.now() + timeoutMs;
-    const first = await this.nextReport(deadline);
+    const report = await this.nextReport(Date.now() + timeoutMs);
     if (this.gone) throw this.gone;
-    if (!first) throw timeoutError();
-    const want = declaredLength(first);
-    if (want <= first.length) return first.slice(0, Math.max(want, 0));
-    const out = new Uint8Array(want);
-    out.set(first);
-    let have = first.length;
-    while (have < want) {
-      const r = await this.nextReport(deadline);
-      if (this.gone) throw this.gone;
-      if (!r) throw timeoutError();
-      const take = Math.min(r.length, want - have);
-      out.set(r.subarray(0, take), have);
-      have += take;
-    }
-    return out;
+    if (!report) throw timeoutError();
+    return report;
   }
 
   async transact(frame: Uint8Array, timeoutMs: number): Promise<Uint8Array> {
     if (this.gone) throw this.gone;
-    if (frame.length > REPORT_LEN) {
-      throw transportError("usage", "The request does not fit in one HID report.", null);
+    if (!isAdcSnapshotRequest(frame)) {
+      throw transportError(
+        "usage",
+        "Over HID the meter only answers basic readings (ADC snapshots).",
+        null,
+      );
     }
     const report = new Uint8Array(REPORT_LEN);
     report.set(frame);
