@@ -139,6 +139,57 @@ describe("gate order (AC-QFTCWY.4)", () => {
   });
 });
 
+/** The commands of the repo-root CLAUDE.md "Gating rule" bash chain, split on `&&`. */
+function gatingChain(): string[] {
+  const lines = read("CLAUDE.md").split(/\r?\n/);
+  const at = lines.findIndex((l) => /\*\*Gating rule:\*\*/.test(l));
+  if (at < 0) return [];
+  const open = lines.findIndex((l, i) => i > at && /^```bash\s*$/.test(l));
+  if (open < 0) return [];
+  const body: string[] = [];
+  for (const line of lines.slice(open + 1)) {
+    if (/^```\s*$/.test(line)) break;
+    body.push(line);
+  }
+  return body
+    .join(" ")
+    .split("&&")
+    .map((c) => c.trim())
+    .filter((c) => c !== "");
+}
+
+describe("gate order (AC-Y6JFM3)", () => {
+  // AC-Y6JFM3.1 / AC-Y6JFM3.3: svelte-check resolves ../../wasm/powerz_wasm.js only after
+  // build:wasm generated it, so the gate's JS step builds the module before check and test.
+  it("the gate job's JS step runs build:wasm before bun run check and bun run test", () => {
+    const gate = gateJob();
+    const build = lineOf(gate, /^\s*(run:\s*)?bun run build:wasm\s*$/);
+    const check = lineOf(gate, /^\s*(run:\s*)?bun run check\s*$/);
+    const test = lineOf(gate, /^\s*(run:\s*)?bun run test\s*$/);
+    expect(build, "bun run build:wasm in the gate job").toBeGreaterThan(-1);
+    expect(check, "bun run check in the gate job").toBeGreaterThan(-1);
+    expect(test, "bun run test in the gate job").toBeGreaterThan(-1);
+    const step = stepOf(gate, check).join("\n");
+    expect(step, "the JS step").toMatch(/name:\s*JS lint, typecheck, test, build/);
+    expect(stepOf(gate, build).join("\n"), "build:wasm sits in the JS step").toBe(step);
+    expect(build, "build:wasm precedes bun run check").toBeLessThan(check);
+    expect(build, "build:wasm precedes bun run test").toBeLessThan(test);
+  });
+
+  // AC-Y6JFM3.2 / AC-Y6JFM3.3: the documented chain matches CI.
+  it("the CLAUDE.md Gating rule chain lists build:wasm before bun run check", () => {
+    const chain = gatingChain();
+    const build = chain.indexOf("bun run build:wasm");
+    const check = chain.indexOf("bun run check");
+    const test = chain.indexOf("bun run test");
+    expect(build, "bun run build:wasm in the gating chain").toBeGreaterThan(-1);
+    expect(check, "bun run check in the gating chain").toBeGreaterThan(-1);
+    expect(test, "bun run test in the gating chain").toBeGreaterThan(-1);
+    expect(build, "build:wasm precedes bun run check").toBeLessThan(check);
+    expect(build, "build:wasm precedes bun run test").toBeLessThan(test);
+  });
+});
+
 describe("built module (AC-QFTCWY.4)", () => {
   it("build:wasm left the module and its JS glue in src/wasm", () => {
     expect(existsSync(MODULE), `${MODULE} (run bun run build:wasm)`).toBe(true);

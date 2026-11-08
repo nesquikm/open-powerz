@@ -88,7 +88,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p powerz-protocol --no-deps --locked
 **Gating rule:** Every feature must pass before merging:
 
 ```bash
-bun install --frozen-lockfile && bun run lint && bun run check && bun run build:wasm && bun run test && bun run build:web && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked
+bun install --frozen-lockfile && bun run build:wasm && bun run lint && bun run check && bun run test && bun run build:web && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked
 ```
 
 `bun run build:web` must run before any cargo command that compiles `apps/desktop/src-tauri`: `tauri::generate_context!` requires `apps/desktop/dist` to exist. CI (`.github/workflows/ci.yml`) runs the same chain on Linux, macOS and Windows.

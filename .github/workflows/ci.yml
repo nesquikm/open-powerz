@@ -70,8 +70,8 @@ jobs:
       - name: JS lint, typecheck, test, build
         run: |
           bun run lint
-          bun run check
           bun run build:wasm
+          bun run check
           bun run test
           bun run build:web
 
