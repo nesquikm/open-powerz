@@ -92,7 +92,18 @@ let backend: MockBackend | null = null;
 afterEach(async () => {
   await backend?.disconnect().catch(() => {});
   backend = null;
+  vi.useRealTimers();
 });
+
+/** The demo stream's batch tick: 25 samples at 1000 samples per second. */
+const STREAM_TICK_MS = 25;
+
+/** Runs a demo export to its end on fake timers: only the export's own zero-delay timer
+ * fires, never a stream tick, so the history holds still (FR B67EYP). */
+async function settled<T>(pending: Promise<T>): Promise<T> {
+  await vi.advanceTimersByTimeAsync(0);
+  return pending;
+}
 
 describe("demo backend export of a folded session (AC-AXHK2W.14)", () => {
   it("reports nothing folded under its limit", async () => {
@@ -104,6 +115,9 @@ describe("demo backend export of a folded session (AC-AXHK2W.14)", () => {
   });
 
   it("reports the folded samples, their span and the file's start past its limit", async () => {
+    // FR B67EYP: the stream's timers are fake, so no demo sample arrives between the
+    // boundary read and either export, and the checks below stay exact.
+    vi.useFakeTimers();
     backend = new MockBackend(null, { historyFullSamples: 5_000 });
     await backend.connect("demo:load-5v-1a", 1000, () => {});
     // One sample per ms from 0.
@@ -114,7 +128,7 @@ describe("demo backend export of a folded session (AC-AXHK2W.14)", () => {
       (b: MockBackend) => b.exportSession("synthetic.csv", () => {}),
       (b: MockBackend) => b.exportSessionDb("synthetic.db", () => {}),
     ]) {
-      const result = await exportFn(backend);
+      const result = await settled(exportFn(backend));
       const folded = result?.folded;
       expect(folded).toBeTruthy();
       expect(folded?.samples).toBe(boundary);
@@ -122,5 +136,22 @@ describe("demo backend export of a folded session (AC-AXHK2W.14)", () => {
       expect(typeof folded?.start_unix_ms).toBe("number");
       expect(folded?.start_unix_ms).toBeGreaterThan(0);
     }
+  });
+
+  // FR B67EYP (AC-B67EYP.2): the hazard the test above shuts out. One stream tick between
+  // the boundary read and an export grows the history, so the export's fold no longer
+  // matches the boundary read before it: the CI failure `expected 15025 to be 15000`.
+  it("drifts from the boundary read when a stream tick lands before the export", async () => {
+    vi.useFakeTimers();
+    backend = new MockBackend(null, { historyFullSamples: 5_000 });
+    await backend.connect("demo:load-5v-1a", 1000, () => {});
+    await backend.seedSyntheticHistory(20_000);
+    const boundary = await backend.historyFoldBoundary();
+    expect(boundary).toBe(15_000);
+    await vi.advanceTimersByTimeAsync(STREAM_TICK_MS);
+    const result = await settled(backend.exportSession("synthetic.csv", () => {}));
+    expect(result?.folded?.samples).toBe(15_025);
+    expect(result?.folded?.samples).not.toBe(boundary);
+    expect(await backend.historyFoldBoundary()).toBe(15_025);
   });
 });
