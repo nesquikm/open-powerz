@@ -15,8 +15,8 @@ Pages address is) or from `localhost`.
 ## Connect a meter: the device picker and permission
 
 1. Plug the meter into the computer.
-2. Click **Connect a meter…**. The browser opens its own USB device picker,
-   filtered to the POWER-Z vendor, so only POWER-Z meters are listed.
+2. Choose **Connect a meter…**, the last item of the device menu. The
+   browser opens its own USB device picker, filtered to the POWER-Z vendor, so only POWER-Z meters are listed.
 3. Pick the meter and click **Connect**.
 
 Choosing the meter in the picker is the permission: the page cannot see any
@@ -37,7 +37,7 @@ one.
 - If the page already has permission for the meter over WebHID, it connects
   over HID on its own.
 - Otherwise the error says the meter is busy and a **Connect over HID…**
-  button appears next to the device list. Click it, pick the meter in the
+  item appears in the device menu. Choose it, pick the meter in the
   browser's HID picker, then connect again.
 - A browser with WebHID but no WebUSB uses the HID picker for **Connect a
   meter…**. Meters granted over HID are listed as `webhid:N`.

@@ -115,6 +115,10 @@ The web edition only reads and streams. These features are desktop-only, so use 
 - Script the meter with `powerz`: list, info, read, watch and stream, with JSON output, raw frame traces and stable exit codes ([CLI reference](docs/reference/cli.md))
 - Build your own tools on the `powerz-protocol` Rust library and the documented USB protocol ([API](docs/reference/api/powerz-protocol.md), [protocol](docs/protocol.md))
 
+### Web edition
+
+- Use open-powerz in Chrome or Edge with nothing to install: live readings, charts, stats, PD capture, CSV recording and the demo meter over WebUSB, with a WebHID fallback for basic readings ([use the web edition](docs/how-to/web-edition.md))
+
 ### Demo device and simulator
 
 - Try everything without a meter on the demo device, with named scenarios and fault injection for tests ([try it without a meter](#try-it-without-a-meter))
@@ -125,8 +129,7 @@ The web edition only reads and streams. These features are desktop-only, so use 
 
 ## Coming next
 
-- Polish across the app
-- A browser edition for Chrome and Edge, hosted on GitHub Pages
+- Polish across the desktop app and the browser edition
 
 ## Layout
 

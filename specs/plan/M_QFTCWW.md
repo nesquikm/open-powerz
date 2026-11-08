@@ -7,6 +7,7 @@ kickoff_branch: feat/web
 frozen_at: null
 migration: none
 codename: Open Tab
+shipped_in: v0.11.0
 ---
 
 # Implementation Plan
