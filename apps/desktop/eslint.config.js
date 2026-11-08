@@ -10,6 +10,7 @@ export default ts.config(
       "dist/",
       "dist-e2e-ui/",
       "dist-e2e-app/",
+      "dist-pages/",
       "e2e-app-logs/",
       "test-results/",
       "playwright-report/",

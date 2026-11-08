@@ -83,6 +83,8 @@
   import StartupLogoView from "./lib/components/StartupLogoView.svelte";
   import { StartupLogoState } from "./lib/logo.svelte";
   import { RecordsPanel } from "./lib/records.svelte";
+  import NotSupported from "./lib/components/NotSupported.svelte";
+  import { detectSupport, type SupportProbe } from "./lib/web/support";
   import TopBar from "./lib/components/TopBar.svelte";
   import TriggerView from "./lib/components/TriggerView.svelte";
   import { TriggerPanel } from "./lib/trigger.svelte";
@@ -127,6 +129,12 @@
     type MotionSettings,
     type ThemeChoice,
   } from "./lib/theme";
+
+  /** The web edition in a browser without WebUSB and WebHID (FR QFTCX1, AC .3). */
+  const unsupportedBrowser =
+    import.meta.env.VITE_BACKEND === "web" &&
+    typeof navigator !== "undefined" &&
+    detectSupport(navigator as SupportProbe) === "not-supported";
 
   const session = new Session();
   /** Every connected meter (FR 1HHT03): the one the full view shows, then each one added
@@ -1325,6 +1333,9 @@
 {/snippet}
 
 <div class="shell">
+  {#if unsupportedBrowser}
+    <NotSupported />
+  {/if}
   <TopBar
     {session}
     {hideSerial}

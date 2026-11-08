@@ -41,6 +41,18 @@ const TEMP_MAX_AGE_MS = 2_000;
 
 /** A jump in meter time past this many ms (or back) starts a new time base. */
 const MAX_STEP_MS = 5_000;
+/** How often a recording reports its rows and elapsed time to the top bar. */
+const PROGRESS_MS = 500;
+
+/** A recording in progress: its rows, file name, pause state and clock. */
+interface WebRecording {
+  csv: CsvRecorder;
+  name: string;
+  paused: boolean;
+  startedAt: number;
+  /** When the last progress event went out. */
+  progressAt: number;
+}
 
 export function usage(message: string): UiError {
   return { kind: "usage", message, hint: null };
@@ -114,7 +126,7 @@ export class WebSession {
   private lastMeterMs = 0;
   private lastT = -Infinity;
   /** The recording in progress (AC-QFTCX0.5): its rows, file name and pause state. */
-  private recording: { csv: CsvRecorder; name: string; paused: boolean } | null = null;
+  private recording: WebRecording | null = null;
   /** The last finished recording, kept for Save As. */
   private lastRecording: { csv: CsvRecorder; name: string } | null = null;
 
@@ -186,6 +198,7 @@ export class WebSession {
       const now = Date.now();
       for (const s of out) rec.csv.push(s, now, fresh ? this.tempC : null);
     }
+    if (rec) this.recordingProgress(rec);
     this.onEvent({
       type: "batch",
       data: { samples: out, temp_c: fresh ? this.tempC : null, stats: this.stats.snapshot() },
@@ -284,9 +297,32 @@ export class WebSession {
   /** Start collecting rows in memory; Stop downloads them as `suggestedName`. */
   async startRecording(suggestedName: string): Promise<string | null> {
     if (this.recording) throw usage("A recording is already running.");
-    this.recording = { csv: new CsvRecorder(), name: suggestedName, paused: false };
+    const now = Date.now();
+    this.recording = {
+      csv: new CsvRecorder(),
+      name: suggestedName,
+      paused: false,
+      startedAt: now,
+      progressAt: now,
+    };
     this.onEvent({ type: "recording", data: { state: "started" } });
     return suggestedName;
+  }
+
+  /** Tell the top bar the rows and elapsed time, at most every `PROGRESS_MS`. */
+  private recordingProgress(rec: WebRecording): void {
+    const now = Date.now();
+    if (now - rec.progressAt < PROGRESS_MS) return;
+    rec.progressAt = now;
+    this.onEvent({
+      type: "recording",
+      data: {
+        state: "progress",
+        rows: rec.csv.rows,
+        elapsed_ms: now - rec.startedAt,
+        paused: rec.paused,
+      },
+    });
   }
 
   async stopRecording(): Promise<RecordingSummary> {

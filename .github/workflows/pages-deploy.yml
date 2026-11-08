@@ -1,0 +1,83 @@
+name: Pages deploy
+
+# FR QFTCX1: builds the web edition and deploys it to GitHub Pages. Reusable only: the
+# release's `pages` job (a `v*` tag) and pages.yml (main, by hand) both call it.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The ref to build and deploy (e.g. refs/tags/v1.0.0 or refs/heads/main)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # One Pages deploy at a time, release or manual; a running deploy is never cancelled.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+
+      - name: Rust toolchain (rust-toolchain.toml) and the wasm32 target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: pages
+
+      # The CLI version equals the crate's wasm-bindgen pin (as in ci.yml).
+      - name: Cache the wasm-bindgen CLI
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/wasm-bindgen*
+          key: wasm-bindgen-cli-0.2.129-${{ runner.os }}
+
+      - name: wasm-bindgen CLI
+        run: |
+          wasm-bindgen --version 2>/dev/null | grep -q ' 0.2.129' || cargo install wasm-bindgen-cli --version 0.2.129 --locked
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: JS install
+        run: bun install --frozen-lockfile
+
+      - name: Build the site
+        run: |
+          bun run build:wasm
+          bun run build:pages
+
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: apps/desktop/dist-pages
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

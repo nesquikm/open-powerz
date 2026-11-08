@@ -189,10 +189,14 @@ class UsbDeviceList {
 
 /** The generated wasm module, fetched and initialised on first use. */
 async function loadBrowserWasm(): Promise<PowerzWasm> {
-  const mod = (await import("../../wasm/powerz_wasm.js")) as unknown as {
-    default: () => Promise<unknown>;
-  };
-  await mod.default();
+  const [mod, wasmUrl] = await Promise.all([
+    import("../../wasm/powerz_wasm.js") as unknown as Promise<{
+      default: (init: { module_or_path: string }) => Promise<unknown>;
+    }>,
+    // `?url` makes Vite emit the .wasm as a hashed asset under the build's base path.
+    import("../../wasm/powerz_wasm_bg.wasm?url").then((m: { default: string }) => m.default),
+  ]);
+  await mod.default({ module_or_path: wasmUrl });
   return mod as unknown as PowerzWasm;
 }
 
