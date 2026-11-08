@@ -41,6 +41,10 @@ codename: Open Tab
 | [HT1EMH](../frs/HT1EMH.md) | Serial lint misses its allowlist on Windows paths (bug) | n/a |
 | [FFQVBQ](../frs/FFQVBQ.md) | Logo write tests stall after resuming the fake clock (bug) | n/a |
 | [B67EYP](../frs/B67EYP.md) | Fold export test races the live demo stream (bug) | n/a |
+| [VG37JA](../frs/VG37JA.md) | WebUSB sign-in to the real meter fails where the native bulk path works (bug) | n/a |
+| [G30K4R](../frs/G30K4R.md) | A failed WebUSB connect leaves the meter claimed (bug) | n/a |
+| [G30K4S](../frs/G30K4S.md) | build:wasm picks a Rust without the wasm target (bug) | n/a |
+| [AYR4W6](../frs/AYR4W6.md) | Connect a meter from the device menu | n/a |
 
 Build order: QFTCWX → QFTCWY → QFTCWZ → QFTCX0 → QFTCX1 → QFTCX2.
 
