@@ -19,7 +19,9 @@
     type FirmwareMeter,
     type FirmwareUpdate,
   } from "../firmwareUpdate.svelte";
+  import { features } from "../backend";
   import { deviceOptionLabel } from "../format";
+  import DesktopOnly from "./DesktopOnly.svelte";
   import FirmwareConfirmDialog from "./FirmwareConfirmDialog.svelte";
   import FirmwareRecordingDialog from "./FirmwareRecordingDialog.svelte";
   import FirmwareFileInfo from "./FirmwareFileInfo.svelte";
@@ -134,15 +136,17 @@
 </div>
 
 <div class="actions">
-  <button
-    type="button"
-    disabled={blocker !== null || firmware.busy}
-    onclick={() => firmware.requestUpdate(meter)}
-    aria-describedby={blocker !== null ? "firmware-update-blocker" : undefined}>Update</button
-  >
-  {#if blocker !== null}
-    <p id="firmware-update-blocker" class="blocker">{blocker}</p>
-  {/if}
+  <DesktopOnly available={features.firmwareUpdate} label="Update">
+    <button
+      type="button"
+      disabled={blocker !== null || firmware.busy}
+      onclick={() => firmware.requestUpdate(meter)}
+      aria-describedby={blocker !== null ? "firmware-update-blocker" : undefined}>Update</button
+    >
+    {#if blocker !== null}
+      <p id="firmware-update-blocker" class="blocker">{blocker}</p>
+    {/if}
+  </DesktopOnly>
 </div>
 
 <!-- Mounted before its text, or a screen reader would not announce it (AC-AXHK2M.7). -->

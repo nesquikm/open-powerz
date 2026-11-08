@@ -1,7 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { backendAvailable, cancelWait, listDevices, toUiError, watchDevices } from "../backend";
+  import {
+    backendAvailable,
+    cancelWait,
+    features,
+    listDevices,
+    requestMeter,
+    toUiError,
+    watchDevices,
+  } from "../backend";
   import { deviceOptionLabel } from "../format";
+  import { pickMeter } from "../pickMeter";
+  import { WEB_FEATURES } from "../web/features";
   import type { Session } from "../session.svelte";
 
   let { session, hideSerial }: { session: Session; hideSerial: boolean } = $props();
@@ -52,6 +62,9 @@
       <option value="">No device</option>
     {/each}
   </select>
+  {#if features === WEB_FEATURES}
+    <button type="button" onclick={() => pickMeter(session, requestMeter)}>Connect a meter…</button>
+  {/if}
 </span>
 
 <style>

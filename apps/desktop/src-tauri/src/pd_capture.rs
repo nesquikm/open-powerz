@@ -3,7 +3,8 @@
 //! rows to the UI (at most 60 batches a second).
 
 use powerz_protocol::decode::pd_packet::{PdRecord, PdRecordKind, PdStatus};
-use powerz_protocol::pd::{self, Decoded, Field, PowerRole};
+use powerz_protocol::pd::{self, Decoded, PowerRole};
+use powerz_protocol::pd_details::{self, field_nodes};
 use powerz_protocol::pdcap;
 use powerz_protocol::pdm::message::cable_identity_from_message;
 use powerz_protocol::session::CapturedRecord;
@@ -118,19 +119,7 @@ pub struct PdRow {
 }
 
 /// One node of a record's field tree, with the bytes of `raw` it covers.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PdFieldNode {
-    /// Field name.
-    pub name: String,
-    /// Human-readable value.
-    pub meaning: String,
-    /// The field's bits, shifted down to bit 0.
-    pub raw: u64,
-    /// `[start, end)` byte range in the record's raw bytes.
-    pub bytes: [usize; 2],
-    /// Sub-fields.
-    pub children: Vec<PdFieldNode>,
-}
+pub use powerz_protocol::pd_details::FieldNode as PdFieldNode;
 
 /// The details of one record.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -265,54 +254,6 @@ impl<T> Outbox<T> {
 /// Meter time `device_ms` moved by `offset_ms` onto session time.
 fn on_session(device_ms: i64, offset_ms: i64) -> u64 {
     u64::try_from(device_ms.saturating_add(offset_ms)).unwrap_or(0)
-}
-
-/// Byte range of bits `hi..=lo` of the word at byte `word`.
-fn bit_bytes(word: usize, hi: u16, lo: u16) -> [usize; 2] {
-    [word + usize::from(lo) / 8, word + usize::from(hi) / 8 + 1]
-}
-
-/// `field` with its byte range: the node covers `span`, its children the
-/// bits of the word at byte `word`; every range is clamped to `len`.
-fn node(field: &Field, span: [usize; 2], word: usize, len: usize) -> PdFieldNode {
-    let clamp = |[s, e]: [usize; 2]| [s.min(len), e.min(len)];
-    let span = clamp(span);
-    PdFieldNode {
-        name: field.name.clone(),
-        meaning: field.meaning.clone(),
-        raw: field.raw,
-        bytes: span,
-        children: field
-            .children
-            .iter()
-            .map(|c| {
-                let r = clamp(bit_bytes(word, c.bits.hi, c.bits.lo));
-                // A child stays inside its parent.
-                let r = [r[0].clamp(span[0], span[1]), r[1].clamp(span[0], span[1])];
-                node(c, r, word, len)
-            })
-            .collect(),
-    }
-}
-
-/// The field tree of `decoded` mapped onto its `len` raw bytes.
-fn field_nodes(decoded: &Decoded, len: usize) -> Vec<PdFieldNode> {
-    let mut at = 0;
-    decoded
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(i, f)| {
-            let size = if i == 0 || (i == 1 && decoded.extended_header.is_some()) {
-                2
-            } else {
-                4
-            };
-            let n = node(f, [at, at + size], at, len);
-            at += size;
-            n
-        })
-        .collect()
 }
 
 impl PdCapture {
@@ -477,9 +418,8 @@ impl PdCapture {
         let index = self.base + self.entries.len() as u64;
         let decoded = record.pd_input().and_then(|i| self.decoder.feed(i));
         let row = match (&record.kind, &decoded) {
-            (PdRecordKind::Message(m) | PdRecordKind::BigMessage(m), Some(d)) => {
-                let mut raw = m.header.to_le_bytes().to_vec();
-                raw.extend_from_slice(&m.body);
+            (PdRecordKind::Message(_) | PdRecordKind::BigMessage(_), Some(d)) => {
+                let raw = pd_details::detail_bytes(record);
                 let h = &d.header;
                 let direction = if h.sop.is_cable() {
                     Direction::Cable

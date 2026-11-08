@@ -4,6 +4,7 @@
  */
 
 import type { UiError } from "../backend";
+import { ERROR_KINDS } from "../errorKinds";
 import type { DemoMeterModule } from "./demoTransport";
 import { disconnectedError, timeoutError, type WebTransport } from "./transport";
 import { openWebUsb, type UsbDeviceLike, type WebUsbOptions } from "./webusb";
@@ -36,7 +37,17 @@ export interface PowerzWasm extends DemoMeterModule {
     otp: Uint8Array,
     uid: Uint8Array,
   ): MeterInfo;
-  PdDecoder: new () => { decode(reply: Uint8Array): unknown; free(): void };
+  PdDecoder: new () => PdDecoderLike;
+}
+
+/** The wasm `PdDecoder`: poll replies into rows, and the capture kept since the last
+ * clear (details, clear, pdcap file). */
+export interface PdDecoderLike {
+  decode(reply: Uint8Array): unknown;
+  details(index: number | bigint): unknown;
+  clear(): unknown;
+  pdcap(model: string, firmwareVersion: string): unknown;
+  free(): void;
 }
 
 /** What opening a WebUSB device yields: a transport, or an offer to use WebHID instead. */
@@ -85,6 +96,9 @@ const RATE_1000_SPS = 3;
 /** ADC snapshot period without the queue `[inferred]`: the meter refreshes its ADC
  * block at its own rate, so a 100 ms poll keeps up with it. */
 const SNAPSHOT_PERIOD_MS = 100;
+/** Least time between two ADC snapshots while the queue streams, for the chip
+ * temperature (native `SnapshotCadence::PERIOD`). */
+const QUEUE_SNAPSHOT_PERIOD_MS = 500;
 /** PD sniffer poll period (native `PdSniffer::POLL_PERIOD`). */
 const PD_POLL_PERIOD_MS = 5;
 /** Each PD poll also asks for the ADC snapshot (the sniffer's `with_adc` option). */
@@ -127,30 +141,19 @@ export interface MeterDriverOptions {
   /** Queue rate code 0..3 (2 SPS, 10 SPS, 50 SPS, 1000 SPS). */
   rateCode: number;
   onBatch: (samples: MeterSample[]) => void;
+  /** Each ADC snapshot's chip temperature, °C (`null` when the meter reports none);
+   * while the queue streams, a snapshot follows a poll at most every 500 ms. */
+  onTemp?: (tempC: number | null) => void;
   /** The session ended on a transfer failure; called at most once. */
   onError: (error: UiError) => void;
   /** Random source for the auth nonce; defaults to `crypto.getRandomValues`. */
   random?: () => bigint;
 }
 
-const ERROR_KINDS: readonly string[] = [
-  "permission_denied",
-  "device_busy",
-  "timeout",
-  "protocol",
-  "disconnected",
-  "usage",
-  "out_of_sync",
-  "flash_needs_consent",
-  "cancelled",
-  "settings_not_saved",
-  "internal",
-];
-
 /** Any failure as a `UiError`: transport errors pass through, wasm decode errors are
  * `protocol`, DOM transfer errors `disconnected` / `timeout`. */
 function asUiError(e: unknown): UiError {
-  if (isUiError(e) && ERROR_KINDS.includes(e.kind) && "hint" in e) {
+  if (isUiError(e) && (ERROR_KINDS as readonly string[]).includes(e.kind) && "hint" in e) {
     return { kind: e.kind, message: e.message, hint: e.hint ?? null };
   }
   if (typeof DOMException !== "undefined" && e instanceof DOMException) {
@@ -178,10 +181,19 @@ export class MeterDriver {
   private ended = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private pdTimer: ReturnType<typeof setTimeout> | null = null;
-  private pd: { decoder: { decode(r: Uint8Array): unknown; free(): void } } | null = null;
+  private pd: { decoder: PdDecoderLike; owned: boolean } | null = null;
   private readonly startedAt = Date.now();
+  private lastSnapshotMs: number | null = null;
+  private rate: number;
 
-  private constructor(private readonly o: MeterDriverOptions) {}
+  private constructor(private readonly o: MeterDriverOptions) {
+    this.rate = o.rateCode;
+  }
+
+  /** The queue rate code the session streams at. */
+  get rateCode(): number {
+    return this.rate;
+  }
 
   /** Connect, read the device info, authenticate at level 1 and start the queue at
    * `rateCode`; when the meter refuses the auth or the queue, poll ADC snapshots. */
@@ -280,7 +292,7 @@ export class MeterDriver {
    * started again once. `false` when the meter refuses it. */
   private async startQueue(): Promise<boolean> {
     const w = this.o.wasm;
-    const start = () => this.expectAccept(w.startQueueRequest(this.nextId(), this.o.rateCode));
+    const start = () => this.expectAccept(w.startQueueRequest(this.nextId(), this.rate));
     try {
       await start();
       return true;
@@ -298,7 +310,7 @@ export class MeterDriver {
   }
 
   private periodMs(): number {
-    return this.mode === "queue" ? queuePollPeriodMs(this.o.rateCode) : SNAPSHOT_PERIOD_MS;
+    return this.mode === "queue" ? queuePollPeriodMs(this.rate) : SNAPSHOT_PERIOD_MS;
   }
 
   private schedulePoll(delayMs: number): void {
@@ -331,10 +343,11 @@ export class MeterDriver {
         w.getDataRequest(this.nextId(), ATT_ADC_QUEUE),
         REPLY_TIMEOUT_MS,
       );
-      return w.decodeQueue(reply, this.o.rateCode);
+      const samples = w.decodeQueue(reply, this.rate);
+      await this.snapshotIfDue();
+      return samples;
     }
-    const reply = await this.exchange(w.getDataRequest(this.nextId(), ATT_ADC), REPLY_TIMEOUT_MS);
-    const adc = w.decodeAdc(reply);
+    const adc = await this.readAdc();
     return [
       {
         time_ms: Date.now() - this.startedAt,
@@ -348,8 +361,61 @@ export class MeterDriver {
     ];
   }
 
-  /** Start the PD sniffer and hand every poll's decoded rows to `onRows`. */
-  async startPdCapture(onRows: (rows: PdRowView[]) => void): Promise<void> {
+  /** One ADC snapshot; its temperature goes to `onTemp`. */
+  private async readAdc(): Promise<Omit<MeterSample, "time_ms">> {
+    const w = this.o.wasm;
+    const reply = await this.exchange(w.getDataRequest(this.nextId(), ATT_ADC), REPLY_TIMEOUT_MS);
+    const adc = w.decodeAdc(reply) as Omit<MeterSample, "time_ms"> & { temp_c?: number | null };
+    this.o.onTemp?.(typeof adc.temp_c === "number" ? adc.temp_c : null);
+    return adc;
+  }
+
+  /** While the queue streams: an ADC snapshot for the temperature once one is due. A
+   * failed snapshot costs only the temperature; a disconnect still ends the session. */
+  private async snapshotIfDue(): Promise<void> {
+    if (!this.o.onTemp) return;
+    const now = Date.now();
+    if (this.lastSnapshotMs !== null && now - this.lastSnapshotMs < QUEUE_SNAPSHOT_PERIOD_MS) {
+      return;
+    }
+    this.lastSnapshotMs = now;
+    try {
+      await this.readAdc();
+    } catch (e) {
+      if (asUiError(e).kind === "disconnected") throw e;
+    }
+  }
+
+  /** Restart the queue at `rateCode`: stop it, then start it at the new rate. Refused
+   * without the queue (the meter declined the auth). */
+  async setRate(rateCode: number): Promise<void> {
+    if (this.ended) throw disconnectedError();
+    if (this.mode !== "queue") {
+      throw {
+        kind: "usage",
+        message: "Changing the rate needs authentication, which the meter refused.",
+        hint: null,
+      } satisfies UiError;
+    }
+    const w = this.o.wasm;
+    try {
+      await this.exclusive(async () => {
+        await this.expectAccept(w.stopQueueRequest(this.nextId()));
+        this.rate = rateCode;
+        await this.expectAccept(w.startQueueRequest(this.nextId(), rateCode));
+      });
+    } catch (e) {
+      throw asUiError(e);
+    }
+  }
+
+  /** Start the PD sniffer and hand every poll's decoded rows to `onRows`. With a
+   * `decoder`, the caller owns it (the capture outlives the run); otherwise the driver
+   * makes one and frees it when the capture stops. */
+  async startPdCapture(
+    onRows: (rows: PdRowView[]) => void,
+    decoder?: PdDecoderLike,
+  ): Promise<void> {
     if (this.ended || this.pd) return;
     const w = this.o.wasm;
     try {
@@ -357,7 +423,7 @@ export class MeterDriver {
     } catch (e) {
       throw asUiError(e);
     }
-    const pd = { decoder: new w.PdDecoder() };
+    const pd = decoder ? { decoder, owned: false } : { decoder: new w.PdDecoder(), owned: true };
     this.pd = pd;
     const tick = async (): Promise<void> => {
       if (this.ended || this.pd !== pd) return;
@@ -388,7 +454,7 @@ export class MeterDriver {
     this.pd = null;
     if (this.pdTimer) clearTimeout(this.pdTimer);
     this.pdTimer = null;
-    pd.decoder.free();
+    if (pd.owned) pd.decoder.free();
     const w = this.o.wasm;
     try {
       await this.exclusive(() => this.expectAccept(w.stopPdSnifferRequest(this.nextId())));
@@ -420,7 +486,7 @@ export class MeterDriver {
     if (this.pdTimer) clearTimeout(this.pdTimer);
     this.pollTimer = null;
     this.pdTimer = null;
-    if (this.pd) this.pd.decoder.free();
+    if (this.pd?.owned) this.pd.decoder.free();
     this.pd = null;
   }
 

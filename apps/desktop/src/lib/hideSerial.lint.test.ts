@@ -64,6 +64,7 @@ describe("components read serials through the helper (AC-AXHK2Q.2)", () => {
       "meterGrid.ts",
       "mockBackend.ts",
       "session.svelte.ts",
+      "web/session.ts", // hands the meter serial to the UI in its connect/attach events, like the desktop backend
     ]);
     const modules = readdirSync(new URL("./", import.meta.url), { recursive: true })
       .map(String)

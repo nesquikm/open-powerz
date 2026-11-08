@@ -12,9 +12,10 @@ pub use builders::{
     start_pd_sniffer_request, start_queue_request, stop_pd_sniffer_request, stop_queue_request,
 };
 pub use decoders::{
-    Adc, DeviceInfoView, Direction, PdDecoder, PdPollResult, PdRow, PdStatusSample, QueueSample,
-    RowKind, decode_accept, decode_adc, decode_adc_js, decode_auth_reply, decode_device_info,
-    decode_device_info_js, decode_memory_read, decode_queue, decode_queue_js,
+    Adc, DeviceInfoView, Direction, PdCleared, PdDecoder, PdDetails, PdPollResult, PdRow,
+    PdStatusSample, PdcapFile, QueueSample, RowKind, decode_accept, decode_adc, decode_adc_js,
+    decode_auth_reply, decode_device_info, decode_device_info_js, decode_memory_read, decode_queue,
+    decode_queue_js,
 };
 pub use demo::DemoMeter;
 pub use error::BindError;

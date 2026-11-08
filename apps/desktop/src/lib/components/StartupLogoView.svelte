@@ -1,6 +1,8 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import { features } from "../backend";
   import { BUILTIN_LOGOS, type StartupLogoState } from "../logo.svelte";
+  import DesktopOnly from "./DesktopOnly.svelte";
   import LogoConfirmDialog from "./LogoConfirmDialog.svelte";
 
   let { logo }: { logo: StartupLogoState } = $props();
@@ -180,22 +182,26 @@
   {/if}
 
   <div class="writes">
-    <button
-      type="button"
-      disabled={logo.busy || logo.uploadDisabledReason !== null}
-      title={logo.uploadDisabledReason ?? undefined}
-      onclick={() => logo.askUpload()}
-    >
-      Upload
-    </button>
-    <button
-      type="button"
-      disabled={logo.busy || logo.removeDisabledReason !== null}
-      title={logo.removeDisabledReason ?? undefined}
-      onclick={() => logo.askRemove()}
-    >
-      Remove
-    </button>
+    <DesktopOnly available={features.logoUpload} label="Upload">
+      <button
+        type="button"
+        disabled={logo.busy || logo.uploadDisabledReason !== null}
+        title={logo.uploadDisabledReason ?? undefined}
+        onclick={() => logo.askUpload()}
+      >
+        Upload
+      </button>
+    </DesktopOnly>
+    <DesktopOnly available={features.logoUpload} label="Remove">
+      <button
+        type="button"
+        disabled={logo.busy || logo.removeDisabledReason !== null}
+        title={logo.removeDisabledReason ?? undefined}
+        onclick={() => logo.askRemove()}
+      >
+        Remove
+      </button>
+    </DesktopOnly>
     <button type="button" disabled={logo.busy || logo.reading} onclick={() => void logo.read()}
       >Read</button
     >

@@ -37,6 +37,7 @@
     type UiError,
     type RecordingOptions,
     type RunProgressQuery,
+    features,
   } from "./lib/backend";
   import {
     defaultPdCaptureName,
@@ -474,8 +475,9 @@
     const on = panelMeter !== null;
     untrack(() => {
       if (on) {
-        void settingsPanel.connected();
-        void recordsPanel.connected();
+        // The web edition keeps these reads in the desktop app (FR QFTCX0, AC .7).
+        if (features.settingsRead) void settingsPanel.connected();
+        if (features.recordsList) void recordsPanel.connected();
       } else {
         settingsPanel.disconnected();
         recordsPanel.disconnected();

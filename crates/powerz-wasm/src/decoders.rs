@@ -9,7 +9,9 @@ use powerz_protocol::crypto;
 use powerz_protocol::decode::pd_packet::{CaptureClock, PdChunk, PdRecord, PdRecordKind, PdStatus};
 use powerz_protocol::decode::{AdcSnapshot, DecodeError, QueueRecord, Rate};
 use powerz_protocol::frame::{self, Attribute, FrameError, Reply, Section};
-use powerz_protocol::pd::{self, PowerRole};
+use powerz_protocol::pd::{self, Decoded, PowerRole};
+use powerz_protocol::pd_details::{FieldNode, detail_bytes, field_nodes};
+use powerz_protocol::pdcap;
 use powerz_protocol::session::{self, DeviceInfo};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -314,8 +316,46 @@ pub struct PdPollResult {
     pub adc: Option<Adc>,
 }
 
+/// The details of one record, in the desktop details' shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PdDetails {
+    /// Record index.
+    pub index: u64,
+    /// The PD message bytes (header little-endian, then the body); the
+    /// record bytes for an event.
+    pub raw: Vec<u8>,
+    /// The decoded field tree.
+    pub fields: Vec<FieldNode>,
+}
+
+/// What a clear answers, in the desktop clear's shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PdCleared {
+    /// Index of the next record; rows numbered below it are stale.
+    pub next_index: u64,
+    /// Time (ms) of the latest status block the capture had, 0 if none.
+    pub status_floor_ms: u64,
+}
+
+/// A saved capture: the pdcap file's text and its number of records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PdcapFile {
+    /// The pdcap file (JSON Lines).
+    pub text: String,
+    /// Records in the file.
+    pub rows: usize,
+}
+
+/// One captured record, kept for its details.
+#[derive(Debug, Clone)]
+struct Entry {
+    raw: Vec<u8>,
+    decoded: Option<Decoded>,
+}
+
 /// A PD sniffer capture: decodes poll replies into table rows, keeping the
-/// PD decoder context, the capture clock and the row numbering across polls.
+/// PD decoder context, the capture clock and the row numbering across polls,
+/// and every record since the last clear for its details and the pdcap file.
 #[wasm_bindgen]
 #[derive(Debug, Default)]
 pub struct PdDecoder {
@@ -324,6 +364,13 @@ pub struct PdDecoder {
     next_index: u64,
     /// Meter time minus elapsed time of the capture's first record.
     session_base: Option<i64>,
+    /// Index of `entries[0]`.
+    base: u64,
+    entries: Vec<Entry>,
+    /// Status blocks and records since the last clear, in capture order.
+    log: Vec<pdcap::Entry>,
+    /// Time of the latest status block (0 if none).
+    last_status_ms: u64,
 }
 
 #[wasm_bindgen]
@@ -338,6 +385,27 @@ impl PdDecoder {
     #[wasm_bindgen(js_name = decode)]
     pub fn decode_js(&mut self, reply: &[u8]) -> Result<JsValue, BindError> {
         to_js(&self.decode(reply)?)
+    }
+
+    /// [`PdDecoder::details`] for JS: `undefined` for a record not kept.
+    #[wasm_bindgen(js_name = details)]
+    pub fn details_js(&self, index: u64) -> Result<JsValue, BindError> {
+        match self.details(index) {
+            Some(d) => to_js(&d),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
+    /// [`PdDecoder::clear`] for JS.
+    #[wasm_bindgen(js_name = clear)]
+    pub fn clear_js(&mut self) -> Result<JsValue, BindError> {
+        to_js(&self.clear())
+    }
+
+    /// [`PdDecoder::pdcap`] for JS.
+    #[wasm_bindgen(js_name = pdcap)]
+    pub fn pdcap_js(&self, model: String, firmware_version: String) -> Result<JsValue, BindError> {
+        to_js(&self.pdcap(model, firmware_version)?)
     }
 }
 
@@ -366,9 +434,19 @@ impl PdDecoder {
                 };
                 let status = PdStatusSample::from(chunk.status);
                 out.status.push(status);
+                self.last_status_ms = self.last_status_ms.max(status.session_ms);
+                self.log.push(pdcap::Entry::Status {
+                    session_ms: status.session_ms,
+                    status: chunk.status,
+                });
                 out.skipped += chunk.skipped;
                 for record in &chunk.records {
                     let row = self.row(record, status.vbus_v, status.ibus_a);
+                    self.log.push(pdcap::Entry::Record {
+                        session_ms: row.session_ms,
+                        elapsed_ms: row.elapsed_ms,
+                        record: record.clone(),
+                    });
                     out.rows.push(row);
                 }
             } else if section.att == Attribute::ADC {
@@ -376,6 +454,57 @@ impl PdDecoder {
             }
         }
         Ok(out)
+    }
+
+    /// The raw bytes and field tree of record `index`, if the capture keeps it.
+    pub fn details(&self, index: u64) -> Option<PdDetails> {
+        let entry = self
+            .entries
+            .get(usize::try_from(index.checked_sub(self.base)?).ok()?)?;
+        let fields = entry
+            .decoded
+            .as_ref()
+            .map(|d| field_nodes(d, entry.raw.len()))
+            .unwrap_or_default();
+        Some(PdDetails {
+            index,
+            raw: entry.raw.clone(),
+            fields,
+        })
+    }
+
+    /// Drop every record and status block; numbering goes on and the PD
+    /// decoder keeps its context.
+    pub fn clear(&mut self) -> PdCleared {
+        let cleared = PdCleared {
+            next_index: self.next_index,
+            status_floor_ms: self.last_status_ms,
+        };
+        self.base = self.next_index;
+        self.entries.clear();
+        self.log.clear();
+        cleared
+    }
+
+    /// The capture since the last clear as a pdcap file, with this crate's
+    /// version (the app's: one workspace version) and the meter's model and
+    /// firmware (no serial number).
+    pub fn pdcap(&self, model: String, firmware_version: String) -> Result<PdcapFile, BindError> {
+        let io = |e: std::io::Error| BindError::new("internal", e.to_string());
+        let header = pdcap::Header::new(env!("CARGO_PKG_VERSION"), model, firmware_version);
+        let mut writer = pdcap::Writer::new(Vec::new(), &header).map_err(io)?;
+        for entry in &self.log {
+            writer.write(entry).map_err(io)?;
+        }
+        let bytes = writer.finish().map_err(io)?;
+        let text =
+            String::from_utf8(bytes).map_err(|e| BindError::new("internal", e.to_string()))?;
+        let rows = self
+            .log
+            .iter()
+            .filter(|e| matches!(e, pdcap::Entry::Record { .. }))
+            .count();
+        Ok(PdcapFile { text, rows })
     }
 
     /// Decode `record` into the next row.
@@ -391,7 +520,12 @@ impl PdDecoder {
         let decoded = record.pd_input().and_then(|i| self.capture.feed(i));
         match (&record.kind, decoded) {
             (PdRecordKind::Message(_) | PdRecordKind::BigMessage(_), Some(d)) => {
-                let h = &d.header;
+                let summary = d.summary();
+                let h = d.header;
+                self.entries.push(Entry {
+                    raw: detail_bytes(record),
+                    decoded: Some(d),
+                });
                 let direction = if h.sop.is_cable() {
                     Direction::Cable
                 } else if h.port_power_role == Some(PowerRole::Source) {
@@ -412,7 +546,7 @@ impl PdDecoder {
                     spec_revision: Some(h.spec_revision.short_label().to_owned()),
                     vbus_v,
                     ibus_a,
-                    summary: d.summary(),
+                    summary,
                 }
             }
             (kind, _) => {
@@ -420,6 +554,10 @@ impl PdDecoder {
                     PdRecordKind::Event(e) => e.name(),
                     _ => "Message".to_owned(),
                 };
+                self.entries.push(Entry {
+                    raw: record.raw.clone(),
+                    decoded: None,
+                });
                 PdRow {
                     index,
                     elapsed_ms,
