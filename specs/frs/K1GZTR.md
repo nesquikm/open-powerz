@@ -33,7 +33,7 @@ The arrow touches the right edge (user report, 2026-11-08).
 ## Acceptance Criteria
 
 - AC-K1GZTR.1: Every drop-down in the app, desktop and web, uses one shared style that turns off the browser's own arrow and draws the app's chevron.
-- AC-K1GZTR.2: The gap between the chevron's right end and the box's inner right edge is between 10 and 12 px in Chromium and in WebKit.
+- AC-K1GZTR.2: Regression: the select-arrow spec (`e2e/ui/select-arrow.spec.ts`) measures that the gap between the chevron's right end and the box's inner right edge is between 10 and 12 px in Chromium and in WebKit.
 - AC-K1GZTR.3: The right padding leaves room for the chevron, so a long option label is cut before it reaches the chevron.
 - AC-K1GZTR.4: The chevron takes the text color of the current theme in light and dark mode, and stays visible in forced-colors mode.
 - AC-K1GZTR.5: Focus rings, hover and disabled states of drop-downs look as before, and the existing accessibility checks still pass.
@@ -54,3 +54,8 @@ A Playwright spec measures the chevron gap and the padding on Chromium and WebKi
 ## Notes
 
 User request relayed by the orchestrator on 2026-11-09.
+
+## Hardware evidence (web HIL rounds 2 and 3)
+
+- [x] AC-K1GZTR.2: round 3 (qa-runs/WEB.hil3-20261109-0101) measured the chevron's right end 11 px from the edge on all three selects in Chrome.
+- [x] AC-K1GZTR.6: before and after screenshots in Chromium and WebKit, light and dark, are in qa-runs/web/select-arrow.

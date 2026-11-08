@@ -43,3 +43,11 @@ Vitest covers the web backend over the demo transport: connect, batches, rate ch
 ## Notes
 
 Offline records and settings read stay desktop-only if they need anything beyond the safe read set.
+
+## Hardware evidence (web HIL rounds 2 and 3)
+
+- [x] AC-QFTCX0.2: round 2 (qa-runs/WEB.hil2-20261108-2223, W2) opened the WebUSB picker from the device menu and the user picked the KM003C; round 3 (qa-runs/WEB.hil3-20261109-0101) listed the paired meter on page load.
+- [x] AC-QFTCX0.3: round 3 (W2, W3, long run) showed live readings, chart, temperature and statistics; rate changes restarted the queue.
+- [x] AC-QFTCX0.4, the start/stop half: round 3 (W4) started and stopped a passive PD capture while streaming. No charger was attached, so rows, details and the pdcap save were not seen on hardware.
+- [x] AC-QFTCX0.5, the recording half: round 3 (W5) saved a recording (837 rows, no gaps) with the desktop CSV header; round 2 (W5) saved one through Chrome's own Save dialog. Session export was not run on hardware.
+- [x] AC-QFTCX0.6: rounds 2 and 3 (W8) found firmware, logo, records, trigger and settings disabled with "Desktop app only" and the releases link; no write command appears in either log.

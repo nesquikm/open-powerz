@@ -13,10 +13,11 @@ kind: bug
 
 ## Summary
 
-The browser edition could not sign in to a real KM003C, while the desktop app signs in to the same meter.
+The browser edition could not sign in to a real KM003C, while the desktop app could.
 The browser driver skipped three steps the desktop path takes.
-It never cleared stale data at open, never recovered after a silent first connect, and expected a memory read in one piece when the meter sends two.
-It now follows the desktop sequence, and an opt-in debug log prints every frame for the tester.
+It never cleared stale data at open and never recovered after a silent first connect.
+It also expected a memory read in one piece when the meter sends two.
+It now follows the desktop sequence, and an opt-in debug log prints every frame.
 
 ## Requirement
 
@@ -55,3 +56,10 @@ Vitest over a fake USBDevice that scripts the meter's transfers per endpoint, pl
 ## Notes
 
 The native rules are in the protocol doc's session flow table. Proven on the device only by the next web HIL run.
+
+## Hardware evidence (web HIL rounds 2 and 3)
+
+- [x] AC-VG37JA.1: rounds 2 and 3 logged "drain: discarded N stale frame(s)" on every open (qa-runs/WEB.hil2-20261108-2223, qa-runs/WEB.hil3-20261109-0101).
+- [x] AC-VG37JA.2: round 2 (W2 try 1) logged one recovery after a silent first CONNECT. The fix of 7T1YGJ made the second CONNECT succeed in tests; recovery did not fire in round 3.
+- [x] AC-VG37JA.3: both rounds reassembled the memory read from a 20-byte confirmation plus separate data frames.
+- [x] AC-VG37JA.5: the ?debug page logged every frame with direction, length and first bytes in both rounds.

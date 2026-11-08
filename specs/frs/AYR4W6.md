@@ -15,7 +15,7 @@ changelog_category: Changed
 In the web edition, pairing a new meter used a separate button beside the device menu.
 The user asked to move it into the device menu, as its last item.
 The fallback for basic readings moves into the same menu.
-On a first visit, when only the demo meter is listed, a small hint next to the menu still points to it.
+On a first visit with only the demo meter listed, a small hint next to the menu points to it.
 The desktop app's device menu stays as it is.
 
 ## Requirement
@@ -42,3 +42,9 @@ Component tests for the menu items, the user-gesture call order and the hint; th
 ## Notes
 
 User request relayed by the orchestrator on 2026-11-08.
+
+## Hardware evidence (web HIL rounds 2 and 3)
+
+- [x] AC-AYR4W6.1: round 2 (qa-runs/WEB.hil2-20261108-2223, W2) opened the WebUSB picker from the menu's last item.
+- [x] AC-AYR4W6.3: round 2 (W7) showed "Connect over HID…" in the menu after a busy meter. Opening the HID picker is W10, pending the user's morning HIL (W2b/W6/W7/W9/W10).
+- [x] AC-AYR4W6.4: round 2 (W1) showed the hint link with only the demo listed, and it was gone after pairing.

@@ -42,3 +42,9 @@ Playwright with one worker over a static server that mounts the build under the 
 ## Notes
 
 Pages must be enabled in the repository settings with the source set to GitHub Actions; the FR does not change repository settings.
+
+## Hardware evidence (web HIL rounds 2 and 3)
+
+- [x] AC-QFTCX1.1: round 3 built the site with build:pages (qa-runs/WEB.hil3-20261109-0101/build.log) and ran every step from it under /open-powerz/.
+- [x] AC-QFTCX1.2: round 2 (qa-runs/WEB.hil2-20261108-2223, W1) showed the favicon (SVG, 16 and 32 px) in Chrome.
+- AC-QFTCX1.3 stays unticked: the not-supported view in Safari is W9, pending the user's morning HIL (W2b/W6/W7/W9/W10).

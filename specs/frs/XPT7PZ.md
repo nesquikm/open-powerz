@@ -15,7 +15,8 @@ kind: bug
 
 After pairing a meter from the device menu, the menu still showed the demo meter.
 The user expected the new meter to be picked so that Connect goes to it.
-The pairing step added the meter to the list but never picked it, and did nothing at all when the list had already been refreshed.
+The pairing step added the meter to the list but never picked it.
+It did nothing at all when the list had already been refreshed.
 Now a paired meter is always picked; a cancelled or failed pairing leaves the previous pick.
 
 ## Requirement
@@ -32,7 +33,7 @@ The device menu shows the demo meter (user report, web HIL run WEB.hil2-20261108
 
 ## Acceptance Criteria
 
-- AC-XPT7PZ.1: After the WebUSB picker grants a meter, the device menu selects that meter, whether or not the device list already holds it.
+- AC-XPT7PZ.1: Regression: the device picker test (`DevicePicker.web.test.ts`) shows that after the WebUSB picker grants a meter, the device menu selects that meter, whether or not the device list already holds it.
 - AC-XPT7PZ.2: The same holds for "Connect over HID…" and the meter its picker grants.
 - AC-XPT7PZ.3: A cancelled picker leaves the selection and the error banner as they were.
 - AC-XPT7PZ.4: A picker that fails shows the error and leaves the previous selection.
@@ -53,3 +54,7 @@ Vitest on the pairing helper and the device menu component.
 ## Notes
 
 Pairing does not connect; the user still clicks Connect.
+
+## Hardware evidence (web HIL rounds 2 and 3)
+
+- [x] AC-XPT7PZ.1, the listed-meter half: round 3 (qa-runs/WEB.hil3-20261109-0101) showed the paired KM003C selected ahead of the demo on every connect. A fresh pairing through the picker was not re-run at e426443.
