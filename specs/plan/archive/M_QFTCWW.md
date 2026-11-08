@@ -1,8 +1,8 @@
 ---
 milestone: M_QFTCWW
 id: fr_01M6VHDG2BG62PZDW7K4QFTCWW
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-08T21:37:53Z
 kickoff_branch: feat/web
 frozen_at: null
 migration: none
