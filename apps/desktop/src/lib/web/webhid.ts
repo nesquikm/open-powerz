@@ -8,7 +8,13 @@
  */
 
 import type { UiError } from "../backend";
-import { disconnectedError, timeoutError, transportError, type WebTransport } from "./transport";
+import {
+  disconnectedError,
+  isNotFoundError,
+  timeoutError,
+  transportError,
+  type WebTransport,
+} from "./transport";
 
 const REPORT_LEN = 64;
 const HEADER_LEN = 4;
@@ -42,7 +48,8 @@ export async function openWebHid(device: HidDeviceLike): Promise<WebTransport> {
   if (!device.opened) {
     try {
       await device.open();
-    } catch {
+    } catch (e) {
+      if (isNotFoundError(e)) throw disconnectedError();
       throw transportError(
         "device_busy",
         "The meter could not be opened.",

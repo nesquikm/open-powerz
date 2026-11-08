@@ -7,6 +7,7 @@
 import type { UiError } from "../backend";
 import {
   disconnectedError,
+  isNotFoundError,
   timeoutError,
   transportError,
   withTimeout,
@@ -70,6 +71,21 @@ function isStall(e: unknown): boolean {
   return typeof e === "object" && e !== null && stallErrors.has(e);
 }
 
+/** FR 7T1YGJ: timeouts standing in for IN transfers that recovery cancelled itself (a
+ * transfer pending before it, ended under the halt clear). Never requeued; the drain
+ * skips them. */
+const cancelledErrors = new WeakSet<object>();
+
+function cancelledError(): UiError {
+  const e = timeoutError();
+  cancelledErrors.add(e);
+  return e;
+}
+
+function isCancelled(e: unknown): boolean {
+  return typeof e === "object" && e !== null && cancelledErrors.has(e);
+}
+
 export interface WebUsbOptions {
   usb?: UsbLike;
   /** Log frames and lifecycle to the console; read from the page when left out. */
@@ -120,11 +136,20 @@ function debugLog(enabled: boolean): DebugLog {
   return enabled ? (message) => console.debug(`[webusb] ${message}`) : () => {};
 }
 
-/** A frame as `<dir> <length> bytes: <first 8 bytes in hex>`. */
+const toHex = (bytes: Uint8Array): string =>
+  Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(" ");
+
+/**
+ * A frame as `<dir> <length> bytes: <first 8 bytes in hex>`; an IN frame longer than
+ * 8 bytes adds ` … <last 4 bytes>`.
+ */
 function describeFrame(dir: "in" | "out", data: Uint8Array): string {
-  const hex = Array.from(data.subarray(0, 8), (b) => b.toString(16).padStart(2, "0")).join(" ");
-  return `${dir} ${data.length} bytes: ${hex}`;
+  const head = `${dir} ${data.length} bytes: ${toHex(data.subarray(0, 8))}`;
+  return dir === "in" && data.length > 8 ? `${head} … ${toHex(data.subarray(-4))}` : head;
 }
+
+/** The `name` of a failed USB call's error (`NetworkError`, `AbortError`, …) for the debug log. */
+const errorName = (e: unknown): string => String((e as { name?: unknown } | null)?.name ?? "error");
 
 function pickBulk(
   config: UsbConfigurationLike,
@@ -148,7 +173,12 @@ export async function openWebUsb(
   if (device.vendorId !== POWERZ_VENDOR_ID) {
     throw transportError("usage", "This is not a POWER-Z meter.", "Pick the KM003C or KM002C.");
   }
-  await device.open();
+  try {
+    await device.open();
+  } catch (e) {
+    if (isNotFoundError(e)) throw disconnectedError();
+    throw e;
+  }
   const value = device.configurations[0]?.configurationValue ?? 1;
   if (device.configuration?.configurationValue !== value) await device.selectConfiguration(value);
   const config = device.configuration ?? device.configurations[0];
@@ -189,6 +219,11 @@ class WebUsbTransport implements WebTransport {
   /** IN transfers issued but not yet received by a caller, oldest first. */
   private pendingIn: Promise<Uint8Array>[] = [];
   private abort: ((e: UiError) => void) | null = null;
+  /** Bumped by each `recover()`; an IN transfer remembers the epoch it started in. */
+  private epoch = 0;
+  /** True while `recover()` runs: an older-epoch IN transfer that fails now was
+   * cancelled by recovery's own halt clear, not lost with the meter. */
+  private recovering = false;
   private readonly aborted: Promise<never>;
   private readonly onDisconnect = (event: { device: unknown }): void => {
     if (event.device === this.device) this.end();
@@ -223,6 +258,7 @@ class WebUsbTransport implements WebTransport {
   }
 
   private startIn(): Promise<Uint8Array> {
+    const epoch = this.epoch;
     const inn = this.device.transferIn(this.inEp, IN_LENGTH).then(
       async (r) => {
         if (r.status === "stall") {
@@ -238,6 +274,13 @@ class WebUsbTransport implements WebTransport {
       },
       (e: unknown) => {
         if (isStall(e)) throw e;
+        // Pending before the running recovery: its halt clear cancelled it, the meter is
+        // not gone (a real unplug ends the transport through the disconnect event).
+        if (this.recovering && epoch < this.epoch && !this.gone) {
+          this.log(`in: transfer cancelled during recovery (${errorName(e)})`);
+          throw cancelledError();
+        }
+        this.log(`in: transfer failed (${errorName(e)})`);
         this.lost();
       },
     );
@@ -249,8 +292,18 @@ class WebUsbTransport implements WebTransport {
   private async clearHalt(direction: "in" | "out", endpoint: number): Promise<void> {
     try {
       await this.device.clearHalt(direction, endpoint);
-    } catch {
+    } catch (e) {
+      this.log(`clearing halt on bulk ${direction} failed (${errorName(e)})`);
       this.lost();
+    }
+  }
+
+  /** Recovery's halt clear: a failing clear is logged and recovery goes on to the drain. */
+  private async recoverHalt(direction: "in" | "out", endpoint: number): Promise<void> {
+    try {
+      await this.device.clearHalt(direction, endpoint);
+    } catch (e) {
+      this.log(`recover: clearing halt on bulk ${direction} failed (${errorName(e)})`);
     }
   }
 
@@ -274,7 +327,7 @@ class WebUsbTransport implements WebTransport {
       return await this.guard(work, timeoutMs);
     } catch (e) {
       const left = inn();
-      const requeue = (e as UiError | null)?.kind === "timeout" && !isStall(e);
+      const requeue = (e as UiError | null)?.kind === "timeout" && !isStall(e) && !isCancelled(e);
       if (left && requeue) this.pendingIn.unshift(left);
       throw e;
     }
@@ -292,6 +345,7 @@ class WebUsbTransport implements WebTransport {
         await this.read(DRAIN_TIMEOUT_MS);
         discarded += 1;
       } catch (e) {
+        if (isCancelled(e)) continue;
         if ((e as UiError | null)?.kind === "timeout") {
           this.log(`drain: discarded ${discarded} stale frame(s)`);
           return discarded;
@@ -301,13 +355,25 @@ class WebUsbTransport implements WebTransport {
     }
   }
 
-  /** As the native bulk `recover`: clear the halt on bulk OUT and IN, then drain. */
+  /**
+   * As the native bulk `recover`: clear the halt on bulk OUT and IN, then drain.
+   * FR 7T1YGJ: recovery never ends the transport by itself. A failing halt clear is
+   * logged and the drain still runs; an IN transfer pending from before recovery that
+   * rejects is skipped as cancelled. Only the browser's disconnect event (a real unplug)
+   * ends the transport, during recovery or after it.
+   */
   async recover(): Promise<void> {
     if (this.gone) throw this.gone;
     this.log("recover: clearing halt on bulk out and in");
-    await this.clearHalt("out", this.outEp);
-    await this.clearHalt("in", this.inEp);
-    await this.drainStale();
+    this.epoch += 1;
+    this.recovering = true;
+    try {
+      await this.recoverHalt("out", this.outEp);
+      await this.recoverHalt("in", this.inEp);
+      await this.drainStale();
+    } finally {
+      this.recovering = false;
+    }
   }
 
   async transact(frame: Uint8Array, timeoutMs: number): Promise<Uint8Array> {
@@ -317,7 +383,8 @@ class WebUsbTransport implements WebTransport {
       this.log(describeFrame("out", data));
       try {
         r = await this.device.transferOut(this.outEp, data);
-      } catch {
+      } catch (e) {
+        this.log(`out: transfer failed (${errorName(e)})`);
         this.lost();
       }
       return (r as { status?: string } | null)?.status === "stall";

@@ -17,6 +17,8 @@ export interface Features {
   settingsRead: boolean;
   recordsList: boolean;
   recordDownload: boolean;
+  /** Reveal a saved file in the file manager and copy its path (AC-R13Y5W.1). */
+  fileReveal: boolean;
 }
 
 /** The Tauri and mock builds: everything on. */
@@ -29,6 +31,7 @@ export const DESKTOP_FEATURES: Readonly<Features> = Object.freeze({
   settingsRead: true,
   recordsList: true,
   recordDownload: true,
+  fileReveal: true,
 });
 
 /** The browser build: no meter writes, and the reads that need more than the safe read
@@ -42,6 +45,7 @@ export const WEB_FEATURES: Readonly<Features> = Object.freeze({
   settingsRead: false,
   recordsList: false,
   recordDownload: false,
+  fileReveal: false,
 });
 
 /** What a control the web build leaves out says instead. */

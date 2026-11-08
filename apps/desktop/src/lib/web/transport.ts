@@ -30,6 +30,11 @@ export function transportError(
 export const disconnectedError = (): UiError =>
   transportError("disconnected", "The meter is disconnected.", "Plug it in and connect again.");
 
+/** True for the `NotFoundError` the browser raises when the device is already gone. */
+export function isNotFoundError(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { name?: unknown }).name === "NotFoundError";
+}
+
 export const timeoutError = (): UiError =>
   transportError("timeout", "The meter did not answer in time.", null);
 

@@ -280,3 +280,74 @@ describe("regression: a fake USB meter that behaves like the real one (AC-VG37JA
     await settle(driver.disconnect());
   });
 });
+
+describe("regression: recovery cancels the pending read (AC-7T1YGJ.3)", () => {
+  /** The 68-byte stale frame that answered the first CONNECT on web HIL run
+   * WEB.hil2-20261108-2223 (W2 try 1); its id byte (0xd6) matches no request. */
+  const STALE_68 = (() => {
+    const f = new Uint8Array(68).fill(0x33);
+    f.set([0x67, 0xd6, 0xa4, 0x86, 0xf5, 0x28, 0xd5, 0x8f]);
+    return f;
+  })();
+
+  /** The demo meter behind a FakeUsbDevice: the first CONNECT gets only the stale
+   * 68-byte frame, and clearing the IN halt cancels the transferIn still waiting. */
+  function cancellingMeter(): FakeUsbDevice {
+    const meter = new w.DemoMeter("load-5v-1a");
+    let last = Date.now();
+    let connects = 0;
+    const dev = new FakeUsbDevice((frame) => {
+      const now = Date.now();
+      if (now > last) {
+        meter.advance(now - last);
+        last = now;
+      }
+      const name = classify(w, frame);
+      if (name === "connect" && connects++ === 0) return STALE_68;
+      const reply = meter.transact(frame);
+      if (reply.length === 0) return null;
+      if (name.startsWith("memory_read:")) return [reply.slice(0, 20), reply.slice(20)];
+      return reply;
+    });
+    dev.clearHaltCancelsIn = true;
+    return dev;
+  }
+
+  async function openAndConnect(dev: FakeUsbDevice): Promise<MeterDriver> {
+    const opened = await settle(
+      openUsbOrOfferHid(
+        dev as unknown as Parameters<typeof openUsbOrOfferHid>[0],
+        { debug: false } as unknown as Parameters<typeof openUsbOrOfferHid>[1],
+      ),
+    );
+    if (!("transport" in opened)) throw new Error("expected the WebUSB transport");
+    return settle(connect(opened.transport));
+  }
+
+  it("sends the second CONNECT after the recovery and signs in", async () => {
+    const dev = cancellingMeter();
+    const driver = await openAndConnect(dev);
+    const names = sentNames(w, dev);
+    expect(names.filter((n) => n === "connect")).toHaveLength(2);
+    expect(dev.calls).toContain("clearHalt:in:6");
+    // The second CONNECT went out after the IN halt was cleared.
+    const cleared = dev.calls.indexOf("clearHalt:in:6");
+    const outs = dev.calls.flatMap((c, i) => (c === "transferOut:5" ? [i] : []));
+    expect(outs[1] ?? -1).toBeGreaterThan(cleared);
+    expect(driver.info).toMatchObject(DEMO_INFO);
+    expect(driver.authLevel).toBe(1);
+    expect(driver.mode).toBe("queue");
+    await settle(driver.disconnect());
+  });
+
+  it("still signs in when the halt clears themselves fail", async () => {
+    const dev = cancellingMeter();
+    dev.clearHaltError = new DOMException("The clear halt failed.", "InvalidStateError");
+    const driver = await openAndConnect(dev);
+    expect(sentNames(w, dev).filter((n) => n === "connect")).toHaveLength(2);
+    expect(driver.info).toMatchObject(DEMO_INFO);
+    expect(driver.authLevel).toBe(1);
+    expect(driver.mode).toBe("queue");
+    await settle(driver.disconnect());
+  });
+});

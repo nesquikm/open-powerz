@@ -88,7 +88,10 @@ type InResult = { status: "ok" | "stall"; data?: DataView };
  * non-empty transferOut end with status "stall". `clearHalt` is recorded in `calls`
  * as `clearHalt:<direction>:<endpoint>`. `releaseInterface` unclaims the interface, and
  * `close` ends every transferIn still waiting with an AbortError, as WebUSB does (FR
- * G30K4R). `releaseError` / `closeError` make those calls reject (after recording). */
+ * G30K4R). `releaseError` / `closeError` make those calls reject (after recording).
+ * FR 7T1YGJ: `clearHaltCancelsIn` makes `clearHalt("in")` end every transferIn still
+ * waiting with an AbortError (as Chrome may cancel the transfer under a halt clear), and
+ * `clearHaltError` makes `clearHalt` reject with it (after recording). */
 export class FakeUsbDevice {
   vendorId = 0x5fc9;
   productId = 0x0063;
@@ -106,6 +109,8 @@ export class FakeUsbDevice {
   stallNextOut = false;
   releaseError: Error | null = null;
   closeError: Error | null = null;
+  clearHaltCancelsIn = false;
+  clearHaltError: Error | null = null;
   private pending: InItem[] = [];
   private waiters: { take: (item: InItem) => void; abort: (e: Error) => void }[] = [];
 
@@ -165,6 +170,14 @@ export class FakeUsbDevice {
   }
   async clearHalt(direction: "in" | "out", endpointNumber: number): Promise<void> {
     this.calls.push(`clearHalt:${direction}:${endpointNumber}`);
+    if (direction === "in" && this.clearHaltCancelsIn) this.cancelWaitingIn();
+    if (this.clearHaltError) throw this.clearHaltError;
+  }
+  /** End every transferIn still waiting with an AbortError. */
+  cancelWaitingIn(): void {
+    const waiting = this.waiters;
+    this.waiters = [];
+    for (const w of waiting) w.abort(new DOMException("The transfer was cancelled.", "AbortError"));
   }
   async transferOut(
     endpoint: number,

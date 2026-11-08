@@ -64,6 +64,8 @@ const FEATURE_COMMANDS: Readonly<Record<keyof Features, readonly string[]>> = {
   settingsRead: ["meterSettings"],
   recordsList: ["recordsList"],
   recordDownload: ["recordDownload"],
+  // No meter command: `revealPath` refuses on the web in backend.ts (AC-R13Y5W.1).
+  fileReveal: [],
 };
 
 /** The commands of the features the web build leaves out: each rejects with a usage

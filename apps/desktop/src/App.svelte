@@ -1326,10 +1326,13 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 {#snippet fileActions(path: string)}
-  <div class="file-actions">
-    <button type="button" onclick={() => revealFile(path)}>{revealLabel}</button>
-    <button type="button" onclick={() => copyPath(path)}>Copy path</button>
-  </div>
+  <!-- AC-R13Y5W.1: a web page can neither open the file manager nor name a path. -->
+  {#if features.fileReveal}
+    <div class="file-actions">
+      <button type="button" onclick={() => revealFile(path)}>{revealLabel}</button>
+      <button type="button" onclick={() => copyPath(path)}>Copy path</button>
+    </div>
+  {/if}
 {/snippet}
 
 <div class="shell">
