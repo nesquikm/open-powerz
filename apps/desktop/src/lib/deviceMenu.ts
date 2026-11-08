@@ -5,7 +5,7 @@
  * gesture WebUSB / WebHID need (AC-AYR4W6.1, AC-AYR4W6.3).
  */
 
-import { requestHidMeter, requestMeter } from "./backend";
+import { cancelWait, requestHidMeter, requestMeter } from "./backend";
 import { pickMeter } from "./pickMeter";
 import type { Session } from "./session.svelte";
 
@@ -26,14 +26,14 @@ export function deviceMenuActions(session: Session, offerHid: boolean): DeviceMe
     {
       value: CONNECT_VALUE,
       label: "Connect a meter…",
-      run: () => pickMeter(session, requestMeter),
+      run: () => pickMeter(session, requestMeter, cancelWait),
     },
   ];
   if (offerHid) {
     actions.push({
       value: CONNECT_HID_VALUE,
       label: "Connect over HID…",
-      run: () => pickMeter(session, requestHidMeter),
+      run: () => pickMeter(session, requestHidMeter, cancelWait),
     });
   }
   return actions;

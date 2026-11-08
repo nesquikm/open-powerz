@@ -17,6 +17,10 @@
  * - AC-AYR4W6.5: the Tauri and mock builds' menus carry no such item.
  * - AC-AYR4W6.6: these tests replace the ones that checked the old buttons.
  *
+ * FR XPT7PZ: a meter the WebUSB or HID picker grants is selected, listed or not (.1, .2);
+ * a cancelled picker changes nothing (.3); a failed one shows the error and keeps the
+ * previous pick (.4); selecting it ends a wait like choosing it by hand (.5).
+ *
  * The picker renders with `svelte/server` (no DOM). Choosing a menu entry goes through
  * `chooseDeviceMenu` in `src/lib/deviceMenu.ts`, which the component's change handler
  * calls directly; `deviceMenuActions` builds the action items.
@@ -28,21 +32,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeviceListing } from "../backend";
 import type { Session } from "../session.svelte";
 
-const { createWebBackend, requestHidMeterMock, requestMeterMock } = vi.hoisted(() => {
-  const requestHidMeterMock = vi.fn(async () => null);
-  const requestMeterMock = vi.fn(async () => null);
-  return {
-    requestHidMeterMock,
-    requestMeterMock,
-    createWebBackend: vi.fn(async () => ({
-      features: null,
-      listDevices: vi.fn(async () => []),
-      watchDevices: vi.fn(async () => () => {}),
-      requestMeter: requestMeterMock,
-      requestHidMeter: requestHidMeterMock,
-    })),
-  };
-});
+const { cancelWaitMock, createWebBackend, requestHidMeterMock, requestMeterMock } = vi.hoisted(
+  () => {
+    const requestHidMeterMock = vi.fn<() => Promise<DeviceListing | null>>(async () => null);
+    const requestMeterMock = vi.fn<() => Promise<DeviceListing | null>>(async () => null);
+    const cancelWaitMock = vi.fn(async () => {});
+    return {
+      cancelWaitMock,
+      requestHidMeterMock,
+      requestMeterMock,
+      createWebBackend: vi.fn(async () => ({
+        features: null,
+        listDevices: vi.fn(async () => []),
+        watchDevices: vi.fn(async () => () => {}),
+        requestMeter: requestMeterMock,
+        requestHidMeter: requestHidMeterMock,
+        cancelWait: cancelWaitMock,
+      })),
+    };
+  },
+);
 
 vi.mock("@tauri-apps/api/core", () => {
   class Channel {
@@ -432,4 +441,240 @@ describe("the desktop builds' menu has no connect items (AC-AYR4W6.5)", () => {
       expect(texts).toHaveLength(1);
     });
   }
+});
+
+// --- FR XPT7PZ: a granted meter is picked ---------------------------------------------
+
+const OTHER: DeviceListing = {
+  id: "webusb:0",
+  label: "KM003C — WEB-0000",
+  model: "KM003C",
+  serial: "WEB-0000",
+  bus: null,
+  address: null,
+  demo_scenario: null,
+  mode: "application",
+};
+
+/** Lets the action's pending picker promise and what follows it settle. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+/** Runs the menu action labelled `label` through `chooseDeviceMenu`, as the change
+ * handler does, and waits for it to finish. */
+async function chooseAction(session: Session, label: string): Promise<{ value: string }> {
+  const { chooseDeviceMenu, deviceMenuActions } = await loadDeviceMenu();
+  const actions = deviceMenuActions(session, true);
+  const action = actions.find((a) => a.label === label);
+  expect(action, label).toBeDefined();
+  const target = { value: action?.value ?? "" };
+  chooseDeviceMenu(session, target, actions);
+  await settle();
+  return target;
+}
+
+describe("the WebUSB picker's meter is selected (AC-XPT7PZ.1)", () => {
+  it("pickMeter selects a granted meter the list did not hold", async () => {
+    const { Session } = await import("../session.svelte");
+    const { pickMeter } = await import("../pickMeter");
+    const session = new Session();
+    session.setDevices([DEMO]);
+    expect(session.selectedId).toBe(DEMO.id);
+    await pickMeter(session, async () => PICKED);
+    expect(session.devices.map((d) => d.id)).toContain(PICKED.id);
+    expect(session.selectedId).toBe(PICKED.id);
+  });
+
+  it("pickMeter selects a granted meter the hotplug list already holds", async () => {
+    const { Session } = await import("../session.svelte");
+    const { pickMeter } = await import("../pickMeter");
+    const session = new Session();
+    session.setDevices([DEMO, PICKED]);
+    session.select(DEMO.id);
+    expect(session.selectedId).toBe(DEMO.id);
+    await pickMeter(session, async () => PICKED);
+    expect(session.selectedId).toBe(PICKED.id);
+    expect(session.devices.filter((d) => d.id === PICKED.id)).toHaveLength(1);
+  });
+
+  it("choosing Connect a meter… in the menu ends with the granted meter selected", async () => {
+    await loadWebBackend();
+    const { Session } = await import("../session.svelte");
+    const session = new Session();
+    session.setDevices([DEMO]);
+    requestMeterMock.mockClear();
+    requestMeterMock.mockResolvedValueOnce(PICKED);
+    await chooseAction(session, ACTION);
+    expect(requestMeterMock).toHaveBeenCalledTimes(1);
+    expect(session.selectedId).toBe(PICKED.id);
+  });
+
+  it("the same when the hotplug list had already added the meter", async () => {
+    await loadWebBackend();
+    const { Session } = await import("../session.svelte");
+    const session = new Session();
+    session.setDevices([DEMO, PICKED]);
+    session.select(DEMO.id);
+    requestMeterMock.mockResolvedValueOnce(PICKED);
+    await chooseAction(session, ACTION);
+    expect(session.selectedId).toBe(PICKED.id);
+  });
+});
+
+describe("the HID picker's meter is selected (AC-XPT7PZ.2)", () => {
+  it("choosing Connect over HID… ends with the granted meter selected", async () => {
+    await loadWebBackend();
+    const { Session } = await import("../session.svelte");
+    const session = new Session();
+    session.setDevices([DEMO]);
+    requestHidMeterMock.mockClear();
+    requestHidMeterMock.mockResolvedValueOnce(PICKED);
+    await chooseAction(session, HID_ACTION);
+    expect(requestHidMeterMock).toHaveBeenCalledTimes(1);
+    expect(session.devices.map((d) => d.id)).toContain(PICKED.id);
+    expect(session.selectedId).toBe(PICKED.id);
+  });
+
+  it("also when the list already holds the HID meter", async () => {
+    await loadWebBackend();
+    const { Session } = await import("../session.svelte");
+    const session = new Session();
+    session.setDevices([DEMO, PICKED]);
+    session.select(DEMO.id);
+    requestHidMeterMock.mockResolvedValueOnce(PICKED);
+    await chooseAction(session, HID_ACTION);
+    expect(session.selectedId).toBe(PICKED.id);
+  });
+});
+
+describe("a cancelled picker changes nothing (AC-XPT7PZ.3)", () => {
+  it("keeps the selection and an error banner already shown", async () => {
+    const { Session } = await import("../session.svelte");
+    const { pickMeter } = await import("../pickMeter");
+    const session = new Session();
+    session.setDevices([DEMO, OTHER]);
+    session.select(OTHER.id);
+    session.reportError(BUSY);
+    await pickMeter(session, async () => null);
+    expect(session.selectedId).toBe(OTHER.id);
+    expect(session.error).toEqual(BUSY);
+    expect(session.devices.map((d) => d.id).sort()).toEqual([DEMO.id, OTHER.id].sort());
+  });
+
+  it("keeps the selection and no banner when none was shown", async () => {
+    await loadWebBackend();
+    const { Session } = await import("../session.svelte");
+    const session = new Session();
+    session.setDevices([DEMO, OTHER]);
+    session.select(DEMO.id);
+    requestMeterMock.mockResolvedValueOnce(null);
+    const target = await chooseAction(session, ACTION);
+    expect(session.selectedId).toBe(DEMO.id);
+    expect(target.value).toBe(DEMO.id);
+    expect(session.error).toBeNull();
+  });
+});
+
+describe("a failed picker reports and keeps the selection (AC-XPT7PZ.4)", () => {
+  it("a rejected request shows the error and the previous meter stays selected", async () => {
+    const { Session } = await import("../session.svelte");
+    const { pickMeter } = await import("../pickMeter");
+    const session = new Session();
+    session.setDevices([DEMO, OTHER]);
+    session.select(OTHER.id);
+    const failure = { kind: "permission_denied", message: "No access to the meter.", hint: null };
+    await pickMeter(session, () => Promise.reject(failure));
+    expect(session.error?.kind).toBe("permission_denied");
+    expect(session.selectedId).toBe(OTHER.id);
+  });
+
+  it("a request that throws at once does the same", async () => {
+    const { Session } = await import("../session.svelte");
+    const { pickMeter } = await import("../pickMeter");
+    const session = new Session();
+    session.setDevices([DEMO, OTHER]);
+    session.select(OTHER.id);
+    const failure = { kind: "permission_denied", message: "No WebUSB.", hint: null };
+    await pickMeter(session, () => {
+      throw failure;
+    });
+    expect(session.error?.kind).toBe("permission_denied");
+    expect(session.selectedId).toBe(OTHER.id);
+  });
+});
+
+describe("selecting the granted meter ends a wait (AC-XPT7PZ.5)", () => {
+  /** A session waiting for the unplugged meter OTHER. */
+  async function waitingSession(): Promise<Session> {
+    const { Session } = await import("../session.svelte");
+    const session = new Session();
+    session.setDevices([DEMO, OTHER]);
+    session.select(OTHER.id);
+    session.waitingSerial = OTHER.serial;
+    session.state = "waiting";
+    return session;
+  }
+
+  it("pickMeter cancels the wait through its cancelWait, like choosing by hand", async () => {
+    const { pickMeter } = await import("../pickMeter");
+    // By hand: select reports that the wait must be cancelled.
+    const byHand = await waitingSession();
+    expect(byHand.select(PICKED.id)).toBe(true);
+
+    const session = await waitingSession();
+    const cancelWait = vi.fn(async () => {});
+    await pickMeter(session, async () => PICKED, cancelWait);
+    expect(session.selectedId).toBe(PICKED.id);
+    expect(session.waitingSerial).toBeNull();
+    expect(session.state).toBe("disconnected");
+    expect(cancelWait).toHaveBeenCalledTimes(1);
+  });
+
+  it("no cancel when the granted meter is the one waited for", async () => {
+    const { pickMeter } = await import("../pickMeter");
+    const session = await waitingSession();
+    const cancelWait = vi.fn(async () => {});
+    await pickMeter(session, async () => OTHER, cancelWait);
+    expect(session.selectedId).toBe(OTHER.id);
+    expect(session.waitingSerial).toBe(OTHER.serial);
+    expect(cancelWait).not.toHaveBeenCalled();
+  });
+
+  it("no cancel without a wait", async () => {
+    const { Session } = await import("../session.svelte");
+    const { pickMeter } = await import("../pickMeter");
+    const session = new Session();
+    session.setDevices([DEMO]);
+    const cancelWait = vi.fn(async () => {});
+    await pickMeter(session, async () => PICKED, cancelWait);
+    expect(cancelWait).not.toHaveBeenCalled();
+  });
+
+  it("a failing cancelWait is reported, not thrown", async () => {
+    const { pickMeter } = await import("../pickMeter");
+    const session = await waitingSession();
+    const failure = { kind: "disconnected", message: "The backend is gone.", hint: null };
+    await expect(
+      pickMeter(
+        session,
+        async () => PICKED,
+        () => Promise.reject(failure),
+      ),
+    ).resolves.toBeUndefined();
+    expect(session.error?.kind).toBe("disconnected");
+    expect(session.selectedId).toBe(PICKED.id);
+  });
+
+  it("the menu's connect item tells the web backend to stop waiting", async () => {
+    await loadWebBackend();
+    const session = await waitingSession();
+    cancelWaitMock.mockClear();
+    requestMeterMock.mockResolvedValueOnce(PICKED);
+    await chooseAction(session, ACTION);
+    expect(session.selectedId).toBe(PICKED.id);
+    expect(session.waitingSerial).toBeNull();
+    expect(cancelWaitMock).toHaveBeenCalledTimes(1);
+  });
 });
