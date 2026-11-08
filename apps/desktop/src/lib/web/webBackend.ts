@@ -347,7 +347,7 @@ class Sessions {
     if (!hidMeter) {
       throw {
         ...opened.error,
-        hint: "Click “Connect over HID…” for basic readings, or close the other app and connect again.",
+        hint: "Pick “Connect over HID…” in the device menu for basic readings, or close the other app and connect again.",
       } satisfies UiError;
     }
     try {

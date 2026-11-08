@@ -159,3 +159,12 @@ test("the streaming page passes an axe scan (AC-QFTCX1.4)", async ({ page }) => 
     "no serious or critical axe violations",
   ).toEqual([]);
 });
+
+test("the device menu ends with Connect a meter…, with no button beside it (AC-AYR4W6.1, .2, .6)", async ({
+  page,
+}) => {
+  await openSite(page);
+  const picker = page.getByLabel("Device", { exact: true });
+  await expect(picker.locator("option").last()).toHaveText("Connect a meter…");
+  await expect(page.getByRole("button", { name: "Connect a meter…", exact: true })).toHaveCount(0);
+});

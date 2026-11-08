@@ -5,13 +5,11 @@
     cancelWait,
     features,
     listDevices,
-    requestHidMeter,
-    requestMeter,
     toUiError,
     watchDevices,
   } from "../backend";
+  import { chooseDeviceMenu, deviceMenuActions } from "../deviceMenu";
   import { deviceOptionLabel } from "../format";
-  import { pickMeter } from "../pickMeter";
   import { WEB_FEATURES } from "../web/features";
   import type { Session } from "../session.svelte";
 
@@ -24,6 +22,17 @@
       session.error?.kind === "device_busy" &&
       typeof navigator !== "undefined" &&
       "hid" in navigator,
+  );
+
+  /** The web build's action items, after the devices (FR AYR4W6). */
+  const menuActions = $derived(
+    features === WEB_FEATURES ? deviceMenuActions(session, offerHid) : [],
+  );
+
+  /** Only the demo meter is listed: a hint points to the menu's connect item and runs
+   * the same action (AC-AYR4W6.4). Undefined when no hint is shown. */
+  const hintAction = $derived(
+    session.devices.every((d) => d.demo_scenario !== null) ? menuActions[0] : undefined,
   );
 
   /** The selected entry's full label, as a tooltip in case the select is cut short. */
@@ -59,7 +68,7 @@
     disabled={session.active || session.flashing || session.devices.length === 0}
     value={session.selectedId ?? ""}
     onchange={(e) => {
-      if (session.select(e.currentTarget.value)) {
+      if (chooseDeviceMenu(session, e.currentTarget, menuActions)) {
         cancelWait().catch((err: unknown) => session.reportError(toUiError(err)));
       }
     }}
@@ -71,13 +80,17 @@
     {:else}
       <option value="">No device</option>
     {/each}
+    {#each menuActions as action (action.value)}
+      <option value={action.value}>{action.label}</option>
+    {/each}
   </select>
-  {#if features === WEB_FEATURES}
-    <button type="button" onclick={() => pickMeter(session, requestMeter)}>Connect a meter…</button>
-  {/if}
-  {#if offerHid}
-    <button type="button" onclick={() => pickMeter(session, requestHidMeter)}
-      >Connect over HID…</button
+  {#if hintAction}
+    <button
+      type="button"
+      class="connect-hint"
+      title="Opens the browser's meter picker, like “{hintAction.label}” in the device menu"
+      disabled={session.flashing}
+      onclick={() => void hintAction.run()}>Pick “{hintAction.label}”</button
     >
   {/if}
 </span>
@@ -99,5 +112,20 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* A small link-style button next to the menu, not a full toolbar button. */
+  .connect-hint {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent, inherit);
+    font-size: 0.8125rem;
+    text-decoration: underline;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .connect-hint:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 </style>
