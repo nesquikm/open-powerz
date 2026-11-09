@@ -3,6 +3,7 @@
 //! the web page moves the bytes.
 
 mod builders;
+mod db_export;
 mod decoders;
 mod demo;
 mod error;
@@ -15,6 +16,9 @@ mod trigger;
 pub use builders::{
     auth_request, connect_request, get_data_request, memory_read_request, pd_poll_request,
     start_pd_sniffer_request, start_queue_request, stop_pd_sniffer_request, stop_queue_request,
+};
+pub use db_export::{
+    DbRows, db_create_sql, db_insert_param_sql, db_insert_row_sql, db_param_values, db_table_name,
 };
 pub use decoders::{
     Adc, DeviceInfoView, Direction, PdCleared, PdDecoder, PdDetails, PdPollResult, PdRow,

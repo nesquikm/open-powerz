@@ -32,10 +32,19 @@ import type {
 } from "../backend";
 import { HistoryColumns, SessionStats } from "../history";
 import { openBackupSink, type PickDirectory } from "./backupFolder";
+import type { SqlJsStatic } from "sql.js";
 import { CsvRecorder } from "./csv";
 import type { MeterDriver, MeterSample, PdDecoderLike, PowerzWasm } from "./driver";
 import { noWebSerialError } from "./serial";
 import type { WebTransport } from "./transport";
+
+/** sql.js, loaded only for a `.db` export (FR AHTZW2). */
+export type LoadSqlJs = () => Promise<SqlJsStatic>;
+
+/** Rows per transaction and progress report of a `.db` export (the desktop's batch). */
+const DB_EXPORT_BATCH = 10_000;
+
+const pad2 = (n: number): string => String(n).padStart(2, "0");
 
 /** Queue rates by rate code (2, 10, 50, 1000 SPS). */
 export const RATES_SPS: readonly number[] = [2, 10, 50, 1000];
@@ -88,6 +97,8 @@ export interface WebSessionOptions {
   /** Opens the pipe a settings write runs over (FR W8SHX9): the meter's serial port,
    * or the demo meter's CDC twin. Without it, a settings change finds no Web Serial. */
   openSettingsPipe?: () => Promise<WebTransport>;
+  /** Loads sql.js for a `.db` export (FR AHTZW2). */
+  sqlJs?: LoadSqlJs;
 }
 
 /** The meter commands a {@link WebSession} answers itself. */
@@ -114,6 +125,7 @@ export const SESSION_COMMANDS = [
   "resumeRecording",
   "saveRecordingAs",
   "exportSession",
+  "exportSessionDb",
   "meterSettings",
   "meterSettingsWrite",
   "recordsList",
@@ -421,6 +433,65 @@ export class WebSession {
     return { path: suggestedName, rows: csv.rows };
   }
 
+  /** Download the whole session history as a vendor-layout `.db` named `suggestedName`
+   * (FR AHTZW2): the desktop's table, SQL and rows, written with sql.js. */
+  async exportSessionDb(
+    suggestedName: string,
+    onProgress: (progress: ExportProgress) => void,
+  ): Promise<ExportResult | null> {
+    const load = this.o.sqlJs;
+    if (!load) throw usage("The .db writer is not available in this browser.");
+    const SQL = await load();
+    const w = this.o.wasm;
+    const h = this.history;
+    const total = h.length;
+    const startMs = Math.round(this.startedAt + (total > 0 ? h.timeAt(0) : 0));
+    const start = new Date(Math.floor(startMs / 1000) * 1000);
+    const [month, day] = [start.getMonth() + 1, start.getDate()];
+    const [hour, minute, second] = [start.getHours(), start.getMinutes(), start.getSeconds()];
+    const table = w.dbTableName(month, day, hour, minute, second);
+    const local = `${start.getFullYear()}-${pad2(month)}-${pad2(day)} ${pad2(hour)}:${pad2(minute)}:${pad2(second)}`;
+    const db = new SQL.Database();
+    const rows = new w.DbRows(startMs);
+    let written = 0;
+    try {
+      db.exec(w.dbCreateSql(table));
+      db.run(w.dbInsertParamSql(table), w.dbParamValues(table, startMs, local, this.rateSps ?? 0));
+      const insert = db.prepare(w.dbInsertRowSql(table));
+      try {
+        const readings = new Float64Array(6);
+        let prev = -Infinity;
+        db.exec("BEGIN");
+        for (let j = 0; j < total; j++) {
+          const s = h.sampleAt(j);
+          const newRun = this.gaps.some((g) => g.from_ms >= prev && g.to_ms <= s.t_ms);
+          prev = s.t_ms;
+          readings.set([s.vbus_v, s.ibus_a, s.dp_v, s.dm_v, s.cc1_v, s.cc2_v]);
+          const row = rows.push(Math.max(0, Math.floor(s.t_ms)), readings, undefined, newRun);
+          insert.run([row.elapsed, ...row.numbers]);
+          written++;
+          if (written % DB_EXPORT_BATCH === 0) {
+            db.exec("COMMIT; BEGIN");
+            onProgress({ done: written, total });
+          }
+        }
+        db.exec("COMMIT");
+      } finally {
+        insert.free();
+      }
+      if (written % DB_EXPORT_BATCH !== 0 || written === 0) onProgress({ done: written, total });
+      const bytes = db.export();
+      this.o.download(
+        suggestedName,
+        new Blob([bytes as BlobPart], { type: "application/vnd.sqlite3" }),
+      );
+    } finally {
+      rows.free();
+      db.close();
+    }
+    return { path: suggestedName, rows: written };
+  }
+
   attach(onEvent: (event: BackendEvent) => void): AttachedSession {
     this.onEvent = onEvent;
     const info = this.driver.info;
@@ -480,6 +551,8 @@ export class WebSession {
       saveRecordingAs: (path: string) => this.saveRecordingAs(path),
       exportSession: (suggestedName: string, onProgress: (progress: ExportProgress) => void) =>
         this.exportSession(suggestedName, onProgress),
+      exportSessionDb: (suggestedName: string, onProgress: (progress: ExportProgress) => void) =>
+        this.exportSessionDb(suggestedName, onProgress),
       meterSettings: (): Promise<MeterSettings> => this.driver.readSettings(),
       meterSettingsWrite: (changes: SettingChanges): Promise<MeterSettings> =>
         this.driver.writeSettings(

@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use powerz_protocol::decode::{QueueRecord, Rate};
+use powerz_record::db::{self, DbRows, DbSample};
 use powerz_record::reader::{CsvReader, FileRow, ReadError, RowOutcome, parse_elapsed};
-use powerz_record::{Integrator, format_elapsed};
-use rusqlite::types::ValueRef;
-use rusqlite::{Connection, ErrorCode, Row, params};
+use rusqlite::types::{Value, ValueRef};
+use rusqlite::{Connection, ErrorCode, Row, params_from_iter};
 use serde::Serialize;
 
 use crate::history::{
@@ -369,7 +369,7 @@ pub fn open_db_limited(
     let db = pd_import::open_immutable(path).map_err(|_| no_database())?;
     let table = data_table(&db, control)?
         .ok_or_else(|| FileError::Refused("This database is not a recording.".to_owned()))?;
-    let table = quoted(&table);
+    let table = db::quoted(&table);
     control.check()?;
 
     let total = row_total(&db, &table);
@@ -435,11 +435,6 @@ fn unreadable_db() -> FileError {
     FileError::Refused("The database could not be read.".to_owned())
 }
 
-/// `name` as an SQL identifier.
-fn quoted(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
 /// The first table by name that has a `_param` table beside it and holds the
 /// vendor's columns. Views and virtual tables do not count: SQLite stores a
 /// real table's statement with exactly this start. A `_param` table is matched
@@ -498,7 +493,7 @@ fn has_vendor_columns(db: &Connection, table: &str) -> rusqlite::Result<bool> {
 /// handed over only when it is short: anything but a number reads as NULL
 /// here, and SQLite answers `typeof` and `octet_length` without loading it.
 fn select_row() -> String {
-    let [elapsed, numbers @ ..] = DB_COLUMNS.map(quoted);
+    let [elapsed, numbers @ ..] = DB_COLUMNS.map(db::quoted);
     let mut columns = vec![format!(
         "CASE WHEN typeof({elapsed}) = 'text' AND octet_length({elapsed}) <= {MAX_ELAPSED_BYTES} \
          THEN {elapsed} END"
@@ -591,8 +586,8 @@ pub type ExportRow = (QueueRecord, bool, Option<f64>);
 
 /// The data table's name for a recording started at local `(month, day, hour,
 /// minute, second)`.
-pub fn db_table_name((month, day, hour, minute, second): (u32, u32, u32, u32, u32)) -> String {
-    format!("powerz_{month:02}_{day:02}_{hour:02}_{minute:02}_{second:02}")
+pub fn db_table_name(local: (u32, u32, u32, u32, u32)) -> String {
+    db::table_name(local)
 }
 
 /// Write `rows` to `path` in the vendor's table layout; returns the rows
@@ -688,54 +683,37 @@ fn write_db(
     let db = Connection::open(path)?;
     db.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")?;
     let (table, local) = local_start(&db, start_unix_ms)?;
-    let param = quoted(&format!("{table}_param"));
-    let data = quoted(&table);
-    db.execute_batch(&format!(
-        "CREATE TABLE {data} (ElapsedTime text, Unix real primary key, VBUS real, IBUS real, \
-         DP real, DM real, CC1 real, CC2 real, TEMP real, CHARGE real, ENERGY real); \
-         CREATE TABLE {param} (name text, Unix text, StartTime text, SamplingRate text);"
-    ))?;
+    db.execute_batch(&db::create_sql(&table))?;
     db.execute(
-        &format!("INSERT INTO {param} VALUES (?1, ?2, ?3, ?4)"),
-        params![
-            table,
-            format!("{:.3}", start_unix_ms as f64 / 1000.0),
-            local,
-            rate_sps.to_string()
-        ],
+        &db::insert_param_sql(&table),
+        params_from_iter(db::param_values(&table, start_unix_ms, &local, rate_sps)),
     )?;
 
     let mut written = 0u64;
     {
-        let mut insert = db.prepare(&format!(
-            "INSERT INTO {data} VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-        ))?;
-        let mut integrator = Integrator::new();
-        let mut first_ms = None;
-        let mut last_unix_us = 0u64;
+        let mut insert = db.prepare(&db::insert_row_sql(&table))?;
+        let mut builder = DbRows::new(start_unix_ms);
         db.execute_batch("BEGIN")?;
         for (r, new_run, temp_c) in rows {
-            if new_run {
-                integrator.break_run();
-            }
-            let t = r.time_ms();
-            let elapsed_ms = u64::from(t.saturating_sub(*first_ms.get_or_insert(t)));
-            let (charge_ah, energy_wh) = integrator.push(t, r.vbus_v(), r.ibus_a());
-            // `Unix` is the primary key: rows with one value move apart.
-            last_unix_us = ((start_unix_ms + elapsed_ms) * 1000).max(last_unix_us + 1);
-            insert.execute(params![
-                format_elapsed(elapsed_ms),
-                last_unix_us as f64 / 1e6,
-                r.vbus_v(),
-                r.ibus_a(),
-                r.dp_v(),
-                r.dm_v(),
-                r.cc1_v(),
-                r.cc2_v(),
+            let row = builder.push(&DbSample {
+                time_ms: r.time_ms(),
+                vbus_v: r.vbus_v(),
+                ibus_a: r.ibus_a(),
+                dp_v: r.dp_v(),
+                dm_v: r.dm_v(),
+                cc1_v: r.cc1_v(),
+                cc2_v: r.cc2_v(),
                 temp_c,
-                charge_ah,
-                energy_wh,
-            ])?;
+                new_run,
+            });
+            let numbers = row.numbers();
+            insert.execute(params_from_iter(
+                std::iter::once(Value::Text(row.elapsed)).chain(
+                    numbers
+                        .into_iter()
+                        .map(|n| n.map_or(Value::Null, Value::Real)),
+                ),
+            ))?;
             written += 1;
             if written.is_multiple_of(EXPORT_BATCH) {
                 db.execute_batch("COMMIT; BEGIN")?;

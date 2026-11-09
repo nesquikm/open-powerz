@@ -13,6 +13,7 @@ import type {
   UiError,
   WebBackendApi,
 } from "../backend";
+import type { SqlJsStatic } from "sql.js";
 import { browserPickDirectory, type PickDirectory } from "./backupFolder";
 import { DemoCdcTransport, serialPipeOpener } from "./cdcTransport";
 import { pageIsolated } from "./coi";
@@ -20,7 +21,7 @@ import { DemoTransport } from "./demoTransport";
 import { MeterDriver, openUsbOrOfferHid, type PowerzWasm } from "./driver";
 import { WEB_FEATURES, desktopOnlyError, type Features } from "./features";
 import { LogoFiles, browserPickLogoFile, type PickLogoFile } from "./logoFiles";
-import { SESSION_COMMANDS, WebSession, rateCodeOf, usage } from "./session";
+import { SESSION_COMMANDS, WebSession, rateCodeOf, usage, type LoadSqlJs } from "./session";
 import { portHeldError, type SerialLike } from "./serial";
 import type { WebTransport } from "./transport";
 import { TRIGGER_MAX_SPS, Triggers, type TriggerWorkerLike } from "./webTrigger";
@@ -54,6 +55,31 @@ export interface WebBackendOptions {
   /** Where the page's `pagehide` and `beforeunload` are listened for (FR W8SHXC); defaults
    * to `window`. */
   pageEvents?: EventTarget | null;
+  /** Loads sql.js for a `.db` export (FR AHTZW2); defaults to the bundled sql.js,
+   * fetched on the first export. */
+  sqlJs?: LoadSqlJs;
+}
+
+/** The bundled sql.js and its wasm, fetched on first use (FR AHTZW2). */
+async function loadBrowserSqlJs(): Promise<SqlJsStatic> {
+  const [mod, wasmUrl] = await Promise.all([
+    import("sql.js"),
+    // `?url` makes Vite emit the .wasm as a hashed asset under the build's base path.
+    import("sql.js/dist/sql-wasm.wasm?url").then((m: { default: string }) => m.default),
+  ]);
+  return mod.default({ locateFile: () => wasmUrl });
+}
+
+/** `load`, run once; a failed load is tried again on the next call. */
+function once<T>(load: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | null = null;
+  return () => {
+    pending ??= load().catch((e: unknown) => {
+      pending = null;
+      throw e;
+    });
+    return pending;
+  };
 }
 
 /** The bundled trigger engine worker (FR W8SHXC). */
@@ -345,6 +371,7 @@ class Sessions {
     private readonly download: (name: string, data: Blob) => void,
     private readonly webSerial: SerialLike | null,
     private readonly pickDirectory: PickDirectory | null = null,
+    private readonly sqlJs: LoadSqlJs = once(loadBrowserSqlJs),
   ) {
     this.wasm = (wasm as PowerzWasm | undefined) ?? null;
   }
@@ -418,6 +445,7 @@ class Sessions {
       wasm: w,
       download: this.download,
       pickDirectory: this.pickDirectory,
+      sqlJs: this.sqlJs,
       openSettingsPipe: this.unlessTriggering(
         deviceId,
         demo
@@ -580,7 +608,15 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
   ) as SerialLike | null;
   const pickDirectory =
     options.pickDirectory === undefined ? browserPickDirectory() : options.pickDirectory;
-  const sessions = new Sessions(devices, usb, options.wasm, download, serial, pickDirectory);
+  const sessions = new Sessions(
+    devices,
+    usb,
+    options.wasm,
+    download,
+    serial,
+    pickDirectory,
+    once(options.sqlJs ?? loadBrowserSqlJs),
+  );
   sessions.triggers = new Triggers({
     module: () => sessions.module(),
     webSerial: serial,

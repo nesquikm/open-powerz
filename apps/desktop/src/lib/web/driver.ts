@@ -80,6 +80,30 @@ export interface PowerzWasm extends DemoMeterModule {
   LogoReader: new (full: boolean) => LogoReaderLike;
   /** One settings check against a logo write's calibration snapshot. */
   settingsSaveCheck(snapshot: Uint8Array, settingsReply: Uint8Array): LogoSettingsCheck;
+  /** FR AHTZW2: the `.db` export's table name, SQL text and rows, as the desktop's. */
+  dbTableName(month: number, day: number, hour: number, minute: number, second: number): string;
+  dbCreateSql(table: string): string;
+  dbInsertParamSql(table: string): string;
+  dbInsertRowSql(table: string): string;
+  dbParamValues(table: string, startUnixMs: number, localStart: string, rateSps: number): string[];
+  DbRows: new (startUnixMs: number) => DbRowsLike;
+}
+
+/** One `.db` data row: `ElapsedTime`, then the other ten columns (`null` = NULL). */
+export interface DbRowValues {
+  elapsed: string;
+  numbers: (number | null)[];
+}
+
+/** The wasm `DbRows` (FR AHTZW2): samples to `.db` rows. */
+export interface DbRowsLike {
+  push(
+    timeMs: number,
+    readings: Float64Array,
+    tempC: number | undefined,
+    newRun: boolean,
+  ): DbRowValues;
+  free(): void;
 }
 
 /** The wasm `SettingsWrite` (FR W8SHX9). */
