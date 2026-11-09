@@ -425,8 +425,8 @@ export class MeterDriver {
     frame: Uint8Array,
     timeoutMs: number,
     matchId = true,
-    t: WebTransport = this.o.transport,
   ): Promise<Uint8Array> {
+    const t = this.o.transport;
     let reply = await t.transact(frame, timeoutMs);
     if (!matchId) return reply;
     for (let rereads = 0; reply[1] !== frame[1]; rereads++) {
@@ -438,6 +438,24 @@ export class MeterDriver {
         } satisfies UiError;
       }
       reply = await t.read(timeoutMs);
+    }
+    return reply;
+  }
+
+  /** FR CJ3QCA: send `frame` over the settings pipe and wait for the reply with its
+   * id, skipping replies to earlier requests (left on a reused serial port) until
+   * `timeoutMs` runs out instead of counting them; then the `timeout` error. */
+  private async pipeExchange(
+    pipe: WebTransport,
+    frame: Uint8Array,
+    timeoutMs: number,
+  ): Promise<Uint8Array> {
+    const deadline = Date.now() + timeoutMs;
+    let reply = await pipe.transact(frame, timeoutMs);
+    while (reply[1] !== frame[1]) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw timeoutError();
+      reply = await pipe.read(left);
     }
     return reply;
   }
@@ -752,14 +770,14 @@ export class MeterDriver {
   ): Promise<MeterSettings> {
     const read = async () =>
       write.takeRead(
-        await this.exchange(write.readRequest(this.nextId()), REPLY_TIMEOUT_MS, true, pipe),
+        await this.pipeExchange(pipe, write.readRequest(this.nextId()), REPLY_TIMEOUT_MS),
       );
     await read();
     await read();
     const request = write.writeRequest(this.nextId());
     let reply: Uint8Array | undefined;
     try {
-      reply = await this.exchange(request, REPLY_TIMEOUT_MS, true, pipe);
+      reply = await this.pipeExchange(pipe, request, REPLY_TIMEOUT_MS);
     } catch (e) {
       if (asUiError(e).kind !== "timeout") throw e;
     }

@@ -510,3 +510,137 @@ describe("another program on the settings port (FR CJ3QC9)", () => {
     await settle(driver.disconnect());
   });
 });
+
+/** FR CJ3QCA: the FINISHED (type 0x07) reply a fresh demo twin gives to a settings
+ * write, answering request id `id`. */
+function finishedReply(id: number): Uint8Array {
+  const meter = new w.DemoMeter("load-5v-1a") as unknown as {
+    cdcTwin(): { transact(r: Uint8Array): Uint8Array; free(): void };
+    free(): void;
+  };
+  const twin = meter.cdcTwin();
+  try {
+    const sw = new (
+      w as unknown as {
+        SettingsWrite: new (c: Record<string, number>) => {
+          readRequest(id: number): Uint8Array;
+          takeRead(r: Uint8Array): void;
+          writeRequest(id: number): Uint8Array;
+          free(): void;
+        };
+      }
+    ).SettingsWrite({ brightness: 80 });
+    try {
+      sw.takeRead(twin.transact(sw.readRequest(1)));
+      sw.takeRead(twin.transact(sw.readRequest(2)));
+      const reply = twin.transact(sw.writeRequest(3));
+      if (((reply[0] ?? 0) & 0x7f) !== 0x07) {
+        throw new Error("the demo twin did not answer the write with FINISHED");
+      }
+      return withId(reply, id);
+    } finally {
+      sw.free();
+    }
+  } finally {
+    twin.free();
+    meter.free();
+  }
+}
+
+/** FR CJ3QCA: a reused serial port where replies to earlier requests (SETTINGS
+ * replies and FINISHED frames with ids used before) arrive after the pipe's drain,
+ * ahead of each reply, more of them than the old re-read budget of three. With
+ * `loseWrite` the write's own reply never comes; with `ignoreWrite` the meter does not
+ * take the write either. */
+class StaleLink {
+  written: Uint8Array[] = [];
+  closed = false;
+  loseWrite = false;
+  ignoreWrite = false;
+  private held: Uint8Array[] = [];
+  constructor(
+    private twin: DemoCdcTransport,
+    private stale = 5,
+  ) {}
+  async write(bytes: Uint8Array): Promise<void> {
+    this.written.push(bytes.slice());
+    const id = bytes[1] ?? 0;
+    const old = demoSettingsReply(w);
+    for (let k = 1; k <= this.stale; k++) {
+      const earlier = (id - k + 256) & 0xff;
+      this.held.push(k % 2 === 0 ? finishedReply(earlier) : withId(old, earlier));
+    }
+    const isWrite = bytes[0] === 0x0a;
+    if (isWrite && this.ignoreWrite) return;
+    const reply = await this.twin.transact(bytes, 1_000).catch(() => null);
+    if (isWrite && this.loseWrite) return;
+    if (reply) this.held.push(reply);
+  }
+  async read(timeoutMs: number): Promise<Uint8Array> {
+    const next = this.held.shift();
+    if (next) return next;
+    await new Promise((r) => setTimeout(r, timeoutMs));
+    throw timeoutError();
+  }
+  drain(): void {}
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+}
+
+describe("earlier replies left on a reused settings port (FR CJ3QCA)", () => {
+  const pipeOn = (link: StaleLink) =>
+    new CdcPipe(w, link as unknown as ConstructorParameters<typeof CdcPipe>[1]);
+
+  it("skips replies with an earlier request's id and completes from the right ones (AC-CJ3QCA.1)", async () => {
+    const { demo, rec, driver, errors } = await start();
+    const link = new StaleLink(new DemoCdcTransport(demo, () => Date.now()));
+    const from = rec.log.length;
+    const after = await settle(driver.writeSettings({ brightness: 80 }, async () => pipeOn(link)));
+    expect(valueOf(after, "brightness")).toContain("80");
+    expect(after.warnings ?? []).toEqual([]);
+    expect(pipeKinds(link.written)).toEqual(["read", "read", "write", "read"]);
+    expect(link.closed).toBe(true);
+    expect(noPolls(rec.names(from))).toEqual(["stop_queue", "start_queue:2"]);
+    expect(errors).toEqual([]);
+    // A second change on the same (reused) port takes too.
+    const again = new StaleLink(new DemoCdcTransport(demo, () => Date.now()), 7);
+    const next = await settle(driver.writeSettings({ brightness: 60 }, async () => pipeOn(again)));
+    expect(valueOf(next, "brightness")).toContain("60");
+    expect(pipeKinds(again.written)).toEqual(["read", "read", "write", "read"]);
+    expect(valueOf(await settle(driver.readSettings()), "brightness")).toContain("60");
+    await settle(driver.disconnect());
+  });
+
+  it("a write without a reply of its own is decided by a read-back that shows it (AC-CJ3QCA.2)", async () => {
+    const { demo, rec, driver, errors } = await start();
+    const link = new StaleLink(new DemoCdcTransport(demo, () => Date.now()));
+    link.loseWrite = true;
+    const from = rec.log.length;
+    const after = await settle(driver.writeSettings({ brightness: 80 }, async () => pipeOn(link)));
+    expect(valueOf(after, "brightness")).toContain("80");
+    expect(pipeKinds(link.written)).toEqual(["read", "read", "write", "read"]);
+    expect(link.closed).toBe(true);
+    expect(noPolls(rec.names(from))).toEqual(["stop_queue", "start_queue:2"]);
+    expect(errors).toEqual([]);
+    await settle(driver.disconnect());
+  });
+
+  it("a read-back without the change still fails the change (AC-CJ3QCA.3)", async () => {
+    const { demo, rec, driver } = await start();
+    const link = new StaleLink(new DemoCdcTransport(demo, () => Date.now()));
+    link.ignoreWrite = true;
+    const from = rec.log.length;
+    const e = await rejection(driver.writeSettings({ brightness: 80 }, async () => pipeOn(link)));
+    expect(e.kind).toBe("protocol");
+    expect(e.message).toMatch(
+      /^The meter's settings do not match after the change: brightness reads .+, expected 80\.$/,
+    );
+    expect(e.hint).toBe("Read the settings again; nothing was retried.");
+    expect(pipeKinds(link.written)).toEqual(["read", "read", "write", "read"]);
+    expect(link.closed).toBe(true);
+    expect(noPolls(rec.names(from))).toEqual([]);
+    expect(valueOf(await settle(driver.readSettings()), "brightness")).not.toContain("80");
+    await settle(driver.disconnect());
+  });
+});
