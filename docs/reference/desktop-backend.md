@@ -430,14 +430,21 @@ It reaches the meter over WebUSB (`web/webusb.ts`), WebHID (`web/webhid.ts`)
 or Web Serial (`web/serial.ts`), and runs the protocol core compiled to
 WebAssembly (`powerz-wasm`). `features` (from `web/features.ts`) tells the UI
 what the build offers: `WEB_FEATURES` has everything on except
-`firmwareUpdate` and `fileReveal`.
+`firmwareUpdate`, `fileReveal` and `recordingFolder`.
 
 - `requestMeter()` opens the browser's USB picker (**Connect a meter…**);
   `requestHidMeter()` opens the HID picker (**Connect over HID…**).
 - A command the browser leaves to the desktop app rejects with a usage error
   "Desktop app only: get the desktop app from …": the firmware commands,
-  `revealPath`, `chooseRecordingFolder`, `pdOpen`, `pdImport` and the PDF
-  chart export.
+  `revealPath` and `chooseRecordingFolder`. Their controls show "Desktop app
+  only" and stay disabled.
+- `pdOpen()` and `pdImport()` open the browser's file picker and read the file
+  with the desktop app's rules (`powerz-protocol`'s `pd_capture` through the
+  wasm module; the vendor log through sql.js). The opened capture stays in the
+  page for `pdDetails(index, true)`, `pdCableSeen()` and `pdClear()` until
+  `pdReleaseOpened()`.
+- `saveChartImage()` writes PDF with the desktop app's writer
+  (`powerz-record`'s `chart_image` through the wasm module).
 - Saved files (recordings, exports, `.pdcap`, record backups) are downloads,
   or files in a folder the user picks for a record delete's backups.
 - The trigger commands run the `powerz-trigger` engine in a worker

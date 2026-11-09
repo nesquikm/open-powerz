@@ -46,8 +46,10 @@ menu explains them and names the current one:
 In the browser you get:
 
 - live readings, charts and stats
-- PD capture, saved as a `.pdcap` download
+- PD capture, saved as a `.pdcap` download; **Open capture** and **Import vendor
+  log** open a `.pdcap` file or the vendor's PD log with no meter needed
 - CSV recording, and session export to CSV or a vendor-layout `.db`
+- saving the chart as PNG, SVG or PDF
 - **Open recording** for a CSV or `.db` file, with no meter needed
 - reading and changing the meter settings
 - the offline records: list, download and delete
@@ -62,9 +64,8 @@ These stay desktop-only, so use the
 [desktop app](https://github.com/nesquikm/open-powerz/releases/latest) for them:
 
 - firmware update
-- showing a saved file in the file manager, and choosing a recording folder
-- PDF export of the chart
-- opening a saved `.pdcap` capture or importing the vendor's PD log
+- showing a saved file in the file manager
+- choosing the recorder's folder (the browser saves recordings to its downloads)
 
 See [Use the web edition](docs/how-to/web-edition.md) for the details.
 

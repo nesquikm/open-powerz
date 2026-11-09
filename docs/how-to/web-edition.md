@@ -104,6 +104,13 @@ next section. Each feature needs one browser interface:
 
 - **Live readings, charts and PD capture:** WebUSB (or WebHID for basic
   readings, see above). **Save capture** downloads a `.pdcap` file.
+- **Opening a PD capture and importing the vendor's PD log:** no device
+  interface. **Open capture** opens the browser's file picker for a `.pdcap`
+  file and **Import vendor log** for the vendor's `.sqlite` PD log; both read
+  the file with the desktop app's rules, so the table, chart, details and the
+  cable identity are the same as there, with no meter needed.
+- **Saving the chart image:** no device interface. PNG, SVG and PDF download
+  as the same files the desktop app saves.
 - **CSV recording:** WebUSB or WebHID. The finished recording downloads as a
   CSV in the desktop app's layout, TEMP included.
 - **Reading the meter's settings:** WebUSB. The Meter settings panel shows the
@@ -166,13 +173,10 @@ These controls say "Desktop app only" in the browser:
   browser tab can be closed, reloaded or put to sleep at any time.
 - **Showing a saved file in the file manager.** A browser page cannot open the
   file manager or see where the browser saved a file.
-- **The PDF chart export.** The browser has no PDF writer; export the chart as
-  PNG or SVG instead.
-- **Opening a saved `.pdcap` capture and importing the vendor's PD log.** The
-  PD tab's Open and Import answer "Desktop app only" in the browser; saving a
-  capture works.
-- **Choosing a recording folder.** The browser saves recordings and exports to
+- **Choosing the recorder's folder.** A browser page cannot save into a folder
+  without asking each time, so the browser saves recordings and exports to
   its downloads instead.
+- **Choosing a firmware file.** It belongs to the firmware update above.
 
 Get the desktop app from the
 [releases page](https://github.com/nesquikm/open-powerz/releases/latest) (see

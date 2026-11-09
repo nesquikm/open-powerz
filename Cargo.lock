@@ -2913,7 +2913,6 @@ dependencies = [
 name = "open-powerz-desktop"
 version = "0.11.1"
 dependencies = [
- "flate2",
  "libc",
  "objc2",
  "objc2-foundation",
@@ -3217,6 +3216,7 @@ dependencies = [
 name = "powerz-record"
 version = "0.11.1"
 dependencies = [
+ "flate2",
  "powerz-protocol",
  "thiserror 2.0.21",
 ]

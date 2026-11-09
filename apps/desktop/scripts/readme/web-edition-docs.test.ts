@@ -29,6 +29,7 @@ const FEATURE_NAMES: Record<keyof Features, RegExp> = {
   recordsList: /(offline )?record(s|ings)? list|list\w* (the )?(offline )?record/i,
   recordDownload: /download\w* (an? |the )?(offline )?record|record\w* download/i,
   fileReveal: /reveal\w* (a |the )?(saved )?file|show\w* (a |the )?(saved )?file/i,
+  recordingFolder: /recorder'?s? (save )?folder|recording folder/i,
 };
 
 const FEATURE_KEYS = Object.keys(FEATURE_NAMES) as (keyof Features)[];

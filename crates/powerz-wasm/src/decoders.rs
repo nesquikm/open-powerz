@@ -415,6 +415,16 @@ impl PdDecoder {
         to_js(&self.clear())
     }
 
+    /// The newest cable identity the capture holds since the last clear, in
+    /// the trigger panel's shape (FR AXHK2P, FR EAKFEC); `null` for none.
+    #[wasm_bindgen(js_name = latestCable)]
+    pub fn latest_cable_js(&self) -> Result<JsValue, BindError> {
+        match self.latest_cable() {
+            Some(c) => to_js(&powerz_trigger::cable_view(&c)),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
     /// [`PdDecoder::pdcap`] for JS.
     #[wasm_bindgen(js_name = pdcap)]
     pub fn pdcap_js(&self, model: String, firmware_version: String) -> Result<JsValue, BindError> {
@@ -497,6 +507,20 @@ impl PdDecoder {
         self.entries.clear();
         self.log.clear();
         cleared
+    }
+
+    /// The newest cable Discover Identity ACK since the last clear, as the
+    /// desktop capture finds it.
+    pub fn latest_cable(&self) -> Option<powerz_protocol::pdm::message::CableIdentity> {
+        self.log.iter().rev().find_map(|entry| {
+            let pdcap::Entry::Record { record, .. } = entry else {
+                return None;
+            };
+            let (PdRecordKind::Message(m) | PdRecordKind::BigMessage(m)) = &record.kind else {
+                return None;
+            };
+            powerz_protocol::pdm::message::cable_identity_from_message(m.sop, m.header, &m.body)
+        })
     }
 
     /// The capture since the last clear as a pdcap file, with this crate's

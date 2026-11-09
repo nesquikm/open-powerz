@@ -982,7 +982,7 @@ export interface PdOpened {
 /** Opens the open dialog and loads the chosen pdcap file (FR TGE83E); needs no meter.
  * Resolves to the capture, or `null` when the dialog was cancelled. */
 export async function pdOpen(): Promise<PdOpened | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.pdOpen());
   if (mock) return mock.pdOpen();
   return invoke<PdOpened | null>("pd_open");
 }
@@ -990,7 +990,7 @@ export async function pdOpen(): Promise<PdOpened | null> {
 /** Releases the capture opened from a file, which the page no longer shows
  * (AC-AXHK2K.5). The slot is the app's, not a meter's: it needs no meter. */
 export async function pdReleaseOpened(): Promise<void> {
-  if (web) return;
+  if (web) return web.then((b) => b.pdReleaseOpened());
   if (mock) return mock.pdReleaseOpened();
   await invoke("pd_release_opened");
 }
@@ -999,7 +999,7 @@ export async function pdReleaseOpened(): Promise<void> {
  * read-only (FR TGE83E, AC .6); needs no meter. Resolves like {@link pdOpen}: the
  * imported capture, or `null` when the dialog was cancelled. */
 export async function pdImport(): Promise<PdOpened | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.pdImport());
   if (mock) return mock.pdImport();
   return invoke<PdOpened | null>("pd_import");
 }
@@ -1773,6 +1773,12 @@ export interface WebBackendApi extends MeterCommands {
     format: "png" | "svg" | "pdf",
     data: Uint8Array,
   ): Promise<string | null>;
+  /** Open capture and Import vendor log (FR EAKFEC): the browser's file picker for
+   * `.pdcap` and `.sqlite` files; `null` when it was dismissed. The opened capture stays
+   * in the page until released. */
+  pdOpen(): Promise<PdOpened | null>;
+  pdImport(): Promise<PdOpened | null>;
+  pdReleaseOpened(): Promise<void>;
   /** Open recording (FR AHTZW3): the browser's file picker for CSV and `.db` files;
    * `null` when it was dismissed or Cancel ended the open. */
   openRecordingFile(onProgress: (progress: OpenProgress) => void): Promise<FileSummary | null>;

@@ -27,7 +27,7 @@ use crate::app_log::SessionLog;
 use crate::batch::{Batch, Batcher, Sample};
 use crate::history::{Records, Series, SeriesBuckets};
 use crate::logo::{LogoProgressView, LogoReadView, LogoSettingsCheckView, LogoWrittenView};
-use crate::pd_capture::{PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
+use crate::pd_capture::{CableSeen as _, PdCapture, PdCleared, PdDetails, PdRow, PdStatusSample};
 use crate::recording::{
     self, EndReason, ExportProgress, Limits, Recorder, RecordingEvent, RecordingSummary,
 };
@@ -1802,7 +1802,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 let _ = reply.send(self.pd_details(index));
             }
             Command::PdCable(reply) => {
-                let _ = reply.send(self.pd.latest_cable());
+                let _ = reply.send(self.pd.latest_cable_view());
             }
             Command::ClearPd(reply) => {
                 let _ = reply.send(self.clear_pd());

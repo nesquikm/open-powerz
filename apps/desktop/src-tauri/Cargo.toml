@@ -33,8 +33,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2.8.3"
 tauri-plugin-opener = "2.7.2"
-# Inflates the chart PNG and deflates the PDF image streams (FR AXHK2V).
-flate2 = "1.1.10"
 # Reads vendor PD log databases, read-only (FR TGE83E, AC .6).
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 

@@ -14,7 +14,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { CSV_HEADER } from "../../src/lib/web/csv";
 import { badge, DEMO_LOAD, readoutValue } from "../ui/helpers";
-import { capture, messageTexts, showPd, stopCapture } from "../ui/pd";
+import { capture, messageTexts, pdView, showPd, stopCapture } from "../ui/pd";
 
 const BRAND = fileURLToPath(new URL("../../../../assets/brand/", import.meta.url));
 const BASE = "/open-powerz/";
@@ -232,4 +232,41 @@ test("Detect in the Trigger tab runs on the demo meter in the browser (AC-W8SHXC
   await expect(view).not.toContainText("Desktop app only");
   await view.getByRole("button", { name: "Detect", exact: true }).click();
   await expect(view.getByRole("region", { name: "Detection" })).toBeVisible({ timeout: 30_000 });
+});
+
+const PD_DATA = fileURLToPath(new URL("../../src-tauri/tests/data/", import.meta.url));
+
+test("Open capture and Import vendor log open files in the browser with no meter (AC-EAKFEC.1, .2, .3)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await showPd(page);
+  await expect(pdView(page)).not.toContainText("Desktop app only");
+  const expected = JSON.parse(readFileSync(`${PD_DATA}pd-open-expected.json`, "utf8")) as Record<
+    "pdcap" | "vendor",
+    { opened: { rows: { name: string }[] } }
+  >;
+
+  for (const [button, file, key] of [
+    ["Open capture", "pd-capture.pdcap", "pdcap"],
+    ["Import vendor log", "pd-vendor.sqlite", "vendor"],
+  ] as const) {
+    const chooser = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: button, exact: true }).click();
+    await (await chooser).setFiles(`${PD_DATA}${file}`);
+    await expect
+      .poll(() => messageTexts(page), { timeout: 15_000 })
+      .toEqual(expected[key].opened.rows.map((r) => r.name));
+  }
+});
+
+test("the recorder's folder is labelled Desktop app only in the browser (AC-EAKFEC.7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+  await page.getByRole("button", { name: "Recorder options" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Recorder options" });
+  await expect(dialog.getByRole("button", { name: "Choose", exact: true })).toBeDisabled();
+  await expect(dialog).toContainText("Desktop app only");
 });

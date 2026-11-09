@@ -25,6 +25,13 @@ import { MeterDriver, openUsbOrOfferHid, type PowerzWasm } from "./driver";
 import { WEB_FEATURES, desktopOnlyError, type Features } from "./features";
 import { LogoFiles, browserPickLogoFile, type PickLogoFile } from "./logoFiles";
 import {
+  PDCAP_ACCEPT,
+  PdFiles,
+  VENDOR_PD_ACCEPT,
+  browserPickPdFile,
+  type PickPdFile,
+} from "./pdFiles";
+import {
   RecordingFiles,
   browserPickRecordingFile,
   wasmRecordingReader,
@@ -70,6 +77,12 @@ export interface WebBackendOptions {
   /** Opens Open recording's file picker for CSV and `.db` files (FR AHTZW3); defaults
    * to the browser's file input. */
   pickRecordingFile?: PickRecordingFile;
+  /** Opens the PD analyzer's Open capture picker for `.pdcap` files (FR EAKFEC);
+   * defaults to the browser's file input. */
+  pickPdCapture?: PickPdFile;
+  /** Opens the PD analyzer's Import vendor log picker for `.sqlite` files (FR EAKFEC);
+   * defaults to the browser's file input. */
+  pickVendorPdLog?: PickPdFile;
 }
 
 /** The bundled sql.js and its wasm, fetched on first use (FR AHTZW2). */
@@ -134,6 +147,8 @@ const FEATURE_COMMANDS: Readonly<Record<keyof Features, readonly string[]>> = {
   recordDownload: ["recordDownload"],
   // No meter command: `revealPath` refuses on the web in backend.ts (AC-R13Y5W.1).
   fileReveal: [],
+  // No meter command: `chooseRecordingFolder` refuses on the web in backend.ts.
+  recordingFolder: [],
 };
 
 /** The commands of the features the web build leaves out: each rejects with a usage
@@ -375,6 +390,9 @@ class Sessions {
   private wasm: PowerzWasm | null;
   /** The trigger sessions (FR W8SHXC), one per meter. */
   triggers: Triggers | null = null;
+  /** The PD capture opened from a file (FR EAKFEC), shared by every meter's commands
+   * as the desktop's opened-capture slot is. */
+  pdFiles: PdFiles | null = null;
 
   constructor(
     private readonly devices: DeviceList,
@@ -538,7 +556,40 @@ class Sessions {
     const refused = Object.fromEntries(
       DESKTOP_ONLY_COMMANDS.map((name) => [name, () => Promise.reject(desktopOnlyError())]),
     );
-    return Object.assign(Object.create(pending()) as MeterCommands, live, trigger, refused);
+    const opened = this.openedPdCommands(live as Partial<MeterCommands>, session);
+    return Object.assign(Object.create(pending()) as MeterCommands, live, trigger, opened, refused);
+  }
+
+  /** The PD commands that answer from the capture opened from a file first, as the
+   * desktop's do (AC-EAKFEC.5): its details, its cable identity, and a Clear that drops
+   * it and needs no meter when it was shown. */
+  private openedPdCommands(
+    live: Partial<MeterCommands>,
+    session: () => WebSession | null,
+  ): Pick<MeterCommands, "pdDetails" | "pdClear" | "pdCableSeen"> {
+    const files = () => this.pdFiles;
+    return {
+      pdDetails: async (index: number, opened?: boolean) => {
+        const f = files();
+        if (opened === true) {
+          if (!f) throw usage("That PD record is not in the opened capture.");
+          return f.details(index);
+        }
+        return (live.pdDetails as MeterCommands["pdDetails"])(index);
+      },
+      pdClear: async () => {
+        const had = files()?.release() ?? false;
+        if (had && !session()) return { next_index: 0, status_floor_ms: 0 };
+        return (live.pdClear as MeterCommands["pdClear"])();
+      },
+      pdCableSeen: async () => {
+        const cable = files()?.cable() ?? null;
+        if (cable) return cable;
+        // No meter is no cable, not an error, as on the desktop.
+        if (!session()) return null;
+        return (live.pdCableSeen as MeterCommands["pdCableSeen"])();
+      },
+    };
   }
 }
 
@@ -639,6 +690,13 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
           : window
         : options.pageEvents,
   });
+  const pdFiles = new PdFiles(
+    options.pickPdCapture ?? browserPickPdFile(PDCAP_ACCEPT),
+    options.pickVendorPdLog ?? browserPickPdFile(VENDOR_PD_ACCEPT),
+    () => sessions.module(),
+    sqlJs,
+  );
+  sessions.pdFiles = pdFiles;
   const commands = sessions.commands(() => sessions.current);
   const logoFiles = new LogoFiles(options.pickLogoFile ?? browserPickLogoFile());
   const recordingFiles = new RecordingFiles(
@@ -660,6 +718,11 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
       sessions.attach(onEvent, deviceId),
     meter: (deviceId: string) => sessions.commands(() => sessions.of(deviceId)),
     connectedMeters: async () => sessions.ids(),
+    pdOpen: () => pdFiles.open(),
+    pdImport: () => pdFiles.import(),
+    pdReleaseOpened: async () => {
+      pdFiles.release();
+    },
     openRecordingFile: (onProgress: (progress: OpenProgress) => void) =>
       recordingFiles.open(onProgress),
     cancelRecordingFile: () => recordingFiles.cancel(),
@@ -677,13 +740,28 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
       format: "png" | "svg" | "pdf",
       data: Uint8Array,
     ) => {
-      // The desktop backend wraps the PNG in a PDF page; the browser has no such writer.
-      if (format === "pdf") throw desktopOnlyError();
       const name = suggestedName.endsWith(`.${format}`)
         ? suggestedName
         : `${suggestedName}.${format}`;
-      const type = format === "png" ? "image/png" : "image/svg+xml";
-      download(name, new Blob([data as BlobPart], { type }));
+      if (format === "svg") {
+        download(name, new Blob([data as BlobPart], { type: "image/svg+xml" }));
+        return name;
+      }
+      // The desktop's checks and its PDF writer, which wraps the PNG in one page
+      // (FR EAKFEC): the same file, refused in the same words.
+      const w = await sessions.module();
+      let bytes: Uint8Array;
+      try {
+        if (format === "pdf") bytes = w.chartPdfFromPng(data);
+        else {
+          w.chartPngCheck(data);
+          bytes = data;
+        }
+      } catch (e) {
+        throw bindError(e);
+      }
+      const type = format === "pdf" ? "application/pdf" : "image/png";
+      download(name, new Blob([bytes as BlobPart], { type }));
       return name;
     },
   });

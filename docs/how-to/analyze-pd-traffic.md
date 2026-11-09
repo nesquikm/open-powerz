@@ -84,7 +84,9 @@ Stop a running capture first. Then:
 **Clear capture** or **Start capture** returns to the live view.
 
 In the web edition PD capture works over WebUSB and **Save capture** downloads
-the `.pdcap` file, but Open capture and Import vendor log are desktop only.
+the `.pdcap` file. **Open capture** and **Import vendor log** open the
+browser's file picker and read the file with the desktop app's rules, so it
+shows the same rows, details and timeline, with no meter needed.
 
 ## From the command line
 

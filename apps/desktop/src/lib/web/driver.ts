@@ -4,6 +4,7 @@
  */
 
 import type {
+  CableView,
   LogoPreview,
   LogoProgress,
   LogoRead,
@@ -18,6 +19,7 @@ import type {
 } from "../backend";
 import { ERROR_KINDS } from "../errorKinds";
 import type { DemoMeterModule } from "./demoTransport";
+import type { PdFilesWasm } from "./pdFiles";
 import { hidOnlyBasicText } from "./features";
 import { disconnectedError, notSafeError, timeoutError, type WebTransport } from "./transport";
 import { openWebUsb, type UsbDeviceLike, type WebUsbOptions } from "./webusb";
@@ -26,7 +28,11 @@ import { LogoDriver, type LogoReaderLike, type LogoSource, type LogoWriteLike } 
 export type { LogoReadChunk, LogoReaderLike, LogoSource, LogoWriteLike } from "./logoDriver";
 
 /** The parts of the generated wasm module (`src/wasm/powerz_wasm.js`) the driver uses. */
-export interface PowerzWasm extends DemoMeterModule {
+export interface PowerzWasm extends DemoMeterModule, PdFilesWasm {
+  /** FR EAKFEC: the desktop's chart image checks and one-page PDF writer; a PNG it
+   * does not take throws a `usage` error in the desktop's words. */
+  chartPdfFromPng(png: Uint8Array): Uint8Array;
+  chartPngCheck(png: Uint8Array): void;
   connectRequest(id: number): Uint8Array;
   getDataRequest(id: number, mask: number): Uint8Array;
   startQueueRequest(id: number, rateCode: number): Uint8Array;
@@ -184,6 +190,8 @@ export interface PdDecoderLike {
   details(index: number | bigint): unknown;
   clear(): unknown;
   pdcap(model: string, firmwareVersion: string): unknown;
+  /** The newest cable identity since the last clear (FR EAKFEC); `null` for none. */
+  latestCable(): CableView | null;
   free(): void;
 }
 

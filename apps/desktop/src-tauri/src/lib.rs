@@ -32,6 +32,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::devices::{
     AppOpener, AttachedSession, DeviceListing, DeviceManager, FlashStatus, WatchHandle,
 };
+use crate::pd_capture::CableSeen as _;
 use crate::recording::{ExportProgress, RecordingSummary};
 use crate::recording_file::{FileError, FileSummary, OpenControl, OpenProgress, OpenedFile};
 use crate::ui_error::UiError;
@@ -141,49 +142,11 @@ impl AppState {
         *self.opened_pd() = None;
     }
 
-    /// Put `pd`, opened from the file at `path`, in the opened-capture slot
-    /// and answer its rows and status samples for the UI.
-    fn show_opened(
-        &self,
-        path: &Path,
-        mut pd: pd_capture::PdCapture,
-        damaged_line: Option<usize>,
-        left_out: LeftOut,
-    ) -> PdOpened {
-        // Rows the capture trimmed past its limit are not sent: the page
-        // gets what `pd_details` can answer, and the count of the rest.
-        let first = pd.first_index();
-        let mut rows = pd.take_all().unwrap_or_default();
-        rows.retain(|r| r.index >= first);
-        let opened = PdOpened {
-            path: path.to_string_lossy().into_owned(),
-            rows,
-            dropped: pd.dropped(),
-            status: pd.take_all_status().unwrap_or_default(),
-            damaged_line,
-            oversized: left_out.oversized,
-            skipped: left_out.skipped,
-            truncated: left_out.truncated,
-        };
-        *self.opened_pd() = Some(pd);
+    /// Put `capture`, opened from a file, in the opened-capture slot and
+    /// answer what the page shows of it.
+    fn show_opened(&self, (opened, capture): (PdOpened, pd_capture::PdCapture)) -> PdOpened {
+        *self.opened_pd() = Some(capture);
         opened
-    }
-
-    /// Open the pdcap file at `path` as the opened capture. A file damaged
-    /// after its header opens with what it holds, even nothing, and names the
-    /// line; a file without a pdcap header is refused.
-    fn open_pdcap_file(&self, path: &Path) -> Result<PdOpened, UiError> {
-        let file = std::fs::File::open(path)
-            .map_err(|e| UiError::usage(format!("Could not open the PD capture: {e}")))?;
-        let loaded = powerz_protocol::pdcap::load(std::io::BufReader::new(file));
-        if let (Some(e), None) = (&loaded.error, &loaded.header) {
-            return Err(UiError::usage(format!(
-                "Could not open the PD capture: {e}"
-            )));
-        }
-        let pd = pd_capture::PdCapture::from_pdcap(&loaded.entries);
-        let damaged_line = loaded.error.as_ref().map(|e| e.line());
-        Ok(self.show_opened(path, pd, damaged_line, LeftOut::default()))
     }
 
     fn opened_file(&self) -> MutexGuard<'_, Option<OpenedFile>> {
@@ -611,7 +574,11 @@ async fn trigger_cable_read(
 /// The newest cable identity in the capture the PD view shows: the one opened
 /// from a file, else the meter's own. Nothing is sent.
 fn cable_seen_of(state: &AppState, device_id: Option<&str>) -> Option<trigger::CableView> {
-    if let Some(cable) = state.opened_pd().as_ref().and_then(|pd| pd.latest_cable()) {
+    if let Some(cable) = state
+        .opened_pd()
+        .as_ref()
+        .and_then(|pd| pd.latest_cable_view())
+    {
         return Some(cable);
     }
     control(state, device_id).ok()?.pd_cable_seen().ok()?
@@ -883,6 +850,58 @@ struct LeftOut {
     truncated: bool,
 }
 
+/// What the page shows of `pd`, opened from the file at `path`, and the
+/// capture that answers its record details.
+fn opened_of(
+    path: &Path,
+    mut pd: pd_capture::PdCapture,
+    damaged_line: Option<usize>,
+    left_out: LeftOut,
+) -> (PdOpened, pd_capture::PdCapture) {
+    let (rows, dropped, status) = pd_capture::opened_view(&mut pd);
+    let opened = PdOpened {
+        path: path.to_string_lossy().into_owned(),
+        rows,
+        dropped,
+        status,
+        damaged_line,
+        oversized: left_out.oversized,
+        skipped: left_out.skipped,
+        truncated: left_out.truncated,
+    };
+    (opened, pd)
+}
+
+/// Open the pdcap file at `path` (FR TGE83E): what the PD view shows and the
+/// capture behind it. A file damaged after its header opens with what it
+/// holds, even nothing, and names the line; a file without a pdcap header is
+/// refused. The web edition opens the same way (FR EAKFEC).
+pub fn open_pdcap_file(path: &Path) -> Result<(PdOpened, pd_capture::PdCapture), UiError> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| UiError::usage(format!("{}: {e}", pd_capture::OPEN_FAILED)))?;
+    let loaded = powerz_protocol::pdcap::load(std::io::BufReader::new(file));
+    if let (Some(e), None) = (&loaded.error, &loaded.header) {
+        return Err(UiError::usage(format!("{}: {e}", pd_capture::OPEN_FAILED)));
+    }
+    let pd = pd_capture::PdCapture::from_pdcap(&loaded.entries);
+    let damaged_line = loaded.error.as_ref().map(|e| e.line());
+    Ok(opened_of(path, pd, damaged_line, LeftOut::default()))
+}
+
+/// Import the vendor PD log at `path`, read-only (FR TGE83E, AC .6): what
+/// the PD view shows and the capture behind it. The web edition imports the
+/// same way (FR EAKFEC).
+pub fn import_vendor_pd_file(path: &Path) -> Result<(PdOpened, pd_capture::PdCapture), UiError> {
+    let imported = pd_import::import_vendor_pd_log_with(path, &pd_import::ImportLimits::DEFAULT)
+        .map_err(|e| UiError::usage(format!("{}: {e}", pd_capture::IMPORT_FAILED)))?;
+    let left_out = LeftOut {
+        oversized: imported.oversized,
+        skipped: imported.skipped,
+        truncated: imported.truncated,
+    };
+    Ok(opened_of(path, imported.capture, None, left_out))
+}
+
 /// Ask which file of type `name` (`extensions`) to open; `None` when the
 /// dialog is cancelled. Blocks: call it on a blocking thread.
 fn choose_open_path(
@@ -915,7 +934,7 @@ async fn pd_open(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<PdOp
         let Some(path) = choose_open_path(&app, "PD capture", &["pdcap"])? else {
             return Ok(None);
         };
-        state.open_pdcap_file(&path).map(Some)
+        open_pdcap_file(&path).map(|o| Some(state.show_opened(o)))
     })
     .await
 }
@@ -930,20 +949,7 @@ async fn pd_import(app: tauri::AppHandle, state: Shared<'_>) -> Result<Option<Pd
         let Some(path) = choose_open_path(&app, "Vendor PD log", &["sqlite"])? else {
             return Ok(None);
         };
-        let imported =
-            pd_import::import_vendor_pd_log_with(&path, &pd_import::ImportLimits::DEFAULT)
-                .map_err(|e| UiError::usage(format!("Could not import the vendor PD log: {e}")))?;
-        let left_out = LeftOut {
-            oversized: imported.oversized,
-            skipped: imported.skipped,
-            truncated: imported.truncated,
-        };
-        Ok(Some(state.show_opened(
-            &path,
-            imported.capture,
-            None,
-            left_out,
-        )))
+        import_vendor_pd_file(&path).map(|o| Some(state.show_opened(o)))
     })
     .await
 }
@@ -2449,7 +2455,7 @@ mod tests {
             &format!("{}{{\"kind\":\"rec", pdcap_header_line()),
         );
         let state = AppState::new();
-        let opened = state.open_pdcap_file(&path).expect("the file opens");
+        let opened = state.show_opened(open_pdcap_file(&path).expect("the file opens"));
         assert!(opened.rows.is_empty() && opened.status.is_empty());
         assert_eq!(opened.damaged_line, Some(2));
         assert!(
@@ -2462,7 +2468,7 @@ mod tests {
     fn a_file_that_is_no_pdcap_at_all_is_still_refused() {
         let path = pdcap_file("not-a-capture.pdcap", "not a pdcap file\n");
         let state = AppState::new();
-        let refused = state.open_pdcap_file(&path);
+        let refused = open_pdcap_file(&path).map(|o| state.show_opened(o));
         assert!(refused.is_err(), "{refused:?}");
         assert!(state.opened_pd().is_none());
     }
@@ -2470,7 +2476,7 @@ mod tests {
     #[test]
     fn the_rows_an_import_skipped_reach_the_page() {
         let state = AppState::new();
-        let opened = state.show_opened(
+        let opened = state.show_opened(opened_of(
             Path::new("log.sqlite"),
             pd_capture::PdCapture::new(),
             None,
@@ -2479,7 +2485,7 @@ mod tests {
                 skipped: 3,
                 truncated: false,
             },
-        );
+        ));
         assert_eq!(opened.skipped, 3);
         let json = serde_json::to_value(&opened).expect("serializes");
         assert_eq!(json["skipped"], 3);
@@ -2511,7 +2517,12 @@ mod tests {
             );
         }
         let state = AppState::new();
-        let opened = state.show_opened(Path::new("log.sqlite"), pd, None, LeftOut::default());
+        let opened = state.show_opened(opened_of(
+            Path::new("log.sqlite"),
+            pd,
+            None,
+            LeftOut::default(),
+        ));
         let indices: Vec<u64> = opened.rows.iter().map(|r| r.index).collect();
         assert_eq!(
             indices,
