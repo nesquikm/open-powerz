@@ -64,6 +64,12 @@ const TERM_GROUPS: readonly (readonly string[])[] = [
   ["PDO", "RDO"],
   ["VDM"],
   ["e-marker"],
+  // FR 62VEDM (AC .1, .3): the Trigger card titles and the sweep's finds.
+  ["VFCP"],
+  ["TFCP"],
+  ["SFCP"],
+  ["VID", "PID"],
+  ["WebUSB", "WebHID"],
 ];
 
 /** Abbreviations the app certainly shows: the readout, the rate picker and the chart. */
@@ -214,5 +220,58 @@ describe("AC-CW66T1.9: every entry records where its text comes from", () => {
       expect(text(key), key).toMatch(/this app|our own|open-powerz/i);
       expect((GLOSSARY as Record<string, { source: string }>)[key]?.source).toBe("our definition");
     }
+  });
+});
+
+/** FR 62VEDM: a source is a docs/protocol.md section that exists, or a named spec. */
+function sourcedOutsideUs(source: string): boolean {
+  const protocol = readFileSync(join(repoRoot, "docs/protocol.md"), "utf8");
+  const anchors = new Set(
+    protocol
+      .split("\n")
+      .filter((l) => /^#{1,6} /.test(l))
+      .map((l) => slugify(l.replace(/^#{1,6} /, ""))),
+  );
+  const doc = /^docs\/protocol\.md#([a-z0-9_-]+)$/.exec(source);
+  if (doc) return anchors.has(doc[1] as string);
+  return /^(USB PD \d|USB Type-C|BC ?1\.2|QC \d|UFCS)/.test(source);
+}
+
+describe("AC-62VEDM.1: VFCP, TFCP and SFCP have short sourced entries", () => {
+  const cases: [string, RegExp][] = [
+    ["VFCP", /vivo/i],
+    ["TFCP", /Transsion|Tecno|Infinix/i],
+    ["SFCP", /Spreadtrum|Unisoc/i],
+  ];
+  for (const [abbr, maker] of cases) {
+    it(`${abbr} has a term entry naming its phone maker, from protocol.md or a named spec`, () => {
+      const key = entryFor([abbr]);
+      expect(key, `${abbr} has a term.* entry`).toBeDefined();
+      const e = GLOSSARY[key as GlossaryKey];
+      expect(e.short, `${abbr}.short names the maker`).toMatch(maker);
+      expect(e.short.length).toBeLessThanOrEqual(160);
+      expect(sourcedOutsideUs(e.source), `${abbr} source ${e.source}`).toBe(true);
+    });
+  }
+
+  it("each of the three has its own entry", () => {
+    const keys = ["VFCP", "TFCP", "SFCP"].map((a) => entryFor([a]));
+    expect(keys.every((k) => k !== undefined)).toBe(true);
+    expect(new Set(keys).size).toBe(3);
+  });
+});
+
+describe("AC-62VEDM.3: entries for the abbreviations the sweep found", () => {
+  it("VID / PID has a term entry", () => {
+    const key = entryFor(["VID", "PID"]);
+    expect(key).toBeDefined();
+    expect(text(key as string)).toMatch(/vendor/i);
+    expect(text(key as string)).toMatch(/product/i);
+  });
+
+  it("WebUSB / WebHID has a term entry", () => {
+    const key = entryFor(["WebUSB", "WebHID"]);
+    expect(key).toBeDefined();
+    expect(text(key as string)).toMatch(/browser/i);
   });
 });

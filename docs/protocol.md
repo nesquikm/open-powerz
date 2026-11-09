@@ -869,6 +869,9 @@ as a sink and ask a charger for a voltage. [doc] [static] [device]
   then `\n` as that text line only when nothing or a printable line follows;
   `scp:` / `tfcp:` then `\n` stay blocks (SCP's first data byte is its max
   power's low byte, which can be 0x0A). [inferred]
+- Whose protocols these are: FCP and SCP are Huawei's, AFC Samsung's, VFCP
+  vivo's, SFCP Spreadtrum's (now Unisoc) and TFCP Transsion's (Tecno, Infinix,
+  itel). [doc]
 - Other protocols: `entry qc|fcp|afc|sfcp|scp|vfcp|tfcp|ufcs` → `ok` then
   `ready` when the charger speaks it, followed by the protocol's capability
   block for SCP, VFCP, TFCP and UFCS. Requests: `qc 5V|9V|12V|20V`,

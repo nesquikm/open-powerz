@@ -136,7 +136,7 @@
     {#if pdConsole.cable}
       {@const c = pdConsole.cable}
       <dl class="facts">
-        <dt>VID</dt>
+        <dt><Term key="term.vidPid">VID</Term></dt>
         <dd>{hex(c.vid)}</dd>
         {#if c.pid !== null}
           <dt>PID</dt>

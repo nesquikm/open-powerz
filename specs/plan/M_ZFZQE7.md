@@ -42,6 +42,7 @@ codename: Full Tab
 | [CJ3QC9](../frs/CJ3QC9.md) | A settings change in the browser misses another program on the serial port (bug) | n/a |
 | [CJ3QCA](../frs/CJ3QCA.md) | A settings change in the browser reports a lost reply although it landed (bug) | n/a |
 | [CJ3QCB](../frs/CJ3QCB.md) | Refreshing the record list in the browser misses a new record (bug) | n/a |
+| [62VEDM](../frs/62VEDM.md) | Some abbreviations have no glossary popover (bug) | n/a |
 
 Build order: the table's order. Triggering goes last of the features: it moves the desktop trigger engine into a shared crate and needs a cross-origin-isolated page.
 

@@ -3,7 +3,7 @@
   import DesktopOnly from "./DesktopOnly.svelte";
   import InfoButton from "./InfoButton.svelte";
   import Term from "./Term.svelte";
-  import { onMount } from "svelte";
+  import { onMount, type Snippet } from "svelte";
   import type { TriggerLimits, TriggerOffer, TriggerProtocol } from "../backend";
   import {
     LEGACY_FIXED_VOLTS,
@@ -128,8 +128,10 @@
    *  the session is reopened). */
   const requestsOff = $derived(!panel.sessionOpen || panel.pending !== null || pressesOff);
 
+  /** PD not entered yet: the markup writes this reason, so PD can be a term. */
+  const NEEDS_PD = Symbol("needs-pd");
   /** Why Read cable is off, shown in the Cable card and as the button's description. */
-  const cableReason = $derived(
+  const cableReason = $derived<string | typeof NEEDS_PD | null>(
     noSession
       ? "Press Detect to read the cable."
       : panel.detecting
@@ -137,7 +139,7 @@
         : panel.chargerGone
           ? "No charger to ask: press Detect to read the cable."
           : !panel.pdEntered
-            ? "Reading the cable needs PD entered: press a USB PD offer first."
+            ? NEEDS_PD
             : null,
   );
 
@@ -214,8 +216,10 @@
     <Term key="term.avs">AVS</Term>{/if}
 {/snippet}
 
-{#snippet cableFact(id: string, label: string, value: string)}
-  <dt id="trigger-cable-{id}">{label}</dt>
+{#snippet cableFact(id: string, label: string | Snippet, value: string)}
+  <dt id="trigger-cable-{id}">
+    {#if typeof label === "string"}{label}{:else}{@render label()}{/if}
+  </dt>
   <dd aria-labelledby="trigger-cable-{id}">{value}</dd>
 {/snippet}
 
@@ -247,7 +251,7 @@
 
   <p class="reason">
     Keep the meter's output empty: detection lets the meter probe protocols, which can briefly raise
-    VBUS above 5 V on some chargers.
+    <Term key="term.vbus">VBUS</Term> above 5 V on some chargers.
   </p>
 
   {#if noSession}
@@ -296,7 +300,7 @@
         <p class="muted">The automatic list ended early (stalled or cut off).</p>
       {/if}
       {#if panel.detection.hint}
-        <p class="muted">{panel.detection.hint}</p>
+        <p class="muted" data-glossary-plain>{panel.detection.hint}</p>
       {/if}
     {:else}
       <p class="muted">Not detected yet.</p>
@@ -311,7 +315,10 @@
             >{:else if s.protocol === "ufcs"}<Term key="term.ufcs">{s.title}</Term
             >{:else if s.protocol === "afc" || s.protocol === "fcp" || s.protocol === "scp"}<Term
               key="term.afcFcpScp">{s.title}</Term
-            >{:else}{s.title}{/if}
+            >{:else if s.protocol === "vfcp"}<Term key="term.vfcp">{s.title}</Term
+            >{:else if s.protocol === "tfcp"}<Term key="term.tfcp">{s.title}</Term
+            >{:else if s.protocol === "sfcp"}<Term key="term.sfcp">{s.title}</Term
+            >{:else if s.protocol === "pd"}<Term key="term.pd">{s.title}</Term>{:else}{s.title}{/if}
         </h2>
         {#if s.state === "pending"}
           <p class="muted">Not listed yet.</p>
@@ -363,11 +370,11 @@
             </div>
           {/each}
           {#if s.section.settings}
-            <h3>PD emulation</h3>
+            <h3><Term key="term.pd">PD</Term> emulation</h3>
             <dl class="facts">
               <dt>Type</dt>
               <dd>{s.section.settings.pd_type}</dd>
-              <dt>E-marker</dt>
+              <dt><Term key="term.emarker">E-marker</Term></dt>
               <dd>{s.section.settings.emarker}</dd>
               <dt>Sink</dt>
               <dd>{s.section.settings.sink}</dd>
@@ -496,7 +503,7 @@
       <p class="muted">No request yet.</p>
     {/if}
     <p class="live">
-      <span id="trigger-live-vbus-label">Live VBUS</span>
+      <span id="trigger-live-vbus-label">Live <Term key="term.vbus">VBUS</Term></span>
       <output aria-labelledby="trigger-live-vbus-label"
         >{panel.vbusV === null ? "—" : `${panel.vbusV.toFixed(2)} V`}</output
       >
@@ -520,17 +527,23 @@
       >
     </div>
     {#if cableReason}
-      <p id="trigger-cable-reason" class="muted">{cableReason}</p>
+      <p id="trigger-cable-reason" class="muted">
+        {#if cableReason === NEEDS_PD}Reading the cable needs <Term key="term.pd">PD</Term> entered: press
+          a USB PD offer first.{:else}{cableReason}{/if}
+      </p>
     {/if}
     {#if panel.cableBusy}
       <p class="muted" aria-live="polite">Reading the cable…</p>
     {/if}
     {#if panel.cable}
       {@const c = panel.cable.cable}
+      {#snippet vidLabel()}<Term key="term.vidPid">VID</Term>{/snippet}
+      {#snippet pidLabel()}<Term key="term.vidPid">PID</Term>{/snippet}
+      {#snippet eprLabel()}<Term key="term.epr">EPR</Term>{/snippet}
       <dl class="facts">
         {@render cableFact("vendor", "Vendor", cableVendorText(c))}
-        {@render cableFact("vid", "VID", hexId(c.vid))}
-        {@render cableFact("pid", "PID", c.pid === null ? "—" : hexId(c.pid))}
+        {@render cableFact("vid", vidLabel, hexId(c.vid))}
+        {@render cableFact("pid", pidLabel, c.pid === null ? "—" : hexId(c.pid))}
         {@render cableFact("current", "Maximum current", amps(c.max_current_ma) ?? "—")}
         {@render cableFact(
           "voltage",
@@ -539,7 +552,7 @@
         )}
         {@render cableFact("speed", "USB speed", c.speed ?? "—")}
         {@render cableFact("type", "Type", c.active ? "Active" : "Passive")}
-        {@render cableFact("epr", "EPR", c.epr_capable ? "Yes" : "No")}
+        {@render cableFact("epr", eprLabel, c.epr_capable ? "Yes" : "No")}
       </dl>
       {#if panel.cable.source === "capture"}
         <p class="muted">Seen in the capture.</p>
@@ -675,6 +688,13 @@
   }
   .facts dd {
     margin: 0;
+  }
+  /* A term on a label row is a target of its own: keep it 24 px tall (WCAG 2.5.8),
+     so the VID and PID rows' terms do not crowd each other (FR 62VEDM). */
+  .facts dt :global(.term) {
+    display: inline-block;
+    min-block-size: 24px;
+    line-height: 24px;
   }
   .entries {
     margin: 0;

@@ -577,7 +577,11 @@
     <div role="rowgroup" class="head">
       <div role="row" class="row" aria-rowindex={1}>
         {#each COLUMNS as name (name)}
-          <div role="columnheader" class="cell">{name}</div>
+          <div role="columnheader" class="cell">
+            {#if name === "VBUS"}<Term key="term.vbus">VBUS</Term>{:else if name === "IBUS"}<Term
+                key="term.ibus">IBUS</Term
+              >{:else}{name}{/if}
+          </div>
         {/each}
       </div>
     </div>

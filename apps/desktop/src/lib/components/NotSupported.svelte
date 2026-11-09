@@ -5,12 +5,14 @@
    * runs here.
    */
   import { RELEASES_URL } from "../web/features";
+  import Term from "./Term.svelte";
 </script>
 
 <section class="not-supported" aria-labelledby="not-supported-title">
   <h2 id="not-supported-title">This browser is not supported</h2>
   <p>
-    Connecting a meter needs WebUSB or WebHID: open this page in Chrome or Edge, or get the
+    Connecting a meter needs <Term key="term.webUsbHid">WebUSB or WebHID</Term>: open this page in
+    Chrome or Edge, or get the
     <a href={RELEASES_URL} target="_blank" rel="noopener noreferrer">desktop app</a>.
   </p>
   <p>The demo meter still works here: pick it in the device list to try the app.</p>
