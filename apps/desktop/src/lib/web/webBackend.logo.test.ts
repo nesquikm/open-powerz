@@ -337,3 +337,33 @@ describe("over WebHID (AC-W8SHXB.7)", () => {
     await settle(backend.disconnect());
   });
 });
+
+describe("the logo read reports its chunks to the page (AC-CJ3QCD.2)", () => {
+  type ReadWithProgress = (
+    deviceId: string,
+    full: boolean,
+    onProgress: (p: LogoProgress) => void,
+  ) => Promise<LogoRead>;
+
+  it("cj3qcd: logoRead passes the read's chunk progress on, ending at the total", async () => {
+    const { backend, id } = await usbBackend();
+    await settle(backend.meterSettings());
+    await settle(
+      backend.logoUploadBuiltin(id, "surf-wordmark", () => {}),
+      30_000,
+    );
+    const seen: LogoProgress[] = [];
+    const read = (backend.logoRead as unknown as ReadWithProgress).bind(backend);
+    const result = await settle(
+      read(id, true, (p) => seen.push({ ...p })),
+      60_000,
+    );
+    expect(result.status).toBe("logo");
+    expect(seen.length).toBeGreaterThan(1);
+    const last = seen[seen.length - 1];
+    expect(last?.step).toBe("chunks");
+    expect(last?.total).toBeGreaterThan(2);
+    expect(last?.done).toBe(last?.total);
+    await settle(backend.disconnect());
+  });
+});

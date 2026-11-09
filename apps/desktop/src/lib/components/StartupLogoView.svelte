@@ -72,6 +72,12 @@
       : `Read-back ${p.done} of ${p.total}`;
   });
 
+  /** The running read's chunks done of the total, in words (FR CJ3QCD). */
+  const readProgressLabel = $derived.by(() => {
+    const p = logo.readProgress;
+    return p === null ? null : `Reading chunk ${p.done} of ${p.total}`;
+  });
+
   function bytes(n: number): string {
     return `${n.toLocaleString("en-US")} bytes`;
   }
@@ -206,6 +212,16 @@
       >Read</button
     >
   </div>
+  {#if logo.reading && readProgressLabel !== null}
+    <div class="progress" data-testid="logo-read-progress">
+      <progress
+        aria-label={readProgressLabel}
+        max={logo.readProgress?.total ?? 1}
+        value={logo.readProgress?.done ?? 0}
+      ></progress>
+      <p aria-live="polite">{readProgressLabel}</p>
+    </div>
+  {/if}
   {#if areaLabel !== null}
     {@const a = logo.area}
     <div class="area">

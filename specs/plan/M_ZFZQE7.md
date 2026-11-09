@@ -43,6 +43,7 @@ codename: Full Tab
 | [CJ3QCA](../frs/CJ3QCA.md) | A settings change in the browser reports a lost reply although it landed (bug) | n/a |
 | [CJ3QCB](../frs/CJ3QCB.md) | Refreshing the record list in the browser misses a new record (bug) | n/a |
 | [CJ3QCC](../frs/CJ3QCC.md) | The startup logo tab over HID gives the wrong reason (bug) | n/a |
+| [CJ3QCD](../frs/CJ3QCD.md) | Small stale and mismatched readings in the browser's meter views (bug) | n/a |
 | [62VEDM](../frs/62VEDM.md) | Some abbreviations have no glossary popover (bug) | n/a |
 
 Build order: the table's order. Triggering goes last of the features: it moves the desktop trigger engine into a shared crate and needs a cross-origin-isolated page.
@@ -76,6 +77,8 @@ Build order: the table's order. Triggering goes last of the features: it moves t
    verify: `bun run test` (driver and backend record suites).
 14. HID reason, model token and session reset on the logo tab — CJ3QCC
    verify: `bun run test` (logo panel suites).
+15. Logo read cleared and with progress, rate picker resync, record totals from the list — CJ3QCD
+   verify: `bun run test` (logo, records and rate picker suites).
 
 **Gate:** CLAUDE.md gating rule, with `bun run build:wasm` before `bun run test`.
 

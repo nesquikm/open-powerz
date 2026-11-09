@@ -432,7 +432,8 @@ describe("Read (AC-MEHQC0.7)", () => {
   it("can show the stored logo", async () => {
     const h = harness();
     await h.state.read(true);
-    expect(h.deps.read).toHaveBeenCalledWith(true);
+    // The full read also hears its chunk progress (AC-CJ3QCD.2).
+    expect(h.deps.read).toHaveBeenCalledWith(true, expect.any(Function));
     expect(h.state.area).toMatchObject({ status: "logo", width: 100, height: 60, image: "AAAA" });
   });
 

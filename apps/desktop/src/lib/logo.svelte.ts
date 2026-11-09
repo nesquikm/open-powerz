@@ -52,7 +52,9 @@ export interface LogoFailure {
 export interface LogoDeps {
   choose(): Promise<string | null>;
   preview(path: string, alpha: boolean): Promise<LogoPreview>;
-  read(full: boolean): Promise<LogoRead>;
+  /** `onProgress` hears the read's chunks done of the total, where the backend reports
+   * them (the browser, FR CJ3QCD). */
+  read(full: boolean, onProgress?: (p: LogoProgress) => void): Promise<LogoRead>;
   upload(path: string, alpha: boolean, onProgress: (p: LogoProgress) => void): Promise<LogoWritten>;
   /** The preview of a built-in logo, always transparent (FR 70X5YX); without it no
    * built-in can be picked. */
@@ -130,6 +132,8 @@ export class StartupLogoState {
   error = $state<UiError | null>(null);
   area = $state<LogoRead | null>(null);
   reading = $state(false);
+  /** The running read's chunks done of the total, while it reports them (FR CJ3QCD). */
+  readProgress = $state<LogoProgress | null>(null);
   /** The settings check of the `saving` phase (FR QG6RNY). */
   saveCheck = $state<SaveCheck>({ checks: 0, lastAt: null, error: null });
   /** The next settings check, while checking. */
@@ -310,6 +314,8 @@ export class StartupLogoState {
     const onProgress = (p: LogoProgress) => (this.progress = p);
     try {
       this.written = await this.#send(action, onProgress);
+      // The logo area changed: the earlier read no longer describes it (FR CJ3QCD).
+      this.area = null;
       this.#afterWritten(this.written);
     } catch (e) {
       this.error = e as UiError;
@@ -414,13 +420,18 @@ export class StartupLogoState {
   async read(full = false): Promise<void> {
     if (this.busy || this.reading) return;
     this.reading = true;
+    this.readProgress = null;
     this.error = null;
     try {
-      this.area = await this.#deps.read(full);
+      // Only the stored logo's read is long enough to report its chunks (FR CJ3QCD).
+      this.area = full
+        ? await this.#deps.read(full, (p) => (this.readProgress = p))
+        : await this.#deps.read(full);
     } catch (e) {
       this.error = e as UiError;
     } finally {
       this.reading = false;
+      this.readProgress = null;
     }
   }
   /** Turns the startup screen on for `seconds` through the settings write

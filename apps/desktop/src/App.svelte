@@ -279,14 +279,11 @@
   }
 
   /** The rate picker of a tile: acts on that meter only. */
-  function selectMeterRate(entry: MeterEntry, sps: number): void {
-    if (meterHeld) return;
+  function selectMeterRate(entry: MeterEntry, sps: number): Promise<void> {
+    if (meterHeld) return Promise.resolve();
     const refused = (err: unknown): void => raiseError(entry.listing.id, err);
-    if (entry.session === session) {
-      void selectRate(sps, refused);
-      return;
-    }
-    void commandsOf(entry.listing.id).setRate(sps).catch(refused);
+    if (entry.session === session) return selectRate(sps, refused);
+    return commandsOf(entry.listing.id).setRate(sps).catch(refused);
   }
 
   /** What the recording of a meter outside the full view needs from the app. */
@@ -555,7 +552,7 @@
     {
       choose: () => logoChoose(),
       preview: (path, alpha) => logoPreview(path, alpha),
-      read: (full) => logoRead(logoMeterId(), full),
+      read: (full, onProgress) => logoRead(logoMeterId(), full, onProgress),
       upload: (path, alpha, onProgress) => logoUpload(logoMeterId(), path, alpha, onProgress),
       previewBuiltin: (name) => logoPreviewBuiltin(name),
       uploadBuiltin: (name, onProgress) => logoUploadBuiltin(logoMeterId(), name, onProgress),
@@ -1360,7 +1357,7 @@
       aboutOpener = opener;
       aboutOpen = true;
     }}
-    onSelectRate={(sps) => void selectRate(sps)}
+    onSelectRate={(sps) => selectRate(sps)}
     {recording}
     {canRecord}
     onToggleRecording={toggleRecording}

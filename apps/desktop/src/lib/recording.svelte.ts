@@ -71,6 +71,21 @@ export function rateChange(
   return { kind: "set", sps };
 }
 
+/** A sample-rate picker's change: ask for the picked rate, wait for the answer, then put
+ * the select back on the rate in use. A one-way `value={rateSps}` does not reset when the
+ * rate stays the same, so a refused change would leave the picked rate on show. */
+export async function pickRate(
+  select: { value: string },
+  onSelectRate: (sps: number) => void | Promise<void>,
+  rateInUse: () => number,
+): Promise<void> {
+  try {
+    await onSelectRate(Number(select.value));
+  } finally {
+    select.value = String(rateInUse());
+  }
+}
+
 const pad = (n: number): string => String(n).padStart(2, "0");
 
 /** The file name the save dialog proposes: `powerz-YYYYMMDD-HHMMSS.csv` in local time, or

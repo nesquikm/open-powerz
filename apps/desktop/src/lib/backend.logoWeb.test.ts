@@ -66,7 +66,11 @@ describe("web routing of the logo calls (AC-W8SHXB.1, .5, .6)", () => {
     vi.stubEnv("VITE_BACKEND", "web");
     const b = await import("./backend");
     expect(await b.logoRead("usb:1", true)).toEqual({ status: "empty" });
-    expect(fakeWeb.logoRead).toHaveBeenCalledWith("usb:1", true);
+    expect(fakeWeb.logoRead).toHaveBeenCalledWith("usb:1", true, undefined);
+    // FR CJ3QCD (AC .2): the browser's read hands its chunk progress to the caller.
+    const onProgress = () => {};
+    await b.logoRead("usb:1", true, onProgress);
+    expect(fakeWeb.logoRead).toHaveBeenLastCalledWith("usb:1", true, onProgress);
     expect(await b.logoSettingsCheck("usb:1")).toEqual({
       settings: "saved",
       startup_duration: "3 s",

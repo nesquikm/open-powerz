@@ -538,7 +538,8 @@ function logoCommands(sessions: Sessions, files: LogoFiles) {
       return preview((w) => w.logoPreview(file.bytes, file.isBin, alpha));
     },
     logoPreviewBuiltin: async (name: string) => preview((w) => w.logoPreviewBuiltin(name)),
-    logoRead: async (deviceId: string, full: boolean) => driver(deviceId).logoRead(full),
+    logoRead: async (deviceId: string, full: boolean, onProgress?: (p: LogoProgress) => void) =>
+      driver(deviceId).logoRead(full, onProgress),
     logoUpload: async (
       deviceId: string,
       path: string,

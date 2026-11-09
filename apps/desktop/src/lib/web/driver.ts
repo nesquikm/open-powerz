@@ -983,8 +983,8 @@ export class MeterDriver {
 
   /** What the logo area holds (a level-1 auth if needed, then memory reads inside the
    * logo window only, paced); with `full`, the stored picture too. */
-  logoRead(full: boolean): Promise<LogoRead> {
-    return this.meterRead(LOGO, () => this.logo.read(full));
+  logoRead(full: boolean, onProgress?: (p: LogoProgress) => void): Promise<LogoRead> {
+    return this.meterRead(LOGO, () => this.logo.read(full, onProgress));
   }
 
   /** One read-only check of the settings against the last logo write's calibration

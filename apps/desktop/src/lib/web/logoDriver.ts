@@ -135,17 +135,27 @@ export class LogoDriver {
 
   /** What the logo area holds (a level-1 auth if needed, then memory reads inside the
    * logo window only, paced); with `full`, the stored picture too. */
-  async read(full: boolean): Promise<LogoRead> {
+  async read(full: boolean, onProgress?: (p: LogoProgress) => void): Promise<LogoRead> {
     const l = this.link;
     await l.signIn();
     const reader = new l.wasm.LogoReader(full);
+    // The reads done of the total known so far: each plan adds its reads (FR CJ3QCD).
+    const gated = onProgress ? logoProgressGate(onProgress) : null;
+    let done = 0;
+    let last: LogoProgress | null = null;
     try {
       for (let plan = reader.readPlan(); plan.length > 0; plan = reader.readPlan()) {
+        const total = done + plan.length;
         for (const c of plan) {
           const request = reader.readRequest(l.nextId(), c.addr, c.len);
           reader.takeRead(c.addr, await this.pacedRead(request, c));
+          done += 1;
+          last = { step: "chunks", done, total };
+          gated?.(last);
         }
       }
+      // The gate may hold back the last message; the read always ends at its total.
+      if (last) onProgress?.(last);
       return reader.result();
     } finally {
       reader.free();

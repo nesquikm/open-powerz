@@ -783,3 +783,37 @@ describe("over HID (AC-W8SHXB.7)", () => {
     await settle(driver.disconnect());
   });
 });
+
+describe("the logo read reports its chunks (AC-CJ3QCD.2)", () => {
+  type ReadWithProgress = (
+    full: boolean,
+    onProgress: (p: LogoProgress) => void,
+  ) => Promise<LogoRead>;
+
+  it("cj3qcd: a full read reports every memory read done of the total, ending at the total", async () => {
+    const { driver, rec } = await start();
+    await settle(driver.logoUpload(UPLOAD, () => {}));
+    const from = rec.log.length;
+    const seen: LogoProgress[] = [];
+    const read = (driver.logoRead as unknown as ReadWithProgress).bind(driver);
+    const result = await settle(read(true, (p) => seen.push({ ...p })));
+    expect(result.status).toBe("logo");
+    const reads = noPolls(rec.names(from)).filter((n) => n.startsWith("logo_read:"));
+    expect(reads.length).toBeGreaterThan(2);
+    expect(seen.length).toBeGreaterThan(1);
+    for (const p of seen) {
+      expect(p.step).toBe("chunks");
+      expect(p.done).toBeGreaterThan(0);
+      expect(p.done).toBeLessThanOrEqual(p.total);
+    }
+    for (let i = 1; i < seen.length; i++) {
+      expect(seen[i]?.done ?? 0, `progress ${i}`).toBeGreaterThanOrEqual(seen[i - 1]?.done ?? 0);
+    }
+    expect(seen[seen.length - 1]).toEqual({
+      step: "chunks",
+      done: reads.length,
+      total: reads.length,
+    });
+    await settle(driver.disconnect());
+  });
+});

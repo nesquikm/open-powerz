@@ -1119,9 +1119,14 @@ export async function logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPre
 }
 
 /** What meter `deviceId`'s logo area holds (FR MEHQC0, AC .7); with `full`, the stored
- * image too. Only memory reads go out. */
-export async function logoRead(deviceId: string, full: boolean): Promise<LogoRead> {
-  if (web) return web.then((b) => b.logoRead(deviceId, full));
+ * image too. Only memory reads go out. In the browser, `onProgress` hears the read's
+ * memory reads done of the total (FR CJ3QCD). */
+export async function logoRead(
+  deviceId: string,
+  full: boolean,
+  onProgress?: (progress: LogoProgress) => void,
+): Promise<LogoRead> {
+  if (web) return web.then((b) => b.logoRead(deviceId, full, onProgress));
   if (mock) return mock.logoRead(deviceId, full);
   return invoke<LogoRead>("logo_read", { deviceId, full });
 }
@@ -1773,7 +1778,11 @@ export interface WebBackendApi extends MeterCommands {
   logoChoose(): Promise<string | null>;
   logoPreview(path: string, alpha: boolean): Promise<LogoPreview>;
   logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPreview>;
-  logoRead(deviceId: string, full: boolean): Promise<LogoRead>;
+  logoRead(
+    deviceId: string,
+    full: boolean,
+    onProgress?: (progress: LogoProgress) => void,
+  ): Promise<LogoRead>;
   logoSettingsCheck(deviceId: string): Promise<LogoSettingsCheck>;
   /** Desktop-only meter writes (AC-QFTCX0.6): each rejects without sending anything. */
   firmwareFlash(
