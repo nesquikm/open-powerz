@@ -11,6 +11,7 @@
   import { chooseDeviceMenu, deviceMenuActions } from "../deviceMenu";
   import { deviceOptionLabel } from "../format";
   import { WEB_FEATURES } from "../web/features";
+  import { detectSupport, type SupportProbe } from "../web/support";
   import type { Session } from "../session.svelte";
 
   let { session, hideSerial }: { session: Session; hideSerial: boolean } = $props();
@@ -29,10 +30,17 @@
     features === WEB_FEATURES ? deviceMenuActions(session, offerHid) : [],
   );
 
+  /** A browser without WebUSB and WebHID cannot connect, so no hint points at the
+   * connect item there; the not-supported box explains it (AC-09R2FM.1). */
+  const canConnect =
+    typeof navigator !== "undefined" && detectSupport(navigator as SupportProbe) === "supported";
+
   /** Only the demo meter is listed: a hint points to the menu's connect item and runs
    * the same action (AC-AYR4W6.4). Undefined when no hint is shown. */
   const hintAction = $derived(
-    session.devices.every((d) => d.demo_scenario !== null) ? menuActions[0] : undefined,
+    canConnect && session.devices.every((d) => d.demo_scenario !== null)
+      ? menuActions[0]
+      : undefined,
   );
 
   /** The selected entry's full label, as a tooltip in case the select is cut short. */
