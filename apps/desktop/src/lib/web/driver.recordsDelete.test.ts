@@ -15,6 +15,10 @@
  * - AC-W8SHXA.6: no SET_DATA but the record-table write is sent; a HID session and a
  *   session whose sign-in failed refuse the delete.
  *
+ * FR CJ3QCB: both of the delete's lists start with a fresh sign-in, and the delete keeps
+ * working on the list it read, also against a meter that answers the list from its state
+ * at the last sign-in (AC-CJ3QCB.1, .3).
+ *
  * Runs against the wasm demo meter on Vitest's fake clock.
  */
 
@@ -220,10 +224,13 @@ describe("one record (AC-W8SHXA.1, .2, .3, .5)", () => {
     const result = await settle(driver.deleteRecords(2, "PD_9V_TEST", save));
 
     const names = noPolls(rec.names(from));
+    // AC-CJ3QCB.1: each of the two lists starts with a fresh sign-in.
     expect(names).toEqual([
+      "auth",
       "get_data:record_list",
       ...Array<FrameName>(8).fill("record_read:2"),
       "record_table_write",
+      "auth",
       "get_data:record_list",
     ]);
 
@@ -288,7 +295,7 @@ describe("one record (AC-W8SHXA.1, .2, .3, .5)", () => {
     const from = rec.log.length;
     const { saved, save } = sink(rec);
     const result = await settle(driver.deleteRecords("all", "all", save));
-    expect(noPolls(rec.names(from))).toEqual(["get_data:record_list"]);
+    expect(noPolls(rec.names(from))).toEqual(["auth", "get_data:record_list"]);
     expect(saved).toEqual([]);
     expect(result).toEqual({ records: [], backup_dir: BACKUP_DIR, backups: [] });
     await settle(driver.disconnect());
@@ -310,7 +317,7 @@ describe("the typed confirmation (AC-W8SHXA.1)", () => {
       const { saved, save } = sink(rec);
       const error = await rejection(driver.deleteRecords(target, confirm, save));
       expect(error).toMatchObject({ kind: "usage", message: CONFIRM_MISMATCH });
-      expect(noPolls(rec.names(from))).toEqual(["get_data:record_list"]);
+      expect(noPolls(rec.names(from))).toEqual(["auth", "get_data:record_list"]);
       expect(saved).toEqual([]);
       expect((await settle(driver.listRecords())).records.map((r) => r.name)).toEqual(DEMO);
       await settle(driver.disconnect());
@@ -323,7 +330,7 @@ describe("the typed confirmation (AC-W8SHXA.1)", () => {
       const from = rec.log.length;
       const error = await rejection(driver.deleteRecords(index, "PHONE_5V", () => {}));
       expect(error).toMatchObject({ kind: "usage", message: NOT_LISTED });
-      expect(noPolls(rec.names(from))).toEqual(["get_data:record_list"]);
+      expect(noPolls(rec.names(from))).toEqual(["auth", "get_data:record_list"]);
     }
     await settle(driver.disconnect());
   });
@@ -349,7 +356,7 @@ describe("refusals before the backup (AC-W8SHXA.3)", () => {
     const { saved, save } = sink(rec);
     const error = await rejection(driver.deleteRecords(1, "PHONE_5V", save));
     expect(error).toMatchObject(TOO_LONG);
-    expect(noPolls(rec.names(from))).toEqual(["get_data:record_list"]);
+    expect(noPolls(rec.names(from))).toEqual(["auth", "get_data:record_list"]);
     expect(saved).toEqual([]);
     await settle(driver.disconnect());
   });
@@ -492,6 +499,76 @@ describe("only the record-table write, and only when signed in (AC-W8SHXA.6)", (
     expect(names).not.toContain("record_table_write");
     expect(recordReads(names)).toEqual([]);
     expect(saved).toEqual([]);
+    await settle(driver.disconnect());
+  });
+});
+
+/** A meter that answers RECORD_LIST from its state at the last sign-in (the inferred
+ * device behaviour behind FR CJ3QCB): the first list after a sign-in is the real one,
+ * later lists replay it until the next sign-in. */
+function listFromLastSignIn(rec: Recorder): void {
+  let snapshot: Uint8Array | null = null;
+  rec.rewrite = (frame, reply, name) => {
+    if (name === "auth") {
+      snapshot = null;
+      return null;
+    }
+    if (name !== "get_data:record_list") return null;
+    if (!snapshot) {
+      snapshot = reply.slice();
+      return null;
+    }
+    const replay = snapshot.slice();
+    replay[1] = frame[1] ?? 0;
+    return replay;
+  };
+}
+
+describe("a fresh sign-in before every list (FR CJ3QCB)", () => {
+  it("AC-CJ3QCB.1: a list after a change since the last list shows the change", async () => {
+    const { rec, driver, errors } = await start();
+    listFromLastSignIn(rec);
+    expect((await settle(driver.listRecords())).records.map((r) => r.name)).toEqual(DEMO);
+    const result = await settle(driver.deleteRecords(2, "PD_9V_TEST", () => {}));
+    expect(result.records.map((r) => r.name)).toEqual(["PHONE_5V", "LAPTOP_20V"]);
+    expect((await settle(driver.listRecords())).records.map((r) => r.name)).toEqual([
+      "PHONE_5V",
+      "LAPTOP_20V",
+    ]);
+    expect(errors).toEqual([]);
+    await settle(driver.disconnect());
+  });
+
+  it("AC-CJ3QCB.3: delete-all works on the list it read and backs up every record", async () => {
+    const { rec, driver } = await start();
+    listFromLastSignIn(rec);
+    await settle(driver.listRecords());
+    const from = rec.log.length;
+    const { saved, save } = sink(rec);
+    const result = await settle(driver.deleteRecords("all", "all", save));
+    const names = noPolls(rec.names(from));
+    expect(names.slice(0, 2)).toEqual(["auth", "get_data:record_list"]);
+    expect(names.slice(-3)).toEqual(["record_table_write", "auth", "get_data:record_list"]);
+    expect(saved.map((s) => s.name)).toEqual([
+      "01_PHONE_5V.csv",
+      "02_PD_9V_TEST.csv",
+      "03_LAPTOP_20V.csv",
+    ]);
+    expect(result.records).toEqual([]);
+    await settle(driver.disconnect());
+  });
+
+  it("AC-CJ3QCB.2: a refused sign-in on a signed-in session refuses the delete untouched", async () => {
+    const { rec, driver } = await start();
+    await settle(driver.listRecords());
+    rec.spoilAuth = true;
+    const from = rec.log.length;
+    const { saved, save } = sink(rec);
+    expect(await rejection(driver.deleteRecords(1, "PHONE_5V", save))).toEqual(SIGN_IN);
+    expect(noPolls(rec.names(from))).toEqual(["auth"]);
+    expect(saved).toEqual([]);
+    rec.spoilAuth = false;
+    expect((await settle(driver.listRecords())).records.map((r) => r.name)).toEqual(DEMO);
     await settle(driver.disconnect());
   });
 });

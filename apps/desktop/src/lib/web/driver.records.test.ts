@@ -14,6 +14,10 @@
  *   session whose sign-in failed refuses the list and the download with the desktop
  *   reason, while the settings read still works.
  *
+ * FR CJ3QCB: every record list starts with a fresh level-1 sign-in (AC-CJ3QCB.1); a
+ * refused sign-in fails it with the sign-in message (AC-CJ3QCB.2); the download keeps
+ * working on the list it read (AC-CJ3QCB.3).
+ *
  * Runs against the wasm demo meter on Vitest's fake clock.
  */
 
@@ -193,7 +197,8 @@ describe("record list (AC-W8SHX8.2)", () => {
     expect(driver.authLevel).toBeGreaterThanOrEqual(1);
     const from = rec.log.length;
     const list = await settle(driver.listRecords());
-    expect(noPolls(rec.names(from))).toEqual(["get_data:record_list"]);
+    // AC-CJ3QCB.1: a fresh sign-in before the list, also when the session holds one.
+    expect(noPolls(rec.names(from))).toEqual(["auth", "get_data:record_list"]);
     expect(list.records.map((r) => [r.index, r.name, r.interval_s, r.points])).toEqual([
       [1, "PHONE_5V", 1, 300],
       [2, "PD_9V_TEST", 2, 120],
@@ -239,7 +244,10 @@ describe("record download (AC-W8SHX8.3, AC-W8SHX8.4)", () => {
     const reads = names.filter((n) => n.startsWith("record_read:") || n.startsWith("memory_read:"));
     // PD_9V_TEST: 120 points × 16 bytes = 1920 bytes = 8 reads of ≤ 256 bytes.
     expect(reads).toEqual(Array(8).fill("record_read:2"));
-    expect(names.every((n) => n === "record_read:2" || n === "get_data:record_list")).toBe(true);
+    expect(names.slice(0, 2)).toEqual(["auth", "get_data:record_list"]);
+    expect(
+      names.every((n) => n === "record_read:2" || n === "get_data:record_list" || n === "auth"),
+    ).toBe(true);
     expect(record.index).toBe(2);
     expect(record.name).toBe("PD_9V_TEST");
     expect(record.interval_s).toBe(2);
@@ -290,10 +298,8 @@ describe("record download (AC-W8SHX8.3, AC-W8SHX8.4)", () => {
       const error = await rejection(driver.downloadRecord(index));
       expect(error).toMatchObject({ kind: "usage", message: "That record is not on the meter." });
       const names = noPolls(rec.names(from));
-      expect(
-        names.filter((n) => n !== "get_data:record_list"),
-        `index ${index}`,
-      ).toEqual([]);
+      // AC-CJ3QCB.1: the download's list starts with a fresh sign-in; no memory read follows.
+      expect(names, `index ${index}`).toEqual(["auth", "get_data:record_list"]);
     }
     await settle(driver.disconnect());
   });
@@ -438,6 +444,64 @@ describe("hardening (FR W8SHX8)", () => {
     const error = await rejection(driver.downloadRecord(1));
     expect(error.kind).toBe("protocol");
     expect(error.message).toMatch(/ended early/);
+    await settle(driver.disconnect());
+  });
+});
+
+describe("a fresh sign-in before every list (FR CJ3QCB)", () => {
+  it("AC-CJ3QCB.1: each list on a signed-in session sends the sign-in, then the list", async () => {
+    const { rec, driver, errors } = await start();
+    expect(driver.authLevel).toBeGreaterThanOrEqual(1);
+    for (let i = 0; i < 3; i++) {
+      const from = rec.log.length;
+      const list = await settle(driver.listRecords());
+      expect(noPolls(rec.names(from)), `list ${i + 1}`).toEqual(["auth", "get_data:record_list"]);
+      expect(list.records.map((r) => r.name)).toEqual(["PHONE_5V", "PD_9V_TEST", "LAPTOP_20V"]);
+      expect(driver.authLevel).toBeGreaterThanOrEqual(1);
+    }
+    expect(errors).toEqual([]);
+    await settle(driver.disconnect());
+  });
+
+  it("AC-CJ3QCB.2: a refused sign-in on a signed-in session fails the list, sending no list", async () => {
+    const { rec, driver, errors } = await start();
+    await settle(driver.listRecords());
+    rec.spoilAuth = true;
+    let from = rec.log.length;
+    expect(await rejection(driver.listRecords())).toEqual(SIGN_IN);
+    let names = noPolls(rec.names(from));
+    expect(names).toEqual(["auth"]);
+
+    from = rec.log.length;
+    expect(await rejection(driver.downloadRecord(1))).toEqual(SIGN_IN);
+    names = noPolls(rec.names(from));
+    expect(names).not.toContain("get_data:record_list");
+    expect(names.some((n) => n.startsWith("record_read:"))).toBe(false);
+
+    // The meter signs in again: the list works once more.
+    rec.spoilAuth = false;
+    from = rec.log.length;
+    const list = await settle(driver.listRecords());
+    expect(noPolls(rec.names(from))).toEqual(["auth", "get_data:record_list"]);
+    expect(list.records).toHaveLength(3);
+    expect(errors).toEqual([]);
+    await settle(driver.disconnect());
+  });
+
+  it("AC-CJ3QCB.3: a download signs in, lists, and reads that list's window", async () => {
+    const { rec, driver } = await start();
+    await settle(driver.listRecords());
+    const from = rec.log.length;
+    const record = await settle(driver.downloadRecord(3));
+    const names = noPolls(rec.names(from));
+    // LAPTOP_20V: 60 points × 16 bytes = 960 bytes = 4 reads.
+    expect(names).toEqual([
+      "auth",
+      "get_data:record_list",
+      ...Array<FrameName>(4).fill("record_read:3"),
+    ]);
+    expect(record).toMatchObject({ index: 3, name: "LAPTOP_20V", interval_s: 5 });
+    expect(record.samples).toHaveLength(60);
     await settle(driver.disconnect());
   });
 });

@@ -41,6 +41,7 @@ codename: Full Tab
 | [K4DWCF](../frs/K4DWCF.md) | A confirmed request in the browser never reaches the trigger engine (bug) | n/a |
 | [CJ3QC9](../frs/CJ3QC9.md) | A settings change in the browser misses another program on the serial port (bug) | n/a |
 | [CJ3QCA](../frs/CJ3QCA.md) | A settings change in the browser reports a lost reply although it landed (bug) | n/a |
+| [CJ3QCB](../frs/CJ3QCB.md) | Refreshing the record list in the browser misses a new record (bug) | n/a |
 
 Build order: the table's order. Triggering goes last of the features: it moves the desktop trigger engine into a shared crate and needs a cross-origin-isolated page.
 
@@ -69,6 +70,8 @@ Build order: the table's order. Triggering goes last of the features: it moves t
    verify: `bun run test` (settings pipe, driver and backend settings suites).
 12. Skip earlier replies on the settings pipe, read-back decides — CJ3QCA
    verify: `bun run test` (driver settings suite).
+13. Fresh sign-in before every record list — CJ3QCB
+   verify: `bun run test` (driver and backend record suites).
 
 **Gate:** CLAUDE.md gating rule, with `bun run build:wasm` before `bun run test`.
 

@@ -824,9 +824,11 @@ export class MeterDriver {
     }
   }
 
-  /** A level-1 auth unless the session already holds it, while holding the link. */
-  private async signInLocked(): Promise<void> {
-    if (this.authLevel < 1 && !(this.uidBlock && (await this.authenticate(this.uidBlock)))) {
+  /** A level-1 auth unless the session already holds it, while holding the link;
+   * `fresh` signs in again even then (FR CJ3QCB: the record list). */
+  private async signInLocked(fresh = false): Promise<void> {
+    if (!fresh && this.authLevel >= 1) return;
+    if (!(this.uidBlock && (await this.authenticate(this.uidBlock)))) {
       throw {
         kind: "protocol",
         message: "The meter did not accept the app's sign-in.",
@@ -838,7 +840,8 @@ export class MeterDriver {
   /** The record list, read while holding the link; the book keeps its windows. */
   private async listLocked(): Promise<{ book: RecordBookLike; list: RecordList }> {
     const w = this.o.wasm;
-    await this.signInLocked();
+    // AC-CJ3QCB.1: the meter answers the list from its last sign-in, so sign in afresh.
+    await this.signInLocked(true);
     // The session may have ended during the sign-in: make no book it would not free.
     if (this.ended) throw disconnectedError();
     const book = (this.book ??= new w.RecordBook());

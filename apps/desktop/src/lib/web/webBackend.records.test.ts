@@ -10,6 +10,8 @@
  * - AC-W8SHX8.7: the session answers them itself (SESSION_COMMANDS), not the
  *   desktop-only refusal.
  *
+ * - AC-CJ3QCB.1: every `recordsList` over WebUSB sends a fresh sign-in before the list.
+ *
  * Runs on Vitest's fake clock against fake devices answered by the wasm demo meter.
  */
 
@@ -176,6 +178,23 @@ describe("over WebHID (AC-W8SHX8.6)", () => {
       expect(error.message).toMatch(/ is not available over HID: it gives basic readings only\.$/);
     }
     expect(hidSentNames(w, dev).filter((n) => n !== "get_data:adc")).toEqual([]);
+    await settle(backend.disconnect());
+  });
+});
+
+describe("a fresh sign-in before every list (AC-CJ3QCB.1)", () => {
+  it("each recordsList sends the sign-in, then the list", async () => {
+    const { backend, dev } = await usbBackend();
+    const SAFE_POLLS = ["get_data:adc", "get_data:adc_queue"];
+    for (let i = 0; i < 2; i++) {
+      const from = sentNames(w, dev).length;
+      const list = await settle(backend.recordsList());
+      expect(list.records.map((r) => r.name)).toEqual(DEMO_NAMES);
+      const names = sentNames(w, dev)
+        .slice(from)
+        .filter((n) => !SAFE_POLLS.includes(n));
+      expect(names, `list ${i + 1}`).toEqual(["auth", "get_data:record_list"]);
+    }
     await settle(backend.disconnect());
   });
 });
