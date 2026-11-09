@@ -4,6 +4,14 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.1] — 2026-11-09 — "Fine Print"
+
+### Fixed
+- Web edition over HID: the disabled rate picker says the rate is not available over HID instead of blaming authentication (09R2FK)
+- Web edition: no "Pick “Connect a meter…”" hint in a browser without WebUSB and WebHID, such as Safari, where the not-supported box explains it (09R2FM)
+
+Total test count at release: 6531 tests, 0 failures, 0 errors.
+
 ## [0.11.0] — 2026-11-09 — "Open Tab"
 
 ### Added

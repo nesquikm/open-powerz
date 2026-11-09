@@ -7,6 +7,7 @@ kickoff_branch: fix/web-polish
 frozen_at: null
 migration: none
 codename: Fine Print
+shipped_in: v0.11.1
 ---
 
 # Implementation Plan
