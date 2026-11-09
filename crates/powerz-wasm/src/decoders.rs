@@ -23,7 +23,7 @@ const QUEUE_RECORD_LEN: usize = 20;
 /// Length of the plaintext memory-read confirmation frame.
 const MEMORY_CONFIRMATION_LEN: usize = 20;
 
-fn malformed(message: impl Into<String>) -> BindError {
+pub(crate) fn malformed(message: impl Into<String>) -> BindError {
     BindError::new("malformed", message)
 }
 
@@ -39,7 +39,7 @@ impl From<DecodeError> for BindError {
     }
 }
 
-fn to_js<T: Serialize>(value: &T) -> Result<JsValue, BindError> {
+pub(crate) fn to_js<T: Serialize>(value: &T) -> Result<JsValue, BindError> {
     serde_wasm_bindgen::to_value(value).map_err(|e| BindError::new("internal", e.to_string()))
 }
 
@@ -52,7 +52,10 @@ fn unexpected(reply: Reply, what: &str) -> BindError {
 }
 
 /// The sections of a PUT_DATA reply; a bare header has none.
-fn put_data_sections<'a>(reply: &'a [u8], what: &str) -> Result<Vec<Section<'a>>, BindError> {
+pub(crate) fn put_data_sections<'a>(
+    reply: &'a [u8],
+    what: &str,
+) -> Result<Vec<Section<'a>>, BindError> {
     match frame::classify_reply(reply)? {
         Reply::PutData(_) => Ok(frame::parse_put_data(reply)?),
         other => Err(unexpected(other, what)),

@@ -45,7 +45,76 @@ export const READ_MASKS = {
   settings: 0x008,
   pd_packet: 0x010,
   pd_status: 0x020,
+  record_list: 0x200,
 } as const;
+
+/** The FR W8SHX8 wasm exports the tests use (settings and offline records). */
+export interface RecordWasm {
+  settingsRequest(id: number): Uint8Array;
+  decodeSettings(reply: Uint8Array): { fields: unknown[]; warnings: string[] };
+  RecordBook: new () => RecordBookLike;
+}
+
+export interface RecordBookLike {
+  listRequest(id: number): Uint8Array;
+  decodeList(reply: Uint8Array): { records: { index: number; name: string; points: number }[] };
+  chunks(index: number): { addr: number; len: number }[];
+  chunkRequest(id: number, addr: number, len: number): Uint8Array;
+  decodeRecord(index: number, data: Uint8Array): unknown;
+  free(): void;
+}
+
+/** The FR W8SHX8 exports of `w`. */
+export function recordWasm(w: PowerzWasm): RecordWasm {
+  return w as unknown as RecordWasm;
+}
+
+/** The demo meter's RecordList reply, read after CONNECT and a level-1 auth. */
+export function demoRecordListReply(w: PowerzWasm): Uint8Array {
+  const rw = recordWasm(w);
+  const m = new w.DemoMeter("idle");
+  try {
+    w.decodeAccept(m.transact(w.connectRequest(1)));
+    const [addr, len] = SAFE_BLOCKS[3] as readonly [number, number];
+    const uid = w.decodeMemoryRead(m.transact(w.memoryReadRequest(2, addr, len)), addr, len);
+    const now = 1_790_000_000_000n;
+    const random = 0x0123_4567_89ab_cdefn;
+    const level = w.decodeAuthReply(
+      m.transact(w.authRequest(3, 1, uid, now, random)),
+      uid,
+      now,
+      random,
+    );
+    if (level < 1) throw new Error("the demo meter refused the level-1 auth");
+    const book = new rw.RecordBook();
+    try {
+      return m.transact(book.listRequest(4));
+    } finally {
+      book.free();
+    }
+  } finally {
+    (m as unknown as { free(): void }).free();
+  }
+}
+
+/** The demo meter's record reads: each listed record's chunks, by 1-based index. */
+let demoChunks: { w: PowerzWasm; book: RecordBookLike; chunks: [number, number, number][] } | null =
+  null;
+
+function recordChunks(w: PowerzWasm): typeof demoChunks {
+  if (demoChunks?.w === w) return demoChunks;
+  const rw = recordWasm(w);
+  if (typeof rw.RecordBook !== "function") return null;
+  const book = new rw.RecordBook();
+  const list = book.decodeList(demoRecordListReply(w));
+  const chunks: [number, number, number][] = [];
+  for (const r of list.records) {
+    if (r.points === 0) continue;
+    for (const c of book.chunks(r.index)) chunks.push([r.index, c.addr, c.len]);
+  }
+  demoChunks = { w, book, chunks };
+  return demoChunks;
+}
 
 export type FrameName =
   | "connect"
@@ -58,6 +127,7 @@ export type FrameName =
   | "pd_poll"
   | "pd_poll_adc"
   | `memory_read:${number}`
+  | `record_read:${number}`
   | "unknown";
 
 function same(a: Uint8Array, b: Uint8Array): boolean {
@@ -82,6 +152,13 @@ export function classify(w: PowerzWasm, frame: Uint8Array): FrameName {
   for (const [addr, len] of SAFE_BLOCKS) {
     if (same(frame, w.memoryReadRequest(id, addr, len))) return `memory_read:${addr}`;
   }
+  // A read of a demo record's own window (FR W8SHX8), by the record's index.
+  if (frame[0] === 0x44) {
+    const demo = recordChunks(w);
+    for (const [index, addr, len] of demo ? demo.chunks : []) {
+      if (demo && same(frame, demo.book.chunkRequest(id, addr, len))) return `record_read:${index}`;
+    }
+  }
   // Auth carries time and random, so only its type byte and length are fixed.
   const authShape = w.authRequest(0, 1, new Uint8Array(12), 0n, 0n);
   if (frame.length === authShape.length && frame[0] === authShape[0]) return "auth";
@@ -96,5 +173,17 @@ describe("test wasm helpers", () => {
     expect(classify(w, w.startQueueRequest(3, 2))).toBe("start_queue:2");
     expect(classify(w, w.memoryReadRequest(4, 0x4001_0450, 12))).toBe(`memory_read:${0x4001_0450}`);
     expect(classify(w, new Uint8Array([0x48, 1, 0, 0]))).toBe("unknown");
+  });
+
+  it("classifies the record list and each demo record's chunk reads (FR W8SHX8)", async () => {
+    const w = await loadWasm();
+    expect(classify(w, w.getDataRequest(5, READ_MASKS.record_list))).toBe("get_data:record_list");
+    const book = new (recordWasm(w).RecordBook)();
+    book.decodeList(demoRecordListReply(w));
+    const [first] = book.chunks(2);
+    expect(first).toBeDefined();
+    if (first)
+      expect(classify(w, book.chunkRequest(6, first.addr, first.len))).toBe("record_read:2");
+    book.free();
   });
 });

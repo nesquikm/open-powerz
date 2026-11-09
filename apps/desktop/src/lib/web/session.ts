@@ -14,10 +14,13 @@ import type {
   ExportProgress,
   ExportResult,
   MeterCommands,
+  MeterSettings,
+  OfflineRecord,
   PdCleared,
   PdDetails,
   PdRow,
   RangeStats,
+  RecordList,
   RecordingSummary,
   RunProgress,
   RunProgressQuery,
@@ -101,6 +104,9 @@ export const SESSION_COMMANDS = [
   "resumeRecording",
   "saveRecordingAs",
   "exportSession",
+  "meterSettings",
+  "recordsList",
+  "recordDownload",
 ] as const satisfies readonly (keyof MeterCommands)[];
 
 /** A live session: its driver, history, stats and event sink. */
@@ -445,6 +451,9 @@ export class WebSession {
       saveRecordingAs: (path: string) => this.saveRecordingAs(path),
       exportSession: (suggestedName: string, onProgress: (progress: ExportProgress) => void) =>
         this.exportSession(suggestedName, onProgress),
+      meterSettings: (): Promise<MeterSettings> => this.driver.readSettings(),
+      recordsList: (): Promise<RecordList> => this.driver.listRecords(),
+      recordDownload: (index: number): Promise<OfflineRecord> => this.driver.downloadRecord(index),
     };
   }
 }

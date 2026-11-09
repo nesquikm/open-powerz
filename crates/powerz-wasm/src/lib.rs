@@ -6,6 +6,7 @@ mod builders;
 mod decoders;
 mod demo;
 mod error;
+mod meter_reads;
 
 pub use builders::{
     auth_request, connect_request, get_data_request, memory_read_request, pd_poll_request,
@@ -19,3 +20,7 @@ pub use decoders::{
 };
 pub use demo::DemoMeter;
 pub use error::BindError;
+pub use meter_reads::{
+    Chunk, OfflineRecordView, RecordBook, RecordEntryView, RecordListView, RecordSampleView,
+    SettingsView, decode_settings, decode_settings_js, settings_request,
+};

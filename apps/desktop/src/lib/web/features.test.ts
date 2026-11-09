@@ -7,6 +7,8 @@
  *   the releases page link.
  * - AC-QFTCX0.7: settings read, the offline record list and record download are
  *   capability flags too (on only when they use the safe read set).
+ * - AC-W8SHX8.7: the web build switches the settings read, the record list and the
+ *   record download on; firmware update and file reveal stay off.
  * - The desktop (Tauri and mock) builds have every feature on.
  */
 
@@ -46,6 +48,15 @@ describe("feature map (AC-QFTCX0.6, AC-QFTCX0.7)", () => {
 
   it("has a boolean flag for each meter read", () => {
     for (const key of READ_FEATURES) expect(typeof WEB_FEATURES[key], key).toBe("boolean");
+  });
+
+  it("switches the settings read, record list and record download on (AC-W8SHX8.7)", () => {
+    for (const key of READ_FEATURES) expect(WEB_FEATURES[key], key).toBe(true);
+  });
+
+  it("keeps firmware update and file reveal off in the web build (AC-W8SHX8.7)", () => {
+    expect(WEB_FEATURES.firmwareUpdate).toBe(false);
+    expect(WEB_FEATURES.fileReveal).toBe(false);
   });
 
   it("keeps every feature on in the desktop build", () => {

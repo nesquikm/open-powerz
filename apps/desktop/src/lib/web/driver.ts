@@ -3,7 +3,7 @@
  * back to WebHID) and runs the read-only session over a `WebTransport`.
  */
 
-import type { UiError } from "../backend";
+import type { MeterSettings, OfflineRecord, RecordList, UiError } from "../backend";
 import { ERROR_KINDS } from "../errorKinds";
 import type { DemoMeterModule } from "./demoTransport";
 import { hidOnlyBasicText } from "./features";
@@ -39,6 +39,25 @@ export interface PowerzWasm extends DemoMeterModule {
     uid: Uint8Array,
   ): MeterInfo;
   PdDecoder: new () => PdDecoderLike;
+  /** GET_DATA SETTINGS (FR W8SHX8). */
+  settingsRequest(id: number): Uint8Array;
+  /** The settings panel rows of a SETTINGS reply, as the desktop app shows them. */
+  decodeSettings(reply: Uint8Array): MeterSettings;
+  /** The offline records book: the latest list and its readable windows (FR W8SHX8). */
+  RecordBook: new () => RecordBookLike;
+}
+
+/** The wasm `RecordBook` (FR W8SHX8). */
+export interface RecordBookLike {
+  listRequest(id: number): Uint8Array;
+  decodeList(reply: Uint8Array): RecordList;
+  /** The reads of record `index` (1-based): its own listed window, ≤ 256 bytes each. */
+  chunks(index: number): { addr: number; len: number }[];
+  /** One memory read inside a listed record window; throws `forbidden` otherwise. */
+  chunkRequest(id: number, addr: number, len: number): Uint8Array;
+  /** Record `index` decoded from its window's bytes. */
+  decodeRecord(index: number, data: Uint8Array): OfflineRecord;
+  free(): void;
 }
 
 /** The wasm `PdDecoder`: poll replies into rows, and the capture kept since the last
@@ -183,6 +202,43 @@ function hidOnlyBasic(what: string): UiError {
   };
 }
 
+/** A request the wasm core refuses as unsafe, in the desktop app's words. */
+const NOT_SAFE: UiError = {
+  kind: "usage",
+  message: "The app refused a request that is not safe.",
+  hint: null,
+};
+
+/** A wasm `BindError` from the records book as the desktop app words it: `forbidden`
+ * is an unsafe request, `usage` keeps its message. */
+function bookError(e: unknown): unknown {
+  if (typeof e !== "object" || e === null || "hint" in e) return e;
+  const { kind, message } = e as { kind?: unknown; message?: unknown };
+  if (kind === "forbidden") return NOT_SAFE;
+  if (kind === "usage") return { kind: "usage", message: String(message), hint: null };
+  return e;
+}
+
+/** Run a records-book call, rewording its refusals as the desktop app does. */
+function callBook<T>(call: () => T): T {
+  try {
+    return call();
+  } catch (e) {
+    throw bookError(e);
+  }
+}
+
+/** `parts` joined into one array. */
+function concat(parts: Uint8Array[]): Uint8Array {
+  const joined = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    joined.set(part, at);
+    at += part.length;
+  }
+  return joined;
+}
+
 function defaultRandom(): bigint {
   const words = new Uint32Array(2);
   crypto.getRandomValues(words);
@@ -205,6 +261,10 @@ export class MeterDriver {
   private readonly startedAt = Date.now();
   private lastSnapshotMs: number | null = null;
   private rate: number;
+  /** The UID block read at open, kept for a later level-1 auth. */
+  private uidBlock: Uint8Array | null = null;
+  /** The offline records book, made on the first list and freed when the session ends. */
+  private book: RecordBookLike | null = null;
 
   private constructor(private readonly o: MeterDriverOptions) {
     this.rate = o.rateCode;
@@ -303,33 +363,41 @@ export class MeterDriver {
     w.decodeAccept(reply);
   }
 
-  private async readBlock(block: { addr: number; len: number }): Promise<Uint8Array> {
-    const w = this.o.wasm;
-    const reply = await this.exchange(
-      w.memoryReadRequest(this.nextId(), block.addr, block.len),
-      REPLY_TIMEOUT_MS,
+  private readBlock(block: { addr: number; len: number }): Promise<Uint8Array> {
+    return this.memoryRead(
+      this.o.wasm.memoryReadRequest(this.nextId(), block.addr, block.len),
+      block.addr,
+      block.len,
     );
+  }
+
+  /** Send a memory read `request` of `len` bytes at `addr` and decode its reply. */
+  private async memoryRead(request: Uint8Array, addr: number, len: number): Promise<Uint8Array> {
+    const w = this.o.wasm;
+    const reply = await this.exchange(request, REPLY_TIMEOUT_MS);
     // The real meter sends the 20-byte confirmation alone and the encrypted data
     // (rounded up to 16 bytes) in further IN transfers; the demo meter joins them.
     // A shorter reply (a REJECT) goes straight to the decoder.
-    const want = MEMORY_CONFIRMATION_LEN + Math.ceil(block.len / 16) * 16;
+    const want = MEMORY_CONFIRMATION_LEN + Math.ceil(len / 16) * 16;
     if (reply.length < MEMORY_CONFIRMATION_LEN || reply.length >= want) {
-      return w.decodeMemoryRead(reply, block.addr, block.len);
+      return w.decodeMemoryRead(reply, addr, len);
     }
     const parts: Uint8Array[] = [reply];
     let have = reply.length;
     while (have < want) {
       const part = await this.o.transport.read(REPLY_TIMEOUT_MS);
+      // An empty transfer would never fill the block: stop rather than read forever.
+      if (part.length === 0) {
+        throw {
+          kind: "protocol",
+          message: `The memory read at 0x${addr.toString(16)} ended early.`,
+          hint: null,
+        } satisfies UiError;
+      }
       parts.push(part);
       have += part.length;
     }
-    const joined = new Uint8Array(have);
-    let at = 0;
-    for (const part of parts) {
-      joined.set(part, at);
-      at += part.length;
-    }
-    return w.decodeMemoryRead(joined, block.addr, block.len);
+    return w.decodeMemoryRead(concat(parts), addr, len);
   }
 
   private async open(): Promise<void> {
@@ -339,6 +407,7 @@ export class MeterDriver {
     const firmware = await this.readBlock(FIRMWARE_INFO);
     const otp = await this.readBlock(OTP);
     const uid = await this.readBlock(UID);
+    this.uidBlock = uid;
     this.info = w.decodeDeviceInfo(hardware, firmware, otp, uid);
     if (await this.authenticate(uid)) {
       this.mode = (await this.startQueue()) ? "queue" : "snapshot";
@@ -487,6 +556,78 @@ export class MeterDriver {
     }
   }
 
+  /** Read the meter's settings (AC-W8SHX8.1): one GET_DATA SETTINGS between polls,
+   * decoded by the wasm core into the desktop panel's rows. */
+  readSettings(): Promise<MeterSettings> {
+    const w = this.o.wasm;
+    return this.meterRead("Reading the settings", async () => {
+      const reply = await this.exchange(w.settingsRequest(this.nextId()), REPLY_TIMEOUT_MS);
+      return w.decodeSettings(reply);
+    });
+  }
+
+  /** List the meter's offline records (AC-W8SHX8.2): a level-1 auth first when the
+   * session is below it, then one GET_DATA RECORD_LIST decoded by the wasm core into
+   * the desktop Records view's list. An empty list is not an error. */
+  listRecords(): Promise<RecordList> {
+    return this.meterRead(
+      "Reading the offline records",
+      async () => (await this.listLocked()).list,
+    );
+  }
+
+  /** A safe read (FR W8SHX8) that a HID session refuses with `what`: `run` holds the
+   * link once the session is known live, and any failure leaves as a `UiError`. */
+  private async meterRead<T>(what: string, run: () => Promise<T>): Promise<T> {
+    if (this.o.hid) throw hidOnlyBasic(what);
+    if (this.ended) throw disconnectedError();
+    try {
+      return await this.exclusive(async () => {
+        if (this.ended) throw disconnectedError();
+        return await run();
+      });
+    } catch (e) {
+      throw asUiError(e);
+    }
+  }
+
+  /** The record list, read while holding the link; the book keeps its windows. */
+  private async listLocked(): Promise<{ book: RecordBookLike; list: RecordList }> {
+    const w = this.o.wasm;
+    if (this.authLevel < 1 && !(this.uidBlock && (await this.authenticate(this.uidBlock)))) {
+      throw {
+        kind: "protocol",
+        message: "The meter did not accept the app's sign-in.",
+        hint: "Replug the meter and try again.",
+      } satisfies UiError;
+    }
+    // The session may have ended during the sign-in: make no book it would not free.
+    if (this.ended) throw disconnectedError();
+    const book = (this.book ??= new w.RecordBook());
+    const reply = await this.exchange(book.listRequest(this.nextId()), REPLY_TIMEOUT_MS);
+    // The session may have ended (and freed the book) while the reply was in flight.
+    if (this.ended) throw disconnectedError();
+    return { book, list: book.decodeList(reply) };
+  }
+
+  /** Download offline record `index` (1-based, AC-W8SHX8.3) as the desktop worker
+   * does: a fresh record list, then that record's own listed window in memory reads of
+   * at most 256 bytes. An unlisted or empty record, or a read outside the listed
+   * windows, is refused before it is sent. */
+  downloadRecord(index: number): Promise<OfflineRecord> {
+    return this.meterRead("Reading the offline records", async () => {
+      const { book } = await this.listLocked();
+      if (this.ended) throw disconnectedError();
+      const parts: Uint8Array[] = [];
+      for (const c of callBook(() => book.chunks(index))) {
+        const request = callBook(() => book.chunkRequest(this.nextId(), c.addr, c.len));
+        parts.push(await this.memoryRead(request, c.addr, c.len));
+        if (this.ended) throw disconnectedError();
+      }
+      return callBook(() => book.decodeRecord(index, concat(parts)));
+    });
+  }
+
   /** Start the PD sniffer and hand every poll's decoded rows to `onRows`. With a
    * `decoder`, the caller owns it (the capture outlives the run); otherwise the driver
    * makes one and frees it when the capture stops. */
@@ -567,6 +708,12 @@ export class MeterDriver {
     this.pdTimer = null;
     if (this.pd?.owned) this.pd.decoder.free();
     this.pd = null;
+    // Every use of the book holds the link: free it once the link's queue (the request
+    // in flight and any queued behind it, which see `ended` and stop) has settled.
+    void this.lock.then(() => {
+      this.book?.free();
+      this.book = null;
+    });
   }
 
   /** End the session on a transfer failure: no further frames, one `onError`. */

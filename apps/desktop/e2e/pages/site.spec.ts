@@ -168,3 +168,24 @@ test("the device menu ends with Connect a meter…, with no button beside it (AC
   await expect(picker.locator("option").last()).toHaveText("Connect a meter…");
   await expect(page.getByRole("button", { name: "Connect a meter…", exact: true })).toHaveCount(0);
 });
+
+test("the demo meter's settings and offline records show in the browser (AC-W8SHX8.1, .2, .4, .7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+
+  const settings = page.getByRole("region", { name: "Meter settings" });
+  await expect(settings).toBeVisible();
+  // The read is on; only the edit (a meter write) is still left to the desktop app.
+  await expect(settings.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
+  await expect(settings.getByText("Brightness", { exact: true })).toBeVisible({ timeout: 10_000 });
+
+  await page.getByRole("tab", { name: "Records" }).click();
+  const records = page.getByRole("region", { name: "Offline records" });
+  // Listing and download are on; only the delete (a meter write) is still left to the desktop app.
+  await expect(records.getByRole("button", { name: "Download all", exact: true })).toBeEnabled();
+  await expect(records.getByText("PHONE_5V")).toBeVisible({ timeout: 10_000 });
+  await records.getByRole("button", { name: "Open PHONE_5V" }).click();
+  await expect(page.getByRole("region", { name: "Offline record" })).toContainText("PHONE_5V");
+});
