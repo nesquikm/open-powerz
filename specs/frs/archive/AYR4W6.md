@@ -43,8 +43,8 @@ Component tests for the menu items, the user-gesture call order and the hint; th
 
 User request relayed by the orchestrator on 2026-11-08.
 
-## Hardware evidence (web HIL rounds 2 and 3)
+## Hardware evidence (web HIL rounds 2 to 4)
 
 - [x] AC-AYR4W6.1: round 2 (qa-runs/WEB.hil2-20261108-2223, W2) opened the WebUSB picker from the menu's last item.
-- [x] AC-AYR4W6.3: round 2 (W7) showed "Connect over HID…" in the menu after a busy meter. Opening the HID picker is W10, pending the user's morning HIL (W2b/W6/W7/W9/W10).
+- [x] AC-AYR4W6.3: round 2 (W7) showed "Connect over HID…" in the menu after a busy meter. Round 4 (2ad6cc0, qa-runs/WEB.hil4-20261109-0946, W10) picked it and the WebHID picker opened; choosing the KM003C started the HID session.
 - [x] AC-AYR4W6.4: round 2 (W1) showed the hint link with only the demo listed, and it was gone after pairing.

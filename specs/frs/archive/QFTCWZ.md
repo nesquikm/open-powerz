@@ -44,9 +44,9 @@ Vitest runs the driver against the demo transport (the built wasm in Node) and a
 
 Real-meter behaviour of WebUSB and WebHID is checked later by the HIL tester in the user's Chrome; this FR never touches the meter.
 
-## Hardware evidence (web HIL rounds 2 and 3)
+## Hardware evidence (web HIL rounds 2 to 4)
 
 - [x] AC-QFTCWZ.2: the web HIL round 3 (e426443, 2026-11-09, qa-runs/WEB.hil3-20261109-0101, W2) opened the KM003C over WebUSB by class and claimed it 21 times in a row, all streaming.
 - [x] AC-QFTCWZ.4: the same run (W2, W3) connected, signed in, read the device info and streamed at 2, 10, 50 and 1000 SPS; each rate change was a STOP then START with no session restart. A 10-minute run at 50 SPS recorded 30,643 rows with no gaps.
 - [x] AC-QFTCWZ.6, the disconnect half: round 2 (2060fb0, qa-runs/WEB.hil2-20261108-2223, W6) unplugged the meter mid-stream and the page said "The meter is disconnected." The timeout half was not provoked on hardware.
-- AC-QFTCWZ.3 stays unticked: the WebHID fallback on the real meter is W10, pending the user's morning HIL (W2b/W6/W7/W9/W10).
+- [x] AC-QFTCWZ.3: round 4 (2ad6cc0, qa-runs/WEB.hil4-20261109-0946, W7 and W10) held the bulk interface with `powerz watch`; Connect said "Another program is using the meter." and the menu gained "Connect over HID…". Over HID the page showed "HID: basic readings only" with live readings for about 5.5 minutes and no reboot; PD capture was refused, and a `sendReport` hook saw only the ADC snapshot request.
