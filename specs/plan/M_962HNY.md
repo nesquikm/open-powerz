@@ -27,8 +27,8 @@ codename: Fine Print
 
 | FR | Title | Tracker |
 |---|---|---|
-| [09R2FK](../frs/09R2FK.md) | The rate tooltip over HID blames authentication (bug) | n/a |
-| [09R2FM](../frs/09R2FM.md) | The connect hint shows in a browser that cannot connect (bug) | n/a |
+| [09R2FK](../frs/archive/09R2FK.md) | The rate tooltip over HID blames authentication (bug) | n/a |
+| [09R2FM](../frs/archive/09R2FM.md) | The connect hint shows in a browser that cannot connect (bug) | n/a |
 
 Build order: the table's order (independent).
 
