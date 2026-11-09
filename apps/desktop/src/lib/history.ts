@@ -144,10 +144,13 @@ function edTimes(q: RunProgressQuery, runT0: number, runT1: number): number[] {
 export class HistoryColumns {
   length = 0;
   #t = new Float64Array(0);
-  /** Float32 values (plenty for a demo double) keep a 10M seed near 320 MB. */
-  #cols = {} as Record<Series, Float32Array>;
+  /** Float32 values (plenty for a demo double) keep a 10M seed near 320 MB; an opened
+   * recording file keeps its readings at full (Float64) precision, as the desktop does. */
+  #cols = {} as Record<Series, Float32Array | Float64Array>;
+  readonly #Col: Float32ArrayConstructor | Float64ArrayConstructor;
 
-  constructor(capacity = 1024) {
+  constructor(capacity = 1024, precision: "f32" | "f64" = "f32") {
+    this.#Col = precision === "f64" ? Float64Array : Float32Array;
     this.#alloc(capacity);
   }
 
@@ -156,8 +159,8 @@ export class HistoryColumns {
     t.set(this.#t.subarray(0, this.length));
     this.#t = t;
     for (const name of FIELDS) {
-      const col = new Float32Array(capacity);
-      const old = this.#cols[name] as Float32Array | undefined;
+      const col = new this.#Col(capacity);
+      const old = this.#cols[name] as Float32Array | Float64Array | undefined;
       if (old) col.set(old.subarray(0, this.length));
       this.#cols[name] = col;
     }

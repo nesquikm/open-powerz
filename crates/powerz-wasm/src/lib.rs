@@ -9,6 +9,7 @@ mod demo;
 mod error;
 mod logo;
 mod meter_reads;
+mod recording_file;
 mod records_delete;
 mod settings_write;
 mod trigger;
@@ -35,6 +36,9 @@ pub use logo::{
 pub use meter_reads::{
     Chunk, OfflineRecordView, RecordBook, RecordEntryView, RecordListView, RecordSampleView,
     SettingsView, decode_settings, decode_settings_js, settings_request,
+};
+pub use recording_file::{
+    DbRecording, OpenedRows, pick_db_table, read_recording_csv, read_recording_csv_js,
 };
 pub use records_delete::BackupFile;
 pub use settings_write::{SettingsWrite, cdc_frame_length};

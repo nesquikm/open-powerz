@@ -139,8 +139,8 @@ need to replug when it asks you to.
 
 ## Open a recording
 
-**Open recording**, in the desktop app's tab bar, reads a CSV or a vendor `.db`
-file back into the app. It needs no meter. The file opens in a **File** tab,
+**Open recording**, in the tab bar of the desktop app and the web edition, reads a
+CSV or a vendor `.db` file back into the app. It needs no meter. The file opens in a **File** tab,
 marked as a file and read-only. The tab exists only while a file is open, and
 **Close file** ends it. One file opens at a time; opening another replaces it.
 

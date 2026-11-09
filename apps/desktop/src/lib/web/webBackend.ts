@@ -7,9 +7,12 @@ import type {
   AttachedSession,
   BackendEvent,
   DeviceListing,
+  HistorySeries,
   LogoPreview,
   LogoProgress,
   MeterCommands,
+  OpenProgress,
+  RunProgressQuery,
   UiError,
   WebBackendApi,
 } from "../backend";
@@ -21,6 +24,12 @@ import { DemoTransport } from "./demoTransport";
 import { MeterDriver, openUsbOrOfferHid, type PowerzWasm } from "./driver";
 import { WEB_FEATURES, desktopOnlyError, type Features } from "./features";
 import { LogoFiles, browserPickLogoFile, type PickLogoFile } from "./logoFiles";
+import {
+  RecordingFiles,
+  browserPickRecordingFile,
+  wasmRecordingReader,
+  type PickRecordingFile,
+} from "./recordingFile";
 import { SESSION_COMMANDS, WebSession, rateCodeOf, usage, type LoadSqlJs } from "./session";
 import { portHeldError, type SerialLike } from "./serial";
 import type { WebTransport } from "./transport";
@@ -58,6 +67,9 @@ export interface WebBackendOptions {
   /** Loads sql.js for a `.db` export (FR AHTZW2); defaults to the bundled sql.js,
    * fetched on the first export. */
   sqlJs?: LoadSqlJs;
+  /** Opens Open recording's file picker for CSV and `.db` files (FR AHTZW3); defaults
+   * to the browser's file input. */
+  pickRecordingFile?: PickRecordingFile;
 }
 
 /** The bundled sql.js and its wasm, fetched on first use (FR AHTZW2). */
@@ -608,15 +620,8 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
   ) as SerialLike | null;
   const pickDirectory =
     options.pickDirectory === undefined ? browserPickDirectory() : options.pickDirectory;
-  const sessions = new Sessions(
-    devices,
-    usb,
-    options.wasm,
-    download,
-    serial,
-    pickDirectory,
-    once(options.sqlJs ?? loadBrowserSqlJs),
-  );
+  const sqlJs = once(options.sqlJs ?? loadBrowserSqlJs);
+  const sessions = new Sessions(devices, usb, options.wasm, download, serial, pickDirectory, sqlJs);
   sessions.triggers = new Triggers({
     module: () => sessions.module(),
     webSerial: serial,
@@ -636,6 +641,10 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
   });
   const commands = sessions.commands(() => sessions.current);
   const logoFiles = new LogoFiles(options.pickLogoFile ?? browserPickLogoFile());
+  const recordingFiles = new RecordingFiles(
+    options.pickRecordingFile ?? browserPickRecordingFile(),
+    wasmRecordingReader(() => sessions.module(), sqlJs),
+  );
   // The desktop-only writes are among `commands`' refused ones (AC-QFTCX0.6).
   type Writes = Pick<WebBackendApi, "firmwareFlash">;
   return Object.assign(Object.create(commands) as MeterCommands & Writes, {
@@ -651,6 +660,18 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
       sessions.attach(onEvent, deviceId),
     meter: (deviceId: string) => sessions.commands(() => sessions.of(deviceId)),
     connectedMeters: async () => sessions.ids(),
+    openRecordingFile: (onProgress: (progress: OpenProgress) => void) =>
+      recordingFiles.open(onProgress),
+    cancelRecordingFile: () => recordingFiles.cancel(),
+    closeRecordingFile: () => recordingFiles.close(),
+    recordingFileRange: <const S extends readonly HistorySeries[]>(
+      series: S,
+      t0Ms: number,
+      t1Ms: number,
+      buckets: number,
+    ) => recordingFiles.range(series, t0Ms, t1Ms, buckets),
+    recordingFileRangeStats: (t0Ms: number, t1Ms: number) => recordingFiles.rangeStats(t0Ms, t1Ms),
+    recordingFileRunProgress: (query: RunProgressQuery) => recordingFiles.runProgress(query),
     saveChartImage: async (
       suggestedName: string,
       format: "png" | "svg" | "pdf",

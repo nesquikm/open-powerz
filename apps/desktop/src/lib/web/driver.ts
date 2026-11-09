@@ -45,6 +45,9 @@ export interface PowerzWasm extends DemoMeterModule {
   decodeAccept(reply: Uint8Array): void;
   decodeAdc(reply: Uint8Array): Omit<MeterSample, "time_ms">;
   decodeQueue(reply: Uint8Array, rateCode: number): MeterSample[];
+  /** A recorder CSV's rows, read with the desktop's reader and row rules (FR AHTZW3);
+   * a file that is no recording throws a `usage` error in the desktop's words. */
+  readRecordingCsv(bytes: Uint8Array): RecordingRows;
   decodeAuthReply(reply: Uint8Array, block: Uint8Array, nowMs: bigint, random: bigint): number;
   decodeMemoryRead(reply: Uint8Array, addr: number, len: number): Uint8Array;
   decodeDeviceInfo(
@@ -87,6 +90,29 @@ export interface PowerzWasm extends DemoMeterModule {
   dbInsertRowSql(table: string): string;
   dbParamValues(table: string, startUnixMs: number, localStart: string, rateSps: number): string[];
   DbRows: new (startUnixMs: number) => DbRowsLike;
+  /** FR AHTZW3: the desktop's SQL and rules that read a vendor `.db` recording back. */
+  dbTableNamesSql(): string;
+  dbTableColumnsSql(): string;
+  dbSelectRowsSql(table: string): string;
+  dbRowTotalSql(table: string): string;
+  /** The data table among `tables` (`[name, plain]`), or `undefined` when none is one;
+   * throws a `usage` error in the desktop's words. */
+  dbPickDataTable(
+    tables: [string, boolean][],
+    columnsOf: (table: string) => string[],
+  ): string | undefined;
+  DbRecording: new () => DbRecordingLike;
+}
+
+/** The wasm `DbRecording` (FR AHTZW3): a `.db` data table's rows, by the desktop's rules. */
+export interface DbRecordingLike {
+  /** One result row: its ElapsedTime text and ten numbers (NaN = NULL); true when a
+   * progress report is due. */
+  push(elapsed: string | undefined, numbers: Float64Array): boolean;
+  lines(): number;
+  /** The rows kept; consumes the reader. Throws a `usage` error when none was. */
+  finish(): RecordingRows;
+  free(): void;
 }
 
 /** One `.db` data row: `ElapsedTime`, then the other ten columns (`null` = NULL). */
@@ -252,6 +278,17 @@ export interface MeterSample {
   cc2_v: number;
   dp_v: number;
   dm_v: number;
+}
+
+/** The rows a recording file opens with (FR AHTZW3), times the file's elapsed ms. */
+export interface RecordingRows {
+  rows: number;
+  skipped: number;
+  left_out: number;
+  /** The file's own last CHARGE / ENERGY, when it has one. */
+  charge_ah?: number | null;
+  energy_wh?: number | null;
+  samples: MeterSample[];
 }
 
 /** One PD table row as the wasm `PdDecoder` gives it. */

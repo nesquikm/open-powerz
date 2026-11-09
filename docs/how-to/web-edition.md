@@ -98,6 +98,10 @@ next section. Each feature needs one browser interface:
   change only on its virtual serial port. The first change opens the
   browser's port picker, filtered to POWER-Z ports. Pick the meter's port and
   the browser remembers it.
+- **Exporting the session as CSV or `.db`, and Open recording:** no device
+  interface. The browser downloads the file; the `.db` has the desktop app's
+  tables, so both open it. **Open recording** asks for a CSV or `.db` file
+  and reads it with the desktop app's rules.
 - **Protocol triggering:** Web Serial, on the same port as the settings
   change. The first trigger session opens the port picker if the page has no
   port yet. The safeguards are the desktop app's: a request above 5 V needs

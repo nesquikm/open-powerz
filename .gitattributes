@@ -13,3 +13,7 @@
 *.woff binary
 *.woff2 binary
 *.ttf binary
+
+# Recording fixtures keep their exact bytes (the vendor CSV has a BOM and CRLF).
+apps/desktop/src-tauri/tests/data/*.csv binary
+*.db binary

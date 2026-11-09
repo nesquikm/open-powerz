@@ -610,7 +610,7 @@ export interface OpenProgress {
 export async function openRecordingFile(
   onProgress: (progress: OpenProgress) => void,
 ): Promise<FileSummary | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.openRecordingFile(onProgress));
   if (mock) return mock.openRecordingFile(onProgress);
   const channel = new Channel<OpenProgress>();
   channel.onmessage = onProgress;
@@ -619,14 +619,14 @@ export async function openRecordingFile(
 
 /** Ends the open under way: it resolves to `null`. */
 export async function cancelRecordingFile(): Promise<void> {
-  if (web) return;
+  if (web) return web.then((b) => b.cancelRecordingFile());
   if (mock) return mock.cancelRecordingFile();
   await invoke("recording_file_cancel");
 }
 
 /** Closes the open recording file. */
 export async function closeRecordingFile(): Promise<void> {
-  if (web) return;
+  if (web) return web.then((b) => b.closeRecordingFile());
   if (mock) return mock.closeRecordingFile();
   await invoke("recording_file_close");
 }
@@ -639,7 +639,7 @@ export async function recordingFileRange<const S extends readonly HistorySeries[
   t1Ms: number,
   buckets: number,
 ): Promise<BucketsFor<S>> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.recordingFileRange(series, t0Ms, t1Ms, buckets));
   if (mock) return mock.recordingFileRange(series, t0Ms, t1Ms, buckets);
   return invoke<BucketsFor<S>>("recording_file_range", {
     series,
@@ -701,7 +701,7 @@ export async function recordingFileRangeStats(
   t0Ms: number,
   t1Ms: number,
 ): Promise<RangeStats | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.recordingFileRangeStats(t0Ms, t1Ms));
   if (mock) return mock.recordingFileRangeStats(t0Ms, t1Ms);
   return invoke<RangeStats | null>("recording_file_range_stats", wholeMs(t0Ms, t1Ms));
 }
@@ -789,7 +789,7 @@ export async function runProgress(query: RunProgressQuery): Promise<RunProgress 
 export async function recordingFileRunProgress(
   query: RunProgressQuery,
 ): Promise<RunProgress | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.recordingFileRunProgress(query));
   if (mock) return mock.recordingFileRunProgress(query);
   return invoke<RunProgress | null>("recording_file_run_progress", { query: wireQuery(query) });
 }
@@ -1773,6 +1773,19 @@ export interface WebBackendApi extends MeterCommands {
     format: "png" | "svg" | "pdf",
     data: Uint8Array,
   ): Promise<string | null>;
+  /** Open recording (FR AHTZW3): the browser's file picker for CSV and `.db` files;
+   * `null` when it was dismissed or Cancel ended the open. */
+  openRecordingFile(onProgress: (progress: OpenProgress) => void): Promise<FileSummary | null>;
+  cancelRecordingFile(): Promise<void>;
+  closeRecordingFile(): Promise<void>;
+  recordingFileRange<const S extends readonly HistorySeries[]>(
+    series: S,
+    t0Ms: number,
+    t1Ms: number,
+    buckets: number,
+  ): Promise<BucketsFor<S>>;
+  recordingFileRangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null>;
+  recordingFileRunProgress(query: RunProgressQuery): Promise<RunProgress | null>;
   /** The startup logo (FR W8SHXB): the browser's file picker answers a token that
    * stands in for the desktop path. */
   logoChoose(): Promise<string | null>;
