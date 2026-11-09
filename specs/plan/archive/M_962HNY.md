@@ -1,8 +1,8 @@
 ---
 milestone: M_962HNY
 id: fr_01M6ZH26N15NXC726QXN962HNY
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-09T07:19:31Z
 kickoff_branch: fix/web-polish
 frozen_at: null
 migration: none
