@@ -31,6 +31,7 @@ import type {
   UiError,
 } from "../backend";
 import { HistoryColumns, SessionStats } from "../history";
+import { TempLog } from "./tempLog";
 import { openBackupSink, type PickDirectory } from "./backupFolder";
 import type { SqlJsStatic } from "sql.js";
 import { CsvRecorder } from "./csv";
@@ -141,6 +142,8 @@ export class WebSession {
   driver!: MeterDriver;
 
   history = new HistoryColumns();
+  /** Temperature changes over the history (FR JFRPME). */
+  temps = new TempLog();
   stats = new SessionStats();
   gaps: HistoryGap[] = [];
   ended = false;
@@ -208,6 +211,7 @@ export class WebSession {
   /** The driver's samples: onto the session clock, into history and stats, out as a batch. */
   onBatch(samples: MeterSample[]): void {
     if (this.ended || samples.length === 0) return;
+    const first = this.history.length;
     const out: Sample[] = [];
     for (const m of samples) {
       const s: Sample = {
@@ -222,6 +226,10 @@ export class WebSession {
       this.history.push(s);
       this.stats.push(s);
       out.push(s);
+    }
+    if (this.tempC !== null) {
+      const readMs = this.tempAt - this.startedAt;
+      this.temps.record(first, this.tempC, readMs, readMs + TEMP_MAX_AGE_MS);
     }
     const fresh = this.tempC !== null && Date.now() - this.tempAt <= TEMP_MAX_AGE_MS;
     const rec = this.recording;
@@ -421,11 +429,12 @@ export class WebSession {
     const h = this.history;
     const csv = new CsvRecorder();
     const unix0 = this.startedAt + (h.length > 0 ? h.timeAt(0) : 0);
+    const cursor = { i: 0 };
     let prev = -Infinity;
     for (let j = 0; j < h.length; j++) {
       const s = h.sampleAt(j);
       if (this.gaps.some((g) => g.from_ms >= prev && g.to_ms <= s.t_ms)) csv.breakRun();
-      csv.push(s, unix0);
+      csv.push(s, unix0, this.temps.at(j, s.t_ms, cursor));
       prev = s.t_ms;
     }
     this.o.download(suggestedName, new Blob([csv.text()], { type: "text/csv" }));
@@ -460,6 +469,7 @@ export class WebSession {
       const insert = db.prepare(w.dbInsertRowSql(table));
       try {
         const readings = new Float64Array(6);
+        const cursor = { i: 0 };
         let prev = -Infinity;
         db.exec("BEGIN");
         for (let j = 0; j < total; j++) {
@@ -467,7 +477,12 @@ export class WebSession {
           const newRun = this.gaps.some((g) => g.from_ms >= prev && g.to_ms <= s.t_ms);
           prev = s.t_ms;
           readings.set([s.vbus_v, s.ibus_a, s.dp_v, s.dm_v, s.cc1_v, s.cc2_v]);
-          const row = rows.push(Math.max(0, Math.floor(s.t_ms)), readings, undefined, newRun);
+          const row = rows.push(
+            Math.max(0, Math.floor(s.t_ms)),
+            readings,
+            this.temps.at(j, s.t_ms, cursor) ?? undefined,
+            newRun,
+          );
           insert.run([row.elapsed, ...row.numbers]);
           written++;
           if (written % DB_EXPORT_BATCH === 0) {
@@ -517,6 +532,7 @@ export class WebSession {
       },
       clearHistory: async (): Promise<void> => {
         this.history = new HistoryColumns();
+        this.temps.clear();
         this.gaps = [];
       },
       historyRange: async <const S extends readonly HistorySeries[]>(

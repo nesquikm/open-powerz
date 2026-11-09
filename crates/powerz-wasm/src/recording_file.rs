@@ -7,7 +7,7 @@
 
 use powerz_record::db::{self, DbClock, DbValue};
 use powerz_record::opened::{FileRows, MAX_ROWS};
-use powerz_record::reader::CsvReader;
+use powerz_record::reader::{CsvReader, RowOutcome};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -28,7 +28,47 @@ pub struct OpenedRows {
     /// The file's own last ENERGY, Wh, when it has one.
     pub energy_wh: Option<f64>,
     /// The kept rows, their time the file's elapsed time.
-    pub samples: Vec<QueueSample>,
+    pub samples: Vec<OpenedSample>,
+}
+
+/// One kept row: its readings, and the file's TEMP when the row has one (FR JFRPME).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OpenedSample {
+    /// The file's elapsed time, ms.
+    pub time_ms: u32,
+    /// VBUS, V.
+    pub vbus_v: f64,
+    /// IBUS, A, signed.
+    pub ibus_a: f64,
+    /// CC1, V.
+    pub cc1_v: f64,
+    /// CC2, V.
+    pub cc2_v: f64,
+    /// D+, V.
+    pub dp_v: f64,
+    /// D−, V.
+    pub dm_v: f64,
+    /// TEMP, °C; `None` where the row's is empty.
+    pub temp_c: Option<f64>,
+}
+
+/// Take in one line through `rules`: the sample it keeps, with the row's TEMP.
+fn take_row(rules: &mut FileRows, outcome: RowOutcome) -> Option<OpenedSample> {
+    let temp_c = match &outcome {
+        RowOutcome::Row(row) => row.temp_c,
+        _ => None,
+    };
+    let s = QueueSample::from(&rules.take(outcome)?);
+    Some(OpenedSample {
+        time_ms: s.time_ms,
+        vbus_v: s.vbus_v,
+        ibus_a: s.ibus_a,
+        cc1_v: s.cc1_v,
+        cc2_v: s.cc2_v,
+        dp_v: s.dp_v,
+        dm_v: s.dm_v,
+        temp_c,
+    })
 }
 
 /// A refusal of a file that is no recording.
@@ -42,15 +82,13 @@ pub fn read_recording_csv(bytes: &[u8]) -> Result<OpenedRows, BindError> {
     let mut rules = FileRows::new(MAX_ROWS);
     let mut samples = Vec::new();
     while let Some(outcome) = reader.next_row().map_err(|e| refused(e.to_string()))? {
-        if let Some(record) = rules.take(outcome) {
-            samples.push(QueueSample::from(&record));
-        }
+        samples.extend(take_row(&mut rules, outcome));
     }
     opened_rows(&rules, samples)
 }
 
 /// The rows `rules` kept, refusing a file with none.
-fn opened_rows(rules: &FileRows, samples: Vec<QueueSample>) -> Result<OpenedRows, BindError> {
+fn opened_rows(rules: &FileRows, samples: Vec<OpenedSample>) -> Result<OpenedRows, BindError> {
     rules.check_any().map_err(refused)?;
     Ok(OpenedRows {
         rows: rules.rows(),
@@ -137,7 +175,7 @@ pub fn db_pick_data_table_js(
 pub struct DbRecording {
     rules: FileRows,
     clock: DbClock,
-    samples: Vec<QueueSample>,
+    samples: Vec<OpenedSample>,
 }
 
 impl Default for DbRecording {
@@ -189,9 +227,7 @@ impl DbRecording {
     /// Take in one result row's values.
     pub fn take(&mut self, values: &[DbValue]) -> bool {
         let outcome = db::file_row(values, &mut self.clock);
-        if let Some(record) = self.rules.take(outcome) {
-            self.samples.push(QueueSample::from(&record));
-        }
+        self.samples.extend(take_row(&mut self.rules, outcome));
         self.rules.report_due()
     }
 

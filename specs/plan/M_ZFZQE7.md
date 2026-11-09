@@ -49,6 +49,7 @@ codename: Full Tab
 | [AHTZW2](../frs/AHTZW2.md) | Export .db does nothing in the browser (bug) | n/a |
 | [AHTZW3](../frs/AHTZW3.md) | Open a saved recording in the browser | n/a |
 | [62VEDM](../frs/62VEDM.md) | Some abbreviations have no glossary popover (bug) | n/a |
+| [JFRPME](../frs/JFRPME.md) | The browser's session history forgets the temperature (bug) | n/a |
 
 Build order: the table's order. Triggering goes last of the features: it moves the desktop trigger engine into a shared crate and needs a cross-origin-isolated page.
 
@@ -91,6 +92,8 @@ Build order: the table's order. Triggering goes last of the features: it moves t
    verify: `cargo test -p powerz-record -p open-powerz-desktop`; `bun run test` (session .db export suite).
 19. Shared file-reading rules; Open recording in the browser (CSV via wasm, .db via sql.js) — AHTZW3
    verify: `cargo test -p powerz-record -p open-powerz-desktop`; `bun run test` (recording file suites).
+20. Temperature log beside the web history; session exports fill TEMP — JFRPME
+   verify: `bun run test` (session export suites).
 
 **Gate:** CLAUDE.md gating rule, with `bun run build:wasm` before `bun run test`.
 
