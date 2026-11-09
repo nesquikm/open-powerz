@@ -11,8 +11,9 @@
  *   record download on; firmware update and file reveal stay off.
  * - AC-W8SHX9.7: the web build switches the settings write on (over Web Serial); the
  *   other meter writes stay off.
- * - AC-W8SHXA.6: the web build switches the record delete on; firmware update, logo
- *   upload and triggering stay off.
+ * - AC-W8SHXA.6: the web build switches the record delete on.
+ * - AC-W8SHXB.7: the web build switches the logo upload on; firmware update and
+ *   triggering stay off.
  * - The desktop (Tauri and mock) builds have every feature on.
  */
 
@@ -27,11 +28,7 @@ import {
 } from "./features";
 
 /** The meter writes the web build still leaves to the desktop app. */
-const WRITE_FEATURES = [
-  "firmwareUpdate",
-  "logoUpload",
-  "trigger",
-] as const satisfies readonly (keyof Features)[];
+const WRITE_FEATURES = ["firmwareUpdate", "trigger"] as const satisfies readonly (keyof Features)[];
 
 const READ_FEATURES = [
   "settingsRead",
@@ -59,6 +56,11 @@ describe("feature map (AC-QFTCX0.6, AC-QFTCX0.7)", () => {
     expect(DESKTOP_FEATURES.recordDelete).toBe(true);
   });
 
+  it("switches the logo upload on in the web build (AC-W8SHXB.7)", () => {
+    expect(WEB_FEATURES.logoUpload).toBe(true);
+    expect(DESKTOP_FEATURES.logoUpload).toBe(true);
+  });
+
   it("has a boolean flag for each meter read", () => {
     for (const key of READ_FEATURES) expect(typeof WEB_FEATURES[key], key).toBe("boolean");
   });
@@ -73,7 +75,12 @@ describe("feature map (AC-QFTCX0.6, AC-QFTCX0.7)", () => {
   });
 
   it("keeps every feature on in the desktop build", () => {
-    for (const key of [...WRITE_FEATURES, ...READ_FEATURES, "recordDelete"] as const) {
+    for (const key of [
+      ...WRITE_FEATURES,
+      ...READ_FEATURES,
+      "recordDelete",
+      "logoUpload",
+    ] as const) {
       expect(DESKTOP_FEATURES[key], key).toBe(true);
     }
     expect(Object.values(DESKTOP_FEATURES).every((v) => v === true)).toBe(true);

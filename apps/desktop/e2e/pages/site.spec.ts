@@ -206,3 +206,18 @@ test("a settings change on the demo meter reads back in the browser (AC-W8SHX9.1
   await expect(settings.locator("input, select")).toHaveCount(0, { timeout: 10_000 });
   await expect(settings).toContainText(`${next}%`);
 });
+
+test("Remove on the demo meter's startup logo verifies in the browser (AC-W8SHXB.3, .7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+  await page.getByRole("tab", { name: "Startup logo" }).click();
+  const v = page.getByRole("tabpanel", { name: "Startup logo" });
+  await expect(v).not.toContainText("Desktop app only");
+  await v.getByRole("button", { name: /^remove$/i }).click();
+  const d = page.getByRole("alertdialog", { name: "remove" });
+  await d.getByRole("textbox").fill("remove");
+  await d.getByRole("button", { name: /^remove$/i }).click();
+  await expect(v.getByRole("status")).toContainText(/verified|removed/i, { timeout: 30_000 });
+});

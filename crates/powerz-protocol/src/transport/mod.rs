@@ -85,6 +85,24 @@ pub enum Error {
     Io(String),
 }
 
+/// The logo chunk frame [`Transport::transact_logo_chunk`] sends for the
+/// plaintext chunk `plain`: checked with
+/// [`check_logo_chunk`](guard::check_logo_chunk) first (a chunk outside the
+/// logo region, off its step or of another type is refused before a frame
+/// exists), then the payload after the 4-byte main header AES-encrypted
+/// under key 0. Pure, so a sans-IO caller sends exactly the native frame.
+pub fn logo_chunk_frame(plain: &[u8]) -> Result<Vec<u8>, Error> {
+    guard::check_logo_chunk(plain)?;
+    let (Some(header), Some(payload)) = (plain.get(..4), plain.get(4..)) else {
+        return Err(Error::Forbidden {
+            ty: guard::LOGO_CHUNK_TYPE,
+        });
+    };
+    let mut frame = header.to_vec();
+    frame.extend(crate::crypto::encrypt(&crate::crypto::KEYS[0], payload));
+    Ok(frame)
+}
+
 /// One request in flight over a pipe to the meter.
 pub trait Transport {
     /// Write `request` and return the next reply buffer.
@@ -123,14 +141,7 @@ pub trait Transport {
     /// [`check_logo_chunk`](guard::check_logo_chunk) before encryption.
     /// Wrappers that sit outside a guard must forward this method.
     fn transact_logo_chunk(&mut self, plain: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        guard::check_logo_chunk(plain)?;
-        let (Some(header), Some(payload)) = (plain.get(..4), plain.get(4..)) else {
-            return Err(Error::Forbidden {
-                ty: guard::LOGO_CHUNK_TYPE,
-            });
-        };
-        let mut frame = header.to_vec();
-        frame.extend(crate::crypto::encrypt(&crate::crypto::KEYS[0], payload));
+        let frame = logo_chunk_frame(plain)?;
         self.transact(&frame, timeout)
     }
 

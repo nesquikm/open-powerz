@@ -4,6 +4,11 @@
  */
 
 import type {
+  LogoPreview,
+  LogoProgress,
+  LogoRead,
+  LogoSettingsCheck,
+  LogoWritten,
   MeterSettings,
   OfflineRecord,
   RecordDeleteResult,
@@ -16,6 +21,9 @@ import type { DemoMeterModule } from "./demoTransport";
 import { hidOnlyBasicText } from "./features";
 import { disconnectedError, notSafeError, timeoutError, type WebTransport } from "./transport";
 import { openWebUsb, type UsbDeviceLike, type WebUsbOptions } from "./webusb";
+import { LogoDriver, type LogoReaderLike, type LogoSource, type LogoWriteLike } from "./logoDriver";
+
+export type { LogoReadChunk, LogoReaderLike, LogoSource, LogoWriteLike } from "./logoDriver";
 
 /** The parts of the generated wasm module (`src/wasm/powerz_wasm.js`) the driver uses. */
 export interface PowerzWasm extends DemoMeterModule {
@@ -57,6 +65,21 @@ export interface PowerzWasm extends DemoMeterModule {
   SettingsWrite: new (changes: Record<string, number>) => SettingsWriteLike;
   /** Length of the first complete CDC frame in `buf`, `undefined` while incomplete. */
   cdcFrameLength(buf: Uint8Array): number | undefined;
+  /** FR W8SHXB: the preview of a picture file's bytes (a raw logo file when `isBin`),
+   * as the desktop app's; no picture throws `usage`. */
+  logoPreview(bytes: Uint8Array, isBin: boolean, alpha: boolean): LogoPreview;
+  /** The preview of a built-in logo. */
+  logoPreviewBuiltin(name: string): LogoPreview;
+  /** One upload or Remove over the native logo paths (FR W8SHXB). */
+  LogoWrite: {
+    upload(bytes: Uint8Array, isBin: boolean, alpha: boolean): LogoWriteLike;
+    uploadBuiltin(name: string): LogoWriteLike;
+    remove(): LogoWriteLike;
+  };
+  /** A read of the logo area: the head, and with `full` the whole logo. */
+  LogoReader: new (full: boolean) => LogoReaderLike;
+  /** One settings check against a logo write's calibration snapshot. */
+  settingsSaveCheck(snapshot: Uint8Array, settingsReply: Uint8Array): LogoSettingsCheck;
 }
 
 /** The wasm `SettingsWrite` (FR W8SHX9). */
@@ -178,6 +201,9 @@ const QUEUE_SNAPSHOT_PERIOD_MS = 500;
 const PD_POLL_PERIOD_MS = 5;
 /** Each PD poll also asks for the ADC snapshot (the sniffer's `with_adc` option). */
 const PD_POLL_WITH_ADC = true;
+
+/** What a HID session refuses for every logo command. */
+const LOGO = "The startup logo";
 
 /** Queue poll period for `rateCode`: 20 ms at 1000 SPS, 100 ms otherwise. */
 function queuePollPeriodMs(rateCode: number): number {
@@ -326,9 +352,28 @@ export class MeterDriver {
   private uidBlock: Uint8Array | null = null;
   /** The offline records book, made on the first list and freed when the session ends. */
   private book: RecordBookLike | null = null;
+  /** The last SETTINGS reply read in this session (a logo write's precondition). */
+  private settingsReply: Uint8Array | null = null;
+  /** The startup logo's sequencing (FR W8SHXB), run while holding the link. */
+  private readonly logo: LogoDriver;
 
   private constructor(private readonly o: MeterDriverOptions) {
     this.rate = o.rateCode;
+    this.logo = new LogoDriver({
+      wasm: o.wasm,
+      nextId: () => this.nextId(),
+      exchange: (frame, timeoutMs = REPLY_TIMEOUT_MS) => this.exchange(frame, timeoutMs),
+      memoryRead: (request, addr, len) => this.memoryRead(request, addr, len),
+      ended: () => this.ended,
+      signIn: () => this.signInLocked(),
+      readInfo: async () => {
+        await this.readInfoLocked();
+        return this.info;
+      },
+      authLevel: () => this.authLevel,
+      settingsReply: () => this.settingsReply ?? undefined,
+      errorMessage: (e) => asUiError(e).message,
+    });
   }
 
   /** The queue rate code the session streams at. */
@@ -461,16 +506,21 @@ export class MeterDriver {
     return w.decodeMemoryRead(concat(parts), addr, len);
   }
 
-  private async open(): Promise<void> {
-    const w = this.o.wasm;
-    await this.connectChecked();
+  /** The device info read (the four safe blocks), while holding the link; returns the
+   * UID block the auth signs. */
+  private async readInfoLocked(): Promise<Uint8Array> {
     const hardware = await this.readBlock(HARDWARE_INFO);
     const firmware = await this.readBlock(FIRMWARE_INFO);
     const otp = await this.readBlock(OTP);
     const uid = await this.readBlock(UID);
     this.uidBlock = uid;
-    this.info = w.decodeDeviceInfo(hardware, firmware, otp, uid);
-    if (await this.authenticate(uid)) {
+    this.info = this.o.wasm.decodeDeviceInfo(hardware, firmware, otp, uid);
+    return uid;
+  }
+
+  private async open(): Promise<void> {
+    await this.connectChecked();
+    if (await this.authenticate(await this.readInfoLocked())) {
       this.mode = (await this.startQueue()) ? "queue" : "snapshot";
     } else {
       this.mode = "snapshot";
@@ -623,6 +673,7 @@ export class MeterDriver {
     const w = this.o.wasm;
     return this.meterRead("Reading the settings", async () => {
       const reply = await this.exchange(w.settingsRequest(this.nextId()), REPLY_TIMEOUT_MS);
+      this.settingsReply = reply;
       return w.decodeSettings(reply);
     });
   }
@@ -728,9 +779,8 @@ export class MeterDriver {
     }
   }
 
-  /** The record list, read while holding the link; the book keeps its windows. */
-  private async listLocked(): Promise<{ book: RecordBookLike; list: RecordList }> {
-    const w = this.o.wasm;
+  /** A level-1 auth unless the session already holds it, while holding the link. */
+  private async signInLocked(): Promise<void> {
     if (this.authLevel < 1 && !(this.uidBlock && (await this.authenticate(this.uidBlock)))) {
       throw {
         kind: "protocol",
@@ -738,6 +788,12 @@ export class MeterDriver {
         hint: "Replug the meter and try again.",
       } satisfies UiError;
     }
+  }
+
+  /** The record list, read while holding the link; the book keeps its windows. */
+  private async listLocked(): Promise<{ book: RecordBookLike; list: RecordList }> {
+    const w = this.o.wasm;
+    await this.signInLocked();
     // The session may have ended during the sign-in: make no book it would not free.
     if (this.ended) throw disconnectedError();
     const book = (this.book ??= new w.RecordBook());
@@ -835,6 +891,58 @@ export class MeterDriver {
       throw backupFailed(e);
     }
     return files;
+  }
+
+  // ---- the startup logo (FR W8SHXB) ----
+
+  /** Upload `source` as the startup logo as the desktop worker does: a level-1 auth if
+   * needed, the device info read again, the native preconditions (SETTINGS read in this
+   * session, a KM003C), every chunk (1000 ms each), the startup-duration write, the
+   * paced read-back and one SETTINGS read. A bad picture is refused before the link is
+   * taken; nothing is retried. */
+  logoUpload(source: LogoSource, onProgress: (p: LogoProgress) => void): Promise<LogoWritten> {
+    if (this.o.hid) return Promise.reject(hidOnlyBasic(LOGO));
+    const w = this.o.wasm;
+    let write: LogoWriteLike;
+    try {
+      write =
+        "builtin" in source
+          ? w.LogoWrite.uploadBuiltin(source.builtin)
+          : w.LogoWrite.upload(source.bytes, source.isBin, source.alpha);
+    } catch (e) {
+      return Promise.reject(asUiError(e));
+    }
+    return this.logoSequence(write, onProgress);
+  }
+
+  /** Remove the startup logo: one 16-byte 0xFF chunk, the duration 0 and a 16-byte
+   * read-back, as the desktop worker does. */
+  logoRemove(onProgress: (p: LogoProgress) => void): Promise<LogoWritten> {
+    if (this.o.hid) return Promise.reject(hidOnlyBasic(LOGO));
+    return this.logoSequence(this.o.wasm.LogoWrite.remove(), onProgress);
+  }
+
+  private async logoSequence(
+    write: LogoWriteLike,
+    onProgress: (p: LogoProgress) => void,
+  ): Promise<LogoWritten> {
+    try {
+      return await this.meterRead(LOGO, () => this.logo.write(write, onProgress));
+    } finally {
+      write.free();
+    }
+  }
+
+  /** What the logo area holds (a level-1 auth if needed, then memory reads inside the
+   * logo window only, paced); with `full`, the stored picture too. */
+  logoRead(full: boolean): Promise<LogoRead> {
+    return this.meterRead(LOGO, () => this.logo.read(full));
+  }
+
+  /** One read-only check of the settings against the last logo write's calibration
+   * snapshot: `saved` and `calibration_changed` end the wait. */
+  logoSettingsCheck(): Promise<LogoSettingsCheck> {
+    return this.meterRead(LOGO, () => this.logo.settingsCheck());
   }
 
   /** Start the PD sniffer and hand every poll's decoded rows to `onRows`. With a

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use super::{Clock, Error, Session};
 use crate::decode::records::MEMORY_READ_MAX_LEN;
-use crate::decode::settings::{CalibrationSnapshot, StartupLogo};
+use crate::decode::settings::{CalibrationSnapshot, Settings, StartupLogo};
 use crate::frame::{self, Reply};
 use crate::logo::{self, CHUNK, HEADER_LEN, LogoBlob, LogoMode, Rgba};
 use crate::transport::Transport;
@@ -197,6 +197,27 @@ pub fn check_logo_dump(addr: u32, len: u32) -> Result<(), Error> {
     } else {
         Err(Error::Forbidden { addr, len })
     }
+}
+
+/// What one SETTINGS block says after a logo write, against the pre-write
+/// calibration `snapshot` (the pure part of
+/// [`Session::check_settings_saved`]): both blocks valid and calibration
+/// unchanged is [`SettingsSave::Saved`] with the startup duration; a block
+/// that fails its check is [`SettingsSave::NeedsMenuSave`]; valid blocks with
+/// other calibration bytes are [`SettingsSave::CalibrationChanged`].
+pub fn settings_save(
+    settings: &Settings,
+    snapshot: &CalibrationSnapshot,
+) -> Result<SettingsSave, Error> {
+    if !settings.block_a_crc_ok() || !settings.block_b_crc_ok() {
+        return Ok(SettingsSave::NeedsMenuSave);
+    }
+    if settings.calibration_snapshot() != *snapshot {
+        return Ok(SettingsSave::CalibrationChanged);
+    }
+    Ok(SettingsSave::Saved(
+        settings.meter_settings()?.startup_logo.value,
+    ))
 }
 
 /// What 16 logo-area bytes say the area holds.
@@ -443,15 +464,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
         snapshot: &CalibrationSnapshot,
     ) -> Result<SettingsSave, Error> {
         let settings = self.read_settings()?;
-        if !settings.block_a_crc_ok() || !settings.block_b_crc_ok() {
-            return Ok(SettingsSave::NeedsMenuSave);
-        }
-        if settings.calibration_snapshot() != *snapshot {
-            return Ok(SettingsSave::CalibrationChanged);
-        }
-        Ok(SettingsSave::Saved(
-            settings.meter_settings()?.startup_logo.value,
-        ))
+        settings_save(&settings, snapshot)
     }
 
     /// Read-only checks every [`SETTINGS_SAVE_POLL_GAP`] until the meter

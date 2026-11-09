@@ -13,8 +13,9 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Featureless (FR QFTCWX): no native transport in the web module.
-powerz-protocol.workspace = true
+# No native transport in the web module (FR QFTCWX); picture loading for the
+# startup logo (FR W8SHXB).
+powerz-protocol = { workspace = true, features = ["image-files"] }
 # The desktop backup file name and CSV (FR W8SHXA).
 powerz-record.workspace = true
 powerz-sim.workspace = true

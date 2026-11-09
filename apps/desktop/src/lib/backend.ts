@@ -1092,7 +1092,7 @@ export interface LogoRead {
 /** Opens the open dialog filtered to logo pictures (PNG, JPEG, BMP, raw `.bin`) (FR
  * MEHQC0, AC .1). Resolves to the chosen path, or `null` when the dialog was cancelled. */
 export async function logoChoose(): Promise<string | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.logoChoose());
   if (mock) return mock.logoChoose();
   return invoke<string | null>("logo_choose");
 }
@@ -1101,7 +1101,7 @@ export async function logoChoose(): Promise<string | null> {
  * (FR MEHQC0, AC .1); needs no meter. A file that is no picture rejects with a usage
  * error. */
 export async function logoPreview(path: string, alpha: boolean): Promise<LogoPreview> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.logoPreview(path, alpha));
   if (mock) return mock.logoPreview(path, alpha);
   return invoke<LogoPreview>("logo_preview", { path, alpha });
 }
@@ -1113,7 +1113,7 @@ export type BuiltinLogoName = "surf" | "surf-wordmark";
 /** The startup logo built-in logo `name` encodes to, always transparent (FR 70X5YX);
  * needs no meter. */
 export async function logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPreview> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.logoPreviewBuiltin(name));
   if (mock) return mock.logoPreviewBuiltin(name);
   return invoke<LogoPreview>("logo_preview", { builtin: name, alpha: true });
 }
@@ -1121,7 +1121,7 @@ export async function logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPre
 /** What meter `deviceId`'s logo area holds (FR MEHQC0, AC .7); with `full`, the stored
  * image too. Only memory reads go out. */
 export async function logoRead(deviceId: string, full: boolean): Promise<LogoRead> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.logoRead(deviceId, full));
   if (mock) return mock.logoRead(deviceId, full);
   return invoke<LogoRead>("logo_read", { deviceId, full });
 }
@@ -1179,7 +1179,7 @@ export async function logoRemove(
  * wait for a menu save on the meter (FR QG6RNY); rejects with a usage error when no
  * logo write is waiting. */
 export async function logoSettingsCheck(deviceId: string): Promise<LogoSettingsCheck> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.logoSettingsCheck(deviceId));
   if (mock) return mock.logoSettingsCheck(deviceId);
   return invoke<LogoSettingsCheck>("logo_settings_check", { deviceId });
 }
@@ -1768,6 +1768,13 @@ export interface WebBackendApi extends MeterCommands {
     format: "png" | "svg" | "pdf",
     data: Uint8Array,
   ): Promise<string | null>;
+  /** The startup logo (FR W8SHXB): the browser's file picker answers a token that
+   * stands in for the desktop path. */
+  logoChoose(): Promise<string | null>;
+  logoPreview(path: string, alpha: boolean): Promise<LogoPreview>;
+  logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPreview>;
+  logoRead(deviceId: string, full: boolean): Promise<LogoRead>;
+  logoSettingsCheck(deviceId: string): Promise<LogoSettingsCheck>;
   /** Desktop-only meter writes (AC-QFTCX0.6): each rejects without sending anything. */
   firmwareFlash(
     deviceId: string,
@@ -1776,6 +1783,7 @@ export interface WebBackendApi extends MeterCommands {
     onStage: (stage: FlashEvent) => void,
     agreed?: FlashHold[],
   ): Promise<FlashDone>;
+  /** The startup logo writes (FR W8SHXB), run in the browser. */
   logoUpload(
     deviceId: string,
     path: string,

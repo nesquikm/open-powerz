@@ -7,6 +7,8 @@ import type {
   AttachedSession,
   BackendEvent,
   DeviceListing,
+  LogoPreview,
+  LogoProgress,
   MeterCommands,
   UiError,
   WebBackendApi,
@@ -16,6 +18,7 @@ import { DemoCdcTransport, serialPipeOpener } from "./cdcTransport";
 import { DemoTransport } from "./demoTransport";
 import { MeterDriver, openUsbOrOfferHid, type PowerzWasm } from "./driver";
 import { WEB_FEATURES, desktopOnlyError, type Features } from "./features";
+import { LogoFiles, browserPickLogoFile, type PickLogoFile } from "./logoFiles";
 import { SESSION_COMMANDS, WebSession, rateCodeOf, usage } from "./session";
 import type { SerialLike } from "./serial";
 import type { WebTransport } from "./transport";
@@ -37,6 +40,9 @@ export interface WebBackendOptions {
   /** Picks a record delete's backup folder (FR W8SHXA); `null`: browser downloads.
    * Defaults to the browser's `showDirectoryPicker` where it has one. */
   pickDirectory?: PickDirectory | null;
+  /** Opens the startup logo's file picker (FR W8SHXB); defaults to the browser's file
+   * input. */
+  pickLogoFile?: PickLogoFile;
 }
 
 const notReady = (name: string): UiError => ({
@@ -338,7 +344,7 @@ class Sessions {
     return this.list.find((s) => s.deviceId === deviceId) ?? null;
   }
 
-  private async module(): Promise<PowerzWasm> {
+  async module(): Promise<PowerzWasm> {
     this.wasm ??= await loadBrowserWasm();
     return this.wasm;
   }
@@ -447,6 +453,66 @@ class Sessions {
   }
 }
 
+/** A wasm `BindError` (or any failure) as a `UiError` the UI shows. */
+function bindError(e: unknown): UiError {
+  if (typeof e === "object" && e !== null && "kind" in e && "message" in e) {
+    const { kind, message, hint } = e as { kind: unknown; message: unknown; hint?: unknown };
+    return {
+      kind: kind === "usage" ? "usage" : "protocol",
+      message: String(message),
+      hint: typeof hint === "string" ? hint : null,
+    };
+  }
+  return { kind: "internal", message: "Something went wrong inside the app.", hint: null };
+}
+
+/** The startup logo commands (FR W8SHXB): the file picker and previews in the page, the
+ * reads and writes on meter `deviceId`'s driver. */
+function logoCommands(sessions: Sessions, files: LogoFiles) {
+  const driver = (deviceId: string) => {
+    const s = sessions.of(deviceId);
+    if (!s) throw usage("No meter is connected.");
+    return s.driver;
+  };
+  const preview = async (make: (w: PowerzWasm) => LogoPreview): Promise<LogoPreview> => {
+    const w = await sessions.module();
+    try {
+      return make(w);
+    } catch (e) {
+      throw bindError(e);
+    }
+  };
+  return {
+    logoChoose: () => files.choose(),
+    logoPreview: async (path: string, alpha: boolean) => {
+      const file = files.get(path);
+      return preview((w) => w.logoPreview(file.bytes, file.isBin, alpha));
+    },
+    logoPreviewBuiltin: async (name: string) => preview((w) => w.logoPreviewBuiltin(name)),
+    logoRead: async (deviceId: string, full: boolean) => driver(deviceId).logoRead(full),
+    logoUpload: async (
+      deviceId: string,
+      path: string,
+      alpha: boolean,
+      onProgress: (progress: LogoProgress) => void,
+    ) => {
+      const file = files.get(path);
+      return driver(deviceId).logoUpload(
+        { bytes: file.bytes, isBin: file.isBin, alpha },
+        onProgress,
+      );
+    },
+    logoUploadBuiltin: async (
+      deviceId: string,
+      name: string,
+      onProgress: (progress: LogoProgress) => void,
+    ) => driver(deviceId).logoUpload({ builtin: name }, onProgress),
+    logoRemove: async (deviceId: string, onProgress: (progress: LogoProgress) => void) =>
+      driver(deviceId).logoRemove(onProgress),
+    logoSettingsCheck: async (deviceId: string) => driver(deviceId).logoSettingsCheck(),
+  };
+}
+
 /** Creates the browser backend. */
 export async function createWebBackend(options: WebBackendOptions = {}): Promise<WebBackendApi> {
   const usb = (
@@ -466,12 +532,11 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
     options.pickDirectory === undefined ? browserPickDirectory() : options.pickDirectory;
   const sessions = new Sessions(devices, usb, options.wasm, download, serial, pickDirectory);
   const commands = sessions.commands(() => sessions.current);
+  const logoFiles = new LogoFiles(options.pickLogoFile ?? browserPickLogoFile());
   // The desktop-only writes are among `commands`' refused ones (AC-QFTCX0.6).
-  type Writes = Pick<
-    WebBackendApi,
-    "firmwareFlash" | "logoUpload" | "logoUploadBuiltin" | "logoRemove"
-  >;
+  type Writes = Pick<WebBackendApi, "firmwareFlash">;
   return Object.assign(Object.create(commands) as MeterCommands & Writes, {
+    ...logoCommands(sessions, logoFiles),
     features: WEB_FEATURES,
     listDevices: () => devices.list(),
     watchDevices: (onChange: (devices: DeviceListing[]) => void) => devices.watch(onChange),

@@ -34,6 +34,7 @@ pub use auth::{auth_credential, auth_plaintext, auth_reply_level, auth_request};
 pub use logo::{
     LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten,
     SETTINGS_SAVE_POLL_GAP, SettingsSave, check_logo_dump, logo_chunk_plaintext, logo_flag_request,
+    settings_save,
 };
 #[cfg(feature = "bulk")]
 pub(crate) use memory::UID;

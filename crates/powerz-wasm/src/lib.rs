@@ -6,6 +6,7 @@ mod builders;
 mod decoders;
 mod demo;
 mod error;
+mod logo;
 mod meter_reads;
 mod records_delete;
 mod settings_write;
@@ -22,6 +23,10 @@ pub use decoders::{
 };
 pub use demo::{DemoCdc, DemoMeter};
 pub use error::BindError;
+pub use logo::{
+    LogoPreviewView, LogoReadView, LogoReader, LogoSettingsCheckView, LogoWrite, LogoWrittenView,
+    logo_preview, logo_preview_builtin, settings_save_check,
+};
 pub use meter_reads::{
     Chunk, OfflineRecordView, RecordBook, RecordEntryView, RecordListView, RecordSampleView,
     SettingsView, decode_settings, decode_settings_js, settings_request,
