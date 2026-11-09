@@ -55,7 +55,14 @@
   } = $props();
 
   const canRecord = $derived(session.meterConnected);
-  const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
+  const picker = $derived(
+    ratePicker(
+      session.state,
+      session.rateSps,
+      recording.phase !== "idle",
+      session.details?.basic_readings_only,
+    ),
+  );
   const record = $derived(recordButton(recording.phase, canRecord));
 </script>
 

@@ -43,8 +43,8 @@ Playwright with one worker over a static server that mounts the build under the 
 
 Pages must be enabled in the repository settings with the source set to GitHub Actions; the FR does not change repository settings.
 
-## Hardware evidence (web HIL rounds 2 and 3)
+## Hardware evidence (web HIL rounds 2 to 4)
 
 - [x] AC-QFTCX1.1: round 3 built the site with build:pages (qa-runs/WEB.hil3-20261109-0101/build.log) and ran every step from it under /open-powerz/.
 - [x] AC-QFTCX1.2: round 2 (qa-runs/WEB.hil2-20261108-2223, W1) showed the favicon (SVG, 16 and 32 px) in Chrome.
-- AC-QFTCX1.3 stays unticked: the not-supported view in Safari is W9, pending the user's morning HIL (W2b/W6/W7/W9/W10).
+- [x] AC-QFTCX1.3: round 4 (2ad6cc0, qa-runs/WEB.hil4-20261109-0946, W9 and W10) showed the "This browser is not supported" box in Safari, naming Chrome and Edge with the desktop-app link, and the demo meter still connected; in Chrome the HID fallback ran as in AC-QFTCWZ.3.

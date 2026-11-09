@@ -12,6 +12,11 @@ desktop (Windows, macOS, Linux). Firefox and Safari have no WebUSB, and mobile
 browsers are not supported. The page must be opened over HTTPS (the GitHub
 Pages address is) or from `localhost`.
 
+In a browser with neither WebUSB nor WebHID, such as Safari, the page shows a
+"This browser is not supported" box with a link to the desktop app. The demo
+meter still works there, and the page shows no connect hint next to the device
+menu.
+
 ## Connect a meter: the device picker and permission
 
 1. Plug the meter into the computer.
@@ -47,7 +52,8 @@ D+/D-, CC1/CC2, temperature) about ten times a second. On the meter's current
 firmware any reply longer than one 64-byte report hangs and reboots it, and
 control commands get no answer, so a HID session never starts the sample
 queue, reads the device info or captures PD traffic. The top bar shows
-"HID: basic readings only", the rate is fixed, and PD capture is refused. For
+"HID: basic readings only". The rate picker is disabled, and its tooltip says
+the rate is not available over HID. PD capture is refused the same way. For
 the full feature set, free the vendor interface (see below) and connect over
 WebUSB.
 

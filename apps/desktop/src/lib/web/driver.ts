@@ -6,6 +6,7 @@
 import type { UiError } from "../backend";
 import { ERROR_KINDS } from "../errorKinds";
 import type { DemoMeterModule } from "./demoTransport";
+import { hidOnlyBasicText } from "./features";
 import { disconnectedError, timeoutError, type WebTransport } from "./transport";
 import { openWebUsb, type UsbDeviceLike, type WebUsbOptions } from "./webusb";
 
@@ -177,7 +178,7 @@ function asUiError(e: unknown): UiError {
 function hidOnlyBasic(what: string): UiError {
   return {
     kind: "usage",
-    message: `${what} is not available over HID: it gives basic readings only.`,
+    message: hidOnlyBasicText(what),
     hint: "Free the meter's USB interface and connect over WebUSB for this.",
   };
 }

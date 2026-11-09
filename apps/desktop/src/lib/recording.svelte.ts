@@ -13,6 +13,7 @@ import {
 import type { ConnectionState } from "./format";
 import type { MeterNotice } from "./meterNotices.svelte";
 import { autoStopMs, DEFAULT_MAX_ROWS, type RecorderSettings } from "./settings";
+import { hidOnlyBasicText } from "./web/features";
 
 /** Sample rates the picker offers, in SPS. */
 export const RATE_OPTIONS = [2, 10, 50, 1000] as const;
@@ -34,7 +35,10 @@ export function ratePicker(
   state: ConnectionState,
   rateSps: number | null,
   recording = false,
+  basicReadingsOnly = false,
 ): RatePickerState {
+  // A HID session gives ADC snapshots only: no rate change, whatever the measured rate.
+  if (basicReadingsOnly) return { disabled: true, label: hidOnlyBasicText("Rate change") };
   if (state === "rate_locked") {
     return {
       disabled: true,

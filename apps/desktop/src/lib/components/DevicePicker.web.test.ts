@@ -21,6 +21,10 @@
  * a cancelled picker changes nothing (.3); a failed one shows the error and keeps the
  * previous pick (.4); selecting it ends a wait like choosing it by hand (.5).
  *
+ * FR 09R2FM: in a browser with neither WebUSB nor WebHID the connect hint is hidden, even
+ * with only the demo listed (AC-09R2FM.1); with either it shows and goes as before
+ * (AC-09R2FM.2).
+ *
  * The picker renders with `svelte/server` (no DOM). Choosing a menu entry goes through
  * `chooseDeviceMenu` in `src/lib/deviceMenu.ts`, which the component's change handler
  * calls directly; `deviceMenuActions` builds the action items.
@@ -397,6 +401,7 @@ describe("the HID fallback is a menu item (AC-AYR4W6.3)", () => {
 
 describe("a hint points to the menu item while only the demo is listed (AC-AYR4W6.4)", () => {
   it("names Connect a meter… next to the menu", async () => {
+    vi.stubGlobal("navigator", { usb: {} });
     const outside = outsideMenu(await pickerHtml("web"));
     expect(outside).toContain(ACTION);
     // A clickable link or button, not plain text.
@@ -404,6 +409,7 @@ describe("a hint points to the menu item while only the demo is listed (AC-AYR4W
   });
 
   it("is gone once a meter is listed", async () => {
+    vi.stubGlobal("navigator", { usb: {} });
     expect(outsideMenu(await pickerHtml("web", null, [DEMO, PICKED]))).not.toContain(ACTION);
   });
 
@@ -429,6 +435,52 @@ describe("a hint points to the menu item while only the demo is listed (AC-AYR4W
     expect(hint?.[1]).toMatch(/device menu/i);
     expect(hint?.[1]).not.toMatch(/^Click\b/);
   });
+});
+
+// --- FR 09R2FM: no connect hint in a browser that cannot connect ----------------------
+
+/** The connect hint button, if the picker renders one. */
+const HINT = /<button[^>]*class="[^"]*\bconnect-hint\b[^"]*"[^>]*>/;
+
+describe("no connect hint without WebUSB and WebHID (AC-09R2FM.1)", () => {
+  it("regression: a navigator with neither usb nor hid shows no hint beside the demo", async () => {
+    vi.stubGlobal("navigator", {});
+    const html = await pickerHtml("web", null, [DEMO]);
+    // The menu still carries the connect item; only the hint beside it goes.
+    expect(menuOptions(html).map((o) => o.text)).toContain(DEMO.label);
+    expect(html).not.toMatch(HINT);
+    expect(outsideMenu(html)).not.toContain(`Pick “${ACTION}”`);
+    expect(outsideMenu(html)).not.toContain(ACTION);
+  });
+
+  it("nor when usb and hid are present but null", async () => {
+    vi.stubGlobal("navigator", { usb: null, hid: undefined });
+    const html = await pickerHtml("web", null, [DEMO]);
+    expect(html).not.toMatch(HINT);
+    expect(outsideMenu(html)).not.toContain(ACTION);
+  });
+});
+
+describe("the hint still shows where the browser can connect (AC-09R2FM.2)", () => {
+  for (const [name, nav] of [
+    ["WebUSB", { usb: {} }],
+    ["WebHID", { hid: {} }],
+    ["WebUSB and WebHID", { usb: {}, hid: {} }],
+  ] as const) {
+    it(`with ${name}, only the demo listed: the hint shows`, async () => {
+      vi.stubGlobal("navigator", nav);
+      const html = await pickerHtml("web", null, [DEMO]);
+      expect(html).toMatch(HINT);
+      expect(outsideMenu(html)).toContain(`Pick “${ACTION}”`);
+    });
+
+    it(`with ${name}, a meter listed: the hint is gone`, async () => {
+      vi.stubGlobal("navigator", nav);
+      const html = await pickerHtml("web", null, [DEMO, PICKED]);
+      expect(html).not.toMatch(HINT);
+      expect(outsideMenu(html)).not.toContain(ACTION);
+    });
+  }
 });
 
 describe("the desktop builds' menu has no connect items (AC-AYR4W6.5)", () => {
