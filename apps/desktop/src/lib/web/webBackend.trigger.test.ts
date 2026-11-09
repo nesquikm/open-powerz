@@ -111,7 +111,9 @@ class FakeTriggerWorker {
   vbus: VbusCell | null = null;
 
   postMessage(data: unknown): void {
-    const m = data as Posted;
+    // A real worker's postMessage structured-clones the message (and throws a
+    // DataCloneError on what it cannot clone, a proxy among them; FR K4DWCF).
+    const m = structuredClone(data) as Posted;
     this.posted.push(m);
     if (m.method === "open") {
       const ch = m.args[0] as {
@@ -568,5 +570,86 @@ describe("a HID session can trigger (AC-W8SHXC.7)", () => {
     });
     await settle(run.backend.triggerClose());
     await settle(run.backend.disconnect());
+  });
+});
+
+// ---- FR K4DWCF: the panel's reactive values reach the worker ----
+
+/** `value` as Svelte's deep `$state` holds it: a proxy over it and its nested objects. */
+function reactive<T>(value: T): T {
+  if (typeof value !== "object" || value === null) return value;
+  const inner = Array.isArray(value)
+    ? value.map((v: unknown) => reactive(v))
+    : Object.fromEntries(Object.entries(value).map(([k, v]) => [k, reactive(v)]));
+  return new Proxy(inner, {}) as T;
+}
+
+describe("the panel's reactive values reach the engine's worker (FR K4DWCF)", () => {
+  it("AC-K4DWCF.1: a confirmed pending request from reactive state is sent and answered", async () => {
+    const { backend, workers } = await realBackend();
+    await settle(backend.triggerOpen());
+    const worker = workers[0] as FakeTriggerWorker;
+    const answer = {
+      command: "pd req=2",
+      requested_mv: 9000,
+      requested_ma: 3000,
+      delivered_mv: 9010,
+      delivered_ma: 0,
+      reply: null,
+    };
+    worker.answers.request = () => ({ ok: answer });
+    const pending = reactive({ request: pd(2), rememberable: true });
+    const reply = await settle(backend.triggerRequest(pending.request, true));
+    expect(reply).toEqual(answer);
+    expect(worker.methods()).toContain("request");
+    await settle(backend.triggerClose());
+    await settle(backend.disconnect());
+  });
+
+  it("AC-K4DWCF.2: every command hands the worker plain values equal to the panel's", async () => {
+    const { backend, workers } = await realBackend();
+    await settle(backend.triggerOpen());
+    const worker = workers[0] as FakeTriggerWorker;
+    const message: PdMessageRequest = { sop: "sop", msg_type: 2, data_objects: [0x1234, 0x5678] };
+    await settle(backend.triggerList("pd"));
+    await settle(backend.triggerRisk(reactive(pd(2))));
+    await settle(backend.triggerRequest(reactive(pd(2)), true, true));
+    await settle(backend.triggerMessageRisk(reactive(message)));
+    await settle(backend.triggerMessageSend(reactive(message), true));
+    await settle(backend.triggerConsoleRisk("pd req=2"));
+    await settle(backend.triggerConsoleSend("pd req=2", true));
+    const argsOf = (m: string) => worker.posted.find((p) => p.method === m)?.args;
+    expect(argsOf("list")).toEqual(["pd"]);
+    expect(argsOf("risk")).toEqual([pd(2)]);
+    expect(argsOf("request")).toEqual([pd(2), true, true]);
+    expect(argsOf("messageRisk")).toEqual([message]);
+    expect(argsOf("sendMessage")).toEqual([message, true]);
+    expect(argsOf("consoleRisk")).toEqual(["pd req=2"]);
+    expect(argsOf("consoleSend")).toEqual(["pd req=2", true]);
+    await settle(backend.triggerClose());
+    await settle(backend.disconnect());
+  });
+
+  it("AC-K4DWCF.3: a value that cannot be copied fails that call; the session goes on", async () => {
+    const { backend, workers } = await realBackend();
+    await settle(backend.triggerOpen());
+    const worker = workers[0] as FakeTriggerWorker;
+    const uncopyable = { ...softReset, onSent: () => {} } as unknown as PdMessageRequest;
+    const e = await rejection(backend.triggerMessageSend(uncopyable, false));
+    expect(typeof e.kind).toBe("string");
+    expect(typeof e.message).toBe("string");
+    expect(worker.methods()).not.toContain("sendMessage");
+    // The session is still usable: the next command reaches the worker and is answered.
+    worker.answers.list = () => ({ ok: { protocol: "pd", supported: true, offers: [] } });
+    expect(await settle(backend.triggerList("pd"))).toEqual({
+      protocol: "pd",
+      supported: true,
+      offers: [],
+    });
+    worker.answers.armed = () => ({ ok: true });
+    expect(await settle(backend.triggerArmed())).toBe(true);
+    await settle(backend.triggerClose());
+    expect(worker.methods()).toContain("close");
+    await settle(backend.disconnect());
   });
 });

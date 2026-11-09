@@ -196,6 +196,18 @@ export const sessionClosed = (): UiError => ({
   hint: null,
 });
 
+/** `value` as plain data: arrays and plain objects copied deeply (a reactive-state
+ * proxy becomes a plain object, FR K4DWCF), shared memory and other objects passed as
+ * they are; a function cannot cross `postMessage`, so it throws. */
+function plainCopy(value: unknown): unknown {
+  if (typeof value === "function") throw new TypeError("A function cannot be sent to the worker.");
+  if (typeof value !== "object" || value === null) return value;
+  if (Array.isArray(value)) return value.map(plainCopy);
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return value;
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plainCopy(v)]));
+}
+
 /** The page's side of the RPC: each call a promise, answered by its id. */
 export class RpcClient {
   private nextId = 1;
@@ -211,7 +223,7 @@ export class RpcClient {
     return new Promise((resolve, reject) => {
       this.waiting.set(id, { resolve, reject });
       try {
-        this.post({ id, method, args });
+        this.post({ id, method, args: args.map(plainCopy) });
       } catch (e) {
         this.waiting.delete(id);
         reject(engineError(e));

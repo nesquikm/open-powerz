@@ -20,7 +20,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { ByteRing, RpcClient, VbusCell, answerRpc } from "./triggerBridge";
+import { ByteRing, RpcClient, VbusCell, answerRpc, type RpcCall } from "./triggerBridge";
 
 const bytes = (...b: number[]) => Uint8Array.from(b);
 const text = (s: string) => new TextEncoder().encode(s);
@@ -188,5 +188,84 @@ describe("the RPC between page and worker", () => {
     expect(reply.id).toBe(4);
     expect(reply.error?.kind).toBe("internal");
     expect("ok" in reply).toBe(false);
+  });
+});
+
+/**
+ * FR K4DWCF: a real `Worker.postMessage` structured-clones its message and throws a
+ * `DataCloneError` on a proxy, and the panel's values come from Svelte's deep `$state`
+ * (proxies). The client posts a plain deep copy of the call's arguments; a value that
+ * cannot be copied at all fails that one call and leaves the client usable.
+ */
+describe("the RPC client posts plain copies of reactive values (FR K4DWCF)", () => {
+  /** A post that clones as `Worker.postMessage` does. */
+  const cloningPost = (posted: RpcCall[]) => (m: RpcCall) => {
+    posted.push(structuredClone(m));
+  };
+
+  const PD_9V = { protocol: "pd", position: 2, voltage_mv: null, current_ma: null };
+
+  it("AC-K4DWCF.1: a call holding a reactive-state proxy is posted and answered", async () => {
+    const posted: RpcCall[] = [];
+    const client = new RpcClient(cloningPost(posted));
+    const reactive = new Proxy({ ...PD_9V }, {});
+    const p = client.call("request", [reactive, true, false]);
+    p.catch(() => {}); // awaited below; keeps an early failure from going unhandled
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.method).toBe("request");
+    client.receive({ id: posted[0]?.id ?? -1, ok: { command: "pd req=2" } });
+    await expect(p).resolves.toEqual({ command: "pd req=2" });
+  });
+
+  it("AC-K4DWCF.2: the posted args are plain values equal to the ones passed", async () => {
+    const posted: RpcCall[] = [];
+    const client = new RpcClient((m) => posted.push(m));
+    const request = Proxy.revocable({ ...PD_9V }, {});
+    const message = Proxy.revocable(
+      { sop: "sop", msg_type: 2, data_objects: Proxy.revocable([0x1234, 0x5678], {}).proxy },
+      {},
+    );
+    void client.call("request", [request.proxy, true, false]);
+    void client.call("sendMessage", [message.proxy, true]);
+    void client.call("consoleSend", ["pd req=2", true]);
+    // Once the reactive state is gone, what was posted must still read as plain values.
+    request.revoke();
+    message.revoke();
+    expect(posted.map((m) => m.args)).toEqual([
+      [PD_9V, true, false],
+      [{ sop: "sop", msg_type: 2, data_objects: [0x1234, 0x5678] }, true],
+      ["pd req=2", true],
+    ]);
+    // And they clone as a real worker's postMessage needs.
+    expect(structuredClone(posted)).toEqual(posted);
+  });
+
+  it("AC-K4DWCF.2: shared memory in a call still reaches the worker as shared memory", () => {
+    const posted: RpcCall[] = [];
+    const client = new RpcClient((m) => posted.push(m));
+    const portIn = new SharedArrayBuffer(32);
+    void client.call("open", [{ portIn }]);
+    const sent = (posted[0]?.args[0] as { portIn: SharedArrayBuffer }).portIn;
+    expect(sent).toBeInstanceOf(SharedArrayBuffer);
+    new Uint8Array(sent)[0] = 7;
+    expect(new Uint8Array(portIn)[0]).toBe(7);
+  });
+
+  it("AC-K4DWCF.3: a value that cannot be copied fails that call; the client still works", async () => {
+    const posted: RpcCall[] = [];
+    const client = new RpcClient(cloningPost(posted));
+    const bad = client.call("request", [{ ...PD_9V, onDone: () => {} }, true, false]);
+    const e = await bad.then(
+      () => null,
+      (err: unknown) => err as { kind: string; message: string },
+    );
+    expect(e).not.toBeNull();
+    expect(typeof e?.kind).toBe("string");
+    expect(typeof e?.message).toBe("string");
+    expect(posted).toEqual([]);
+    const next = client.call("armed", []);
+    expect(posted).toHaveLength(1);
+    client.receive({ id: posted[0]?.id ?? -1, ok: true });
+    await expect(next).resolves.toBe(true);
   });
 });
