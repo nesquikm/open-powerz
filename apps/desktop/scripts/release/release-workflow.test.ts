@@ -394,7 +394,10 @@ describe("permissions, pins and tokens (AC-E1ZJ2N.9)", () => {
   });
 
   it("pins every action to a full commit SHA with a version comment", () => {
-    const uses = lines().filter((l) => /^\s*-?\s*uses:/.test(l) && !isComment(l));
+    // A local reusable workflow (`uses: ./.github/workflows/…`, FR QFTCX1) lives in this repo: no pin.
+    const uses = lines().filter(
+      (l) => /^\s*-?\s*uses:/.test(l) && !isComment(l) && !/uses:\s*\.\//.test(l),
+    );
     expect(uses.length).toBeGreaterThan(3);
     const offenders = uses.filter(
       (l) => !/uses:\s*[\w.-]+\/[\w./-]+@[0-9a-f]{40}\s+#\s+\S/.test(l),

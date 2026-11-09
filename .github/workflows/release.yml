@@ -138,7 +138,7 @@ jobs:
         if: matrix.targets
         env:
           TARGETS: ${{ matrix.targets }}
-        run: rustup target add $TARGETS
+        run: read -ra targets <<< "$TARGETS" && rustup target add "${targets[@]}"
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -234,7 +234,7 @@ jobs:
       - name: Rust targets
         env:
           TARGETS: ${{ matrix.targets }}
-        run: rustup target add $TARGETS
+        run: read -ra targets <<< "$TARGETS" && rustup target add "${targets[@]}"
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -391,3 +391,17 @@ jobs:
         run: |
           bun apps/desktop/scripts/release/publish.ts \
             --notes "$RUNNER_TEMP/notes/release-notes.md" "$RUNNER_TEMP"/dist/*
+
+  # FR QFTCX1: deploys the tagged web edition to GitHub Pages (pages-deploy.yml, shared
+  # with the manual pages.yml). A pull request dry run skips it.
+  pages:
+    name: pages
+    needs: check
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages-deploy.yml
+    with:
+      ref: ${{ format('refs/tags/{0}', needs.check.outputs.tag) }}

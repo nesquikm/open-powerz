@@ -3,9 +3,55 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { MockBackend } from "./mockBackend";
+import { version as packageVersion } from "../../package.json";
+import { ERROR_KINDS } from "./errorKinds";
+import { DESKTOP_FEATURES, WEB_FEATURES, desktopOnlyError, type Features } from "./web/features";
 
 /** The scripted demo backend, when the web build was made with `VITE_BACKEND=mock`. */
 const mock: MockBackend | null = import.meta.env.VITE_BACKEND === "mock" ? new MockBackend() : null;
+
+/** The browser backend over WebUSB / WebHID, when the build was made with
+ * `VITE_BACKEND=web` (FR QFTCX0). A separate chunk, so the other builds carry none of
+ * it, but preloaded at start-up so a click reaches the browser's picker synchronously. */
+const web: Promise<WebBackendApi> | null =
+  import.meta.env.VITE_BACKEND === "web"
+    ? import("./web/webBackend").then((m) => m.createWebBackend())
+    : null;
+
+/** The web backend once it has loaded (the click path needs it without an await). */
+let webReady: WebBackendApi | null = null;
+web?.then(
+  (b) => (webReady = b),
+  () => {},
+);
+
+/** A command the web build leaves to the desktop app (AC-QFTCX0.6): rejects with a usage
+ * error and sends nothing anywhere. */
+function desktopOnly<T>(): Promise<T> {
+  return Promise.reject(desktopOnlyError());
+}
+
+/** What this build offers: components hide or disable the controls it leaves out. */
+export const features: Readonly<Features> = web ? WEB_FEATURES : DESKTOP_FEATURES;
+
+/** Asks the browser for a meter to use (its device picker; FR QFTCX0). Resolves to the
+ * granted meter's listing, or `null` when none was picked or the build has no picker. */
+export function requestMeter(): Promise<DeviceListing | null> {
+  // Loaded: straight to navigator.usb.requestDevice, still inside the user gesture.
+  if (webReady) return webReady.requestMeter();
+  if (web) return web.then((b) => b.requestMeter());
+  return Promise.resolve(null);
+}
+
+/** Asks the browser for a meter over WebHID (AC-QFTCWZ.3), for a meter whose USB
+ * interface another driver holds. Resolves `null` when none was picked or the build has
+ * no browser backend. */
+export function requestHidMeter(): Promise<DeviceListing | null> {
+  // Loaded: straight to navigator.hid.requestDevice, still inside the user gesture.
+  if (webReady) return webReady.requestHidMeter();
+  if (web) return web.then((b) => b.requestHidMeter());
+  return Promise.resolve(null);
+}
 
 // The mock build exposes itself so the UI suite can read what it recorded (reveal requests).
 if (mock && typeof window !== "undefined") {
@@ -14,7 +60,7 @@ if (mock && typeof window !== "undefined") {
 
 /** Whether a backend is there to talk to: the Tauri app, or the mock build. */
 export function backendAvailable(): boolean {
-  return mock !== null || isTauri();
+  return mock !== null || web !== null || isTauri();
 }
 
 /** One measurement. */
@@ -70,20 +116,6 @@ export interface UiError {
   /** The sessions a `flash_needs_consent` refusal names; sent only then. */
   sessions?: FlashHold[];
 }
-
-const ERROR_KINDS: readonly ErrorKind[] = [
-  "permission_denied",
-  "device_busy",
-  "timeout",
-  "protocol",
-  "disconnected",
-  "usage",
-  "out_of_sync",
-  "flash_needs_consent",
-  "cancelled",
-  "settings_not_saved",
-  "internal",
-];
 
 function isUiError(value: unknown): value is UiError {
   if (typeof value !== "object" || value === null) return false;
@@ -144,6 +176,9 @@ export interface ConnectedInfo {
   serial: string;
   rate_sps: number | null;
   rate_locked: boolean;
+  /** A WebHID session of the web build (AC-QFTCWZ.3): ADC snapshots only, no PD capture
+   * or queue rates. Absent elsewhere. */
+  basic_readings_only?: boolean | undefined;
   session_id: number;
   /** Oldest supported firmware, from the protocol library. */
   min_supported_firmware: string;
@@ -331,6 +366,7 @@ export type BackendEvent =
 
 /** Lists the meters and demo devices available right now. */
 export function listDevices(): Promise<DeviceListing[]> {
+  if (web) return web.then((b) => b.listDevices());
   if (mock) return mock.listDevices();
   return invoke<DeviceListing[]>("list_devices");
 }
@@ -341,6 +377,7 @@ export function listDevices(): Promise<DeviceListing[]> {
 export async function watchDevices(
   onChange: (devices: DeviceListing[]) => void,
 ): Promise<() => void> {
+  if (web) return web.then((b) => b.watchDevices(onChange));
   if (mock) return mock.watchDevices(onChange);
   let deliver = onChange;
   const channel = new Channel<DeviceListing[]>();
@@ -370,6 +407,7 @@ export async function connect(
   onEvent: (event: BackendEvent) => void,
   source: MeasurementSource = "queue",
 ): Promise<void> {
+  if (web) return web.then((b) => b.connect(deviceId, rateSps, onEvent, source));
   if (mock) return mock.connect(deviceId, rateSps, onEvent, source);
   const channel = new Channel<BackendEvent>();
   channel.onmessage = onEvent;
@@ -396,6 +434,8 @@ export interface AttachedSession {
   serial: string | null;
   rate_sps: number | null;
   rate_locked: boolean;
+  /** A WebHID session of the web build (AC-QFTCWZ.3). */
+  basic_readings_only?: boolean | undefined;
   session_id: number;
   recording: RecordingSnapshot | null;
   /** The PD capture runs (AC-AXHK2K.7). */
@@ -412,6 +452,7 @@ export async function attach(
   onEvent: (event: BackendEvent) => void,
   deviceId?: string,
 ): Promise<AttachedSession | null> {
+  if (web) return web.then((b) => b.attach(onEvent, deviceId));
   if (mock) return mock.attach(onEvent, deviceId);
   const channel = new Channel<BackendEvent>();
   channel.onmessage = onEvent;
@@ -423,24 +464,28 @@ export async function attach(
  * in the order they were connected (FR 1HHT03): what a reloaded page picks up with
  * {@link attach}. */
 export async function connectedMeters(): Promise<string[]> {
+  if (web) return web.then((b) => b.connectedMeters());
   if (mock) return mock.connectedIds();
   return invoke<string[]>("running_meters");
 }
 
 /** Ends the current session. */
 export async function disconnect(): Promise<void> {
+  if (web) return web.then((b) => b.disconnect());
   if (mock) return mock.disconnect();
   await invoke("disconnect");
 }
 
 /** Stops waiting for an unplugged meter, after the user picked another device. */
 export async function cancelWait(): Promise<void> {
+  if (web) return web.then((b) => b.cancelWait());
   if (mock) return mock.cancelWait();
   await invoke("cancel_wait");
 }
 
 /** Changes the queue rate of the current session. */
 export async function setRate(rateSps: number): Promise<void> {
+  if (web) return web.then((b) => b.setRate(rateSps));
   if (mock) return mock.setRate(rateSps);
   await invoke("set_rate", { rateSps });
 }
@@ -459,30 +504,35 @@ export async function startRecording(
   suggestedName: string,
   options?: RecordingOptions,
 ): Promise<string | null> {
+  if (web) return web.then((b) => b.startRecording(suggestedName, options));
   if (mock) return mock.startRecording(suggestedName, options);
   return invoke<string | null>("start_recording", { suggestedName, options });
 }
 
 /** Asks which folder recordings go to; `null` when the dialog was cancelled. */
 export async function chooseRecordingFolder(): Promise<string | null> {
+  if (web) return desktopOnly();
   if (mock) return mock.chooseRecordingFolder();
   return invoke<string | null>("choose_recording_folder");
 }
 
 /** Stops the recording; resolves to its row count and gaps. */
 export async function stopRecording(): Promise<RecordingSummary> {
+  if (web) return web.then((b) => b.stopRecording());
   if (mock) return mock.stopRecording();
   return invoke<RecordingSummary>("stop_recording");
 }
 
 /** Holds the recording's rows back while the stream goes on. */
 export async function pauseRecording(): Promise<void> {
+  if (web) return web.then((b) => b.pauseRecording());
   if (mock) return mock.pauseRecording();
   await invoke("recording_pause");
 }
 
 /** Writes the recording's rows again, in the same file. */
 export async function resumeRecording(): Promise<void> {
+  if (web) return web.then((b) => b.resumeRecording());
   if (mock) return mock.resumeRecording();
   await invoke("recording_resume");
 }
@@ -490,6 +540,7 @@ export async function resumeRecording(): Promise<void> {
 /** Opens the save dialog for the finished recording at `path` and moves it to the chosen
  * file. Resolves to the new path, or `null` when the dialog was cancelled. */
 export async function saveRecordingAs(path: string): Promise<string | null> {
+  if (web) return web.then((b) => b.saveRecordingAs(path));
   if (mock) return mock.saveRecordingAs(path);
   return invoke<string | null>("save_recording_as", { path });
 }
@@ -500,6 +551,7 @@ export async function exportSession(
   suggestedName: string,
   onProgress: (progress: ExportProgress) => void,
 ): Promise<ExportResult | null> {
+  if (web) return web.then((b) => b.exportSession(suggestedName, onProgress));
   if (mock) return mock.exportSession(suggestedName, onProgress);
   const channel = new Channel<ExportProgress>();
   channel.onmessage = onProgress;
@@ -512,6 +564,7 @@ export async function exportSessionDb(
   suggestedName: string,
   onProgress: (progress: ExportProgress) => void,
 ): Promise<ExportResult | null> {
+  if (web) return web.then((b) => b.exportSessionDb(suggestedName, onProgress));
   if (mock) return mock.exportSessionDb(suggestedName, onProgress);
   const channel = new Channel<ExportProgress>();
   channel.onmessage = onProgress;
@@ -520,6 +573,7 @@ export async function exportSessionDb(
 
 /** Statistics of the open session since its start or the last reset. */
 export async function stats(): Promise<StatsSnapshot> {
+  if (web) return web.then((b) => b.stats());
   if (mock) return mock.stats();
   return invoke<StatsSnapshot>("stats");
 }
@@ -556,6 +610,7 @@ export interface OpenProgress {
 export async function openRecordingFile(
   onProgress: (progress: OpenProgress) => void,
 ): Promise<FileSummary | null> {
+  if (web) return desktopOnly();
   if (mock) return mock.openRecordingFile(onProgress);
   const channel = new Channel<OpenProgress>();
   channel.onmessage = onProgress;
@@ -564,12 +619,14 @@ export async function openRecordingFile(
 
 /** Ends the open under way: it resolves to `null`. */
 export async function cancelRecordingFile(): Promise<void> {
+  if (web) return;
   if (mock) return mock.cancelRecordingFile();
   await invoke("recording_file_cancel");
 }
 
 /** Closes the open recording file. */
 export async function closeRecordingFile(): Promise<void> {
+  if (web) return;
   if (mock) return mock.closeRecordingFile();
   await invoke("recording_file_close");
 }
@@ -582,6 +639,7 @@ export async function recordingFileRange<const S extends readonly HistorySeries[
   t1Ms: number,
   buckets: number,
 ): Promise<BucketsFor<S>> {
+  if (web) return desktopOnly();
   if (mock) return mock.recordingFileRange(series, t0Ms, t1Ms, buckets);
   return invoke<BucketsFor<S>>("recording_file_range", {
     series,
@@ -598,6 +656,7 @@ export async function historyRange<const S extends readonly HistorySeries[]>(
   t1Ms: number,
   buckets: number,
 ): Promise<BucketsFor<S>> {
+  if (web) return web.then((b) => b.historyRange(series, t0Ms, t1Ms, buckets));
   if (mock) return mock.historyRange(series, t0Ms, t1Ms, buckets);
   return invoke<BucketsFor<S>>("history_range", { series, ...wholeMs(t0Ms, t1Ms), buckets });
 }
@@ -605,6 +664,7 @@ export async function historyRange<const S extends readonly HistorySeries[]>(
 /** The gaps between measuring runs of the open session's history that overlap
  * `t0Ms..=t1Ms`, oldest first. */
 export async function historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]> {
+  if (web) return web.then((b) => b.historyGaps(t0Ms, t1Ms));
   if (mock) return mock.historyGaps(t0Ms, t1Ms);
   return invoke<HistoryGap[]>("history_gaps", wholeMs(t0Ms, t1Ms));
 }
@@ -612,6 +672,7 @@ export async function historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGa
 /** Where the open session's history keeps full resolution from, ms; the data before it is
  * folded into coarser blocks. `null` while nothing is folded (AC-AXHK2W.11). */
 export async function historyFoldBoundary(): Promise<number | null> {
+  if (web) return web.then((b) => b.historyFoldBoundary());
   if (mock) return mock.historyFoldBoundary();
   return invoke<number | null>("history_fold_boundary");
 }
@@ -630,6 +691,7 @@ export interface RangeStats {
 /** The ruler's stats over the open session's history between `t0Ms` and `t1Ms`; `null`
  * when no sample is in range (AC-AXHK2T.2). */
 export async function rangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null> {
+  if (web) return web.then((b) => b.rangeStats(t0Ms, t1Ms));
   if (mock) return mock.rangeStats(t0Ms, t1Ms);
   return invoke<RangeStats | null>("range_stats", wholeMs(t0Ms, t1Ms));
 }
@@ -639,6 +701,7 @@ export async function recordingFileRangeStats(
   t0Ms: number,
   t1Ms: number,
 ): Promise<RangeStats | null> {
+  if (web) return desktopOnly();
   if (mock) return mock.recordingFileRangeStats(t0Ms, t1Ms);
   return invoke<RangeStats | null>("recording_file_range_stats", wholeMs(t0Ms, t1Ms));
 }
@@ -717,6 +780,7 @@ function wireQuery(q: RunProgressQuery): Required<RunProgressQuery> {
 /** Segment marks and E.D. of the open session's current run; `null` with an empty
  * history (AC-AXHK2T.4, .5). */
 export async function runProgress(query: RunProgressQuery): Promise<RunProgress | null> {
+  if (web) return web.then((b) => b.runProgress(query));
   if (mock) return mock.runProgress(query);
   return invoke<RunProgress | null>("run_progress", { query: wireQuery(query) });
 }
@@ -725,18 +789,21 @@ export async function runProgress(query: RunProgressQuery): Promise<RunProgress 
 export async function recordingFileRunProgress(
   query: RunProgressQuery,
 ): Promise<RunProgress | null> {
+  if (web) return desktopOnly();
   if (mock) return mock.recordingFileRunProgress(query);
   return invoke<RunProgress | null>("recording_file_run_progress", { query: wireQuery(query) });
 }
 
 /** Zeroes the session statistics; they count again from the next sample. */
 export async function resetStats(): Promise<void> {
+  if (web) return web.then((b) => b.resetStats());
   if (mock) return mock.resetStats();
   await invoke("reset_stats");
 }
 
 /** Discards the session history; the stream (and any recording) goes on. */
 export async function clearHistory(): Promise<void> {
+  if (web) return web.then((b) => b.clearHistory());
   if (mock) return mock.clearHistory();
   await invoke("clear_history");
 }
@@ -744,12 +811,14 @@ export async function clearHistory(): Promise<void> {
 /** Starts the PD capture on the open session; rows and the capture state arrive on the
  * session channel (`pd_rows`, `pd_state`). */
 export async function pdStart(): Promise<void> {
+  if (web) return web.then((b) => b.pdStart());
   if (mock) return mock.pdStart();
   await invoke("pd_start");
 }
 
 /** Stops the PD capture; the captured records stay. */
 export async function pdStop(): Promise<void> {
+  if (web) return web.then((b) => b.pdStop());
   if (mock) return mock.pdStop();
   await invoke("pd_stop");
 }
@@ -757,6 +826,7 @@ export async function pdStop(): Promise<void> {
 /** The raw bytes and field tree of PD record `index`: of the capture opened from a file
  * when `opened`, of the live capture otherwise. */
 export async function pdDetails(index: number, opened = false): Promise<PdDetails> {
+  if (web) return web.then((b) => b.pdDetails(index, opened));
   if (mock) return mock.pdDetails(index, opened);
   return invoke<PdDetails>("pd_details", opened ? { index, opened } : { index });
 }
@@ -783,6 +853,7 @@ export interface MeterSettings {
 /** Reads the connected meter's settings (GET_DATA 0x008 only); rejects with the
  * backend's error, e.g. without a meter or on a CRC mismatch. */
 export async function meterSettings(): Promise<MeterSettings> {
+  if (web) return web.then((b) => b.meterSettings());
   if (mock) return mock.meterSettings();
   return invoke<MeterSettings>("meter_settings");
 }
@@ -800,6 +871,7 @@ export type SettingChanges = Partial<Record<EditableSettingKey | "startup_durati
  * resolves to the settings as read back; rejects with the backend's error, e.g. when
  * the re-read does not match. Nothing is retried. */
 export async function meterSettingsWrite(changes: SettingChanges): Promise<MeterSettings> {
+  if (web) return web.then((b) => b.meterSettingsWrite(changes));
   if (mock) return mock.meterSettingsWrite(changes);
   return invoke<MeterSettings>("meter_settings_write", { changes });
 }
@@ -847,6 +919,7 @@ export interface OfflineRecord {
 /** Lists the connected meter's offline records (GET_DATA 0x200 only); rejects with
  * the backend's error, e.g. without a meter. */
 export async function recordsList(): Promise<RecordList> {
+  if (web) return web.then((b) => b.recordsList());
   if (mock) return mock.recordsList();
   return invoke<RecordList>("records_list");
 }
@@ -854,6 +927,7 @@ export async function recordsList(): Promise<RecordList> {
 /** Downloads offline record `index` (1-based): its own window, read in chunks of at most
  * 256 bytes. */
 export async function recordDownload(index: number): Promise<OfflineRecord> {
+  if (web) return web.then((b) => b.recordDownload(index));
   if (mock) return mock.recordDownload(index);
   return invoke<OfflineRecord>("record_download", { index });
 }
@@ -875,6 +949,7 @@ export async function recordsDelete(
   target: number | "all",
   confirm: string,
 ): Promise<RecordDeleteResult> {
+  if (web) return web.then((b) => b.recordsDelete(target, confirm));
   if (mock) return mock.recordsDelete(target, confirm);
   return invoke<RecordDeleteResult>("records_delete", {
     index: target === "all" ? null : target,
@@ -907,6 +982,7 @@ export interface PdOpened {
 /** Opens the open dialog and loads the chosen pdcap file (FR TGE83E); needs no meter.
  * Resolves to the capture, or `null` when the dialog was cancelled. */
 export async function pdOpen(): Promise<PdOpened | null> {
+  if (web) return desktopOnly();
   if (mock) return mock.pdOpen();
   return invoke<PdOpened | null>("pd_open");
 }
@@ -914,6 +990,7 @@ export async function pdOpen(): Promise<PdOpened | null> {
 /** Releases the capture opened from a file, which the page no longer shows
  * (AC-AXHK2K.5). The slot is the app's, not a meter's: it needs no meter. */
 export async function pdReleaseOpened(): Promise<void> {
+  if (web) return;
   if (mock) return mock.pdReleaseOpened();
   await invoke("pd_release_opened");
 }
@@ -922,6 +999,7 @@ export async function pdReleaseOpened(): Promise<void> {
  * read-only (FR TGE83E, AC .6); needs no meter. Resolves like {@link pdOpen}: the
  * imported capture, or `null` when the dialog was cancelled. */
 export async function pdImport(): Promise<PdOpened | null> {
+  if (web) return desktopOnly();
   if (mock) return mock.pdImport();
   return invoke<PdOpened | null>("pd_import");
 }
@@ -944,6 +1022,7 @@ export interface FirmwareFileInfo {
 /** Reads the firmware container at `path` and resolves to its metadata; needs no meter.
  * A corrupt file or one that is not a firmware container rejects with a usage error. */
 export async function firmwareInspect(path: string): Promise<FirmwareFileInfo> {
+  if (web) return desktopOnly();
   if (mock) return mock.firmwareInspect(path);
   return invoke<FirmwareFileInfo>("firmware_inspect", { path });
 }
@@ -951,6 +1030,7 @@ export async function firmwareInspect(path: string): Promise<FirmwareFileInfo> {
 /** Opens the open dialog filtered to firmware containers (`.mencrypt`) (FR V9SK55,
  * AC .2). Resolves to the chosen path, or `null` when the dialog was cancelled. */
 export async function firmwareChoose(): Promise<string | null> {
+  if (web) return desktopOnly();
   if (mock) return mock.firmwareChoose();
   return invoke<string | null>("firmware_choose");
 }
@@ -1012,6 +1092,7 @@ export interface LogoRead {
 /** Opens the open dialog filtered to logo pictures (PNG, JPEG, BMP, raw `.bin`) (FR
  * MEHQC0, AC .1). Resolves to the chosen path, or `null` when the dialog was cancelled. */
 export async function logoChoose(): Promise<string | null> {
+  if (web) return desktopOnly();
   if (mock) return mock.logoChoose();
   return invoke<string | null>("logo_choose");
 }
@@ -1020,6 +1101,7 @@ export async function logoChoose(): Promise<string | null> {
  * (FR MEHQC0, AC .1); needs no meter. A file that is no picture rejects with a usage
  * error. */
 export async function logoPreview(path: string, alpha: boolean): Promise<LogoPreview> {
+  if (web) return desktopOnly();
   if (mock) return mock.logoPreview(path, alpha);
   return invoke<LogoPreview>("logo_preview", { path, alpha });
 }
@@ -1031,6 +1113,7 @@ export type BuiltinLogoName = "surf" | "surf-wordmark";
 /** The startup logo built-in logo `name` encodes to, always transparent (FR 70X5YX);
  * needs no meter. */
 export async function logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPreview> {
+  if (web) return desktopOnly();
   if (mock) return mock.logoPreviewBuiltin(name);
   return invoke<LogoPreview>("logo_preview", { builtin: name, alpha: true });
 }
@@ -1038,6 +1121,7 @@ export async function logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPre
 /** What meter `deviceId`'s logo area holds (FR MEHQC0, AC .7); with `full`, the stored
  * image too. Only memory reads go out. */
 export async function logoRead(deviceId: string, full: boolean): Promise<LogoRead> {
+  if (web) return desktopOnly();
   if (mock) return mock.logoRead(deviceId, full);
   return invoke<LogoRead>("logo_read", { deviceId, full });
 }
@@ -1052,6 +1136,7 @@ export async function logoUpload(
   alpha: boolean,
   onProgress: (progress: LogoProgress) => void,
 ): Promise<LogoWritten> {
+  if (web) return web.then((b) => b.logoUpload(deviceId, path, alpha, onProgress));
   if (mock) return mock.logoUpload(deviceId, path, alpha, onProgress);
   const channel = new Channel<LogoProgress>();
   channel.onmessage = onProgress;
@@ -1065,6 +1150,7 @@ export async function logoUploadBuiltin(
   name: BuiltinLogoName,
   onProgress: (progress: LogoProgress) => void,
 ): Promise<LogoWritten> {
+  if (web) return web.then((b) => b.logoUploadBuiltin(deviceId, name, onProgress));
   if (mock) return mock.logoUploadBuiltin(deviceId, name, onProgress);
   const channel = new Channel<LogoProgress>();
   channel.onmessage = onProgress;
@@ -1082,6 +1168,7 @@ export async function logoRemove(
   deviceId: string,
   onProgress: (progress: LogoProgress) => void,
 ): Promise<LogoWritten> {
+  if (web) return web.then((b) => b.logoRemove(deviceId, onProgress));
   if (mock) return mock.logoRemove(deviceId, onProgress);
   const channel = new Channel<LogoProgress>();
   channel.onmessage = onProgress;
@@ -1092,6 +1179,7 @@ export async function logoRemove(
  * wait for a menu save on the meter (FR QG6RNY); rejects with a usage error when no
  * logo write is waiting. */
 export async function logoSettingsCheck(deviceId: string): Promise<LogoSettingsCheck> {
+  if (web) return desktopOnly();
   if (mock) return mock.logoSettingsCheck(deviceId);
   return invoke<LogoSettingsCheck>("logo_settings_check", { deviceId });
 }
@@ -1132,6 +1220,7 @@ export async function firmwareFlash(
   onStage: (stage: FlashEvent) => void,
   agreed: FlashHold[] = [],
 ): Promise<FlashDone> {
+  if (web) return web.then((b) => b.firmwareFlash(deviceId, path, confirmation, onStage, agreed));
   if (mock) return mock.firmwareFlash(deviceId, path, confirmation, onStage, agreed);
   const channel = new Channel<FlashEvent>();
   channel.onmessage = onStage;
@@ -1146,6 +1235,7 @@ export async function firmwareFlash(
 
 /** Asks the running update to stop (AC-4PJRVJ.1); rejects once its erase has begun. */
 export async function firmwareCancel(): Promise<void> {
+  if (web) return;
   if (mock) return mock.firmwareCancel();
   return invoke<void>("firmware_cancel");
 }
@@ -1166,6 +1256,7 @@ export interface FlashStatus {
 /** The update the backend is running, else the ended one it kept, which this read takes;
  * null when neither: a reloaded page picks it up. */
 export async function firmwareFlashStatus(): Promise<FlashStatus | null> {
+  if (web) return null;
   if (mock) return mock.firmwareFlashStatus();
   return invoke<FlashStatus | null>("firmware_flash_status");
 }
@@ -1182,6 +1273,7 @@ export interface PdCleared {
 
 /** Drops every captured PD record; resolves to {@link PdCleared}. */
 export async function pdClear(): Promise<PdCleared> {
+  if (web) return web.then((b) => b.pdClear());
   if (mock) return mock.pdClear();
   return invoke<PdCleared>("pd_clear");
 }
@@ -1190,6 +1282,7 @@ export async function pdClear(): Promise<PdCleared> {
  * pdcap file (FR TGE83E). Resolves to the path and the number of records (`rows`), or
  * `null` when the dialog was cancelled. */
 export async function pdSave(suggestedName: string): Promise<ExportResult | null> {
+  if (web) return web.then((b) => b.pdSave(suggestedName));
   if (mock) return mock.pdSave(suggestedName);
   return invoke<ExportResult | null>("pd_save", { suggestedName });
 }
@@ -1202,6 +1295,7 @@ export async function saveChartImage(
   format: "png" | "svg" | "pdf",
   data: Uint8Array,
 ): Promise<string | null> {
+  if (web) return web.then((b) => b.saveChartImage(suggestedName, format, data));
   if (mock) return mock.saveChartImage(suggestedName, format, data);
   return invoke<string | null>("save_chart_image", {
     suggestedName,
@@ -1218,6 +1312,8 @@ export interface AppInfo {
 
 /** Reads the app and protocol-library versions from the backend. */
 export async function appInfo(): Promise<AppInfo> {
+  // The protocol library shares the workspace version with the app.
+  if (web) return { appVersion: packageVersion, protocolVersion: packageVersion };
   if (mock) return mock.appInfo();
   const info = await invoke<{ app_version: string; protocol_version: string }>("app_info");
   return { appVersion: info.app_version, protocolVersion: info.protocol_version };
@@ -1225,6 +1321,7 @@ export async function appInfo(): Promise<AppInfo> {
 
 /** Shows `path` selected in the system file manager (Finder, Explorer, …). */
 export async function revealPath(path: string): Promise<void> {
+  if (web) return desktopOnly();
   if (mock) return mock.revealPath(path);
   await revealItemInDir(path);
 }
@@ -1332,18 +1429,21 @@ export interface TriggerReply {
 
 /** Opens the trigger session on the connected meter. */
 export async function triggerOpen(): Promise<void> {
+  if (web) return web.then((b) => b.triggerOpen());
   if (mock) return mock.triggerOpen();
   await invoke("trigger_open");
 }
 
 /** BC 1.2, Apple and the automatic list. */
 export async function triggerDetect(): Promise<Detection> {
+  if (web) return web.then((b) => b.triggerDetect());
   if (mock) return mock.triggerDetect();
   return invoke<Detection>("trigger_detect");
 }
 
 /** One protocol's section (offers, limits, PD emulation settings). */
 export async function triggerList(protocol: TriggerProtocol): Promise<ProtocolSection> {
+  if (web) return web.then((b) => b.triggerList(protocol));
   if (mock) return mock.triggerList(protocol);
   return invoke<ProtocolSection>("trigger_list", { protocol });
 }
@@ -1351,6 +1451,7 @@ export async function triggerList(protocol: TriggerProtocol): Promise<ProtocolSe
 /** The risk class of `request`: `above_5v` and `above_5v_rememberable` need the user's
  * confirmation. */
 export async function triggerRisk(request: TriggerRequest): Promise<RiskClass> {
+  if (web) return web.then((b) => b.triggerRisk(request));
   if (mock) return mock.triggerRisk(request);
   return invoke<RiskClass>("trigger_risk", { request });
 }
@@ -1362,6 +1463,7 @@ export async function triggerRequest(
   confirmed: boolean,
   remember = false,
 ): Promise<TriggerReply> {
+  if (web) return web.then((b) => b.triggerRequest(request, confirmed, remember));
   if (mock) return mock.triggerRequest(request, confirmed, remember);
   return invoke<TriggerReply>("trigger_request", requestArgs(request, confirmed, remember));
 }
@@ -1377,18 +1479,21 @@ function requestArgs(
 
 /** Whether "don't ask again" is armed; false with no trigger session. */
 export async function triggerArmed(): Promise<boolean> {
+  if (web) return web.then((b) => b.triggerArmed());
   if (mock) return mock.triggerArmed();
   return invoke<boolean>("trigger_armed");
 }
 
 /** Ends "don't ask again"; does nothing with no trigger session. */
 export async function triggerDisarm(): Promise<void> {
+  if (web) return web.then((b) => b.triggerDisarm());
   if (mock) return mock.triggerDisarm();
   await invoke("trigger_disarm");
 }
 
 /** Whether VBUS collapsed under a contract; false with no trigger session. */
 export async function triggerChargerGone(): Promise<boolean> {
+  if (web) return web.then((b) => b.triggerChargerGone());
   if (mock) return mock.triggerChargerGone();
   return invoke<boolean>("trigger_charger_gone");
 }
@@ -1396,6 +1501,7 @@ export async function triggerChargerGone(): Promise<boolean> {
 /** Whether PD is entered in the trigger session, so Read cable goes out (AC-AXHK2P.13);
  * false with no trigger session. Nothing is sent to the meter. */
 export async function triggerPdEntered(): Promise<boolean> {
+  if (web) return web.then((b) => b.triggerPdEntered());
   if (mock) return mock.triggerPdEntered();
   return invoke<boolean>("trigger_pd_entered");
 }
@@ -1403,6 +1509,7 @@ export async function triggerPdEntered(): Promise<boolean> {
 /** Back to 5 V; the session stays open. `leaving`: the trigger view was left, which
  * the log names as the reason "don't ask again" ended (FR AXHK2N). */
 export async function triggerBackTo5v(leaving = false): Promise<void> {
+  if (web) return web.then((b) => b.triggerBackTo5v(leaving));
   if (mock) return mock.triggerBackTo5v();
   if (leaving) await invoke("trigger_back_to_5v", { leaving: true });
   else await invoke("trigger_back_to_5v");
@@ -1410,6 +1517,7 @@ export async function triggerBackTo5v(leaving = false): Promise<void> {
 
 /** Back to 5 V where the protocol allows it, then closes the session. */
 export async function triggerClose(): Promise<void> {
+  if (web) return web.then((b) => b.triggerClose());
   if (mock) return mock.triggerClose();
   await invoke("trigger_close");
 }
@@ -1465,6 +1573,7 @@ export interface PdSendReply {
 
 /** The library risk class of a built message; GoodCRC is a usage error. */
 export async function triggerMessageRisk(message: PdMessageRequest): Promise<RiskClass> {
+  if (web) return web.then((b) => b.triggerMessageRisk(message));
   if (mock) return mock.triggerMessageRisk(message);
   return invoke<RiskClass>("trigger_message_risk", { message });
 }
@@ -1474,6 +1583,7 @@ export async function triggerMessageSend(
   message: PdMessageRequest,
   confirmed: boolean,
 ): Promise<PdSendReply> {
+  if (web) return web.then((b) => b.triggerMessageSend(message, confirmed));
   if (mock) return mock.triggerMessageSend(message, confirmed);
   return invoke<PdSendReply>("trigger_message_send", { message, confirmed });
 }
@@ -1481,24 +1591,28 @@ export async function triggerMessageSend(
 /** One SOP' Discover Identity inside the open PD session, no dialog (FR AXHK2P). Takes
  * no argument: nothing from the page selects the exemption. */
 export async function triggerCableRead(): Promise<CableRead> {
+  if (web) return web.then((b) => b.triggerCableRead());
   if (mock) return mock.triggerCableRead();
   return invoke<CableRead>("trigger_cable_read");
 }
 
 /** The cable identity a PD capture holds, null when it holds none; sends nothing. */
 export async function pdCableSeen(): Promise<CableView | null> {
+  if (web) return web.then((b) => b.pdCableSeen());
   if (mock) return mock.pdCableSeen();
   return invoke<CableView | null>("pd_cable_seen");
 }
 
 /** The library risk class of a raw console line. */
 export async function triggerConsoleRisk(line: string): Promise<RiskClass> {
+  if (web) return web.then((b) => b.triggerConsoleRisk(line));
   if (mock) return mock.triggerConsoleRisk(line);
   return invoke<RiskClass>("trigger_console_risk", { line });
 }
 
 /** Sends a raw console line; above 5 V (any unparsable line too) needs `confirmed`. */
 export async function triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]> {
+  if (web) return web.then((b) => b.triggerConsoleSend(line, confirmed));
   if (mock) return mock.triggerConsoleSend(line, confirmed);
   return invoke<ConsoleLine[]>("trigger_console_send", { line, confirmed });
 }
@@ -1625,9 +1739,75 @@ export const currentMeterCommands: MeterCommands = {
   triggerConsoleSend,
 };
 
+/** The browser backend (`VITE_BACKEND=web`, FR QFTCX0) as the dispatch calls it: the
+ * current-session commands, plus devices, the browser's picker and one meter's commands. */
+export interface WebBackendApi extends MeterCommands {
+  readonly features: Readonly<Features>;
+  listDevices(): Promise<DeviceListing[]>;
+  watchDevices(onChange: (devices: DeviceListing[]) => void): Promise<() => void>;
+  requestMeter(): Promise<DeviceListing | null>;
+  /** The browser's WebHID picker (AC-QFTCWZ.3); `null` when none was picked or there is
+   * no WebHID. */
+  requestHidMeter(): Promise<DeviceListing | null>;
+  connect(
+    deviceId: string,
+    rateSps: number,
+    onEvent: (event: BackendEvent) => void,
+    source?: MeasurementSource,
+  ): Promise<void>;
+  attach(
+    onEvent: (event: BackendEvent) => void,
+    deviceId?: string,
+  ): Promise<AttachedSession | null>;
+  meter(deviceId: string): MeterCommands;
+  /** The connected meters' ids, in the order they were connected. */
+  connectedMeters(): Promise<string[]>;
+  /** Downloads the chart image `data` as `suggestedName`; resolves to the file name. */
+  saveChartImage(
+    suggestedName: string,
+    format: "png" | "svg" | "pdf",
+    data: Uint8Array,
+  ): Promise<string | null>;
+  /** Desktop-only meter writes (AC-QFTCX0.6): each rejects without sending anything. */
+  firmwareFlash(
+    deviceId: string,
+    path: string,
+    confirmation: string,
+    onStage: (stage: FlashEvent) => void,
+    agreed?: FlashHold[],
+  ): Promise<FlashDone>;
+  logoUpload(
+    deviceId: string,
+    path: string,
+    alpha: boolean,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten>;
+  logoUploadBuiltin(
+    deviceId: string,
+    name: BuiltinLogoName,
+    onProgress: (progress: LogoProgress) => void,
+  ): Promise<LogoWritten>;
+  logoRemove(deviceId: string, onProgress: (progress: LogoProgress) => void): Promise<LogoWritten>;
+}
+
 /** The commands of meter `deviceId` (FR 1HHT03): each invokes its Tauri command with
  * `deviceId`, or the mock's {@link MockBackend.meter}. */
 export function meterBackend(deviceId: string): MeterBackend {
+  if (web) {
+    const commands = Object.fromEntries(
+      Object.keys(currentMeterCommands).map((name) => [
+        name,
+        (...args: unknown[]) =>
+          web.then((b) => {
+            const command = b.meter(deviceId)[name as keyof MeterCommands] as (
+              ...a: unknown[]
+            ) => Promise<unknown>;
+            return command(...args);
+          }),
+      ]),
+    ) as unknown as MeterCommands;
+    return { deviceId, ...commands };
+  }
   if (mock) return { deviceId, ...mock.meter(deviceId) };
   const call = <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> =>
     invoke<T>(cmd, { deviceId, ...args });

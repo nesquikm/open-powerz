@@ -25,8 +25,9 @@ pub(crate) mod msg {
     pub const AUTH_REPLY: u8 = 0x4C;
 }
 
-/// Size in bytes of every main and section header.
-pub(crate) const HEADER_LEN: usize = 4;
+/// Size in bytes of every main and section header; a PUT_DATA reply of
+/// exactly this length carries no section.
+pub const HEADER_LEN: usize = 4;
 
 /// Mask for the message type in byte 0 of a frame (bits 0..6; bit 7 is the
 /// extend flag).
@@ -363,11 +364,14 @@ pub fn parse_put_data(frame: &[u8]) -> Result<Vec<Section<'_>>, FrameError> {
 /// [`parse_put_data`], except that a last `ADC_QUEUE` section (`next = 0`)
 /// shorter than it declares keeps the bytes that arrived instead of failing.
 ///
-/// [device] FW 2.0.6 at 50 SPS after a 70 s pause: the first queue poll
+/// \[device\] FW 2.0.6 at 50 SPS after a 70 s pause: the first queue poll
 /// declared 63 records (1260 bytes) but only 1208 arrived. The caller keeps
 /// the whole records; the lost tail shows up as a stream gap. Every other
 /// attribute, or a cut queue section followed by another, still fails.
-pub(crate) fn parse_put_data_cut_queue(frame: &[u8]) -> Result<Vec<Section<'_>>, FrameError> {
+///
+/// The cut section's payload may end mid-record; callers decode only the
+/// whole `ADC_QUEUE` records it holds and drop the partial tail.
+pub fn parse_put_data_cut_queue(frame: &[u8]) -> Result<Vec<Section<'_>>, FrameError> {
     walk_sections(frame, true)
 }
 

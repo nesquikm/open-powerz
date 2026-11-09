@@ -27,7 +27,7 @@ use super::Error;
 use super::caps::{self, CapBlock};
 use crate::adcnew::{Frame, decode_frame};
 use crate::frame::msg;
-use crate::transport::cdc::frame_complete;
+use crate::transport::cdc_frame::frame_complete;
 
 /// One item read from the reply stream.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { features } from "../backend";
+  import DesktopOnly from "./DesktopOnly.svelte";
   import InfoButton from "./InfoButton.svelte";
   import {
     EDITABLE_SETTINGS,
@@ -54,20 +56,24 @@
     </div>
     {#if !panel.editing}
       <div class="actions">
-        <button
-          type="button"
-          onclick={() => void panel.refresh()}
-          disabled={!connected || panel.loading || held}
-        >
-          Refresh
-        </button>
-        <button
-          type="button"
-          onclick={startEdit}
-          disabled={!connected || panel.loading || !panel.settings}
-        >
-          Edit
-        </button>
+        <DesktopOnly available={features.settingsRead} label="Refresh">
+          <button
+            type="button"
+            onclick={() => void panel.refresh()}
+            disabled={!connected || panel.loading || held}
+          >
+            Refresh
+          </button>
+        </DesktopOnly>
+        <DesktopOnly available={features.settingsWrite} label="Edit">
+          <button
+            type="button"
+            onclick={startEdit}
+            disabled={!connected || panel.loading || !panel.settings}
+          >
+            Edit
+          </button>
+        </DesktopOnly>
       </div>
     {/if}
   </div>

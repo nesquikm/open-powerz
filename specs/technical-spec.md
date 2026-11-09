@@ -4,7 +4,8 @@
 
 ### System Overview
 
-A Rust cargo workspace with six crates and one web UI:
+A Rust cargo workspace with seven crates and one web UI, shipped as the desktop app and as a
+browser edition on GitHub Pages:
 
 - `powerz-protocol` (library): everything that knows the device. Transports (vendor bulk via
   `nusb`, HID via `hidapi`, CDC via `serialport`) behind a transport trait; frame building and
@@ -30,14 +31,25 @@ A Rust cargo workspace with six crates and one web UI:
   integration), and the streaming reader that reads those recordings back.
 - `powerz-pd` (library): the USB PD r3.2 message decoder (headers, PDOs/RDOs, VDMs,
   extended messages and chunk reassembly, a one-line summary and a field tree per
-  message). It has no dependencies and does no I/O, so it also builds for wasm32 (checked
-  in CI) for the later web edition; `powerz-protocol` re-exports it as `powerz_protocol::pd`.
+  message). It has no dependencies and does no I/O, so it builds for wasm32 (checked in CI)
+  for the web edition; `powerz-protocol` re-exports it as `powerz_protocol::pd`.
+  `powerz-protocol` (with the `bulk` / `hid` / `cdc` transport features off) and `powerz-sim`
+  build for wasm32 too; the CLI and the desktop backend turn those features on by name.
 - `powerz-sim` (library): a stateful simulated KM003C behind the same `Transport` trait, with
   bulk, CDC and HID personas, named scenarios and fault injection. It is both the e2e test
   device and a shipped "demo device" (`powerz --transport sim`, and the desktop device
   picker).
+- `powerz-wasm` (wasm-bindgen binding, built by `bun run build:wasm` into
+  `apps/desktop/src/wasm`): the sans-IO frame builders and decoders of the read-only session,
+  plus the demo meter (`powerz-sim` on a manual clock) for the browser.
 - Web UI (`apps/desktop/src`): Svelte 5 + TypeScript, uPlot charts, built by Vite and embedded
-  into the Tauri binary.
+  into the Tauri binary. The same UI is the browser edition: `VITE_BACKEND=web` swaps the Tauri
+  backend for `apps/desktop/src/lib/web/` (WebUSB transport, a WebHID fallback limited to the ADC
+  snapshot, a TS session driver over the wasm
+  builders and decoders, and the demo meter). `bun run build:pages` builds it with base
+  `/open-powerz/` into `apps/desktop/dist-pages/`; the release workflow's `pages` job and the
+  manual `pages.yml` deploy it through `pages-deploy.yml`. Meter writes, firmware, triggers,
+  settings read and offline records are desktop-only there.
 
 The protocol reference lives in `docs/protocol.md`: rewritten in our own words from the
 research notes (outside the repo), keeping `[device]` / `[static]` / `[inferred]` tags.
@@ -52,12 +64,18 @@ crates/powerz-cli/src/main.rs    # `powerz` binary
 crates/powerz-record/src/        # shared CSV recorder + reader + charge/energy integrator
 crates/powerz-pd/src/            # USB PD message decoder (no deps, no I/O, wasm32-clean)
 crates/powerz-sim/src/           # simulated KM003C (demo device, e2e double)
+crates/powerz-wasm/src/          # wasm-bindgen binding: sans-IO builders/decoders + demo meter (build:wasm)
 apps/desktop/src/                # App.svelte, main.ts, lib/*.ts (+ co-located *.test.ts)
+apps/desktop/src/lib/web/        # web backend: WebUSB/WebHID transports, driver, browser backend
 apps/desktop/src-tauri/          # Tauri crate: commands, devices, worker, batch, history, stats, recording, recording_file
 apps/desktop/e2e/app/            # WebdriverIO + tauri-driver suite (real app, Linux + Windows)
 apps/desktop/e2e/ui/             # Playwright + axe suite (web build, mocked backend, all OSes)
+apps/desktop/e2e/pages/          # Playwright suite for the Pages build (dist-pages, demo meter, unsupported browsers)
+apps/desktop/dist-pages/         # `bun run build:pages` output (git-ignored)
 docs/                            # user docs + protocol.md
-.github/workflows/ci.yml         # gate matrix: ubuntu-24.04, macos-latest, windows-latest
+.github/workflows/ci.yml         # gate matrix: ubuntu-24.04, macos-latest, windows-latest (+ wasm32 build on Linux)
+.github/workflows/release.yml    # v* tag: installers, CLI, GitHub Release, `pages` job
+.github/workflows/pages*.yml     # manual Pages deploy; pages-deploy.yml is the shared reusable deploy
 specs/                           # SDD specs (this file)
 ```
 
@@ -120,7 +138,10 @@ Defined per FR. Core types: `Frame`/`MainHeader`/`SectionHeader`,
 
 ### State Management
 Device sessions live in the Rust backend (one worker per device, one request in flight). The
-UI holds view state in Svelte 5 runes and receives measurement batches over a Channel.
+UI holds view state in Svelte 5 runes and receives measurement batches over a Channel. In the
+browser edition the session is the TS driver in `lib/web/driver.ts` (same order: connect,
+device info, auth, queue or snapshot fallback; one request in flight), and history, stats and
+CSV live in shared TS modules.
 
 ### Error Handling
 `thiserror` error enums in `powerz-protocol` (transport, timeout, framing, auth, rejected);
@@ -190,3 +211,4 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | GUI toolkit | egui/eframe, Iced, Tauri 2 + web UI, PySide6, Qt6 C++, Electron | Tauri 2 + Svelte 5 | User decision; better tables/trees/i18n than egui, small bundles vs. Electron |
 | Prior-art reuse | Depend on km003c-lib, fork laPower, build new | Build new | User decision; prior art is a test oracle and reference only |
 | Key policy | Ship keys, user-supplied key file, drop auth features | Ship keys | User decision |
+| Web edition I/O | Sync Rust session in a Worker over Atomics (needs COOP/COEP), JSPI-suspended sync session, sans-IO wasm binding + TS driver | Sans-IO wasm binding (`powerz-wasm`) + TS session driver | GitHub Pages cannot send COOP/COEP headers; JSPI support in wasm-bindgen is experimental. Pure builders/decoders run sync in wasm, WebUSB/WebHID stay async in JS (M_QFTCWW) |

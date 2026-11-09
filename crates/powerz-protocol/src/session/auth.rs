@@ -27,6 +27,17 @@ pub fn auth_plaintext(now_ms: u64, credential: &[u8], random: u64) -> [u8; 32] {
     p
 }
 
+/// The credential bytes of the block read for auth `level`: the whole UID
+/// for level 1, the first 16 OTP bytes for level 2; `None` for any other
+/// level.
+pub fn auth_credential(level: u8, block: &[u8]) -> Option<&[u8]> {
+    match level {
+        1 => Some(block),
+        2 => Some(&block[..block.len().min(OTP_CREDENTIAL_LEN)]),
+        _ => None,
+    }
+}
+
 /// How long to wait before the next auth request: the rest of
 /// [`AUTH_SPACING_MS`] since `last`, never more (the wall clock can step back).
 fn spacing_sleep(last_ms: u64, now_ms: u64) -> Duration {
@@ -48,6 +59,29 @@ fn auth_reply_key() -> [u8; 16] {
     k
 }
 
+/// The level an auth `reply` grants for a request built from `plaintext`
+/// over a credential of `credential_len` bytes. `None` when the reply is not
+/// an auth reply of the right length, its echo of the timestamp or the
+/// random value is wrong, or it grants level 0.
+pub fn auth_reply_level(reply: &[u8], plaintext: &[u8; 32], credential_len: usize) -> Option<u8> {
+    let header = match frame::classify_reply(reply) {
+        Ok(Reply::AuthReply(h)) => h,
+        _ => return None,
+    };
+    if reply.len() != frame::HEADER_LEN + plaintext.len() {
+        return None;
+    }
+    // The meter echoes the timestamp and the random value.
+    let echo = crypto::decrypt(&auth_reply_key(), &reply[frame::HEADER_LEN..]);
+    // Same clamp as `auth_plaintext`, so the offsets always agree.
+    let rnd = 8 + credential_len.min(OTP_CREDENTIAL_LEN);
+    if echo[0..8] != plaintext[0..8] || echo[rnd..rnd + 8] != plaintext[rnd..rnd + 8] {
+        return None;
+    }
+    let granted = header.data().permi;
+    (granted != 0).then_some(granted)
+}
+
 impl<T: Transport, C: Clock> Session<T, C> {
     /// Authenticate at `level` (1 = UID, 2 = OTP); returns the level the
     /// meter reports.
@@ -56,40 +90,21 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// exchange itself, a malformed reply, a wrong echo or a granted level
     /// of 0 is reported as [`Error::AuthFailed`].
     pub fn authenticate(&mut self, level: u8) -> Result<u8, Error> {
-        let credential = match level {
+        let block = match level {
             1 => self.read_block(UID)?,
-            2 => {
-                let mut otp = self.read_block(OTP)?;
-                otp.truncate(OTP_CREDENTIAL_LEN);
-                otp
-            }
+            2 => self.read_block(OTP)?,
             _ => return Err(Error::AuthFailed),
         };
+        let credential = auth_credential(level, &block).ok_or(Error::AuthFailed)?;
         self.wait_auth_spacing();
         let now_ms = self.clock.now_ms();
         let random = self.clock.random_u64();
         self.last_auth_ms = Some(now_ms);
-        let plaintext = auth_plaintext(now_ms, &credential, random);
+        let plaintext = auth_plaintext(now_ms, credential, random);
         let request = auth_request(self.counter.next(), &plaintext);
         let reply = self.exchange(&request).map_err(|_| Error::AuthFailed)?;
-        let header = match frame::classify_reply(&reply) {
-            Ok(Reply::AuthReply(h)) => h,
-            _ => return Err(Error::AuthFailed),
-        };
-        if reply.len() != frame::HEADER_LEN + plaintext.len() {
-            return Err(Error::AuthFailed);
-        }
-        // The meter echoes the timestamp and the random value.
-        let echo = crypto::decrypt(&auth_reply_key(), &reply[frame::HEADER_LEN..]);
-        // Same clamp as `auth_plaintext`, so the offsets always agree.
-        let rnd = 8 + credential.len().min(OTP_CREDENTIAL_LEN);
-        if echo[0..8] != plaintext[0..8] || echo[rnd..rnd + 8] != plaintext[rnd..rnd + 8] {
-            return Err(Error::AuthFailed);
-        }
-        let granted = header.data().permi;
-        if granted == 0 {
-            return Err(Error::AuthFailed);
-        }
+        let granted =
+            auth_reply_level(&reply, &plaintext, credential.len()).ok_or(Error::AuthFailed)?;
         self.auth_level = granted;
         Ok(granted)
     }
@@ -118,6 +133,37 @@ mod tests {
             spacing_sleep(10_000_000, 6_400_000),
             Duration::from_millis(1000)
         );
+    }
+
+    /// AC-QFTCWX.3: the random value is injected, not drawn inside the
+    /// builder, so the browser's crypto source (or a test) can supply it.
+    #[test]
+    fn auth_plaintext_carries_the_injected_random_value() {
+        let uid = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
+        ];
+        let random = 0x0123_4567_89AB_CDEF_u64;
+        let p = auth_plaintext(1_790_000_000_000, &uid, random);
+        let mut want = [0xFF_u8; 32];
+        want[0..8].copy_from_slice(&1_790_000_000_000_u64.to_le_bytes());
+        want[8..20].copy_from_slice(&uid);
+        want[20..28].copy_from_slice(&random.to_le_bytes());
+        assert_eq!(p, want);
+        assert_ne!(
+            auth_plaintext(1_790_000_000_000, &uid, random ^ 1),
+            p,
+            "a different random gives a different plaintext"
+        );
+    }
+
+    /// AC-QFTCWX.3: a session draws the auth random from its clock; on
+    /// wasm32 the system clock reads it from getrandom's web backend.
+    #[test]
+    fn system_clock_random_values_differ() {
+        let mut c = crate::session::SystemClock;
+        let a = c.random_u64();
+        let b = c.random_u64();
+        assert_ne!(a, b, "two OS random draws");
     }
 
     #[test]

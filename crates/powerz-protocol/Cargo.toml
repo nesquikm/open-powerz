@@ -11,8 +11,11 @@ keywords = ["usb-c", "usb-pd", "power-meter", "km003c", "power-z"]
 categories = ["hardware-support"]
 
 [features]
-default = ["hid"]
+default = ["bulk", "hid", "cdc"]
+# Native transports (FR QFTCWX); the featureless crate builds for wasm32.
+bulk = ["dep:nusb"]
 hid = ["dep:hidapi"]
+cdc = ["dep:serialport"]
 # Startup logo file loading (PNG, JPEG, BMP, raw .bin) for FR PVFHM7.
 image-files = ["dep:image"]
 
@@ -22,13 +25,17 @@ crc32fast = "1.5.3"
 getrandom = "0.4.3"
 hidapi = { version = "2.6.7", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"], optional = true }
-nusb = "0.2.8"
+nusb = { version = "0.2.8", optional = true }
 powerz-pd.workspace = true
 # The pdcap capture file format (FR TGE83E).
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-serialport = "4.10.1"
+serialport = { version = "4.10.1", optional = true }
 thiserror = "2"
+
+# On wasm32 the auth random comes from the browser's crypto source.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
 
 [lints]
 workspace = true
@@ -37,3 +44,44 @@ workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 proptest = "1.12.0"
 sha2 = "0.11.1"
+
+# Integration tests that need a native transport (FR QFTCWX).
+[[test]]
+name = "adcnew_session"
+required-features = ["cdc"]
+
+[[test]]
+name = "firmware_flash"
+required-features = ["bulk"]
+
+[[test]]
+name = "firmware_jump"
+required-features = ["bulk"]
+
+[[test]]
+name = "firmware_probe"
+required-features = ["bulk"]
+
+[[test]]
+name = "firmware"
+required-features = ["bulk"]
+
+[[test]]
+name = "held_port_pty"
+required-features = ["cdc"]
+
+[[test]]
+name = "pdm_held_port"
+required-features = ["cdc"]
+
+[[test]]
+name = "port_name_privacy"
+required-features = ["cdc"]
+
+[[test]]
+name = "replug_listing"
+required-features = ["bulk"]
+
+[[test]]
+name = "usb_identity"
+required-features = ["bulk"]

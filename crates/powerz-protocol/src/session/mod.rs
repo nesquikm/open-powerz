@@ -30,17 +30,18 @@ use crate::decode::{AdcSnapshot, DecodeError, Rate, Settings};
 use crate::frame::{self, Attribute, FrameError, Reply, SequenceCounter};
 use crate::transport::{self, Transport};
 
-pub use auth::{auth_plaintext, auth_request};
+pub use auth::{auth_credential, auth_plaintext, auth_reply_level, auth_request};
 pub use logo::{
     LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten,
     SETTINGS_SAVE_POLL_GAP, SettingsSave, check_logo_dump, logo_chunk_plaintext, logo_flag_request,
 };
+#[cfg(feature = "bulk")]
 pub(crate) use memory::UID;
 pub use memory::{
-    DeviceInfo, FirmwareProblem, FirmwareProblemKind, FirmwareStatus, memory_read_plaintext,
-    memory_read_request,
+    DeviceInfo, FirmwareProblem, FirmwareProblemKind, FirmwareStatus, is_memory_read_allowed,
+    memory_read_plaintext, memory_read_request,
 };
-pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer};
+pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer, pd_poll_mask};
 pub use probe::{ConnectOutcome, HeadOutcome, ProbeReport};
 pub use records::{
     RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_delete_table, record_table_request,

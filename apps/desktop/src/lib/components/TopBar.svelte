@@ -29,6 +29,7 @@
     type Fit,
   } from "../topBarFit";
   import DevicePicker from "./DevicePicker.svelte";
+  import { HID_BASIC_NOTE } from "../web/features";
   import { holdTitle, recordDisabled } from "../logoHold";
   import RecorderButtons from "./RecorderButtons.svelte";
   import ThemeControl from "./ThemeControl.svelte";
@@ -222,8 +223,15 @@
   });
 
   const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
-  /** The locked rate is news worth showing; "stop to change" is only a tooltip. */
-  const rateNote = $derived(session.state === "rate_locked" ? picker.label : null);
+  /** The locked rate is news worth showing; "stop to change" is only a tooltip. A WebHID
+   * session says it gives basic readings only (AC-QFTCWZ.3). */
+  const rateNote = $derived(
+    session.details?.basic_readings_only
+      ? HID_BASIC_NOTE
+      : session.state === "rate_locked"
+        ? picker.label
+        : null,
+  );
   /** The name of the bar's controls; the grid's tiles name their own. */
   const scopeLabel = $derived(controlsInTiles ? null : controlsLabel);
   const record = $derived(recordButton(recording.phase, canRecord));
@@ -709,9 +717,12 @@
   .top-bar:global(.compact) .group {
     gap: 0.375rem;
   }
-  .top-bar:global(.compact) :global(button),
-  .top-bar:global(.compact) :global(select) {
+  .top-bar:global(.compact) :global(button) {
     padding-inline: 0.55rem;
+  }
+  /* The right padding stays the shared one: it holds the drop-down chevron (FR K1GZTR). */
+  .top-bar:global(.compact) :global(select) {
+    padding-left: 0.55rem;
   }
   .top-bar:global(.compact) .narrow-hidden {
     position: absolute;

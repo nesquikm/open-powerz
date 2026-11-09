@@ -1,0 +1,21 @@
+name: Pages
+
+# FR QFTCX1: deploys main to GitHub Pages by hand. The deploy itself lives in
+# pages-deploy.yml, shared with the release's `pages` job (and its `pages` concurrency
+# group, so a manual and a release deploy never run at once).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pages:
+    name: pages
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages-deploy.yml
+    with:
+      ref: refs/heads/main

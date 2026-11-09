@@ -26,6 +26,7 @@ pub mod detect;
 pub mod legacy;
 pub mod message;
 pub mod pd;
+#[cfg(feature = "cdc")]
 pub mod port;
 pub mod reply;
 pub mod risk;
@@ -34,6 +35,7 @@ pub mod vendors;
 
 pub use caps::{CapBlock, Capabilities, PdoBlock, ScpCaps, TfcpCaps, UfcsCap, UfcsCaps, VfcpCaps};
 pub use command::{Command, FixedProtocol, Protocol};
+#[cfg(feature = "cdc")]
 pub use port::{find_port, open_found, open_port};
 pub use reply::{ReplyItem, ReplyReader};
 pub use risk::{Risk, classify};

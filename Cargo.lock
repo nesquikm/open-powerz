@@ -1578,9 +1578,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2909,7 +2911,7 @@ dependencies = [
 
 [[package]]
 name = "open-powerz-desktop"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "flate2",
  "libc",
@@ -3167,7 +3169,7 @@ checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "powerz-cli"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -3186,14 +3188,14 @@ dependencies = [
 
 [[package]]
 name = "powerz-pd"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "powerz-protocol"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "aes",
  "crc32fast",
@@ -3212,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "powerz-record"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "powerz-protocol",
  "thiserror 2.0.21",
@@ -3220,10 +3222,22 @@ dependencies = [
 
 [[package]]
 name = "powerz-sim"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "powerz-protocol",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "powerz-wasm"
+version = "0.11.0"
+dependencies = [
+ "powerz-protocol",
+ "powerz-sim",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3735,6 +3749,17 @@ dependencies = [
  "serde",
  "serde_core",
  "typeid",
+]
+
+[[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
 ]
 
 [[package]]

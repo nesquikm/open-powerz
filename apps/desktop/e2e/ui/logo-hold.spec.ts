@@ -13,7 +13,7 @@
  */
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { holdClock, open, streamDemo } from "./helpers";
+import { holdClock, open, stepHeldClock, streamDemo } from "./helpers";
 
 const MOCK_HOOK = "__OPEN_POWERZ_MOCK__";
 const HOLD_TITLE = /startup logo write is running/i;
@@ -23,6 +23,11 @@ const MENU_WIDTH = { width: 600, height: 800 };
 
 function view(page: Page): Locator {
   return page.getByRole("tabpanel", { name: "Startup logo" });
+}
+
+/** A `stepHeldClock` condition: the logo view's text reads `text`. */
+function viewSays(page: Page, text: RegExp): () => Promise<boolean> {
+  return async () => text.test((await view(page).textContent()) ?? "");
 }
 
 function topBar(page: Page): Locator {
@@ -79,8 +84,9 @@ async function holdWrite(page: Page): Promise<void> {
 
 /** Lets the held write finish and waits for `ending` in the logo view. */
 async function finishWrite(page: Page, ending: RegExp): Promise<void> {
-  await page.clock.resume();
   if (!(await view(page).isVisible())) await tab(page, "Startup logo").click();
+  await stepHeldClock(page, viewSays(page, ending));
+  await page.clock.resume();
   await expect(view(page)).toContainText(ending, { timeout: 30_000 });
 }
 
@@ -160,8 +166,9 @@ test.describe("a logo write holds the session actions (FR 70X5YY)", () => {
     for (const [c, what] of topBarActions(page, false)) await expectHeld(c, what);
 
     // Verified, then the view waits for the meter's menu save: nothing stays held.
-    await page.clock.resume();
     await tab(page, "Startup logo").click();
+    await stepHeldClock(page, () => view(page).getByTestId("logo-menu-save").isVisible());
+    await page.clock.resume();
     await expect(view(page).getByTestId("logo-menu-save")).toBeVisible({ timeout: 30_000 });
     for (const [c, what] of topBarActions(page, false)) await expectFree(c, what);
   });
@@ -216,6 +223,7 @@ test.describe("a logo write holds the session actions (FR 70X5YY)", () => {
       }
     }
 
+    await stepHeldClock(page, () => stripAction(page, "Add meter").isEnabled());
     await page.clock.resume();
     await expect(stripAction(page, "Add meter")).toBeEnabled({ timeout: 30_000 });
     for (const tile of await tiles(page).all()) {
@@ -386,8 +394,9 @@ test.describe("a logo write holds the actions in the overflow menu (FR 70X5YY)",
     await expect(page.locator("#top-bar-menu")).toHaveCount(0);
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 
-    await page.clock.resume();
     await tab(page, "Startup logo").click();
+    await stepHeldClock(page, viewSays(page, /verified/i));
+    await page.clock.resume();
     await expect(view(page)).toContainText(/verified/i, { timeout: 30_000 });
     await more(page).click();
     await expectFree(menuItem(page, "Export"), "menu Export");

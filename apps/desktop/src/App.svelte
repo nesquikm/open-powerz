@@ -37,6 +37,7 @@
     type UiError,
     type RecordingOptions,
     type RunProgressQuery,
+    features,
   } from "./lib/backend";
   import {
     defaultPdCaptureName,
@@ -82,6 +83,8 @@
   import StartupLogoView from "./lib/components/StartupLogoView.svelte";
   import { StartupLogoState } from "./lib/logo.svelte";
   import { RecordsPanel } from "./lib/records.svelte";
+  import NotSupported from "./lib/components/NotSupported.svelte";
+  import { detectSupport, type SupportProbe } from "./lib/web/support";
   import TopBar from "./lib/components/TopBar.svelte";
   import TriggerView from "./lib/components/TriggerView.svelte";
   import { TriggerPanel } from "./lib/trigger.svelte";
@@ -126,6 +129,12 @@
     type MotionSettings,
     type ThemeChoice,
   } from "./lib/theme";
+
+  /** The web edition in a browser without WebUSB and WebHID (FR QFTCX1, AC .3). */
+  const unsupportedBrowser =
+    import.meta.env.VITE_BACKEND === "web" &&
+    typeof navigator !== "undefined" &&
+    detectSupport(navigator as SupportProbe) === "not-supported";
 
   const session = new Session();
   /** Every connected meter (FR 1HHT03): the one the full view shows, then each one added
@@ -474,8 +483,9 @@
     const on = panelMeter !== null;
     untrack(() => {
       if (on) {
-        void settingsPanel.connected();
-        void recordsPanel.connected();
+        // The web edition keeps these reads in the desktop app (FR QFTCX0, AC .7).
+        if (features.settingsRead) void settingsPanel.connected();
+        if (features.recordsList) void recordsPanel.connected();
       } else {
         settingsPanel.disconnected();
         recordsPanel.disconnected();
@@ -1316,13 +1326,19 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 {#snippet fileActions(path: string)}
-  <div class="file-actions">
-    <button type="button" onclick={() => revealFile(path)}>{revealLabel}</button>
-    <button type="button" onclick={() => copyPath(path)}>Copy path</button>
-  </div>
+  <!-- AC-R13Y5W.1: a web page can neither open the file manager nor name a path. -->
+  {#if features.fileReveal}
+    <div class="file-actions">
+      <button type="button" onclick={() => revealFile(path)}>{revealLabel}</button>
+      <button type="button" onclick={() => copyPath(path)}>Copy path</button>
+    </div>
+  {/if}
 {/snippet}
 
 <div class="shell">
+  {#if unsupportedBrowser}
+    <NotSupported />
+  {/if}
   <TopBar
     {session}
     {hideSerial}

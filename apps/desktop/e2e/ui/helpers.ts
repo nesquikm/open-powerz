@@ -420,6 +420,23 @@ export async function holdClock(page: Page): Promise<void> {
   }
 }
 
+/** A page-state check `stepHeldClock` polls between clock steps. */
+type Condition = () => Promise<boolean>;
+
+/**
+ * FR FFQVBQ: steps a held page clock in 100 ms slices until `until()` holds, and fails
+ * once `limitMs` of page time has passed without it. Resuming the clock instead makes it
+ * catch up with real time, and on a slow runner two streaming demo meters' timers outgrow
+ * each catch-up, so the awaited state never shows.
+ */
+export async function stepHeldClock(page: Page, until: Condition, limitMs = 10_000): Promise<void> {
+  for (let stepped = 0; stepped <= limitMs; stepped += 100) {
+    if (await until()) return;
+    if (stepped < limitMs) await page.clock.runFor(100);
+  }
+  throw new Error(`stepHeldClock: condition never held within ${limitMs} ms of page time`);
+}
+
 /** The frame-rate tests' rule for CI runners (FR 9QTPNQ), where a frame-rate result is
  * recorded, not failed:
  * - WebKit on any runner: the runners have no GPU, so WebKit draws on the CPU, on Linux and

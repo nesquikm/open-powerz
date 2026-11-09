@@ -48,6 +48,31 @@ pub struct DeviceInfo {
     pub uid: String,
 }
 
+impl DeviceInfo {
+    /// Device info from the four blocks as read: the hardware (0x420) and
+    /// firmware (0x4420) info blocks, the OTP block and the UID.
+    pub fn decode(
+        hardware: &[u8],
+        firmware: &[u8],
+        otp: &[u8],
+        uid: &[u8],
+    ) -> Result<DeviceInfo, Error> {
+        let hardware = DeviceInfoBlock::decode(hardware)?;
+        let firmware = DeviceInfoBlock::decode(firmware)?;
+        let otp = OtpBlock::decode(otp)?;
+        let uid = Uid::decode(uid)?;
+        let model = block_model(&firmware, &hardware)
+            .ok_or_else(|| Error::Protocol("both device-info blocks are empty".into()))?;
+        Ok(DeviceInfo {
+            model,
+            firmware_version: block_version(&firmware),
+            hardware_version: block_version(&hardware),
+            serial: otp.serial(),
+            uid: uid.to_string(),
+        })
+    }
+}
+
 /// Both firmware info blocks and the HEAD old-firmware flag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirmwareStatus {
@@ -123,6 +148,12 @@ impl FirmwareStatus {
     }
 }
 
+/// Whether `(addr, len)` is one of the four known blocks
+/// [`Session::memory_read`] may read.
+pub fn is_memory_read_allowed(addr: u32, len: u32) -> bool {
+    MEMORY_READ_ALLOWED.contains(&(addr, len))
+}
+
 /// Plaintext of a memory-read request: `addr, len, 0xFFFFFFFF,
 /// crc32(first 12 bytes)`, padded with 0xFF to 32 bytes.
 pub fn memory_read_plaintext(addr: u32, len: u32) -> [u8; 32] {
@@ -150,7 +181,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// Any other `(addr, len)` fails with [`Error::Forbidden`] before
     /// anything is sent.
     pub fn memory_read(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, Error> {
-        if !MEMORY_READ_ALLOWED.contains(&(addr, len)) {
+        if !is_memory_read_allowed(addr, len) {
             return Err(Error::Forbidden { addr, len });
         }
         self.memory_read_unchecked(addr, len)
@@ -220,20 +251,13 @@ impl<T: Transport, C: Clock> Session<T, C> {
 
     /// Model, versions, serial and UID; works at auth level 0.
     pub fn device_info(&mut self) -> Result<DeviceInfo, Error> {
-        let hardware = DeviceInfoBlock::decode(&self.read_block(HARDWARE_INFO)?)?;
-        let firmware = DeviceInfoBlock::decode(&self.read_block(FIRMWARE_INFO)?)?;
-        let otp = OtpBlock::decode(&self.read_block(OTP)?)?;
-        let uid = Uid::decode(&self.read_block(UID)?)?;
-        let model = block_model(&firmware, &hardware)
-            .ok_or_else(|| Error::Protocol("both device-info blocks are empty".into()))?;
-        self.model = Some(model.clone());
-        Ok(DeviceInfo {
-            model,
-            firmware_version: block_version(&firmware),
-            hardware_version: block_version(&hardware),
-            serial: otp.serial(),
-            uid: uid.to_string(),
-        })
+        let hardware = self.read_block(HARDWARE_INFO)?;
+        let firmware = self.read_block(FIRMWARE_INFO)?;
+        let otp = self.read_block(OTP)?;
+        let uid = self.read_block(UID)?;
+        let info = DeviceInfo::decode(&hardware, &firmware, &otp, &uid)?;
+        self.model = Some(info.model.clone());
+        Ok(info)
     }
 
     /// Both info blocks and the HEAD old-firmware flag; read-only.

@@ -29,6 +29,8 @@ export class Session {
   /** Statistics of the latest batch, null until the first one. They stay after a
    * disconnect, so the final totals remain readable. */
   stats = $state<StatsSnapshot | null>(null);
+  /** Device whose session the statistics belong to (FR R13Y5W). */
+  #statsDeviceId: string | null = null;
   /** The connected meter's details (mode, versions, firmware warnings), null while
    * no meter is connected. */
   details = $state.raw<ConnectedInfo | null>(null);
@@ -65,22 +67,29 @@ export class Session {
 
   /** Replaces the device list; keeps the selection while it is still present. While the
    * backend waits for an unplugged meter, that meter stays listed and picked, and follows
-   * it to its new listing when the OS lists it again. A picked meter that vanishes while
-   * its session runs or has just ended with an error stays too: the hotplug list can
-   * arrive before the waiting status, and the fallback must never pick a demo then. */
+   * it to its new listing when the OS lists it again. Once its session has ended, a picked
+   * meter that vanishes follows a new listing with the same non-empty serial (a browser
+   * replug) and the dead entry goes (FR R13Y5V). With no such listing, a picked meter that
+   * vanishes while its session runs or has just ended with an error stays: the hotplug
+   * list can arrive before the waiting status, and the fallback must never pick a demo. */
   setDevices(devices: readonly DeviceListing[]): void {
     let list = sortDevices(devices);
+    const meterWithSerial = (serial: string): DeviceListing | undefined =>
+      list.find((d) => d.demo_scenario === null && d.serial === serial);
     const away = this.waitingSerial;
     const kept = this.devices.find((d) => d.id === this.selectedId);
+    const vanished = kept !== undefined && !list.some((d) => d.id === kept.id);
+    const replugged =
+      kept?.demo_scenario === null && kept.serial && !this.active && vanished
+        ? meterWithSerial(kept.serial)
+        : undefined;
     if (away !== null) {
-      const back = list.find((d) => d.demo_scenario === null && d.serial === away);
+      const back = meterWithSerial(away);
       if (back) this.selectedId = back.id;
-      else if (kept && !list.some((d) => d.id === kept.id)) list = sortDevices([kept, ...list]);
-    } else if (
-      kept?.demo_scenario === null &&
-      this.state !== "disconnected" &&
-      !list.some((d) => d.id === kept.id)
-    ) {
+      else if (kept && vanished) list = sortDevices([kept, ...list]);
+    } else if (replugged) {
+      this.selectedId = replugged.id;
+    } else if (kept?.demo_scenario === null && this.state !== "disconnected" && vanished) {
       list = sortDevices([kept, ...list]);
     }
     this.devices = list;
@@ -106,12 +115,16 @@ export class Session {
   adopt(snapshot: AttachedSession): void {
     this.error = null;
     this.selectedId = snapshot.device_id;
+    this.#statsDeviceId = snapshot.device_id;
     this.rateSps = snapshot.rate_sps;
     this.state = snapshot.rate_locked ? "rate_locked" : "streaming";
   }
 
   beginConnect(): void {
     this.error = null;
+    // Another device's numbers must not sit next to this connect (FR R13Y5W, AC .2).
+    if (this.#statsDeviceId !== this.selectedId) this.stats = null;
+    this.#statsDeviceId = this.selectedId;
     this.state = "connecting";
   }
 

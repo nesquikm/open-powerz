@@ -10,6 +10,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { toPosixPath } from "./posixPath";
 
 /** A field read, a destructured field, a bracket read, or the backend's label, which holds
  * the serial ("KM003C — <serial>"). */
@@ -28,6 +29,7 @@ function directReads(source: string): string[] {
 describe("components read serials through the helper (AC-AXHK2Q.2)", () => {
   const components = readdirSync(new URL("./components/", import.meta.url), { recursive: true })
     .map(String)
+    .map(toPosixPath)
     .filter((name) => name.endsWith(".svelte"))
     .map((name) => new URL(`./components/${name}`, import.meta.url));
   const files = [new URL("../App.svelte", import.meta.url), ...components];
@@ -64,9 +66,11 @@ describe("components read serials through the helper (AC-AXHK2Q.2)", () => {
       "meterGrid.ts",
       "mockBackend.ts",
       "session.svelte.ts",
+      "web/session.ts", // hands the meter serial to the UI in its connect/attach events, like the desktop backend
     ]);
     const modules = readdirSync(new URL("./", import.meta.url), { recursive: true })
       .map(String)
+      .map(toPosixPath)
       .filter((name) => name.endsWith(".ts") && !name.includes(".test."))
       .filter((name) => !known.has(name));
     expect(modules.length).toBeGreaterThan(20);
@@ -74,6 +78,19 @@ describe("components read serials through the helper (AC-AXHK2Q.2)", () => {
       /\.(serial|uid)\b/.test(readFileSync(new URL(`./${name}`, import.meta.url), "utf8")),
     );
     expect(reads).toEqual([]);
+  });
+});
+
+describe("module names", () => {
+  // AC-HT1EMH.1/.2: readdirSync yields backslashes on Windows; the known list uses forward slashes.
+  it("a Windows-style name normalizes to forward slashes", () => {
+    expect(toPosixPath("web\\session.ts")).toBe("web/session.ts");
+    expect(toPosixPath("a\\b\\c.svelte")).toBe("a/b/c.svelte");
+  });
+
+  it("forward-slash and flat names stay unchanged", () => {
+    expect(toPosixPath("web/session.ts")).toBe("web/session.ts");
+    expect(toPosixPath("format.ts")).toBe("format.ts");
   });
 });
 

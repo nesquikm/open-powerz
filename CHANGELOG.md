@@ -4,6 +4,29 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] — 2026-11-09 — "Open Tab"
+
+### Added
+- Web edition: open-powerz in Chrome or Edge at nesquikm.github.io/open-powerz, with live readings, charts, stats, passive PD capture, CSV recording and the demo meter over WebUSB, and a WebHID fallback for basic readings (QFTCX0)
+- The protocol core, PD decoder and simulator build for WebAssembly, with the native transports behind cargo features (QFTCWX)
+- `powerz-wasm`: a WebAssembly binding for the request builders, reply decoders and demo meter (QFTCWY)
+- Browser transports and a read-only session driver: WebUSB by interface class, WebHID for snapshots, and an opt-in frame log (QFTCWZ)
+- GitHub Pages site under /open-powerz/ with a not-supported view for browsers without WebUSB, deployed on `v*` tags or by hand (QFTCX1)
+
+### Changed
+- Web edition: "Connect a meter…" and "Connect over HID…" live in the device menu, with a hint while only the demo is listed (AYR4W6)
+- Docs: a web edition guide with browser support, the device picker and permissions, and the WebHID fallback (QFTCX2)
+
+### Fixed
+- Web edition sign-in to a real KM003C: stale data drained at open, a silent first connect recovered, a split memory read reassembled, and a recovery that cancels its own read no longer ends the session (VG37JA, 7T1YGJ)
+- Web edition stream: the meter's empty queue reply means "nothing yet" instead of a broken frame (F3M587)
+- Web edition connect: a failed connect releases the meter, the meter you pair is the one selected, and a replugged meter replaces its dead menu entry (G30K4R, XPT7PZ, R13Y5V)
+- Web edition: no "Reveal in Finder" on a saved recording, and the demo's statistics clear when a real meter connects (R13Y5W)
+- Drop-downs draw their own arrow with room before the edge, and the device picker fits its longest label again (K1GZTR, 350H0S)
+- Build and tests: build:wasm picks a Rust with the wasm target, the gate typechecks before the wasm module exists, the serial lint matches Windows paths, and two timing-sensitive tests hold (G30K4S, Y6JFM3, HT1EMH, FFQVBQ, B67EYP)
+
+Total test count at release: 6513 tests, 0 failures, 0 errors.
+
 ## [0.10.0] — 2026-11-07 — "First Impression"
 
 ### Added

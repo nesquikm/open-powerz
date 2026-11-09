@@ -500,7 +500,7 @@ fn guard(bytes: &[u8]) -> Result<(), Error> {
         other => Error::Io(other.to_string()),
     };
     crate::transport::guard::check(bytes).map_err(mapped)?;
-    crate::transport::cdc::check_cdc(bytes).map_err(mapped)
+    crate::transport::cdc_frame::check_cdc(bytes).map_err(mapped)
 }
 
 impl<P: Read + Write, C: Clock> Drop for PdmSession<P, C> {

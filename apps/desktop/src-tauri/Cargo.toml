@@ -23,7 +23,7 @@ tauri-build = { version = "2.7.3", features = [] }
 
 [dependencies]
 # FR MEHQC0: the Startup logo view opens PNG, JPEG, BMP and raw .bin files.
-powerz-protocol = { workspace = true, features = ["image-files"] }
+powerz-protocol = { workspace = true, features = ["bulk", "hid", "cdc", "image-files"] }
 powerz-record.workspace = true
 powerz-sim.workspace = true
 tauri = { version = "2.12.4", features = [] }

@@ -23,9 +23,11 @@ crates/
 ├── powerz-protocol/            # library: transports (bulk/HID/CDC), framing, ADC/queue/PD/settings decode, auth
 ├── powerz-sim/                 # simulated KM003C behind the Transport trait (demo device, e2e test double)
 ├── powerz-record/              # library: vendor-compatible CSV recorder shared by CLI and desktop app
+├── powerz-wasm/                # wasm-bindgen binding: sans-IO builders/decoders + demo meter, built by build:wasm
 └── powerz-cli/                 # `powerz` binary: live readout, CSV streaming, raw frame dumps
 apps/desktop/                   # Tauri 2 app
 ├── src/                        # Svelte 5 + TS web UI (App.svelte, lib/*.ts, co-located *.test.ts)
+│   └── lib/web/                # web backend: WebUSB/WebHID transports, driver, browser backend
 ├── src-tauri/                  # Rust backend crate `open-powerz-desktop` (Tauri commands, embeds ../dist)
 └── vite.config.ts, tsconfig.json, eslint.config.js
 docs/                           # user-facing docs, docs/protocol.md (in-repo protocol spec)
@@ -63,6 +65,8 @@ cargo run -p powerz-cli         # the `powerz` CLI
 
 # Build
 bun run build:web               # build the UI into apps/desktop/dist (required before compiling the Tauri crate)
+bun run build:wasm              # build crates/powerz-wasm into apps/desktop/src/wasm (wasm-bindgen)
+bun run build:pages             # build the web edition for GitHub Pages into apps/desktop/dist-pages
 cargo build --workspace         # library + CLI + desktop backend
 bun run --cwd apps/desktop tauri build   # bundled desktop installer
 
@@ -84,7 +88,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p powerz-protocol --no-deps --locked
 **Gating rule:** Every feature must pass before merging:
 
 ```bash
-bun install --frozen-lockfile && bun run lint && bun run check && bun run test && bun run build:web && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked
+bun install --frozen-lockfile && bun run build:wasm && bun run lint && bun run check && bun run test && bun run build:web && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked
 ```
 
 `bun run build:web` must run before any cargo command that compiles `apps/desktop/src-tauri`: `tauri::generate_context!` requires `apps/desktop/dist` to exist. CI (`.github/workflows/ci.yml`) runs the same chain on Linux, macOS and Windows.

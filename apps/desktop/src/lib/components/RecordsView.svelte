@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { features } from "../backend";
+  import DesktopOnly from "./DesktopOnly.svelte";
   import InfoButton from "./InfoButton.svelte";
   import {
     formatRecordDuration,
@@ -111,18 +113,24 @@
             Downloaded {panel.lastAll} of {panel.lastAll}
           </span>
         {/if}
-        <button type="button" onclick={() => void panel.refresh()} disabled={!connected || busy}>
-          Refresh
-        </button>
-        {#if connected && anyDownloadable}
-          <button type="button" onclick={() => void panel.downloadAll()} disabled={busy}>
-            Download all
+        <DesktopOnly available={features.recordsList} label="Refresh">
+          <button type="button" onclick={() => void panel.refresh()} disabled={!connected || busy}>
+            Refresh
           </button>
+        </DesktopOnly>
+        {#if connected && anyDownloadable}
+          <DesktopOnly available={features.recordDownload} label="Download all">
+            <button type="button" onclick={() => void panel.downloadAll()} disabled={busy}>
+              Download all
+            </button>
+          </DesktopOnly>
         {/if}
         {#if connected && rows.length > 0}
-          <button type="button" onclick={() => (confirming = "all")} disabled={busy}>
-            Delete all
-          </button>
+          <DesktopOnly available={features.recordDelete} label="Delete all">
+            <button type="button" onclick={() => (confirming = "all")} disabled={busy}>
+              Delete all
+            </button>
+          </DesktopOnly>
         {/if}
       </div>
     </div>
@@ -181,12 +189,14 @@
                     {:else if panel.downloading === row.index}
                       <span class="muted">Downloading…</span>
                     {:else}
-                      <button
-                        type="button"
-                        onclick={() => void panel.download(row.index)}
-                        disabled={busy}
-                        aria-label="Download {row.name}">Download</button
-                      >
+                      <DesktopOnly available={features.recordDownload} label="Download">
+                        <button
+                          type="button"
+                          onclick={() => void panel.download(row.index)}
+                          disabled={busy}
+                          aria-label="Download {row.name}">Download</button
+                        >
+                      </DesktopOnly>
                     {/if}
                     <button
                       type="button"
@@ -195,11 +205,13 @@
                       aria-label="Open {row.name}">Open</button
                     >
                   {/if}
-                  <button
-                    type="button"
-                    onclick={() => (confirming = { index: row.index, name: row.name })}
-                    disabled={busy}>Delete</button
-                  >
+                  <DesktopOnly available={features.recordDelete} label="Delete">
+                    <button
+                      type="button"
+                      onclick={() => (confirming = { index: row.index, name: row.name })}
+                      disabled={busy}>Delete</button
+                    >
+                  </DesktopOnly>
                 </td>
               </tr>
             {/each}

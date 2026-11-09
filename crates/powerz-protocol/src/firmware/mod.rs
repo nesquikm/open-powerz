@@ -2,6 +2,7 @@
 //! or bootloader) and the firmware version checks. See `docs/protocol.md`.
 
 pub mod container;
+#[cfg(feature = "bulk")]
 pub mod flash;
 pub mod version;
 

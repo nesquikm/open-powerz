@@ -1,18 +1,21 @@
 {
   "name": "open-powerz-desktop",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:wasm": "bun run scripts/build-wasm.ts",
+    "build:pages": "vite build --mode pages",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "lint": "prettier --check . && eslint .",
     "format": "prettier --write .",
     "test": "vitest run",
     "e2e:ui": "playwright test -c e2e/ui/playwright.config.ts",
+    "e2e:pages": "playwright test -c e2e/pages/playwright.config.ts",
     "e2e:app": "wdio run e2e/app/wdio.conf.ts",
     "tauri": "tauri",
     "icons": "bun run scripts/icons.ts"

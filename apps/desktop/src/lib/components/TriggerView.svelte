@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { features } from "../backend";
+  import DesktopOnly from "./DesktopOnly.svelte";
   import InfoButton from "./InfoButton.svelte";
   import Term from "./Term.svelte";
   import { onMount } from "svelte";
@@ -220,13 +222,15 @@
 <div class="trigger">
   <div class="toolbar" role="toolbar" aria-label="Trigger">
     <InfoButton key="section.trigger" />
-    <button
-      type="button"
-      class="primary"
-      disabled={!connected || panel.detecting}
-      aria-describedby={reason ? "trigger-reason" : undefined}
-      onclick={() => void panel.detect()}>Detect</button
-    >
+    <DesktopOnly available={features.trigger} label="Detect">
+      <button
+        type="button"
+        class="primary"
+        disabled={!connected || panel.detecting}
+        aria-describedby={reason ? "trigger-reason" : undefined}
+        onclick={() => void panel.detect()}>Detect</button
+      >
+    </DesktopOnly>
     {#if panel.showBackTo5v}
       <button type="button" disabled={panel.detecting} onclick={() => void panel.backTo5v()}
         >Back to 5 V</button

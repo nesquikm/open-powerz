@@ -11,13 +11,18 @@
  */
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { holdClock, open, streamDemo } from "./helpers";
+import { holdClock, open, stepHeldClock, streamDemo } from "./helpers";
 
 const MOCK_HOOK = "__OPEN_POWERZ_MOCK__";
 const NARROW = { width: 375, height: 812 };
 
 function view(page: Page): Locator {
   return page.getByRole("tabpanel", { name: "Startup logo" });
+}
+
+/** A `stepHeldClock` condition: the logo view's status reads `text`. */
+function statusSays(page: Page, text: RegExp): () => Promise<boolean> {
+  return async () => text.test((await view(page).getByRole("status").allTextContents()).join(" "));
 }
 
 function confirmDialog(page: Page, word: RegExp): Locator {
@@ -396,6 +401,7 @@ test.describe("a logo write holds every meter control (AC-MEHQC0.3)", () => {
 
     await page.getByRole("tab", { name: "Startup logo" }).click();
     await expect(view(page).getByRole("progressbar")).toBeVisible();
+    await stepHeldClock(page, statusSays(page, /verified/i));
     await page.clock.resume();
     await expect(view(page).getByRole("status")).toContainText(/verified/i, { timeout: 30_000 });
 
@@ -439,6 +445,7 @@ test.describe("a logo write holds every meter control (AC-MEHQC0.3)", () => {
       .click();
     await page.getByRole("tab", { name: "Startup logo" }).click();
     await expect(view(page).getByRole("progressbar")).toBeVisible();
+    await stepHeldClock(page, statusSays(page, /verified/i));
     await page.clock.resume();
     await expect(view(page).getByRole("status")).toContainText(/verified/i, { timeout: 30_000 });
 

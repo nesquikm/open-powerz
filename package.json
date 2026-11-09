@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "bun run --cwd apps/desktop tauri dev",
     "build:web": "bun run --cwd apps/desktop build",
+    "build:wasm": "bun run --cwd apps/desktop build:wasm",
+    "build:pages": "bun run --cwd apps/desktop build:pages",
     "check": "bun run --cwd apps/desktop check",
     "lint": "bun run --cwd apps/desktop lint",
     "format": "bun run --cwd apps/desktop format",

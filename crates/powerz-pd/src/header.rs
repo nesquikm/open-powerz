@@ -43,6 +43,19 @@ impl Sop {
             Sop::SopPrime | Sop::SopDoublePrime | Sop::SopPrimeDebug | Sop::SopDoublePrimeDebug
         )
     }
+
+    /// Display name of the kind: `SOP`, `SOP'`, `SOP''`, `SOP'_Debug`,
+    /// `SOP''_Debug`, or `SOP <code>` for any other code.
+    pub fn name(self) -> String {
+        match self {
+            Sop::Sop => "SOP".to_owned(),
+            Sop::SopPrime => "SOP'".to_owned(),
+            Sop::SopDoublePrime => "SOP''".to_owned(),
+            Sop::SopPrimeDebug => "SOP'_Debug".to_owned(),
+            Sop::SopDoublePrimeDebug => "SOP''_Debug".to_owned(),
+            Sop::Other(n) => format!("SOP {n}"),
+        }
+    }
 }
 
 /// Port Power Role (bit 8 on SOP).
@@ -104,6 +117,17 @@ impl SpecRevision {
             SpecRevision::Rev1 => "Revision 1.0",
             SpecRevision::Rev2 => "Revision 2.0",
             SpecRevision::Rev3 => "Revision 3.x",
+            SpecRevision::Reserved => "Reserved",
+        }
+    }
+
+    /// Short form of the revision for table cells: `1.0`, `2.0`, `3.x` or
+    /// `Reserved`.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            SpecRevision::Rev1 => "1.0",
+            SpecRevision::Rev2 => "2.0",
+            SpecRevision::Rev3 => "3.x",
             SpecRevision::Reserved => "Reserved",
         }
     }

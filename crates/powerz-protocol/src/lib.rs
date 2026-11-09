@@ -11,6 +11,7 @@ pub mod decode;
 pub mod firmware;
 pub mod frame;
 pub mod logo;
+pub mod pd_details;
 pub mod pdcap;
 pub mod pdm;
 pub mod session;
