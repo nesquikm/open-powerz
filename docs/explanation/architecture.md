@@ -18,9 +18,11 @@ powerz-protocol   library: framing, decoders, transports, session, crypto,
                   firmware update                             uses pd
 powerz-sim        demo device: a simulated KM003C behind the Transport trait
 powerz-record     vendor-compatible CSV writer
+powerz-trigger    protocol-trigger engine shared by desktop and web   uses protocol
+powerz-wasm       WebAssembly binding for the web edition    uses protocol, sim, record, trigger
 
 powerz-cli        the `powerz` binary         uses protocol, sim, record
-open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
+open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record, trigger
 ```
 
 - **powerz-pd** turns PD message bytes into typed messages, a one-line
@@ -36,6 +38,11 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
   the desktop app and their end-to-end tests run without hardware.
 - **powerz-record** writes the vendor-compatible CSV, so `powerz stream`, the
   desktop app's recordings and its exports produce the same file.
+- **powerz-trigger** is the protocol-trigger engine: the PDM session, the
+  confirmations above 5 V and the way back to 5 V. The desktop app runs it on a
+  thread, the web edition in a worker, so both follow the same rules.
+- **powerz-wasm** compiles the protocol core, the trigger engine and the demo
+  meter to WebAssembly for the web edition.
 - **open-powerz-desktop** is the Tauri backend: a worker thread owns the meter
   session and keeps the session history; the Svelte web UI draws it with
   uPlot.

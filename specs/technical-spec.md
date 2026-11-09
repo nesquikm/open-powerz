@@ -40,16 +40,24 @@ browser edition on GitHub Pages:
   device and a shipped "demo device" (`powerz --transport sim`, and the desktop device
   picker).
 - `powerz-wasm` (wasm-bindgen binding, built by `bun run build:wasm` into
-  `apps/desktop/src/wasm`): the sans-IO frame builders and decoders of the read-only session,
-  plus the demo meter (`powerz-sim` on a manual clock) for the browser.
+  `apps/desktop/src/wasm`): the sans-IO frame builders, decoders and guarded write state
+  machines (settings write, record delete, startup logo) the browser drives, the trigger engine
+  (`powerz-trigger`) on a page-supplied blocking port, plus the demo meter (`powerz-sim` on a
+  manual clock).
+- `powerz-trigger`: the protocol-trigger engine (PDM text session, confirmations, "don't ask
+  again", VBUS watch, back to 5 V) shared by the desktop app's trigger thread and the browser;
+  pure Rust over a `Read + Write` port and the session `Clock`, builds for wasm32.
 - Web UI (`apps/desktop/src`): Svelte 5 + TypeScript, uPlot charts, built by Vite and embedded
   into the Tauri binary. The same UI is the browser edition: `VITE_BACKEND=web` swaps the Tauri
   backend for `apps/desktop/src/lib/web/` (WebUSB transport, a WebHID fallback limited to the ADC
   snapshot, a TS session driver over the wasm
   builders and decoders, and the demo meter). `bun run build:pages` builds it with base
   `/open-powerz/` into `apps/desktop/dist-pages/`; the release workflow's `pages` job and the
-  manual `pages.yml` deploy it through `pages-deploy.yml`. Meter writes, firmware, triggers,
-  settings read and offline records are desktop-only there.
+  manual `pages.yml` deploy it through `pages-deploy.yml`. Settings changes and protocol
+  triggering use the meter's serial port through Web Serial; the trigger engine runs in a
+  dedicated Worker over SharedArrayBuffer rings, so the page installs its own service worker
+  (`apps/desktop/public/coi-sw.js`) for cross-origin isolation. Only firmware update and showing a file in
+  the file manager stay desktop-only (M_ZFZQE7).
 
 The protocol reference lives in `docs/protocol.md`: rewritten in our own words from the
 research notes (outside the repo), keeping `[device]` / `[static]` / `[inferred]` tags.
@@ -212,3 +220,4 @@ See `specs/testing-spec.md`. Decoders are tested with byte vectors; transports w
 | Prior-art reuse | Depend on km003c-lib, fork laPower, build new | Build new | User decision; prior art is a test oracle and reference only |
 | Key policy | Ship keys, user-supplied key file, drop auth features | Ship keys | User decision |
 | Web edition I/O | Sync Rust session in a Worker over Atomics (needs COOP/COEP), JSPI-suspended sync session, sans-IO wasm binding + TS driver | Sans-IO wasm binding (`powerz-wasm`) + TS session driver | GitHub Pages cannot send COOP/COEP headers; JSPI support in wasm-bindgen is experimental. Pure builders/decoders run sync in wasm, WebUSB/WebHID stay async in JS (M_QFTCWW) |
+| Web trigger engine | Port the trigger orchestration to TS, make the Rust engine async, run the sync engine in a Worker over Atomics | Sync `powerz-trigger` engine in a Worker over SharedArrayBuffer rings; our own service worker adds COOP/COEP on Pages | Keeps one Rust engine for desktop and browser (no second implementation of the safety rules); the header limit of the row above is met by `apps/desktop/public/coi-sw.js`, installed only by the web build (M_ZFZQE7) |

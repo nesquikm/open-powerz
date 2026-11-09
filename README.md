@@ -146,6 +146,8 @@ These stay desktop-only, so use the
 | ------------------------ | ---------------------------------------------------------------------------- |
 | `crates/powerz-protocol` | Rust protocol library: transports (vendor bulk, HID, CDC), framing, decoders |
 | `crates/powerz-record`   | vendor-compatible CSV recorder shared by the CLI and the desktop app         |
+| `crates/powerz-trigger`  | protocol-trigger engine shared by the desktop app and the web edition        |
+| `crates/powerz-wasm`     | WebAssembly binding of the protocol core for the web edition                 |
 | `crates/powerz-cli`      | `powerz` command-line tool                                                   |
 | `apps/desktop`           | Tauri 2 desktop app (Svelte 5 + TypeScript + Vite, uPlot charts)             |
 | `specs/`                 | requirements, technical spec, plans                                          |
