@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use super::caps::Capabilities;
 use super::command::{Command, Protocol};
+use super::pd::Offer;
 use super::reply::{ReplyItem, ReplyReader};
 use super::risk::Risk;
 use super::{Error, map_io};
@@ -76,6 +77,11 @@ pub struct PdmSession<P: Read + Write, C: Clock = SystemClock> {
     /// The protocol of the last `entry` written; cleared by `reset`,
     /// `pdm open` and `pdm close`.
     entered: Option<Protocol>,
+    /// A PD negotiation brought offers after the last `entry`, `reset`,
+    /// `pd hrst`, `pdm open` or `pdm close`: a request may go out against
+    /// them without entering PD again, and is checked against these offers
+    /// (FR AHTZW4). `None` while PD is not ready.
+    pd_offers: Option<Vec<Offer>>,
 }
 
 impl<P: Read + Write> PdmSession<P, SystemClock> {
@@ -99,6 +105,7 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
             out_of_sync: None,
             opened: false,
             entered: None,
+            pd_offers: None,
         };
         // On any error below, dropping `session` sends `pdm close` before
         // the port is released.
@@ -270,11 +277,20 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
         if *command == Command::PdmOpen {
             self.opened = false;
         }
-        // Written is what counts: an entry attempt may leave the meter in
-        // the protocol even when its reply never comes.
+        // Written is what counts for `entered`: an entry attempt may leave
+        // the meter in the protocol even when its reply never comes. Offers
+        // are fresh only once the negotiation these start has read them
+        // ([`PdmSession::mark_pd_ready`]).
         match command {
-            Command::Entry(protocol) => self.entered = Some(*protocol),
-            Command::Reset | Command::PdmOpen | Command::PdmClose => self.entered = None,
+            Command::Entry(protocol) => {
+                self.entered = Some(*protocol);
+                self.pd_offers = None;
+            }
+            Command::Reset | Command::PdmOpen | Command::PdmClose => {
+                self.entered = None;
+                self.pd_offers = None;
+            }
+            Command::PdHardReset => self.pd_offers = None,
             _ => {}
         }
         self.current = Some(command.clone());
@@ -332,6 +348,26 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
     /// 2026-10-24, `pd req=2` after `entry ufcs` got `req error 252`.
     pub fn entered(&self) -> Option<Protocol> {
         self.entered
+    }
+
+    /// Whether a PD negotiation brought offers after the last `entry`,
+    /// `reset`, `pd hrst`, `pdm open` or `pdm close`: a PD request may then
+    /// go out without entering PD again. A written `entry pd` whose offers
+    /// never came leaves it `false` while [`PdmSession::entered`] says PD.
+    pub fn pd_ready(&self) -> bool {
+        self.pd_offers.is_some()
+    }
+
+    /// The offers of the latest negotiation while PD is ready
+    /// ([`PdmSession::pd_ready`]); `None` otherwise.
+    pub fn pd_offers(&self) -> Option<&[Offer]> {
+        self.pd_offers.as_deref()
+    }
+
+    /// Record that the negotiation after the last `entry pd` / `pd hrst`
+    /// brought `offers`.
+    pub(crate) fn mark_pd_ready(&mut self, offers: Vec<Offer>) {
+        self.pd_offers = Some(offers);
     }
 
     /// Capabilities from every block seen so far, solicited or not.

@@ -45,6 +45,7 @@ codename: Full Tab
 | [CJ3QCC](../frs/CJ3QCC.md) | The startup logo tab over HID gives the wrong reason (bug) | n/a |
 | [CJ3QCD](../frs/CJ3QCD.md) | Small stale and mismatched readings in the browser's meter views (bug) | n/a |
 | [AHTZW1](../frs/AHTZW1.md) | The first PD request after Detect sometimes times out in the browser (bug) | n/a |
+| [AHTZW4](../frs/AHTZW4.md) | A request after a failed PD entry goes out against old offers (bug) | n/a |
 | [62VEDM](../frs/62VEDM.md) | Some abbreviations have no glossary popover (bug) | n/a |
 
 Build order: the table's order. Triggering goes last of the features: it moves the desktop trigger engine into a shared crate and needs a cross-origin-isolated page.
@@ -82,6 +83,8 @@ Build order: the table's order. Triggering goes last of the features: it moves t
    verify: `bun run test` (logo, records and rate picker suites).
 16. PD re-entry retried once before a request; trigger log to the page console — AHTZW1
    verify: `cargo test -p powerz-trigger`; `bun run test` (trigger worker and backend suites).
+17. PD ready only after fresh offers; requests checked against the latest negotiation — AHTZW4
+   verify: `cargo test -p powerz-protocol -p powerz-trigger`.
 
 **Gate:** CLAUDE.md gating rule, with `bun run build:wasm` before `bun run test`.
 

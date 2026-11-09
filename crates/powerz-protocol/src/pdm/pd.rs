@@ -464,28 +464,31 @@ fn negotiation<P: Read + Write, C: Clock>(
             Err(e) => return Err(e.into()),
         }
     }
-    Ok(Negotiation {
-        offers: offers(session.capabilities()),
-        vbus,
-    })
+    let offers = offers(session.capabilities());
+    if !offers.is_empty() {
+        session.mark_pd_ready(offers.clone());
+    }
+    Ok(Negotiation { offers, vbus })
 }
 
 /// `entry pd` unless PD is the protocol entered last
-/// ([`PdmSession::entered`]); the new negotiation when it was sent. Another
+/// ([`PdmSession::entered`]) and its offers arrived
+/// ([`PdmSession::pd_ready`], FR AHTZW4); the new negotiation when it was
+/// sent. Another
 /// protocol entered after PD leaves the meter answering `pd req=` with
 /// `req error 252`. \[device\] 2026-10-24
 pub fn ensure_entered<P: Read + Write, C: Clock>(
     session: &mut PdmSession<P, C>,
 ) -> Result<Option<Negotiation>, Error> {
-    if session.entered() == Some(Protocol::Pd) {
+    if session.entered() == Some(Protocol::Pd) && session.pd_ready() {
         return Ok(None);
     }
     enter(session).map(Some)
 }
 
 /// Validate, enter PD again when another protocol (or none) was entered
-/// after it ([`ensure_entered`]; the request is then checked against the
-/// refreshed offers), send (with `confirmation` when above 5 V) and read
+/// after it or PD is not ready ([`ensure_entered`]); the request is then
+/// checked against the latest negotiation's offers. Send (with `confirmation` when above 5 V) and read
 /// `req:` / `ready:`.
 pub fn request<P: Read + Write, C: Clock>(
     session: &mut PdmSession<P, C>,
@@ -499,7 +502,9 @@ pub fn request<P: Read + Write, C: Clock>(
         // The charger may offer less now (SPR only): nothing is written
         // for a position it no longer offers.
         Some(negotiation) => validate(&negotiation.offers, request)?,
-        None => validate(offers, request)?,
+        // PD is ready: checked against the latest negotiation's offers, not
+        // only the caller's, which may be older (FR AHTZW4).
+        None => validate(session.pd_offers().unwrap_or_default(), request)?,
     };
     send_request(session, command, confirmation)
 }
