@@ -37,6 +37,7 @@ codename: Full Tab
 | [W8SHXB](../frs/W8SHXB.md) | Startup logo upload in the browser | n/a |
 | [W8SHXC](../frs/W8SHXC.md) | Protocol triggering in the browser | n/a |
 | [W8SHXF](../frs/W8SHXF.md) | Web edition docs for the new browser features | n/a |
+| [60QB2S](../frs/60QB2S.md) | An (i) beside the web device menu explains the connections | n/a |
 
 Build order: the table's order. Triggering goes last of the features: it moves the desktop trigger engine into a shared crate and needs a cross-origin-isolated page.
 
@@ -57,6 +58,8 @@ Build order: the table's order. Triggering goes last of the features: it moves t
    verify: `cargo test --workspace`; Vitest bridge and backend suites; Pages e2e (`--workers=1`).
 8. Docs — W8SHXF
    verify: docs Vitest checks.
+9. Connection info button beside the web device menu — 60QB2S
+   verify: `bun run test` (device picker suites); Pages e2e connection-info check (`--workers=1`).
 
 **Gate:** CLAUDE.md gating rule, with `bun run build:wasm` before `bun run test`.
 

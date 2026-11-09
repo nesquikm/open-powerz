@@ -98,6 +98,12 @@ const ENTRIES = {
     short: "Saves the live readings to a CSV file on this computer while it runs.",
     source: "our definition",
   },
+  "section.connection": {
+    term: "Connections",
+    short:
+      "The ways this page reaches the meter, what each one gives, and which browsers can connect.",
+    source: "our definition",
+  },
   "term.vbus": {
     term: "VBUS",
     short: "The USB-C power line; its voltage is what the charger delivers.",

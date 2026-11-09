@@ -1,8 +1,7 @@
 <script lang="ts">
   import { type GlossaryKey } from "../glossary";
   import GlossaryPopover from "./GlossaryPopover.svelte";
-  import { glossaryTrigger } from "../infoPopover.svelte";
-  import { getContext } from "svelte";
+  import { glossaryTrigger, infoIconsShown } from "../infoPopover.svelte";
 
   /**
    * The (i) button beside a section's title (FR CW66T1): it opens a short popover
@@ -13,9 +12,9 @@
   const uid = $props.id();
   const trigger = glossaryTrigger(() => key, uid);
   let button = $state<HTMLButtonElement>();
-  // The Show (i) icons switch (AC-CW66T1.8); shown when no app context provides it.
-  const showInfoIcons = getContext<(() => boolean) | undefined>("showInfoIcons");
-  const shown = $derived(showInfoIcons?.() ?? true);
+  // The Show (i) icons switch (AC-CW66T1.8).
+  const showInfoIcons = infoIconsShown();
+  const shown = $derived(showInfoIcons());
 </script>
 
 {#if shown}<span class="info">

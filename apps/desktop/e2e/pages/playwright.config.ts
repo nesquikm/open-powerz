@@ -45,6 +45,14 @@ export default defineConfig({
       testMatch: "**/unsupported.spec.ts",
       use: { ...devices["Desktop Safari"] },
     },
+    {
+      // The connection (i)'s top bar layout check (AC-60QB2S.7) on WebKit, with a
+      // stand-in WebUSB so the page draws the web edition's top bar.
+      name: "webkit-layout",
+      testMatch: "**/connection-info.spec.ts",
+      grep: /AC-60QB2S\.7/,
+      use: { ...devices["Desktop Safari"] },
+    },
   ],
   webServer: {
     // Run from apps/desktop. The pages mode sets the base path, the backend and the folder.
