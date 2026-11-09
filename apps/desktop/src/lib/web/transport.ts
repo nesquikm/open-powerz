@@ -38,6 +38,10 @@ export function isNotFoundError(e: unknown): boolean {
 export const timeoutError = (): UiError =>
   transportError("timeout", "The meter did not answer in time.", null);
 
+/** A request the app refuses as unsafe, in the desktop app's words. */
+export const notSafeError = (): UiError =>
+  transportError("usage", "The app refused a request that is not safe.", null);
+
 /** `work` raced against a `timeoutMs` timer that rejects as `timeout`. */
 export function withTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {

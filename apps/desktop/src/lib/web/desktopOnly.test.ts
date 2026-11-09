@@ -88,6 +88,12 @@ describe("the web build shows the meter reads (AC-W8SHX8.7)", () => {
     });
   }
 
+  it('the settingsWrite control renders without "Desktop app only" (AC-W8SHX9.7)', () => {
+    const body = html({ available: WEB_FEATURES.settingsWrite, label: "Edit", children: child });
+    expect(body).toContain("<button>Flash firmware</button>");
+    expect(body).not.toContain(DESKTOP_ONLY_TEXT);
+  });
+
   for (const feature of ["firmwareUpdate", "fileReveal"] as const) {
     it(`the ${feature} control still says "Desktop app only"`, () => {
       const body = html({ available: WEB_FEATURES[feature], label: "Update", children: child });

@@ -2,7 +2,7 @@
 //! See `docs/protocol.md` "Settings write".
 
 use super::{Clock, Error, Session, unexpected_reply};
-use crate::decode::settings::{MeterSettings, WritableField, settings_write_request};
+use crate::decode::settings::{MeterSettings, Settings, WritableField, settings_write_request};
 use crate::frame::{self, Reply};
 use crate::transport::{self, Transport};
 
@@ -86,13 +86,26 @@ impl<T: Transport, C: Clock> Session<T, C> {
             Err(e) => return Err(e),
         }
         let block_after = self.read_settings()?;
-        let after = block_after.meter_settings()?;
-        verify(&before, &after, changes)?;
-        Ok(SettingsWritten {
-            settings: after,
-            undecoded_changed: block_before.undecoded_diff(&block_after),
-        })
+        settings_written(&block_before, &block_after, changes)
     }
+}
+
+/// The read-back check of [`Session::write_settings_checked`], with no
+/// transport: `after` (the SETTINGS block read again) must show every
+/// changed field at its new value and every other field as in `before`,
+/// else [`Error::SettingsMismatch`] names the field. Bytes no field decodes
+/// that moved are reported, not refused.
+pub fn settings_written(
+    before: &Settings,
+    after: &Settings,
+    changes: &[(WritableField, i32)],
+) -> Result<SettingsWritten, Error> {
+    let (decoded_before, decoded_after) = (before.meter_settings()?, after.meter_settings()?);
+    verify(&decoded_before, &decoded_after, changes)?;
+    Ok(SettingsWritten {
+        settings: decoded_after,
+        undecoded_changed: before.undecoded_diff(after),
+    })
 }
 
 /// Every writable field at its new (or read) code, every other field as read.
@@ -269,6 +282,71 @@ mod tests {
             Err(Error::Transport(crate::transport::Error::Timeout).to_string())
         );
         assert_eq!(sent, vec![settings_read(1), settings_read(2)]);
+    }
+
+    // ---- FR W8SHX9: the pure check the web edition shares ----
+
+    fn block(payload: &[u8]) -> crate::decode::settings::Settings {
+        crate::decode::settings::Settings::decode(payload).expect("a passing block")
+    }
+
+    /// AC-W8SHX9.3: `settings_written` is the read-back check of
+    /// `write_settings_checked`, with no transport.
+    #[test]
+    fn settings_written_accepts_a_read_back_with_the_change() {
+        let before = block(&captured());
+        let after = block(&passing(|p| brightness(p, 80)));
+        let written = settings_written(&before, &after, &[(WritableField::Brightness, 80)])
+            .expect("the read-back shows the change");
+        assert_eq!(written.settings.brightness.value, 80);
+        assert!(written.undecoded_changed.is_empty(), "{written:?}");
+        assert!(written.warnings().is_empty());
+    }
+
+    #[test]
+    fn settings_written_names_a_changed_field_that_did_not_take() {
+        let before = block(&captured());
+        let err = settings_written(&before, &before, &[(WritableField::Brightness, 80)])
+            .expect_err("the read-back lacks the change");
+        match err {
+            Error::SettingsMismatch {
+                field, expected, ..
+            } => {
+                assert_eq!(field, "brightness");
+                assert_eq!(expected, "80");
+            }
+            other => panic!("not a mismatch: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settings_written_names_an_unchanged_field_that_moved() {
+        let before = block(&captured());
+        let after = block(&passing(|p| brightness(p, 80)));
+        let err = settings_written(&before, &after, &[]).expect_err("brightness moved");
+        assert!(
+            matches!(
+                err,
+                Error::SettingsMismatch {
+                    field: "brightness",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn settings_written_reports_moved_undecoded_bytes_as_a_warning() {
+        let before = block(&captured());
+        let after = block(&passing(|p| {
+            brightness(p, 80);
+            p[0x08] ^= 0x01;
+        }));
+        let written = settings_written(&before, &after, &[(WritableField::Brightness, 80)])
+            .expect("undecoded bytes do not fail the write");
+        assert_eq!(written.undecoded_changed, vec![0x08]);
+        assert_eq!(written.warnings().len(), 1, "{:?}", written.warnings());
     }
 
     #[test]

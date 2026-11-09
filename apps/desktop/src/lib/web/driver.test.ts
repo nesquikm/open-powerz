@@ -312,7 +312,10 @@ describe("closed command set (AC-QFTCWZ.5)", () => {
       (k) => k !== "constructor",
     );
     expect(methods.length).toBeGreaterThan(0);
-    expect(methods.filter((k) => rawish.test(k))).toEqual([]);
+    // FR W8SHX9: the settings write takes typed field changes, which the wasm core
+    // checks and frames; it is the only write-named method allowed.
+    const typed = new Set(["writeSettings"]);
+    expect(methods.filter((k) => rawish.test(k) && !typed.has(k))).toEqual([]);
     const statics = Object.getOwnPropertyNames(MeterDriver).filter(
       (k) => !["length", "name", "prototype"].includes(k),
     );

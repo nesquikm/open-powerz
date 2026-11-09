@@ -189,3 +189,20 @@ test("the demo meter's settings and offline records show in the browser (AC-W8SH
   await records.getByRole("button", { name: "Open PHONE_5V" }).click();
   await expect(page.getByRole("region", { name: "Offline record" })).toContainText("PHONE_5V");
 });
+
+test("a settings change on the demo meter reads back in the browser (AC-W8SHX9.1, .7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+  const settings = page.getByRole("region", { name: "Meter settings" });
+  await expect(settings.getByText("Brightness", { exact: true })).toBeVisible({ timeout: 10_000 });
+  await settings.getByRole("button", { name: "Edit" }).click();
+  const brightness = settings.getByLabel("Brightness", { exact: true });
+  const before = await brightness.inputValue();
+  const next = before === "80" ? "60" : "80";
+  await brightness.fill(next);
+  await settings.getByRole("button", { name: "Apply" }).click();
+  await expect(settings.locator("input, select")).toHaveCount(0, { timeout: 10_000 });
+  await expect(settings).toContainText(`${next}%`);
+});

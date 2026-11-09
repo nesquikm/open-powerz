@@ -1,8 +1,9 @@
 /**
  * FR QFTCX0: the capability map components read to hide or disable the controls a
  * build cannot offer. The desktop (Tauri and mock) builds have every feature; the web
- * build leaves out every meter write (AC-QFTCX0.6) but does the safe reads: settings,
- * the records list and record downloads (AC-W8SHX8.7). Firmware update and file reveal
+ * build leaves out every meter write except the settings write (AC-QFTCX0.6,
+ * AC-W8SHX9.7) and does the safe reads: settings, the records list and record
+ * downloads (AC-W8SHX8.7). Firmware update and file reveal
  * stay desktop only. Pure data: no WebUSB code lives here.
  */
 
@@ -36,12 +37,13 @@ export const DESKTOP_FEATURES: Readonly<Features> = Object.freeze({
 });
 
 /** The browser build: the safe reads (settings, records list, record download) are on
- * (AC-W8SHX8.7); meter writes stay off for now, and firmware update and file reveal
- * stay in the desktop app. */
+ * (AC-W8SHX8.7), and so is the settings write over Web Serial (AC-W8SHX9.7); the other
+ * meter writes stay off for now, and firmware update and file reveal stay in the
+ * desktop app. */
 export const WEB_FEATURES: Readonly<Features> = Object.freeze({
   firmwareUpdate: false,
   logoUpload: false,
-  settingsWrite: false,
+  settingsWrite: true,
   recordDelete: false,
   trigger: false,
   settingsRead: true,

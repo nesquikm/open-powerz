@@ -25,12 +25,15 @@ import type {
   RunProgress,
   RunProgressQuery,
   Sample,
+  SettingChanges,
   StatsSnapshot,
   UiError,
 } from "../backend";
 import { HistoryColumns, SessionStats } from "../history";
 import { CsvRecorder } from "./csv";
 import type { MeterDriver, MeterSample, PdDecoderLike, PowerzWasm } from "./driver";
+import { noWebSerialError } from "./serial";
+import type { WebTransport } from "./transport";
 
 /** Queue rates by rate code (2, 10, 50, 1000 SPS). */
 export const RATES_SPS: readonly number[] = [2, 10, 50, 1000];
@@ -78,6 +81,9 @@ export interface WebSessionOptions {
   wasm: PowerzWasm;
   /** Saves a file for the user. */
   download: (name: string, data: Blob) => void;
+  /** Opens the pipe a settings write runs over (FR W8SHX9): the meter's serial port,
+   * or the demo meter's CDC twin. Without it, a settings change finds no Web Serial. */
+  openSettingsPipe?: () => Promise<WebTransport>;
 }
 
 /** The meter commands a {@link WebSession} answers itself. */
@@ -105,6 +111,7 @@ export const SESSION_COMMANDS = [
   "saveRecordingAs",
   "exportSession",
   "meterSettings",
+  "meterSettingsWrite",
   "recordsList",
   "recordDownload",
 ] as const satisfies readonly (keyof MeterCommands)[];
@@ -452,6 +459,11 @@ export class WebSession {
       exportSession: (suggestedName: string, onProgress: (progress: ExportProgress) => void) =>
         this.exportSession(suggestedName, onProgress),
       meterSettings: (): Promise<MeterSettings> => this.driver.readSettings(),
+      meterSettingsWrite: (changes: SettingChanges): Promise<MeterSettings> =>
+        this.driver.writeSettings(
+          changes,
+          this.o.openSettingsPipe ?? (() => Promise.reject(noWebSerialError())),
+        ),
       recordsList: (): Promise<RecordList> => this.driver.listRecords(),
       recordDownload: (index: number): Promise<OfflineRecord> => this.driver.downloadRecord(index),
     };

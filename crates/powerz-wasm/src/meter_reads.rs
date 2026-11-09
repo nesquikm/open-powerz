@@ -17,7 +17,11 @@ use crate::decoders::{malformed, put_data_sections, to_js};
 
 /// The payload of the `att` section of a PUT_DATA reply named `what`. A
 /// reply without that section is `malformed`; a REJECT is `rejected`.
-fn section_payload<'a>(reply: &'a [u8], att: Attribute, what: &str) -> Result<&'a [u8], BindError> {
+pub(crate) fn section_payload<'a>(
+    reply: &'a [u8],
+    att: Attribute,
+    what: &str,
+) -> Result<&'a [u8], BindError> {
     put_data_sections(reply, what)?
         .into_iter()
         .find(|s| s.att == att)

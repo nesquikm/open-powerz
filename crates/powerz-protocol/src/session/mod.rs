@@ -46,7 +46,7 @@ pub use probe::{ConnectOutcome, HeadOutcome, ProbeReport};
 pub use records::{
     RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_delete_table, record_table_request,
 };
-pub use settings_write::SettingsWritten;
+pub use settings_write::{SettingsWritten, settings_written};
 pub use stream::{Gap, RATE_SWITCH_RUN, SnapshotCadence, StreamPoll, Streamer};
 
 /// Text of [`Error::RecordTableMismatch`]: a matching count alone would read

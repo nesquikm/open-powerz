@@ -3,11 +3,11 @@
  * back to WebHID) and runs the read-only session over a `WebTransport`.
  */
 
-import type { MeterSettings, OfflineRecord, RecordList, UiError } from "../backend";
+import type { MeterSettings, OfflineRecord, RecordList, SettingChanges, UiError } from "../backend";
 import { ERROR_KINDS } from "../errorKinds";
 import type { DemoMeterModule } from "./demoTransport";
 import { hidOnlyBasicText } from "./features";
-import { disconnectedError, timeoutError, type WebTransport } from "./transport";
+import { disconnectedError, notSafeError, timeoutError, type WebTransport } from "./transport";
 import { openWebUsb, type UsbDeviceLike, type WebUsbOptions } from "./webusb";
 
 /** The parts of the generated wasm module (`src/wasm/powerz_wasm.js`) the driver uses. */
@@ -45,6 +45,22 @@ export interface PowerzWasm extends DemoMeterModule {
   decodeSettings(reply: Uint8Array): MeterSettings;
   /** The offline records book: the latest list and its readable windows (FR W8SHX8). */
   RecordBook: new () => RecordBookLike;
+  /** One settings write between two reads and a read-back (FR W8SHX9); the
+   * constructor refuses bad changes as `usage`. */
+  SettingsWrite: new (changes: Record<string, number>) => SettingsWriteLike;
+  /** Length of the first complete CDC frame in `buf`, `undefined` while incomplete. */
+  cdcFrameLength(buf: Uint8Array): number | undefined;
+}
+
+/** The wasm `SettingsWrite` (FR W8SHX9). */
+export interface SettingsWriteLike {
+  readRequest(id: number): Uint8Array;
+  takeRead(reply: Uint8Array): void;
+  writeRequest(id: number): Uint8Array;
+  /** The write's reply, `undefined` when none came in time. */
+  takeWriteReply(reply: Uint8Array | undefined): void;
+  result(): MeterSettings;
+  free(): void;
 }
 
 /** The wasm `RecordBook` (FR W8SHX8). */
@@ -75,6 +91,12 @@ export type UsbOpenResult = { transport: WebTransport } | { offerHid: true; erro
 
 function isUiError(e: unknown): e is UiError {
   return typeof e === "object" && e !== null && "kind" in e && "message" in e;
+}
+
+/** A failure the app already words for the user (a transport error, or a wasm
+ * refusal of a kind the UI knows), as opposed to a wasm decode error. */
+function isWorded(e: unknown): e is UiError {
+  return isUiError(e) && (ERROR_KINDS as readonly string[]).includes(e.kind);
 }
 
 /**
@@ -183,7 +205,7 @@ export interface MeterDriverOptions {
 /** Any failure as a `UiError`: transport errors pass through, wasm decode errors are
  * `protocol`, DOM transfer errors `disconnected` / `timeout`. */
 function asUiError(e: unknown): UiError {
-  if (isUiError(e) && (ERROR_KINDS as readonly string[]).includes(e.kind) && "hint" in e) {
+  if (isUiError(e) && (ERROR_KINDS as readonly string[]).includes(e.kind)) {
     return { kind: e.kind, message: e.message, hint: e.hint ?? null };
   }
   if (typeof DOMException !== "undefined" && e instanceof DOMException) {
@@ -202,20 +224,19 @@ function hidOnlyBasic(what: string): UiError {
   };
 }
 
-/** A request the wasm core refuses as unsafe, in the desktop app's words. */
-const NOT_SAFE: UiError = {
-  kind: "usage",
-  message: "The app refused a request that is not safe.",
-  hint: null,
-};
-
 /** A wasm `BindError` from the records book as the desktop app words it: `forbidden`
  * is an unsafe request, `usage` keeps its message. */
 function bookError(e: unknown): unknown {
-  if (typeof e !== "object" || e === null || "hint" in e) return e;
-  const { kind, message } = e as { kind?: unknown; message?: unknown };
-  if (kind === "forbidden") return NOT_SAFE;
-  if (kind === "usage") return { kind: "usage", message: String(message), hint: null };
+  if (typeof e !== "object" || e === null) return e;
+  const { kind, message, hint } = e as { kind?: unknown; message?: unknown; hint?: unknown };
+  if (kind === "forbidden") return notSafeError();
+  if (kind === "usage") {
+    return {
+      kind: "usage",
+      message: String(message),
+      hint: typeof hint === "string" ? hint : null,
+    };
+  }
   return e;
 }
 
@@ -316,8 +337,8 @@ export class MeterDriver {
     frame: Uint8Array,
     timeoutMs: number,
     matchId = true,
+    t: WebTransport = this.o.transport,
   ): Promise<Uint8Array> {
-    const t = this.o.transport;
     let reply = await t.transact(frame, timeoutMs);
     if (!matchId) return reply;
     for (let rereads = 0; reply[1] !== frame[1]; rereads++) {
@@ -443,14 +464,14 @@ export class MeterDriver {
       await start();
       return true;
     } catch (e) {
-      if (isUiError(e) && "hint" in e) throw e;
+      if (isWorded(e)) throw e;
     }
     try {
       await this.expectAccept(w.stopQueueRequest(this.nextId()));
       await start();
       return true;
     } catch (e) {
-      if (isUiError(e) && "hint" in e) throw e;
+      if (isWorded(e)) throw e;
       return false;
     }
   }
@@ -564,6 +585,82 @@ export class MeterDriver {
       const reply = await this.exchange(w.settingsRequest(this.nextId()), REPLY_TIMEOUT_MS);
       return w.decodeSettings(reply);
     });
+  }
+
+  /** Change the meter's settings (FR W8SHX9) as the desktop app does: over the
+   * settings pipe `openPipe` gives (the meter's serial port), read SETTINGS twice, send
+   * one type-0x0A write built by the wasm core and read SETTINGS again. Bad changes are
+   * refused before the pipe opens; the stream waits meanwhile, and a queue stream
+   * restarts at the session's rate after a change that took (AC-W8SHX9.5). */
+  async writeSettings(
+    changes: SettingChanges,
+    openPipe: () => Promise<WebTransport>,
+  ): Promise<MeterSettings> {
+    if (this.o.hid) throw hidOnlyBasic("Changing the meter's settings");
+    if (this.ended) throw disconnectedError();
+    let write: SettingsWriteLike;
+    try {
+      write = new this.o.wasm.SettingsWrite(changes as Record<string, number>);
+    } catch (e) {
+      throw asUiError(e);
+    }
+    let written: MeterSettings;
+    try {
+      // Open the pipe before waiting for the link: picking a serial port needs the
+      // user's click, whose activation must not wait behind an in-flight poll.
+      const pipe = await openPipe();
+      try {
+        written = await this.exclusive(async () => {
+          if (this.ended) throw disconnectedError();
+          return await this.settingsSequence(pipe, write);
+        });
+      } finally {
+        await pipe.close().catch(() => {});
+      }
+    } catch (e) {
+      throw asUiError(e);
+    } finally {
+      write.free();
+    }
+    await this.restartQueueAfterChange();
+    return written;
+  }
+
+  /** Read, read, write, read over `pipe`; no reply to the write leaves it to the
+   * read-back. */
+  private async settingsSequence(
+    pipe: WebTransport,
+    write: SettingsWriteLike,
+  ): Promise<MeterSettings> {
+    const read = async () =>
+      write.takeRead(
+        await this.exchange(write.readRequest(this.nextId()), REPLY_TIMEOUT_MS, true, pipe),
+      );
+    await read();
+    await read();
+    const request = write.writeRequest(this.nextId());
+    let reply: Uint8Array | undefined;
+    try {
+      reply = await this.exchange(request, REPLY_TIMEOUT_MS, true, pipe);
+    } catch (e) {
+      if (asUiError(e).kind !== "timeout") throw e;
+    }
+    write.takeWriteReply(reply);
+    await read();
+    return write.result();
+  }
+
+  /** After a settings write the meter's queue goes back to its own rate `[inferred]`:
+   * stop and start a queue stream again at the session's rate (native
+   * `restart_after_settings_write`). A failed restart does not fail the write. */
+  private async restartQueueAfterChange(): Promise<void> {
+    if (this.mode !== "queue" || this.ended) return;
+    const w = this.o.wasm;
+    await this.exclusive(async () => {
+      if (this.ended) return;
+      await this.expectAccept(w.stopQueueRequest(this.nextId()));
+      await this.expectAccept(w.startQueueRequest(this.nextId(), this.rate));
+    }).catch(() => {});
   }
 
   /** List the meter's offline records (AC-W8SHX8.2): a level-1 auth first when the

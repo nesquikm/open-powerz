@@ -1,8 +1,8 @@
 /**
  * FR QFTCX0: what the web backend refuses.
  *
- * - AC-QFTCX0.6: firmware update, logo upload, settings writes, record delete and
- *   protocol triggering are desktop-only: each web backend function for them rejects
+ * - AC-QFTCX0.6: firmware update, logo upload, record delete and protocol
+ *   triggering are desktop-only (settings writes run in the browser, AC-W8SHX9.7): each web backend function for them rejects
  *   with a "desktop app" usage error and sends nothing to the meter; the backend's
  *   `features` map says so.
  * - AC-QFTCX0.7: settings read, the offline record list and record download work only
@@ -93,10 +93,10 @@ describe("desktop-only meter writes (AC-QFTCX0.6)", () => {
     await settle(backend.disconnect());
   });
 
-  it("settings writes, record delete and triggering reject without sending anything", async () => {
+  // Settings writes run in the browser since FR W8SHX9 (AC-W8SHX9.7).
+  it("record delete and triggering reject without sending anything", async () => {
     const { backend, dev, id } = await connected();
     for (const m of [backend, backend.meter(id)]) {
-      await expectDesktopOnly(() => m.meterSettingsWrite({ brightness: 3 } as never), dev);
       await expectDesktopOnly(() => m.recordsDelete("all", "DELETE ALL"), dev);
       await expectDesktopOnly(() => m.recordsDelete(1, "DELETE 1"), dev);
       await expectDesktopOnly(() => m.triggerOpen(), dev);

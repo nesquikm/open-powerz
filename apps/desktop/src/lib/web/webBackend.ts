@@ -11,10 +11,12 @@ import type {
   UiError,
   WebBackendApi,
 } from "../backend";
+import { DemoCdcTransport, serialPipeOpener } from "./cdcTransport";
 import { DemoTransport } from "./demoTransport";
 import { MeterDriver, openUsbOrOfferHid, type PowerzWasm } from "./driver";
 import { WEB_FEATURES, desktopOnlyError, type Features } from "./features";
 import { SESSION_COMMANDS, WebSession, rateCodeOf, usage } from "./session";
+import type { SerialLike } from "./serial";
 import type { WebTransport } from "./transport";
 import { openWebHid, type HidDeviceLike } from "./webhid";
 import { POWERZ_VENDOR_ID, type UsbDeviceLike, type UsbLike } from "./webusb";
@@ -27,6 +29,8 @@ export interface WebBackendOptions {
   usb?: unknown;
   /** `navigator.hid`, or `null` without WebHID. */
   hid?: unknown;
+  /** The browser's Web Serial API (`navigator` serial), or `null` without it (FR W8SHX9: settings writes). */
+  serial?: unknown;
   /** Saves a file for the user (a Blob behind an anchor click). */
   download?: (name: string, data: Blob) => void;
 }
@@ -132,9 +136,9 @@ const modelOf = (device: { productName?: string | null }): string =>
   device.productName || DEFAULT_MODEL;
 
 /** `navigator[name]`, or `null` outside a browser or without that API. */
-function browserApi(name: "usb" | "hid"): unknown {
+function browserApi(name: "usb" | "hid" | "serial"): unknown {
   if (typeof navigator === "undefined") return null;
-  return (navigator as { usb?: unknown; hid?: unknown })[name] ?? null;
+  return (navigator as { usb?: unknown; hid?: unknown; serial?: unknown })[name] ?? null;
 }
 
 const demoListing = (): DeviceListing => ({
@@ -294,6 +298,8 @@ function browserDownload(name: string, data: Blob): void {
 /** An opened meter: its transport, and whether it runs over WebHID. */
 interface OpenedMeter {
   transport: WebTransport;
+  /** The demo meter's transport, whose CDC twin carries its settings writes. */
+  demo?: DemoTransport;
   hid?: boolean;
   model?: string;
 }
@@ -309,6 +315,7 @@ class Sessions {
     private readonly usb: UsbNavigatorLike | null,
     wasm: unknown,
     private readonly download: (name: string, data: Blob) => void,
+    private readonly webSerial: SerialLike | null,
   ) {
     this.wasm = (wasm as PowerzWasm | undefined) ?? null;
   }
@@ -336,7 +343,8 @@ class Sessions {
    * already-permitted HID meter (AC-QFTCWZ.3). */
   private async open(w: PowerzWasm, deviceId: string): Promise<OpenedMeter> {
     if (deviceId.startsWith("demo:")) {
-      return { transport: new DemoTransport(w, deviceId.slice("demo:".length), () => Date.now()) };
+      const demo = new DemoTransport(w, deviceId.slice("demo:".length), () => Date.now());
+      return { transport: demo, demo };
     }
     const device = this.devices.deviceOf(deviceId);
     if (!device) throw usage("This meter is no longer available. Pick it again.");
@@ -373,12 +381,16 @@ class Sessions {
     await this.of(deviceId)?.disconnect();
     const w = await this.module();
     const opened = await this.open(w, deviceId);
+    const demo = opened.demo;
     const session = new WebSession({
       deviceId,
       sessionId: this.nextSessionId++,
       onEvent,
       wasm: w,
       download: this.download,
+      openSettingsPipe: demo
+        ? async () => new DemoCdcTransport(demo, () => Date.now())
+        : serialPipeOpener(this.webSerial, w),
       onEnd: (s) => {
         this.list = this.list.filter((x) => x !== s);
       },
@@ -439,7 +451,12 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
   ) as HidNavigatorLike | null;
   const devices = new DeviceList(usb, hid);
   const download = options.download ?? browserDownload;
-  const sessions = new Sessions(devices, usb, options.wasm, download);
+  // Destructured: the Web Serial API is no meter serial number (hideSerial lint).
+  const { serial: serialOption } = options;
+  const serial = (
+    serialOption === undefined ? browserApi("serial") : serialOption
+  ) as SerialLike | null;
+  const sessions = new Sessions(devices, usb, options.wasm, download, serial);
   const commands = sessions.commands(() => sessions.current);
   // The desktop-only writes are among `commands`' refused ones (AC-QFTCX0.6).
   type Writes = Pick<

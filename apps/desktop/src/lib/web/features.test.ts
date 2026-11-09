@@ -9,6 +9,8 @@
  *   capability flags too (on only when they use the safe read set).
  * - AC-W8SHX8.7: the web build switches the settings read, the record list and the
  *   record download on; firmware update and file reveal stay off.
+ * - AC-W8SHX9.7: the web build switches the settings write on (over Web Serial); the
+ *   other meter writes stay off.
  * - The desktop (Tauri and mock) builds have every feature on.
  */
 
@@ -22,10 +24,10 @@ import {
   type Features,
 } from "./features";
 
+/** The meter writes the web build still leaves to the desktop app. */
 const WRITE_FEATURES = [
   "firmwareUpdate",
   "logoUpload",
-  "settingsWrite",
   "recordDelete",
   "trigger",
 ] as const satisfies readonly (keyof Features)[];
@@ -42,8 +44,13 @@ describe("feature map (AC-QFTCX0.6, AC-QFTCX0.7)", () => {
     expect(RELEASES_URL).toBe("https://github.com/nesquikm/open-powerz/releases");
   });
 
-  it("turns every meter write off in the web build", () => {
+  it("turns every other meter write off in the web build", () => {
     for (const key of WRITE_FEATURES) expect(WEB_FEATURES[key], key).toBe(false);
+  });
+
+  it("switches the settings write on in the web build (AC-W8SHX9.7)", () => {
+    expect(WEB_FEATURES.settingsWrite).toBe(true);
+    expect(DESKTOP_FEATURES.settingsWrite).toBe(true);
   });
 
   it("has a boolean flag for each meter read", () => {

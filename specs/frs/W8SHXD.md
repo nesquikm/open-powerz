@@ -14,7 +14,8 @@ kind: bug
 ## Summary
 
 Over HID the meter gives basic readings only, so the rate picker is disabled.
-The keyboard shortcuts 1 to 4 still asked the meter for a new rate, and the refusal showed as an error.
+The keyboard shortcuts 1 to 4 still asked the meter for a new rate.
+The refusal then showed as an error.
 Now the keys follow the picker: they change nothing.
 They show the same short note as the picker's tooltip.
 
