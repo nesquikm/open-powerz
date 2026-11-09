@@ -123,4 +123,10 @@ describe("AC-62VEDM.3: the other abbreviations the sweep found", () => {
   it("the meter settings view wraps SPS", () => {
     expect(source("MeterSettingsView.svelte")).toMatch(termTag("term.sps"));
   });
+
+  it("the QC 3.0 slider label wraps QC 3.0 like the PPS and AVS labels wrap theirs", () => {
+    expect(source("TriggerView.svelte")).toMatch(
+      new RegExp(`${termTag("term.qc").source}>\\s*QC 3\\.0\\s*</Term>`),
+    );
+  });
 });

@@ -168,6 +168,8 @@
     request?: { label: string; onclick: () => void };
     /** A PPS / AVS offer: its name at the start of `label` is drawn as terms. */
     offer?: TriggerOffer;
+    /** The QC 3.0 slider: its name at the start of `label` is drawn as a term. */
+    qc3?: boolean;
   }
 
   const SUPPORT_TEXT: Record<string, string> = {
@@ -181,6 +183,8 @@
   <label for={p.id}
     >{#if p.offer}{@render rangeTerms(p.offer)}{p.label.slice(
         rangeName(p.offer).length,
+      )}{:else if p.qc3}<Term key="term.qc">QC 3.0</Term>{p.label.slice(
+        "QC 3.0".length,
       )}{:else}{p.label}{/if}</label
   >
   <div class="range-row">
@@ -397,6 +401,7 @@
             <div class="range">
               {@render slider({
                 id: "trigger-qc3",
+                qc3: true,
                 label: `QC 3.0, ${volts(QC3_RANGE.minMv)}–${volts(QC3_RANGE.maxMv)}`,
                 min: QC3_RANGE.minMv,
                 max: QC3_RANGE.maxMv,
