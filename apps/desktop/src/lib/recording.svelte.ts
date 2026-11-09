@@ -27,6 +27,9 @@ export interface RatePickerState {
 /** Why the rate cannot change while a recording is open. */
 const RATE_LOCKED_WHILE_RECORDING = "Stop the recording to change the rate";
 
+/** Why a HID session cannot change the rate: it gives ADC snapshots only. */
+const RATE_HID_ONLY = hidOnlyBasicText("Rate change");
+
 /**
  * How the rate picker looks for a session state: disabled with an explanation
  * when the meter's rate is locked (no authentication), enabled otherwise.
@@ -38,7 +41,7 @@ export function ratePicker(
   basicReadingsOnly = false,
 ): RatePickerState {
   // A HID session gives ADC snapshots only: no rate change, whatever the measured rate.
-  if (basicReadingsOnly) return { disabled: true, label: hidOnlyBasicText("Rate change") };
+  if (basicReadingsOnly) return { disabled: true, label: RATE_HID_ONLY };
   if (state === "rate_locked") {
     return {
       disabled: true,
@@ -58,7 +61,12 @@ export function ratePicker(
 export type RateChange = { kind: "set"; sps: number } | { kind: "refused"; notice: string };
 
 /** A rate key (1–4) follows the picker's lock: no rate change mid-recording. */
-export function rateChange(sps: number, { recording }: { recording: boolean }): RateChange {
+export function rateChange(
+  sps: number,
+  { recording, basicReadingsOnly = false }: { recording: boolean; basicReadingsOnly?: boolean },
+): RateChange {
+  // A HID session has no rate change: the keys refuse with the disabled picker's label.
+  if (basicReadingsOnly) return { kind: "refused", notice: RATE_HID_ONLY };
   if (recording) return { kind: "refused", notice: `${RATE_LOCKED_WHILE_RECORDING}.` };
   return { kind: "set", sps };
 }

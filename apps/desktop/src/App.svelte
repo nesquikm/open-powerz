@@ -1173,6 +1173,7 @@
     // own refusal says so instead.
     const change = rateChange(sps, {
       recording: recording.phase !== "idle" && session.state !== "rate_locked",
+      basicReadingsOnly: session.details?.basic_readings_only === true,
     });
     if (change.kind === "refused") {
       if (noticesId !== null) {

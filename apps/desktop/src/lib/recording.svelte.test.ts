@@ -988,3 +988,80 @@ describe("both callers pass the HID flag (AC-09R2FK.4)", () => {
     });
   }
 });
+
+/** FR W8SHXD: the rate keys 1–4 follow the HID-disabled picker. `rateChange` takes the
+ * session's `basicReadingsOnly` flag and refuses with the picker's own label. */
+describe("rate keys over HID change nothing (AC-W8SHXD.1)", () => {
+  it("refuses every key rate for a basic-readings-only session", () => {
+    for (const sps of [2, 10, 50, 1000]) {
+      const change = rateChange(sps, { recording: false, basicReadingsOnly: true });
+      expect(change.kind).toBe("refused");
+    }
+  });
+
+  it("selectRate returns on the refusal before touching requestedRateSps or setRate", () => {
+    const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
+    const body = app.slice(app.indexOf("async function selectRate("));
+    const refusedAt = body.indexOf('change.kind === "refused"');
+    const requestedAt = body.indexOf("requestedRateSps = sps");
+    const setRateAt = body.indexOf(".setRate(sps)");
+    expect(refusedAt).toBeGreaterThan(0);
+    expect(requestedAt).toBeGreaterThan(refusedAt);
+    expect(setRateAt).toBeGreaterThan(refusedAt);
+  });
+
+  it("selectRate passes basicReadingsOnly from session.details?.basic_readings_only", () => {
+    const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
+    const body = app.slice(app.indexOf("async function selectRate("));
+    const call = body.match(/\brateChange\(sps,\s*\{([\s\S]*?)\}\s*\)/);
+    expect(call).not.toBeNull();
+    expect(call?.[1]).toMatch(/basicReadingsOnly:\s*[^,}]*session\.details\?\.basic_readings_only/);
+  });
+});
+
+describe("rate keys over HID show the picker's wording (AC-W8SHXD.2)", () => {
+  it("the refusal notice equals the disabled picker's label, as an info note", () => {
+    const label = ratePicker("streaming", 1000, false, true).label;
+    expect(label).toBe(features.hidOnlyBasicText("Rate change"));
+    for (const sps of [2, 10, 50, 1000]) {
+      expect(rateChange(sps, { recording: false, basicReadingsOnly: true })).toEqual({
+        kind: "refused",
+        notice: label,
+      });
+    }
+  });
+
+  it("over HID the picker's HID label wins over the recording lock, and so do the keys", () => {
+    expect(rateChange(50, { recording: true, basicReadingsOnly: true })).toEqual({
+      kind: "refused",
+      notice: ratePicker("streaming", 50, true, true).label,
+    });
+  });
+
+  it("App shows the refusal as an info notice", () => {
+    const app = readFileSync(new URL("../App.svelte", import.meta.url), "utf8");
+    const body = app.slice(app.indexOf("async function selectRate("));
+    const start = body.indexOf('change.kind === "refused"');
+    const refused = body.slice(start, body.indexOf("return;", start));
+    expect(refused).toMatch(/tone:\s*"info",\s*text:\s*change\.notice/);
+  });
+});
+
+describe("rate keys off HID behave as before (AC-W8SHXD.3)", () => {
+  it("WebUSB and desktop sessions change the rate", () => {
+    for (const sps of [2, 10, 50, 1000]) {
+      expect(rateChange(sps, { recording: false, basicReadingsOnly: false })).toEqual({
+        kind: "set",
+        sps,
+      });
+      expect(rateChange(sps, { recording: false })).toEqual({ kind: "set", sps });
+    }
+  });
+
+  it("the recording lock still refuses with its own note", () => {
+    expect(rateChange(10, { recording: true, basicReadingsOnly: false })).toEqual({
+      kind: "refused",
+      notice: "Stop the recording to change the rate.",
+    });
+  });
+});
