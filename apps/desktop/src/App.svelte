@@ -569,7 +569,11 @@
       checkSettings: () => logoSettingsCheck(logoMeterId()),
       refreshSettings: () => settingsPanel.refresh(),
     },
-    () => ({ model: session.details?.model ?? null, settings: settingsPanel.settings }),
+    () => ({
+      model: session.details?.model ?? null,
+      settings: settingsPanel.settings,
+      basicReadingsOnly: session.details?.basic_readings_only === true,
+    }),
   );
   $effect(() => {
     if (view === "logo" && !meterConnected) untrack(() => (view = "meter"));
@@ -577,6 +581,12 @@
   /** The settings check after a logo write stops when the meter goes away (FR QG6RNY). */
   $effect(() => {
     if (!meterConnected) untrack(() => startupLogo.stopChecking());
+  });
+  /** A new connection, or another meter picked, clears the logo tab's previous error
+   * and read (FR CJ3QCC). */
+  $effect(() => {
+    void session.selectedId;
+    if (meterConnected) untrack(() => startupLogo.resetSession());
   });
   /** A logo write holds every meter (AC-MEHQC0.3): nothing else is sent to one until it
    * ends. The controls that send are disabled, and the PD analyzer, Trigger and Records

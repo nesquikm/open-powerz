@@ -13,6 +13,7 @@ import type {
   SettingChanges,
   UiError,
 } from "./backend";
+import { hidOnlyBasicText } from "./web/features";
 
 /** The word the Upload confirmation asks for. */
 export const UPLOAD_WORD = "upload";
@@ -84,10 +85,11 @@ export interface SaveCheck {
 }
 
 /** The meter as the view sees it: its model and its settings as read, each null until
- * read. */
+ * read, and whether its connection gives basic readings only (HID, FR CJ3QCC). */
 export interface LogoMeter {
   model: string | null;
   settings: MeterSettings | null;
+  basicReadingsOnly?: boolean;
 }
 
 /** The word a confirmation of `action` asks for. */
@@ -173,8 +175,10 @@ export class StartupLogoState {
    * read, and the logo is a KM003C feature. */
   get #meterDisabledReason(): string | null {
     const meter = this.#meter();
+    if (meter.basicReadingsOnly === true) return hidOnlyBasicText("The startup logo");
     if (meter.model === null) return "The meter's model has not been read yet.";
-    if (meter.model !== "KM003C")
+    // HID sessions report the USB product name ("POWER-Z KM003C"); match the model token.
+    if (!meter.model.split(/\s+/).includes("KM003C"))
       return `The startup logo needs a KM003C; this meter is a ${meter.model}.`;
     if (meter.settings === null) return "The meter's settings have not been read yet.";
     return null;
@@ -355,6 +359,14 @@ export class StartupLogoState {
     this.#stopped = false;
     if (this.#checkTimer !== null || this.#checkInFlight) return;
     this.#checkTimer = setTimeout(() => void this.#check(), SETTINGS_CHECK_MS);
+  }
+
+  /** A new connection (FR CJ3QCC): the previous session's error and logo read no
+   * longer describe this meter. */
+  resetSession(): void {
+    this.error = null;
+    this.durationError = null;
+    this.area = null;
   }
 
   /** Cancels the next settings check; the phase stays `saving`. */
