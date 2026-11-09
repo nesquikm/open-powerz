@@ -19,7 +19,13 @@ import type { UiError } from "../backend";
 import { CdcPipe, DemoCdcTransport } from "./cdcTransport";
 import { DemoTransport } from "./demoTransport";
 import type { PowerzWasm } from "./driver";
-import { demoSettingsReply, demoWriteFrame, withId, writeWasm } from "./fakeSerial.test";
+import {
+  demoSettingsReply,
+  demoWriteFrame,
+  foreignAdcReply,
+  withId,
+  writeWasm,
+} from "./fakeSerial.test";
 import { loadWasm } from "./testWasm.test";
 import { timeoutError } from "./transport";
 import { settle } from "./webBackendFakes.test";
@@ -215,5 +221,75 @@ describe("stale bytes (FR W8SHX9 review)", () => {
     const request = new Uint8Array([0x0c, 8, 0x10, 0x00]);
     const reply = await settle(pipe.transact(request, 1_000));
     expect(reply[1]).toBe(8);
+  });
+});
+
+describe("another program on the port (FR CJ3QC9)", () => {
+  const IN_USE = {
+    kind: "device_busy",
+    message: "The meter's serial port is in use by another program.",
+    hint: "Close that program, then try again.",
+  };
+
+  it("a PUT_DATA reply for another attribute than SETTINGS rejects with the in-use error (AC-CJ3QC9.1)", async () => {
+    const settings = demoSettingsReply(w);
+    const link = new FakeLink((f) => [foreignAdcReply(w, 0x5a), withId(settings, f[1] ?? 0)]);
+    const e = await rejection(pipeOver(link).transact(w.settingsRequest(3), 1_000));
+    expect(e).toEqual(IN_USE);
+  });
+
+  it("a foreign ADC reply with our request's id is refused the same (AC-CJ3QC9.1)", async () => {
+    const link = new FakeLink((f) => [foreignAdcReply(w, f[1] ?? 0)]);
+    const e = await rejection(pipeOver(link).transact(w.settingsRequest(4), 1_000));
+    expect(e).toEqual(IN_USE);
+  });
+
+  it("a foreign reply met by a re-read rejects with the in-use error (AC-CJ3QC9.1)", async () => {
+    const settings = demoSettingsReply(w);
+    const link = new FakeLink((f) => [withId(settings, f[1] ?? 0), foreignAdcReply(w, 0x5b)]);
+    const pipe = pipeOver(link);
+    await settle(pipe.transact(w.settingsRequest(5), 1_000));
+    expect(await rejection(pipe.read(1_000))).toEqual(IN_USE);
+  });
+
+  it("foreign replies waiting before the first request reject it with the in-use error (AC-CJ3QC9.2)", async () => {
+    const settings = demoSettingsReply(w);
+    let held: Uint8Array[] = [foreignAdcReply(w, 0x21), foreignAdcReply(w, 0x22)];
+    const link = {
+      written: [] as Uint8Array[],
+      async write(bytes: Uint8Array) {
+        this.written.push(bytes.slice());
+        held.push(withId(settings, bytes[1] ?? 0));
+      },
+      async read(): Promise<Uint8Array> {
+        const next = held.shift();
+        if (!next) throw timeoutError();
+        return next;
+      },
+      async close() {},
+      drain() {
+        held = [];
+      },
+    };
+    const pipe = new CdcPipe(writeWasm(w), link);
+    const e = await rejection(pipe.transact(new Uint8Array([0x0c, 6, 0x10, 0x00]), 1_000));
+    expect(e).toEqual(IN_USE);
+  });
+
+  it("our own replies are not taken for another program's (AC-CJ3QC9.4)", async () => {
+    const settings = demoSettingsReply(w);
+    // A SETTINGS reply left from an earlier request, then the one asked for.
+    const stale = new FakeLink((f) => [withId(settings, 0x30), withId(settings, f[1] ?? 0)]);
+    const pipe = pipeOver(stale);
+    expect((await settle(pipe.transact(w.settingsRequest(7), 1_000)))[1]).toBe(0x30);
+    expect((await settle(pipe.read(1_000)))[1]).toBe(7);
+    // The write's FINISHED, an ACCEPT and a REJECT pass through.
+    for (const ty of [0x07, 0x05, 0x06]) {
+      const link = new FakeLink((f) => [new Uint8Array([ty, f[1] ?? 0, 0, 0])]);
+      const reply = await settle(
+        pipeOver(link).transact(demoWriteFrame(w, { brightness: 80 }, 8), 1_000),
+      );
+      expect([...reply]).toEqual([ty, 8, 0, 0]);
+    }
   });
 });

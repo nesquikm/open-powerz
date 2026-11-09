@@ -13,6 +13,7 @@ import {
   noWebSerialError,
   openSerialLink,
   pickMeterPort,
+  portHeldError,
   type SerialLike,
   type SerialLink,
 } from "./serial";
@@ -27,6 +28,30 @@ export function isSettingsFrame(frame: Uint8Array): boolean {
   const ty = (frame[0] ?? 0) & 0x7f;
   if (ty === SETTINGS_WRITE_TYPE) return frame.length > 4;
   return frame.length === 4 && frame[0] === 0x0c && frame[2] === 0x10 && frame[3] === 0x00;
+}
+
+/** PUT_DATA, the type of every data reply. */
+const PUT_DATA_TYPE = 0x41;
+/** The SETTINGS attribute (`ATT_SETTINGS`), the only data the settings pipe asks for. */
+const SETTINGS_ATTRIBUTE = 0x008;
+
+/** FR CJ3QC9: a data reply for another attribute than SETTINGS, which can only answer
+ * another program's request on the same port. */
+export function isForeignReply(frame: Uint8Array): boolean {
+  if (((frame[0] ?? 0) & 0x7f) !== PUT_DATA_TYPE || frame.length < 6) return false;
+  const attribute = ((frame[4] ?? 0) | ((frame[5] ?? 0) << 8)) & 0x7fff;
+  return attribute !== SETTINGS_ATTRIBUTE;
+}
+
+/** `parts` joined into one array. */
+function concat(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
 }
 
 /** The wasm export that frames CDC replies. */
@@ -47,13 +72,17 @@ export class CdcPipe implements WebTransport {
     if (!isSettingsFrame(frame)) throw notSafeError();
     // Bytes still held answer an earlier request that timed out (native CDC
     // `drain_demux` before a request): drop them.
-    this.buffer = new Uint8Array(0);
+    // FR CJ3QC9: another program's replies among them mean it shares the port.
+    const held = this.link.drain ? await this.takeHeld() : new Uint8Array(0);
     this.link.drain?.();
+    this.buffer = new Uint8Array(0);
+    if (this.holdsForeignReply(held)) throw portHeldError();
     await this.link.write(frame);
     return this.read(timeoutMs);
   }
 
-  /** The next complete frame; rejects `timeout` when none completes in `timeoutMs`. */
+  /** The next complete frame; rejects `timeout` when none completes in `timeoutMs`,
+   * and with the in-use error on a reply the settings pipe never asks for (FR CJ3QC9). */
   async read(timeoutMs: number): Promise<Uint8Array> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -61,15 +90,36 @@ export class CdcPipe implements WebTransport {
       if (n !== undefined && n > 0) {
         const out = this.buffer.slice(0, n);
         this.buffer = this.buffer.slice(n);
+        if (isForeignReply(out)) throw portHeldError();
         return out;
       }
       const left = deadline - Date.now();
       if (left <= 0) throw timeoutError();
-      const chunk = await this.link.read(left);
-      const joined = new Uint8Array(this.buffer.length + chunk.length);
-      joined.set(this.buffer);
-      joined.set(chunk, this.buffer.length);
-      this.buffer = joined;
+      this.buffer = concat([this.buffer, await this.link.read(left)]);
+    }
+  }
+
+  /** The buffer plus every byte the link already holds, without waiting. */
+  private async takeHeld(): Promise<Uint8Array> {
+    const parts: Uint8Array[] = [this.buffer];
+    for (;;) {
+      try {
+        parts.push(await this.link.read(0));
+      } catch {
+        break;
+      }
+    }
+    return concat(parts);
+  }
+
+  /** Whether the complete frames in `bytes` include another program's reply. */
+  private holdsForeignReply(bytes: Uint8Array): boolean {
+    let rest = bytes;
+    for (;;) {
+      const n = rest.length > 0 ? this.wasm.cdcFrameLength(rest) : undefined;
+      if (n === undefined || n <= 0) return false;
+      if (isForeignReply(rest.slice(0, n))) return true;
+      rest = rest.slice(n);
     }
   }
 

@@ -20,12 +20,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MeterSettings, SettingChanges, UiError } from "../backend";
-import { DemoCdcTransport } from "./cdcTransport";
+import { CdcPipe, DemoCdcTransport } from "./cdcTransport";
 import { DemoTransport } from "./demoTransport";
 import { MeterDriver } from "./driver";
 import type { PowerzWasm } from "./driver";
 import { hidOnlyBasicText } from "./features";
-import { demoSettingsReply, withId } from "./fakeSerial.test";
+import { demoSettingsReply, foreignAdcReply, withId } from "./fakeSerial.test";
 import { classify, loadWasm, type FrameName } from "./testWasm.test";
 import { timeoutError, type WebTransport } from "./transport";
 
@@ -406,6 +406,107 @@ describe("the user's click (FR W8SHX9 hardening)", () => {
     const after = await settle(write);
     expect(valueOf(after, "brightness")).toBeDefined();
     expect(pipes[0]?.closed).toBe(true);
+    await settle(driver.disconnect());
+  });
+});
+
+/** FR CJ3QC9: a serial link answered by the demo meter's CDC twin, shared (while
+ * `shared`) with another program whose ADC replies come first; `waiting` replies are
+ * already held when the pipe starts. */
+class SharedLink {
+  written: Uint8Array[] = [];
+  closed = false;
+  shared = true;
+  private held: Uint8Array[];
+  constructor(
+    private twin: DemoCdcTransport,
+    waiting: Uint8Array[] = [],
+  ) {
+    this.held = [...waiting];
+  }
+  async write(bytes: Uint8Array): Promise<void> {
+    this.written.push(bytes.slice());
+    if (this.shared) this.held.push(foreignAdcReply(w, 0x5a));
+    const reply = await this.twin.transact(bytes, 1_000).catch(() => null);
+    if (reply) this.held.push(reply);
+  }
+  async read(timeoutMs: number): Promise<Uint8Array> {
+    const next = this.held.shift();
+    if (next) return next;
+    await new Promise((r) => setTimeout(r, timeoutMs));
+    throw timeoutError();
+  }
+  drain(): void {}
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+}
+
+describe("another program on the settings port (FR CJ3QC9)", () => {
+  const IN_USE: UiError = {
+    kind: "device_busy",
+    message: "The meter's serial port is in use by another program.",
+    hint: "Close that program, then try again.",
+  };
+  const pipeOn = (link: SharedLink) =>
+    new CdcPipe(w, link as unknown as ConstructorParameters<typeof CdcPipe>[1]);
+  const linkWrites = (link: SharedLink) => link.written.filter((f) => f[0] === 0x0a);
+
+  it("stops with the in-use message and sends no write (AC-CJ3QC9.1)", async () => {
+    const { demo, rec, driver } = await start();
+    const link = new SharedLink(new DemoCdcTransport(demo, () => Date.now()));
+    const from = rec.log.length;
+    const e = await rejection(driver.writeSettings({ brightness: 80 }, async () => pipeOn(link)));
+    expect(e).toEqual(IN_USE);
+    expect(linkWrites(link)).toEqual([]);
+    expect(noPolls(rec.names(from))).toEqual([]);
+    expect(valueOf(await settle(driver.readSettings()), "brightness")).not.toContain("80");
+    await settle(driver.disconnect());
+  });
+
+  it("replies already waiting when the change starts count the same (AC-CJ3QC9.2)", async () => {
+    const { demo, driver } = await start();
+    const link = new SharedLink(new DemoCdcTransport(demo, () => Date.now()), [
+      foreignAdcReply(w, 0x21),
+      foreignAdcReply(w, 0x22),
+    ]);
+    link.shared = false;
+    const e = await rejection(driver.writeSettings({ brightness: 80 }, async () => pipeOn(link)));
+    expect(e).toEqual(IN_USE);
+    expect(linkWrites(link)).toEqual([]);
+    await settle(driver.disconnect());
+  });
+
+  it("the refusal closes the pipe and the next change on a clean port takes (AC-CJ3QC9.3)", async () => {
+    const { demo, rec, driver, errors } = await start();
+    const busy = new SharedLink(new DemoCdcTransport(demo, () => Date.now()));
+    expect(
+      await rejection(driver.writeSettings({ brightness: 80 }, async () => pipeOn(busy))),
+    ).toEqual(IN_USE);
+    expect(busy.closed).toBe(true);
+    // The stream goes on.
+    const polls = rec.log.length;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(rec.log.length).toBeGreaterThan(polls);
+    const clean = new SharedLink(new DemoCdcTransport(demo, () => Date.now()));
+    clean.shared = false;
+    const after = await settle(driver.writeSettings({ brightness: 80 }, async () => pipeOn(clean)));
+    expect(valueOf(after, "brightness")).toContain("80");
+    expect(pipeKinds(clean.written)).toEqual(["read", "read", "write", "read"]);
+    expect(clean.closed).toBe(true);
+    expect(errors).toEqual([]);
+    await settle(driver.disconnect());
+  });
+
+  it("with nobody else on the port the change works as before (AC-CJ3QC9.4)", async () => {
+    const { demo, rec, driver } = await start();
+    const clean = new SharedLink(new DemoCdcTransport(demo, () => Date.now()));
+    clean.shared = false;
+    const from = rec.log.length;
+    const after = await settle(driver.writeSettings({ brightness: 80 }, async () => pipeOn(clean)));
+    expect(valueOf(after, "brightness")).toContain("80");
+    expect(pipeKinds(clean.written)).toEqual(["read", "read", "write", "read"]);
+    expect(noPolls(rec.names(from))).toEqual(["stop_queue", "start_queue:2"]);
     await settle(driver.disconnect());
   });
 });

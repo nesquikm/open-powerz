@@ -39,6 +39,7 @@ codename: Full Tab
 | [W8SHXF](../frs/W8SHXF.md) | Web edition docs for the new browser features | n/a |
 | [60QB2S](../frs/60QB2S.md) | An (i) beside the web device menu explains the connections | n/a |
 | [K4DWCF](../frs/K4DWCF.md) | A confirmed request in the browser never reaches the trigger engine (bug) | n/a |
+| [CJ3QC9](../frs/CJ3QC9.md) | A settings change in the browser misses another program on the serial port (bug) | n/a |
 
 Build order: the table's order. Triggering goes last of the features: it moves the desktop trigger engine into a shared crate and needs a cross-origin-isolated page.
 
@@ -63,6 +64,8 @@ Build order: the table's order. Triggering goes last of the features: it moves t
    verify: `bun run test` (device picker suites); Pages e2e connection-info check (`--workers=1`).
 10. Plain copies of the trigger RPC arguments — K4DWCF
    verify: `bun run test` (trigger bridge and web trigger suites).
+11. Foreign-reply check on the settings pipe — CJ3QC9
+   verify: `bun run test` (settings pipe, driver and backend settings suites).
 
 **Gate:** CLAUDE.md gating rule, with `bun run build:wasm` before `bun run test`.
 

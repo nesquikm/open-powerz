@@ -27,6 +27,7 @@ import {
   POWERZ_USB_VENDOR,
   demoCdcResponder,
   demoMeterWithTwin,
+  foreignAdcReply,
 } from "./fakeSerial.test";
 import { WEB_FEATURES, hidOnlyBasicText } from "./features";
 import { SESSION_COMMANDS } from "./session";
@@ -281,6 +282,121 @@ describe("a HID session (AC-W8SHX9.7)", () => {
     expect(e.message).toBe(hidOnlyBasicText("Changing the meter's settings"));
     expect(serial.requests).toEqual([]);
     expect(hidSentNames(w, dev).every((n) => n === "get_data:adc")).toBe(true);
+    await settle(backend.disconnect());
+  });
+});
+
+/** FR CJ3QC9: the in-use refusal (`portHeldError`). */
+const IN_USE: UiError = {
+  kind: "device_busy",
+  message: "The meter's serial port is in use by another program.",
+  hint: "Close that program, then try again.",
+};
+
+/** Another program polling ADC on `port`: while `on()`, each frame we write is
+ * answered first by that program's ADC reply (`sameId`: carrying our request's id). */
+function sharePort(port: FakeSerialPort, on: () => boolean, sameId = false): void {
+  const meter = port.respond;
+  port.respond = (frame) =>
+    on() ? [foreignAdcReply(w, sameId ? (frame[1] ?? 0) : 0x5a), ...meter(frame)] : meter(frame);
+}
+
+/** Another program's ADC replies already waiting on `port` when it opens (first open only). */
+function repliesWaitingOnOpen(port: FakeSerialPort): void {
+  const open = port.open.bind(port);
+  let first = true;
+  port.open = async (options) => {
+    await open(options);
+    if (!first) return;
+    first = false;
+    port.emit(foreignAdcReply(w, 0x21));
+    port.emit(foreignAdcReply(w, 0x22));
+  };
+}
+
+const writes = (port: FakeSerialPort) => portKinds(port).filter((k) => k === "write");
+
+describe("another program on the serial port (FR CJ3QC9)", () => {
+  it("a reply the change never asked for stops it with the in-use message, no write (AC-CJ3QC9.1)", async () => {
+    const { backend, dev, port } = await usbBackend();
+    sharePort(port, () => true);
+    const from = sentNames(w, dev).length;
+    const e = await rejection(backend.meterSettingsWrite({ brightness: 80 }));
+    expect(e).toEqual(IN_USE);
+    expect(writes(port)).toEqual([]);
+    expect(usbNamesFrom(dev, from)).toEqual([]);
+    expect(valueOf(await settle(backend.meterSettings()), "brightness")).not.toContain("80");
+    await settle(backend.disconnect());
+  });
+
+  it("a foreign ADC reply that happens to carry our request's id counts the same (AC-CJ3QC9.1)", async () => {
+    const { backend, port } = await usbBackend();
+    sharePort(port, () => true, true);
+    const e = await rejection(backend.meterSettingsWrite({ brightness: 80 }));
+    expect(e).toEqual(IN_USE);
+    expect(writes(port)).toEqual([]);
+    await settle(backend.disconnect());
+  });
+
+  it("another program's replies waiting on the port before the first request: in-use, no write (AC-CJ3QC9.2)", async () => {
+    const { backend, dev, port } = await usbBackend();
+    repliesWaitingOnOpen(port);
+    const from = sentNames(w, dev).length;
+    const e = await rejection(backend.meterSettingsWrite({ brightness: 80 }));
+    expect(e).toEqual(IN_USE);
+    expect(writes(port)).toEqual([]);
+    expect(usbNamesFrom(dev, from)).toEqual([]);
+    await settle(backend.disconnect());
+  });
+
+  it("the refusal releases the port and a following change on a clean port takes (AC-CJ3QC9.3)", async () => {
+    const { backend, dev, port, serial } = await usbBackend();
+    let otherProgram = true;
+    sharePort(port, () => otherProgram);
+    expect(await rejection(backend.meterSettingsWrite({ brightness: 80 }))).toEqual(IN_USE);
+    expect(port.isOpen).toBe(false);
+    expect(port.closes).toBe(1);
+    // The session goes on streaming over WebUSB.
+    const polls = sentNames(w, dev).length;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(sentNames(w, dev).length).toBeGreaterThan(polls);
+    // The other program has quit: the next try reuses the granted port and takes.
+    otherProgram = false;
+    const before = port.frames().length;
+    const after = await settle(backend.meterSettingsWrite({ brightness: 80 }));
+    expect(valueOf(after, "brightness")).toContain("80");
+    expect(
+      port
+        .frames()
+        .slice(before)
+        .map((f) =>
+          classify(w, f) === "get_data:settings" ? "read" : f[0] === 0x0a ? "write" : "other",
+        ),
+    ).toEqual(["read", "read", "write", "read"]);
+    expect(serial.requests).toHaveLength(1);
+    expect(port.isOpen).toBe(false);
+    await settle(backend.disconnect());
+  });
+
+  it("the refusal after replies waiting on open also releases the port for another try (AC-CJ3QC9.3)", async () => {
+    const { backend, port } = await usbBackend();
+    repliesWaitingOnOpen(port);
+    expect(await rejection(backend.meterSettingsWrite({ brightness: 80 }))).toEqual(IN_USE);
+    expect(port.isOpen).toBe(false);
+    const after = await settle(backend.meterSettingsWrite({ brightness: 80 }));
+    expect(valueOf(after, "brightness")).toContain("80");
+    await settle(backend.disconnect());
+  });
+
+  it("with nobody else on the port the change works as before (AC-CJ3QC9.4)", async () => {
+    const { backend, dev, port } = await usbBackend();
+    const from = sentNames(w, dev).length;
+    const after = await settle(backend.meterSettingsWrite({ brightness: 80 }));
+    expect(valueOf(after, "brightness")).toContain("80");
+    expect(after.warnings ?? []).toEqual([]);
+    expect(portKinds(port)).toEqual(["read", "read", "write", "read"]);
+    expect(port.isOpen).toBe(false);
+    expect(usbNamesFrom(dev, from)).toEqual(["stop_queue", "start_queue:2"]);
     await settle(backend.disconnect());
   });
 });

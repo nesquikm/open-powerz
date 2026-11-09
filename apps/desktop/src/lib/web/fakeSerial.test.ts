@@ -220,6 +220,23 @@ export function demoWriteFrame(
   }
 }
 
+/** FR CJ3QC9: another program's traffic on the meter's serial port: the PUT_DATA ADC
+ * reply (attribute 0x0001) a fresh demo meter gives to a GET_DATA ADC with id `id`,
+ * a reply the settings change never asks for. */
+export function foreignAdcReply(w: PowerzWasm, id: number): Uint8Array {
+  const meter = demoMeterWithTwin(w);
+  try {
+    const reply = meter.transact(w.getDataRequest(id, 0x001));
+    const attribute = ((reply[4] ?? 0) | ((reply[5] ?? 0) << 8)) & 0x7fff;
+    if (((reply[0] ?? 0) & 0x7f) !== 0x41 || attribute !== 0x001) {
+      throw new Error("the demo meter did not answer GET_DATA ADC with a PUT_DATA ADC reply");
+    }
+    return withId(reply, id);
+  } finally {
+    meter.free();
+  }
+}
+
 /** `reply` answering request id `id` (byte 1 of the main header). */
 export function withId(reply: Uint8Array, id: number): Uint8Array {
   const out = reply.slice();
