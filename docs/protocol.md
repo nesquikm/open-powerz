@@ -163,8 +163,8 @@ Data types (main header type 0x40 and up):
 | 0x41 PUT_DATA | reply only | section chain | GET_DATA reply | [doc] [static] [device] |
 | 0x42 | `42 id 00 04` | 64-byte firmware descriptor | firmware download; sent only by the firmware flash path (see Firmware download) | [static] |
 | 0x44 | `44 id 01 01` | 32 encrypted bytes | memory read (see Memory read and device info) | [static] [device] |
-| 0x48 SET_DATA | varies | section header + plain data | writes a setting, a calibration value or the record table; we send it only with attribute 0x28 to rewrite the record table (see Deleting records) | [static] |
-| 0x4A | varies | encrypted block header + data | memory / SPI-flash write; never sent by us | [static] |
+| 0x48 SET_DATA | varies | section header + plain data | writes a setting, a calibration value or the record table; we send it only with attribute 0x28 to rewrite the record table (see Deleting records) and attribute 0x1C to set the startup duration (see Startup logo) | [static] |
+| 0x4A | varies | encrypted block header + data | memory / SPI-flash write; we send it only for logo chunks inside the logo region (see Never-send commands, Startup logo paths) | [static] |
 | 0x4C | `4C id 00 02` | 32 encrypted bytes | session authentication (see Authentication) | [static] [device] |
 
 Other opcodes reported by third parties (0x4B, 0x4D, 0x27) are not seen in

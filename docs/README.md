@@ -16,13 +16,13 @@ Recipes for one task each, in [how-to/](how-to/):
 
 - [Record a high-rate CSV](how-to/record-a-csv.md), from the CLI or the desktop app
 - [Explore a session in the desktop app](how-to/explore-a-session.md): pause, zoom, gaps, replug, keyboard, hide serial numbers
-- [Read the meter's recordings and settings](how-to/read-the-meters-memory.md): download offline records as CSV and view the settings block, read-only
+- [Read the meter's recordings and settings](how-to/read-the-meters-memory.md): download, open and delete offline records, read and change the settings
 - [Use several meters at once](how-to/use-several-meters.md) in the desktop app: add, expand, disconnect, replug
 - [Analyze USB PD traffic](how-to/analyze-pd-traffic.md): capture, filter and read PD messages, see them on the power chart, save and open captures
 - [Trigger a charger](how-to/trigger-a-charger.md): detect protocols, request a voltage safely, send PD messages and console commands, read a cable's e-marker
 - [Update the meter's firmware](how-to/update-firmware.md) from a ChargerLAB firmware file, from the CLI or the desktop app, and recover from a failed update
 - [Install a release](how-to/install-a-release.md): download, check and open the unsigned builds on macOS, Windows and Linux
-- [Use the Web edition](how-to/web-edition.md) in Chrome or Edge: browser support, the device picker and permissions, the WebHID fallback, Linux and Windows notes, what works in the browser and what stays in the desktop app
+- [Use the Web edition](how-to/web-edition.md) in Chrome or Edge: browser support, the device picker and permissions, the (i) connection note, the WebHID fallback, Linux and Windows notes, what works in the browser (Web Serial settings and triggering, exports, Open recording) and what stays in the desktop app
 - [Set up Linux permissions](linux.md) (udev rule, `powerz` hwmon driver)
 
 ## Reference {#reference}

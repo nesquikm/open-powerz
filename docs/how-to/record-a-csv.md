@@ -95,6 +95,10 @@ a recording.
 `powerz stream` has none of these options: it has no pause, auto-stop or row
 limit, and it writes to the file you name.
 
+In the web edition a recording, an export and a saved file go to the
+browser's downloads: there is no Folder option and no reveal in the file
+manager. The file is the same, TEMP included.
+
 ### Temperature
 
 The TEMP column carries the meter's latest valid temperature reading at or

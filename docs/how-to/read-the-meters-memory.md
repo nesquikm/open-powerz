@@ -123,6 +123,10 @@ the CLI and the app say so in one line after a write.
 - Reading and deleting recordings and reading the settings use the vendor
   bulk interface (the default transport); the settings write goes over the
   meter's virtual serial port, which open-powerz opens for it on its own.
+- The web edition does all of this in Chrome and Edge: the reads and the
+  delete over WebUSB, the settings change over Web Serial (the browser asks
+  once for the meter's serial port). A delete there first asks for a folder
+  for the CSV backups. See [Use the web edition](web-edition.md#what-works-in-the-browser).
 - Downloads read the record's own window of the meter's memory, at most 256
   bytes per read, and nothing outside it. See [docs/protocol.md](../protocol.md)
   for the formats and their confidence tags.

@@ -97,5 +97,7 @@ Press Ctrl-C to stop it.
   [trigger a charger](../how-to/trigger-a-charger.md) (ask it for 9 V, 20 V
   and more, with the safety rules first),
   [update the meter's firmware](../how-to/update-firmware.md)
+- No install at all: [use the web edition](../how-to/web-edition.md) in
+  Chrome or Edge, with the demo meter or a real one
 - Every command and option: [CLI reference](../reference/cli.md)
 - Why it is built this way: [architecture](../explanation/architecture.md)

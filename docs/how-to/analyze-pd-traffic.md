@@ -83,6 +83,9 @@ Stop a running capture first. Then:
 
 **Clear capture** or **Start capture** returns to the live view.
 
+In the web edition PD capture works over WebUSB and **Save capture** downloads
+the `.pdcap` file, but Open capture and Import vendor log are desktop only.
+
 ## From the command line
 
 The `powerz` CLI captures and reads the same files:

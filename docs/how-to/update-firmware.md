@@ -8,6 +8,10 @@ failed update can always be retried.
 
 Tested on a real KM003C going from application 2.0.6 to 2.0.7 (bootloader 2.5).
 
+Firmware update is not in the web edition: an interrupted update could brick
+the meter, and a browser tab can be closed, reloaded or put to sleep at any
+time. Use the desktop app or the CLI.
+
 ## Before you start
 
 - Plug the meter straight into the computer, on a port that has been stable.
