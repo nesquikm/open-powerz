@@ -21,6 +21,9 @@
  *   (SharedArrayBuffer); without it `triggerOpen` refuses with a usage error whose hint
  *   asks for a reload, before any picker or port.
  * - AC-W8SHXC.7: the web build has the trigger feature on; a HID session can trigger.
+ * - AC-AHTZW1.4: every line of the trigger session's log the worker posts (`{ log: line }`)
+ *   reaches the page console, as one message starting with `[trigger]` that carries the
+ *   line; a log message is no RPC answer and leaves the session working.
  *
  * The backend options these tests use: `crossOriginIsolated` (defaults to the page's),
  * `triggerWorker` (starts the engine's dedicated worker; defaults to the bundled
@@ -129,6 +132,11 @@ class FakeTriggerWorker {
     }
     const answer = this.answers[m.method]?.(m.args) ?? { ok: null };
     void Promise.resolve().then(() => this.emit({ data: { id: m.id, ...answer } }));
+  }
+
+  /** A message the worker posts on its own (not an answer). */
+  push(data: unknown): void {
+    this.emit({ data: structuredClone(data) });
   }
 
   private emit(e: { data: unknown }): void {
@@ -651,5 +659,43 @@ describe("the panel's reactive values reach the engine's worker (FR K4DWCF)", ()
     await settle(backend.triggerClose());
     expect(worker.methods()).toContain("close");
     await settle(backend.disconnect());
+  });
+});
+
+describe("the trigger session's log reaches the page console (AC-AHTZW1.4)", () => {
+  it("writes every line the worker posts with a [trigger] prefix", async () => {
+    const seen: string[] = [];
+    const record = (...args: unknown[]) => {
+      seen.push(args.map((a) => String(a)).join(" "));
+    };
+    const spies = (["debug", "info", "log"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(record),
+    );
+    try {
+      const { backend, workers } = await realBackend();
+      await settle(backend.triggerOpen());
+      const worker = workers[0] as FakeTriggerWorker;
+      const lines = [
+        "trigger sent: pdm open",
+        "trigger sent: entry pd",
+        "pd offers: 5V 3A, 9V 3A, 15V 3A, 20V 3.25A",
+        "trigger sent: pd req=2",
+      ];
+      for (const line of lines) worker.push({ log: line });
+      await vi.advanceTimersByTimeAsync(10);
+      for (const line of lines) {
+        expect(
+          seen.filter((m) => m.startsWith("[trigger]") && m.includes(line)),
+          `${line} in ${JSON.stringify(seen)}`,
+        ).toHaveLength(1);
+      }
+      // A log line answers no call: the session goes on.
+      worker.answers.armed = () => ({ ok: true });
+      expect(await settle(backend.triggerArmed())).toBe(true);
+      await settle(backend.triggerClose());
+      await settle(backend.disconnect());
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
   });
 });

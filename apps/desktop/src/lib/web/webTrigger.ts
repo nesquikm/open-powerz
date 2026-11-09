@@ -198,6 +198,12 @@ class WorkerTrigger implements TriggerHandle {
   private onMessage(data: unknown): void {
     // Every worker message drains the out-ring: the worker posts one after each write.
     this.pumpOut();
+    // A line of the session's log (AC-AHTZW1.4): to the console, no RPC answer.
+    const log = (data as { log?: unknown } | null)?.log;
+    if (typeof log === "string") {
+      console.debug(`[trigger] ${log}`);
+      return;
+    }
     const failed = (data as { failed?: UiError } | null)?.failed;
     if (failed) {
       this.die(failed.kind === "disconnected" ? failed : engineStopped());

@@ -347,9 +347,15 @@ impl<P: Read + Write, C: Clock> Session<P, C> {
     }
 
     /// `entry pd` unless PD is the protocol the meter entered last; the
-    /// refreshed offers replace the old ones. (AC-DGSQ6S.13)
+    /// refreshed offers replace the old ones. (AC-DGSQ6S.13) An entry whose
+    /// offers do not come in time is sent once more: the charger is sometimes
+    /// slower straight after a listing. \[inferred\] (AC-AHTZW1.1)
     fn enter_pd(&mut self) -> Result<(), TriggerError> {
-        if let Some(negotiation) = pd::ensure_entered(&mut self.pdm).map_err(|e| pd_error(&e))? {
+        let entered = match pd::ensure_entered(&mut self.pdm) {
+            Err(pd::Error::Pdm(pdm::Error::Timeout { .. })) => pd::enter(&mut self.pdm).map(Some),
+            other => other,
+        };
+        if let Some(negotiation) = entered.map_err(|e| pd_error(&e))? {
             self.entered = Entered::Pd;
             self.set_offers(negotiation.offers);
         }

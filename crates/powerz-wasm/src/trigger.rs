@@ -10,7 +10,8 @@
 //! [`powerz_trigger::console_refusal`], [`Confirm::of`]); after the close
 //! every call refuses.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::rc::Rc;
 use std::time::Duration;
@@ -18,9 +19,10 @@ use std::time::Duration;
 use powerz_protocol::session::Clock;
 use powerz_sim::{SimCable, SimCharger, SimClock, SimPdm};
 use powerz_trigger::{
-    ArmedEnd, CableRead, Confirm, ConsoleLine, Detection, Engine, PdMessageRequest, PdSendReply,
-    ProtocolSection, RiskClass, Session, TriggerError, TriggerErrorKind, TriggerProtocol,
-    TriggerReply, TriggerRequest, VbusReading, console_refusal, guarded, leave_view,
+    ArmedEnd, CableRead, Confirm, ConsoleLine, Detection, Engine, LogSink, PdMessageRequest,
+    PdSendReply, ProtocolSection, RiskClass, Session, SharedLog, TriggerError, TriggerErrorKind,
+    TriggerProtocol, TriggerReply, TriggerRequest, VbusReading, console_refusal, guarded,
+    leave_view, set_log_sink,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -72,6 +74,9 @@ type VbusSlot = Rc<Cell<Option<VbusReading>>>;
 pub struct TriggerEngine {
     session: Option<Session<DynPort, DynClock>>,
     vbus: VbusSlot,
+    /// The page's log callback, kept until the session above has gone (its
+    /// last lines are logged as it drops). (AC-AHTZW1.4)
+    _log: Option<LogCallback>,
 }
 
 impl std::fmt::Debug for TriggerEngine {
@@ -132,7 +137,22 @@ impl TriggerEngine {
         clock: DynClock,
         source: Option<Box<dyn FnMut() -> Option<VbusReading>>>,
     ) -> Result<TriggerEngine, BindError> {
-        let mut session = Session::open(port, clock).map_err(bind)?;
+        TriggerEngine::open_logged(port, clock, source, None)
+    }
+
+    /// [`TriggerEngine::open_on`], the session's log handed to `log` (the
+    /// lines of the handshake included).
+    fn open_logged(
+        port: DynPort,
+        clock: DynClock,
+        source: Option<Box<dyn FnMut() -> Option<VbusReading>>>,
+        log: Option<LogCallback>,
+    ) -> Result<TriggerEngine, BindError> {
+        let lines = SharedLog::default();
+        if let Some(callback) = &log {
+            set_log_sink(&lines, callback.sink());
+        }
+        let mut session = Session::open_logged(port, clock, lines).map_err(bind)?;
         let vbus: VbusSlot = Rc::new(Cell::new(None));
         let slot = Rc::clone(&vbus);
         let mut source = source;
@@ -147,6 +167,7 @@ impl TriggerEngine {
         Ok(TriggerEngine {
             session: Some(session),
             vbus,
+            _log: log,
         })
     }
 
@@ -299,6 +320,56 @@ extern "C" {
     pub type TriggerVbusJs;
     #[wasm_bindgen(method)]
     fn get(this: &TriggerVbusJs) -> JsValue;
+
+    /// The worker's log callback: called with each line of the session's log.
+    #[wasm_bindgen(typescript_type = "TriggerLogJs")]
+    pub type TriggerLogJs;
+    #[wasm_bindgen(method, catch, js_name = call)]
+    fn call_line(this: &TriggerLogJs, this_arg: &JsValue, line: &str) -> Result<(), JsValue>;
+}
+
+thread_local! {
+    /// The log callbacks of the open engines, by id: the engine's log sink
+    /// must be `Send`, a JS function is not, so the sink carries the id.
+    static LOG_CALLBACKS: RefCell<HashMap<u64, TriggerLogJs>> = RefCell::new(HashMap::new());
+    static NEXT_LOG_ID: Cell<u64> = const { Cell::new(0) };
+}
+
+/// One engine's log callback in [`LOG_CALLBACKS`], removed on drop.
+struct LogCallback(u64);
+
+impl LogCallback {
+    fn new(js: TriggerLogJs) -> LogCallback {
+        let id = NEXT_LOG_ID.with(|n| {
+            let id = n.get();
+            n.set(id.wrapping_add(1));
+            id
+        });
+        LOG_CALLBACKS.with(|m| m.borrow_mut().insert(id, js));
+        LogCallback(id)
+    }
+
+    /// The session's log sink: each line to the callback; one that throws
+    /// loses that line only.
+    fn sink(&self) -> LogSink {
+        let id = self.0;
+        Box::new(move |line: String| {
+            let js = LOG_CALLBACKS.with(|m| {
+                m.borrow()
+                    .get(&id)
+                    .map(|f| JsValue::clone(f).unchecked_into::<TriggerLogJs>())
+            });
+            if let Some(js) = js {
+                let _ = js.call_line(&JsValue::NULL, &line);
+            }
+        })
+    }
+}
+
+impl Drop for LogCallback {
+    fn drop(&mut self) {
+        LOG_CALLBACKS.with(|m| m.borrow_mut().remove(&self.0));
+    }
 }
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -325,6 +396,8 @@ export interface TriggerVbusReading {
 export interface TriggerVbusJs {
   get(): TriggerVbusReading | null;
 }
+/** Called with each line of the session's log. */
+export type TriggerLogJs = (line: string) => void;
 "#;
 
 /// How long one port read waits for bytes, ms.
@@ -441,18 +514,20 @@ fn out<T: Serialize>(value: Result<T, BindError>) -> Result<JsValue, BindError> 
 #[wasm_bindgen]
 impl TriggerEngine {
     /// Open the PDM session on the worker's `port` and `clock` (handshake
-    /// included); `vbus`, when given, is where the VBUS watch reads.
+    /// included); `vbus`, when given, is where the VBUS watch reads, and
+    /// `log`, when given, takes each line of the session's log.
     #[wasm_bindgen(js_name = open)]
     pub fn open_js(
         port: TriggerPortJs,
         clock: TriggerClockJs,
         vbus: Option<TriggerVbusJs>,
+        log: Option<TriggerLogJs>,
     ) -> Result<TriggerEngine, BindError> {
         let seed = clock.now_ms() as u64 ^ 0x5DEE_CE66_D1CE_4E5B;
         let source = vbus.map(|v| {
             Box::new(move || reading_of(v.get())) as Box<dyn FnMut() -> Option<VbusReading>>
         });
-        TriggerEngine::open_on(
+        TriggerEngine::open_logged(
             DynPort(Box::new(JsPort {
                 js: port,
                 pending: Vec::new(),
@@ -462,6 +537,7 @@ impl TriggerEngine {
                 rng: seed,
             })),
             source,
+            log.map(LogCallback::new),
         )
     }
 

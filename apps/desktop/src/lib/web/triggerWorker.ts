@@ -11,7 +11,9 @@
  * - `{ wrote: true }` after each write to the out-ring, so the page drains it at once
  *   (worker messages are not throttled in a hidden tab the way the page's timers are);
  * - `{ failed: UiError }` when the VBUS watch fails for any reason other than the
- *   session having closed: the page ends the session.
+ *   session having closed: the page ends the session;
+ * - `{ log: line }` for each line of the session's log (AC-AHTZW1.4), the lines of the
+ *   handshake included: the page writes it to the console.
  */
 
 import {
@@ -52,7 +54,12 @@ export interface WorkerClock {
 /** The wasm module's engine constructor. */
 export interface WorkerGlue {
   TriggerEngine: {
-    open(port: WorkerPort, clock: WorkerClock, vbus: { get(): unknown }): WorkerEngine;
+    open(
+      port: WorkerPort,
+      clock: WorkerClock,
+      vbus: { get(): unknown },
+      log: (line: string) => void,
+    ): WorkerEngine;
   };
 }
 
@@ -143,7 +150,9 @@ export function runTriggerWorker(
         if (ms > 0) Atomics.wait(sleeper, 0, 0, ms);
       },
     };
-    engine = glue.TriggerEngine.open(port, clock, { get: () => vbus.get() });
+    engine = glue.TriggerEngine.open(port, clock, { get: () => vbus.get() }, (line) =>
+      scope.postMessage({ log: line }),
+    );
     timer = setInterval(() => {
       const e = engine;
       if (!e) return;

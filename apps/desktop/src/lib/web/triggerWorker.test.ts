@@ -11,10 +11,15 @@
  *   out-ring at once.
  * - A VBUS-watch error other than the closed session is reported as `{ failed }`; the
  *   closed session's refusal is not.
+ * - AC-AHTZW1.4: the worker opens the engine with a log callback as its fourth argument
+ *   (`TriggerEngine.open(port, clock, vbus, log)`) and posts each line to the page as
+ *   `{ log: line }`, the lines the engine logs while it opens (`pdm open`) included; the
+ *   real wasm engine hands its session log to that callback.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UiError } from "../backend";
+import { loadWasm } from "./testWasm.test";
 import { ByteRing, VbusCell, sessionClosed } from "./triggerBridge";
 import {
   VBUS_CHECK_MS,
@@ -43,6 +48,7 @@ class FakeEngine implements WorkerEngine {
   constructor(
     readonly port: WorkerPort,
     readonly clock: WorkerClock,
+    readonly log: unknown = undefined,
   ) {}
   pushVbus(): void {
     this.pushes++;
@@ -74,8 +80,11 @@ function run(o: { holdLoad?: boolean } = {}): Run {
   const engines: FakeEngine[] = [];
   const glue: WorkerGlue = {
     TriggerEngine: {
-      open: (port, clock) => {
-        const e = new FakeEngine(port, clock);
+      open: (...args: unknown[]) => {
+        const [port, clock, , log] = args as [WorkerPort, WorkerClock, unknown, unknown];
+        // The engine logs `pdm open` while it opens, before it is returned.
+        if (typeof log === "function") (log as (line: string) => void)("trigger sent: pdm open");
+        const e = new FakeEngine(port, clock, log);
         engines.push(e);
         return e;
       },
@@ -212,5 +221,78 @@ describe("the VBUS watch", () => {
     vi.advanceTimersByTime(VBUS_CHECK_MS * 3);
     expect(r.posted.some((m) => "failed" in (m as object))).toBe(false);
     expect(engine.pushes).toBe(3);
+  });
+});
+
+describe("the session log (AC-AHTZW1.4)", () => {
+  it("opens the engine with a log callback and posts every line to the page", async () => {
+    const r = run();
+    const engine = await opened(r);
+    expect(typeof engine.log).toBe("function");
+    const log = engine.log as (line: string) => void;
+    const lines = [
+      "trigger sent: entry pd",
+      "pd offers: 5V 3A, 9V 3A, 15V 3A, 20V 3.25A",
+      "trigger armed ended: back to 5 V",
+    ];
+    for (const line of lines) log(line);
+    const logged = r.posted
+      .filter((m) => typeof m === "object" && m !== null && "log" in m)
+      .map((m) => (m as { log: unknown }).log);
+    // The line logged while the engine opened comes first, then each in order.
+    expect(logged).toEqual(["trigger sent: pdm open", ...lines]);
+  });
+
+  it("the real wasm engine hands its session log to the callback", async () => {
+    const wasm = (await loadWasm()) as unknown as {
+      TriggerEngine: {
+        open(
+          port: WorkerPort,
+          clock: WorkerClock,
+          vbus: null,
+          log: (line: string) => void,
+        ): { list(protocol: string): unknown; free(): void };
+      };
+    };
+    let t = 1_790_000_000_000;
+    let pending: Uint8Array = new Uint8Array(0);
+    const written: string[] = [];
+    const replies: Record<string, string> = {
+      "pdm open": "pdm mode entry\nver1.0\n",
+      "entry qc": "ok\nready\n",
+    };
+    const port: WorkerPort = {
+      read: (timeoutMs) => {
+        if (pending.length === 0) {
+          t += Math.max(1, timeoutMs);
+          return new Uint8Array(0);
+        }
+        const out = pending;
+        pending = new Uint8Array(0);
+        return out;
+      },
+      write: (bytes) => {
+        const cmd = new TextDecoder().decode(bytes).trim();
+        written.push(cmd);
+        const reply = replies[cmd];
+        if (reply) pending = new TextEncoder().encode(reply);
+      },
+    };
+    const clock: WorkerClock = {
+      nowMs: () => t,
+      sleep: (ms) => {
+        t += ms;
+      },
+    };
+    const lines: string[] = [];
+    const engine = wasm.TriggerEngine.open(port, clock, null, (line) => lines.push(line));
+    try {
+      expect(written[0]).toBe("pdm open");
+      engine.list("qc");
+      expect(lines.some((l) => l.includes("pdm open"))).toBe(true);
+      expect(lines.some((l) => l.includes("entry qc"))).toBe(true);
+    } finally {
+      engine.free();
+    }
   });
 });
