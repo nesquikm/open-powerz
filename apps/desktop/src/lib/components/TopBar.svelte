@@ -222,7 +222,14 @@
     };
   });
 
-  const picker = $derived(ratePicker(session.state, session.rateSps, recording.phase !== "idle"));
+  const picker = $derived(
+    ratePicker(
+      session.state,
+      session.rateSps,
+      recording.phase !== "idle",
+      session.details?.basic_readings_only,
+    ),
+  );
   /** The locked rate is news worth showing; "stop to change" is only a tooltip. A WebHID
    * session says it gives basic readings only (AC-QFTCWZ.3). */
   const rateNote = $derived(

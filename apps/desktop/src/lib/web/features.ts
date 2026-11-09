@@ -67,3 +67,9 @@ export function desktopOnlyError(): UiError {
 /** What a WebHID session shows (AC-QFTCWZ.3): HID carries ADC snapshots only, so no PD
  * capture and no queue rates. */
 export const HID_BASIC_NOTE = "HID: basic readings only";
+
+/** The refusal a HID session gives for `what` (AC-09R2FK.2): HID carries ADC snapshots
+ * only, so PD capture and rate changes are not available. */
+export function hidOnlyBasicText(what: string): string {
+  return `${what} is not available over HID: it gives basic readings only.`;
+}

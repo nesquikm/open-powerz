@@ -23,6 +23,8 @@ import {
   revealActionLabel,
 } from "./recording.svelte";
 import { DEFAULT_RECORDER_SETTINGS } from "./settings";
+import { readFileSync } from "node:fs";
+import * as features from "./web/features";
 
 const CLOCK = new Date(2026, 9, 21, 9, 5, 7); // local time 2026-10-21 09:05:07
 
@@ -893,4 +895,96 @@ describe("Recording races with a stop rule (review)", () => {
     expect(pauseRecording).toHaveBeenCalledTimes(1);
     expect(resumeRecording).not.toHaveBeenCalled();
   });
+});
+
+/** FR 09R2FK: the HID rate tooltip. `ratePicker`'s fourth argument is the session's
+ * `basic_readings_only` flag; the wording comes from `hidOnlyBasicText` in web/features. */
+const HID_RATE_LABEL = "Rate change is not available over HID: it gives basic readings only.";
+type HidText = (what: string) => string;
+const hidText = (): HidText =>
+  (features as unknown as { hidOnlyBasicText: HidText }).hidOnlyBasicText;
+
+describe("rate picker over HID (AC-09R2FK.1)", () => {
+  it("is disabled with the HID label whatever the measured rate", () => {
+    for (const rate of [null, 2, 10, 50, 1000]) {
+      expect(ratePicker("rate_locked", rate, false, true)).toEqual({
+        disabled: true,
+        label: HID_RATE_LABEL,
+      });
+    }
+  });
+
+  it("blames HID, not authentication or the recording, for a basic-readings session", () => {
+    expect(ratePicker("rate_locked", 50, true, true)).toEqual({
+      disabled: true,
+      label: HID_RATE_LABEL,
+    });
+    expect(ratePicker("streaming", 50, false, true)).toEqual({
+      disabled: true,
+      label: HID_RATE_LABEL,
+    });
+    expect(ratePicker("rate_locked", 50, false, true).label).not.toMatch(/authentication/);
+  });
+});
+
+describe("one HID wording for the rate and PD capture (AC-09R2FK.2)", () => {
+  it("web/features exports the helper that builds the HID refusal text", () => {
+    const text = hidText();
+    expect(typeof text).toBe("function");
+    expect(text("PD capture")).toBe(
+      "PD capture is not available over HID: it gives basic readings only.",
+    );
+    expect(text("Rate change")).toBe(HID_RATE_LABEL);
+  });
+
+  it("the rate label is the helper's text", () => {
+    expect(ratePicker("rate_locked", 50, false, true).label).toBe(hidText()("Rate change"));
+  });
+
+  it("the driver and the rate picker build the wording with the helper, not a copy", () => {
+    const driver = readFileSync(new URL("./web/driver.ts", import.meta.url), "utf8");
+    const picker = readFileSync(new URL("./recording.svelte.ts", import.meta.url), "utf8");
+    const feats = readFileSync(new URL("./web/features.ts", import.meta.url), "utf8");
+    expect(feats).toMatch(/export\s+function\s+hidOnlyBasicText\b/);
+    for (const src of [driver, picker]) {
+      expect(src).toMatch(/\bhidOnlyBasicText\b/);
+      expect(src).not.toMatch(/is not available over HID/);
+    }
+  });
+});
+
+describe("rate picker off HID keeps its reasons (AC-09R2FK.3)", () => {
+  it("an authentication-failed session keeps the authentication label", () => {
+    expect(ratePicker("rate_locked", 50, false, false)).toEqual({
+      disabled: true,
+      label: "Rate set on the meter: 50 SPS — authentication unavailable",
+    });
+    expect(ratePicker("rate_locked", null, false, false)).toEqual({
+      disabled: true,
+      label: "Rate set on the meter (measuring…) — authentication unavailable",
+    });
+    expect(ratePicker("rate_locked", 1000)).toEqual({
+      disabled: true,
+      label: "Rate set on the meter: 1000 SPS — authentication unavailable",
+    });
+  });
+
+  it("a recording still locks the rate", () => {
+    expect(ratePicker("streaming", 50, true, false)).toEqual({
+      disabled: true,
+      label: "Stop the recording to change the rate",
+    });
+    expect(ratePicker("streaming", 50, false, false)).toEqual({ disabled: false, label: null });
+  });
+});
+
+describe("both callers pass the HID flag (AC-09R2FK.4)", () => {
+  for (const file of ["TopBar.svelte", "MeterControls.svelte"]) {
+    it(`${file} hands basic_readings_only to ratePicker`, () => {
+      const src = readFileSync(new URL(`./components/${file}`, import.meta.url), "utf8");
+      const calls = [...src.matchAll(/\bratePicker\(([\s\S]*?)\)\s*\)?;/g)].map((m) => m[1]);
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      for (const args of calls) expect(args).toMatch(/\bbasic_readings_only\b/);
+    });
+  }
 });

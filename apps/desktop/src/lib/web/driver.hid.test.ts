@@ -19,6 +19,7 @@ import { FakeHidDevice, toReports } from "./fakeDevices.test";
 import { classify, loadWasm, type FrameName } from "./testWasm.test";
 import type { WebTransport } from "./transport";
 import { openWebHid } from "./webhid";
+import * as features from "./features";
 
 type DriverOptions = Parameters<typeof MeterDriver.connect>[0];
 type Sample = { time_ms: number; vbus_v: number; ibus_a: number };
@@ -221,5 +222,24 @@ describe("the WebHID guard under a full session (AC-QFTCWZ.3)", () => {
       expect(classify(w, data.slice(0, adcLen))).toBe("get_data:adc");
       expect(data.slice(adcLen).every((b) => b === 0)).toBe(true);
     }
+  });
+});
+
+/** FR 09R2FK: the PD refusal uses the shared HID wording helper from ./features. */
+describe("the HID refusal wording (AC-09R2FK.2)", () => {
+  it("refuses PD capture with the helper's text", async () => {
+    const { driver } = await startHid();
+    await vi.advanceTimersByTimeAsync(50);
+    const text = (features as unknown as { hidOnlyBasicText?: (what: string) => string })
+      .hidOnlyBasicText;
+    expect(typeof text).toBe("function");
+    await expect(settle(driver.startPdCapture(() => {}))).rejects.toMatchObject({
+      kind: "usage",
+      message: "PD capture is not available over HID: it gives basic readings only.",
+    });
+    expect(text!("PD capture")).toBe(
+      "PD capture is not available over HID: it gives basic readings only.",
+    );
+    await settle(driver.disconnect());
   });
 });
