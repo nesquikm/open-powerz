@@ -15,7 +15,7 @@ changelog_category: Changed
 The web edition docs and the README said the browser could only read and stream.
 They now list what works in the browser: settings, records, record delete, logo upload and protocol triggering.
 They say which features need Web Serial.
-They also name the two that stay in the desktop app: firmware update and showing a file.
+They also name what stays in the desktop app: firmware update, showing a file and the PDF chart export.
 
 ## Requirement
 
@@ -24,7 +24,7 @@ The user docs, the README web section and the browser-support page match the web
 ## Acceptance Criteria
 
 - AC-W8SHXF.1: The browser-support page lists every feature with the interface it needs (WebUSB, Web Serial or none) and which features stay desktop-only, with the reason.
-- AC-W8SHXF.2: The README's web edition section no longer says the browser is read-only and names the two desktop-only features.
+- AC-W8SHXF.2: The README's web edition section no longer says the browser is read-only and names the desktop-only features (firmware update and file reveal, plus the PDF chart export).
 - AC-W8SHXF.3: A docs test checks that every feature the web build switches off is named on the browser-support page as desktop-only, and every feature it switches on is not.
 
 ## Technical Design

@@ -30,15 +30,24 @@ You can also use open-powerz in the browser, with nothing to install:
 Chrome and Edge on desktop, which support WebUSB. Pick the demo meter to
 try the app without a meter.
 
-The web edition only reads and streams. These features are desktop-only, so use the
+In the browser you get:
+
+- live readings, charts and stats
+- PD capture and CSV recording
+- reading and changing the meter settings
+- the offline records: list, download and delete
+- startup logo upload and remove
+- protocol triggering
+
+Logo writes, record deletes and protocol triggering keep the same safeguards as the
+desktop app. Changing the meter settings and protocol triggering need Web Serial, so
+they work in Chrome and Edge only.
+
+These stay desktop-only, so use the
 [desktop app](https://github.com/nesquikm/open-powerz/releases/latest) for them:
 
 - firmware update
-- startup logo upload
-- settings writes (changing the meter settings)
-- deleting offline records
-- protocol triggering
-- reading the meter settings and the offline records
+- showing a saved file in the file manager
 - PDF export of the chart
 
 ## Features
@@ -117,7 +126,7 @@ The web edition only reads and streams. These features are desktop-only, so use 
 
 ### Web edition
 
-- Use open-powerz in Chrome or Edge with nothing to install: live readings, charts, stats, PD capture, CSV recording and the demo meter over WebUSB, with a WebHID fallback for basic readings ([use the web edition](docs/how-to/web-edition.md))
+- Use open-powerz in Chrome or Edge with nothing to install: live readings, charts, stats, PD capture, CSV recording, meter settings, offline records, the startup logo, protocol triggering and the demo meter over WebUSB and Web Serial, with a WebHID fallback for basic readings ([use the web edition](docs/how-to/web-edition.md))
 
 ### Demo device and simulator
 

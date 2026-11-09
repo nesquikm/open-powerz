@@ -1,10 +1,9 @@
 /**
  * FR QFTCX0: the capability map components read to hide or disable the controls a
- * build cannot offer. The desktop (Tauri and mock) builds have every feature; the web
- * build leaves out every meter write except the settings write (AC-QFTCX0.6,
- * AC-W8SHX9.7) and does the safe reads: settings, the records list and record
- * downloads (AC-W8SHX8.7). Firmware update and file reveal
- * stay desktop only. Pure data: no WebUSB code lives here.
+ * build cannot offer. The desktop (Tauri and mock) builds have every feature. The web
+ * build has them too (FR milestone M_ZFZQE7) except firmware update and file reveal,
+ * which stay desktop only (an interrupted update in a tab could brick the meter; a page
+ * cannot open the file manager). Pure data: no WebUSB code lives here.
  */
 
 import type { UiError } from "../backend";

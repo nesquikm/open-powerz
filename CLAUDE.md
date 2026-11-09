@@ -22,6 +22,7 @@ crates/
 ├── powerz-pd/                  # library: USB PD r3.2 message decoder (pure, no I/O, builds for wasm32)
 ├── powerz-protocol/            # library: transports (bulk/HID/CDC), framing, ADC/queue/PD/settings decode, auth
 ├── powerz-sim/                 # simulated KM003C behind the Transport trait (demo device, e2e test double)
+├── powerz-trigger/             # library: trigger engine shared by the desktop app and the web edition
 ├── powerz-record/              # library: vendor-compatible CSV recorder shared by CLI and desktop app
 ├── powerz-wasm/                # wasm-bindgen binding: sans-IO builders/decoders + demo meter, built by build:wasm
 └── powerz-cli/                 # `powerz` binary: live readout, CSV streaming, raw frame dumps
