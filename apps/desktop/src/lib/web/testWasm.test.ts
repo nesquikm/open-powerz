@@ -64,6 +64,18 @@ export interface RecordBookLike {
   free(): void;
 }
 
+/** The FR W8SHXA delete methods of the wasm `RecordBook`. */
+export interface RecordDeleteBookLike extends RecordBookLike {
+  /** 1-based targets over the latest list (`undefined` = every record), or a throw. */
+  deleteTargets(index: number | undefined, confirm: string): Uint32Array | number[];
+  /** The record's desktop backup file from its window's bytes. */
+  backupFile(index: number, data: Uint8Array): { name: string; csv: string };
+  /** The SET_DATA 0x48 att 0x28 frame that keeps every listed record but `indices`. */
+  deleteRequest(id: number, indices: Uint32Array): Uint8Array;
+  takeDeleteReply(reply: Uint8Array): void;
+  checkAfterDelete(): void;
+}
+
 /** The FR W8SHX8 exports of `w`. */
 export function recordWasm(w: PowerzWasm): RecordWasm {
   return w as unknown as RecordWasm;
@@ -128,6 +140,7 @@ export type FrameName =
   | "pd_poll_adc"
   | `memory_read:${number}`
   | `record_read:${number}`
+  | "record_table_write"
   | "unknown";
 
 function same(a: Uint8Array, b: Uint8Array): boolean {
@@ -159,6 +172,11 @@ export function classify(w: PowerzWasm, frame: Uint8Array): FrameName {
       if (demo && same(frame, demo.book.chunkRequest(id, addr, len))) return `record_read:${index}`;
     }
   }
+  // The record-table write (FR W8SHXA): SET_DATA whose one section is attribute 0x28.
+  if (((frame[0] ?? 0) & 0x7f) === 0x48 && frame.length >= 8) {
+    const att = ((frame[4] ?? 0) | ((frame[5] ?? 0) << 8)) & 0x7fff;
+    return att === 0x28 ? "record_table_write" : "unknown";
+  }
   // Auth carries time and random, so only its type byte and length are fixed.
   const authShape = w.authRequest(0, 1, new Uint8Array(12), 0n, 0n);
   if (frame.length === authShape.length && frame[0] === authShape[0]) return "auth";
@@ -185,5 +203,20 @@ describe("test wasm helpers", () => {
     if (first)
       expect(classify(w, book.chunkRequest(6, first.addr, first.len))).toBe("record_read:2");
     book.free();
+  });
+
+  it("classifies the record-table write the core builds (FR W8SHXA)", async () => {
+    const w = await loadWasm();
+    const book = new (recordWasm(w).RecordBook)() as RecordDeleteBookLike;
+    book.decodeList(demoRecordListReply(w));
+    expect(classify(w, book.deleteRequest(7, new Uint32Array([1])))).toBe("record_table_write");
+    expect(classify(w, book.deleteRequest(8, new Uint32Array([1, 2, 3])))).toBe(
+      "record_table_write",
+    );
+    book.free();
+    // Any other SET_DATA attribute stays unknown.
+    expect(classify(w, new Uint8Array([0x48, 1, 0x80, 0x00, 0x1c, 0x00, 0x40, 0x00]))).toBe(
+      "unknown",
+    );
   });
 });

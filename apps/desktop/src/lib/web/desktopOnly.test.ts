@@ -94,6 +94,12 @@ describe("the web build shows the meter reads (AC-W8SHX8.7)", () => {
     expect(body).not.toContain(DESKTOP_ONLY_TEXT);
   });
 
+  it('the recordDelete control renders without "Desktop app only" (AC-W8SHXA.6)', () => {
+    const body = html({ available: WEB_FEATURES.recordDelete, label: "Delete", children: child });
+    expect(body).toContain("<button>Flash firmware</button>");
+    expect(body).not.toContain(DESKTOP_ONLY_TEXT);
+  });
+
   for (const feature of ["firmwareUpdate", "fileReveal"] as const) {
     it(`the ${feature} control still says "Desktop app only"`, () => {
       const body = html({ available: WEB_FEATURES[feature], label: "Update", children: child });

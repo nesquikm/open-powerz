@@ -20,6 +20,7 @@ import type {
   PdDetails,
   PdRow,
   RangeStats,
+  RecordDeleteResult,
   RecordList,
   RecordingSummary,
   RunProgress,
@@ -30,6 +31,7 @@ import type {
   UiError,
 } from "../backend";
 import { HistoryColumns, SessionStats } from "../history";
+import { openBackupSink, type PickDirectory } from "./backupFolder";
 import { CsvRecorder } from "./csv";
 import type { MeterDriver, MeterSample, PdDecoderLike, PowerzWasm } from "./driver";
 import { noWebSerialError } from "./serial";
@@ -81,6 +83,8 @@ export interface WebSessionOptions {
   wasm: PowerzWasm;
   /** Saves a file for the user. */
   download: (name: string, data: Blob) => void;
+  /** Picks the folder a record delete backs up into (FR W8SHXA); `null`: downloads. */
+  pickDirectory?: PickDirectory | null;
   /** Opens the pipe a settings write runs over (FR W8SHX9): the meter's serial port,
    * or the demo meter's CDC twin. Without it, a settings change finds no Web Serial. */
   openSettingsPipe?: () => Promise<WebTransport>;
@@ -114,6 +118,7 @@ export const SESSION_COMMANDS = [
   "meterSettingsWrite",
   "recordsList",
   "recordDownload",
+  "recordsDelete",
 ] as const satisfies readonly (keyof MeterCommands)[];
 
 /** A live session: its driver, history, stats and event sink. */
@@ -466,6 +471,16 @@ export class WebSession {
         ),
       recordsList: (): Promise<RecordList> => this.driver.listRecords(),
       recordDownload: (index: number): Promise<OfflineRecord> => this.driver.downloadRecord(index),
+      recordsDelete: async (
+        target: number | "all",
+        confirm: string,
+      ): Promise<RecordDeleteResult> => {
+        // A HID session refuses before anything is picked or sent.
+        if (this.driver.hid) return this.driver.deleteRecords(target, confirm, () => {});
+        // Picked first, in the user's click: every backup is a confirmed file write.
+        const sink = await openBackupSink(this.o.pickDirectory ?? null, this.o.download);
+        return this.driver.deleteRecords(target, confirm, sink.save, sink.label);
+      },
     };
   }
 }

@@ -7,6 +7,7 @@ mod decoders;
 mod demo;
 mod error;
 mod meter_reads;
+mod records_delete;
 mod settings_write;
 
 pub use builders::{
@@ -25,4 +26,5 @@ pub use meter_reads::{
     Chunk, OfflineRecordView, RecordBook, RecordEntryView, RecordListView, RecordSampleView,
     SettingsView, decode_settings, decode_settings_js, settings_request,
 };
+pub use records_delete::BackupFile;
 pub use settings_write::{SettingsWrite, cdc_frame_length};

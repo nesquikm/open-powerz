@@ -3233,6 +3233,7 @@ name = "powerz-wasm"
 version = "0.11.1"
 dependencies = [
  "powerz-protocol",
+ "powerz-record",
  "powerz-sim",
  "serde",
  "serde-wasm-bindgen",

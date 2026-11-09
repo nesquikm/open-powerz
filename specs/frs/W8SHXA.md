@@ -14,6 +14,7 @@ changelog_category: Added
 
 The records view in the browser can now delete one record or all of them, as the desktop app does.
 Before anything is deleted, each affected record is downloaded and saved as a CSV backup file.
+The backups go into a folder the user picks, so each one is really written first.
 The user types the record's name, or the word all, to confirm.
 The meter's record table is rewritten once and read again to check it.
 
@@ -24,7 +25,7 @@ A WebUSB session deletes offline records with the desktop app's safeguards: a ty
 ## Acceptance Criteria
 
 - AC-W8SHXA.1: A delete reads the record list again first; the typed confirmation must equal the record's name (or "all" for every record), else nothing is deleted and nothing is written.
-- AC-W8SHXA.2: Before the write, every affected record is downloaded and saved as a CSV download named as the desktop app names its backup files; a failed download deletes nothing.
+- AC-W8SHXA.2: Before the write, every affected record is downloaded and saved as a CSV file named as the desktop app names its backup files: written into a folder the user picks (Chrome and Edge), or as a browser download where the browser cannot write a folder. Every file is written before the table write; a failed download, a failed file write or a cancelled folder picker deletes nothing.
 - AC-W8SHXA.3: The table write is the one frame the protocol core builds from the kept entries, unchanged and in order; a table too long to write is refused before the backup, and "all" on an empty list sends nothing.
 - AC-W8SHXA.4: The write counts on ACCEPT or FINISHED; a REJECT or other reply fails. The list is read again and must equal the kept entries, else the delete fails naming the backup; nothing is retried.
 - AC-W8SHXA.5: The answer lists the records after the delete and names the backup files; the records view shows them as on the desktop.
@@ -32,7 +33,7 @@ A WebUSB session deletes offline records with the desktop app's safeguards: a ty
 
 ## Technical Design
 
-Wasm exports the native delete-table planner and the record-table request builder (with the native guard check) plus the CSV writer. The driver runs list, backups, write and re-list inside its lock, like the native delete. Backup files go through the page's download function; the answer's backup folder is the browser's downloads.
+Wasm exports the native delete-table planner and the record-table request builder (with the native guard check) plus the CSV writer. The driver runs list, backups, write and re-list inside its lock, like the native delete. Backups are written into the picked folder through the File System Access API, each write finished before the table write; without that API they are downloads. The answer names the folder.
 
 ## Testing
 

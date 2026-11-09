@@ -123,8 +123,10 @@ pub struct RecordListView {
 #[wasm_bindgen]
 #[derive(Debug, Default)]
 pub struct RecordBook {
-    entries: Vec<RecordEntry>,
+    pub(crate) entries: Vec<RecordEntry>,
     windows: Vec<(u32, u32)>,
+    /// The entries the last built record-table write keeps (FR W8SHXA).
+    pub(crate) kept: Option<Vec<RecordEntry>>,
 }
 
 /// One sample of a downloaded record, as the desktop worker's
@@ -207,7 +209,7 @@ impl RecordBook {
     }
 }
 
-fn not_listed() -> BindError {
+pub(crate) fn not_listed() -> BindError {
     BindError::new("usage", "That record is not on the meter.")
 }
 
@@ -241,7 +243,7 @@ impl RecordBook {
     }
 
     /// The listed entry at 1-based `index`, or the desktop app's refusal.
-    fn entry(&self, index: u32) -> Result<&RecordEntry, BindError> {
+    pub(crate) fn entry(&self, index: u32) -> Result<&RecordEntry, BindError> {
         let i = usize::try_from(index).map_err(|_| not_listed())?;
         i.checked_sub(1)
             .and_then(|i| self.entries.get(i))

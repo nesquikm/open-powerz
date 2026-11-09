@@ -37,14 +37,14 @@ export const DESKTOP_FEATURES: Readonly<Features> = Object.freeze({
 });
 
 /** The browser build: the safe reads (settings, records list, record download) are on
- * (AC-W8SHX8.7), and so is the settings write over Web Serial (AC-W8SHX9.7); the other
- * meter writes stay off for now, and firmware update and file reveal stay in the
- * desktop app. */
+ * (AC-W8SHX8.7), and so are the settings write over Web Serial (AC-W8SHX9.7) and the
+ * record delete (AC-W8SHXA.6); the other meter writes stay off for now, and firmware
+ * update and file reveal stay in the desktop app. */
 export const WEB_FEATURES: Readonly<Features> = Object.freeze({
   firmwareUpdate: false,
   logoUpload: false,
   settingsWrite: true,
-  recordDelete: false,
+  recordDelete: true,
   trigger: false,
   settingsRead: true,
   recordsList: true,

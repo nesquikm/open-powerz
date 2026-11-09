@@ -3,7 +3,14 @@
  * back to WebHID) and runs the read-only session over a `WebTransport`.
  */
 
-import type { MeterSettings, OfflineRecord, RecordList, SettingChanges, UiError } from "../backend";
+import type {
+  MeterSettings,
+  OfflineRecord,
+  RecordDeleteResult,
+  RecordList,
+  SettingChanges,
+  UiError,
+} from "../backend";
 import { ERROR_KINDS } from "../errorKinds";
 import type { DemoMeterModule } from "./demoTransport";
 import { hidOnlyBasicText } from "./features";
@@ -73,8 +80,29 @@ export interface RecordBookLike {
   chunkRequest(id: number, addr: number, len: number): Uint8Array;
   /** Record `index` decoded from its window's bytes. */
   decodeRecord(index: number, data: Uint8Array): OfflineRecord;
+  /** FR W8SHXA: the 1-based records a delete removes over the latest list
+   * (`undefined` = every record); throws `usage` on a wrong confirmation, an unlisted
+   * record or a table too long to write. */
+  deleteTargets(index: number | undefined, confirm: string): Uint32Array | number[];
+  /** Record `index`'s desktop backup file from its window's bytes. */
+  backupFile(index: number, data: Uint8Array): BackupFile;
+  /** The SET_DATA 0x48 att 0x28 frame keeping every listed record but `indices`. */
+  deleteRequest(id: number, indices: Uint32Array): Uint8Array;
+  /** ACCEPT / FINISHED pass; a REJECT or other reply throws. */
+  takeDeleteReply(reply: Uint8Array): void;
+  /** After a fresh list: throws unless it equals the kept entries. */
+  checkAfterDelete(): void;
   free(): void;
 }
+
+/** A record's backup file as the desktop worker names and writes it. */
+export interface BackupFile {
+  name: string;
+  csv: string;
+}
+
+/** Where the web edition's record backups go: the browser picks the folder. */
+const BACKUP_DIR = "your browser's downloads";
 
 /** The wasm `PdDecoder`: poll replies into rows, and the capture kept since the last
  * clear (details, clear, pdcap file). */
@@ -247,6 +275,18 @@ function callBook<T>(call: () => T): T {
   } catch (e) {
     throw bookError(e);
   }
+}
+
+/** A failure before the table write, as the desktop worker words it: the cause's
+ * kind and hint (a meter unplugged mid-backup stays `disconnected`), its message
+ * after the prefix. */
+function backupFailed(e: unknown): UiError {
+  const ui = asUiError(e);
+  const reason = ui.kind === "internal" && e instanceof Error && e.message ? e.message : ui.message;
+  return {
+    ...ui,
+    message: `The backup download failed, so nothing was deleted. ${reason}`,
+  };
 }
 
 /** `parts` joined into one array. */
@@ -715,14 +755,86 @@ export class MeterDriver {
     return this.meterRead("Reading the offline records", async () => {
       const { book } = await this.listLocked();
       if (this.ended) throw disconnectedError();
-      const parts: Uint8Array[] = [];
-      for (const c of callBook(() => book.chunks(index))) {
-        const request = callBook(() => book.chunkRequest(this.nextId(), c.addr, c.len));
-        parts.push(await this.memoryRead(request, c.addr, c.len));
-        if (this.ended) throw disconnectedError();
-      }
-      return callBook(() => book.decodeRecord(index, concat(parts)));
+      const data = await this.recordWindowLocked(book, index);
+      return callBook(() => book.decodeRecord(index, data));
     });
+  }
+
+  /** Record `index`'s listed window, read in the wasm core's chunks (memory reads of
+   * at most 256 bytes) and joined. */
+  private async recordWindowLocked(book: RecordBookLike, index: number): Promise<Uint8Array> {
+    const parts: Uint8Array[] = [];
+    for (const c of callBook(() => book.chunks(index))) {
+      const request = callBook(() => book.chunkRequest(this.nextId(), c.addr, c.len));
+      parts.push(await this.memoryRead(request, c.addr, c.len));
+      if (this.ended) throw disconnectedError();
+    }
+    return concat(parts);
+  }
+
+  /** Delete offline record `target` (1-based) or `"all"` (FR W8SHXA) as the desktop
+   * worker does: a fresh list, the typed confirmation (the record's name or "all"),
+   * a backup of every affected record handed to `saveBackup` before anything is
+   * written, one record-table write built by the wasm core, and a fresh list that must
+   * equal the kept entries. Nothing is retried. */
+  deleteRecords(
+    target: number | "all",
+    confirm: string,
+    saveBackup: (name: string, csv: string) => void | Promise<void>,
+    backupDir: string = BACKUP_DIR,
+  ): Promise<RecordDeleteResult> {
+    return this.meterRead("Deleting offline records", async () => {
+      const { book, list } = await this.listLocked();
+      const targets = Array.from(
+        callBook(() => book.deleteTargets(target === "all" ? undefined : target, confirm)),
+      );
+      if (targets.length === 0) return { records: [], backup_dir: backupDir, backups: [] };
+      const files = await this.backupsLocked(book, list, targets);
+      try {
+        // Every save settles (a written file) before the table write goes out.
+        for (const f of files) await saveBackup(f.name, f.csv);
+      } catch (e) {
+        throw backupFailed(e);
+      }
+      try {
+        const request = callBook(() => book.deleteRequest(this.nextId(), new Uint32Array(targets)));
+        const reply = await this.exchange(request, REPLY_TIMEOUT_MS);
+        if (this.ended) throw disconnectedError();
+        callBook(() => book.takeDeleteReply(reply));
+        const after = await this.listLocked();
+        callBook(() => book.checkAfterDelete());
+        return {
+          records: after.list.records,
+          backup_dir: backupDir,
+          backups: files.map((f) => f.name),
+        };
+      } catch (e) {
+        const ui = asUiError(bookError(e));
+        throw { ...ui, message: `${ui.message} Backup: ${backupDir}` } satisfies UiError;
+      }
+    });
+  }
+
+  /** Download each of `targets` (records with no samples need no reads) and build its
+   * backup file; any failure deletes nothing. */
+  private async backupsLocked(
+    book: RecordBookLike,
+    list: RecordList,
+    targets: number[],
+  ): Promise<BackupFile[]> {
+    const files: BackupFile[] = [];
+    try {
+      for (const index of targets) {
+        const data =
+          (list.records[index - 1]?.points ?? 0) > 0
+            ? await this.recordWindowLocked(book, index)
+            : new Uint8Array();
+        files.push(callBook(() => book.backupFile(index, data)));
+      }
+    } catch (e) {
+      throw backupFailed(e);
+    }
+    return files;
   }
 
   /** Start the PD sniffer and hand every poll's decoded rows to `onRows`. With a

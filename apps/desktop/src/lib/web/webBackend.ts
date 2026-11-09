@@ -11,6 +11,7 @@ import type {
   UiError,
   WebBackendApi,
 } from "../backend";
+import { browserPickDirectory, type PickDirectory } from "./backupFolder";
 import { DemoCdcTransport, serialPipeOpener } from "./cdcTransport";
 import { DemoTransport } from "./demoTransport";
 import { MeterDriver, openUsbOrOfferHid, type PowerzWasm } from "./driver";
@@ -33,6 +34,9 @@ export interface WebBackendOptions {
   serial?: unknown;
   /** Saves a file for the user (a Blob behind an anchor click). */
   download?: (name: string, data: Blob) => void;
+  /** Picks a record delete's backup folder (FR W8SHXA); `null`: browser downloads.
+   * Defaults to the browser's `showDirectoryPicker` where it has one. */
+  pickDirectory?: PickDirectory | null;
 }
 
 const notReady = (name: string): UiError => ({
@@ -316,6 +320,7 @@ class Sessions {
     wasm: unknown,
     private readonly download: (name: string, data: Blob) => void,
     private readonly webSerial: SerialLike | null,
+    private readonly pickDirectory: PickDirectory | null = null,
   ) {
     this.wasm = (wasm as PowerzWasm | undefined) ?? null;
   }
@@ -388,6 +393,7 @@ class Sessions {
       onEvent,
       wasm: w,
       download: this.download,
+      pickDirectory: this.pickDirectory,
       openSettingsPipe: demo
         ? async () => new DemoCdcTransport(demo, () => Date.now())
         : serialPipeOpener(this.webSerial, w),
@@ -456,7 +462,9 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
   const serial = (
     serialOption === undefined ? browserApi("serial") : serialOption
   ) as SerialLike | null;
-  const sessions = new Sessions(devices, usb, options.wasm, download, serial);
+  const pickDirectory =
+    options.pickDirectory === undefined ? browserPickDirectory() : options.pickDirectory;
+  const sessions = new Sessions(devices, usb, options.wasm, download, serial, pickDirectory);
   const commands = sessions.commands(() => sessions.current);
   // The desktop-only writes are among `commands`' refused ones (AC-QFTCX0.6).
   type Writes = Pick<
