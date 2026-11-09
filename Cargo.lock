@@ -2921,6 +2921,7 @@ dependencies = [
  "powerz-protocol",
  "powerz-record",
  "powerz-sim",
+ "powerz-trigger",
  "proptest",
  "rusqlite",
  "serde",
@@ -3229,12 +3230,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "powerz-trigger"
+version = "0.11.1"
+dependencies = [
+ "powerz-protocol",
+ "powerz-sim",
+ "serde",
+]
+
+[[package]]
 name = "powerz-wasm"
 version = "0.11.1"
 dependencies = [
  "powerz-protocol",
  "powerz-record",
  "powerz-sim",
+ "powerz-trigger",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

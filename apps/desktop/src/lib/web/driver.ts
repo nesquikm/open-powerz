@@ -348,6 +348,9 @@ export class MeterDriver {
   private readonly startedAt = Date.now();
   private lastSnapshotMs: number | null = null;
   private rate: number;
+  /** Holds on the stream's polling (a trigger session's automatic list); polls skip
+   * while any is held (native `Worker::hold_polling`). */
+  private pollHolds = 0;
   /** The UID block read at open, kept for a later level-1 auth. */
   private uidBlock: Uint8Array | null = null;
   /** The offline records book, made on the first list and freed when the session ends. */
@@ -578,8 +581,32 @@ export class MeterDriver {
     }, delayMs);
   }
 
+  /** Hold (`true`) or release (`false`) the stream's polling: while held, no poll
+   * asks the meter; the last release polls at once. A release with no hold is a no-op. */
+  holdPolling(hold: boolean): void {
+    if (hold) {
+      this.pollHolds += 1;
+      return;
+    }
+    if (this.pollHolds === 0) return;
+    this.pollHolds -= 1;
+    if (this.pollHolds === 0 && this.pollTimer !== null && !this.ended) {
+      clearTimeout(this.pollTimer);
+      this.schedulePoll(1);
+    }
+  }
+
+  /** Whether the stream's polling is held. */
+  get pollingHeld(): boolean {
+    return this.pollHolds > 0;
+  }
+
   private async pollOnce(): Promise<void> {
     if (this.ended) return;
+    if (this.pollHolds > 0) {
+      this.schedulePoll(this.periodMs());
+      return;
+    }
     const began = Date.now();
     try {
       const samples = await this.exclusive(() => this.readSamples());

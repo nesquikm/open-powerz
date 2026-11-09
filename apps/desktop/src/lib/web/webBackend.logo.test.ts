@@ -11,8 +11,8 @@
  *   read, a logo chunk inside the region, the duration write or a logo-window read.
  * - AC-W8SHXB.5/.6: `logoRead` and `logoSettingsCheck` answer in the browser.
  * - AC-W8SHXB.7: a HID session refuses every logo command with the basic-readings
- *   wording; the web build switches the logo feature on (triggering and firmware
- *   update stay off).
+ *   wording; the web build switches the logo feature on (firmware update stays off;
+ *   triggering is on since AC-W8SHXC.7).
  *
  * Runs on Vitest's fake clock against fake devices answered by the wasm demo meter.
  */
@@ -131,9 +131,8 @@ async function usbBackend(files: { name: string; bytes: Uint8Array }[] = []): Pr
 const frameCount = (dev: FakeUsbDevice) => dev.outTransfers.filter((t) => t.data.length > 0).length;
 
 describe("the feature map (AC-W8SHXB.7)", () => {
-  it("the web build switches the logo feature on; triggering and firmware update stay off", () => {
+  it("the web build switches the logo feature on; firmware update stays off", () => {
     expect(WEB_FEATURES.logoUpload).toBe(true);
-    expect(WEB_FEATURES.trigger).toBe(false);
     expect(WEB_FEATURES.firmwareUpdate).toBe(false);
   });
 });

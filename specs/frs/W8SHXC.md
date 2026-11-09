@@ -42,3 +42,5 @@ The moved engine keeps its Rust tests; wasm tests over a scripted port; Vitest f
 ## Notes
 
 Above-5 V triggering on the real meter is approved only in the wall-charger setup (laptop on the data port, output empty).
+
+Closing the tab (AC-W8SHXC.4) is best effort: on `pagehide` the page posts the leave way back and the close to the engine at once, but the browser may stop the worker before the bytes reach the meter. The page tries; a closed tab cannot wait. While the last accepted contract is above 5 V the page registers a `beforeunload` handler, so the browser asks before the tab closes; it is removed at 5 V and on close.

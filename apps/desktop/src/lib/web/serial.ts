@@ -48,7 +48,7 @@ export const noWebSerialError = (): UiError =>
   );
 
 /** Another program holds the port (the desktop app's `port_held`). */
-const portHeldError = (): UiError =>
+export const portHeldError = (): UiError =>
   transportError(
     "device_busy",
     "The meter's serial port is in use by another program.",

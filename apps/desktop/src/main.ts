@@ -42,4 +42,12 @@ if (import.meta.env.VITE_BACKEND === "mock") {
   (window as unknown as Record<string, ReloadHook>)[RELOAD_HOOK] = reload;
 }
 
+// The web edition (FR W8SHXC): our own service worker makes the page cross-origin
+// isolated from the next load, so protocol triggering gets shared memory.
+if (import.meta.env.VITE_BACKEND === "web") {
+  void import("./lib/web/coi").then((m) =>
+    m.registerCoiServiceWorker(import.meta.env.BASE_URL, import.meta.env.VITE_BACKEND),
+  );
+}
+
 export default app;

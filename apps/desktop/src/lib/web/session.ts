@@ -292,6 +292,23 @@ export class WebSession {
     this.onEvent({ type: "pd_state", data: { capturing: false } });
   }
 
+  /** A trigger session opens: a running PD capture stops, with the reason `trigger`
+   * (the meter refuses a capture during PDM [device]). */
+  async pdStopForTrigger(): Promise<void> {
+    if (!this.pdCapturing) return;
+    this.pdCapturing = false;
+    try {
+      await this.driver.stopPdCapture();
+    } finally {
+      this.onEvent({ type: "pd_state", data: { capturing: false, reason: "trigger" } });
+    }
+  }
+
+  /** Hold or release the stream's polling (a trigger session's automatic list). */
+  holdPolling(hold: boolean): void {
+    this.driver.holdPolling(hold);
+  }
+
   async pdDetails(index: number): Promise<PdDetails> {
     const details = this.pd?.details(BigInt(index)) as PdDetails | undefined;
     if (!details) throw usage(`PD record ${index} is no longer in the capture.`);

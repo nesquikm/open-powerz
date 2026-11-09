@@ -26,6 +26,8 @@ tauri-build = { version = "2.7.3", features = [] }
 powerz-protocol = { workspace = true, features = ["bulk", "hid", "cdc", "image-files"] }
 powerz-record.workspace = true
 powerz-sim.workspace = true
+# The trigger engine, shared with the web edition (FR W8SHXC).
+powerz-trigger.workspace = true
 tauri = { version = "2.12.4", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

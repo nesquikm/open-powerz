@@ -497,10 +497,7 @@ async fn trigger_request(
     let state = Arc::clone(&state);
     blocking(move || {
         let control = trigger_control(&state, device_id.as_deref())?;
-        let confirm = match (confirmed, remember) {
-            (true, Some(true)) => trigger::Confirm::YesRemember,
-            _ => confirmed.into(),
-        };
+        let confirm = trigger::Confirm::of(confirmed, remember.unwrap_or(false));
         control.request(request, confirm)
     })
     .await

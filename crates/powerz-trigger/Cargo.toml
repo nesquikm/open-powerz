@@ -1,0 +1,22 @@
+[package]
+name = "powerz-trigger"
+description = "Protocol trigger engine (PDM text session) for the POWER-Z KM003C / KM002C, shared by the desktop app and the web edition"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# Featureless on purpose (FR W8SHXC): no native transport, so the engine
+# builds for wasm32-unknown-unknown and runs in the browser.
+[dependencies]
+powerz-protocol.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+powerz-sim.workspace = true
+
+[lints]
+workspace = true

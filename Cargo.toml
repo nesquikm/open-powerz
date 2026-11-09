@@ -7,9 +7,10 @@ members = [
     "crates/powerz-record",
     "crates/powerz-cli",
     "crates/powerz-wasm",
+    "crates/powerz-trigger",
     "apps/desktop/src-tauri",
 ]
-default-members = ["crates/powerz-pd", "crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-record", "crates/powerz-cli", "crates/powerz-wasm"]
+default-members = ["crates/powerz-pd", "crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-record", "crates/powerz-cli", "crates/powerz-wasm", "crates/powerz-trigger"]
 
 [workspace.package]
 version = "0.11.1"
@@ -25,6 +26,7 @@ powerz-pd = { path = "crates/powerz-pd", version = "0.11.1" }
 powerz-protocol = { path = "crates/powerz-protocol", version = "0.11.1", default-features = false }
 powerz-sim = { path = "crates/powerz-sim", version = "0.11.1" }
 powerz-record = { path = "crates/powerz-record", version = "0.11.1" }
+powerz-trigger = { path = "crates/powerz-trigger", version = "0.11.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

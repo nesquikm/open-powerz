@@ -15,13 +15,15 @@ import type {
 } from "../backend";
 import { browserPickDirectory, type PickDirectory } from "./backupFolder";
 import { DemoCdcTransport, serialPipeOpener } from "./cdcTransport";
+import { pageIsolated } from "./coi";
 import { DemoTransport } from "./demoTransport";
 import { MeterDriver, openUsbOrOfferHid, type PowerzWasm } from "./driver";
 import { WEB_FEATURES, desktopOnlyError, type Features } from "./features";
 import { LogoFiles, browserPickLogoFile, type PickLogoFile } from "./logoFiles";
 import { SESSION_COMMANDS, WebSession, rateCodeOf, usage } from "./session";
-import type { SerialLike } from "./serial";
+import { portHeldError, type SerialLike } from "./serial";
 import type { WebTransport } from "./transport";
+import { TRIGGER_MAX_SPS, Triggers, type TriggerWorkerLike } from "./webTrigger";
 import { openWebHid, type HidDeviceLike } from "./webhid";
 import { POWERZ_VENDOR_ID, type UsbDeviceLike, type UsbLike } from "./webusb";
 
@@ -43,6 +45,20 @@ export interface WebBackendOptions {
   /** Opens the startup logo's file picker (FR W8SHXB); defaults to the browser's file
    * input. */
   pickLogoFile?: PickLogoFile;
+  /** Whether the page is cross-origin isolated, so a real meter's trigger engine gets
+   * shared memory (FR W8SHXC); defaults to the page's `crossOriginIsolated`. */
+  crossOriginIsolated?: boolean;
+  /** Starts the trigger engine's dedicated worker (FR W8SHXC); defaults to the bundled
+   * `triggerWorker.ts`. */
+  triggerWorker?: () => TriggerWorkerLike;
+  /** Where the page's `pagehide` and `beforeunload` are listened for (FR W8SHXC); defaults
+   * to `window`. */
+  pageEvents?: EventTarget | null;
+}
+
+/** The bundled trigger engine worker (FR W8SHXC). */
+function bundledTriggerWorker(): TriggerWorkerLike {
+  return new Worker(new URL("./triggerWorker.ts", import.meta.url), { type: "module" });
 }
 
 const notReady = (name: string): UiError => ({
@@ -319,6 +335,8 @@ class Sessions {
   private list: WebSession[] = [];
   private nextSessionId = 1;
   private wasm: PowerzWasm | null;
+  /** The trigger sessions (FR W8SHXC), one per meter. */
+  triggers: Triggers | null = null;
 
   constructor(
     private readonly devices: DeviceList,
@@ -400,11 +418,16 @@ class Sessions {
       wasm: w,
       download: this.download,
       pickDirectory: this.pickDirectory,
-      openSettingsPipe: demo
-        ? async () => new DemoCdcTransport(demo, () => Date.now())
-        : serialPipeOpener(this.webSerial, w),
+      openSettingsPipe: this.unlessTriggering(
+        deviceId,
+        demo
+          ? async () => new DemoCdcTransport(demo, () => Date.now())
+          : serialPipeOpener(this.webSerial, w),
+      ),
       onEnd: (s) => {
         this.list = this.list.filter((x) => x !== s);
+        // The meter is gone: its trigger session goes back to 5 V and closes.
+        void this.triggers?.closeFor(s.deviceId).catch(() => {});
       },
     });
     session.driver = await MeterDriver.connect({
@@ -413,7 +436,10 @@ class Sessions {
       rateCode,
       hid: opened.hid === true,
       ...(opened.model ? { model: opened.model } : {}),
-      onBatch: (samples) => session.onBatch(samples),
+      onBatch: (samples) => {
+        session.onBatch(samples);
+        this.triggers?.samples(deviceId, samples, session.rateSps);
+      },
       onTemp: (t) => session.onTemp(t),
       onError: (e) => session.onError(e),
     });
@@ -421,9 +447,29 @@ class Sessions {
     session.announce();
   }
 
+  /** `open`, refused with the desktop's busy-port wording while meter `deviceId`'s
+   * trigger session holds the serial port (FR W8SHXC). */
+  private unlessTriggering(
+    deviceId: string,
+    open: () => Promise<WebTransport>,
+  ): () => Promise<WebTransport> {
+    return () => (this.triggers?.holds(deviceId) ? Promise.reject(portHeldError()) : open());
+  }
+
   attach(onEvent: (event: BackendEvent) => void, deviceId?: string): AttachedSession | null {
     const s = deviceId === undefined ? this.current : this.of(deviceId);
     return s ? s.attach(onEvent) : null;
+  }
+
+  /** Refuses a rate meter `deviceId` may not take now: the queue stays at
+   * `TRIGGER_MAX_SPS` or less while its trigger session is open, as on the desktop. */
+  private checkRate(deviceId: string, rateSps: number): void {
+    rateCodeOf(rateSps);
+    if (rateSps > TRIGGER_MAX_SPS && this.triggers?.holds(deviceId)) {
+      throw usage(
+        `The rate stays at ${TRIGGER_MAX_SPS} samples/s or less while the trigger panel is open.`,
+      );
+    }
   }
 
   /** The session commands of `session()`, or the pending ones for anything else. */
@@ -438,7 +484,9 @@ class Sessions {
         name,
         (...args: unknown[]) => {
           try {
-            const command = open().commands()[name] as (...a: unknown[]) => Promise<unknown>;
+            const s = open();
+            if (name === "setRate") this.checkRate(s.deviceId, args[0] as number);
+            const command = s.commands()[name] as (...a: unknown[]) => Promise<unknown>;
             return command(...args);
           } catch (e) {
             return Promise.reject(e as UiError);
@@ -446,10 +494,11 @@ class Sessions {
         },
       ]),
     );
+    const trigger = this.triggers?.commands(() => session()?.deviceId ?? null) ?? {};
     const refused = Object.fromEntries(
       DESKTOP_ONLY_COMMANDS.map((name) => [name, () => Promise.reject(desktopOnlyError())]),
     );
-    return Object.assign(Object.create(pending()) as MeterCommands, live, refused);
+    return Object.assign(Object.create(pending()) as MeterCommands, live, trigger, refused);
   }
 }
 
@@ -531,6 +580,23 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
   const pickDirectory =
     options.pickDirectory === undefined ? browserPickDirectory() : options.pickDirectory;
   const sessions = new Sessions(devices, usb, options.wasm, download, serial, pickDirectory);
+  sessions.triggers = new Triggers({
+    module: () => sessions.module(),
+    webSerial: serial,
+    isolated: options.crossOriginIsolated ?? pageIsolated(),
+    startWorker: options.triggerWorker ?? bundledTriggerWorker,
+    // The meter's measurement session, which a trigger session changes as on the desktop.
+    stream: (deviceId) => {
+      const s = sessions.of(deviceId);
+      return s && !s.ended ? s : null;
+    },
+    pageEvents:
+      options.pageEvents === undefined
+        ? typeof window === "undefined"
+          ? null
+          : window
+        : options.pageEvents,
+  });
   const commands = sessions.commands(() => sessions.current);
   const logoFiles = new LogoFiles(options.pickLogoFile ?? browserPickLogoFile());
   // The desktop-only writes are among `commands`' refused ones (AC-QFTCX0.6).

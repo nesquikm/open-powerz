@@ -19,6 +19,8 @@ powerz-protocol = { workspace = true, features = ["image-files"] }
 # The desktop backup file name and CSV (FR W8SHXA).
 powerz-record.workspace = true
 powerz-sim.workspace = true
+# The trigger engine the desktop app runs (FR W8SHXC).
+powerz-trigger.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde-wasm-bindgen = "0.6.5"
 # The build:wasm script pins wasm-bindgen-cli to this exact version.

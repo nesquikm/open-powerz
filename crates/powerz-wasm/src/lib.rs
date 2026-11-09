@@ -10,6 +10,7 @@ mod logo;
 mod meter_reads;
 mod records_delete;
 mod settings_write;
+mod trigger;
 
 pub use builders::{
     auth_request, connect_request, get_data_request, memory_read_request, pd_poll_request,
@@ -33,3 +34,4 @@ pub use meter_reads::{
 };
 pub use records_delete::BackupFile;
 pub use settings_write::{SettingsWrite, cdc_frame_length};
+pub use trigger::{TriggerClockJs, TriggerEngine, TriggerPortJs, TriggerVbusJs};

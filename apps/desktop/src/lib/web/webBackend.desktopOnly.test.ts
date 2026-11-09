@@ -1,11 +1,11 @@
 /**
  * FR QFTCX0: what the web backend refuses.
  *
- * - AC-QFTCX0.6: firmware update and protocol triggering are desktop-only (settings
- *   writes run in the browser, AC-W8SHX9.7, and so do the record delete, AC-W8SHXA.6,
- *   and the startup logo, AC-W8SHXB.7): each web backend function for them rejects
- *   with a "desktop app" usage error and sends nothing to the meter; the backend's
- *   `features` map says so.
+ * - AC-QFTCX0.6: firmware update is desktop-only (settings writes run in the browser,
+ *   AC-W8SHX9.7, and so do the record delete, AC-W8SHXA.6, the startup logo,
+ *   AC-W8SHXB.7, and protocol triggering, AC-W8SHXC.7): its web backend function
+ *   rejects with a "desktop app" usage error and sends nothing to the meter; the
+ *   backend's `features` map says so.
  * - AC-QFTCX0.7: settings read, the offline record list and record download work only
  *   over the safe read set; otherwise they are desktop-only too.
  *
@@ -92,21 +92,31 @@ describe("desktop-only meter writes (AC-QFTCX0.6)", () => {
   });
 
   // Settings writes run in the browser since FR W8SHX9 (AC-W8SHX9.7), record deletes
-  // since FR W8SHXA (AC-W8SHXA.6).
-  it("triggering rejects without sending anything", async () => {
+  // since FR W8SHXA (AC-W8SHXA.6), triggering since FR W8SHXC (AC-W8SHXC.7).
+});
+
+describe("triggering runs in the browser (AC-W8SHXC.7)", () => {
+  it("is not the desktop-only refusal, and sends nothing over WebUSB", async () => {
     const { backend, dev, id } = await connected();
     for (const m of [backend, backend.meter(id)]) {
-      await expectDesktopOnly(() => m.triggerOpen(), dev);
-      await expectDesktopOnly(() => m.triggerDetect(), dev);
-      await expectDesktopOnly(() => m.triggerRequest({ protocol: "qc", volts: 9 }, true), dev);
-      await expectDesktopOnly(
+      const calls: (() => Promise<unknown>)[] = [
+        () => m.triggerDetect(),
+        () => m.triggerRequest({ protocol: "qc", volts: 9 }, true),
         () => m.triggerMessageSend({ sop: "sop", msg_type: 7, data_objects: [] }, true),
-        dev,
-      );
-      await expectDesktopOnly(() => m.triggerCableRead(), dev);
-      await expectDesktopOnly(() => m.triggerConsoleSend("pdm open", true), dev);
+        () => m.triggerCableRead(),
+        () => m.triggerConsoleSend("pdm open", true),
+      ];
+      for (const call of calls) {
+        const error = await settle(call(), 20_000).then(
+          () => null,
+          (e: unknown) => e as UiError,
+        );
+        // No session was opened: the desktop's refusal, not the desktop-only one.
+        expect(error?.kind).toBe("usage");
+        expect(error?.message).not.toMatch(/desktop app/i);
+        expect(error?.message).toBe("No trigger session is open.");
+      }
     }
-    // Over the whole session, every frame was a safe read or stream request.
     expect(sentNames(w, dev)).not.toContain("unknown");
     await settle(backend.disconnect());
   });

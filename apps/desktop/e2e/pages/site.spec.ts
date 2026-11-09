@@ -221,3 +221,15 @@ test("Remove on the demo meter's startup logo verifies in the browser (AC-W8SHXB
   await d.getByRole("button", { name: /^remove$/i }).click();
   await expect(v.getByRole("status")).toContainText(/verified|removed/i, { timeout: 30_000 });
 });
+
+test("Detect in the Trigger tab runs on the demo meter in the browser (AC-W8SHXC.1, .7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+  await page.getByRole("tab", { name: "Trigger" }).click();
+  const view = page.getByRole("tabpanel", { name: "Trigger" });
+  await expect(view).not.toContainText("Desktop app only");
+  await view.getByRole("button", { name: "Detect", exact: true }).click();
+  await expect(view.getByRole("region", { name: "Detection" })).toBeVisible({ timeout: 30_000 });
+});
