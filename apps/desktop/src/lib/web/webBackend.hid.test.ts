@@ -106,7 +106,11 @@ describe("HID meters in the device list (AC-QFTCWZ.3)", () => {
     const usb = new FakeUsbNavigator();
     usb.devices = [demoUsbDevice(w, "123456")];
     const hid = new FakeHidNavigator();
-    hid.devices = [demoHidDevice(w)];
+    // Another product than the WebUSB meter: one meter of the same product is listed
+    // once, over WebUSB (FR EHY1JX).
+    const hidMeter = demoHidDevice(w);
+    hidMeter.productId = 0x0062;
+    hid.devices = [hidMeter];
     const backend = await backendWith(usb, hid);
     const ids = (await settle(backend.listDevices())).map((d) => d.id);
     expect(ids.filter((id) => id.startsWith("webusb:"))).toHaveLength(1);

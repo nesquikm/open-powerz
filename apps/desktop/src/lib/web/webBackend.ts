@@ -172,6 +172,7 @@ function pending(): MeterCommands {
 
 /** The parts of a WebUSB `USBDevice` the device list reads. */
 interface UsbDeviceInfo {
+  productId?: number;
   serialNumber?: string | null;
   productName?: string | null;
 }
@@ -189,6 +190,7 @@ interface UsbNavigatorLike {
 /** The parts of a WebHID `HIDDevice` the device list reads. */
 interface HidDeviceInfo {
   vendorId: number;
+  productId?: number;
   productName?: string | null;
 }
 
@@ -236,6 +238,8 @@ const demoListing = (): DeviceListing => ({
 class DeviceList {
   private ids = new Map<object, string>();
   private next = { webusb: 1, webhid: 1 };
+  /** The ids of the meters with a live session, set once the sessions exist. */
+  liveIds: () => string[] = () => [];
 
   constructor(
     private readonly usb: UsbNavigatorLike | null,
@@ -296,9 +300,24 @@ class DeviceList {
   async list(): Promise<DeviceListing[]> {
     const meters = this.usb ? await this.usb.getDevices() : [];
     const hidMeters = await this.hidMeters();
+    // A meter permitted over both WebUSB and WebHID is one meter: per product id,
+    // leave out as many HID meters as there are WebUSB ones (AC-EHY1JX.1). A HID meter
+    // with a live session stays listed and counts against none (AC-EHY1JX.3).
+    const live = new Set(this.liveIds());
+    const usbPerProduct = new Map<number | undefined, number>();
+    for (const d of meters)
+      usbPerProduct.set(d.productId, (usbPerProduct.get(d.productId) ?? 0) + 1);
+    const extraHid = hidMeters.filter((d) => {
+      const id = this.ids.get(d);
+      if (id !== undefined && live.has(id)) return true;
+      const left = usbPerProduct.get(d.productId) ?? 0;
+      if (left === 0) return true;
+      usbPerProduct.set(d.productId, left - 1);
+      return false;
+    });
     return [
       ...meters.map((d) => this.listing(d)),
-      ...hidMeters.map((d) => this.hidListing(d)),
+      ...extraHid.map((d) => this.hidListing(d)),
       demoListing(),
     ];
   }
@@ -674,6 +693,7 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
     options.pickDirectory === undefined ? browserPickDirectory() : options.pickDirectory;
   const sqlJs = once(options.sqlJs ?? loadBrowserSqlJs);
   const sessions = new Sessions(devices, usb, options.wasm, download, serial, pickDirectory, sqlJs);
+  devices.liveIds = () => sessions.ids();
   sessions.triggers = new Triggers({
     module: () => sessions.module(),
     webSerial: serial,
