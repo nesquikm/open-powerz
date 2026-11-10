@@ -94,6 +94,11 @@ export interface SerialLink {
 
 /** Open `port` at 115200 baud and wait out the first-frame delay. */
 export async function openSerialLink(port: SerialPortLike): Promise<SerialLink> {
+  // This page still holds the port (an earlier close did not finish): its own streams
+  // are still there. Close it first, so the open below takes it again.
+  if (port.readable !== null && port.writable !== null) {
+    await port.close().catch(() => {});
+  }
   try {
     await port.open({ baudRate: BAUD_RATE });
   } catch (e) {

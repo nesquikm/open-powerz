@@ -8,7 +8,6 @@
  */
 
 import type { DemoTransport } from "./demoTransport";
-import type { PowerzWasm } from "./driver";
 import {
   noWebSerialError,
   openSerialLink,
@@ -54,54 +53,62 @@ function concat(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-/** The wasm export that frames CDC replies. */
+/** FR X3H3JY: the wasm `CdcReplyReader`, the desktop app's CDC demux keeping only
+ * whole binary replies (stream frames, text lines and noise are dropped). */
+export interface CdcReplyReaderLike {
+  push(bytes: Uint8Array): void;
+  nextReply(): Uint8Array | undefined;
+  free?(): void;
+}
+
+/** The wasm export that frames CDC replies (FR X3H3JY). */
 export interface CdcFraming {
-  cdcFrameLength(buf: Uint8Array): number | undefined;
+  CdcReplyReader: new () => CdcReplyReaderLike;
 }
 
 /** The settings pipe over a Web Serial link. */
 export class CdcPipe implements WebTransport {
-  private buffer = new Uint8Array(0);
+  private readonly reader: CdcReplyReaderLike;
+  private freed = false;
 
   constructor(
-    private readonly wasm: CdcFraming,
+    wasm: CdcFraming,
     private readonly link: SerialLink,
-  ) {}
+  ) {
+    this.reader = new wasm.CdcReplyReader();
+  }
 
   async transact(frame: Uint8Array, timeoutMs: number): Promise<Uint8Array> {
     if (!isSettingsFrame(frame)) throw notSafeError();
     // Bytes still held answer an earlier request that timed out (native CDC
     // `drain_demux` before a request): drop them.
     // FR CJ3QC9: another program's replies among them mean it shares the port.
-    const held = this.link.drain ? await this.takeHeld() : new Uint8Array(0);
+    if (this.link.drain) this.reader.push(await this.takeHeld());
     this.link.drain?.();
-    this.buffer = new Uint8Array(0);
-    if (this.holdsForeignReply(held)) throw portHeldError();
+    if (this.dropHeldReplies()) throw portHeldError();
     await this.link.write(frame);
     return this.read(timeoutMs);
   }
 
-  /** The next complete frame; rejects `timeout` when none completes in `timeoutMs`,
+  /** The next whole reply; rejects `timeout` when none completes in `timeoutMs`,
    * and with the in-use error on a reply the settings pipe never asks for (FR CJ3QC9). */
   async read(timeoutMs: number): Promise<Uint8Array> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const n = this.buffer.length > 0 ? this.wasm.cdcFrameLength(this.buffer) : undefined;
-      if (n !== undefined && n > 0) {
-        const out = this.buffer.slice(0, n);
-        this.buffer = this.buffer.slice(n);
+      const out = this.reader.nextReply();
+      if (out !== undefined) {
         if (isForeignReply(out)) throw portHeldError();
         return out;
       }
       const left = deadline - Date.now();
       if (left <= 0) throw timeoutError();
-      this.buffer = concat([this.buffer, await this.link.read(left)]);
+      this.reader.push(await this.link.read(left));
     }
   }
 
-  /** The buffer plus every byte the link already holds, without waiting. */
+  /** Every byte the link already holds, without waiting. */
   private async takeHeld(): Promise<Uint8Array> {
-    const parts: Uint8Array[] = [this.buffer];
+    const parts: Uint8Array[] = [];
     for (;;) {
       try {
         parts.push(await this.link.read(0));
@@ -112,19 +119,23 @@ export class CdcPipe implements WebTransport {
     return concat(parts);
   }
 
-  /** Whether the complete frames in `bytes` include another program's reply. */
-  private holdsForeignReply(bytes: Uint8Array): boolean {
-    let rest = bytes;
-    for (;;) {
-      const n = rest.length > 0 ? this.wasm.cdcFrameLength(rest) : undefined;
-      if (n === undefined || n <= 0) return false;
-      if (isForeignReply(rest.slice(0, n))) return true;
-      rest = rest.slice(n);
+  /** Drops the whole replies the reader holds; whether one is another program's. */
+  private dropHeldReplies(): boolean {
+    let foreign = false;
+    for (let r = this.reader.nextReply(); r !== undefined; r = this.reader.nextReply()) {
+      if (isForeignReply(r)) foreign = true;
     }
+    return foreign;
   }
 
   async close(): Promise<void> {
-    await this.link.close();
+    try {
+      await this.link.close();
+    } finally {
+      // Once: a second close must not free the wasm object again.
+      if (!this.freed) this.reader.free?.();
+      this.freed = true;
+    }
   }
 }
 
@@ -132,7 +143,7 @@ export class CdcPipe implements WebTransport {
  * Serial (`serial`, `null` without it), picked on first use and reused once granted. */
 export function serialPipeOpener(
   serial: SerialLike | null,
-  wasm: Pick<PowerzWasm, "cdcFrameLength">,
+  wasm: CdcFraming,
 ): () => Promise<WebTransport> {
   return async () => {
     if (!serial) throw noWebSerialError();

@@ -15,6 +15,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { CdcReplyReaderLike } from "./cdcTransport";
 import type { PowerzWasm } from "./driver";
 import { loadWasm } from "./testWasm.test";
 
@@ -170,6 +171,7 @@ export interface SettingsWriteLike {
 export interface WriteWasm {
   SettingsWrite: new (changes: Record<string, number>) => SettingsWriteLike;
   cdcFrameLength(buf: Uint8Array): number | undefined;
+  CdcReplyReader: new () => CdcReplyReaderLike;
 }
 
 export const writeWasm = (w: PowerzWasm): WriteWasm => w as unknown as WriteWasm;

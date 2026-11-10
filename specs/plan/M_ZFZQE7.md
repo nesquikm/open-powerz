@@ -51,6 +51,8 @@ codename: Full Tab
 | [62VEDM](../frs/62VEDM.md) | Some abbreviations have no glossary popover (bug) | n/a |
 | [JFRPME](../frs/JFRPME.md) | The browser's session history forgets the temperature (bug) | n/a |
 | [EAKFEC](../frs/EAKFEC.md) | Open a PD capture and import a vendor PD log in the browser | n/a |
+| [X3H3JY](../frs/X3H3JY.md) | A repeated settings change in the browser fails although it landed (bug) | n/a |
+| [Z99166](../frs/Z99166.md) | Three small web edition snags from the parity HIL (bug) | n/a |
 
 Build order: the table's order. Triggering goes last of the features: it moves the desktop trigger engine into a shared crate and needs a cross-origin-isolated page.
 
@@ -97,6 +99,10 @@ Build order: the table's order. Triggering goes last of the features: it moves t
    verify: `bun run test` (session export suites).
 21. Shared PD capture and vendor log rules in powerz-protocol; PD Open capture and Import vendor log in the browser (pdcap via wasm, .sqlite via sql.js); desktop-only sweep — EAKFEC
    verify: `cargo test -p powerz-protocol -p powerz-wasm -p open-powerz-desktop`; `bun run test` (PD open suites).
+22. Settings pipe reads the serial port through the CDC demux; SETTINGS re-read on a bad block; own-open port reopened — X3H3JY
+   verify: `cargo test -p powerz-wasm`; `bun run test` (settings pipe, serial and driver settings suites).
+23. HID logo Read disabled; TEMP judged on arrival; a new pick supersedes a pending one — Z99166
+   verify: `bun run test` (logo, session export and PD file suites).
 
 **Gate:** CLAUDE.md gating rule, with `bun run build:wasm` before `bun run test`.
 

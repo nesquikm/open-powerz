@@ -18,6 +18,7 @@ import type {
   UiError,
 } from "../backend";
 import { ERROR_KINDS } from "../errorKinds";
+import type { CdcReplyReaderLike } from "./cdcTransport";
 import type { DemoMeterModule } from "./demoTransport";
 import type { PdFilesWasm } from "./pdFiles";
 import { hidOnlyBasicText } from "./features";
@@ -74,6 +75,8 @@ export interface PowerzWasm extends DemoMeterModule, PdFilesWasm {
   SettingsWrite: new (changes: Record<string, number>) => SettingsWriteLike;
   /** Length of the first complete CDC frame in `buf`, `undefined` while incomplete. */
   cdcFrameLength(buf: Uint8Array): number | undefined;
+  /** FR X3H3JY: whole binary replies off the meter's serial port (the CDC demux). */
+  CdcReplyReader: new () => CdcReplyReaderLike;
   /** FR W8SHXB: the preview of a picture file's bytes (a raw logo file when `isBin`),
    * as the desktop app's; no picture throws `usage`. */
   logoPreview(bytes: Uint8Array, isBin: boolean, alpha: boolean): LogoPreview;
@@ -243,6 +246,9 @@ const CONNECT_TIMEOUT_MS = 2_000;
 /** The first CONNECT's wait (native `FIRST_CONNECT_TIMEOUT`); a miss recovers once. */
 const FIRST_CONNECT_TIMEOUT_MS = 500;
 const REPLY_TIMEOUT_MS = 1_000;
+/** FR X3H3JY: SETTINGS reads per step of a settings write when a reply fails its
+ * block check. */
+const SETTINGS_READ_TRIES = 3;
 /** Mismatched-id replies discarded before a request fails (native `MAX_STALE_REPLIES`). */
 const MAX_STALE_REPLIES = 3;
 /** A memory read's confirmation, before its encrypted data. */
@@ -837,10 +843,24 @@ export class MeterDriver {
     pipe: WebTransport,
     write: SettingsWriteLike,
   ): Promise<MeterSettings> {
-    const read = async () =>
-      write.takeRead(
-        await this.pipeExchange(pipe, write.readRequest(this.nextId()), REPLY_TIMEOUT_MS),
-      );
+    // FR X3H3JY: a reply that fails its block check (`malformed`, the step stays
+    // where it was) is read again with a new request, up to 3 reads per step.
+    const read = async () => {
+      for (let attempt = 1; ; attempt++) {
+        const reply = await this.pipeExchange(
+          pipe,
+          write.readRequest(this.nextId()),
+          REPLY_TIMEOUT_MS,
+        );
+        try {
+          write.takeRead(reply);
+          return;
+        } catch (e) {
+          const kind: unknown = isUiError(e) ? e.kind : undefined;
+          if (attempt >= SETTINGS_READ_TRIES || kind !== "malformed") throw e;
+        }
+      }
+    };
     await read();
     await read();
     const request = write.writeRequest(this.nextId());
