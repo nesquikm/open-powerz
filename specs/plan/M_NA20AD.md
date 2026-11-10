@@ -24,6 +24,7 @@ codename: Loose Ends
 - The CLI watch over CDC while the browser streams over WebUSB.
 - The recording rows type, and the unasked PD offer list.
 - An independent docs review: README and docs match the app; new README screenshot.
+- HIL12 findings: a snapshot timeout in the CLI watch, the silent queue stall while the CLI polls over CDC.
 - Docs review follow-ups (PR #18): stats scope under a zoomed File chart, the live chart buffer wording, one name for the web edition.
 
 **Out of scope:** the Import vendor log known issue (no real vendor file exists; stays in Known issues); any meter command outside the CLI CDC read path; meter runs (a HIL run follows).
@@ -45,6 +46,8 @@ codename: Loose Ends
 | [2VPF6P](../frs/2VPF6P.md) | The recorder's chart memory line reads like the session history (bug) | n/a |
 | [Z9PC5A](../frs/Z9PC5A.md) | The README says browser edition where the rest says web edition (bug) | n/a |
 | [EWEV1Z](../frs/EWEV1Z.md) | The stats scope toggle hides which scope is on (bug) | n/a |
+| [NVN6M7](../frs/NVN6M7.md) | A snapshot timeout ends the CLI watch (bug) | n/a |
+| [NVN6M8](../frs/NVN6M8.md) | The app chart freezes without a word while the CLI polls over CDC (bug) | n/a |
 
 Build order: the table's order (independent).
 
@@ -75,3 +78,7 @@ Build order: the table's order (independent).
    verify: `bun run test`.
 13. A segmented Stats scope toggle with a filled chosen segment — EWEV1Z
    verify: `bun run test` and the stats-scope Playwright spec on WebKit.
+14. A snapshot timeout skips one watch refresh instead of ending it — NVN6M7
+   verify: `cargo test -p powerz-cli`.
+15. Empty queue polls for 2 s raise a stall notice in both editions — NVN6M8
+   verify: `bun run test` and `cargo test -p open-powerz-desktop`.
