@@ -4,6 +4,39 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-11-10 — "Full Tab"
+
+### Added
+- Web edition: meter settings and offline records over WebUSB: read the settings, then list, download and open the meter's own recordings (W8SHX8)
+- Web edition: change the meter's settings over Web Serial, with two matching reads, one write and a read-back check (W8SHX9)
+- Web edition: delete offline records after a CSV backup to a folder you pick and a typed confirmation (W8SHXA)
+- Web edition: startup logo preview, upload, remove and read, each write checked by reading it back (W8SHXB)
+- Web edition: protocol triggering over Web Serial with the desktop's own trigger engine, a confirmation above 5 V and "Don't ask again" up to 20 V (W8SHXC)
+- Web edition: Open recording reads a CSV or `.db` recording in the browser, no meter needed (AHTZW3)
+- Web edition: open and save PD capture files (`.pdcap`) and import a vendor PD log in the PD analyzer (EAKFEC)
+- Web edition: an (i) beside the device menu explains WebUSB, HID and Web Serial and names the current connection (60QB2S)
+
+### Changed
+- Docs: the browser-support page lists every feature with the interface it needs, and the README names what stays desktop-only (W8SHXF)
+
+### Fixed
+- Web edition: Export .db downloads a `.db` of the session, and both session exports fill the TEMP column (AHTZW2, JFRPME)
+- Web edition settings changes: another program on the serial port is caught before the write, and a change that landed is no longer reported as failed (CJ3QC9, CJ3QCA, X3H3JY)
+- Web edition trigger: a confirmed request reaches the engine, the first request after Detect no longer times out, and a request after a failed PD entry waits for fresh offers (K4DWCF, AHTZW1, AHTZW4)
+- Web edition: Refresh lists a record made after connect, the logo tab over HID gives the HID reason and clears on reconnect, the stored-logo read shows progress, and the rate picker and record totals match the meter (CJ3QCB, CJ3QCC, CJ3QCD)
+- Web edition: Read is disabled on the logo tab over HID, TEMP is judged when a batch arrives, and a new file pick replaces one that never answered (Z99166)
+- Rate keys over HID no longer try to change the rate (W8SHXD)
+- Glossary popovers for VFCP, TFCP and SFCP and the other abbreviations that had none (62VEDM)
+- Release builds cache the bundler's tools and retry packaging once when the download times out (W8SHXE)
+
+### Known issues
+- Cancel can't interrupt a large Open recording parse in the browser
+- The first ~20 rows (0.4 s) of a web session after a HID↔USB reconnect have an empty TEMP
+- `powerz --transport cdc watch` exits by itself while the browser streams over WebUSB
+- Import vendor log is tested on synthetic files only; it has not run against a real vendor PD log yet
+
+Total test count at release: 7488 tests, 0 failures, 0 errors.
+
 ## [0.11.1] — 2026-11-09 — "Fine Print"
 
 ### Fixed

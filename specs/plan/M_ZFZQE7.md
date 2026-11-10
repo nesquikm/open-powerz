@@ -7,6 +7,7 @@ kickoff_branch: feat/web-parity
 frozen_at: null
 migration: none
 codename: Full Tab
+shipped_in: v0.12.0
 ---
 
 # Implementation Plan
@@ -107,3 +108,12 @@ Build order: the table's order. Triggering goes last of the features: it moves t
 **Gate:** CLAUDE.md gating rule, with `bun run build:wasm` before `bun run test`.
 
 **Device rules:** the developer does not touch the meter. Writes (settings, record delete, logo) and triggering above 5 V run on the real meter only in the HIL tester's tab, each first run with the user's OK; triggering above 5 V only in the wall-charger setup. Firmware update stays out of the browser.
+
+**Known follow-ups (not fixed in this milestone):**
+- AHTZW3: Cancel can't interrupt a big parse in Open recording.
+- AHTZW4: an unasked `pdo:` block isn't refreshed after a failed PD entry (safe: a request is still checked against the latest offers).
+- The `RecordingRows` type lacks `temp_c`.
+- Up to ~20 empty TEMP rows in the first 0.4 s after a HID↔USB reconnect (qa-runs/WEB.parity-hil4-20261110-1037, P14).
+- The CLI `powerz --transport cdc watch` exits by itself while the browser streams over WebUSB (poll source: `unexpected reply to GET_DATA`; `--source cdc`: after ≈25–40 s).
+- Not verified on hardware: Import vendor log (AC-EAKFEC.3), no vendor PD .sqlite at hand.
+- The desktop README screenshot (`docs/images/desktop.png`) waits for a new capture.

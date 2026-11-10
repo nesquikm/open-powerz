@@ -145,7 +145,7 @@ See [Use the web edition](docs/how-to/web-edition.md) for the details.
 
 ### Web edition
 
-- Use open-powerz in Chrome or Edge with nothing to install: live readings, charts, stats, PD capture, CSV recording, session export, Open recording, meter settings, offline records, the startup logo, protocol triggering and the demo meter over WebUSB and Web Serial, with a WebHID fallback for basic readings ([use the web edition](docs/how-to/web-edition.md))
+- Use open-powerz in Chrome or Edge with nothing to install: live readings, charts, stats, PD capture, PD capture files, CSV recording, session export, Open recording, meter settings, offline records, the startup logo, protocol triggering and the demo meter over WebUSB and Web Serial, with a WebHID fallback for basic readings ([use the web edition](docs/how-to/web-edition.md))
 - See what WebUSB, HID and Web Serial each give, and which one the session uses, in a short note beside the web device menu ([connection note](docs/how-to/web-edition.md#the-i-button-beside-the-device-menu))
 
 ### Demo device and simulator
