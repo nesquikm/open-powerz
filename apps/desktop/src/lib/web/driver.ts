@@ -316,7 +316,12 @@ export interface RecordingRows {
   /** The file's own last CHARGE / ENERGY, when it has one. */
   charge_ah?: number | null;
   energy_wh?: number | null;
-  samples: MeterSample[];
+  samples: RecordingSample[];
+}
+
+/** One recording row: the measurement plus its TEMP in degrees Celsius (`null` when empty). */
+export interface RecordingSample extends MeterSample {
+  temp_c: number | null;
 }
 
 /** One PD table row as the wasm `PdDecoder` gives it. */

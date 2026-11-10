@@ -506,9 +506,7 @@ fn arg<T: for<'de> Deserialize<'de>>(value: JsValue) -> Result<T, BindError> {
 
 /// `value` for JS, every `None` and `()` as `null` (as Tauri answers).
 fn out<T: Serialize>(value: Result<T, BindError>) -> Result<JsValue, BindError> {
-    value?
-        .serialize(&serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true))
-        .map_err(|e| BindError::new("internal", e.to_string()))
+    crate::decoders::to_js_view(&value?)
 }
 
 #[wasm_bindgen]

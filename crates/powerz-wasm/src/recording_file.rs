@@ -12,7 +12,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::BindError;
-use crate::decoders::{QueueSample, to_js};
+use crate::decoders::{QueueSample, to_js_view};
 
 /// The rows a recording file opens with.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -103,7 +103,7 @@ fn opened_rows(rules: &FileRows, samples: Vec<OpenedSample>) -> Result<OpenedRow
 /// [`read_recording_csv`] for JS.
 #[wasm_bindgen(js_name = readRecordingCsv)]
 pub fn read_recording_csv_js(bytes: &[u8]) -> Result<JsValue, BindError> {
-    to_js(&read_recording_csv(bytes)?)
+    to_js_view(&read_recording_csv(bytes)?)
 }
 
 /// A recorder CSV read a slice of lines at a time, so a big file leaves the
@@ -149,7 +149,7 @@ impl CsvRecording {
 
     /// The rows kept, as [`OpenedRows`]; a file with none is refused.
     pub fn finish(self) -> Result<JsValue, BindError> {
-        to_js(&self.into_rows()?)
+        to_js_view(&self.into_rows()?)
     }
 }
 
@@ -273,7 +273,7 @@ impl DbRecording {
 
     /// The rows kept, as [`OpenedRows`]; a table with none is refused.
     pub fn finish(self) -> Result<JsValue, BindError> {
-        to_js(&self.into_rows()?)
+        to_js_view(&self.into_rows()?)
     }
 }
 
