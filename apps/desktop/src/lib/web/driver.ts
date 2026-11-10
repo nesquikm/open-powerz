@@ -111,6 +111,20 @@ export interface PowerzWasm extends DemoMeterModule, PdFilesWasm {
     columnsOf: (table: string) => string[],
   ): string | undefined;
   DbRecording: new () => DbRecordingLike;
+  CsvRecording: new (bytes: Uint8Array) => CsvRecordingLike;
+}
+
+/** The wasm `CsvRecording` (FR 3B70S6): a recorder CSV read a slice of lines at a time,
+ * ending with exactly `readRecordingCsv`'s rows. The constructor throws a `usage` error
+ * for a file that is no recorder CSV. */
+export interface CsvRecordingLike {
+  /** Takes in at most `maxLines` lines; true while lines may remain. */
+  step(maxLines: number): boolean;
+  /** Bytes read so far. */
+  bytesRead(): number;
+  /** The rows kept; consumes the reader. Throws a `usage` error when none was. */
+  finish(): RecordingRows;
+  free(): void;
 }
 
 /** The wasm `DbRecording` (FR AHTZW3): a `.db` data table's rows, by the desktop's rules. */
@@ -261,6 +275,19 @@ const SNAPSHOT_PERIOD_MS = 100;
 /** Least time between two ADC snapshots while the queue streams, for the chip
  * temperature (native `SnapshotCadence::PERIOD`). */
 const QUEUE_SNAPSHOT_PERIOD_MS = 500;
+/** Unheld polling time with only empty queue replies before the stream counts as
+ * stalled (FR NVN6M8): the meter stops filling the queue while another program polls it
+ * over CDC `[device]`. */
+const STALL_AFTER_MS = 2_000;
+/** Most time one empty poll adds toward the stall beyond its period, so a poll that
+ * waited behind a hold or a settings write counts as one ordinary poll. */
+const STALL_POLL_SLACK_MS = 100;
+/** Polling time a run of polls with samples must span to end a stall (FR EHY1JW): the
+ * meter hands over a stray sample now and then mid-stall `[device]`. */
+const RECOVER_AFTER_MS = 1_000;
+/** Most polling time between two polls with samples in one recovery run (FR EHY1JW);
+ * fits the 2 SPS stream, which returns samples every 500 ms. */
+const RECOVER_GAP_MS = 750;
 /** PD sniffer poll period (native `PdSniffer::POLL_PERIOD`). */
 const PD_POLL_PERIOD_MS = 5;
 /** Each PD poll also asks for the ADC snapshot (the sniffer's `with_adc` option). */
@@ -302,7 +329,12 @@ export interface RecordingRows {
   /** The file's own last CHARGE / ENERGY, when it has one. */
   charge_ah?: number | null;
   energy_wh?: number | null;
-  samples: MeterSample[];
+  samples: RecordingSample[];
+}
+
+/** One recording row: the measurement plus its TEMP in degrees Celsius (`null` when empty). */
+export interface RecordingSample extends MeterSample {
+  temp_c: number | null;
 }
 
 /** One PD table row as the wasm `PdDecoder` gives it. */
@@ -310,6 +342,9 @@ export type PdRowView = { name: string } & Record<string, unknown>;
 
 /** How the session measures: the ADC queue, or ADC snapshots when auth failed. */
 export type MeterMode = "queue" | "snapshot";
+
+/** How a queue-mode snapshot read went, for the `[temp]` debug line. */
+type TempOutcome = "ok" | "none" | "failed";
 
 export interface MeterDriverOptions {
   wasm: PowerzWasm;
@@ -322,6 +357,9 @@ export interface MeterDriverOptions {
   onTemp?: (tempC: number | null) => void;
   /** The session ended on a transfer failure; called at most once. */
   onError: (error: UiError) => void;
+  /** FR NVN6M8: the queue stopped filling (`true`, after `STALL_AFTER_MS` of unheld
+   * polling with no samples) or samples came back (`false`); once per change. */
+  onStall?: (stalled: boolean) => void;
   /** Random source for the auth nonce; defaults to `crypto.getRandomValues`. */
   random?: () => bigint;
   /** A WebHID session (AC-QFTCWZ.3): ADC snapshots only, so no CONNECT, device info,
@@ -422,10 +460,22 @@ export class MeterDriver {
   private pd: { decoder: PdDecoderLike; owned: boolean } | null = null;
   private readonly startedAt = Date.now();
   private lastSnapshotMs: number | null = null;
+  /** The last queue-mode snapshot outcome a `[temp]` debug line reported. */
+  private lastTempOutcome: TempOutcome = "ok";
   private rate: number;
   /** Holds on the stream's polling (a trigger session's automatic list); polls skip
    * while any is held (native `Worker::hold_polling`). */
   private pollHolds = 0;
+  /** FR NVN6M8 / EHY1JW: when the last queue poll ended, the unheld polling time since
+   * the stream began (each poll adds at most one period plus slack), where on that clock
+   * the empty run began (null after samples), the recovery run's start and last poll
+   * with samples while stalled, and whether `onStall(true)` was sent. */
+  private lastPollAt: number | null = null;
+  private pollClockMs = 0;
+  private emptyFrom: number | null = null;
+  private recoverFrom: number | null = null;
+  private lastSamplesAt: number | null = null;
+  private stalled = false;
   /** The UID block read at open, kept for a later level-1 auth. */
   private uidBlock: Uint8Array | null = null;
   /** The offline records book, made on the first list and freed when the session ends. */
@@ -704,12 +754,55 @@ export class MeterDriver {
     try {
       const samples = await this.exclusive(() => this.readSamples());
       if (this.ended) return;
+      if (this.mode === "queue") this.trackStall(samples.length > 0);
       if (samples.length > 0) this.o.onBatch(samples);
     } catch (e) {
       this.fail(e);
       return;
     }
     this.schedulePoll(Math.max(1, began + this.periodMs() - Date.now()));
+  }
+
+  /** FR NVN6M8 / EHY1JW: advance the polling clock by one queue poll, at most one
+   * period plus some slack, so time spent held or waiting for the link does not count.
+   * 2 s of empty polls start a stall; it ends once polls with samples span 1 s of
+   * polling (each counting its own stretch), with at most 750 ms between two of them. */
+  private trackStall(gotSamples: boolean): void {
+    const now = Date.now();
+    const step =
+      this.lastPollAt === null
+        ? 0
+        : Math.min(now - this.lastPollAt, this.periodMs() + STALL_POLL_SLACK_MS);
+    this.pollClockMs += step;
+    this.lastPollAt = now;
+    const clock = this.pollClockMs;
+    if (gotSamples) {
+      this.emptyFrom = null;
+      if (!this.stalled) return;
+      if (
+        this.recoverFrom === null ||
+        this.lastSamplesAt === null ||
+        clock - this.lastSamplesAt > RECOVER_GAP_MS
+      ) {
+        // The run covers this poll's own stretch of polling, not just its end.
+        this.recoverFrom = clock - step;
+      }
+      this.lastSamplesAt = clock;
+      if (clock - this.recoverFrom >= RECOVER_AFTER_MS) {
+        this.stalled = false;
+        this.recoverFrom = null;
+        this.lastSamplesAt = null;
+        this.o.onStall?.(false);
+      }
+      return;
+    }
+    this.emptyFrom ??= clock;
+    if (!this.stalled && clock - this.emptyFrom >= STALL_AFTER_MS) {
+      this.stalled = true;
+      this.recoverFrom = null;
+      this.lastSamplesAt = null;
+      this.o.onStall?.(true);
+    }
   }
 
   private async readSamples(): Promise<MeterSample[]> {
@@ -757,10 +850,21 @@ export class MeterDriver {
     }
     this.lastSnapshotMs = now;
     try {
-      await this.readAdc();
+      const adc = (await this.readAdc()) as { temp_c?: number | null };
+      if (typeof adc.temp_c === "number") this.logTempOutcome("ok");
+      else this.logTempOutcome("none", "[temp] the snapshot read no temperature");
     } catch (e) {
-      if (asUiError(e).kind === "disconnected") throw e;
+      const err = asUiError(e);
+      if (err.kind === "disconnected") throw e;
+      this.logTempOutcome("failed", `[temp] the snapshot failed: ${err.message}`);
     }
+  }
+
+  /** One debug line per change of the snapshot outcome; a good one logs nothing. */
+  private logTempOutcome(outcome: TempOutcome, line?: string): void {
+    if (outcome === this.lastTempOutcome) return;
+    this.lastTempOutcome = outcome;
+    if (line) console.debug(line);
   }
 
   /** Restart the queue at `rateCode`: stop it, then start it at the new rate. Refused

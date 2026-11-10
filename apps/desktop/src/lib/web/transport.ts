@@ -1,5 +1,5 @@
 /**
- * FR QFTCWZ: the browser edition's transport seam. One interface, three
+ * FR QFTCWZ: the web edition's transport seam. One interface, three
  * implementations: WebUSB (`webusb.ts`), WebHID (`webhid.ts`) and the demo meter
  * (`demoTransport.ts`). Every failure rejects with a `UiError`-shaped value.
  */

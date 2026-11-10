@@ -263,6 +263,15 @@ pub struct RangeStats {
     pub ibus_avg_a: f64,
     /// Mean of VBUS × IBUS over the records, W.
     pub power_avg_w: f64,
+    /// Lowest and highest VBUS over the records, V (a folded block's kept ones).
+    pub vbus_min_v: f64,
+    pub vbus_max_v: f64,
+    /// Lowest and highest IBUS over the records, A (signed).
+    pub ibus_min_a: f64,
+    pub ibus_max_a: f64,
+    /// Lowest and highest VBUS × IBUS over the records, W (signed).
+    pub power_min_w: f64,
+    pub power_max_w: f64,
 }
 
 /// What segment marks follow (FR AXHK2T, AC-AXHK2T.4).
@@ -566,6 +575,13 @@ impl Records {
         }
         let (mut charge_ah, mut energy_wh) = (0.0, 0.0);
         let (mut samples, mut v_sum, mut i_sum, mut p_sum) = (0u64, 0.0, 0.0, 0.0);
+        // Min and max of VBUS, IBUS and Power, in that order.
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        let mut extend = |k: usize, min: f64, max: f64| {
+            lo[k] = lo[k].min(min);
+            hi[k] = hi[k].max(max);
+        };
         // The folded part, block by block, with the stretches between them.
         let mut prev: Option<Sample> = None;
         for b in self.blocks_between(i0, i1) {
@@ -580,6 +596,13 @@ impl Records {
             v_sum += b.sum[series_index(Series::Vbus)];
             i_sum += b.sum[series_index(Series::Ibus)];
             p_sum += b.sum[series_index(Series::Power)];
+            for (k, series) in [Series::Vbus, Series::Ibus, Series::Power]
+                .into_iter()
+                .enumerate()
+            {
+                let x = series_index(series);
+                extend(k, f64::from(b.min[x]), f64::from(b.max[x]));
+            }
             prev = Some(b.last);
         }
         // The full-resolution part.
@@ -599,6 +622,9 @@ impl Records {
             v_sum += v;
             i_sum += a;
             p_sum += v * a;
+            extend(0, v, v);
+            extend(1, a, a);
+            extend(2, v * a, v * a);
         }
         // The part from `t0` to the first record in range, and from the last
         // one to `t1`, each within one run (none from inside a block).
@@ -644,6 +670,12 @@ impl Records {
             vbus_avg_v: v_sum / n,
             ibus_avg_a: i_sum / n,
             power_avg_w: p_sum / n,
+            vbus_min_v: lo[0],
+            vbus_max_v: hi[0],
+            ibus_min_a: lo[1],
+            ibus_max_a: hi[1],
+            power_min_w: lo[2],
+            power_max_w: hi[2],
         })
     }
 

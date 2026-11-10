@@ -265,6 +265,12 @@ export class WebSession {
     return t;
   }
 
+  /** The driver's queue stall (FR NVN6M8), out as a `stall` event. */
+  onStall(stalled: boolean): void {
+    if (this.ended) return;
+    this.onEvent({ type: "stall", data: { stalled } });
+  }
+
   /** The driver failed: the session is over, with `error`. */
   onError(error: UiError): void {
     this.end(error);

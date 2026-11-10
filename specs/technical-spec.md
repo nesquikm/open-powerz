@@ -5,7 +5,7 @@
 ### System Overview
 
 A Rust cargo workspace with seven crates and one web UI, shipped as the desktop app and as a
-browser edition on GitHub Pages:
+web edition on GitHub Pages:
 
 - `powerz-protocol` (library): everything that knows the device. Transports (vendor bulk via
   `nusb`, HID via `hidapi`, CDC via `serialport`) behind a transport trait; frame building and
@@ -48,7 +48,7 @@ browser edition on GitHub Pages:
   again", VBUS watch, back to 5 V) shared by the desktop app's trigger thread and the browser;
   pure Rust over a `Read + Write` port and the session `Clock`, builds for wasm32.
 - Web UI (`apps/desktop/src`): Svelte 5 + TypeScript, uPlot charts, built by Vite and embedded
-  into the Tauri binary. The same UI is the browser edition: `VITE_BACKEND=web` swaps the Tauri
+  into the Tauri binary. The same UI is the web edition: `VITE_BACKEND=web` swaps the Tauri
   backend for `apps/desktop/src/lib/web/` (WebUSB transport, a WebHID fallback limited to the ADC
   snapshot, a TS session driver over the wasm
   builders and decoders, and the demo meter). `bun run build:pages` builds it with base
@@ -147,7 +147,7 @@ Defined per FR. Core types: `Frame`/`MainHeader`/`SectionHeader`,
 ### State Management
 Device sessions live in the Rust backend (one worker per device, one request in flight). The
 UI holds view state in Svelte 5 runes and receives measurement batches over a Channel. In the
-browser edition the session is the TS driver in `lib/web/driver.ts` (same order: connect,
+web edition the session is the TS driver in `lib/web/driver.ts` (same order: connect,
 device info, auth, queue or snapshot fallback; one request in flight), and history, stats and
 CSV live in shared TS modules.
 

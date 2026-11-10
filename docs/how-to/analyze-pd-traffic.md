@@ -1,6 +1,6 @@
 # Analyze USB PD traffic
 
-The **PD analyzer** tab of the desktop app captures the USB Power Delivery
+The **PD analyzer** tab of the desktop app and the web edition captures the USB Power Delivery
 messages on the cable that passes through the meter. The capture is passive:
 the meter keeps passing power and nothing is triggered.
 
@@ -26,7 +26,8 @@ says so. After any trigger session the meter refuses a new capture until you
 unplug it and plug it back in; the refusal says to replug.
 
 While capturing, the table follows new rows. Scroll up to stop following;
-**Follow** jumps back to the newest row. **Clear capture** empties the table
+**Follow** jumps back to the newest row. Scrolling back to the bottom also
+resumes following. **Clear capture** empties the table
 after you confirm.
 
 ## Narrow the table
@@ -66,8 +67,8 @@ Press **Save capture** to write the current capture to a `.pdcap` file. This is
 an open, documented format; see the [pdcap reference](../reference/pdcap.md).
 The meter's serial number is never written.
 
-A notice names the file, with buttons to show it in the file manager or copy
-its path.
+In the desktop app, a notice names the file, with buttons to show it in the
+file manager or copy its path. The web edition downloads the file.
 
 ## Open a saved capture or a vendor log
 
@@ -79,7 +80,8 @@ Stop a running capture first. Then:
   stopped.
 - **Import vendor log** opens a PD log database saved by the vendor's Windows
   app (`.sqlite`), read-only, and shows its messages. Rows that cannot be read
-  are skipped and counted in the notice.
+  are skipped and counted in the notice. Import vendor log is tested on
+  synthetic files only. It has not yet run on a real vendor log.
 
 **Clear capture** or **Start capture** returns to the live view.
 

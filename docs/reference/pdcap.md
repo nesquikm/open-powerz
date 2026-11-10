@@ -3,8 +3,8 @@
 A `.pdcap` file holds one USB PD capture: the meter's status samples and the
 PD records it reported. The format is open and plain text, so any tool can read
 it. The `powerz` CLI writes it with `powerz pd --save FILE` and reads it with
-`powerz pd decode FILE` (see the [CLI reference](cli.md)). The desktop app saves
-and opens the same files.
+`powerz pd decode FILE` (see the [CLI reference](cli.md)). The desktop app and
+the web edition save and open the same files.
 
 The file is [JSON Lines](https://jsonlines.org/): UTF-8 text, one JSON object
 per line, each line ended by `\n`. Line 1 is the header. Every further line is
@@ -20,7 +20,7 @@ format holds it, so a file is safe to share.
 |---|---|---|
 | `format` | string | Always `"pdcap"`. |
 | `format_version` | integer | Version of the format. This document describes version `1`. |
-| `app_version` | string | Version of the app that wrote the file, for example `"0.2.0"`. |
+| `app_version` | string | Version of the app that wrote the file, for example `"0.12.1"`. |
 | `model` | string | Meter model, for example `"KM003C"`. |
 | `firmware_version` | string | Meter firmware version, for example `"2.0.6"`. |
 
@@ -30,9 +30,9 @@ Every entry line has a `kind` field: `status` or `record`.
 
 All times are whole milliseconds. `session_ms` is the time on the session
 time axis of the app that wrote the file, the one its timeline uses. Each app
-uses its own time base: the CLI writes the meter's own clock, the desktop app
-writes its session time (the time axis of its meter readings). The same
-capture saved by both can therefore differ by a constant offset in
+uses its own time base: the CLI and the web edition write the meter's own
+clock, the desktop app writes its session time (the time axis of its meter readings). The same
+capture saved by two of them can therefore differ by a constant offset in
 `session_ms`; the gaps between entries, `elapsed_ms` and `raw` are the same.
 Compare captures by their spacing, not by the absolute value.
 
@@ -88,7 +88,7 @@ A short capture from the demo device (`powerz --transport sim --scenario
 pd-9v-2a pd --save capture.pdcap`), trimmed:
 
 ```jsonl
-{"format":"pdcap","format_version":1,"app_version":"0.2.0","model":"KM003C","firmware_version":"2.0.6"}
+{"format":"pdcap","format_version":1,"app_version":"0.12.1","model":"KM003C","firmware_version":"2.0.6"}
 {"kind":"status","session_ms":15,"raw":"0f0000008813000000000000"}
 {"kind":"status","session_ms":20,"raw":"1400000088130000f8050000"}
 {"kind":"record","session_ms":20,"elapsed_ms":0,"raw":"051400000011"}
@@ -100,7 +100,7 @@ pd-9v-2a pd --save capture.pdcap`), trimmed:
 
 Line by line:
 
-1. The header: format version 1, written by app 0.2.0 for a KM003C on firmware
+1. The header: format version 1, written by app 0.12.1 for a KM003C on firmware
    2.0.6. There is no serial number.
 2. Status at 15 ms: meter time `0f000000` = 15 ms, VBUS `8813` = 5000 mV,
    IBUS 0 mA, CC1 and CC2 0 mV.

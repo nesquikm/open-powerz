@@ -7,7 +7,7 @@ Windows. open-powerz is an open-source replacement for macOS, Linux and
 Windows. It is written clean-room: from the vendor's public API documents and
 our own device experiments, never from vendor code. What we learned is written
 down in [docs/protocol.md](../protocol.md), where each fact is tagged
-`[device]`, `[static]` or `[inferred]` so readers know how sure it is.
+`[device]`, `[static]`, `[doc]` or `[inferred]` so readers know how sure it is.
 
 ## Modules
 
@@ -28,7 +28,7 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record, trigge
 
 - **powerz-pd** turns PD message bytes into typed messages, a one-line
   summary and a field tree. It has no dependencies and does no I/O, so it
-  builds for `wasm32-unknown-unknown` and a later web edition can share it.
+  builds for `wasm32-unknown-unknown`, and the web edition shares it.
   `powerz-protocol` re-exports it as `powerz_protocol::pd`.
 - **powerz-protocol** holds everything that talks to the meter. Framing and
   decoding are pure functions over byte slices; transports sit behind one
@@ -76,7 +76,7 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record, trigge
   by step on a real KM003C, each step only after the user approved it.
 - **Three meter writes, each on its own narrow path.** Deleting records,
   changing settings and the startup logo are the only other writes. The shared guard still refuses
-  every SET_DATA (0x48) and settings write (0x0A); each passes only through
+  every SET_DATA (0x48), memory or flash write (0x4A) and settings write (0x0A); each passes only through
   its own transport method (`transact_record_table`, `transact_settings`),
   whose check accepts exactly one frame shape: the record table on attribute
   0x28, or the settings keys in order with every value in range and the save
@@ -169,7 +169,8 @@ final gate for the confirmation.
 ## The desktop app
 
 - **The backend owns the session.** One worker thread per connected meter
-  polls the stream, keeps the whole session history with min/max summaries for
+  polls the stream, keeps the session history (the newest 10 million samples at full
+  resolution, older ones folded into min/max blocks) with summaries for
   every zoom level, and computes statistics. The web UI receives measurements in
   batches of at most 20 per second over a Tauri channel, never one message per
   sample.
@@ -236,8 +237,8 @@ backend (`apps/desktop/src/lib/web/`) instead of Tauri commands.
   are downloaded, or written to a folder the user picks where the browser
   allows it. The `.db` export and the `.db` reader use SQLite compiled to
   WebAssembly (sql.js), loaded only when needed, with the table, SQL and row
-  values from `powerz-record`. Firmware update, revealing a file and the PDF
-  chart export stay in the desktop app.
+  values from `powerz-record`. Firmware update, revealing a file and choosing the
+  recording folder stay in the desktop app.
 - **The session lives in the page.** The web backend keeps the session
   history, statistics and temperature log in the tab, in the same column
   layout as the mock backend, so the chart's range, ruler and export answers
@@ -269,7 +270,7 @@ a file that does not exist. A release that adds a feature therefore also adds
 its README line.
 
 Releases come from `.github/workflows/release.yml`. A pushed `vX.Y.Z` tag, or a
-manual run that names an existing tag, runs five jobs:
+manual run that names an existing tag, runs six jobs:
 
 - **check** compares the tag with the workspace, desktop and Tauri versions and
   reads that version's CHANGELOG section, which becomes the release notes;
@@ -283,8 +284,11 @@ manual run that names an existing tag, runs five jobs:
 - **publish** runs `apps/desktop/scripts/release/publish.ts`: it creates the
   release as a draft (or finds the one an earlier run left), keeps that
   release's id for every later call, attaches every file and only then
-  publishes it.
+  publishes it;
+- **pages** deploys the tagged web edition to GitHub Pages through
+  `pages-deploy.yml`.
 
-Only the publish job can write to the repository. A pull request that changes
-the release setup runs the same jobs without publish, as a dry run whose files
-stay workflow artifacts.
+Only the publish job can write to the repository, and only the pages job
+can write to GitHub Pages. A pull request that changes the release setup
+runs the same jobs without publish and pages, as a dry run whose files stay
+workflow artifacts.

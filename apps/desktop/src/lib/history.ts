@@ -259,9 +259,22 @@ export class HistoryColumns {
     let sv = 0;
     let si = 0;
     let sp = 0;
+    let vMin = Infinity;
+    let vMax = -Infinity;
+    let iMin = Infinity;
+    let iMax = -Infinity;
+    let pMin = Infinity;
+    let pMax = -Infinity;
     let prev: RunPoint | null = null;
     for (let j = lo; j < hi; j++) {
       const cur = this.#pt(j);
+      const v = this.#cols.vbus[j] as number;
+      vMin = Math.min(vMin, v);
+      vMax = Math.max(vMax, v);
+      iMin = Math.min(iMin, cur.i);
+      iMax = Math.max(iMax, cur.i);
+      pMin = Math.min(pMin, cur.p);
+      pMax = Math.max(pMax, cur.p);
       if (prev !== null && !this.#startsRun(j, gaps)) {
         const [dq, de] = trapezoid(prev, cur);
         chargeAh += dq;
@@ -292,6 +305,12 @@ export class HistoryColumns {
       vbus_avg_v: sv / n,
       ibus_avg_a: si / n,
       power_avg_w: sp / n,
+      vbus_min_v: vMin,
+      vbus_max_v: vMax,
+      ibus_min_a: iMin,
+      ibus_max_a: iMax,
+      power_min_w: pMin,
+      power_max_w: pMax,
     };
   }
 

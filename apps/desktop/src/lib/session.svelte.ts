@@ -36,6 +36,8 @@ export class Session {
   details = $state.raw<ConnectedInfo | null>(null);
   /** Serial of the unplugged meter the backend waits for, null when none. */
   waitingSerial = $state<string | null>(null);
+  /** The meter stopped filling the queue (FR NVN6M8): the view shows `STALL_NOTICE`. */
+  stalled = $state(false);
   /** A firmware update holds the meter (FR V9SK55, AC .4): no switching, no connect. */
   flashing = $state(false);
 
@@ -122,6 +124,7 @@ export class Session {
 
   beginConnect(): void {
     this.error = null;
+    this.stalled = false;
     // Another device's numbers must not sit next to this connect (FR R13Y5W, AC .2).
     if (this.#statsDeviceId !== this.selectedId) this.stats = null;
     this.#statsDeviceId = this.selectedId;
@@ -160,6 +163,7 @@ export class Session {
           this.tempC = null;
           this.rateSps = null;
           this.details = null;
+          this.stalled = false;
           this.error = event.data.error;
           this.state = event.data.error ? "error" : "disconnected";
         } else if (event.data.state === "waiting") {
@@ -177,6 +181,9 @@ export class Session {
         break;
       case "error":
         this.error = event.data;
+        break;
+      case "stall":
+        this.stalled = event.data.stalled;
         break;
       default:
         break;

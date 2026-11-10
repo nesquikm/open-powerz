@@ -14,14 +14,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::BindError;
-
-/// `value` for JS with `None` as `null`, as the desktop's JSON answers it, so
-/// the page sees the same view from both apps.
-fn to_js<T: Serialize>(value: &T) -> Result<JsValue, BindError> {
-    value
-        .serialize(&serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true))
-        .map_err(|e| BindError::new("internal", e.to_string()))
-}
+use crate::decoders::to_js_view;
 
 /// A capture opened from a file, in the desktop's `PdOpened` shape less the
 /// path (the page names the file).
@@ -100,7 +93,7 @@ impl OpenedPd {
     /// after the first call (the capture keeps only what its details need).
     pub fn take(&mut self) -> Result<JsValue, BindError> {
         match self.take_view() {
-            Some(v) => to_js(&v),
+            Some(v) => to_js_view(&v),
             None => Ok(JsValue::UNDEFINED),
         }
     }
@@ -110,7 +103,7 @@ impl OpenedPd {
     #[wasm_bindgen(js_name = details)]
     pub fn details_js(&self, index: u64) -> Result<JsValue, BindError> {
         match self.details(index) {
-            Some(d) => to_js(&d),
+            Some(d) => to_js_view(&d),
             None => Ok(JsValue::UNDEFINED),
         }
     }
@@ -120,7 +113,7 @@ impl OpenedPd {
     #[wasm_bindgen(js_name = latestCable)]
     pub fn latest_cable_js(&self) -> Result<JsValue, BindError> {
         match self.capture.latest_cable() {
-            Some(c) => to_js(&powerz_trigger::cable_view(&c)),
+            Some(c) => to_js_view(&powerz_trigger::cable_view(&c)),
             None => Ok(JsValue::NULL),
         }
     }
@@ -173,7 +166,7 @@ pub fn vendor_pd_sql() -> VendorPdSql {
 /// [`vendor_pd_sql`] for JS.
 #[wasm_bindgen(js_name = vendorPdSql)]
 pub fn vendor_pd_sql_js() -> Result<JsValue, BindError> {
-    to_js(&vendor_pd_sql())
+    to_js_view(&vendor_pd_sql())
 }
 
 /// The refusal of a vendor PD log in the desktop's words: `detail` is why

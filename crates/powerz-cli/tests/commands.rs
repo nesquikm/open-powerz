@@ -655,6 +655,7 @@ fn run_watch(tty: bool) -> (Result<(), CliError>, String, Vec<Duration>, usize) 
             }
         },
         &mut out,
+        &mut Vec::new(),
     );
     let remaining = s.transport().remaining();
     (r, text(&out), sleeps, remaining)

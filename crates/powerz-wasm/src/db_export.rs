@@ -102,8 +102,6 @@ impl DbRows {
             numbers: row.numbers(),
             elapsed: row.elapsed,
         };
-        let ser = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
-        view.serialize(&ser)
-            .map_err(|e| BindError::new("internal", e.to_string()))
+        crate::decoders::to_js_view(&view)
     }
 }

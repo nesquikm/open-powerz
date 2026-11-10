@@ -70,7 +70,7 @@ const README = [
   "",
   "## Coming next",
   "",
-  "- A browser edition",
+  "- A web edition",
   "",
 ].join("\n");
 
@@ -396,7 +396,9 @@ describe("repository gate", () => {
     expect(next).not.toMatch(/delet\w* offline records|record delete/i);
     expect(next).not.toMatch(/settings/i);
     expect(next).toMatch(/polish/i);
-    expect(next).toMatch(/browser edition/i);
+    // AC-Z9PC5A.1: one name everywhere: web edition, never browser edition.
+    expect(next).toMatch(/web edition/i);
+    expect(next).not.toMatch(/browser edition/i);
     expect(next).not.toMatch(/\b20\d\d\b|\bQ[1-4]\b/);
   });
 

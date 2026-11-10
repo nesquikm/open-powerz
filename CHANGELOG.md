@@ -4,6 +4,27 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] — 2026-11-10 — "Loose Ends"
+
+### Fixed
+- `powerz watch` over the serial port keeps running while the browser streams: stray stream frames are skipped, `--source cdc` falls back to ADC snapshots, and a missed snapshot skips one refresh instead of ending the watch (3B70S8, NVN6M7)
+- Both apps say when the meter stops sending samples because another program polls it over the serial port, and the notice stays put until samples keep coming again (NVN6M8, EHY1JW)
+- Web edition: the device menu lists a meter granted over both WebUSB and WebHID once; a HID-only meter says "(HID)" (EHY1JX)
+- Web edition: Cancel interrupts a large Open recording parse and keeps the file that was open before (3B70S6)
+- PD analyzer: a wheel scroll up in a live capture pauses following instead of snapping back to the bottom (3B70S5)
+- PD triggering: an unasked offer list refreshes the ready offers (3B70SA)
+- The first rows of a session have no TEMP until the first valid reading, the same in both editions, and the docs say so (3B70S7, 3B70S9)
+- File tab: stats follow the zoomed range, with min and max, and the scope toggle shows which side is on (PBDEQE, EWEV1Z)
+- The recorder's chart memory line names the live chart buffer, not the session history (2VPF6P)
+- README and docs match the app, with a new README screenshot and one name for the web edition (SHTZHQ, Z9PC5A)
+- Tests: the live windows and zoom readout e2e tests no longer depend on wall time (3B70S3, 3B70S4)
+
+### Known issues
+- Import vendor log is tested on synthetic files only; it has not run against a real vendor PD log yet
+- Settings Apply is refused while another program, such as `powerz watch` over the serial port, holds the meter's serial port
+
+Total test count at release: 7765 tests, 0 failures, 0 errors.
+
 ## [0.12.0] — 2026-11-10 — "Full Tab"
 
 ### Added

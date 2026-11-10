@@ -841,7 +841,18 @@ test.describe("review fixes (FR FENCD9)", () => {
     // It follows the view and matches what a screen reader hears.
     await page.getByRole("button", { name: "Whole session" }).click();
     await expect(readout).toHaveText(/^\d+:\d{2}$/);
-    await expect(slider).toHaveAttribute("aria-valuetext", (await readout.textContent()) ?? "");
+    // The span keeps growing while the demo streams, so read both at one moment.
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const text = document.querySelector(".chart-wrap .zoom-span")?.textContent?.trim();
+          const spoken = document
+            .querySelector(".chart-wrap .zoom-slider")
+            ?.getAttribute("aria-valuetext");
+          return text === spoken ? text : `readout ${text} vs slider ${spoken}`;
+        }),
+      )
+      .toMatch(/^\d+:\d{2}$/);
   });
 
   test("a mouse click focuses the plot or the strip window without a ring; Tab focus shows it", async ({

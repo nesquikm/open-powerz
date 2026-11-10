@@ -1,9 +1,15 @@
-# Explore a session in the desktop app
+# Explore a session
 
-The desktop app keeps every sample of the current session, so you can pause,
+The app keeps the current session's history (the newest 10 million samples at
+full resolution, older ones folded; see
+[Long sessions](record-a-csv.md#long-sessions)), so you can pause,
 zoom and scroll back through it while the meter keeps measuring. Pick a meter
 (or the demo device) in the device picker, press Connect, and the chart starts
 following the newest data.
+
+While live, the chart draws from its live chart buffer. It holds about 10
+minutes at 1000 SPS, and longer at lower rates. The session history keeps far
+more, and the chart reads it when you scroll back.
 
 The web edition's chart works the same way; where it differs, see
 [Use the web edition](web-edition.md).
@@ -57,6 +63,19 @@ lowest power in each stretch.
 
 The overview strip draws slow stretches (10 or 50 samples per second over a
 long session) as continuous lines.
+
+## What the stats cover
+
+The live Stats panel says "Since connect or Reset". It counts every sample
+since the connect or the last **Reset stats**, whatever the chart shows.
+
+A recording opened in the **File** tab (see
+[Open a recording](record-a-csv.md#open-a-recording)) shows a label above its
+stats: "Whole file", or "Shown range, <start> to <end>". While you are zoomed
+in, the **Stats** toggle offers **File** and **Shown range**. Shown
+range follows each new zoom, and its stats come from the rows in the range. The
+zoom bar's **Whole file** button resets the zoom. The desktop app and the web
+edition work the same way.
 
 ## Gaps
 
@@ -172,7 +191,8 @@ Reverse current changes no data: the readings, the statistics and every export k
   IBUS, stays put whatever the data does.
 - **Series style** sets each series' colour, line width and transparency.
   Each line keeps its own dash pattern, so the lines stay apart without
-  colour. **Reset** puts a series back on its theme look. A colour that is
+  colour. **Reset VBUS style** (and so on for each series) puts it back on its theme
+  look. A colour that is
   hard to see on the chart background gets a low-contrast warning, but you
   can still use it.
 - **Chart title** shows a title above the chart and in saved images. Leave it

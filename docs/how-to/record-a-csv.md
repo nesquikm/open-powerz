@@ -27,7 +27,7 @@ Streaming the ADC queue needs the vendor bulk interface (the default
 ## Record the serial-port stream instead
 
 The meter can also push its samples on its virtual serial port (the ADCNEW
-stream). It needs no sign-in, at 50 or 1000 samples per second:
+stream). It needs no sign-in and runs at 50 or 1000 samples per second:
 
 ```bash
 powerz stream --source cdc --rate 1000 --csv run.csv --duration 60
@@ -36,13 +36,13 @@ powerz stream --source cdc --rate 1000 --csv run.csv --duration 60
 The CSV has the same columns, with `TEMP` empty (this stream carries no
 temperature). The summary line reads
 `<n> records, <g> gaps, <d> dropped frames, <c> CRC errors`. Right after a bulk
-session the meter may echo the start for a few seconds; the CLI says so and
-starts again after 12 s. In the desktop app, pick **Serial stream** in the
+session the meter may echo the start for a few seconds. The CLI says so, sends the
+start again after 12 s of quiet, and gives up after 3 echoes. In the desktop app, pick **Serial stream** in the
 Measurement source picker before connecting.
 
-## Record or export from the desktop app
+## Record or export in the app
 
-The desktop app writes the same CSV layout.
+The desktop app and the web edition write the same CSV layout.
 
 - **Record** starts at once, on a new file in your Downloads folder under
   `open-powerz-recordings` (the app's data folder if there is no Downloads
@@ -57,6 +57,11 @@ the folder with the file selected, and "Copy path" puts its path on the
 clipboard. The stop notice counts only the gaps that happened after the first
 written row, so a recording that starts mid-stream never reports a gap it does
 not contain.
+
+A CLI that polls the same meter over CDC (for example `powerz watch
+--transport cdc`) pauses the app's queue stream while it runs, so a recording
+gets no samples then. The desktop app and the web edition show a notice while
+it lasts.
 
 A sample carries the same Unix time in a recording and in an export of the same
 session, also after the chart history was cleared.
@@ -76,7 +81,7 @@ while any meter records.
 
 - **File name prefix** replaces `powerz` in the file name, so `bench` gives
   `bench-20261102-143000.csv`. It cannot hold a path separator or any of
-  `: * ? " < > |`.
+  `: * ? " < > |`, or a control character.
 - **Folder** sets where new files go. With a folder set, Stop asks nothing and
   the file stays there. A folder that is missing or cannot be written to is
   refused when you press Record, and no recording starts. With no folder, files
@@ -88,16 +93,17 @@ while any meter records.
 - **Row limit** ends a recording at that many rows (default 10,000,000). It
   keeps the file, and the notice opens with "Recording ended at the row limit".
 
-The dialog also shows how long the chart's memory lasts at the current rate:
-about 10 minutes at 1000 SPS, longer at lower rates. This limits the chart, not
-a recording.
+The dialog also shows the live chart buffer: how long the live chart's data
+lasts at the current rate. It is about 10 minutes at 1000 SPS, and longer at
+lower rates. The session history keeps far more (see
+[Long sessions](#long-sessions)). Neither limits a recording.
 
 `powerz stream` has none of these options: it has no pause, auto-stop or row
 limit, and it writes to the file you name.
 
 In the web edition a recording, an export and a saved file go to the
-browser's downloads: there is no Folder option and no reveal in the file
-manager. The file is the same, TEMP included.
+browser's downloads: there is no Folder option, no reveal in the file
+manager and no **Copy path**. The file is the same, TEMP included.
 
 ### Temperature
 
@@ -105,6 +111,11 @@ The TEMP column carries the meter's latest valid temperature reading at or
 before each row; it stays empty until the meter has reported one, and empty
 again once that reading is more than 2 s old. Recordings, exports and
 `powerz stream` fill it the same way.
+
+Rows recorded before the meter's first valid temperature reading have an empty
+TEMP. After a connect these are the first batch of readings, about 0.4 s,
+because the app reads the temperature just after that batch.
+The desktop app and the web edition both do this.
 
 At 1000 SPS the readout shows the temperature with the tooltip "Updated once a
 second at 1000 SPS", because the meter reports it from a separate reading. A
@@ -115,7 +126,10 @@ meter whose firmware reports no temperature at that rate shows "—" instead.
 The chart history keeps the newest 10 million samples at full resolution, about
 2 h 45 min at 1000 samples/s. Older data folds into blocks that keep each
 series' minimum, maximum and average and the block's charge and energy, so the
-statistics, the ruler, segment marks and E.D. stay exact at block edges. A faint
+ruler, segment marks and E.D. stay exact at block edges. Folding never changes
+the Stats panel: its label says "Since connect or Reset", and it counts every
+sample since the connect or the last **Reset stats**, whatever the chart shows.
+A faint
 "coarser before here" tick marks where the folded part ends on the chart.
 
 An export of a folded session holds only the full-resolution part, and its
@@ -130,7 +144,7 @@ Two buttons in the Stats panel erase different things:
   The chart history stays.
 - **Clear chart history…** erases the chart history and what Export saves,
   after you confirm. The chart, "Whole session" and the overview strip then
-  start again from the moment of the clear.
+  start again from the moment of the clear. The statistics stay.
 
 The meter stays connected and keeps measuring through either one, and a
 recording in progress keeps every row.
@@ -171,7 +185,16 @@ the CHARGE and ENERGY columns, at their last values, because a recording with a
 pause does not count that time and the rows alone cannot show it. A file without
 those columns has them integrated from its rows.
 
-Drag across the chart to zoom in, and press **Whole file** to go back.
+Drag across the chart to zoom in, and press **Whole file** in the zoom bar to go
+back.
+
+A label above the stats says what they cover: "Whole file", or "Shown range,
+<start> to <end>". While you are zoomed in, the **Stats** toggle offers
+**File** and **Shown range**. Shown range follows each new zoom. Its min,
+max, average, charge and energy come from the rows in the range, with charge
+and energy integrated from those rows. So a range with a paused stretch can
+differ from the CHARGE and ENERGY columns that the whole file uses. This works
+the same in the desktop app and the web edition.
 
 ### Export a vendor database
 

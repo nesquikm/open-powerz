@@ -123,6 +123,8 @@ export function deviceOptionLabel(
     const n = sameModelNumber(device, among);
     if (n !== null) name = `${name} (${n})`;
   }
+  // A meter the web edition reaches over WebHID says so, last (AC-EHY1JX.2).
+  if (device.id.startsWith("webhid:")) name = `${name} (HID)`;
   // A meter in bootloader mode is listed as such (FR V9SK52, AC .5).
   return device.mode === "bootloader" ? `${name} (bootloader mode)` : name;
 }

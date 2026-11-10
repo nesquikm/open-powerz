@@ -30,24 +30,59 @@ export function visibleRange(v: {
 /** How close to the bottom still counts as at the bottom, px. */
 const BOTTOM_SLACK_PX = 4;
 
+/** The scroll metrics of the table's view. */
+interface ScrollView {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+}
+
+/** Whether `v` is scrolled to its bottom, within the slack. */
+function atBottom(v: ScrollView): boolean {
+  return v.scrollTop + v.clientHeight >= v.scrollHeight - BOTTOM_SLACK_PX;
+}
+
 /** Whether the table follows new rows: it does until the user scrolls up. */
 export class FollowState {
   following = true;
   #lastTop: number | null = null;
+  /** Paused by a wheel up: only a scroll back down to the bottom resumes. */
+  #wheelPaused = false;
 
   /** The view scrolled (or its content grew). */
-  scrolled(v: { scrollTop: number; clientHeight: number; scrollHeight: number }): void {
-    const atBottom = v.scrollTop + v.clientHeight >= v.scrollHeight - BOTTOM_SLACK_PX;
-    if (atBottom) this.following = true;
-    else if (this.#lastTop === null || v.scrollTop < this.#lastTop || !this.following) {
+  scrolled(v: ScrollView): void {
+    const movedDown = this.#lastTop !== null && v.scrollTop > this.#lastTop;
+    if (atBottom(v)) {
+      // Within the bottom slack after a wheel up, stay paused until the view moves down.
+      if (!this.#wheelPaused || movedDown) {
+        this.following = true;
+        this.#wheelPaused = false;
+      }
+    } else if (this.#lastTop === null || v.scrollTop < this.#lastTop || !this.following) {
       this.following = false;
     }
     this.#lastTop = v.scrollTop;
   }
 
+  /** A wheel turned over the view `v`; `deltaY < 0` scrolls up and pauses at once,
+   * before the animated scroll moves the view. A view with nothing to scroll keeps
+   * following, and a wheel down at the bottom ends a wheel-up pause (no scroll event
+   * comes when the view cannot move). */
+  wheeled(deltaY: number, v?: ScrollView): void {
+    if (v && v.scrollHeight <= v.clientHeight + BOTTOM_SLACK_PX) return;
+    if (deltaY < 0 && this.following) {
+      this.following = false;
+      this.#wheelPaused = true;
+    } else if (deltaY > 0 && this.#wheelPaused && v && atBottom(v)) {
+      this.following = true;
+      this.#wheelPaused = false;
+    }
+  }
+
   /** The Follow button. */
   resume(): void {
     this.following = true;
+    this.#wheelPaused = false;
   }
 }
 

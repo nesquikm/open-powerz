@@ -17,7 +17,8 @@ A wide window shows two columns; a narrow one stacks the tiles. With
 [Hide serial numbers](explore-a-session.md#hide-serial-numbers) on, tiles are
 titled by model and position instead, for example "KM003C 2".
 
-Each tile has its own **Record**, **Export**, rate and **Disconnect** controls,
+Each tile has its own **Record** (with **Pause** and **Options**), **Export**,
+**Export .db**, rate and **Disconnect** controls,
 named after its meter, so they act on that meter only. The tiles keep their
 order across a reload.
 
@@ -35,7 +36,7 @@ order across a reload.
 - Unplugging one meter leaves the others streaming. Its tile shows **Waiting
   for meter** and it reconnects on its own when plugged back in, as described
   in [Explore a session](explore-a-session.md).
-- A reload of the window picks up every running meter, each with its session
+- In the desktop app, a reload of the window picks up every running meter, each with its session
   and any open recording.
 
 ## Update firmware on one meter
@@ -44,6 +45,13 @@ While one meter updates, you can still add or keep using another. The meter
 being updated stays locked. So does any meter the app cannot tell apart from
 it, which is one with the same serial number, one with none, or one not in
 application mode.
+
+## Share a meter with the CLI
+
+A CLI that polls the same meter over CDC (for example `powerz watch
+--transport cdc`) pauses the app's queue stream while it runs. The desktop
+app and the web edition show a notice while it lasts, and the stream goes on
+when the CLI stops.
 
 ## Try it without hardware
 

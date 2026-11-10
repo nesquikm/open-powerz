@@ -18,7 +18,7 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use super::caps::Capabilities;
+use super::caps::{CapBlock, Capabilities};
 use super::command::{Command, Protocol};
 use super::pd::Offer;
 use super::reply::{ReplyItem, ReplyReader};
@@ -353,13 +353,15 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
     /// Whether a PD negotiation brought offers after the last `entry`,
     /// `reset`, `pd hrst`, `pdm open` or `pdm close`: a PD request may then
     /// go out without entering PD again. A written `entry pd` whose offers
-    /// never came leaves it `false` while [`PdmSession::entered`] says PD.
+    /// never came leaves it `false` while [`PdmSession::entered`] says PD,
+    /// and so does an unasked `pdo:` list with no usable offer (FR 3B70SA).
     pub fn pd_ready(&self) -> bool {
         self.pd_offers.is_some()
     }
 
-    /// The offers of the latest negotiation while PD is ready
-    /// ([`PdmSession::pd_ready`]); `None` otherwise.
+    /// The latest offers while PD is ready ([`PdmSession::pd_ready`]): those
+    /// of the last negotiation, or of a `pdo:` list the charger sent unasked
+    /// since (FR 3B70SA); `None` otherwise.
     pub fn pd_offers(&self) -> Option<&[Offer]> {
         self.pd_offers.as_deref()
     }
@@ -440,7 +442,16 @@ impl<P: Read + Write, C: Clock> PdmSession<P, C> {
             if let Some(item) = self.reader.next_item() {
                 let item = item?;
                 match &item {
-                    ReplyItem::Block(block) => self.caps.update(block),
+                    ReplyItem::Block(block) => {
+                        self.caps.update(block);
+                        // A `pdo:` list that comes while PD is ready (unasked,
+                        // or inside another reply) replaces the ready offers;
+                        // one with no usable offer leaves PD not ready.
+                        if matches!(block, CapBlock::Pdo(_)) && self.pd_offers.is_some() {
+                            let offers = super::pd::offers(&self.caps);
+                            self.pd_offers = (!offers.is_empty()).then_some(offers);
+                        }
+                    }
                     ReplyItem::Line(line) if line.starts_with("pdm mode entry") => {
                         self.opened = true;
                     }

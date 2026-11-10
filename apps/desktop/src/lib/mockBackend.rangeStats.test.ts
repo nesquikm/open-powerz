@@ -23,6 +23,15 @@ function reference(t0: number, t1: number): RangeStats {
   let si = 0;
   let sp = 0;
   let n = 0;
+  const v0 = load(Math.ceil(t0));
+  const ext = {
+    vbus_min_v: v0.v,
+    vbus_max_v: v0.v,
+    ibus_min_a: v0.i,
+    ibus_max_a: v0.i,
+    power_min_w: v0.v * v0.i,
+    power_max_w: v0.v * v0.i,
+  };
   let prev: { t: number; v: number; i: number } | null = null;
   for (let t = Math.ceil(t0); t <= Math.floor(t1); t++) {
     const { v, i } = load(t);
@@ -35,6 +44,12 @@ function reference(t0: number, t1: number): RangeStats {
     sv += v;
     si += i;
     sp += v * i;
+    ext.vbus_min_v = Math.min(ext.vbus_min_v, v);
+    ext.vbus_max_v = Math.max(ext.vbus_max_v, v);
+    ext.ibus_min_a = Math.min(ext.ibus_min_a, i);
+    ext.ibus_max_a = Math.max(ext.ibus_max_a, i);
+    ext.power_min_w = Math.min(ext.power_min_w, v * i);
+    ext.power_max_w = Math.max(ext.power_max_w, v * i);
     n++;
   }
   return {
@@ -44,6 +59,7 @@ function reference(t0: number, t1: number): RangeStats {
     vbus_avg_v: sv / n,
     ibus_avg_a: si / n,
     power_avg_w: sp / n,
+    ...ext,
   };
 }
 

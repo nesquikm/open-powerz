@@ -3,7 +3,7 @@
 // CLAUDE.md / technical spec updated for the powerz-wasm crate and web backend.
 // FR W8SHXF: the browser can now write too; the page, README and the web feature
 // map (WEB_FEATURES) must agree on what stays desktop-only.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -277,5 +277,31 @@ describe("docs index links the web edition page (AC-QFTCX2.4)", () => {
     const links = webDocsLinks(index);
     expect(links.length).toBeGreaterThan(0);
     expect(links.some((t) => existsSync(join(repoRoot, "docs", t)))).toBe(true);
+  });
+});
+
+describe("one name for the web edition (AC-Z9PC5A.2)", () => {
+  /** Every .md file under docs/, as repo-relative paths. */
+  function docsPages(): string[] {
+    const entries = readdirSync(join(repoRoot, "docs"), { recursive: true, encoding: "utf8" });
+    return entries
+      .filter((e) => e.endsWith(".md"))
+      .map((e) => join("docs", e).split("\\").join("/"));
+  }
+
+  it("finds the docs pages it checks", () => {
+    expect(docsPages()).toContain("docs/how-to/web-edition.md");
+  });
+
+  it("no README line and no docs page says browser edition", () => {
+    const offenders: string[] = [];
+    for (const rel of ["README.md", ...docsPages()]) {
+      read(rel)
+        .split("\n")
+        .forEach((line, i) => {
+          if (/browser[- ]edition/i.test(line)) offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
+        });
+    }
+    expect(offenders).toEqual([]);
   });
 });

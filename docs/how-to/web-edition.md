@@ -9,10 +9,11 @@ WebAssembly.
 ## Browser support
 
 The web edition needs WebUSB, so it works in **Chrome** and **Edge** on the
-desktop (Windows, macOS, Linux). They also have the WebHID and Web Serial the
-fallback, the settings change and triggering use. Firefox and Safari have none
-of these and show the demo meter only; mobile browsers are not supported. The page must be opened over HTTPS (the GitHub
-Pages address is) or from `localhost`.
+desktop (Windows, macOS, Linux). They also have WebHID, for the HID fallback,
+and Web Serial, for settings changes and triggering. Firefox and Safari have
+none of these and show the demo meter only. Mobile browsers are not supported.
+The page must be opened over HTTPS (the GitHub Pages address is) or from
+`localhost`.
 
 In a browser with neither WebUSB nor WebHID, such as Safari, the page shows a
 "This browser is not supported" box with a link to the desktop app. The demo
@@ -23,7 +24,7 @@ menu.
 
 1. Plug the meter into the computer.
 2. Choose **Connect a meter…**, the last item of the device menu. The
-   browser opens its own USB device picker, filtered to the POWER-Z vendor, so only POWER-Z meters are listed.
+   browser opens its own USB device picker, filtered to POWER-Z meters.
 3. Pick the meter and click **Connect**.
 
 Choosing the meter in the picker is the permission: the page cannot see any
@@ -108,11 +109,15 @@ next section. Each feature needs one browser interface:
   interface. **Open capture** opens the browser's file picker for a `.pdcap`
   file and **Import vendor log** for the vendor's `.sqlite` PD log; both read
   the file with the desktop app's rules, so the table, chart, details and the
-  cable identity are the same as there, with no meter needed.
+  cable identity are the same as there, with no meter needed. Import vendor
+  log is tested on synthetic files only. It has not yet run on a real vendor
+  log.
 - **Saving the chart image:** no device interface. PNG, SVG and PDF download
   as the same files the desktop app saves.
 - **CSV recording:** WebUSB or WebHID. The finished recording downloads as a
-  CSV in the desktop app's layout, TEMP included.
+  CSV in the desktop app's layout, TEMP included. Rows recorded before the
+  meter's first valid temperature reading have an empty TEMP (on a connect,
+  the first batch, about the first 0.4 s), as in the desktop app.
 - **Reading the meter's settings:** WebUSB. The Meter settings panel shows the
   same rows as the desktop app. The browser sends only the reads the desktop
   app sends: the SETTINGS read, the record list (after a sign-in when needed)
@@ -148,7 +153,8 @@ next section. Each feature needs one browser interface:
   port yet. The browser runs the desktop app's trigger engine, so the
   safeguards are the same: a request above 5 V needs your confirmation,
   "Don't ask again" covers PD requests up to 20 V only and ends at 5 V, EPR
-  requests and console lines always ask, and leaving the panel, disconnecting
+  requests always ask, and so do console lines above 5 V or of unknown
+  effect. Leaving the Trigger tab, disconnecting
   or closing the session goes back to 5 V first. A settings change waits
   while a trigger session holds the port. Closing the tab is best effort: the
   page tries to return to 5 V, and asks before closing while a contract above
@@ -167,7 +173,8 @@ uses only the serial port.
 
 ## What stays in the desktop app
 
-These controls say "Desktop app only" in the browser:
+Three things stay in the desktop app. In the browser the first and the last
+show "Desktop app only"; the buttons for the second are left out.
 
 - **Firmware update.** An interrupted update could brick the meter, and a
   browser tab can be closed, reloaded or put to sleep at any time.

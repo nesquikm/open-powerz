@@ -35,7 +35,7 @@ KM002C facts stay `[inferred]` until a KM002C is tested.
 | PID matching | the vendor app accepts any PID 0x00xx and never branches on it; the model comes from the device-info block | [static] |
 | device class | 0xEF / 0x02 / 0x01 (composite with an interface association), USB 2.10, full speed, EP0 32 bytes | [device] (firmware 2.0.6) |
 | string 4 (iProduct) | `POWER-Z KM003C` | [device] (firmware 2.0.6) |
-| string 2 | `APP` in application mode (the interface string of IF0 and IF1, not the product string); the vendor app reads anything else as boot loader, while this library reports only BOOT or DFU strings as boot loader and anything else as unknown | [static] [device] (firmware 2.0.6) |
+| string 2 | `APP` in application mode (the interface string of IF0 and IF1, not the product string); the vendor app reads anything else as bootloader, while this library reports only BOOT or DFU strings as bootloader and anything else as unknown | [static] [device] (firmware 2.0.6) |
 | string 3 (iSerial) | the device serial number (not reproduced here) | [device] |
 | WinUSB binding | MS OS 2.0 descriptor set (vendor request code 0x20) gives interface 0 the `WINUSB` compatible ID | [device] (firmware 2.0.6) |
 
@@ -159,7 +159,7 @@ Data types (main header type 0x40 and up):
 
 | type | request header | payload | purpose | tag |
 |---|---|---|---|---|
-| 0x40 HEAD | `40 id 00 01` | 16 zero bytes | read-only status check. The reply is type 0x40, and the u32 LE at offset 4 is 0 for normal firmware; the vendor app reads non-zero as "original firmware, update required", which we do not (see the HEAD rows below). The vendor app sends it 50 ms after CONNECT in application mode, and before a download in boot-loader mode, where the field must be 0. Our `firmware probe` sends only CONNECT and HEAD, in either mode | [static]; meaning [inferred] |
+| 0x40 HEAD | `40 id 00 01` | 16 zero bytes | read-only status check. The reply is type 0x40, and the u32 LE at offset 4 is 0 for normal firmware; the vendor app reads non-zero as "original firmware, update required", which we do not (see the HEAD rows below). The vendor app sends it 50 ms after CONNECT in application mode, and before a download in bootloader mode, where the field must be 0. Our `firmware probe` sends only CONNECT and HEAD, in either mode | [static]; meaning [inferred] |
 | 0x41 PUT_DATA | reply only | section chain | GET_DATA reply | [doc] [static] [device] |
 | 0x42 | `42 id 00 04` | 64-byte firmware descriptor | firmware download; sent only by the firmware flash path (see Firmware download) | [static] |
 | 0x44 | `44 id 01 01` | 32 encrypted bytes | memory read (see Memory read and device info) | [static] [device] |
@@ -512,7 +512,7 @@ Known addresses (the only ones we ever read):
 
 | address | length | content | tag |
 |---|---|---|---|
-| `0x420` | 64 | info block: four strings at 0x10 / 0x1C / 0x28 / 0x34 = model (`KM003C`), version (`2.5`), date, extra; likely the boot loader / hardware block | [static] [device]; meaning [inferred] |
+| `0x420` | 64 | info block: four strings at 0x10 / 0x1C / 0x28 / 0x34 = model (`KM003C`), version (`2.5`), date, extra; likely the bootloader / hardware block | [static] [device]; meaning [inferred] |
 | `0x4420` | 64 | application firmware info: u32 0x4000 (app start), size, CRC, then model, version (`2.0.6`), date; first u32 0xFFFFFFFF would mean "none" | [static] [device] (firmware 2.0.6) |
 | `0x03000C00` | 64 | OTP block: ASCII serial number, a 128-bit hex id, a production Unix time, a short tag; the first 16 bytes are the level-2 auth credential | [static] [device] |
 | `0x40010450` | 12 | MCU unique ID; the level-1 auth credential | [static] [device]; meaning [inferred] |
@@ -527,11 +527,11 @@ Firmware status (FR V9SK52). All requests below are read-only:
 
 | item | rule | tag |
 |---|---|---|
-| mode | the interface string (string 2) of the vendor-class (0xFF) interface, picked by class and read from the OS device list without opening the device: `APP` is application mode [device] (firmware 2.0.6), a string naming BOOT or DFU is boot-loader mode [inferred], and anything else (or no string) is reported as unknown | [static] [device] [inferred] |
-| sequence | CONNECT, the info blocks `0x420` (boot loader) and `0x4420` (application), then 50 ms later HEAD. The vendor app sends HEAD first; we read the blocks first so a failed HEAD cannot cost them. Each step that fails is reported as a problem (a HEAD problem includes the raw reply in hex), followed by one CONNECT to recover the pipe; what was read is kept, and the update check is reported as unknown when HEAD was not read | [static] [device] (firmware 2.0.6: blocks read; HEAD answered with id 0, see the HEAD rows below) |
+| mode | the interface string (string 2) of the vendor-class (0xFF) interface, picked by class and read from the OS device list without opening the device: `APP` is application mode [device] (firmware 2.0.6), a string naming BOOT or DFU is bootloader mode [inferred], and anything else (or no string) is reported as unknown | [static] [device] [inferred] |
+| sequence | CONNECT, the info blocks `0x420` (bootloader) and `0x4420` (application), then 50 ms later HEAD. The vendor app sends HEAD first; we read the blocks first so a failed HEAD cannot cost them. Each step that fails is reported as a problem (a HEAD problem includes the raw reply in hex), followed by one CONNECT to recover the pipe; what was read is kept, and the update check is reported as unknown when HEAD was not read | [static] [device] (firmware 2.0.6: blocks read; HEAD answered with id 0, see the HEAD rows below) |
 | warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated. Version strings are read tolerantly: surrounding whitespace and one leading `v` or `V` are dropped, a `-` suffix makes a pre-release, which sorts below its release (`2.0.7-beta` is outdated) and keeps its tag when shown, pre-releases of one version sort by semver tag order (`2.0.7-rc.2` below `2.0.7-rc.10`), and a `+` suffix is ignored (`v2.0.7+build5` is 2.0.7). An empty tag (`2.0.7-`) and a number with a leading `+` (`+2.0.7`) are refused, and a string that does not parse gives no version warning | [static] [inferred] |
 | HEAD in application mode | the meter answers with reply id 0 (not the request's id): `40 00 00 01 00 10 00 00`, i.e. type 0x40, id 0, and a u32 at offset 4 of 0x00001000 on firmware 2.0.6 and 2.0.7, followed by 12 stale bytes from its own transmit buffer (20 bytes in all). We accept a type-0x40, id-0 reply only as the first transfer after our HEAD. A field of 0 means current; any other value is reported as an unrecognised reply, never as "update required", because the vendor's reading (non-zero = update required) does not fit a meter on normal firmware | [device] (firmware 2.0.6, 2.0.7) [static] |
-| HEAD in boot-loader mode | the flash path accepts only a reply that echoes its own request id, with field 0; anything else stops before the descriptor | [static]; boot loader 2.5 answers `c0 <id> 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00`, field 0, with or without a valid application [device] |
+| HEAD in bootloader mode | the flash path accepts only a reply that echoes its own request id, with field 0; anything else stops before the descriptor | [static]; bootloader 2.5 answers `c0 <id> 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00`, field 0, with or without a valid application [device] |
 
 ## Offline records
 
@@ -811,13 +811,21 @@ Frame header (4 bytes):
   request in that time keeps it so; a start sent after 6–10 s of host
   silence streams normally. [device] (firmware 2.0.6, 2026-10-28) Our
   library drops the echo, keeps quiet for 12 s and sends the start once
-  more; the CLI gives up after 3 echoes.
+  more. `stream --source cdc` gives up after 3 echoes, while
+  `watch --source cdc` falls back to ADC snapshots on the same port instead
+  of giving up.
 - The note says auto-upload stops after one hour or on unplug unless
   refreshed. [doc] Our library sends the keep-alive every 30 minutes while
   a stream runs and `03` when it stops one.
 - On the shared byte stream our reader tells ADCNEW frames, binary replies
   and PDM text lines apart, drops a frame whose length or CRC is wrong and
   resyncs one byte later. [inferred]
+- The CDC reader matches every binary reply to its request by id and skips
+  ADCNEW frames, echoed starts, PDM text lines and replies to other ids, also
+  when no ADCNEW stream was started. Stray `02` frames reached a reader that
+  had started no stream while a browser streamed over WebUSB (web parity
+  HIL 4). [device] (firmware 2.0.6, 2026-11-10) Why the meter sends them
+  then is unknown. [inferred]
 
 ## PDM text session (protocol triggering)
 
@@ -1046,32 +1054,32 @@ layout is a Qt data stream, big-endian. [static]
 
 ## Firmware download
 
-The application firmware is updated from the boot loader, in this order. Every
+The application firmware is updated from the bootloader, in this order. Every
 step follows the vendor app. The switch, connect and check steps have been seen
 on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
 
 | step | host sends | expects | on failure (vendor code) | tag |
 |---|---|---|---|---|
-| switch | in application mode: a session first (CONNECT, the UID read, 0x4C at level 1), then JUMP_DFU `09 id 00 00`, write only; one 500 ms read records any reply; then ask for a replug if the meter does not restart by itself, and wait up to 120 s for boot-loader mode | a device in boot-loader mode | a failed authentication stops before JUMP_DFU; otherwise stop and hold Back while plugging the meter in | [static] (the vendor session); application 2.0.6 answers a cold JUMP_DFU, sent without that session, with REJECT `06 01 00 00` [device] |
-| connect | CONNECT `02 id 00 00` (1000 ms); if it gets no reply, clear the halt, drain, and send one more | ACCEPT | Read (−108) | [static]; the boot loader leaves the first CONNECT unanswered and ACCEPTs the second [device] |
-| check | HEAD `40 id 00 01` + 16 zero bytes | type 0x40 (the extend bit may be set), the request id echoed, field 0 | Product (−100), WorkMode (−111) | [static]; boot-loader reply `c0 03 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00` to HEAD id 3 [device] |
+| switch | in application mode: a session first (CONNECT, the UID read, 0x4C at level 1), then JUMP_DFU `09 id 00 00`, write only; one 500 ms read records any reply; then ask for a replug if the meter does not restart by itself, and wait up to 120 s for bootloader mode | a device in bootloader mode | a failed authentication stops before JUMP_DFU; otherwise stop and hold Back while plugging the meter in | [static] (the vendor session); application 2.0.6 answers a cold JUMP_DFU, sent without that session, with REJECT `06 01 00 00` [device] |
+| connect | CONNECT `02 id 00 00` (1000 ms); if it gets no reply, clear the halt, drain, and send one more | ACCEPT | Read (−108) | [static]; the bootloader leaves the first CONNECT unanswered and ACCEPTs the second [device] |
+| check | HEAD `40 id 00 01` + 16 zero bytes | type 0x40 (the extend bit may be set), the request id echoed, field 0 | Product (−100), WorkMode (−111) | [static]; bootloader reply `c0 03 01 01 00 00 00 00 00 00 00 00 ff ff ff ff 00 00 00 00` to HEAD id 3 [device] |
 | descriptor | `42 id 00 04` + 64 bytes: start 0x4000, end = start + size, size, CRC, model, version, date, a random nonce | no reply: the 20 ms read times out while the meter erases; an ACCEPT echoing the descriptor id means the erase is done | Write (−107) for any other reply | [static]; the ACCEPT [device] |
-| erase wait | N−1 reads of 10 ms (N = whole 4080-byte blocks of the payload), then one of 1000 ms | timeouts, then ACCEPT; an ACCEPT echoing the descriptor id ends the wait early | Erase (−105) for any other reply | [static]; the boot loader ACKed the descriptor with `05 03 00 00` during the 10 ms reads [device]; which length N counts is [inferred] |
+| erase wait | N−1 reads of 10 ms (N = whole 4080-byte blocks of the payload), then one of 1000 ms | timeouts, then ACCEPT; an ACCEPT echoing the descriptor id ends the wait early | Erase (−105) for any other reply | [static]; the bootloader ACKed the descriptor with `05 03 00 00` during the 10 ms reads [device]; which length N counts is [inferred] |
 | data | the stored payload, unchanged, in raw 4080-byte bulk writes and then the remainder; a zero-length packet after a write that is a multiple of 64 bytes | SYNC `01` after each write | Download (−106) | [static] |
 | verify | read for 1000 ms | FINISHED `07` | Verify (−103) | [static] |
-| return | JUMP_APROM `08 id 00 00`, write only; one 500 ms read records any reply; ask for a replug and wait up to 120 s for application mode; read the info block `0x4420` | the new version | ask for a power cycle if the meter stays in its boot loader | [static] [inferred]; a plain replug leaves the boot loader for the application [device] |
+| return | JUMP_APROM `08 id 00 00`, write only; one 500 ms read records any reply; ask for a replug and wait up to 120 s for application mode; read the info block `0x4420` | the new version | ask for a power cycle if the meter stays in its bootloader | [static] [inferred]; a plain replug leaves the bootloader for the application [device] |
 
-- The boot loader lives below 0x4000 and is never written: the descriptor's
+- The bootloader lives below 0x4000 and is never written: the descriptor's
   start is always 0x4000. [static] [inferred]
 - There is no automatic retry. After a failure the meter stays in its boot
   loader; the update can be run again from there. [static]
-- Once the descriptor is ACKed the boot loader is in its download phase: it
+- Once the descriptor is ACKed the bootloader is in its download phase: it
   takes every later frame as payload and answers it with SYNC `01`. After a
   flash that stopped there, send nothing; unplug the meter and plug it back
-  in (holding Back if the application is intact) to restart the boot loader
+  in (holding Back if the application is intact) to restart the bootloader
   before probing or flashing again. [device] (the SYNC replies) [inferred]
   (the power cycle resets it)
-- The boot loader's screen tells the two cases apart: "firmware details"
+- The bootloader's screen tells the two cases apart: "firmware details"
   when a valid application is present, a blank screen with a blinking green
   bar when there is none (after an erase). Both enumerate as `BOOT`. [device]
 - Write-capable frames (JUMP_DFU, JUMP_APROM, the descriptor and the raw
@@ -1088,15 +1096,15 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
   before it is written.
 - `powerz firmware jump` sends only the switch or return step on its own,
   through the same guard: from application mode CONNECT, the UID read, the
-  level-1 authentication and one JUMP_DFU; from boot-loader mode one
+  level-1 authentication and one JUMP_DFU; from bootloader mode one
   JUMP_APROM and nothing else (no HEAD or info read either way). It reports
   the meter's reply to the jump, asks for a replug if the meter does not
   restart by itself, waits up to 120 s and reports the mode the meter comes
   back in. [static] [inferred]
 - `powerz firmware probe` stops at the first SYNC reply to CONNECT or HEAD:
-  that is a boot loader left in its download phase, so it sends nothing more
+  that is a bootloader left in its download phase, so it sends nothing more
   and asks for a power cycle holding Back. [device]
-- In boot-loader mode the meter keeps its USB vendor and product IDs
+- In bootloader mode the meter keeps its USB vendor and product IDs
   (0x5FC9 / 0x0063) and its product string; interface 0 (vendor 0xFF) and
   the CDC interface report `BOOT` instead of `APP`, and there is no HID
   interface. [device]
@@ -1178,8 +1186,8 @@ nothing relies on one. [device] (2026-11-06)
 Our library refuses to send these requests, so a bug or a CLI typo cannot
 brick, decalibrate or reboot a device. Three checks run before any byte
 reaches the meter: the transport-layer guard refuses the seven frame types, the
-session refuses memory reads outside the four known blocks and the offline
-record window, and the HID transport sends only the ADC snapshot. [device] [static] The one exception
+session refuses memory reads outside the four known blocks, the offline
+record window and the logo read window, and the HID transport sends only the ADC snapshot. [device] [static] The one exception
 is the firmware flash path, which may send JUMP_DFU, JUMP_APROM and the 0x42
 descriptor under its own stricter guard (see Firmware download). The one
 memory-read exception is an offline record: the window `0x98100000 + offset`,

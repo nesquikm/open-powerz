@@ -354,6 +354,8 @@ export type BackendEvent =
   | { type: "gap"; data: Gap }
   | { type: "status"; data: Status }
   | { type: "error"; data: UiError }
+  /** FR NVN6M8: the queue stopped filling (`true`) or samples came back (`false`). */
+  | { type: "stall"; data: { stalled: boolean } }
   | { type: "recording"; data: RecordingEvent }
   | { type: "pd_state"; data: { capturing: boolean; reason?: PdStopReason } }
   | { type: "pd_rows"; data: { rows: PdRow[] } }
@@ -686,6 +688,13 @@ export interface RangeStats {
   vbus_avg_v: number;
   ibus_avg_a: number;
   power_avg_w: number;
+  /** Lowest and highest VBUS, IBUS and Power over the samples in range (FR PBDEQE). */
+  vbus_min_v: number;
+  vbus_max_v: number;
+  ibus_min_a: number;
+  ibus_max_a: number;
+  power_min_w: number;
+  power_max_w: number;
 }
 
 /** The ruler's stats over the open session's history between `t0Ms` and `t1Ms`; `null`

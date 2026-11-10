@@ -24,16 +24,8 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::BindError;
-use crate::decoders::to_js;
+use crate::decoders::{to_js, to_js_view};
 use crate::meter_reads::{Chunk, section_payload, settings_request};
-
-/// `value` for JS with every `None` as `null`, as the desktop app's views
-/// reach the UI.
-fn to_js_view<T: Serialize>(value: &T) -> Result<JsValue, BindError> {
-    value
-        .serialize(&serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true))
-        .map_err(|e| BindError::new("internal", e.to_string()))
-}
 
 const REFUSED_HINT: &str = "Replug the meter so the app reads it again, then retry.";
 const CHUNK_HINT: &str =

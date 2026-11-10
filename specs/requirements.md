@@ -53,7 +53,7 @@ Feature scope (from the research notes): **MVP** = discovery + live meter + reco
 `.db`/`.sqlite` PD logs, protocol trigger panel (CDC), firmware update, release pipeline,
 offline recordings and the settings block, the ADCNEW serial stream, multi-device, and
 record delete and settings writes, the polish milestones, startup logo upload, `.db`
-export in the vendor layout, and a browser edition (Chrome and Edge) that also changes
+export in the vendor layout, and a web edition (Chrome and Edge) that also changes
 settings, deletes records, writes the logo and triggers. **Later** = UFCS analyzer and
 vendor `.sqlite` PD log export. Each lands as its own FR in
 `specs/frs/`.

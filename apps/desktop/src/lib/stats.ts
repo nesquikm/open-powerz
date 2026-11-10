@@ -1,4 +1,5 @@
-import type { MinMaxAvg, StatsSnapshot } from "./backend";
+import type { MinMaxAvg, RangeStats, StatsSnapshot } from "./backend";
+import type { TimeRange } from "./chartView";
 import { DASH, formatFixed } from "./format";
 
 export { MINUS } from "./format";
@@ -68,4 +69,21 @@ export function statsView(s: StatsSnapshot | null): StatsView {
 /** A formatted value is the missing-value placeholder. */
 export function isMissing(text: string): boolean {
   return text.startsWith(DASH);
+}
+
+/** What the live Stats panel counts over (AC-PBDEQE.5). */
+export const LIVE_STATS_SCOPE = "Since connect or Reset";
+
+/** Range stats over `range` as a stats snapshot, so the stats view formats them like
+ * the whole file's (AC-PBDEQE.3). */
+export function rangeStatsSnapshot(stats: RangeStats, range: TimeRange): StatsSnapshot {
+  return {
+    elapsed_ms: range.t1Ms - range.t0Ms,
+    samples: stats.samples,
+    charge_ah: stats.charge_ah,
+    energy_wh: stats.energy_wh,
+    vbus: { min: stats.vbus_min_v, max: stats.vbus_max_v, avg: stats.vbus_avg_v },
+    ibus: { min: stats.ibus_min_a, max: stats.ibus_max_a, avg: stats.ibus_avg_a },
+    power: { min: stats.power_min_w, max: stats.power_max_w, avg: stats.power_avg_w },
+  };
 }

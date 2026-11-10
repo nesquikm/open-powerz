@@ -159,6 +159,101 @@ pub enum GapKind {
     Pause,
 }
 
+/// Whether the meter stopped filling the ADC queue (FR NVN6M8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Stall {
+    /// `true` once 2 s of unheld queue polls returned no records, `false`
+    /// once polls with records span 1 s of polling, at most 750 ms apart
+    /// (FR EHY1JW).
+    pub stalled: bool,
+}
+
+/// Unheld queue polling without records before it counts as a stall, ms.
+const STALL_AFTER_MS: u64 = 2_000;
+
+/// Most time one empty poll adds toward a stall beyond the poll period, ms: a
+/// poll that waited behind a hold, a settings write or a record download
+/// counts as one ordinary poll (as the web driver does).
+const STALL_POLL_SLACK_MS: u64 = 100;
+
+/// Polling time that polls with records must span to end a stall, ms (FR EHY1JW).
+const RECOVER_AFTER_MS: u64 = 1_000;
+
+/// Most polling time between two polls with records in one recovery run, ms
+/// (FR EHY1JW): a longer gap starts the run over.
+const RECOVER_GAP_MS: u64 = 750;
+
+/// Tracks runs of empty queue polls and recovery runs (FR NVN6M8 / EHY1JW).
+#[derive(Debug, Default)]
+struct StallTracker {
+    /// When the last poll happened, ms.
+    last_poll_ms: Option<u64>,
+    /// Polling time so far, ms: each poll adds a bounded step.
+    clock_ms: u64,
+    /// The last poll was empty, so the current run of empty polls goes on.
+    in_empty_run: bool,
+    /// Polling time the current run of empty polls adds up to, ms.
+    empty_ms: u64,
+    /// Polling clock where the current recovery run starts.
+    recover_from: Option<u64>,
+    /// Polling clock at the last poll with records in the recovery run.
+    last_records: Option<u64>,
+    /// A stall event went out and no stall-ended event since.
+    stalled: bool,
+}
+
+impl StallTracker {
+    /// One queue poll at `now`, `period_ms` after the last one was due; the
+    /// event to send, if any. Each poll advances the polling clock by the time
+    /// since the last one, at most one period plus [`STALL_POLL_SLACK_MS`], so
+    /// time the worker spent held or busy elsewhere does not count. 2 s of empty
+    /// polls start a stall; it ends once polls with records span 1 s of polling
+    /// (each counting its own stretch), with at most 750 ms between two of them.
+    fn poll(&mut self, now: u64, empty: bool, period_ms: u64) -> Option<Stall> {
+        let step = self.last_poll_ms.map_or(0, |last| {
+            now.saturating_sub(last)
+                .min(period_ms.saturating_add(STALL_POLL_SLACK_MS))
+        });
+        self.clock_ms = self.clock_ms.saturating_add(step);
+        self.last_poll_ms = Some(now);
+        let clock = self.clock_ms;
+        if !empty {
+            self.in_empty_run = false;
+            self.empty_ms = 0;
+            if !self.stalled {
+                return None;
+            }
+            let from = match (self.recover_from, self.last_records) {
+                (Some(from), Some(last)) if clock.saturating_sub(last) <= RECOVER_GAP_MS => from,
+                // A new run covers this poll's own stretch of polling, not just its end.
+                _ => clock.saturating_sub(step),
+            };
+            self.recover_from = Some(from);
+            self.last_records = Some(clock);
+            if clock.saturating_sub(from) >= RECOVER_AFTER_MS {
+                self.stalled = false;
+                self.recover_from = None;
+                self.last_records = None;
+                return Some(Stall { stalled: false });
+            }
+            return None;
+        }
+        if self.in_empty_run {
+            self.empty_ms = self.empty_ms.saturating_add(step);
+        } else {
+            self.in_empty_run = true;
+            self.empty_ms = 0;
+        }
+        if !self.stalled && self.empty_ms >= STALL_AFTER_MS {
+            self.stalled = true;
+            self.recover_from = None;
+            self.last_records = None;
+            return Some(Stall { stalled: true });
+        }
+        None
+    }
+}
+
 /// A span of session time without samples.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Gap {
@@ -346,6 +441,8 @@ pub enum BackendEvent {
     PdRows(PdRows),
     /// PD status blocks.
     PdStatus(PdStatusBatch),
+    /// The queue stopped or resumed delivering samples (FR NVN6M8).
+    Stall(Stall),
 }
 
 /// Where the worker sends its events.
@@ -623,6 +720,8 @@ pub struct Worker<T: Transport, C: Clock> {
     /// Holds on the queue polling (FR DGSQ6S): while any is held, no
     /// GET_DATA goes out, but the session stays connected.
     poll_holds: u32,
+    /// Runs of empty queue polls (FR NVN6M8).
+    stall: StallTracker,
     /// Whether a PDM session is open on this meter, when the owner tells.
     pdm_open: Option<PdmOpen>,
     /// Where errors that leave the session running are logged (FR AXHK2G).
@@ -727,6 +826,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             pd: PdCapture::new().with_status_limit(config.pd_status_limit),
             pd_meter: (info.model.clone(), info.firmware_version.clone()),
             poll_holds: 0,
+            stall: StallTracker::default(),
             pdm_open: None,
             log: SessionLog::default(),
             queue_faulted: false,
@@ -1681,6 +1781,14 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 }
                 if let Some(rate) = poll.rate_switch {
                     self.log_event_with("queue interval switched", rate_label(rate));
+                }
+                if self.source == MeasurementSource::Queue {
+                    let now = self.clock.now_ms();
+                    let period = u64::try_from(Streamer::poll_period(self.rate).as_millis())
+                        .unwrap_or(u64::MAX);
+                    if let Some(stall) = self.stall.poll(now, poll.records.is_empty(), period) {
+                        self.emit(BackendEvent::Stall(stall));
+                    }
                 }
                 self.queue_records(&poll);
                 // A failed snapshot only costs the temperature reading; a
@@ -3277,6 +3385,150 @@ pub(crate) fn late_hold_control() -> (WorkerControl, Arc<Mutex<Vec<bool>>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FR NVN6M8, AC .3 / .4: a long pause between two empty polls (a
+    /// settings write or a record download on the worker thread) counts as
+    /// one ordinary poll, not as its wall time.
+    #[test]
+    fn nvn6m8_a_long_pause_between_empty_polls_counts_as_one_poll() {
+        let mut t = StallTracker::default();
+        assert_eq!(t.poll(0, true, 100), None);
+        assert_eq!(t.poll(100, true, 100), None);
+        // 5 s inside a settings write, then the next empty poll.
+        assert_eq!(t.poll(5_100, true, 100), None);
+        assert!(t.empty_ms < STALL_AFTER_MS, "{}", t.empty_ms);
+        // Ordinary empty polls still reach the stall at 2 s of polling.
+        let mut now = 5_100;
+        let mut events = Vec::new();
+        while events.is_empty() && now < 10_000 {
+            now += 100;
+            events.extend(t.poll(now, true, 100));
+        }
+        assert_eq!(events, vec![Stall { stalled: true }]);
+        assert!(now >= 5_100 + 1_700, "stalled too early at {now}");
+    }
+
+    /// FR NVN6M8, AC .2 (with FR EHY1JW's rule): records end the stall once;
+    /// a quiet run reports none.
+    #[test]
+    fn nvn6m8_records_end_a_stall_once() {
+        let mut t = StallTracker::default();
+        let mut now = 0;
+        let mut events: Vec<Stall> = Vec::new();
+        while now <= 2_200 {
+            events.extend(t.poll(now, true, 100));
+            now += 100;
+        }
+        let end = now + 1_500;
+        while now <= end {
+            events.extend(t.poll(now, false, 100));
+            now += 100;
+        }
+        assert_eq!(
+            events,
+            vec![Stall { stalled: true }, Stall { stalled: false }]
+        );
+    }
+
+    /// A tracker 2.2 s into a stall (polls every 100 ms); the time of the next poll.
+    fn ehy1jw_stalled() -> (StallTracker, u64) {
+        let mut t = StallTracker::default();
+        let mut now = 0;
+        let mut events = Vec::new();
+        while now <= 2_200 {
+            events.extend(t.poll(now, true, 100));
+            now += 100;
+        }
+        assert_eq!(events, vec![Stall { stalled: true }]);
+        (t, now)
+    }
+
+    /// Polls every 100 ms from `*now` for `ms`; records on the polls `records`
+    /// picks (by ms since the start). The events they sent, with their times.
+    fn ehy1jw_polls(
+        t: &mut StallTracker,
+        now: &mut u64,
+        ms: u64,
+        records: impl Fn(u64) -> bool,
+    ) -> Vec<(u64, Stall)> {
+        let start = *now;
+        let mut events = Vec::new();
+        while *now < start + ms {
+            let empty = !records(*now - start);
+            if let Some(e) = t.poll(*now, empty, 100) {
+                events.push((*now - start, e));
+            }
+            *now += 100;
+        }
+        events
+    }
+
+    /// FR EHY1JW, AC .1 / .4: one poll with records mid-stall, then empty
+    /// polls again: the stall goes on, and is not sent again.
+    #[test]
+    fn ehy1jw_a_stray_poll_with_records_keeps_the_stall() {
+        let (mut t, mut now) = ehy1jw_stalled();
+        let events = ehy1jw_polls(&mut t, &mut now, 10_000, |ms| ms == 0);
+        assert_eq!(events, vec![]);
+    }
+
+    /// FR EHY1JW, AC .2 / .4: polls with records end the stall once they span
+    /// 1 s, with at most 750 ms between two of them; one stall-ended event.
+    #[test]
+    fn ehy1jw_records_for_one_second_end_the_stall_once() {
+        // Every poll has records.
+        let (mut t, mut now) = ehy1jw_stalled();
+        let events = ehy1jw_polls(&mut t, &mut now, 5_000, |_| true);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].1, Stall { stalled: false });
+        assert!((900..=1_200).contains(&events[0].0), "{events:?}");
+
+        // Records every 500 ms (2 SPS) and every 700 ms.
+        for every in [500, 700] {
+            let (mut t, mut now) = ehy1jw_stalled();
+            let events = ehy1jw_polls(&mut t, &mut now, 5_000, |ms| ms % every == 0);
+            assert_eq!(events.len(), 1, "every {every}: {events:?}");
+            assert_eq!(events[0].1, Stall { stalled: false });
+            assert!(events[0].0 >= 900, "every {every}: {events:?}");
+            assert!(events[0].0 <= 1_200 + every, "every {every}: {events:?}");
+        }
+    }
+
+    /// FR EHY1JW, AC .3 / .4: records further apart than 750 ms of polling
+    /// start the run over and never end the stall.
+    #[test]
+    fn ehy1jw_records_further_apart_than_750_ms_never_end_the_stall() {
+        for every in [800, 900, 1_600] {
+            let (mut t, mut now) = ehy1jw_stalled();
+            let events = ehy1jw_polls(&mut t, &mut now, 20_000, |ms| ms % every == 0);
+            assert_eq!(events, vec![], "records every {every} ms");
+        }
+    }
+
+    /// FR EHY1JW, AC .3: a gap over 750 ms restarts the 1 s run.
+    #[test]
+    fn ehy1jw_a_long_gap_restarts_the_run() {
+        let (mut t, mut now) = ehy1jw_stalled();
+        // 600 ms of run, a 1.6 s gap, 600 ms of run again.
+        let picks = [0, 600, 2_200, 2_800];
+        let events = ehy1jw_polls(&mut t, &mut now, 3_500, |ms| picks.contains(&ms));
+        assert_eq!(events, vec![]);
+    }
+
+    /// FR EHY1JW, AC .5: the stall still starts after 2 s of empty polls, and
+    /// again after a recovery.
+    #[test]
+    fn ehy1jw_the_stall_still_starts_after_two_seconds() {
+        let mut t = StallTracker::default();
+        let mut now = 0;
+        let events = ehy1jw_polls(&mut t, &mut now, 3_000, |_| false);
+        assert_eq!(events, vec![(2_000, Stall { stalled: true })]);
+        let events = ehy1jw_polls(&mut t, &mut now, 2_000, |_| true);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].1, Stall { stalled: false });
+        let events = ehy1jw_polls(&mut t, &mut now, 3_000, |_| false);
+        assert_eq!(events, vec![(2_000, Stall { stalled: true })]);
+    }
 
     fn control() -> (WorkerControl, mpsc::Receiver<Command>) {
         let (commands, inbox) = mpsc::channel();

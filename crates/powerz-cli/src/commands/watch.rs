@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use powerz_protocol::adcnew::Content;
 use powerz_protocol::decode::Rate;
-use powerz_protocol::session::{Clock, Session};
-use powerz_protocol::transport::Transport;
+use powerz_protocol::session::{self, Clock, Session};
+use powerz_protocol::transport::{self, Transport};
 
-use super::stream::{MAX_START_ECHOES, too_many_echoes};
+use super::stream::MAX_START_ECHOES;
 use crate::error::CliError;
 use crate::output::{Reading, is_closed_pipe, write_adc_line, write_adc_lines};
 
@@ -32,20 +32,39 @@ pub struct WatchOptions {
 }
 
 /// `powerz watch`: checks `stop` before every refresh; each refresh reads one
-/// ADC snapshot, draws it, then calls `sleep(interval)`. Returns `Ok` once
-/// `stop` is set (Ctrl-C); a closed output pipe ends it with
-/// [`CliError::OutputClosed`].
+/// ADC snapshot, draws it, then calls `sleep(interval)`. A snapshot the meter
+/// leaves unanswered (a transport time-out; it does while busy with another
+/// session `[device]`) draws nothing for that refresh, the first one of the
+/// watch gets one note on `err`, and the next refresh asks again. Returns
+/// `Ok` once `stop` is set (Ctrl-C); a closed output pipe ends it with
+/// [`CliError::OutputClosed`]; any other failure ends it with its error.
 pub fn watch<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     opts: &WatchOptions,
     stop: &AtomicBool,
     sleep: &mut dyn FnMut(Duration),
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), CliError> {
     let mut view = View::default();
+    let mut noted_timeout = false;
     while !stop.load(Ordering::SeqCst) {
-        let a = session.read_adc()?;
-        view.draw(opts, &Reading::from(&a), out)?;
+        match session.read_adc() {
+            Ok(a) => view.draw(opts, &Reading::from(&a), out)?,
+            Err(session::Error::Transport(transport::Error::Timeout)) => {
+                if !noted_timeout {
+                    noted_timeout = true;
+                    writeln!(
+                        err,
+                        "an ADC snapshot request timed out; skipping that refresh and trying again"
+                    )?;
+                    // A fresh view, as in `watch_cdc`: redrawing over the
+                    // last view would overwrite the note on a terminal.
+                    view = View::default();
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
         sleep(opts.interval);
     }
     Ok(())
@@ -55,21 +74,45 @@ pub fn watch<T: Transport, C: Clock>(
 /// only, no sign-in, no CONNECT), then on every refresh draw the latest
 /// pushed record in the same format as [`watch`] (temperature `-`: records
 /// carry none) and call `sleep(interval)`. The stream is stopped (`03`)
-/// when `stop` is set, the output pipe closes or a refresh fails. Fails at once where the pipe has
-/// no ADCNEW stream (anything but CDC).
+/// when `stop` is set, the output pipe closes or a refresh fails. Fails at
+/// once where the pipe has no ADCNEW stream (anything but CDC). A meter that
+/// echoes the start more
+/// than [`MAX_START_ECHOES`] times (it does while another program reads it
+/// over USB `[device]`) gets one note on `err`, then the stream is stopped and
+/// the watch goes on with ADC snapshots ([`watch`]) on the same port.
 pub fn watch_cdc<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     opts: &WatchOptions,
     stop: &AtomicBool,
     sleep: &mut dyn FnMut(Duration),
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), CliError> {
     session.start_adcnew(Content::Adc, CDC_RATE)?;
     let result = watch_stream(session, opts, stop, sleep, out);
     let stopped = session.stop_adcnew();
-    result?;
+    let ended = result?;
     stopped?;
+    if ended == StreamEnd::Echoed {
+        writeln!(
+            err,
+            "the meter keeps echoing the ADCNEW start instead of streaming; watching ADC snapshots instead"
+        )?;
+        // A fresh view on purpose: the note went out between the two views,
+        // so moving the cursor back over the stream's last view would
+        // overwrite the note instead.
+        return watch(session, opts, stop, sleep, out, err);
+    }
     Ok(())
+}
+
+/// How [`watch_stream`] ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamEnd {
+    /// `stop` was set.
+    Stopped,
+    /// The meter echoed the start more than [`MAX_START_ECHOES`] times.
+    Echoed,
 }
 
 /// The refresh loop of [`watch_cdc`] on a started stream.
@@ -79,7 +122,7 @@ fn watch_stream<T: Transport, C: Clock>(
     stop: &AtomicBool,
     sleep: &mut dyn FnMut(Duration),
     out: &mut dyn Write,
-) -> Result<(), CliError> {
+) -> Result<StreamEnd, CliError> {
     let mut view = View::default();
     let mut latest: Option<Reading> = None;
     let mut waited_since: Option<u64> = None;
@@ -88,7 +131,7 @@ fn watch_stream<T: Transport, C: Clock>(
             latest = Some(Reading::from(r));
         }
         if session.adcnew_counters().start_echoes > MAX_START_ECHOES {
-            return Err(too_many_echoes());
+            return Ok(StreamEnd::Echoed);
         }
         if latest.is_none() && session.adcnew_restart_pending() {
             // The meter echoed the start (right after a bulk session); the
@@ -112,7 +155,7 @@ fn watch_stream<T: Transport, C: Clock>(
         view.draw(opts, &reading, out)?;
         sleep(opts.interval);
     }
-    Ok(())
+    Ok(StreamEnd::Stopped)
 }
 
 /// What one refresh draws: a view redrawn in place on a terminal, else one

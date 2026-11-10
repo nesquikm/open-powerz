@@ -43,6 +43,14 @@ pub(crate) fn to_js<T: Serialize>(value: &T) -> Result<JsValue, BindError> {
     serde_wasm_bindgen::to_value(value).map_err(|e| BindError::new("internal", e.to_string()))
 }
 
+/// `value` for JS with every `None` (and `()`) as `null`, not `undefined`,
+/// the shape the desktop's JSON gives the page, so both apps answer alike.
+pub(crate) fn to_js_view<T: Serialize>(value: &T) -> Result<JsValue, BindError> {
+    value
+        .serialize(&serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true))
+        .map_err(|e| BindError::new("internal", e.to_string()))
+}
+
 /// A REJECT reply as a `rejected` error, other replies as `malformed`.
 fn unexpected(reply: Reply, what: &str) -> BindError {
     match reply {

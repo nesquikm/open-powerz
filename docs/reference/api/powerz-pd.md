@@ -75,7 +75,7 @@ The decoder never panics on any input; anything it cannot type is kept raw.
 | `VdmBody` | `DiscoverIdentity(DiscoverIdentity)`, `DiscoverSvids(Vec<u16>)`, `DiscoverModes(Vec<u32>)`, `Objects(Vec<u32>)` |
 | `VdmCommand` | `name(self) -> String` (for example `Discover Identity`) |
 | `CommandType` | `Req`, `Ack`, `Nak`, `Busy`; `name(self) -> &'static str` |
-| `DiscoverIdentity`, `IdHeader`, `ProductVdo`, `ProductTypeVdo`, `PassiveCableVdo`, `ActiveCableVdo`, `ActiveCableVdo2`, `UfpVdo`, `DfpVdo` | The Discover Identity ACK and its VDOs |
+| `DiscoverIdentity`, `IdHeader`, `ProductVdo`, `ProductTypeVdo`, `PassiveCableVdo`, `ActiveCableVdo`, `ActiveCableVdo2`, `UfpVdo`, `DfpVdo`, `UsbSpeed` | The Discover Identity ACK and its VDOs; `UsbSpeed` is a cable's USB speed |
 | `ExtendedControl` | `ExtendedControl::decode(data: &[u8]) -> Option<ExtendedControl>`; its type is an `EcdbType` (`name(self) -> &'static str`) |
 | `EprMode` | `EprMode::decode(dobj: u32) -> EprMode`; its action is an `EprAction` (`name(self) -> &'static str`) |
 

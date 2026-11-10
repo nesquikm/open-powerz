@@ -44,6 +44,12 @@ const hour: RangeStats = {
   vbus_avg_v: 5,
   ibus_avg_a: 1,
   power_avg_w: 5,
+  vbus_min_v: 5,
+  vbus_max_v: 5,
+  ibus_min_a: 1,
+  ibus_max_a: 1,
+  power_min_w: 5,
+  power_max_w: 5,
 };
 
 describe("placing the ruler (AC-AXHK2T.1)", () => {

@@ -186,7 +186,7 @@ test("a drag zooms the file's chart and Whole file comes back (AC-AXHK2S.4)", as
   const view = fileView(page);
   const range = view.locator(".range");
   const whole = await range.textContent();
-  await expect(button(view, "Whole file")).toBeDisabled();
+  await expect(button(view.locator(".zoom"), "Whole file")).toBeDisabled();
 
   const over = view.locator(".u-over");
   const box = await over.boundingBox();
@@ -198,9 +198,9 @@ test("a drag zooms the file's chart and Whole file comes back (AC-AXHK2S.4)", as
   await page.mouse.up();
 
   await expect(range).not.toHaveText(whole ?? "");
-  await expect(button(view, "Whole file")).toBeEnabled();
+  await expect(button(view.locator(".zoom"), "Whole file")).toBeEnabled();
 
-  await button(view, "Whole file").click();
+  await button(view.locator(".zoom"), "Whole file").click();
   await expect(range).toHaveText(whole ?? "");
 });
 
