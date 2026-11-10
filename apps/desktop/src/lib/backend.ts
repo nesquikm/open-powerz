@@ -1,6 +1,7 @@
 /** Shapes the Tauri backend sends to the UI (mirrors `src-tauri/src/{batch,worker,devices,ui_error}.rs`). */
 
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { MockBackend } from "./mockBackend";
 import { version as packageVersion } from "../../package.json";
@@ -617,6 +618,27 @@ export async function openRecordingFile(
   const channel = new Channel<OpenProgress>();
   channel.onmessage = onProgress;
   return invoke<FileSummary | null>("recording_file_open", { onProgress: channel });
+}
+
+/** Opens the recording file handed to the app at launch or by the OS (FR M078V5), with
+ * no dialog, as {@link openRecordingFile} reads one. Resolves to its summary, or `null`
+ * when none was handed over; the web build never has one. */
+export async function openLaunchRecordingFile(
+  onProgress: (progress: OpenProgress) => void,
+): Promise<FileSummary | null> {
+  if (web) return null;
+  if (mock) return mock.openLaunchRecordingFile(onProgress);
+  const channel = new Channel<OpenProgress>();
+  channel.onmessage = onProgress;
+  return invoke<FileSummary | null>("recording_file_open_launch", { onProgress: channel });
+}
+
+/** Calls `handler` whenever the system hands the running app a recording file
+ * (macOS Open With or a Dock drop; AC-M078V5.3); {@link openLaunchRecordingFile} then
+ * opens it. Resolves to the unsubscribe; the web and mock builds never hear one. */
+export async function onLaunchFile(handler: () => void): Promise<() => void> {
+  if (web || mock || !isTauri()) return () => {};
+  return listen("launch-file", () => handler());
 }
 
 /** Ends the open under way: it resolves to `null`. */

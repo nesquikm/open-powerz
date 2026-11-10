@@ -162,6 +162,10 @@ CSV or a vendor `.db` file back into the app. It needs no meter. The file opens 
 marked as a file and read-only. The tab exists only while a file is open, and
 **Close file** ends it. One file opens at a time; opening another replaces it.
 
+The desktop app also opens a recording named on its command line
+(`open-powerz-desktop readme.csv`) straight into the File tab, and on macOS one
+opened with **Open With** in Finder.
+
 An **overview strip** sits under the file's chart, in the desktop app and the
 web edition alike. It shows the whole file, with a window over the range on
 screen. Drag the window, click the strip, or use the arrow keys to move the

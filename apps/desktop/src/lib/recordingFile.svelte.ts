@@ -1,6 +1,7 @@
 import {
   cancelRecordingFile,
   closeRecordingFile,
+  openLaunchRecordingFile,
   openRecordingFile,
   toUiError,
   type FileSummary,
@@ -28,12 +29,24 @@ export class RecordingFile {
   /** Asks for a file and opens it; resolves to whether a new file is now open. A second
    * call while one runs is ignored. */
   async open(): Promise<boolean> {
+    return this.#read(openRecordingFile);
+  }
+
+  /** Opens the file handed to the app at launch or by the OS (FR M078V5), with no dialog,
+   * by {@link open}'s rules; resolves to whether a new file is now open. */
+  async openLaunch(): Promise<boolean> {
+    return this.#read(openLaunchRecordingFile);
+  }
+
+  async #read(
+    read: (onProgress: (p: OpenProgress) => void) => Promise<FileSummary | null>,
+  ): Promise<boolean> {
     if (this.opening) return false;
     this.opening = true;
     this.progress = null;
     this.error = null;
     try {
-      const opened = await openRecordingFile((p) => (this.progress = p));
+      const opened = await read((p) => (this.progress = p));
       if (opened === null) return false;
       this.summary = opened;
       return true;
