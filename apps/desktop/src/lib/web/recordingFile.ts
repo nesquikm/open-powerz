@@ -15,8 +15,11 @@ import type {
 } from "../backend";
 import type { SqlJsStatic } from "sql.js";
 import { HistoryColumns, SessionStats } from "../history";
-import type { PowerzWasm, RecordingRows } from "./driver";
+import type { CsvRecordingLike, PowerzWasm, RecordingRows } from "./driver";
 import { usage, type LoadSqlJs } from "./session";
+
+/** The most lines (CSV) or rows (`.db`) read before the reader yields to the event loop. */
+export const RECORDING_SLICE_LINES = 5000;
 
 /** The file types the picker offers: the desktop dialog's CSV and vendor `.db` files. */
 export const RECORDING_ACCEPT = ".csv,.db";
@@ -88,6 +91,7 @@ export interface OpenedRecording {
 export type ReadRecordingFile = (
   file: PickedRecordingFile,
   onProgress: (progress: OpenProgress) => void,
+  signal: AbortSignal,
 ) => Promise<{ summary: FileSummary; opened: OpenedRecording }>;
 
 /** The web edition's recording-file commands: one file open at a time. */
@@ -95,6 +99,8 @@ export class RecordingFiles {
   private opened: OpenedRecording | null = null;
   /** Bumped by Cancel: an open that started under an older one ends as `null`. */
   private generation = 0;
+  /** Aborted by Cancel: the running open's read stops before its next slice. */
+  private reading: AbortController | null = null;
 
   constructor(
     private readonly pick: PickRecordingFile,
@@ -109,11 +115,15 @@ export class RecordingFiles {
     const file = await this.pick();
     if (!file || generation !== this.generation) return null;
     let result: Awaited<ReturnType<ReadRecordingFile>>;
+    const reading = new AbortController();
+    this.reading = reading;
     try {
-      result = await this.read(file, onProgress);
+      result = await this.read(file, onProgress, reading.signal);
     } catch (e) {
       if (generation !== this.generation) return null;
       throw e;
+    } finally {
+      if (this.reading === reading) this.reading = null;
     }
     if (generation !== this.generation) return null;
     this.opened = result.opened;
@@ -123,6 +133,8 @@ export class RecordingFiles {
   /** Ends a running open as `null`; the file already open stays open. */
   async cancel(): Promise<void> {
     this.generation++;
+    this.reading?.abort();
+    this.reading = null;
   }
 
   async close(): Promise<void> {
@@ -211,15 +223,33 @@ const NOT_A_DATABASE = "This file is not a database that can be opened.";
 const NOT_A_RECORDING = "This database is not a recording.";
 const UNREADABLE_DB = "The database could not be read.";
 
+/** The refusal of a read whose signal was aborted (a Cancel). */
+const CANCELLED = "The recording read was cancelled.";
+
+/** Throws when `signal` was aborted, so a read stops before its next slice. */
+function throwIfCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw usage(CANCELLED);
+}
+
+/** The gap between two slices of a read: a macrotask turn of the event loop, so the
+ * page stays free, then the Cancel check before the next slice. */
+async function nextSlice(signal: AbortSignal | undefined): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  throwIfCancelled(signal);
+}
+
 /** The rows of the vendor `.db` `bytes`, read with sql.js by the desktop's SQL and
  * rules (`powerz_record::db`): the same table picked, the same rows kept and skipped.
- * Progress counts the table's rows, up to its highest rowid. */
-export function readRecordingDb(
+ * Progress counts the table's rows, up to its highest rowid. The rows are read in
+ * slices of `RECORDING_SLICE_LINES`, with a turn of the event loop between slices; an
+ * aborted `signal` stops the read before its next slice and frees the reader. */
+export async function readRecordingDb(
   w: PowerzWasm,
   SQL: SqlJsStatic,
   bytes: Uint8Array,
   onProgress: (progress: OpenProgress) => void,
-): RecordingRows {
+  signal?: AbortSignal,
+): Promise<RecordingRows> {
   let db: InstanceType<SqlJsStatic["Database"]>;
   try {
     db = new SQL.Database(bytes);
@@ -259,7 +289,13 @@ export function readRecordingDb(
         throw usage(UNREADABLE_DB);
       }
       const numbers = new Float64Array(10);
+      let inSlice = 0;
+      throwIfCancelled(signal);
       for (;;) {
+        if (inSlice === RECORDING_SLICE_LINES) {
+          await nextSlice(signal);
+          inSlice = 0;
+        }
         let row: ReturnType<typeof stmt.get>;
         try {
           if (!stmt.step()) break;
@@ -272,6 +308,7 @@ export function readRecordingDb(
           const v = row[i + 1];
           numbers[i] = typeof v === "number" ? v : NaN;
         }
+        inSlice++;
         if (reader.push(typeof elapsed === "string" ? elapsed : undefined, numbers)) {
           onProgress({ done: doneOf(reader.lines()), total });
         }
@@ -291,12 +328,13 @@ export function readRecordingDb(
 
 /** Reads a picked file with the wasm module's recording readers: a `.db` (the name
  * ends in `.db`, any case) with the desktop's `.db` rules over sql.js, anything else
- * with the desktop's CSV reader, whose progress counts the file's bytes. */
+ * with the desktop's CSV reader, whose progress counts the file's bytes. Both read in
+ * slices; an aborted `signal` stops the read before its next slice and frees the reader. */
 export function wasmRecordingReader(
   module: () => Promise<PowerzWasm>,
   sqlJs?: LoadSqlJs,
 ): ReadRecordingFile {
-  return async (file, onProgress) => {
+  return async (file, onProgress, signal) => {
     onProgress({ done: 0, total: 0 });
     const w = await module();
     const bytes = new Uint8Array(await file.arrayBuffer());
@@ -305,17 +343,41 @@ export function wasmRecordingReader(
       const SQL = await sqlJs();
       let rows: RecordingRows;
       try {
-        rows = readRecordingDb(w, SQL, bytes, onProgress);
+        rows = await readRecordingDb(w, SQL, bytes, onProgress, signal);
       } catch (e) {
         throw usage(messageOf(e, UNREADABLE_DB));
       }
       return openedFromRows(file.name, rows);
     }
+    const notARecording = (e: unknown) => usage(messageOf(e, "This file is not a recording."));
+    let reader: CsvRecordingLike;
+    try {
+      reader = new w.CsvRecording(bytes);
+    } catch (e) {
+      throw notARecording(e);
+    }
     let rows: RecordingRows;
     try {
-      rows = w.readRecordingCsv(bytes);
+      throwIfCancelled(signal);
+      for (;;) {
+        let more: boolean;
+        try {
+          more = reader.step(RECORDING_SLICE_LINES);
+        } catch (e) {
+          throw notARecording(e);
+        }
+        if (!more) break;
+        onProgress({ done: reader.bytesRead(), total: bytes.length });
+        await nextSlice(signal);
+      }
     } catch (e) {
-      throw usage(messageOf(e, "This file is not a recording."));
+      reader.free();
+      throw e;
+    }
+    try {
+      rows = reader.finish();
+    } catch (e) {
+      throw notARecording(e);
     }
     onProgress({ done: bytes.length, total: bytes.length });
     return openedFromRows(file.name, rows);

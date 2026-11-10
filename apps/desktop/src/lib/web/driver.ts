@@ -111,6 +111,20 @@ export interface PowerzWasm extends DemoMeterModule, PdFilesWasm {
     columnsOf: (table: string) => string[],
   ): string | undefined;
   DbRecording: new () => DbRecordingLike;
+  CsvRecording: new (bytes: Uint8Array) => CsvRecordingLike;
+}
+
+/** The wasm `CsvRecording` (FR 3B70S6): a recorder CSV read a slice of lines at a time,
+ * ending with exactly `readRecordingCsv`'s rows. The constructor throws a `usage` error
+ * for a file that is no recorder CSV. */
+export interface CsvRecordingLike {
+  /** Takes in at most `maxLines` lines; true while lines may remain. */
+  step(maxLines: number): boolean;
+  /** Bytes read so far. */
+  bytesRead(): number;
+  /** The rows kept; consumes the reader. Throws a `usage` error when none was. */
+  finish(): RecordingRows;
+  free(): void;
 }
 
 /** The wasm `DbRecording` (FR AHTZW3): a `.db` data table's rows, by the desktop's rules. */

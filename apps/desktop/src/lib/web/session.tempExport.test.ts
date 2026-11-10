@@ -278,7 +278,7 @@ describe("Open recording reads the exported TEMP back (AC-JFRPME.4)", () => {
     playTimeline(session);
     await session.exportSessionDb("export.db", () => {});
     const bytes = new Uint8Array(await (downloads[0] as Download).blob.arrayBuffer());
-    const rows = readRecordingDb(w, SQL, bytes, () => {});
+    const rows = await readRecordingDb(w, SQL, bytes, () => {});
     expect(rows.rows).toBe(TIMELINE_TEMPS.length);
     expect(rowTemps(rows)).toEqual(TIMELINE_TEMPS);
   });

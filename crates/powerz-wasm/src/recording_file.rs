@@ -106,6 +106,60 @@ pub fn read_recording_csv_js(bytes: &[u8]) -> Result<JsValue, BindError> {
     to_js(&read_recording_csv(bytes)?)
 }
 
+/// A recorder CSV read a slice of lines at a time, so a big file leaves the
+/// page free between slices; it ends with exactly [`read_recording_csv`]'s rows.
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct CsvRecording {
+    reader: CsvReader<std::io::Cursor<Vec<u8>>>,
+    rules: FileRows,
+    samples: Vec<OpenedSample>,
+}
+
+#[wasm_bindgen]
+impl CsvRecording {
+    /// A reader past the header of `bytes`; a file that is no recorder CSV is refused.
+    #[wasm_bindgen(constructor)]
+    pub fn new(bytes: Vec<u8>) -> Result<CsvRecording, BindError> {
+        let reader =
+            CsvReader::new(std::io::Cursor::new(bytes)).map_err(|e| refused(e.to_string()))?;
+        Ok(CsvRecording {
+            reader,
+            rules: FileRows::new(MAX_ROWS),
+            samples: Vec::new(),
+        })
+    }
+
+    /// Take in at most `max_lines` lines; true while lines may remain.
+    pub fn step(&mut self, max_lines: u32) -> Result<bool, BindError> {
+        for _ in 0..max_lines {
+            match self.reader.next_row().map_err(|e| refused(e.to_string()))? {
+                Some(outcome) => self.samples.extend(take_row(&mut self.rules, outcome)),
+                None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Bytes read so far, for a progress report.
+    #[wasm_bindgen(js_name = bytesRead)]
+    pub fn bytes_read(&self) -> f64 {
+        self.reader.bytes_read() as f64
+    }
+
+    /// The rows kept, as [`OpenedRows`]; a file with none is refused.
+    pub fn finish(self) -> Result<JsValue, BindError> {
+        to_js(&self.into_rows()?)
+    }
+}
+
+impl CsvRecording {
+    /// The rows kept; a file with none is refused.
+    pub fn into_rows(self) -> Result<OpenedRows, BindError> {
+        opened_rows(&self.rules, self.samples)
+    }
+}
+
 // ---- a vendor `.db`, its SQL run by sql.js ----
 
 /// The statement listing a database's tables as `(name, plain)` rows.
@@ -290,6 +344,111 @@ mod tests {
     fn a_db_table_with_no_row_is_refused() {
         let e = DbRecording::new().into_rows().unwrap_err();
         assert_eq!(e.message, "This file holds no readable row.");
+    }
+
+    // ---- FR 3B70S6: the CSV read in slices ----
+
+    /// A recorder CSV of good, damaged and blank lines (CRLF on some).
+    fn mixed_csv() -> String {
+        let mut csv = format!("{HEADER}\n");
+        for i in 0..40u32 {
+            match i % 7 {
+                3 => csv.push_str("bad,line\n"),
+                5 => csv.push('\n'),
+                6 => csv.push_str(&format!(
+                    "0:00:{:02}.{:03},{},5.1,1.5,0.6,0.01,1.68,0,,0.{:03},0.{:03},7.65\r\n",
+                    i / 2,
+                    (i % 2) * 500,
+                    i,
+                    i,
+                    i
+                )),
+                _ => csv.push_str(&format!(
+                    "0:00:{:02}.{:03},{},5,1,0.6,0.01,1.68,0,25,0.{:03},0.{:03},5\n",
+                    i / 2,
+                    (i % 2) * 500,
+                    i,
+                    i,
+                    i
+                )),
+            }
+        }
+        csv
+    }
+
+    /// Steps `bytes` through a [`CsvRecording`] `slice` lines at a time: the rows, the
+    /// number of `step` calls and each call's `bytes_read`.
+    fn stepped(bytes: &[u8], slice: u32) -> (OpenedRows, usize, Vec<f64>) {
+        let mut reader = CsvRecording::new(bytes.to_vec()).expect("a recorder header");
+        let mut calls = 0;
+        let mut read = vec![reader.bytes_read()];
+        loop {
+            calls += 1;
+            let more = reader.step(slice).expect("a readable file");
+            read.push(reader.bytes_read());
+            if !more {
+                break;
+            }
+            assert!(calls < 100_000, "step never ends");
+        }
+        (reader.into_rows().expect("a recording"), calls, read)
+    }
+
+    #[test]
+    fn a_csv_stepped_in_slices_gives_the_one_shot_rows() {
+        let csv = mixed_csv();
+        let whole = read_recording_csv(csv.as_bytes()).expect("a recording");
+        assert!(whole.skipped > 0, "the fixture has damaged lines");
+        for slice in [1, 2, 5_000] {
+            let (rows, _, _) = stepped(csv.as_bytes(), slice);
+            assert_eq!(rows, whole, "slice of {slice} lines");
+        }
+    }
+
+    #[test]
+    fn a_step_parses_at_most_its_slice_and_says_whether_more_remain() {
+        let csv = mixed_csv();
+        let lines = csv.lines().count();
+        let (_, one, _) = stepped(csv.as_bytes(), 1);
+        let (_, two, _) = stepped(csv.as_bytes(), 2);
+        let (_, all, _) = stepped(csv.as_bytes(), 5_000);
+        // One line per call takes a call per line; a slice past the file takes one.
+        assert!(one >= lines - 1, "{one} calls for {lines} lines");
+        assert!(
+            two >= (lines - 1) / 2 && two < one,
+            "{two} calls of 2 lines"
+        );
+        assert_eq!(all, 1);
+        let mut reader = CsvRecording::new(csv.into_bytes()).expect("a recorder header");
+        assert!(
+            reader.step(1).expect("a readable line"),
+            "more lines remain"
+        );
+    }
+
+    #[test]
+    fn bytes_read_grows_to_the_files_length() {
+        let csv = mixed_csv();
+        let (_, _, read) = stepped(csv.as_bytes(), 3);
+        assert!(read.windows(2).all(|w| w[0] <= w[1]), "{read:?}");
+        assert!(read.iter().any(|&r| r > 0.0 && r < csv.len() as f64));
+        assert_eq!(read.last().copied(), Some(csv.len() as f64));
+    }
+
+    #[test]
+    fn a_stepped_csv_refuses_what_the_one_shot_reader_refuses() {
+        for bytes in [&b""[..], b"time,volts\n0,5\n"] {
+            let want = read_recording_csv(bytes).unwrap_err();
+            let got = CsvRecording::new(bytes.to_vec()).expect_err("refused");
+            assert_eq!((got.kind, got.message), (want.kind, want.message));
+        }
+        let header_only = format!("{HEADER}\n");
+        let mut reader = CsvRecording::new(header_only.into_bytes()).expect("a recorder header");
+        while reader.step(5_000).expect("no damaged line") {}
+        assert_eq!(
+            reader.into_rows().unwrap_err().message,
+            "This file holds no readable row."
+        );
     }
 
     #[test]
