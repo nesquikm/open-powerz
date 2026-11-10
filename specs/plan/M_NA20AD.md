@@ -25,6 +25,7 @@ codename: Loose Ends
 - The recording rows type, and the unasked PD offer list.
 - An independent docs review: README and docs match the app; new README screenshot.
 - HIL12 findings: a snapshot timeout in the CLI watch, the silent queue stall while the CLI polls over CDC.
+- HIL12b findings: the stall notice flickers mid-stall, one meter listed twice in the web device menu.
 - Docs review follow-ups (PR #18): stats scope under a zoomed File chart, the live chart buffer wording, one name for the web edition.
 
 **Out of scope:** the Import vendor log known issue (no real vendor file exists; stays in Known issues); any meter command outside the CLI CDC read path; meter runs (a HIL run follows).
@@ -48,6 +49,8 @@ codename: Loose Ends
 | [EWEV1Z](../frs/EWEV1Z.md) | The stats scope toggle hides which scope is on (bug) | n/a |
 | [NVN6M7](../frs/NVN6M7.md) | A snapshot timeout ends the CLI watch (bug) | n/a |
 | [NVN6M8](../frs/NVN6M8.md) | The app chart freezes without a word while the CLI polls over CDC (bug) | n/a |
+| [EHY1JW](../frs/EHY1JW.md) | The stall notice flickers during a long stall (bug) | n/a |
+| [EHY1JX](../frs/EHY1JX.md) | The web device menu lists one meter twice (bug) | n/a |
 
 Build order: the table's order (independent).
 
@@ -82,3 +85,7 @@ Build order: the table's order (independent).
    verify: `cargo test -p powerz-cli`.
 15. Empty queue polls for 2 s raise a stall notice in both editions — NVN6M8
    verify: `bun run test` and `cargo test -p open-powerz-desktop`.
+16. A stall ends only after 1 s of samples — EHY1JW
+   verify: `bun run test` and `cargo test -p open-powerz-desktop`.
+17. One device entry per meter in the web device list — EHY1JX
+   verify: `bun run test`.

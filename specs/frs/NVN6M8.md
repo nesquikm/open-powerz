@@ -34,7 +34,7 @@ Every queue poll gets an empty reply for the whole CLI run; the chart freezes fo
 ## Acceptance Criteria
 
 - AC-NVN6M8.1: Regression: in the web edition, when queue polls return no samples for 2 s of polling, the meter's view shows the notice "The meter stopped sending samples. Another program may be polling it, such as powerz watch over the serial port; the stream comes back when it stops."
-- AC-NVN6M8.2: The notice goes away once a queue poll returns samples again, and it shows at most once per stall.
+- AC-NVN6M8.2: The notice goes away once a queue poll returns samples again, and it shows at most once per stall (FR EHY1JW later requires samples to keep arriving for 1 s first).
 - AC-NVN6M8.3: Time with the stream's polling held (a settings write, a memory read) does not count toward the 2 s, and empty polls shorter than 2 s show no notice.
 - AC-NVN6M8.4: The desktop app shows the same notice under the same rule for its queue source.
 - AC-NVN6M8.5: The use-several-meters and record-a-csv pages and the CLI reference's watch section say that a CLI polling the meter over CDC pauses the app's queue stream.
@@ -54,3 +54,4 @@ Vitest: the driver over a fake transport with recorded empty queue replies and a
 ## Notes
 
 The snapshot source is unaffected. The chart keeps the stall as an ordinary pause in the samples.
+While a CLI holds the meter's serial port, settings Apply is refused in both apps; that is by design (HIL12b note B), so the settings-write hold is checked without a CLI.
