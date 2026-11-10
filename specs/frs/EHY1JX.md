@@ -53,3 +53,7 @@ Vitest: the web backend's device list over fake WebUSB and WebHID navigators (bo
 ## Notes
 
 WebHID gives no serial number, so the two permissions cannot be matched one to one; the count per product is the best match.
+
+## Hardware evidence (HIL12 and HIL12b)
+
+- [ ] AC-EHY1JX.1–.4: written after the HIL12b run; not run on a browser with both permissions yet.

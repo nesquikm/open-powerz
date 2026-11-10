@@ -54,3 +54,8 @@ Scripted-port tests in the CLI crate: a port that drops one snapshot reply for t
 ## Notes
 
 Needs the HIL re-check: the CDC source watch with the browser streaming, three runs.
+
+## Hardware evidence (HIL12 and HIL12b)
+
+- [x] AC-NVN6M7.3: qa-runs/WEB.hil12b-20261110-1705 step 1; three `watch --source cdc` runs of 130 s beside the browser stream, none ended early, all exit 0 on SIGINT.
+- [ ] AC-NVN6M7.1, AC-NVN6M7.2: no snapshot timed out in those runs, so the skip and its note were not seen on the meter; the CLI tests cover them.

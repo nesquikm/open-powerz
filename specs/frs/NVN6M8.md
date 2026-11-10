@@ -55,3 +55,11 @@ Vitest: the driver over a fake transport with recorded empty queue replies and a
 
 The snapshot source is unaffected. The chart keeps the stall as an ordinary pause in the samples.
 While a CLI holds the meter's serial port, settings Apply is refused in both apps; that is by design (HIL12b note B), so the settings-write hold is checked without a CLI.
+
+## Hardware evidence (HIL12 and HIL12b)
+
+- [x] AC-NVN6M8.1: qa-runs/WEB.hil12b-20261110-1705 step 2; the web notice showed 2.3 s into a CLI poll watch with the exact wording.
+- [x] AC-NVN6M8.2: same step; it cleared 0.55 s after the CLI exited. The mid-stall flicker seen there is fixed by FR EHY1JW.
+- [x] AC-NVN6M8.3 (settings-write hold, short empty polls): qa-runs/WEB.hil12b-20261110-1705 steps 4 and 5; no notice during settings writes without a CLI, and none at 50 or 1000 SPS without a CLI.
+- [ ] AC-NVN6M8.3 (memory-read hold): not exercised on the meter; the driver and worker tests cover it.
+- [x] AC-NVN6M8.4: qa-runs/WEB.hil12b-20261110-1705 step 3; the desktop notice showed 2.7 s in and cleared 0.08 s after the CLI exited.

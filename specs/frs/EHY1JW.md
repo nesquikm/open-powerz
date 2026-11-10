@@ -54,3 +54,7 @@ Vitest: the driver over a fake transport and a fake clock with a stall, stray si
 ## Notes
 
 The 750 ms gap fits the 2 SPS stream, which returns samples every 500 ms.
+
+## Hardware evidence (HIL12 and HIL12b)
+
+- [ ] AC-EHY1JW.1–.5: written after the HIL12b run; not run on the meter yet.
