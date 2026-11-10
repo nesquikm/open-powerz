@@ -128,11 +128,11 @@ function spanText(seconds: number): string {
   return countText(Math.round(seconds / 86_400), "day");
 }
 
-/** How long a chart memory of `capacity` samples lasts at a rate, or that the rate is still
- * unknown (`null` or 0). */
+/** How long the live chart buffer of `capacity` samples lasts at a rate (the session history
+ * keeps far more), or that the rate is still unknown (`null` or 0). */
 export function memoryDepthText(capacity: number, rateSps: number | null): string {
-  if (rateSps === null || rateSps <= 0) return "Chart memory: measuring the rate…";
-  return `Chart memory holds about ${spanText(capacity / rateSps)} at this rate`;
+  if (rateSps === null || rateSps <= 0) return "Live chart buffer: measuring the rate…";
+  return `Live chart buffer: about ${spanText(capacity / rateSps)} at this rate. The session history keeps far more.`;
 }
 
 /** The word before the time in the recording indicator. */

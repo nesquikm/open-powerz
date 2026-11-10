@@ -694,6 +694,28 @@ describe("memory depth (AC-AXHK2R.7)", () => {
   });
 });
 
+describe("the memory line names the live chart buffer (AC-2VPF6P.1, AC-2VPF6P.2)", () => {
+  it("AC-2VPF6P.1: names the live chart buffer, its span, and the session history", () => {
+    expect(memoryDepthText(600_000, 1000)).toBe(
+      "Live chart buffer: about 10 minutes at this rate. The session history keeps far more.",
+    );
+    const slow = memoryDepthText(600_000, 50);
+    expect(slow).toMatch(/^Live chart buffer: about 3(\.\d)? hours? at this rate\./);
+    expect(slow).toContain("The session history keeps far more.");
+  });
+
+  it('AC-2VPF6P.1: no longer says "Chart memory"', () => {
+    for (const rate of [1000, 50, 2, null, 0]) {
+      expect(memoryDepthText(600_000, rate)).not.toMatch(/chart'?s? memory/i);
+    }
+  });
+
+  it("AC-2VPF6P.2: names the live chart buffer while measuring the rate", () => {
+    expect(memoryDepthText(600_000, null)).toBe("Live chart buffer: measuring the rate…");
+    expect(memoryDepthText(600_000, 0)).toBe("Live chart buffer: measuring the rate…");
+  });
+});
+
 describe("the summary says why a recording ended (AC-AXHK2R.3, AC-AXHK2R.5)", () => {
   it("names the low current", () => {
     const text = recordingSummaryText({ ...summary(42), ended: "low_current" }, "/tmp/rec.csv");

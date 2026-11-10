@@ -7,6 +7,10 @@ zoom and scroll back through it while the meter keeps measuring. Pick a meter
 (or the demo device) in the device picker, press Connect, and the chart starts
 following the newest data.
 
+While live, the chart draws from its live chart buffer. It holds about 10
+minutes at 1000 SPS, and longer at lower rates. The session history keeps far
+more, and the chart reads it when you scroll back.
+
 The web edition's chart works the same way; where it differs, see
 [Use the web edition](web-edition.md).
 

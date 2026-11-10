@@ -88,10 +88,10 @@ while any meter records.
 - **Row limit** ends a recording at that many rows (default 10,000,000). It
   keeps the file, and the notice opens with "Recording ended at the row limit".
 
-The dialog also shows how long the chart's memory (its live buffer) lasts at
-the current rate: about 10 minutes at 1000 SPS, longer at lower rates. The session
-history behind it keeps far more (see [Long sessions](#long-sessions)).
-Neither limits a recording.
+The dialog also shows the live chart buffer: how long the live chart's data
+lasts at the current rate. It is about 10 minutes at 1000 SPS, and longer at
+lower rates. The session history keeps far more (see
+[Long sessions](#long-sessions)). Neither limits a recording.
 
 `powerz stream` has none of these options: it has no pause, auto-stop or row
 limit, and it writes to the file you name.
