@@ -17,11 +17,14 @@
     panel,
     connected,
     theme,
+    target,
   }: {
     panel: RecordsPanel;
     /** A meter is connected, so its records can be read. */
     connected: boolean;
     theme: ResolvedTheme;
+    /** Who a delete goes to, named in its confirm (AC-NWGY72.5). */
+    target: string;
   } = $props();
 
   const rows = $derived(panel.records ? recordRows({ records: panel.records }) : []);
@@ -35,10 +38,10 @@
   let confirming = $state<{ index: number; name: string } | "all" | null>(null);
 
   function confirmDelete(typed: string): void {
-    const target = confirming;
+    const pending = confirming;
     confirming = null;
-    if (target === null) return;
-    void panel.delete(target === "all" ? "all" : target.index, typed);
+    if (pending === null) return;
+    void panel.delete(pending === "all" ? "all" : pending.index, typed);
   }
   const anyDownloadable = $derived(rows.some((r) => r.downloadable));
   const stats = $derived(panel.openedStats);
@@ -222,6 +225,7 @@
     {#if confirming !== null}
       <RecordDeleteDialog
         name={confirming === "all" ? null : confirming.name}
+        {target}
         onCancel={() => (confirming = null)}
         onConfirm={confirmDelete}
       />

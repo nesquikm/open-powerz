@@ -58,7 +58,8 @@ export function firmwareWarningText(code: FirmwareWarningCode, info: ConnectedIn
   }
 }
 
-/** The picked entry can be connected: anything but a meter in bootloader mode. */
+/** The picked entry can be connected: anything but a meter in bootloader mode or one
+ * that is not connected (AC-NWGY72.3). */
 export function canConnectTo(device: DeviceListing | null): boolean {
-  return device !== null && device.mode !== "bootloader";
+  return device !== null && device.mode !== "bootloader" && device.absent !== true;
 }

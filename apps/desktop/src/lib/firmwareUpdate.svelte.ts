@@ -89,7 +89,8 @@ function updatedListing(
 ): DeviceListing | undefined {
   const demo = listings.find((l) => l.demo_scenario !== null && l.id === updated.id);
   if (demo !== undefined) return demo;
-  const real = listings.filter((l) => l.demo_scenario === null);
+  // A not-connected stand-in (FR NWGY72) is no listing of the meter: it is not there.
+  const real = listings.filter((l) => l.demo_scenario === null && l.absent !== true);
   const serial = updated.serial ?? null;
   if (serial !== null) return real.find((l) => l.serial === serial);
   const same = real.find((l) => l.id === updated.id);

@@ -50,6 +50,19 @@
     return device ? deviceOptionLabel(device, hideSerial, session.devices) : undefined;
   });
 
+  /** The picked meter left the device list; it stays picked as not connected
+   * (AC-NWGY72.3). */
+  const pickedAbsent = $derived(
+    session.devices.some((d) => d.id === session.selectedId && d.absent === true),
+  );
+
+  /** Reads the device list again; a failure is shown like the startup listing's. */
+  function refresh() {
+    listDevices()
+      .then((devices) => session.setDevices(devices))
+      .catch((err: unknown) => session.reportError(toUiError(err)));
+  }
+
   /** Every menu entry's label, in menu order, for the width sizer. */
   const entryLabels = $derived([
     ...(session.devices.length > 0
@@ -122,6 +135,18 @@
   {#if features === WEB_FEATURES}
     <ConnectionInfo {session} />
   {/if}
+  {#if pickedAbsent}
+    <span class="absent-note">Not connected — plug it in</span>
+    <button
+      type="button"
+      class="connect-hint"
+      title="Reads the device list again"
+      disabled={session.flashing}
+      onclick={refresh}
+    >
+      Refresh
+    </button>
+  {/if}
   {#if hintAction}
     <button
       type="button"
@@ -185,6 +210,11 @@
     text-decoration: underline;
     white-space: nowrap;
     cursor: pointer;
+  }
+  .absent-note {
+    font-size: 0.8125rem;
+    white-space: nowrap;
+    opacity: 0.8;
   }
   .connect-hint:disabled {
     opacity: 0.5;

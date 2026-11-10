@@ -16,12 +16,15 @@
     panel,
     connected,
     held = false,
+    target,
   }: {
     panel: MeterSettingsPanel;
     /** A meter is connected, so its settings can be read. */
     connected: boolean;
     /** A logo write holds the meter (AC-MEHQC0.3): nothing is read or applied until it ends. */
     held?: boolean;
+    /** Who Apply writes to (AC-NWGY72.5). */
+    target: string;
   } = $props();
 
   const rows = $derived(panel.settings ? meterSettingRows(panel.settings) : []);
@@ -137,6 +140,7 @@
         </p>
       {/if}
       <div class="actions">
+        <span class="target">Writes to {target}</span>
         <button type="button" onclick={() => panel.cancelEdit()} disabled={panel.applying}>
           Cancel
         </button>
@@ -198,6 +202,13 @@
     gap: 0.5rem;
     justify-content: flex-end;
     margin-left: auto;
+  }
+  .actions .target {
+    margin-right: auto;
+    align-self: center;
+    font-size: 0.8125rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
   }
   .edit {
     display: grid;

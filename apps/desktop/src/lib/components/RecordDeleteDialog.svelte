@@ -8,12 +8,15 @@
     name,
     onCancel,
     onConfirm,
+    target,
   }: {
     /** The record to delete, or null for every record. */
     name: string | null;
     onCancel: () => void;
     /** Called with the typed confirmation once it matches. */
     onConfirm: (typed: string) => void;
+    /** Who the delete goes to (AC-NWGY72.5). */
+    target: string;
   } = $props();
 
   let typed = $state("");
@@ -73,6 +76,7 @@
         : "The record is removed from the meter."}
       A CSV backup is written first; nothing is deleted when the backup fails.
     </p>
+    <p data-testid="record-delete-target">Deletes on {target}</p>
     <form onsubmit={submit}>
       <label>
         <span>Type <strong>{want}</strong> to confirm</span>
