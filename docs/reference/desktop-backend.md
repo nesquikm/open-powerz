@@ -16,6 +16,8 @@ recording files; the source code has the rest.
 
 Live samples reach the page as `batch` events on the session channel, at most 20 a second. A session with no new samples still sends an empty heartbeat batch after 250 ms, so about 4 a second while idle.
 
+With the queue source, a `stall` event (`{ stalled: boolean }`) says when the meter stopped filling the queue: `true` after 2 s of queue polls with no samples (another program polling the meter over the serial port does this), `false` once samples keep arriving for 1 s again. It is sent once per change.
+
 | function | answers |
 |---|---|
 | `historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]>` | The breaks between measuring runs that overlap `t0Ms..=t1Ms`, oldest first. A `HistoryGap` is `{ from_ms, to_ms }`. |
