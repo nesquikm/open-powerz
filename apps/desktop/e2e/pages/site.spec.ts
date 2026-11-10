@@ -14,7 +14,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { CSV_HEADER } from "../../src/lib/web/csv";
 import { badge, DEMO_LOAD, readoutValue } from "../ui/helpers";
-import { capture, messageTexts, showPd, stopCapture } from "../ui/pd";
+import { capture, messageTexts, pdView, showPd, stopCapture } from "../ui/pd";
 
 const BRAND = fileURLToPath(new URL("../../../../assets/brand/", import.meta.url));
 const BASE = "/open-powerz/";
@@ -167,4 +167,106 @@ test("the device menu ends with Connect a meter…, with no button beside it (AC
   const picker = page.getByLabel("Device", { exact: true });
   await expect(picker.locator("option").last()).toHaveText("Connect a meter…");
   await expect(page.getByRole("button", { name: "Connect a meter…", exact: true })).toHaveCount(0);
+});
+
+test("the demo meter's settings and offline records show in the browser (AC-W8SHX8.1, .2, .4, .7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+
+  const settings = page.getByRole("region", { name: "Meter settings" });
+  await expect(settings).toBeVisible();
+  // The read is on; only the edit (a meter write) is still left to the desktop app.
+  await expect(settings.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
+  await expect(settings.getByText("Brightness", { exact: true })).toBeVisible({ timeout: 10_000 });
+
+  await page.getByRole("tab", { name: "Records" }).click();
+  const records = page.getByRole("region", { name: "Offline records" });
+  // Listing and download are on; only the delete (a meter write) is still left to the desktop app.
+  await expect(records.getByRole("button", { name: "Download all", exact: true })).toBeEnabled();
+  await expect(records.getByText("PHONE_5V")).toBeVisible({ timeout: 10_000 });
+  await records.getByRole("button", { name: "Open PHONE_5V" }).click();
+  await expect(page.getByRole("region", { name: "Offline record" })).toContainText("PHONE_5V");
+});
+
+test("a settings change on the demo meter reads back in the browser (AC-W8SHX9.1, .7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+  const settings = page.getByRole("region", { name: "Meter settings" });
+  await expect(settings.getByText("Brightness", { exact: true })).toBeVisible({ timeout: 10_000 });
+  await settings.getByRole("button", { name: "Edit" }).click();
+  const brightness = settings.getByLabel("Brightness", { exact: true });
+  const before = await brightness.inputValue();
+  const next = before === "80" ? "60" : "80";
+  await brightness.fill(next);
+  await settings.getByRole("button", { name: "Apply" }).click();
+  await expect(settings.locator("input, select")).toHaveCount(0, { timeout: 10_000 });
+  await expect(settings).toContainText(`${next}%`);
+});
+
+test("Remove on the demo meter's startup logo verifies in the browser (AC-W8SHXB.3, .7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+  await page.getByRole("tab", { name: "Startup logo" }).click();
+  const v = page.getByRole("tabpanel", { name: "Startup logo" });
+  await expect(v).not.toContainText("Desktop app only");
+  await v.getByRole("button", { name: /^remove$/i }).click();
+  const d = page.getByRole("alertdialog", { name: "remove" });
+  await d.getByRole("textbox").fill("remove");
+  await d.getByRole("button", { name: /^remove$/i }).click();
+  await expect(v.getByRole("status")).toContainText(/verified|removed/i, { timeout: 30_000 });
+});
+
+test("Detect in the Trigger tab runs on the demo meter in the browser (AC-W8SHXC.1, .7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+  await page.getByRole("tab", { name: "Trigger" }).click();
+  const view = page.getByRole("tabpanel", { name: "Trigger" });
+  await expect(view).not.toContainText("Desktop app only");
+  await view.getByRole("button", { name: "Detect", exact: true }).click();
+  await expect(view.getByRole("region", { name: "Detection" })).toBeVisible({ timeout: 30_000 });
+});
+
+const PD_DATA = fileURLToPath(new URL("../../src-tauri/tests/data/", import.meta.url));
+
+test("Open capture and Import vendor log open files in the browser with no meter (AC-EAKFEC.1, .2, .3)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await showPd(page);
+  await expect(pdView(page)).not.toContainText("Desktop app only");
+  const expected = JSON.parse(readFileSync(`${PD_DATA}pd-open-expected.json`, "utf8")) as Record<
+    "pdcap" | "vendor",
+    { opened: { rows: { name: string }[] } }
+  >;
+
+  for (const [button, file, key] of [
+    ["Open capture", "pd-capture.pdcap", "pdcap"],
+    ["Import vendor log", "pd-vendor.sqlite", "vendor"],
+  ] as const) {
+    const chooser = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: button, exact: true }).click();
+    await (await chooser).setFiles(`${PD_DATA}${file}`);
+    await expect
+      .poll(() => messageTexts(page), { timeout: 15_000 })
+      .toEqual(expected[key].opened.rows.map((r) => r.name));
+  }
+});
+
+test("the recorder's folder is labelled Desktop app only in the browser (AC-EAKFEC.7)", async ({
+  page,
+}) => {
+  await openSite(page);
+  await streamDemo(page);
+  await page.getByRole("button", { name: "Recorder options" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Recorder options" });
+  await expect(dialog.getByRole("button", { name: "Choose", exact: true })).toBeDisabled();
+  await expect(dialog).toContainText("Desktop app only");
 });

@@ -119,11 +119,13 @@
 </section>
 
 <div class="file">
-  <button
-    type="button"
-    disabled={firmware.phase === "updating" || firmware.phase === "confirming"}
-    onclick={() => void firmware.chooseFile()}>Choose file…</button
-  >
+  <DesktopOnly available={features.firmwareUpdate} label="Choose file…">
+    <button
+      type="button"
+      disabled={firmware.phase === "updating" || firmware.phase === "confirming"}
+      onclick={() => void firmware.chooseFile()}>Choose file…</button
+    >
+  </DesktopOnly>
   {#if firmware.fileError !== null}
     <p class="error" role="alert">
       {firmware.fileError}

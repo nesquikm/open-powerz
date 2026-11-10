@@ -5,6 +5,7 @@
   import { menuIndexAfter } from "../menuNav";
   import {
     RATE_OPTIONS,
+    pickRate,
     formatRecordingElapsed,
     ratePicker,
     recordButton,
@@ -67,7 +68,7 @@
     onToggleConnect: () => void;
     /** Open About; `opener` is the control focus returns to when it closes. */
     onAbout: (opener: HTMLElement | null) => void;
-    onSelectRate: (sps: number) => void;
+    onSelectRate: (sps: number) => void | Promise<void>;
     /** The rate the next connect asks for, or the session's current rate. */
     rateSps: number;
     /** Where the next (or running) session's measurements come from (FR 1HHT02). */
@@ -267,7 +268,7 @@
     title={picker.label ?? undefined}
     disabled={picker.disabled || held}
     value={rateSps}
-    onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
+    onchange={(e) => void pickRate(e.currentTarget, onSelectRate, () => rateSps)}
   >
     {#each RATE_OPTIONS as sps (sps)}
       <option value={sps}>{sps} SPS</option>

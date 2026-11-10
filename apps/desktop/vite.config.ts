@@ -55,9 +55,23 @@ function pagesHead(): Plugin {
 // /open-powerz/, written to dist-pages; `.env.pages` sets VITE_BACKEND=web.
 export default defineConfig(({ mode }) => {
   const pages = mode === "pages";
+  // Cross-origin isolation for the web edition's trigger worker (FR W8SHXC); on GitHub
+  // Pages public/coi-sw.js adds the same headers.
+  const isolation = pages
+    ? {
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp",
+      }
+    : undefined;
   return {
     plugins: [svelte(), ...(pages ? [pagesHead()] : [])],
     ...(pages ? { base: "/open-powerz/", build: { outDir: "dist-pages" } } : {}),
+    // public/ holds only the web edition's coi-sw.js (FR W8SHXC): the desktop bundle
+    // and the mock build never ship it.
+    publicDir: pages ? "public" : false,
+    // The trigger worker imports the wasm glue lazily: ES module workers split chunks.
+    worker: { format: "es" },
+    preview: { headers: isolation },
     // Keep Rust errors visible in the terminal.
     clearScreen: false,
     server: {
@@ -66,6 +80,7 @@ export default defineConfig(({ mode }) => {
       host: host || false,
       hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
       watch: { ignored: ["**/src-tauri/**"] },
+      headers: isolation,
     },
     test: {
       include: ["src/**/*.test.ts", "scripts/**/*.test.ts", "e2e/**/*.test.ts"],

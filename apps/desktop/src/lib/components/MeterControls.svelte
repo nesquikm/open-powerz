@@ -4,6 +4,7 @@
   import type { Snippet } from "svelte";
   import {
     RATE_OPTIONS,
+    pickRate,
     ratePicker,
     recordButton,
     type ExportJob,
@@ -43,7 +44,7 @@
     notices: readonly MeterNotice[];
     onDismissNotice: (notice: MeterNotice) => void;
     rateSps: number;
-    onSelectRate: (sps: number) => void;
+    onSelectRate: (sps: number) => void | Promise<void>;
     onToggleRecording: () => void;
     onTogglePause: () => void;
     onRecorderOptions: () => void;
@@ -72,7 +73,7 @@
     title={picker.label ?? undefined}
     disabled={picker.disabled || held}
     value={rateSps}
-    onchange={(e) => onSelectRate(Number(e.currentTarget.value))}
+    onchange={(e) => void pickRate(e.currentTarget, onSelectRate, () => rateSps)}
   >
     {#each RATE_OPTIONS as sps (sps)}
       <option value={sps}>{sps} SPS</option>

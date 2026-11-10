@@ -4,7 +4,6 @@
 //! reads buckets as it does for a session, and its statistics. It lives
 //! outside every connection, so it opens with no meter and touches none.
 
-use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufReader};
@@ -12,11 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use powerz_protocol::decode::{QueueRecord, Rate};
-use powerz_record::reader::{CsvReader, FileRow, ReadError, RowOutcome, parse_elapsed};
-use powerz_record::{Integrator, format_elapsed};
-use rusqlite::types::ValueRef;
-use rusqlite::{Connection, ErrorCode, Row, params};
+use powerz_protocol::decode::QueueRecord;
+use powerz_record::db::{self, DbClock, DbRows, DbSample, DbValue};
+use powerz_record::opened::FileRows;
+use powerz_record::reader::{CsvReader, ReadError, RowOutcome};
+use rusqlite::types::{Value, ValueRef};
+use rusqlite::{Connection, ErrorCode, Row, params_from_iter};
 use serde::Serialize;
 
 use crate::history::{
@@ -29,43 +29,13 @@ use crate::ui_error::UiError;
 
 /// The most rows a file opens with; [`FileSummary::left_out`] says how many
 /// more it held.
-pub const MAX_ROWS: u64 = 10_000_000;
-
-/// Rows between two progress reports, which is also how soon Cancel is seen.
-const REPORT_EVERY: u64 = 8_192;
+pub use powerz_record::opened::MAX_ROWS;
 
 /// Input size of a read in bytes.
 const READ_BUFFER: usize = 1 << 16;
 
-/// Highest CC or D± value the 0.1 mV scale holds, V.
-const FINE_MAX_V: f64 = 6.5535;
-
-/// The columns of a vendor data table, in the order [`select_row`] reads them.
-const DB_COLUMNS: [&str; 11] = [
-    "ElapsedTime",
-    "Unix",
-    "VBUS",
-    "IBUS",
-    "DP",
-    "DM",
-    "CC1",
-    "CC2",
-    "TEMP",
-    "CHARGE",
-    "ENERGY",
-];
-
 /// Rows in one transaction of an export, which is also how often it reports.
 const EXPORT_BATCH: u64 = 10_000;
-
-/// Longest ElapsedTime taken as one, bytes; a real one is a dozen.
-const MAX_ELAPSED_BYTES: usize = 64;
-
-/// Most tables a database may hold; a recording has two.
-const MAX_TABLES: usize = 10_000;
-
-/// Longest table name taken as one, bytes; a real one is a few dozen.
-const MAX_NAME_BYTES: usize = 1_024;
 
 /// How far an open has got, in a unit of the reader's own. A `total` of 0
 /// means the end is not known.
@@ -182,21 +152,11 @@ impl OpenedFile {
     }
 }
 
-/// Collects a file's rows into an [`OpenedFile`].
+/// Collects a file's rows into an [`OpenedFile`], by the shared row rules.
 struct FileBuilder {
     history: History,
     stats: Stats,
-    /// The last CHARGE and ENERGY of the rows taken in.
-    charge_ah: Option<f64>,
-    energy_wh: Option<f64>,
-    rows: u64,
-    skipped: u64,
-    left_out: u64,
-    /// Blank lines, which only count towards the next report.
-    blank: u64,
-    max_rows: u64,
-    /// A row has needed the coarse line scale: the rest of the file keeps it.
-    coarse: bool,
+    rules: FileRows,
 }
 
 impl FileBuilder {
@@ -204,67 +164,37 @@ impl FileBuilder {
         FileBuilder {
             history: History::new(),
             stats: Stats::new(),
-            charge_ah: None,
-            energy_wh: None,
-            rows: 0,
-            skipped: 0,
-            left_out: 0,
-            blank: 0,
-            max_rows,
-            coarse: false,
+            rules: FileRows::new(max_rows),
         }
     }
 
     /// Take in one line of the file.
     fn take(&mut self, outcome: RowOutcome) {
-        match outcome {
-            RowOutcome::Row(row) => self.push(&row),
-            RowOutcome::Damaged => self.skipped += 1,
-            RowOutcome::Blank => self.blank += 1,
+        if let Some(record) = self.rules.take(outcome) {
+            self.history.push(&record);
+            self.stats.push(&record);
         }
     }
 
-    /// Lines taken in so far: each one lands in exactly one of these counts.
+    /// Lines taken in so far: each one lands in exactly one of the counts.
     fn lines(&self) -> u64 {
-        self.rows + self.skipped + self.left_out + self.blank
+        self.rules.lines()
     }
 
     /// Whether the line just taken in is one to report after.
     fn report_due(&self) -> bool {
-        self.lines().is_multiple_of(REPORT_EVERY)
-    }
-
-    fn push(&mut self, row: &FileRow) {
-        // A time past a record's reach is readable, and so are all after it.
-        let Some(time_ms) = u32::try_from(row.elapsed_ms)
-            .ok()
-            .filter(|_| self.rows < self.max_rows)
-        else {
-            self.left_out += 1;
-            return;
-        };
-        self.coarse |= [row.cc1_v, row.cc2_v, row.dp_v, row.dm_v]
-            .iter()
-            .any(|&v| v > FINE_MAX_V);
-        let record = record_of(row, time_ms, self.coarse);
-        self.history.push(&record);
-        self.stats.push(&record);
-        self.charge_ah = row.charge_ah.or(self.charge_ah);
-        self.energy_wh = row.energy_wh.or(self.energy_wh);
-        self.rows += 1;
+        self.rules.report_due()
     }
 
     fn finish(self, path: &Path) -> Result<OpenedFile, FileError> {
-        if self.rows == 0 {
-            return Err(FileError::Refused(
-                "This file holds no readable row.".to_owned(),
-            ));
-        }
+        self.rules
+            .check_any()
+            .map_err(|m| FileError::Refused(m.to_owned()))?;
         // A recording counts no charge across a pause or a break, which the
         // rows alone cannot show: its own last values win over a sum of them.
         let mut stats = self.stats.snapshot();
-        stats.charge_ah = self.charge_ah.unwrap_or(stats.charge_ah);
-        stats.energy_wh = self.energy_wh.unwrap_or(stats.energy_wh);
+        stats.charge_ah = self.rules.charge_ah().unwrap_or(stats.charge_ah);
+        stats.energy_wh = self.rules.energy_wh().unwrap_or(stats.energy_wh);
         let name = path
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -272,35 +202,13 @@ impl FileBuilder {
             history: self.history,
             summary: FileSummary {
                 name,
-                rows: self.rows,
-                skipped: self.skipped,
-                left_out: self.left_out,
+                rows: self.rules.rows(),
+                skipped: self.rules.skipped(),
+                left_out: self.rules.left_out(),
                 stats,
             },
         })
     }
-}
-
-/// `row` as a record at `time_ms`.
-///
-/// A record's rate sets the scale of its CC and D± codes, and a file names no
-/// rate. A file starts on the fine scale and takes the coarse one at the first
-/// row that needs it, so a 0.1 mV digit from 2 SPS and 7.5 V from 1000 SPS both
-/// survive, and the history keeps at most one rate change however rows mix.
-fn record_of(row: &FileRow, time_ms: u32, coarse: bool) -> QueueRecord {
-    let lines = [row.cc1_v, row.cc2_v, row.dp_v, row.dm_v];
-    let (per_volt, rate) = if coarse {
-        (1_000.0, Rate::Sps1000)
-    } else {
-        (10_000.0, Rate::Sps2)
-    };
-    QueueRecord::from_raw(
-        time_ms,
-        (row.vbus_v * 1e6).round() as i32,
-        (row.ibus_a * 1e6).round() as i32,
-        lines.map(|v| (v * per_volt).round() as u16),
-        rate,
-    )
 }
 
 /// Open the recording at `path`, picking the reader by its extension. The
@@ -368,21 +276,21 @@ pub fn open_db_limited(
     refuse_sidecars(path)?;
     let db = pd_import::open_immutable(path).map_err(|_| no_database())?;
     let table = data_table(&db, control)?
-        .ok_or_else(|| FileError::Refused("This database is not a recording.".to_owned()))?;
-    let table = quoted(&table);
+        .ok_or_else(|| FileError::Refused(db::NOT_A_RECORDING.to_owned()))?;
     control.check()?;
 
     let total = row_total(&db, &table);
     control.report(0, total)?;
 
     let mut rows = db
-        .prepare(&format!("SELECT {} FROM {table}", select_row()))
+        .prepare(&db::select_rows_sql(&table))
         .map_err(|_| unreadable_db())?;
     let mut rows = rows.query([]).map_err(|_| unreadable_db())?;
     let mut opened = FileBuilder::new(max_rows);
     let mut clock = DbClock::default();
     while let Some(row) = rows.next().map_err(|_| unreadable_db())? {
-        opened.take(file_row(row, &mut clock).map_err(|_| unreadable_db())?);
+        let values = db_values(row).map_err(|_| unreadable_db())?;
+        opened.take(db::file_row(&values, &mut clock));
         if opened.report_due() {
             control.report(done_of(opened.lines(), total), total)?;
         }
@@ -415,10 +323,10 @@ fn refuse_sidecars(path: &Path) -> Result<(), FileError> {
     Ok(())
 }
 
-/// A cheap total for progress: the table's highest rowid, which SQLite finds
-/// at the end of the tree. 0, for unknown, on a table with no rowids.
+/// A cheap total for progress: the table's highest rowid. 0, for unknown, on
+/// a table with no rowids.
 fn row_total(db: &Connection, table: &str) -> u64 {
-    db.query_row(&format!("SELECT max(rowid) FROM {table}"), [], |r| {
+    db.query_row(&db::row_total_sql(table), [], |r| {
         r.get::<_, Option<i64>>(0)
     })
     .ok()
@@ -428,161 +336,53 @@ fn row_total(db: &Connection, table: &str) -> u64 {
 }
 
 fn no_database() -> FileError {
-    FileError::Refused("This file is not a database that can be opened.".to_owned())
+    FileError::Refused(db::NOT_A_DATABASE.to_owned())
 }
 
 fn unreadable_db() -> FileError {
-    FileError::Refused("The database could not be read.".to_owned())
+    FileError::Refused(db::UNREADABLE_DB.to_owned())
 }
 
-/// `name` as an SQL identifier.
-fn quoted(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-/// The first table by name that has a `_param` table beside it and holds the
-/// vendor's columns. Views and virtual tables do not count: SQLite stores a
-/// real table's statement with exactly this start. A `_param` table is matched
-/// as SQLite matches names, ignoring ASCII case.
-fn data_table(db: &Connection, control: &OpenControl) -> Result<Option<String>, FileError> {
-    let mut tables = table_names(db).map_err(|_| no_database())?;
-    if tables.len() > MAX_TABLES {
-        return Err(FileError::Refused(
-            "This database holds too many tables to be a recording.".to_owned(),
-        ));
-    }
-    tables.sort();
-    let names: HashSet<String> = tables
-        .iter()
-        .map(|(name, _)| name.to_ascii_lowercase())
-        .collect();
-    for (name, _) in tables.iter().filter(|(_, plain)| *plain) {
+/// The data table, picked by the shared rules ([`db::pick_data_table`]).
+fn data_table(conn: &Connection, control: &OpenControl) -> Result<Option<String>, FileError> {
+    let tables = table_names(conn).map_err(|_| no_database())?;
+    db::check_table_count(&tables).map_err(|m| FileError::Refused(m.to_owned()))?;
+    db::pick_data_table(&tables, |name| {
         control.check()?;
-        if names.contains(&format!("{}_param", name.to_ascii_lowercase()))
-            && has_vendor_columns(db, name).map_err(|_| no_database())?
-        {
-            return Ok(Some(name.clone()));
-        }
-    }
-    Ok(None)
+        table_columns(conn, name).map_err(|_| no_database())
+    })
 }
 
-/// The file's tables, one past [`MAX_TABLES`] at most, each with whether it is
-/// a plain one. A name past [`MAX_NAME_BYTES`] is no table of a recording.
-fn table_names(db: &Connection) -> rusqlite::Result<Vec<(String, bool)>> {
-    let mut tables = db.prepare(&format!(
-        "SELECT name, coalesce(sql LIKE 'CREATE TABLE%', 0) FROM sqlite_master \
-         WHERE type = 'table' AND typeof(name) = 'text' \
-         AND octet_length(name) <= {MAX_NAME_BYTES} LIMIT {}",
-        MAX_TABLES + 1
-    ))?;
+/// The file's tables, each with whether it is a plain one.
+fn table_names(conn: &Connection) -> rusqlite::Result<Vec<(String, bool)>> {
+    let mut tables = conn.prepare(&db::table_names_sql())?;
     tables
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect()
 }
 
-/// Whether `table` holds every vendor column. A generated column is not
-/// listed, so a file cannot compute one.
-fn has_vendor_columns(db: &Connection, table: &str) -> rusqlite::Result<bool> {
-    let mut missing = DB_COLUMNS.to_vec();
-    let mut columns = db.prepare("SELECT name FROM pragma_table_info(?1)")?;
-    let mut columns = columns.query([table])?;
-    while let Some(column) = columns.next()? {
-        let name: String = column.get(0)?;
-        missing.retain(|c| !c.eq_ignore_ascii_case(&name));
-    }
-    Ok(missing.is_empty())
+/// The column names of `table`.
+fn table_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let mut columns = conn.prepare(db::table_columns_sql())?;
+    columns.query_map([table], |r| r.get(0))?.collect()
 }
 
-/// The result columns of a data row, in [`DB_COLUMNS`] order. A value is
-/// handed over only when it is short: anything but a number reads as NULL
-/// here, and SQLite answers `typeof` and `octet_length` without loading it.
-fn select_row() -> String {
-    let [elapsed, numbers @ ..] = DB_COLUMNS.map(quoted);
-    let mut columns = vec![format!(
-        "CASE WHEN typeof({elapsed}) = 'text' AND octet_length({elapsed}) <= {MAX_ELAPSED_BYTES} \
-         THEN {elapsed} END"
-    )];
-    columns.extend(
-        numbers.map(|c| format!("CASE WHEN typeof({c}) IN ('real', 'integer') THEN {c} END")),
-    );
-    columns.join(", ")
-}
-
-/// The time of the rows read so far.
-#[derive(Default)]
-struct DbClock {
-    /// Time of the last good row: a row before it goes backwards.
-    last_ms: u64,
-    /// The last good row's time and its Unix column.
-    anchor: Option<(u64, f64)>,
-}
-
-impl DbClock {
-    /// The time of a row: its ElapsedTime, or else the distance of its Unix
-    /// value from the last good row's. `None` when it has neither, or when it
-    /// goes backwards.
-    fn time_of(&self, elapsed: Option<&str>, unix: Option<f64>) -> Option<u64> {
-        let ms = elapsed
-            .and_then(parse_elapsed)
-            .or_else(|| self.since_anchor(unix?))?;
-        (ms >= self.last_ms).then_some(ms)
-    }
-
-    fn since_anchor(&self, unix: f64) -> Option<u64> {
-        let Some((at_ms, at_unix)) = self.anchor else {
-            return Some(0);
-        };
-        let since_ms = ((unix - at_unix) * 1000.0).round();
-        // `as` saturates, and a time past a record's reach is then damage.
-        (since_ms >= 0.0).then(|| at_ms.saturating_add(since_ms as u64))
-    }
-
-    fn advance(&mut self, row: &FileRow) {
-        self.last_ms = row.elapsed_ms;
-        self.anchor = row.unix.map(|unix| (row.elapsed_ms, unix));
-    }
-}
-
-/// One data row of [`select_row`] as a [`FileRow`], unless it is damaged.
-fn file_row(row: &Row<'_>, clock: &mut DbClock) -> rusqlite::Result<RowOutcome> {
-    let number = |i| pd_import::real(row, i);
-    let elapsed = match row.get_ref(0)? {
-        ValueRef::Text(text) => std::str::from_utf8(text).ok(),
-        _ => None,
-    };
-    let unix = number(1)?;
-    let (Some(vbus_v), Some(ibus_a)) = (number(2)?, number(3)?) else {
-        return Ok(RowOutcome::Damaged);
-    };
-    // As in a CSV: all four empty is a meter-memory row, some of them damage.
-    let lines = [number(4)?, number(5)?, number(6)?, number(7)?];
-    let [dp_v, dm_v, cc1_v, cc2_v] = if lines.iter().all(Option::is_none) {
-        [0.0; 4]
-    } else {
-        lines.map(|v| v.unwrap_or(f64::NAN))
-    };
-    let Some(elapsed_ms) = clock.time_of(elapsed, unix) else {
-        return Ok(RowOutcome::Damaged);
-    };
-    let row = FileRow {
-        elapsed_ms,
-        unix,
-        vbus_v,
-        ibus_a,
-        dp_v,
-        dm_v,
-        cc1_v,
-        cc2_v,
-        temp_c: number(8)?,
-        charge_ah: number(9)?,
-        energy_wh: number(10)?,
-    };
-    if !row.in_range() {
-        return Ok(RowOutcome::Damaged);
-    }
-    clock.advance(&row);
-    Ok(RowOutcome::Row(row))
+/// One result row of [`db::select_rows_sql`] as the shared rules' values.
+fn db_values(row: &Row<'_>) -> rusqlite::Result<Vec<DbValue>> {
+    (0..db::DB_COLUMNS.len())
+        .map(|i| {
+            Ok(match row.get_ref(i)? {
+                ValueRef::Null => DbValue::Null,
+                ValueRef::Integer(n) => DbValue::Integer(n),
+                ValueRef::Real(f) => DbValue::Real(f),
+                ValueRef::Text(t) => match std::str::from_utf8(t) {
+                    Ok(t) => DbValue::Text(t.to_owned()),
+                    Err(_) => DbValue::Blob(t.to_vec()),
+                },
+                ValueRef::Blob(b) => DbValue::Blob(b.to_vec()),
+            })
+        })
+        .collect()
 }
 
 /// One row of a session to export: its record, whether it starts a new
@@ -591,8 +391,8 @@ pub type ExportRow = (QueueRecord, bool, Option<f64>);
 
 /// The data table's name for a recording started at local `(month, day, hour,
 /// minute, second)`.
-pub fn db_table_name((month, day, hour, minute, second): (u32, u32, u32, u32, u32)) -> String {
-    format!("powerz_{month:02}_{day:02}_{hour:02}_{minute:02}_{second:02}")
+pub fn db_table_name(local: (u32, u32, u32, u32, u32)) -> String {
+    db::table_name(local)
 }
 
 /// Write `rows` to `path` in the vendor's table layout; returns the rows
@@ -688,54 +488,37 @@ fn write_db(
     let db = Connection::open(path)?;
     db.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")?;
     let (table, local) = local_start(&db, start_unix_ms)?;
-    let param = quoted(&format!("{table}_param"));
-    let data = quoted(&table);
-    db.execute_batch(&format!(
-        "CREATE TABLE {data} (ElapsedTime text, Unix real primary key, VBUS real, IBUS real, \
-         DP real, DM real, CC1 real, CC2 real, TEMP real, CHARGE real, ENERGY real); \
-         CREATE TABLE {param} (name text, Unix text, StartTime text, SamplingRate text);"
-    ))?;
+    db.execute_batch(&db::create_sql(&table))?;
     db.execute(
-        &format!("INSERT INTO {param} VALUES (?1, ?2, ?3, ?4)"),
-        params![
-            table,
-            format!("{:.3}", start_unix_ms as f64 / 1000.0),
-            local,
-            rate_sps.to_string()
-        ],
+        &db::insert_param_sql(&table),
+        params_from_iter(db::param_values(&table, start_unix_ms, &local, rate_sps)),
     )?;
 
     let mut written = 0u64;
     {
-        let mut insert = db.prepare(&format!(
-            "INSERT INTO {data} VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-        ))?;
-        let mut integrator = Integrator::new();
-        let mut first_ms = None;
-        let mut last_unix_us = 0u64;
+        let mut insert = db.prepare(&db::insert_row_sql(&table))?;
+        let mut builder = DbRows::new(start_unix_ms);
         db.execute_batch("BEGIN")?;
         for (r, new_run, temp_c) in rows {
-            if new_run {
-                integrator.break_run();
-            }
-            let t = r.time_ms();
-            let elapsed_ms = u64::from(t.saturating_sub(*first_ms.get_or_insert(t)));
-            let (charge_ah, energy_wh) = integrator.push(t, r.vbus_v(), r.ibus_a());
-            // `Unix` is the primary key: rows with one value move apart.
-            last_unix_us = ((start_unix_ms + elapsed_ms) * 1000).max(last_unix_us + 1);
-            insert.execute(params![
-                format_elapsed(elapsed_ms),
-                last_unix_us as f64 / 1e6,
-                r.vbus_v(),
-                r.ibus_a(),
-                r.dp_v(),
-                r.dm_v(),
-                r.cc1_v(),
-                r.cc2_v(),
+            let row = builder.push(&DbSample {
+                time_ms: r.time_ms(),
+                vbus_v: r.vbus_v(),
+                ibus_a: r.ibus_a(),
+                dp_v: r.dp_v(),
+                dm_v: r.dm_v(),
+                cc1_v: r.cc1_v(),
+                cc2_v: r.cc2_v(),
                 temp_c,
-                charge_ah,
-                energy_wh,
-            ])?;
+                new_run,
+            });
+            let numbers = row.numbers();
+            insert.execute(params_from_iter(
+                std::iter::once(Value::Text(row.elapsed)).chain(
+                    numbers
+                        .into_iter()
+                        .map(|n| n.map_or(Value::Null, Value::Real)),
+                ),
+            ))?;
             written += 1;
             if written.is_multiple_of(EXPORT_BATCH) {
                 db.execute_batch("COMMIT; BEGIN")?;

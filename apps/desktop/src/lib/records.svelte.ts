@@ -132,7 +132,16 @@ export class RecordsPanel {
   /** How many records the last finished download-all fetched, or null. */
   lastAll = $state<number | null>(null);
   opened = $state<OfflineRecord | null>(null);
-  openedStats = $derived(this.opened ? recordStats(this.opened) : null);
+  /** The opened record's stats; charge and energy are its list row's (the meter's
+   * stored totals, as magnitudes), so the two never disagree (FR CJ3QCD). */
+  openedStats = $derived.by(() => {
+    const opened = this.opened;
+    if (!opened) return null;
+    const stats = recordStats(opened);
+    const entry = this.records?.find((r) => r.index === opened.index && r.name === opened.name);
+    if (!entry) return stats;
+    return { ...stats, charge_ah: Math.abs(entry.charge_ah), energy_wh: Math.abs(entry.energy_wh) };
+  });
   /** The delete in flight: a record index, `"all"`, or null (FR JKWT3V). */
   deleting = $state<number | "all" | null>(null);
   /** The last finished delete: the new list and the backup folder, or null. */

@@ -8,6 +8,9 @@ use std::io::{self, Write};
 use powerz_protocol::decode::QueueRecord;
 use powerz_protocol::decode::records::{RecordEntry, RecordSample};
 
+pub mod chart_image;
+pub mod db;
+pub mod opened;
 pub mod reader;
 
 /// Header of the recorder CSV, matching the vendor recorder.

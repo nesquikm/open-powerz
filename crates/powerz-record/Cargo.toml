@@ -9,6 +9,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The chart image PDF writer (FR AXHK2V, FR EAKFEC).
+flate2 = "1.1.10"
 powerz-protocol.workspace = true
 thiserror = "2"
 

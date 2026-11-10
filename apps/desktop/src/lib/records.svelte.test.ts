@@ -310,3 +310,64 @@ describe("RecordsPanel (AC-1HHT00.5)", () => {
     expect(p.loading).toBe(false);
   });
 });
+
+describe("an opened record shows its list row's totals (AC-CJ3QCD.4)", () => {
+  /** The HIL record: the meter stores +0.037251 Ah, while the last sample runs one
+   * interval short and carries the current's sign. */
+  const HIL: OfflineRecordEntry = {
+    index: 1,
+    name: "REC007",
+    interval_s: 1,
+    points: 3,
+    duration_s: 3,
+    charge_ah: 0.037251,
+    energy_wh: 0.186255,
+    offset: 0x1000,
+  };
+  const HIL_REC: OfflineRecord = {
+    index: 1,
+    name: "REC007",
+    interval_s: 1,
+    samples: [
+      { t_s: 0, vbus_v: 5, ibus_a: -1, charge_ah: 0, energy_wh: 0 },
+      { t_s: 1, vbus_v: 5, ibus_a: -1, charge_ah: -0.018536, energy_wh: -0.09268 },
+      { t_s: 2, vbus_v: 5, ibus_a: -1, charge_ah: -0.037073, energy_wh: -0.185365 },
+    ],
+  };
+
+  function panelWith(entry: OfflineRecordEntry, rec: OfflineRecord): RecordsPanel {
+    return new RecordsPanel(
+      async () => ({ records: [entry] }),
+      async () => rec,
+    );
+  }
+
+  it("cj3qcd: the opened record's charge and energy are its row's", async () => {
+    const panel = panelWith(HIL, HIL_REC);
+    await panel.connected();
+    await panel.open(1);
+    const row = recordRows({ records: [HIL] })[0];
+    expect(panel.openedStats?.charge_ah).toBeCloseTo(0.037251, 9);
+    expect(panel.openedStats?.energy_wh).toBeCloseTo(0.186255, 9);
+    expect(row?.charge).toContain("0.037251");
+    expect(panel.openedStats?.charge_ah).toBeGreaterThan(0);
+  });
+
+  it("cj3qcd: a row stored with a negative sign still matches its shown magnitude", async () => {
+    const stored: OfflineRecordEntry = { ...HIL, charge_ah: -0.037251, energy_wh: -0.186255 };
+    const panel = panelWith(stored, HIL_REC);
+    await panel.connected();
+    await panel.open(1);
+    expect(panel.openedStats?.charge_ah).toBeCloseTo(0.037251, 9);
+    expect(panel.openedStats?.energy_wh).toBeCloseTo(0.186255, 9);
+  });
+
+  it("cj3qcd: the other stats still come from the samples", async () => {
+    const panel = panelWith(HIL, HIL_REC);
+    await panel.connected();
+    await panel.open(1);
+    expect(panel.openedStats?.samples).toBe(3);
+    expect(panel.openedStats?.duration_s).toBe(2);
+    expect(panel.openedStats?.vbus).toEqual({ min: 5, max: 5, avg: 5 });
+  });
+});

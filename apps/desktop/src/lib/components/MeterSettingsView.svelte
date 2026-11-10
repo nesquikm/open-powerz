@@ -2,6 +2,7 @@
   import { features } from "../backend";
   import DesktopOnly from "./DesktopOnly.svelte";
   import InfoButton from "./InfoButton.svelte";
+  import Term from "./Term.svelte";
   import {
     EDITABLE_SETTINGS,
     meterSettingRows,
@@ -163,7 +164,10 @@
         <div class="row">
           <dt>{row.label}</dt>
           <dd>
-            <span class="value">{row.value}</span>
+            <span class="value"
+              >{#if row.value.endsWith(" SPS")}{row.value.slice(0, -4)}
+                <Term key="term.sps">SPS</Term>{:else}{row.value}{/if}</span
+            >
             <span class="tag" data-tag={row.tag}>{row.tagText}</span>
           </dd>
         </div>

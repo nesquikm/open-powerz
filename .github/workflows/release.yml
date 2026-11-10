@@ -151,7 +151,39 @@ jobs:
       - name: JS install
         run: bun install --frozen-lockfile
 
+      - name: Tauri CLI version (bun.lock)
+        id: tauri-cli
+        shell: bash
+        run: |
+          version=$(grep -o '"@tauri-apps/cli@[0-9][^"]*"' bun.lock | head -n 1 | sed 's/.*@//; s/"//')
+          if [ -z "$version" ]; then
+            echo "::error::no @tauri-apps/cli@<version> in bun.lock"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The bundler downloads its tools (WiX, NSIS, linuxdeploy, AppImage plugins) into this folder.
+      - name: Bundler tool cache
+        if: runner.os != 'macOS'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/tauri
+            ~\AppData\Local\tauri
+          key: tauri-bundler-${{ runner.os }}-${{ steps.tauri-cli.outputs.version }}
+
+      # Packaging can fail on a flaky download (e.g. the bundler tools), so one failure retries once.
       - name: Build the desktop app
+        id: build
+        continue-on-error: true
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        with:
+          projectPath: apps/desktop
+          tauriScript: bun run tauri
+          args: ${{ needs.check.outputs.prerelease == 'true' && matrix.prerelease_args || matrix.args }}
+
+      - name: Build the desktop app (retry after a failed first build)
+        if: steps.build.outcome == 'failure'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         with:
           projectPath: apps/desktop

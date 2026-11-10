@@ -98,6 +98,12 @@ const ENTRIES = {
     short: "Saves the live readings to a CSV file on this computer while it runs.",
     source: "our definition",
   },
+  "section.connection": {
+    term: "Connections",
+    short:
+      "The ways this page reaches the meter, what each one gives, and which browsers can connect.",
+    source: "our definition",
+  },
   "term.vbus": {
     term: "VBUS",
     short: "The USB-C power line; its voltage is what the charger delivers.",
@@ -200,6 +206,22 @@ const ENTRIES = {
       "Phone makers' fast-charge modes (Samsung AFC, Huawei FCP and SCP), signalled on D+ / D−.",
     source: "docs/protocol.md#pdm-text-session-protocol-triggering",
   },
+  "term.vfcp": {
+    term: "VFCP",
+    short: "vivo's fast-charge mode, signalled on the data lines (D+ / D−).",
+    source: "docs/protocol.md#pdm-text-session-protocol-triggering",
+  },
+  "term.tfcp": {
+    term: "TFCP",
+    short:
+      "Transsion's fast-charge mode (Tecno, Infinix, itel phones), signalled on the data lines (D+ / D−).",
+    source: "docs/protocol.md#pdm-text-session-protocol-triggering",
+  },
+  "term.sfcp": {
+    term: "SFCP",
+    short: "Spreadtrum (Unisoc) fast-charge mode, signalled on the data lines (D+ / D−).",
+    source: "docs/protocol.md#pdm-text-session-protocol-triggering",
+  },
   "term.bc12": {
     term: "BC1.2",
     short:
@@ -216,6 +238,18 @@ const ENTRIES = {
     short:
       "A chip in a USB-C cable that reports its maker, current and voltage rating and speed over PD (SOP').",
     source: "USB PD 3.2",
+  },
+  "term.vidPid": {
+    term: "VID / PID",
+    short:
+      "USB vendor ID and product ID: the numbers that name a device's (or a cable's) vendor and product.",
+    source: "USB PD 3.2",
+  },
+  "term.webUsbHid": {
+    term: "WebUSB / WebHID",
+    short:
+      "Browser features that let a web page talk to a USB device; Chrome and Edge have them, most other browsers do not.",
+    source: "our definition",
   },
 } as const satisfies Record<string, GlossaryEntry>;
 

@@ -1,0 +1,12 @@
+{"format":"pdcap","format_version":1,"app_version":"0.0.0-fixture","model":"KM003C","firmware_version":"2.0.7"}
+{"kind":"status","session_ms":3000,"raw":"102700009213780054060000"}
+{"kind":"record","session_ms":3000,"elapsed_ms":0,"raw":"451027000011"}
+{"kind":"record","session_ms":3040,"elapsed_ms":40,"raw":"8f3827000000a1212c9181092cd10200"}
+{"kind":"status","session_ms":3300,"raw":"3c2800009c138c0054060000"}
+{"kind":"record","session_ms":3042,"elapsed_ms":42,"raw":"cb3a2700000082102cb14413"}
+{"kind":"record","session_ms":3050,"elapsed_ms":50,"raw":"874227000000a303"}
+{"kind":"record","session_ms":3060,"elapsed_ms":60,"raw":"9b4c270000018f5141a800ff0d0560184d4000000000548240260a00"}
+{"kind":"status","session_ms":4100,"raw":"68290000322306ff54060000"}
+{"kind":"record","session_ms":3700,"elapsed_ms":200,"raw":"87d827000000a605"}
+{"kind":"record","session_ms":3750,"elapsed_ms":250,"raw":"450a28000004"}
+{"kind":"rec

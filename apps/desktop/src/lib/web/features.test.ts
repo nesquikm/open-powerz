@@ -7,6 +7,14 @@
  *   the releases page link.
  * - AC-QFTCX0.7: settings read, the offline record list and record download are
  *   capability flags too (on only when they use the safe read set).
+ * - AC-W8SHX8.7: the web build switches the settings read, the record list and the
+ *   record download on; firmware update and file reveal stay off.
+ * - AC-W8SHX9.7: the web build switches the settings write on (over Web Serial); the
+ *   other meter writes stay off.
+ * - AC-W8SHXA.6: the web build switches the record delete on.
+ * - AC-W8SHXB.7: the web build switches the logo upload on.
+ * - AC-W8SHXC.7: the web build switches protocol triggering on (over Web Serial);
+ *   firmware update and file reveal stay off.
  * - The desktop (Tauri and mock) builds have every feature on.
  */
 
@@ -20,13 +28,8 @@ import {
   type Features,
 } from "./features";
 
-const WRITE_FEATURES = [
-  "firmwareUpdate",
-  "logoUpload",
-  "settingsWrite",
-  "recordDelete",
-  "trigger",
-] as const satisfies readonly (keyof Features)[];
+/** The meter writes the web build still leaves to the desktop app. */
+const WRITE_FEATURES = ["firmwareUpdate"] as const satisfies readonly (keyof Features)[];
 
 const READ_FEATURES = [
   "settingsRead",
@@ -40,16 +43,51 @@ describe("feature map (AC-QFTCX0.6, AC-QFTCX0.7)", () => {
     expect(RELEASES_URL).toBe("https://github.com/nesquikm/open-powerz/releases");
   });
 
-  it("turns every meter write off in the web build", () => {
+  it("turns every other meter write off in the web build", () => {
     for (const key of WRITE_FEATURES) expect(WEB_FEATURES[key], key).toBe(false);
+  });
+
+  it("switches the settings write on in the web build (AC-W8SHX9.7)", () => {
+    expect(WEB_FEATURES.settingsWrite).toBe(true);
+    expect(DESKTOP_FEATURES.settingsWrite).toBe(true);
+  });
+
+  it("switches the record delete on in the web build (AC-W8SHXA.6)", () => {
+    expect(WEB_FEATURES.recordDelete).toBe(true);
+    expect(DESKTOP_FEATURES.recordDelete).toBe(true);
+  });
+
+  it("switches the logo upload on in the web build (AC-W8SHXB.7)", () => {
+    expect(WEB_FEATURES.logoUpload).toBe(true);
+    expect(DESKTOP_FEATURES.logoUpload).toBe(true);
+  });
+
+  it("switches triggering on in the web build (AC-W8SHXC.7)", () => {
+    expect(WEB_FEATURES.trigger).toBe(true);
+    expect(DESKTOP_FEATURES.trigger).toBe(true);
   });
 
   it("has a boolean flag for each meter read", () => {
     for (const key of READ_FEATURES) expect(typeof WEB_FEATURES[key], key).toBe("boolean");
   });
 
+  it("switches the settings read, record list and record download on (AC-W8SHX8.7)", () => {
+    for (const key of READ_FEATURES) expect(WEB_FEATURES[key], key).toBe(true);
+  });
+
+  it("keeps firmware update and file reveal off in the web build (AC-W8SHX8.7)", () => {
+    expect(WEB_FEATURES.firmwareUpdate).toBe(false);
+    expect(WEB_FEATURES.fileReveal).toBe(false);
+  });
+
   it("keeps every feature on in the desktop build", () => {
-    for (const key of [...WRITE_FEATURES, ...READ_FEATURES]) {
+    for (const key of [
+      ...WRITE_FEATURES,
+      ...READ_FEATURES,
+      "recordDelete",
+      "logoUpload",
+      "trigger",
+    ] as const) {
       expect(DESKTOP_FEATURES[key], key).toBe(true);
     }
     expect(Object.values(DESKTOP_FEATURES).every((v) => v === true)).toBe(true);

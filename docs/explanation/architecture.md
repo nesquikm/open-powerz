@@ -17,10 +17,13 @@ powerz-protocol   library: framing, decoders, transports, session, crypto,
                   PD capture, pdcap files, PDM text session,
                   firmware update                             uses pd
 powerz-sim        demo device: a simulated KM003C behind the Transport trait
-powerz-record     vendor-compatible CSV writer
+powerz-record     vendor-compatible CSV and .db rules: writer,      uses protocol
+                  readers, .db layout
+powerz-trigger    protocol-trigger engine shared by desktop and web   uses protocol
+powerz-wasm       WebAssembly binding for the web edition    uses protocol, sim, record, trigger
 
 powerz-cli        the `powerz` binary         uses protocol, sim, record
-open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
+open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record, trigger
 ```
 
 - **powerz-pd** turns PD message bytes into typed messages, a one-line
@@ -34,8 +37,16 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
   `Session` and an output sink, so tests drive it with a mock transport.
 - **powerz-sim** plays scripted scenarios through the same trait, so the CLI,
   the desktop app and their end-to-end tests run without hardware.
-- **powerz-record** writes the vendor-compatible CSV, so `powerz stream`, the
-  desktop app's recordings and its exports produce the same file.
+- **powerz-record** holds the recording file rules: the vendor-compatible CSV
+  writer, the CSV and vendor `.db` readers that Open recording uses, and the
+  `.db` layout (table name, SQL and row values). `powerz stream`, the desktop
+  app and the web edition all go through it, so they write and read the same
+  files.
+- **powerz-trigger** is the protocol-trigger engine: the PDM session, the
+  confirmations above 5 V and the way back to 5 V. The desktop app runs it on a
+  thread, the web edition in a worker, so both follow the same rules.
+- **powerz-wasm** compiles the protocol core, the recording file rules, the
+  trigger engine and the demo meter to WebAssembly for the web edition.
 - **open-powerz-desktop** is the Tauri backend: a worker thread owns the meter
   session and keeps the session history; the Svelte web UI draws it with
   uPlot.
@@ -63,8 +74,8 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
   Nothing is retried automatically: after a failure the meter stays in its
   bootloader, which can always be flashed again. The engine was checked step
   by step on a real KM003C, each step only after the user approved it.
-- **Two meter writes, each on its own narrow path.** Deleting records and
-  changing settings are the only other writes. The shared guard still refuses
+- **Three meter writes, each on its own narrow path.** Deleting records,
+  changing settings and the startup logo are the only other writes. The shared guard still refuses
   every SET_DATA (0x48) and settings write (0x0A); each passes only through
   its own transport method (`transact_record_table`, `transact_settings`),
   whose check accepts exactly one frame shape: the record table on attribute
@@ -72,7 +83,11 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record
   marker last, never calibration or the factory reset. Both write once, read
   the meter back and stop on a mismatch without retrying; a delete backs the
   records up as CSV first and deletes nothing when that fails. The settings
-  write goes over the CDC port, since the KM003C ignores it over bulk.
+  write goes over the CDC port, since the KM003C ignores it over bulk. The
+  logo write has two methods of its own (`transact_logo_chunk`,
+  `transact_logo_flag`): a chunk is refused unless it lies inside the logo
+  area on its step, and the flag write only sets the startup duration. It
+  reads the logo back and is never retried.
 - **Auth keys ship in the repository.** Authenticated features (queue
   streaming, device info) need the meter's AES keys; shipping them makes those
   features work out of the box.
@@ -191,6 +206,42 @@ final gate for the confirmation.
   at 16 and 32 pixels; `bun run icons` in `apps/desktop` regenerates every
   platform's icon files from them, so edit the drawings rather than the
   generated images.
+
+## The web edition
+
+The web edition is the same Svelte UI built with `VITE_BACKEND=web`. The UI
+calls the same `backend.ts` functions; in this build they go to a browser
+backend (`apps/desktop/src/lib/web/`) instead of Tauri commands.
+
+- **The protocol core runs as WebAssembly.** `powerz-wasm` exposes the
+  sans-I/O parts: frame builders, decoders, the sign-in, the PD decoder, the
+  recording file rules and the demo meter. The TypeScript side only moves
+  bytes, so the browser sends the frames the desktop app sends and decodes
+  them the same way.
+- **Three browser transports.** WebUSB claims the vendor bulk interface (by
+  class) for the full feature set. WebHID is the fallback when another driver
+  holds that interface and carries ADC snapshots only. Web Serial opens the
+  meter's virtual serial port for the settings change and the PDM session.
+- **The trigger engine runs in a worker.** The `powerz-trigger` engine is
+  blocking code. In the browser it runs in a dedicated worker, on a blocking
+  port over two shared byte rings that the page fills and drains with Web
+  Serial, with a clock whose sleep blocks on shared memory. The page stays
+  the final gate for the confirmation above 5 V, as the desktop backend is.
+- **A service worker for isolation.** Shared memory needs a cross-origin
+  isolated page, and GitHub Pages cannot send the headers. The web build
+  registers its own small service worker (`coi-sw.js`), which adds them to
+  the site's responses from the next load; so the first visit may need one
+  reload before triggering works.
+- **Files are downloads.** Exports, recordings, PD captures and record backups
+  are downloaded, or written to a folder the user picks where the browser
+  allows it. The `.db` export and the `.db` reader use SQLite compiled to
+  WebAssembly (sql.js), loaded only when needed, with the table, SQL and row
+  values from `powerz-record`. Firmware update, revealing a file and the PDF
+  chart export stay in the desktop app.
+- **The session lives in the page.** The web backend keeps the session
+  history, statistics and temperature log in the tab, in the same column
+  layout as the mock backend, so the chart's range, ruler and export answers
+  match the desktop app's. Closing or reloading the tab ends the session.
 
 ## Timing budgets in tests
 

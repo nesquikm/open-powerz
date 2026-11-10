@@ -1,8 +1,10 @@
 /**
  * FR QFTCX0: the capability map components read to hide or disable the controls a
- * build cannot offer. The desktop (Tauri and mock) builds have every feature; the web
- * build leaves out every meter write (AC-QFTCX0.6) and every read outside the safe
- * read set (AC-QFTCX0.7). Pure data: no WebUSB code lives here.
+ * build cannot offer. The desktop (Tauri and mock) builds have every feature. The web
+ * build has them too (FR milestone M_ZFZQE7) except firmware update, file reveal and the
+ * recorder's folder, which stay desktop only (an interrupted update in a tab could brick
+ * the meter; a page cannot open the file manager or save into a folder unasked). Pure
+ * data: no WebUSB code lives here.
  */
 
 import type { UiError } from "../backend";
@@ -19,6 +21,9 @@ export interface Features {
   recordDownload: boolean;
   /** Reveal a saved file in the file manager and copy its path (AC-R13Y5W.1). */
   fileReveal: boolean;
+  /** A folder the recorder saves into without asking (FR AXHK2R); the browser saves a
+   * recording as a download (FR EAKFEC, AC .7). */
+  recordingFolder: boolean;
 }
 
 /** The Tauri and mock builds: everything on. */
@@ -32,20 +37,25 @@ export const DESKTOP_FEATURES: Readonly<Features> = Object.freeze({
   recordsList: true,
   recordDownload: true,
   fileReveal: true,
+  recordingFolder: true,
 });
 
-/** The browser build: no meter writes, and the reads that need more than the safe read
- * set stay in the desktop app. */
+/** The browser build: the safe reads (settings, records list, record download) are on
+ * (AC-W8SHX8.7), and so are the settings write over Web Serial (AC-W8SHX9.7), the
+ * record delete (AC-W8SHXA.6), the startup logo (AC-W8SHXB.7) and protocol triggering
+ * over Web Serial (AC-W8SHXC.7); firmware update, file reveal and the recorder's folder
+ * stay in the desktop app (a recording is a download in the browser). */
 export const WEB_FEATURES: Readonly<Features> = Object.freeze({
   firmwareUpdate: false,
-  logoUpload: false,
-  settingsWrite: false,
-  recordDelete: false,
-  trigger: false,
-  settingsRead: false,
-  recordsList: false,
-  recordDownload: false,
+  logoUpload: true,
+  settingsWrite: true,
+  recordDelete: true,
+  trigger: true,
+  settingsRead: true,
+  recordsList: true,
+  recordDownload: true,
   fileReveal: false,
+  recordingFolder: false,
 });
 
 /** What a control the web build leaves out says instead. */

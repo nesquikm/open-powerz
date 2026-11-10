@@ -3,7 +3,10 @@
 The meter can act as a sink and ask a charger for a voltage: a PD offer, a
 PPS or AVS voltage, or a QC, FCP, AFC, SFCP, SCP, VFCP, TFCP or UFCS level.
 This page shows how to do it in the desktop app's **Trigger** tab and with the
-`powerz` CLI. Both talk to the meter over its virtual serial port.
+`powerz` CLI. Both talk to the meter over its virtual serial port. The web
+edition's Trigger tab works the same way in Chrome and Edge, over Web Serial,
+with the same safeguards; the first trigger session there may ask you to
+reload the page once ([web edition](web-edition.md#what-works-in-the-browser)).
 
 ## Safety rules first
 

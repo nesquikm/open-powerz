@@ -1,3 +1,4 @@
+import { getContext } from "svelte";
 import { GLOSSARY, type GlossaryKey } from "./glossary";
 
 /**
@@ -42,4 +43,13 @@ export function glossaryTrigger(key: () => GlossaryKey, uid: string) {
     },
     toggle: () => infoPopover.toggle(popoverId),
   };
+}
+
+/**
+ * Whether the (i) buttons show, from the app's Show (i) icons switch (AC-CW66T1.8);
+ * true when no app context provides it. Call it while a component initialises.
+ */
+export function infoIconsShown(): () => boolean {
+  const showInfoIcons = getContext<(() => boolean) | undefined>("showInfoIcons");
+  return () => showInfoIcons?.() ?? true;
 }

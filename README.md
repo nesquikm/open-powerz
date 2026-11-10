@@ -11,7 +11,8 @@ the features of the vendor's Windows-only "POWER-Z Lab" PC software with a moder
 > manuals and firmware, see the
 > [POWER-Z technical support page](https://www.power-z.com/blogs/technical-support/power-z-km003c-km002c-technical-support).
 
-**Status:** the desktop app and the `powerz` CLI work and are tested on a real KM003C.
+**Status:** the desktop app, the web edition and the `powerz` CLI work and are tested on a
+real KM003C.
 The KM002C should work the same way but is untested. Release builds are not signed yet.
 
 ![The desktop app streaming from the demo device: live readout, chart and statistics](docs/images/desktop.png)
@@ -27,19 +28,46 @@ check the download and open the app past the macOS and Windows warnings.
 
 You can also use open-powerz in the browser, with nothing to install:
 [nesquikm.github.io/open-powerz](https://nesquikm.github.io/open-powerz/). It runs in
-Chrome and Edge on desktop, which support WebUSB. Pick the demo meter to
-try the app without a meter.
+Chrome and Edge on desktop. Pick the demo meter to try the app without a meter, or
+choose **Connect a meter…** in the device menu and pick the meter in the browser's
+USB picker. Safari and Firefox show the demo meter only.
 
-The web edition only reads and streams. These features are desktop-only, so use the
+![The web edition with a real KM003C recording opened: an Apple 140 W charger asked over USB PD for 5, 9, 15 and 20 V and back down](docs/images/web-edition.png)
+
+The browser reaches the meter in three ways; the **(i)** button beside the device
+menu explains them and names the current one:
+
+- **WebUSB** gives the full feature set.
+- **WebHID** (**Connect over HID…**) gives basic readings only, and works even when
+  another program holds the meter.
+- **Web Serial** carries settings changes and protocol triggering; Chrome asks once
+  for the meter's serial port.
+
+In the browser you get:
+
+- live readings, charts and stats
+- PD capture, saved as a `.pdcap` download; **Open capture** and **Import vendor
+  log** open a `.pdcap` file or the vendor's PD log with no meter needed
+- CSV recording, and session export to CSV or a vendor-layout `.db`
+- saving the chart as PNG, SVG or PDF
+- **Open recording** for a CSV or `.db` file, with no meter needed
+- reading and changing the meter settings
+- the offline records: list, download and delete
+- startup logo upload and remove
+- protocol triggering (the first trigger session may ask you to reload the page
+  once, so the page can be cross-origin isolated)
+
+Logo writes, record deletes and protocol triggering keep the same safeguards as the
+desktop app. Files the browser saves go to its downloads.
+
+These stay desktop-only, so use the
 [desktop app](https://github.com/nesquikm/open-powerz/releases/latest) for them:
 
 - firmware update
-- startup logo upload
-- settings writes (changing the meter settings)
-- deleting offline records
-- protocol triggering
-- reading the meter settings and the offline records
-- PDF export of the chart
+- showing a saved file in the file manager
+- choosing the recorder's folder (the browser saves recordings to its downloads)
+
+See [Use the web edition](docs/how-to/web-edition.md) for the details.
 
 ## Features
 
@@ -117,7 +145,8 @@ The web edition only reads and streams. These features are desktop-only, so use 
 
 ### Web edition
 
-- Use open-powerz in Chrome or Edge with nothing to install: live readings, charts, stats, PD capture, CSV recording and the demo meter over WebUSB, with a WebHID fallback for basic readings ([use the web edition](docs/how-to/web-edition.md))
+- Use open-powerz in Chrome or Edge with nothing to install: live readings, charts, stats, PD capture, PD capture files, CSV recording, session export, Open recording, meter settings, offline records, the startup logo, protocol triggering and the demo meter over WebUSB and Web Serial, with a WebHID fallback for basic readings ([use the web edition](docs/how-to/web-edition.md))
+- See what WebUSB, HID and Web Serial each give, and which one the session uses, in a short note beside the web device menu ([connection note](docs/how-to/web-edition.md#the-i-button-beside-the-device-menu))
 
 ### Demo device and simulator
 
@@ -137,6 +166,8 @@ The web edition only reads and streams. These features are desktop-only, so use 
 | ------------------------ | ---------------------------------------------------------------------------- |
 | `crates/powerz-protocol` | Rust protocol library: transports (vendor bulk, HID, CDC), framing, decoders |
 | `crates/powerz-record`   | vendor-compatible CSV recorder shared by the CLI and the desktop app         |
+| `crates/powerz-trigger`  | protocol-trigger engine shared by the desktop app and the web edition        |
+| `crates/powerz-wasm`     | WebAssembly binding of the protocol core for the web edition                 |
 | `crates/powerz-cli`      | `powerz` command-line tool                                                   |
 | `apps/desktop`           | Tauri 2 desktop app (Svelte 5 + TypeScript + Vite, uPlot charts)             |
 | `specs/`                 | requirements, technical spec, plans                                          |

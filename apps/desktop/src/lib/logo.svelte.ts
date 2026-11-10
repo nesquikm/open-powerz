@@ -13,6 +13,7 @@ import type {
   SettingChanges,
   UiError,
 } from "./backend";
+import { hidOnlyBasicText } from "./web/features";
 
 /** The word the Upload confirmation asks for. */
 export const UPLOAD_WORD = "upload";
@@ -51,7 +52,9 @@ export interface LogoFailure {
 export interface LogoDeps {
   choose(): Promise<string | null>;
   preview(path: string, alpha: boolean): Promise<LogoPreview>;
-  read(full: boolean): Promise<LogoRead>;
+  /** `onProgress` hears the read's chunks done of the total, where the backend reports
+   * them (the browser, FR CJ3QCD). */
+  read(full: boolean, onProgress?: (p: LogoProgress) => void): Promise<LogoRead>;
   upload(path: string, alpha: boolean, onProgress: (p: LogoProgress) => void): Promise<LogoWritten>;
   /** The preview of a built-in logo, always transparent (FR 70X5YX); without it no
    * built-in can be picked. */
@@ -84,10 +87,11 @@ export interface SaveCheck {
 }
 
 /** The meter as the view sees it: its model and its settings as read, each null until
- * read. */
+ * read, and whether its connection gives basic readings only (HID, FR CJ3QCC). */
 export interface LogoMeter {
   model: string | null;
   settings: MeterSettings | null;
+  basicReadingsOnly?: boolean;
 }
 
 /** The word a confirmation of `action` asks for. */
@@ -128,6 +132,8 @@ export class StartupLogoState {
   error = $state<UiError | null>(null);
   area = $state<LogoRead | null>(null);
   reading = $state(false);
+  /** The running read's chunks done of the total, while it reports them (FR CJ3QCD). */
+  readProgress = $state<LogoProgress | null>(null);
   /** The settings check of the `saving` phase (FR QG6RNY). */
   saveCheck = $state<SaveCheck>({ checks: 0, lastAt: null, error: null });
   /** The next settings check, while checking. */
@@ -172,9 +178,12 @@ export class StartupLogoState {
   /** Why neither write is allowed on this meter yet: the model and the settings must be
    * read, and the logo is a KM003C feature. */
   get #meterDisabledReason(): string | null {
+    const hid = this.readDisabledReason;
+    if (hid !== null) return hid;
     const meter = this.#meter();
     if (meter.model === null) return "The meter's model has not been read yet.";
-    if (meter.model !== "KM003C")
+    // HID sessions report the USB product name ("POWER-Z KM003C"); match the model token.
+    if (!meter.model.split(/\s+/).includes("KM003C"))
       return `The startup logo needs a KM003C; this meter is a ${meter.model}.`;
     if (meter.settings === null) return "The meter's settings have not been read yet.";
     return null;
@@ -185,6 +194,11 @@ export class StartupLogoState {
     if (meter !== null) return meter;
     if (this.preview === null) return "Choose an image first.";
     return null;
+  }
+  /** Why Read and Show stored logo are off: over HID the logo area cannot be read
+   * (FR Z99166), so the read is never sent. */
+  get readDisabledReason(): string | null {
+    return this.#meter().basicReadingsOnly === true ? hidOnlyBasicText("The startup logo") : null;
   }
   get removeDisabledReason(): string | null {
     if (this.busy) return "A logo write is running.";
@@ -306,6 +320,8 @@ export class StartupLogoState {
     const onProgress = (p: LogoProgress) => (this.progress = p);
     try {
       this.written = await this.#send(action, onProgress);
+      // The logo area changed: the earlier read no longer describes it (FR CJ3QCD).
+      this.area = null;
       this.#afterWritten(this.written);
     } catch (e) {
       this.error = e as UiError;
@@ -357,6 +373,14 @@ export class StartupLogoState {
     this.#checkTimer = setTimeout(() => void this.#check(), SETTINGS_CHECK_MS);
   }
 
+  /** A new connection (FR CJ3QCC): the previous session's error and logo read no
+   * longer describe this meter. */
+  resetSession(): void {
+    this.error = null;
+    this.durationError = null;
+    this.area = null;
+  }
+
   /** Cancels the next settings check; the phase stays `saving`. */
   stopChecking(): void {
     this.#stopped = true;
@@ -400,15 +424,20 @@ export class StartupLogoState {
   /** Reads what the meter's logo area holds now; `full` also fetches the stored logo's
    * pixels so the view can show it. */
   async read(full = false): Promise<void> {
-    if (this.busy || this.reading) return;
+    if (this.busy || this.reading || this.readDisabledReason !== null) return;
     this.reading = true;
+    this.readProgress = null;
     this.error = null;
     try {
-      this.area = await this.#deps.read(full);
+      // Only the stored logo's read is long enough to report its chunks (FR CJ3QCD).
+      this.area = full
+        ? await this.#deps.read(full, (p) => (this.readProgress = p))
+        : await this.#deps.read(full);
     } catch (e) {
       this.error = e as UiError;
     } finally {
       this.reading = false;
+      this.readProgress = null;
     }
   }
   /** Turns the startup screen on for `seconds` through the settings write

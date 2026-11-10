@@ -95,6 +95,10 @@ a recording.
 `powerz stream` has none of these options: it has no pause, auto-stop or row
 limit, and it writes to the file you name.
 
+In the web edition a recording, an export and a saved file go to the
+browser's downloads: there is no Folder option and no reveal in the file
+manager. The file is the same, TEMP included.
+
 ### Temperature
 
 The TEMP column carries the meter's latest valid temperature reading at or
@@ -139,8 +143,8 @@ need to replug when it asks you to.
 
 ## Open a recording
 
-**Open recording**, in the desktop app's tab bar, reads a CSV or a vendor `.db`
-file back into the app. It needs no meter. The file opens in a **File** tab,
+**Open recording**, in the tab bar of the desktop app and the web edition, reads a
+CSV or a vendor `.db` file back into the app. It needs no meter. The file opens in a **File** tab,
 marked as a file and read-only. The tab exists only while a file is open, and
 **Close file** ends it. One file opens at a time; opening another replaces it.
 

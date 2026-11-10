@@ -18,12 +18,10 @@
 
 use std::path::Path;
 
-use powerz_protocol::decode::pd_packet::{PdChunk, PdRecord, STATUS_LEN};
+use powerz_protocol::pd_capture::{NOT_PD_LOG, PdCapture, VendorLog, vendor_sql};
 use rusqlite::config::DbConfig;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
-
-use crate::pd_capture::{PdCapture, PdStatusSample};
 
 /// Why a vendor PD log could not be imported.
 #[derive(Debug)]
@@ -38,9 +36,7 @@ impl std::fmt::Display for PdImportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PdImportError::Database(e) => write!(f, "could not read the vendor PD log: {e}"),
-            PdImportError::NotPdLog => {
-                f.write_str("the file is not a vendor PD log (it has no pd_table)")
-            }
+            PdImportError::NotPdLog => f.write_str(NOT_PD_LOG),
         }
     }
 }
@@ -60,37 +56,7 @@ impl From<rusqlite::Error> for PdImportError {
     }
 }
 
-/// How much of a vendor PD log an import takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ImportLimits {
-    /// A `Raw` value longer than this (bytes) is skipped unread; a whole PD
-    /// record is at most a few dozen bytes.
-    pub max_raw_bytes: u64,
-    /// At most this many `pd_table` rows and this many `pd_chart` rows.
-    pub max_rows: u64,
-}
-
-impl ImportLimits {
-    /// The limits of the app's import.
-    pub const DEFAULT: ImportLimits = ImportLimits {
-        max_raw_bytes: 4096,
-        max_rows: 1_000_000,
-    };
-}
-
-/// A vendor PD log as far as it was imported.
-#[derive(Debug)]
-pub struct VendorImport {
-    /// The imported capture.
-    pub capture: PdCapture,
-    /// `pd_table` rows skipped because their `Raw` is over the limit.
-    pub oversized: u64,
-    /// `pd_table` rows skipped because their `Raw` is not one whole record.
-    pub skipped: u64,
-    /// The log has more rows than [`ImportLimits::max_rows`]: only the first
-    /// ones were imported.
-    pub truncated: bool,
-}
+pub use powerz_protocol::pd_capture::{ImportLimits, VendorImport};
 
 /// Import the vendor PD log database at `path`, read-only, within the
 /// default [`ImportLimits`]: every `pd_table` row becomes a decoded row
@@ -100,7 +66,8 @@ pub fn import_vendor_pd_log(path: &Path) -> Result<PdCapture, PdImportError> {
     import_vendor_pd_log_with(path, &ImportLimits::DEFAULT).map(|i| i.capture)
 }
 
-/// [`import_vendor_pd_log`] within `limits`, telling what was left out.
+/// [`import_vendor_pd_log`] within `limits`, telling what was left out. The
+/// SQL and the row rules are the shared ones the web edition runs too.
 pub fn import_vendor_pd_log_with(
     path: &Path,
     limits: &ImportLimits,
@@ -110,71 +77,33 @@ pub fn import_vendor_pd_log_with(
         return Err(PdImportError::NotPdLog);
     }
     let max_raw = i64::try_from(limits.max_raw_bytes).unwrap_or(i64::MAX);
-    // One row past the cap tells that there are more.
-    let fetch = i64::try_from(limits.max_rows.saturating_add(1)).unwrap_or(i64::MAX);
-
-    // `octet_length` is answered without loading the value.
-    let oversized: i64 = db.query_row(
-        "SELECT count(*) FROM pd_table WHERE octet_length(Raw) > ?1",
-        [max_raw],
-        |r| r.get(0),
-    )?;
-    let mut pd = PdCapture::new();
-    let mut taken = 0u64;
-    let mut skipped = 0u64;
-    let mut truncated = false;
-    let mut rows = db.prepare(
-        "SELECT Time, Vbus, Ibus, Raw FROM pd_table \
-         WHERE Raw IS NULL OR octet_length(Raw) <= ?1 ORDER BY rowid LIMIT ?2",
-    )?;
+    let oversized: i64 = db.query_row(vendor_sql::OVERSIZED, [max_raw], |r| r.get(0))?;
+    let mut log = VendorLog::new(*limits, u64::try_from(oversized).unwrap_or(0));
+    let fetch = i64::try_from(log.fetch()).unwrap_or(i64::MAX);
+    let mut rows = db.prepare(vendor_sql::RECORDS)?;
     let mut rows = rows.query([max_raw, fetch])?;
     while let Some(row) = rows.next()? {
-        if taken == limits.max_rows {
-            truncated = true;
+        if !log.push_record(real(row, 0)?, real(row, 1)?, real(row, 2)?, blob(row, 3)?) {
             break;
         }
-        taken += 1;
-        // A row without whole record bytes has nothing to decode.
-        let Some(record) = blob(row, 3)?.and_then(record_from) else {
-            skipped += 1;
-            continue;
-        };
-        pd.push_imported(
-            record,
-            session_ms(real(row, 0)?),
-            real(row, 1)?.unwrap_or(0.0),
-            real(row, 2)?.unwrap_or(0.0),
-        );
     }
-
     if has_table(&db, "pd_chart")? {
-        let mut chart =
-            db.prepare("SELECT Time, VBUS, IBUS, CC1, CC2 FROM pd_chart ORDER BY rowid LIMIT ?1")?;
+        let mut chart = db.prepare(vendor_sql::CHART)?;
         let mut chart = chart.query([fetch])?;
-        let mut taken = 0u64;
         while let Some(row) = chart.next()? {
-            if taken == limits.max_rows {
-                truncated = true;
+            let values = [
+                real(row, 0)?,
+                real(row, 1)?,
+                real(row, 2)?,
+                real(row, 3)?,
+                real(row, 4)?,
+            ];
+            if !log.push_chart(values) {
                 break;
             }
-            taken += 1;
-            let value =
-                |i: usize| -> Result<f64, rusqlite::Error> { Ok(real(row, i)?.unwrap_or(0.0)) };
-            pd.push_imported_status(PdStatusSample {
-                session_ms: session_ms(real(row, 0)?),
-                vbus_v: value(1)?,
-                ibus_a: value(2)?,
-                cc1_v: value(3)?,
-                cc2_v: value(4)?,
-            });
         }
     }
-    Ok(VendorImport {
-        capture: pd,
-        oversized: u64::try_from(oversized).unwrap_or(0),
-        skipped,
-        truncated,
-    })
+    Ok(log.finish())
 }
 
 /// Column `i` as a number; text, blobs and NULL are `None`.
@@ -236,11 +165,7 @@ fn checked(db: Connection) -> Result<Connection, rusqlite::Error> {
 /// Whether the database has a table named `name`.
 fn has_table(db: &Connection, name: &str) -> Result<bool, rusqlite::Error> {
     Ok(db
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
-            [name],
-            |_| Ok(()),
-        )
+        .query_row(vendor_sql::HAS_TABLE, [name], |_| Ok(()))
         .optional()?
         .is_some())
 }
@@ -269,24 +194,6 @@ fn file_uri(path: &Path) -> String {
     }
     uri.push_str("?immutable=1");
     uri
-}
-
-/// Seconds from the log's start as session ms; a missing or negative time is 0.
-fn session_ms(time_s: Option<f64>) -> u64 {
-    // `as` saturates: NaN and negative times become 0.
-    (time_s.unwrap_or(0.0) * 1000.0).round() as u64
-}
-
-/// One whole record from exactly its own bytes, as the meter sends it.
-fn record_from(raw: &[u8]) -> Option<PdRecord> {
-    let mut chunk = vec![0; STATUS_LEN];
-    chunk.extend_from_slice(raw);
-    let parsed = PdChunk::parse(&chunk).ok()?;
-    let mut records = parsed.records;
-    match (records.pop(), records.is_empty(), parsed.skipped) {
-        (Some(r), true, 0) if r.raw == raw => Some(r),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

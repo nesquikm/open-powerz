@@ -8,6 +8,7 @@
     toUiError,
     watchDevices,
   } from "../backend";
+  import ConnectionInfo from "./ConnectionInfo.svelte";
   import { chooseDeviceMenu, deviceMenuActions } from "../deviceMenu";
   import { deviceOptionLabel } from "../format";
   import { WEB_FEATURES } from "../web/features";
@@ -118,6 +119,9 @@
       </span>
     {/if}
   </span>
+  {#if features === WEB_FEATURES}
+    <ConnectionInfo {session} />
+  {/if}
   {#if hintAction}
     <button
       type="button"

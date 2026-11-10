@@ -1,0 +1,2819 @@
+{
+  "pdcap": {
+    "cable": {
+      "active": false,
+      "epr_capable": true,
+      "max_current_ma": 5000,
+      "max_voltage_v": 50,
+      "pid": 33364,
+      "speed": "USB 2.0",
+      "vendor": "Belkin",
+      "vid": 1293
+    },
+    "details": [
+      {
+        "fields": [],
+        "index": 0,
+        "raw": [
+          69,
+          16,
+          39,
+          0,
+          0,
+          17
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "2",
+                "name": "Number of Data Objects",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "MessageID",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "Source",
+                "name": "Port Power Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "DFP",
+                "name": "Port Data Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Source_Capabilities (Data)",
+                "name": "Message Type",
+                "raw": 1
+              }
+            ],
+            "meaning": "0x21A1 Source_Capabilities",
+            "name": "Header",
+            "raw": 8609
+          },
+          {
+            "bytes": [
+              2,
+              6
+            ],
+            "children": [
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Fixed Supply",
+                "name": "Supply Type",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Dual-Role Power",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Suspend Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "Unconstrained Power",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Communications Capable",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Dual-Role Data",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "Unchunked Extended Messages Supported",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "EPR Capable",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Peak Current",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  3,
+                  5
+                ],
+                "children": [],
+                "meaning": "5.00 V",
+                "name": "Voltage",
+                "raw": 100
+              },
+              {
+                "bytes": [
+                  2,
+                  4
+                ],
+                "children": [],
+                "meaning": "3.00 A",
+                "name": "Maximum Current",
+                "raw": 300
+              }
+            ],
+            "meaning": "Fixed 5.00 V 3.00 A",
+            "name": "PDO 1",
+            "raw": 159486252
+          },
+          {
+            "bytes": [
+              6,
+              10
+            ],
+            "children": [
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "Fixed Supply",
+                "name": "Supply Type",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Dual-Role Power",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Suspend Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Unconstrained Power",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Communications Capable",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Dual-Role Data",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Unchunked Extended Messages Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "EPR Capable",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Peak Current",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  7,
+                  9
+                ],
+                "children": [],
+                "meaning": "9.00 V",
+                "name": "Voltage",
+                "raw": 180
+              },
+              {
+                "bytes": [
+                  6,
+                  8
+                ],
+                "children": [],
+                "meaning": "3.00 A",
+                "name": "Maximum Current",
+                "raw": 300
+              }
+            ],
+            "meaning": "Fixed 9.00 V 3.00 A",
+            "name": "PDO 2",
+            "raw": 184620
+          }
+        ],
+        "index": 1,
+        "raw": [
+          161,
+          33,
+          44,
+          145,
+          129,
+          9,
+          44,
+          209,
+          2,
+          0
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "1",
+                "name": "Number of Data Objects",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "MessageID",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "Sink",
+                "name": "Port Power Role",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "UFP",
+                "name": "Port Data Role",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Request (Data)",
+                "name": "Message Type",
+                "raw": 2
+              }
+            ],
+            "meaning": "0x1082 Request",
+            "name": "Header",
+            "raw": 4226
+          },
+          {
+            "bytes": [
+              2,
+              6
+            ],
+            "children": [
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "1",
+                "name": "Object Position",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "GiveBack (deprecated)",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Capability Mismatch",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "USB Communications Capable",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "No USB Suspend",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Unchunked Extended Messages Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "EPR Capable",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  3,
+                  5
+                ],
+                "children": [],
+                "meaning": "3.00 A",
+                "name": "Operating Current",
+                "raw": 300
+              },
+              {
+                "bytes": [
+                  2,
+                  4
+                ],
+                "children": [],
+                "meaning": "3.00 A",
+                "name": "Maximum Operating Current",
+                "raw": 300
+              }
+            ],
+            "meaning": "Fixed/Variable RDO",
+            "name": "RDO",
+            "raw": 323268908
+          }
+        ],
+        "index": 2,
+        "raw": [
+          130,
+          16,
+          44,
+          177,
+          68,
+          19
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Number of Data Objects",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "1",
+                "name": "MessageID",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "Source",
+                "name": "Port Power Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "DFP",
+                "name": "Port Data Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Accept (Control)",
+                "name": "Message Type",
+                "raw": 3
+              }
+            ],
+            "meaning": "0x03A3 Accept",
+            "name": "Header",
+            "raw": 931
+          }
+        ],
+        "index": 3,
+        "raw": [
+          163,
+          3
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "5",
+                "name": "Number of Data Objects",
+                "raw": 5
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "MessageID",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "From a Cable Plug or VPD",
+                "name": "Cable Plug",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Reserved (shall be 0)",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Vendor_Defined (Data)",
+                "name": "Message Type",
+                "raw": 15
+              }
+            ],
+            "meaning": "0x518F Vendor_Defined",
+            "name": "Header",
+            "raw": 20879
+          },
+          {
+            "bytes": [
+              2,
+              6
+            ],
+            "children": [
+              {
+                "bytes": [
+                  4,
+                  6
+                ],
+                "children": [],
+                "meaning": "0xFF00",
+                "name": "SVID",
+                "raw": 65280
+              },
+              {
+                "bytes": [
+                  3,
+                  4
+                ],
+                "children": [],
+                "meaning": "Structured",
+                "name": "VDM Type",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  3,
+                  4
+                ],
+                "children": [],
+                "meaning": "Version 2.x",
+                "name": "Structured VDM Version (Major)",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  3,
+                  4
+                ],
+                "children": [],
+                "meaning": "x.1",
+                "name": "Structured VDM Version (Minor)",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  3,
+                  4
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Object Position",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  2,
+                  3
+                ],
+                "children": [],
+                "meaning": "ACK",
+                "name": "Command Type",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  2,
+                  3
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  2,
+                  3
+                ],
+                "children": [],
+                "meaning": "Discover Identity",
+                "name": "Command",
+                "raw": 1
+              }
+            ],
+            "meaning": "Discover Identity ACK",
+            "name": "VDM Header",
+            "raw": 4278233153
+          },
+          {
+            "bytes": [
+              6,
+              10
+            ],
+            "children": [
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Communications Capable as USB Host",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Communications Capable as a USB Device",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "Passive Cable",
+                "name": "SOP' Product Type (Cable Plug/VPD)",
+                "raw": 3
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Modal Operation Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  10
+                ],
+                "children": [],
+                "meaning": "Not a DFP",
+                "name": "Product Type (DFP)",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "USB Type-C Plug",
+                "name": "Connector Type",
+                "raw": 3
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  6,
+                  8
+                ],
+                "children": [],
+                "meaning": "0x050D",
+                "name": "USB Vendor ID",
+                "raw": 1293
+              }
+            ],
+            "meaning": "VID 0x050D",
+            "name": "ID Header",
+            "raw": 408945933
+          },
+          {
+            "bytes": [
+              10,
+              14
+            ],
+            "children": [
+              {
+                "bytes": [
+                  10,
+                  14
+                ],
+                "children": [],
+                "meaning": "0x404D",
+                "name": "XID",
+                "raw": 16461
+              }
+            ],
+            "meaning": "0x0000404D",
+            "name": "Cert Stat VDO",
+            "raw": 16461
+          },
+          {
+            "bytes": [
+              14,
+              18
+            ],
+            "children": [
+              {
+                "bytes": [
+                  16,
+                  18
+                ],
+                "children": [],
+                "meaning": "0x8254",
+                "name": "USB Product ID",
+                "raw": 33364
+              },
+              {
+                "bytes": [
+                  14,
+                  16
+                ],
+                "children": [],
+                "meaning": "0x0000",
+                "name": "bcdDevice",
+                "raw": 0
+              }
+            ],
+            "meaning": "PID 0x8254",
+            "name": "Product VDO",
+            "raw": 2186543104
+          },
+          {
+            "bytes": [
+              18,
+              22
+            ],
+            "children": [
+              {
+                "bytes": [
+                  21,
+                  22
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "HW Version",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  21,
+                  22
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Firmware Version",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  20,
+                  21
+                ],
+                "children": [],
+                "meaning": "1.0",
+                "name": "VDO Version",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  20,
+                  21
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  20,
+                  21
+                ],
+                "children": [],
+                "meaning": "USB Type-C",
+                "name": "USB Type-C plug to",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  20,
+                  21
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "EPR Capable",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  19,
+                  21
+                ],
+                "children": [],
+                "meaning": "<10 ns (~1 m)",
+                "name": "Cable Latency",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  19,
+                  20
+                ],
+                "children": [],
+                "meaning": "VCONN not required",
+                "name": "Cable Termination Type",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  19,
+                  20
+                ],
+                "children": [],
+                "meaning": "50 V",
+                "name": "Maximum VBUS Voltage",
+                "raw": 3
+              },
+              {
+                "bytes": [
+                  18,
+                  20
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  18,
+                  19
+                ],
+                "children": [],
+                "meaning": "5 A",
+                "name": "VBUS Current Handling",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  18,
+                  19
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  18,
+                  19
+                ],
+                "children": [],
+                "meaning": "USB 2.0 only",
+                "name": "USB Highest Speed",
+                "raw": 0
+              }
+            ],
+            "meaning": "0x000A2640",
+            "name": "Passive Cable VDO",
+            "raw": 665152
+          }
+        ],
+        "index": 4,
+        "raw": [
+          143,
+          81,
+          65,
+          168,
+          0,
+          255,
+          13,
+          5,
+          96,
+          24,
+          77,
+          64,
+          0,
+          0,
+          0,
+          0,
+          84,
+          130,
+          64,
+          38,
+          10,
+          0
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Number of Data Objects",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "2",
+                "name": "MessageID",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "Source",
+                "name": "Port Power Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "DFP",
+                "name": "Port Data Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "PS_RDY (Control)",
+                "name": "Message Type",
+                "raw": 6
+              }
+            ],
+            "meaning": "0x05A6 PS_RDY",
+            "name": "Header",
+            "raw": 1446
+          }
+        ],
+        "index": 5,
+        "raw": [
+          166,
+          5
+        ]
+      },
+      {
+        "fields": [],
+        "index": 6,
+        "raw": [
+          69,
+          10,
+          40,
+          0,
+          0,
+          4
+        ]
+      }
+    ],
+    "opened": {
+      "damaged_line": 12,
+      "dropped": 0,
+      "oversized": 0,
+      "rows": [
+        {
+          "direction": null,
+          "elapsed_ms": 0,
+          "ibus_a": 0.12,
+          "index": 0,
+          "kind": "event",
+          "message_id": null,
+          "name": "Attach",
+          "objects": null,
+          "session_ms": 3000,
+          "sop": null,
+          "spec_revision": null,
+          "summary": "Attach",
+          "vbus_v": 5.01
+        },
+        {
+          "direction": "source_to_sink",
+          "elapsed_ms": 40,
+          "ibus_a": 0.12,
+          "index": 1,
+          "kind": "message",
+          "message_id": 0,
+          "name": "Source_Capabilities",
+          "objects": 2,
+          "session_ms": 3040,
+          "sop": "SOP",
+          "spec_revision": "3.x",
+          "summary": "Source_Capabilities: Fixed 5.00 V 3.00 A, Fixed 9.00 V 3.00 A",
+          "vbus_v": 5.01
+        },
+        {
+          "direction": "sink_to_source",
+          "elapsed_ms": 42,
+          "ibus_a": 0.14,
+          "index": 2,
+          "kind": "message",
+          "message_id": 0,
+          "name": "Request",
+          "objects": 1,
+          "session_ms": 3042,
+          "sop": "SOP",
+          "spec_revision": "3.x",
+          "summary": "Request: #1 Fixed 5.00 V 3.00 A",
+          "vbus_v": 5.02
+        },
+        {
+          "direction": "source_to_sink",
+          "elapsed_ms": 50,
+          "ibus_a": 0.14,
+          "index": 3,
+          "kind": "message",
+          "message_id": 1,
+          "name": "Accept",
+          "objects": 0,
+          "session_ms": 3050,
+          "sop": "SOP",
+          "spec_revision": "3.x",
+          "summary": "Accept",
+          "vbus_v": 5.02
+        },
+        {
+          "direction": "cable",
+          "elapsed_ms": 60,
+          "ibus_a": 0.14,
+          "index": 4,
+          "kind": "message",
+          "message_id": 0,
+          "name": "Vendor_Defined",
+          "objects": 5,
+          "session_ms": 3060,
+          "sop": "SOP'",
+          "spec_revision": "3.x",
+          "summary": "Vendor_Defined: Discover Identity ACK (SVID 0xFF00)",
+          "vbus_v": 5.02
+        },
+        {
+          "direction": "source_to_sink",
+          "elapsed_ms": 200,
+          "ibus_a": -0.25,
+          "index": 5,
+          "kind": "message",
+          "message_id": 2,
+          "name": "PS_RDY",
+          "objects": 0,
+          "session_ms": 3700,
+          "sop": "SOP",
+          "spec_revision": "3.x",
+          "summary": "PS_RDY",
+          "vbus_v": 9.01
+        },
+        {
+          "direction": null,
+          "elapsed_ms": 250,
+          "ibus_a": -0.25,
+          "index": 6,
+          "kind": "event",
+          "message_id": null,
+          "name": "Hard Reset",
+          "objects": null,
+          "session_ms": 3750,
+          "sop": null,
+          "spec_revision": null,
+          "summary": "Hard Reset",
+          "vbus_v": 9.01
+        }
+      ],
+      "skipped": 0,
+      "status": [
+        {
+          "cc1_v": 1.62,
+          "cc2_v": 0.0,
+          "ibus_a": 0.12,
+          "session_ms": 3000,
+          "vbus_v": 5.01
+        },
+        {
+          "cc1_v": 1.62,
+          "cc2_v": 0.0,
+          "ibus_a": 0.14,
+          "session_ms": 3300,
+          "vbus_v": 5.02
+        },
+        {
+          "cc1_v": 1.62,
+          "cc2_v": 0.0,
+          "ibus_a": -0.25,
+          "session_ms": 4100,
+          "vbus_v": 9.01
+        }
+      ],
+      "truncated": false
+    }
+  },
+  "vendor": {
+    "cable": {
+      "active": false,
+      "epr_capable": true,
+      "max_current_ma": 5000,
+      "max_voltage_v": 50,
+      "pid": 33364,
+      "speed": "USB 2.0",
+      "vendor": "Belkin",
+      "vid": 1293
+    },
+    "details": [
+      {
+        "fields": [],
+        "index": 0,
+        "raw": [
+          69,
+          0,
+          0,
+          0,
+          0,
+          17
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "2",
+                "name": "Number of Data Objects",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "MessageID",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "Source",
+                "name": "Port Power Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "DFP",
+                "name": "Port Data Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Source_Capabilities (Data)",
+                "name": "Message Type",
+                "raw": 1
+              }
+            ],
+            "meaning": "0x21A1 Source_Capabilities",
+            "name": "Header",
+            "raw": 8609
+          },
+          {
+            "bytes": [
+              2,
+              6
+            ],
+            "children": [
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Fixed Supply",
+                "name": "Supply Type",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Dual-Role Power",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Suspend Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "Unconstrained Power",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Communications Capable",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Dual-Role Data",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "Unchunked Extended Messages Supported",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "EPR Capable",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Peak Current",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  3,
+                  5
+                ],
+                "children": [],
+                "meaning": "5.00 V",
+                "name": "Voltage",
+                "raw": 100
+              },
+              {
+                "bytes": [
+                  2,
+                  4
+                ],
+                "children": [],
+                "meaning": "3.00 A",
+                "name": "Maximum Current",
+                "raw": 300
+              }
+            ],
+            "meaning": "Fixed 5.00 V 3.00 A",
+            "name": "PDO 1",
+            "raw": 159486252
+          },
+          {
+            "bytes": [
+              6,
+              10
+            ],
+            "children": [
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "Fixed Supply",
+                "name": "Supply Type",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Dual-Role Power",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Suspend Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Unconstrained Power",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Communications Capable",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Dual-Role Data",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Unchunked Extended Messages Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "EPR Capable",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Peak Current",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  7,
+                  9
+                ],
+                "children": [],
+                "meaning": "9.00 V",
+                "name": "Voltage",
+                "raw": 180
+              },
+              {
+                "bytes": [
+                  6,
+                  8
+                ],
+                "children": [],
+                "meaning": "3.00 A",
+                "name": "Maximum Current",
+                "raw": 300
+              }
+            ],
+            "meaning": "Fixed 9.00 V 3.00 A",
+            "name": "PDO 2",
+            "raw": 184620
+          }
+        ],
+        "index": 1,
+        "raw": [
+          161,
+          33,
+          44,
+          145,
+          129,
+          9,
+          44,
+          209,
+          2,
+          0
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "1",
+                "name": "Number of Data Objects",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "MessageID",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "Sink",
+                "name": "Port Power Role",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "UFP",
+                "name": "Port Data Role",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Request (Data)",
+                "name": "Message Type",
+                "raw": 2
+              }
+            ],
+            "meaning": "0x1082 Request",
+            "name": "Header",
+            "raw": 4226
+          },
+          {
+            "bytes": [
+              2,
+              6
+            ],
+            "children": [
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "1",
+                "name": "Object Position",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "GiveBack (deprecated)",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Capability Mismatch",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "USB Communications Capable",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  5,
+                  6
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "No USB Suspend",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Unchunked Extended Messages Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "EPR Capable",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  4,
+                  5
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  3,
+                  5
+                ],
+                "children": [],
+                "meaning": "3.00 A",
+                "name": "Operating Current",
+                "raw": 300
+              },
+              {
+                "bytes": [
+                  2,
+                  4
+                ],
+                "children": [],
+                "meaning": "3.00 A",
+                "name": "Maximum Operating Current",
+                "raw": 300
+              }
+            ],
+            "meaning": "Fixed/Variable RDO",
+            "name": "RDO",
+            "raw": 323268908
+          }
+        ],
+        "index": 2,
+        "raw": [
+          130,
+          16,
+          44,
+          177,
+          68,
+          19
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Number of Data Objects",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "1",
+                "name": "MessageID",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "Source",
+                "name": "Port Power Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "DFP",
+                "name": "Port Data Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Accept (Control)",
+                "name": "Message Type",
+                "raw": 3
+              }
+            ],
+            "meaning": "0x03A3 Accept",
+            "name": "Header",
+            "raw": 931
+          }
+        ],
+        "index": 3,
+        "raw": [
+          163,
+          3
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "5",
+                "name": "Number of Data Objects",
+                "raw": 5
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "MessageID",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "From a Cable Plug or VPD",
+                "name": "Cable Plug",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Reserved (shall be 0)",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Vendor_Defined (Data)",
+                "name": "Message Type",
+                "raw": 15
+              }
+            ],
+            "meaning": "0x518F Vendor_Defined",
+            "name": "Header",
+            "raw": 20879
+          },
+          {
+            "bytes": [
+              2,
+              6
+            ],
+            "children": [
+              {
+                "bytes": [
+                  4,
+                  6
+                ],
+                "children": [],
+                "meaning": "0xFF00",
+                "name": "SVID",
+                "raw": 65280
+              },
+              {
+                "bytes": [
+                  3,
+                  4
+                ],
+                "children": [],
+                "meaning": "Structured",
+                "name": "VDM Type",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  3,
+                  4
+                ],
+                "children": [],
+                "meaning": "Version 2.x",
+                "name": "Structured VDM Version (Major)",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  3,
+                  4
+                ],
+                "children": [],
+                "meaning": "x.1",
+                "name": "Structured VDM Version (Minor)",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  3,
+                  4
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Object Position",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  2,
+                  3
+                ],
+                "children": [],
+                "meaning": "ACK",
+                "name": "Command Type",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  2,
+                  3
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  2,
+                  3
+                ],
+                "children": [],
+                "meaning": "Discover Identity",
+                "name": "Command",
+                "raw": 1
+              }
+            ],
+            "meaning": "Discover Identity ACK",
+            "name": "VDM Header",
+            "raw": 4278233153
+          },
+          {
+            "bytes": [
+              6,
+              10
+            ],
+            "children": [
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Communications Capable as USB Host",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "USB Communications Capable as a USB Device",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "Passive Cable",
+                "name": "SOP' Product Type (Cable Plug/VPD)",
+                "raw": 3
+              },
+              {
+                "bytes": [
+                  9,
+                  10
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Modal Operation Supported",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  10
+                ],
+                "children": [],
+                "meaning": "Not a DFP",
+                "name": "Product Type (DFP)",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "USB Type-C Plug",
+                "name": "Connector Type",
+                "raw": 3
+              },
+              {
+                "bytes": [
+                  8,
+                  9
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  6,
+                  8
+                ],
+                "children": [],
+                "meaning": "0x050D",
+                "name": "USB Vendor ID",
+                "raw": 1293
+              }
+            ],
+            "meaning": "VID 0x050D",
+            "name": "ID Header",
+            "raw": 408945933
+          },
+          {
+            "bytes": [
+              10,
+              14
+            ],
+            "children": [
+              {
+                "bytes": [
+                  10,
+                  14
+                ],
+                "children": [],
+                "meaning": "0x404D",
+                "name": "XID",
+                "raw": 16461
+              }
+            ],
+            "meaning": "0x0000404D",
+            "name": "Cert Stat VDO",
+            "raw": 16461
+          },
+          {
+            "bytes": [
+              14,
+              18
+            ],
+            "children": [
+              {
+                "bytes": [
+                  16,
+                  18
+                ],
+                "children": [],
+                "meaning": "0x8254",
+                "name": "USB Product ID",
+                "raw": 33364
+              },
+              {
+                "bytes": [
+                  14,
+                  16
+                ],
+                "children": [],
+                "meaning": "0x0000",
+                "name": "bcdDevice",
+                "raw": 0
+              }
+            ],
+            "meaning": "PID 0x8254",
+            "name": "Product VDO",
+            "raw": 2186543104
+          },
+          {
+            "bytes": [
+              18,
+              22
+            ],
+            "children": [
+              {
+                "bytes": [
+                  21,
+                  22
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "HW Version",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  21,
+                  22
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Firmware Version",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  20,
+                  21
+                ],
+                "children": [],
+                "meaning": "1.0",
+                "name": "VDO Version",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  20,
+                  21
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  20,
+                  21
+                ],
+                "children": [],
+                "meaning": "USB Type-C",
+                "name": "USB Type-C plug to",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  20,
+                  21
+                ],
+                "children": [],
+                "meaning": "Yes",
+                "name": "EPR Capable",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  19,
+                  21
+                ],
+                "children": [],
+                "meaning": "<10 ns (~1 m)",
+                "name": "Cable Latency",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  19,
+                  20
+                ],
+                "children": [],
+                "meaning": "VCONN not required",
+                "name": "Cable Termination Type",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  19,
+                  20
+                ],
+                "children": [],
+                "meaning": "50 V",
+                "name": "Maximum VBUS Voltage",
+                "raw": 3
+              },
+              {
+                "bytes": [
+                  18,
+                  20
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  18,
+                  19
+                ],
+                "children": [],
+                "meaning": "5 A",
+                "name": "VBUS Current Handling",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  18,
+                  19
+                ],
+                "children": [],
+                "meaning": "0x0",
+                "name": "Reserved",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  18,
+                  19
+                ],
+                "children": [],
+                "meaning": "USB 2.0 only",
+                "name": "USB Highest Speed",
+                "raw": 0
+              }
+            ],
+            "meaning": "0x000A2640",
+            "name": "Passive Cable VDO",
+            "raw": 665152
+          }
+        ],
+        "index": 4,
+        "raw": [
+          143,
+          81,
+          65,
+          168,
+          0,
+          255,
+          13,
+          5,
+          96,
+          24,
+          77,
+          64,
+          0,
+          0,
+          0,
+          0,
+          84,
+          130,
+          64,
+          38,
+          10,
+          0
+        ]
+      },
+      {
+        "fields": [
+          {
+            "bytes": [
+              0,
+              2
+            ],
+            "children": [
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "No",
+                "name": "Extended",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "0",
+                "name": "Number of Data Objects",
+                "raw": 0
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "2",
+                "name": "MessageID",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  1,
+                  2
+                ],
+                "children": [],
+                "meaning": "Source",
+                "name": "Port Power Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "Revision 3.x",
+                "name": "Specification Revision",
+                "raw": 2
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "DFP",
+                "name": "Port Data Role",
+                "raw": 1
+              },
+              {
+                "bytes": [
+                  0,
+                  1
+                ],
+                "children": [],
+                "meaning": "PS_RDY (Control)",
+                "name": "Message Type",
+                "raw": 6
+              }
+            ],
+            "meaning": "0x05A6 PS_RDY",
+            "name": "Header",
+            "raw": 1446
+          }
+        ],
+        "index": 5,
+        "raw": [
+          166,
+          5
+        ]
+      },
+      {
+        "fields": [],
+        "index": 6,
+        "raw": [
+          69,
+          226,
+          4,
+          0,
+          0,
+          4
+        ]
+      }
+    ],
+    "opened": {
+      "damaged_line": null,
+      "dropped": 0,
+      "oversized": 1,
+      "rows": [
+        {
+          "direction": null,
+          "elapsed_ms": 0,
+          "ibus_a": 0.0,
+          "index": 0,
+          "kind": "event",
+          "message_id": null,
+          "name": "Attach",
+          "objects": null,
+          "session_ms": 0,
+          "sop": null,
+          "spec_revision": null,
+          "summary": "Attach",
+          "vbus_v": 5.01
+        },
+        {
+          "direction": "source_to_sink",
+          "elapsed_ms": 40,
+          "ibus_a": 0.02,
+          "index": 1,
+          "kind": "message",
+          "message_id": 0,
+          "name": "Source_Capabilities",
+          "objects": 2,
+          "session_ms": 40,
+          "sop": "SOP",
+          "spec_revision": "3.x",
+          "summary": "Source_Capabilities: Fixed 5.00 V 3.00 A, Fixed 9.00 V 3.00 A",
+          "vbus_v": 5.012
+        },
+        {
+          "direction": "sink_to_source",
+          "elapsed_ms": 42,
+          "ibus_a": 0.021,
+          "index": 2,
+          "kind": "message",
+          "message_id": 0,
+          "name": "Request",
+          "objects": 1,
+          "session_ms": 42,
+          "sop": "SOP",
+          "spec_revision": "3.x",
+          "summary": "Request: #1 Fixed 5.00 V 3.00 A",
+          "vbus_v": 5.012
+        },
+        {
+          "direction": "source_to_sink",
+          "elapsed_ms": 50,
+          "ibus_a": 0.022,
+          "index": 3,
+          "kind": "message",
+          "message_id": 1,
+          "name": "Accept",
+          "objects": 0,
+          "session_ms": 50,
+          "sop": "SOP",
+          "spec_revision": "3.x",
+          "summary": "Accept",
+          "vbus_v": 0.0
+        },
+        {
+          "direction": "cable",
+          "elapsed_ms": 60,
+          "ibus_a": 0.022,
+          "index": 4,
+          "kind": "message",
+          "message_id": 0,
+          "name": "Vendor_Defined",
+          "objects": 5,
+          "session_ms": 60,
+          "sop": "SOP'",
+          "spec_revision": "3.x",
+          "summary": "Vendor_Defined: Discover Identity ACK (SVID 0xFF00)",
+          "vbus_v": 5.013
+        },
+        {
+          "direction": "source_to_sink",
+          "elapsed_ms": 200,
+          "ibus_a": 0.5,
+          "index": 5,
+          "kind": "message",
+          "message_id": 2,
+          "name": "PS_RDY",
+          "objects": 0,
+          "session_ms": 200,
+          "sop": "SOP",
+          "spec_revision": "3.x",
+          "summary": "PS_RDY",
+          "vbus_v": 9.004
+        },
+        {
+          "direction": null,
+          "elapsed_ms": 1250,
+          "ibus_a": 0.0,
+          "index": 6,
+          "kind": "event",
+          "message_id": null,
+          "name": "Hard Reset",
+          "objects": null,
+          "session_ms": 1250,
+          "sop": null,
+          "spec_revision": null,
+          "summary": "Hard Reset",
+          "vbus_v": 0.0
+        }
+      ],
+      "skipped": 3,
+      "status": [
+        {
+          "cc1_v": 1.62,
+          "cc2_v": 0.0,
+          "ibus_a": 0.0,
+          "session_ms": 0,
+          "vbus_v": 5.01
+        },
+        {
+          "cc1_v": 1.62,
+          "cc2_v": 0.0,
+          "ibus_a": 0.021,
+          "session_ms": 100,
+          "vbus_v": 5.012
+        },
+        {
+          "cc1_v": 1.61,
+          "cc2_v": 0.0,
+          "ibus_a": 0.5,
+          "session_ms": 300,
+          "vbus_v": 9.004
+        },
+        {
+          "cc1_v": 0.0,
+          "cc2_v": 0.0,
+          "ibus_a": 0.0,
+          "session_ms": 1300,
+          "vbus_v": 0.0
+        }
+      ],
+      "truncated": false
+    }
+  }
+}

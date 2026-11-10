@@ -27,6 +27,7 @@
   import { GLOSSARY, type GlossaryKey } from "../glossary";
   import { infoPopover } from "../infoPopover.svelte";
   import { placePopover } from "../popoverPlacement";
+  import type { Snippet } from "svelte";
 
   /**
    * The popover of one glossary entry (FR CW66T1), shared by InfoButton and Term. It is
@@ -38,6 +39,7 @@
     id,
     open,
     anchor,
+    children,
   }: {
     key: GlossaryKey;
     id: string;
@@ -45,6 +47,8 @@
     open: boolean;
     /** The trigger the popover sits beside. */
     anchor: HTMLElement | undefined;
+    /** Extra content after the entry's text, rendered only while the popover is open. */
+    children?: Snippet;
   } = $props();
 
   const entry = $derived(GLOSSARY[key]);
@@ -117,6 +121,9 @@
   <span class="short">{entry.short}</span>
   {#if entry.long}
     <span class="long">{entry.long}</span>
+  {/if}
+  {#if children && open}
+    {@render children()}
   {/if}
 </span>
 

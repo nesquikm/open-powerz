@@ -65,6 +65,12 @@ function section(page: Page, name: (typeof PROTOCOL_REGIONS)[number]): Locator {
   return view(page).getByRole("region", { name, exact: true });
 }
 
+/** The buttons in a card that press something: a glossary term's button opens a popover
+ * and is no offer (FR 62VEDM). */
+function offersIn(card: Locator): Locator {
+  return card.locator("button:not([data-glossary-key])");
+}
+
 function detectButton(page: Page): Locator {
   return view(page).getByRole("button", { name: "Detect", exact: true });
 }
@@ -115,7 +121,7 @@ async function detected(page: Page, query = ""): Promise<void> {
   await streamDemo(page);
   await showTrigger(page);
   await detectButton(page).click();
-  await expect(section(page, "USB PD").getByRole("button").first()).toBeVisible();
+  await expect(offersIn(section(page, "USB PD")).first()).toBeVisible();
 }
 
 /** Request 9 V on the PD section and confirm. */
@@ -632,7 +638,7 @@ test("a meter out of step after a cut list shows the power-cycle error (AC-DGSQ6
   const sent = await commands(page);
   expect(sent.slice(sent.indexOf("entry list"))).toEqual(["entry list", "reset", "pdm parm"]);
   // Nothing was listed after the failed check.
-  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(offersIn(section(page, "USB PD"))).toHaveCount(0);
 });
 
 test("detection names which check said what when they disagree (AC-DGSQ6R.8)", async ({ page }) => {
@@ -803,7 +809,7 @@ test("a page reload does not arm (AC-AXHK2N.4)", async ({ page }) => {
   await showTrigger(page);
   await expect(armedStatus(page)).toBeHidden();
   await detectButton(page).click();
-  await expect(section(page, "USB PD").getByRole("button").first()).toBeVisible();
+  await expect(offersIn(section(page, "USB PD")).first()).toBeVisible();
   await asks15V(page);
 });
 
@@ -1041,7 +1047,7 @@ test("a collapse leaves no offer to press until Detect (AC-AXHK2N.10)", async ({
   await request9V(page);
   await expect(chargerGoneText(page)).toBeVisible();
   await expect(offerControls(page)).toHaveCount(0);
-  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(offersIn(section(page, "USB PD"))).toHaveCount(0);
   await expect(result(page).getByText("pd req=2")).toBeHidden();
 
   await detectButton(page).click();
@@ -1076,7 +1082,7 @@ test("leaving the tab leaves no offers and says to press Detect (AC-AXHK2N.11)",
   await showTrigger(page);
   await expect(noOffersText(page)).toBeVisible();
   await expect(offerControls(page)).toHaveCount(0);
-  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(offersIn(section(page, "USB PD"))).toHaveCount(0);
   await expect(view(page).getByText("Not detected yet.")).toBeVisible();
 
   await detectButton(page).click();
@@ -1175,7 +1181,7 @@ test("a charger gone after Detect with no offer pressed shows the gone state (AC
   const sent = (await commands(page)).length;
   await expect(chargerGoneText(page)).toBeVisible();
   await expect(offerControls(page)).toHaveCount(0);
-  await expect(section(page, "USB PD").getByRole("button")).toHaveCount(0);
+  await expect(offersIn(section(page, "USB PD"))).toHaveCount(0);
   await expect(readCableButton(page)).toBeDisabled();
   await expect(readCableButton(page)).toHaveAccessibleDescription(NO_CHARGER_REASON);
   await expect(cableCard(page).getByText(NO_CHARGER_REASON)).toBeVisible();

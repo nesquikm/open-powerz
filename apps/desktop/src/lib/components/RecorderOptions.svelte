@@ -7,7 +7,8 @@
    * Also shows how long the chart's memory lasts at the meter's rate.
    */
   import { untrack } from "svelte";
-  import { chooseRecordingFolder, toUiError } from "../backend";
+  import { chooseRecordingFolder, features, toUiError } from "../backend";
+  import DesktopOnly from "./DesktopOnly.svelte";
   import { LIVE_CAPACITY } from "../chartData";
   import { memoryDepthText } from "../recording.svelte";
   import { recorderSettingsError, type RecorderSettings } from "../settings";
@@ -129,11 +130,15 @@
     <div class="field" role="group" aria-labelledby="recorder-folder-label">
       <span id="recorder-folder-label">Folder</span>
       <div class="folder">
-        <span class="path" title={folder ?? undefined}>{folder ?? "Asked at Stop"}</span>
-        <button type="button" disabled={locked || choosing} onclick={chooseFolder}>Choose</button>
-        {#if folder !== null}
-          <button type="button" disabled={locked} onclick={() => (folder = null)}>Clear</button>
-        {/if}
+        <span class="path" title={folder ?? undefined}
+          >{folder ?? (features.recordingFolder ? "Asked at Stop" : "Downloads")}</span
+        >
+        <DesktopOnly available={features.recordingFolder} label="Choose">
+          <button type="button" disabled={locked || choosing} onclick={chooseFolder}>Choose</button>
+          {#if folder !== null}
+            <button type="button" disabled={locked} onclick={() => (folder = null)}>Clear</button>
+          {/if}
+        </DesktopOnly>
       </div>
     </div>
     <label class="check">

@@ -34,6 +34,7 @@ pub use auth::{auth_credential, auth_plaintext, auth_reply_level, auth_request};
 pub use logo::{
     LogoProgress, LogoRefusal, LogoRemoveStep, LogoStatus, LogoStep, LogoWritten,
     SETTINGS_SAVE_POLL_GAP, SettingsSave, check_logo_dump, logo_chunk_plaintext, logo_flag_request,
+    settings_save,
 };
 #[cfg(feature = "bulk")]
 pub(crate) use memory::UID;
@@ -46,7 +47,7 @@ pub use probe::{ConnectOutcome, HeadOutcome, ProbeReport};
 pub use records::{
     RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_delete_table, record_table_request,
 };
-pub use settings_write::SettingsWritten;
+pub use settings_write::{SettingsWritten, settings_written};
 pub use stream::{Gap, RATE_SWITCH_RUN, SnapshotCadence, StreamPoll, Streamer};
 
 /// Text of [`Error::RecordTableMismatch`]: a matching count alone would read

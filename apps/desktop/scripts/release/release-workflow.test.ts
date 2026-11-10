@@ -637,3 +637,154 @@ describe("MSRV job covers the desktop crate (FR AXHK2H)", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// FR W8SHXE: the bundler's tool downloads are cached, and a failed packaging step
+// runs once more before the job fails.
+// ---------------------------------------------------------------------------
+
+const CACHE_SHA = "0057852bfaa89a56745cba8c7296529d2fc39830";
+
+/** The steps of a job as their non-comment lines, each step starting at its `- ` line. */
+function stepsOf(j: { lines: string[] }): string[][] {
+  const src = j.lines;
+  const at = src.findIndex((l) => /^\s*steps:\s*$/.test(l));
+  if (at < 0) return [];
+  const body = blockAfter(src, at).filter((l) => !isComment(l));
+  const starts = body.filter((l) => /^\s*-\s/.test(l));
+  if (starts.length === 0) return [];
+  const stepIndent = Math.min(...starts.map(indentOf));
+  const out: string[][] = [];
+  for (const l of body) {
+    if (indentOf(l) === stepIndent && /^\s*-\s/.test(l)) out.push([l]);
+    else if (out.length > 0 && l.trim() !== "") out[out.length - 1]?.push(l);
+  }
+  return out;
+}
+
+const desktopSteps = (): string[] =>
+  stepsOf(desktopJob() ?? { lines: [] }).map((s) => s.join("\n"));
+
+/** The value of `key:` in a step's text (first occurrence, trailing `# comment` dropped), or "". */
+function field(step: string, key: string): string {
+  const m = new RegExp(`^\\s*(?:-\\s+)?${key}:\\s*(.*)$`, "m").exec(step);
+  return (m?.[1] ?? "").replace(/\s+#\s.*$/, "").trim();
+}
+
+const isTauriActionStep = (s: string): boolean =>
+  new RegExp(`uses:\\s*tauri-apps/tauri-action@${TAURI_ACTION_SHA}\\b`).test(s);
+
+/** The step that reads the Tauri CLI version from bun.lock into a step output. */
+const cliVersionStep = (): string | undefined =>
+  desktopSteps().find(
+    (s) => /bun\.lock/.test(s) && /@tauri-apps\/cli@/.test(s) && /GITHUB_OUTPUT/.test(s),
+  );
+
+const cacheSteps = (): string[] =>
+  desktopSteps().filter((s) =>
+    new RegExp(`uses:\\s*actions/cache@${CACHE_SHA}\\s+#\\s+v4\\.3\\.0`).test(s),
+  );
+
+describe("bundler tool cache (AC-W8SHXE.1)", () => {
+  it("reads the Tauri CLI version from bun.lock into a step output, with an id", () => {
+    const s = cliVersionStep();
+    expect(s, "no desktop step reads @tauri-apps/cli@<version> from bun.lock").toBeDefined();
+    expect(field(s ?? "", "id"), "the CLI-version step has no id").toMatch(/^[\w-]+$/);
+  });
+
+  it("restores and saves the tool folder with a pinned actions/cache v4.3.0", () => {
+    expect(cacheSteps(), "no actions/cache@<v4.3.0 sha> step in the desktop job").toHaveLength(1);
+  });
+
+  it("caches only on Linux and Windows", () => {
+    const s = cacheSteps()[0] ?? "";
+    expect(field(s, "if")).toMatch(/^runner\.os\s*!=\s*'macOS'$/);
+  });
+
+  it("covers the Linux and Windows tool folders", () => {
+    const s = cacheSteps()[0] ?? "";
+    expect(s).toMatch(/^\s*~\/\.cache\/tauri\s*$/m);
+    expect(s).toMatch(/^\s*~\\AppData\\Local\\tauri\s*$/m);
+    // Both folders sit under the cache step's `path:` key, not elsewhere in it.
+    const src = s.split("\n");
+    const at = src.findIndex((l) => /^\s*path:\s*\|?\s*$/.test(l));
+    expect(at, "the cache step has no block `path:`").toBeGreaterThanOrEqual(0);
+    const paths = blockAfter(src, at).join("\n");
+    expect(paths).toContain("~/.cache/tauri");
+    expect(paths).toContain("~\\AppData\\Local\\tauri");
+  });
+
+  it("keys the cache on the runner OS and the CLI version step output", () => {
+    const id = field(cliVersionStep() ?? "", "id");
+    expect(id, "no CLI-version step id").not.toBe("");
+    const key = field(cacheSteps()[0] ?? "", "key");
+    expect(key).toMatch(/\$\{\{\s*runner\.os\s*\}\}/);
+    expect(key).toMatch(new RegExp(`\\$\\{\\{\\s*steps\\.${id}\\.outputs\\.[\\w-]+\\s*\\}\\}`));
+  });
+
+  it("reads the version and restores the cache before the first build", () => {
+    const steps = desktopSteps();
+    const read = steps.findIndex((s) => s === cliVersionStep());
+    const cache = steps.findIndex((s) => s === cacheSteps()[0]);
+    const build = steps.findIndex(isTauriActionStep);
+    expect(read).toBeGreaterThanOrEqual(0);
+    expect(cache).toBeGreaterThanOrEqual(0);
+    expect(build).toBeGreaterThanOrEqual(0);
+    expect(read).toBeLessThan(cache);
+    expect(cache).toBeLessThan(build);
+  });
+});
+
+describe("packaging retry (AC-W8SHXE.2)", () => {
+  const builds = (): string[] => desktopSteps().filter(isTauriActionStep);
+
+  it("has exactly two tauri-action steps", () => {
+    expect(builds()).toHaveLength(2);
+  });
+
+  it("lets the first build fail without failing the job, under id build", () => {
+    const first = builds()[0] ?? "";
+    expect(field(first, "id")).toBe("build");
+    expect(field(first, "continue-on-error")).toBe("true");
+    expect(field(first, "if")).toBe("");
+  });
+
+  it("runs the second build only when the first failed, and lets it fail the job", () => {
+    const second = builds()[1] ?? "";
+    expect(field(second, "if")).toMatch(/^steps\.build\.outcome\s*==\s*'failure'$/);
+    expect(second).not.toMatch(/^\s*continue-on-error:/m);
+  });
+
+  it("retries with the same inputs", () => {
+    const [first = "", second = ""] = builds();
+    for (const key of ["projectPath", "tauriScript", "args"]) {
+      expect(field(first, key), `first build has no ${key}`).not.toBe("");
+      expect(field(second, key), `retry differs in ${key}`).toBe(field(first, key));
+    }
+  });
+
+  it("collects the bundles after both builds", () => {
+    const steps = desktopSteps();
+    const collect = steps.findIndex((s) => /name:\s*Collect the bundles/.test(s));
+    const lastBuild = steps.map((s, i) => (isTauriActionStep(s) ? i : -1)).filter((i) => i >= 0);
+    expect(lastBuild).toHaveLength(2);
+    expect(collect).toBeGreaterThan(Math.max(...lastBuild));
+  });
+});
+
+describe("pins and lint after the cache and retry (AC-W8SHXE.3)", () => {
+  it("pins every uses: in the desktop job to a 40-hex SHA with a version comment", () => {
+    const uses = desktopSteps()
+      .flatMap((s) => s.split("\n"))
+      .filter((l) => /^\s*-?\s*uses:/.test(l));
+    expect(uses.some((l) => l.includes(`actions/cache@${CACHE_SHA}`))).toBe(true);
+    const offenders = uses.filter(
+      (l) => !/uses:\s*[\w.-]+\/[\w./-]+@[0-9a-f]{40}\s+#\s+\S/.test(l),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it("still passes the toolchain-pin scan", () => {
+    expect(scanWorkflow(text(), "release.yml")).toEqual([]);
+  });
+});

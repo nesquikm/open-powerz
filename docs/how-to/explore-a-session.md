@@ -5,6 +5,9 @@ zoom and scroll back through it while the meter keeps measuring. Pick a meter
 (or the demo device) in the device picker, press Connect, and the chart starts
 following the newest data.
 
+The web edition's chart works the same way; where it differs, see
+[Use the web edition](web-edition.md).
+
 ## Pause the chart
 
 While the chart follows the newest data, its Live button reads "Live" and is

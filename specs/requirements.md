@@ -52,9 +52,10 @@ Feature scope (from the research notes): **MVP** = discovery + live meter + reco
 **Shipped after the MVP** = PD sniffer and analyzer, read-only import of vendor
 `.db`/`.sqlite` PD logs, protocol trigger panel (CDC), firmware update, release pipeline,
 offline recordings and the settings block, the ADCNEW serial stream, multi-device, and
-record delete and settings writes, the polish milestones, startup logo upload, and a
-browser edition (Chrome and Edge, read and stream only). **Later** = UFCS analyzer and
-vendor `.db`/`.sqlite` export. Each lands as its own FR in
+record delete and settings writes, the polish milestones, startup logo upload, `.db`
+export in the vendor layout, and a browser edition (Chrome and Edge) that also changes
+settings, deletes records, writes the logo and triggers. **Later** = UFCS analyzer and
+vendor `.sqlite` PD log export. Each lands as its own FR in
 `specs/frs/`.
 
 Roadmap: one plan per milestone in `specs/plan/`; shipped ones move to
@@ -68,7 +69,8 @@ Analyzer (v0.3.0) → M_X4VEQ3 Protocol Triggers (v0.4.0) → M_MJ7KE9 Firmware 
 → M_WBBQ7F Release Pipeline (v0.6.0) → M_FW682R Release Publish Fix (v0.6.1) → M_1HHSZZ
 Meter Data, read side (v0.7.0) → M_93MYZZ README Features (v0.7.1) → M_CD7M3M Meter Writes
 (v0.8.0) → M_3KPN7D Polish: Fixes (v0.8.1) → M_7PKVA6 Polish: UX Features (v0.9.0) →
-M_PVFHM6 Polish: Startup Logo Upload (v0.10.0) → M_QFTCWW Web Edition (v0.11.0).
+M_PVFHM6 Polish: Startup Logo Upload (v0.10.0) → M_QFTCWW Web Edition (v0.11.0) → M_962HNY
+Web Polish (v0.11.1) → M_ZFZQE7 Web Parity (v0.12.0).
 
 ## 2. Functional Requirements (cross-cutting only)
 

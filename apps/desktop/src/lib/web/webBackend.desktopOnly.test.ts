@@ -1,10 +1,11 @@
 /**
  * FR QFTCX0: what the web backend refuses.
  *
- * - AC-QFTCX0.6: firmware update, logo upload, settings writes, record delete and
- *   protocol triggering are desktop-only: each web backend function for them rejects
- *   with a "desktop app" usage error and sends nothing to the meter; the backend's
- *   `features` map says so.
+ * - AC-QFTCX0.6: firmware update is desktop-only (settings writes run in the browser,
+ *   AC-W8SHX9.7, and so do the record delete, AC-W8SHXA.6, the startup logo,
+ *   AC-W8SHXB.7, and protocol triggering, AC-W8SHXC.7): its web backend function
+ *   rejects with a "desktop app" usage error and sends nothing to the meter; the
+ *   backend's `features` map says so.
  * - AC-QFTCX0.7: settings read, the offline record list and record download work only
  *   over the safe read set; otherwise they are desktop-only too.
  *
@@ -84,33 +85,81 @@ describe("desktop-only meter writes (AC-QFTCX0.6)", () => {
     await settle(backend.disconnect());
   });
 
-  it("firmware update and logo writes reject without sending anything", async () => {
+  it("firmware update rejects without sending anything", async () => {
     const { backend, dev, id } = await connected();
     await expectDesktopOnly(() => backend.firmwareFlash(id, "fw.bin", "FLASH", () => {}), dev);
-    await expectDesktopOnly(() => backend.logoUpload(id, "logo.png", true, () => {}), dev);
-    await expectDesktopOnly(() => backend.logoUploadBuiltin(id, "surf", () => {}), dev);
-    await expectDesktopOnly(() => backend.logoRemove(id, () => {}), dev);
     await settle(backend.disconnect());
   });
 
-  it("settings writes, record delete and triggering reject without sending anything", async () => {
+  // Settings writes run in the browser since FR W8SHX9 (AC-W8SHX9.7), record deletes
+  // since FR W8SHXA (AC-W8SHXA.6), triggering since FR W8SHXC (AC-W8SHXC.7).
+});
+
+describe("triggering runs in the browser (AC-W8SHXC.7)", () => {
+  it("is not the desktop-only refusal, and sends nothing over WebUSB", async () => {
     const { backend, dev, id } = await connected();
     for (const m of [backend, backend.meter(id)]) {
-      await expectDesktopOnly(() => m.meterSettingsWrite({ brightness: 3 } as never), dev);
-      await expectDesktopOnly(() => m.recordsDelete("all", "DELETE ALL"), dev);
-      await expectDesktopOnly(() => m.recordsDelete(1, "DELETE 1"), dev);
-      await expectDesktopOnly(() => m.triggerOpen(), dev);
-      await expectDesktopOnly(() => m.triggerDetect(), dev);
-      await expectDesktopOnly(() => m.triggerRequest({ protocol: "qc", volts: 9 }, true), dev);
-      await expectDesktopOnly(
+      const calls: (() => Promise<unknown>)[] = [
+        () => m.triggerDetect(),
+        () => m.triggerRequest({ protocol: "qc", volts: 9 }, true),
         () => m.triggerMessageSend({ sop: "sop", msg_type: 7, data_objects: [] }, true),
-        dev,
-      );
-      await expectDesktopOnly(() => m.triggerCableRead(), dev);
-      await expectDesktopOnly(() => m.triggerConsoleSend("pdm open", true), dev);
+        () => m.triggerCableRead(),
+        () => m.triggerConsoleSend("pdm open", true),
+      ];
+      for (const call of calls) {
+        const error = await settle(call(), 20_000).then(
+          () => null,
+          (e: unknown) => e as UiError,
+        );
+        // No session was opened: the desktop's refusal, not the desktop-only one.
+        expect(error?.kind).toBe("usage");
+        expect(error?.message).not.toMatch(/desktop app/i);
+        expect(error?.message).toBe("No trigger session is open.");
+      }
     }
-    // Over the whole session, every frame was a safe read or stream request.
     expect(sentNames(w, dev)).not.toContain("unknown");
+    await settle(backend.disconnect());
+  });
+});
+
+describe("record delete runs in the browser (AC-W8SHXA.6)", () => {
+  it("is not the desktop-only refusal, and a wrong confirmation writes nothing", async () => {
+    const { backend, dev, id } = await connected();
+    for (const m of [backend, backend.meter(id)]) {
+      const error = await settle(m.recordsDelete(1, "DELETE 1"), 20_000).then(
+        () => null,
+        (e: unknown) => e as UiError,
+      );
+      expect(error?.kind).toBe("usage");
+      expect(error?.message).not.toMatch(/desktop app/i);
+      expect(error?.message).toBe("The typed confirmation does not match; nothing was deleted.");
+    }
+    expect(sentNames(w, dev)).not.toContain("unknown");
+    expect(sentNames(w, dev)).not.toContain("record_table_write");
+    await settle(backend.disconnect());
+  });
+});
+
+describe("the startup logo runs in the browser (AC-W8SHXB.7)", () => {
+  it("is not the desktop-only refusal, and nothing is written without a settings read", async () => {
+    const { backend, dev, id } = await connected();
+    for (const call of [
+      () => backend.logoUpload(id, "logo.png", true, () => {}),
+      () => backend.logoUploadBuiltin(id, "surf", () => {}),
+      () => backend.logoRemove(id, () => {}),
+    ]) {
+      const error = await settle(call(), 20_000).then(
+        () => null,
+        (e: unknown) => e as UiError,
+      );
+      expect(error?.kind).toBe("usage");
+      expect(error?.message).not.toMatch(/desktop app/i);
+    }
+    const names = sentNames(w, dev);
+    expect(names).not.toContain("unknown");
+    expect(names.filter((n) => n.startsWith("logo_chunk:") || n.startsWith("logo_flag:"))).toEqual(
+      [],
+    );
     await settle(backend.disconnect());
   });
 });

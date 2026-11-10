@@ -9,25 +9,44 @@ import type {
   AttachedSession,
   BackendEvent,
   BucketsFor,
+  CableView,
   HistoryGap,
   HistorySeries,
   ExportProgress,
   ExportResult,
   MeterCommands,
+  MeterSettings,
+  OfflineRecord,
   PdCleared,
   PdDetails,
   PdRow,
   RangeStats,
+  RecordDeleteResult,
+  RecordList,
   RecordingSummary,
   RunProgress,
   RunProgressQuery,
   Sample,
+  SettingChanges,
   StatsSnapshot,
   UiError,
 } from "../backend";
 import { HistoryColumns, SessionStats } from "../history";
+import { TempLog } from "./tempLog";
+import { openBackupSink, type PickDirectory } from "./backupFolder";
+import type { SqlJsStatic } from "sql.js";
 import { CsvRecorder } from "./csv";
 import type { MeterDriver, MeterSample, PdDecoderLike, PowerzWasm } from "./driver";
+import { noWebSerialError } from "./serial";
+import type { WebTransport } from "./transport";
+
+/** sql.js, loaded only for a `.db` export (FR AHTZW2). */
+export type LoadSqlJs = () => Promise<SqlJsStatic>;
+
+/** Rows per transaction and progress report of a `.db` export (the desktop's batch). */
+const DB_EXPORT_BATCH = 10_000;
+
+const pad2 = (n: number): string => String(n).padStart(2, "0");
 
 /** Queue rates by rate code (2, 10, 50, 1000 SPS). */
 export const RATES_SPS: readonly number[] = [2, 10, 50, 1000];
@@ -75,6 +94,13 @@ export interface WebSessionOptions {
   wasm: PowerzWasm;
   /** Saves a file for the user. */
   download: (name: string, data: Blob) => void;
+  /** Picks the folder a record delete backs up into (FR W8SHXA); `null`: downloads. */
+  pickDirectory?: PickDirectory | null;
+  /** Opens the pipe a settings write runs over (FR W8SHX9): the meter's serial port,
+   * or the demo meter's CDC twin. Without it, a settings change finds no Web Serial. */
+  openSettingsPipe?: () => Promise<WebTransport>;
+  /** Loads sql.js for a `.db` export (FR AHTZW2). */
+  sqlJs?: LoadSqlJs;
 }
 
 /** The meter commands a {@link WebSession} answers itself. */
@@ -95,12 +121,19 @@ export const SESSION_COMMANDS = [
   "pdDetails",
   "pdClear",
   "pdSave",
+  "pdCableSeen",
   "startRecording",
   "stopRecording",
   "pauseRecording",
   "resumeRecording",
   "saveRecordingAs",
   "exportSession",
+  "exportSessionDb",
+  "meterSettings",
+  "meterSettingsWrite",
+  "recordsList",
+  "recordDownload",
+  "recordsDelete",
 ] as const satisfies readonly (keyof MeterCommands)[];
 
 /** A live session: its driver, history, stats and event sink. */
@@ -111,6 +144,8 @@ export class WebSession {
   driver!: MeterDriver;
 
   history = new HistoryColumns();
+  /** Temperature changes over the history (FR JFRPME). */
+  temps = new TempLog();
   stats = new SessionStats();
   gaps: HistoryGap[] = [];
   ended = false;
@@ -178,6 +213,7 @@ export class WebSession {
   /** The driver's samples: onto the session clock, into history and stats, out as a batch. */
   onBatch(samples: MeterSample[]): void {
     if (this.ended || samples.length === 0) return;
+    const first = this.history.length;
     const out: Sample[] = [];
     for (const m of samples) {
       const s: Sample = {
@@ -193,16 +229,25 @@ export class WebSession {
       this.stats.push(s);
       out.push(s);
     }
-    const fresh = this.tempC !== null && Date.now() - this.tempAt <= TEMP_MAX_AGE_MS;
+    // FR Z99166: judge the reading once, on arrival, as the live batch and the record
+    // CSV do: a fresh one covers the whole batch, a stale one none of it.
+    const tempC = Date.now() - this.tempAt <= TEMP_MAX_AGE_MS ? this.tempC : null;
+    if (tempC !== null) {
+      const readMs = this.tempAt - this.startedAt;
+      const lastMs = (out[out.length - 1] as Sample).t_ms;
+      this.temps.record(first, tempC, readMs, Math.max(readMs + TEMP_MAX_AGE_MS, lastMs));
+    } else if (first > 0) {
+      this.temps.expire(this.history.timeAt(first - 1));
+    }
     const rec = this.recording;
     if (rec && !rec.paused) {
       const now = Date.now();
-      for (const s of out) rec.csv.push(s, now, fresh ? this.tempC : null);
+      for (const s of out) rec.csv.push(s, now, tempC);
     }
     if (rec) this.recordingProgress(rec);
     this.onEvent({
       type: "batch",
-      data: { samples: out, temp_c: fresh ? this.tempC : null, stats: this.stats.snapshot() },
+      data: { samples: out, temp_c: tempC, stats: this.stats.snapshot() },
     });
   }
 
@@ -272,6 +317,23 @@ export class WebSession {
     this.pdCapturing = false;
     await this.driver.stopPdCapture();
     this.onEvent({ type: "pd_state", data: { capturing: false } });
+  }
+
+  /** A trigger session opens: a running PD capture stops, with the reason `trigger`
+   * (the meter refuses a capture during PDM [device]). */
+  async pdStopForTrigger(): Promise<void> {
+    if (!this.pdCapturing) return;
+    this.pdCapturing = false;
+    try {
+      await this.driver.stopPdCapture();
+    } finally {
+      this.onEvent({ type: "pd_state", data: { capturing: false, reason: "trigger" } });
+    }
+  }
+
+  /** Hold or release the stream's polling (a trigger session's automatic list). */
+  holdPolling(hold: boolean): void {
+    this.driver.holdPolling(hold);
   }
 
   async pdDetails(index: number): Promise<PdDetails> {
@@ -374,16 +436,82 @@ export class WebSession {
     const h = this.history;
     const csv = new CsvRecorder();
     const unix0 = this.startedAt + (h.length > 0 ? h.timeAt(0) : 0);
+    const cursor = { i: 0 };
     let prev = -Infinity;
     for (let j = 0; j < h.length; j++) {
       const s = h.sampleAt(j);
       if (this.gaps.some((g) => g.from_ms >= prev && g.to_ms <= s.t_ms)) csv.breakRun();
-      csv.push(s, unix0);
+      csv.push(s, unix0, this.temps.at(j, s.t_ms, cursor));
       prev = s.t_ms;
     }
     this.o.download(suggestedName, new Blob([csv.text()], { type: "text/csv" }));
     onProgress({ done: csv.rows, total: csv.rows });
     return { path: suggestedName, rows: csv.rows };
+  }
+
+  /** Download the whole session history as a vendor-layout `.db` named `suggestedName`
+   * (FR AHTZW2): the desktop's table, SQL and rows, written with sql.js. */
+  async exportSessionDb(
+    suggestedName: string,
+    onProgress: (progress: ExportProgress) => void,
+  ): Promise<ExportResult | null> {
+    const load = this.o.sqlJs;
+    if (!load) throw usage("The .db writer is not available in this browser.");
+    const SQL = await load();
+    const w = this.o.wasm;
+    const h = this.history;
+    const total = h.length;
+    const startMs = Math.round(this.startedAt + (total > 0 ? h.timeAt(0) : 0));
+    const start = new Date(Math.floor(startMs / 1000) * 1000);
+    const [month, day] = [start.getMonth() + 1, start.getDate()];
+    const [hour, minute, second] = [start.getHours(), start.getMinutes(), start.getSeconds()];
+    const table = w.dbTableName(month, day, hour, minute, second);
+    const local = `${start.getFullYear()}-${pad2(month)}-${pad2(day)} ${pad2(hour)}:${pad2(minute)}:${pad2(second)}`;
+    const db = new SQL.Database();
+    const rows = new w.DbRows(startMs);
+    let written = 0;
+    try {
+      db.exec(w.dbCreateSql(table));
+      db.run(w.dbInsertParamSql(table), w.dbParamValues(table, startMs, local, this.rateSps ?? 0));
+      const insert = db.prepare(w.dbInsertRowSql(table));
+      try {
+        const readings = new Float64Array(6);
+        const cursor = { i: 0 };
+        let prev = -Infinity;
+        db.exec("BEGIN");
+        for (let j = 0; j < total; j++) {
+          const s = h.sampleAt(j);
+          const newRun = this.gaps.some((g) => g.from_ms >= prev && g.to_ms <= s.t_ms);
+          prev = s.t_ms;
+          readings.set([s.vbus_v, s.ibus_a, s.dp_v, s.dm_v, s.cc1_v, s.cc2_v]);
+          const row = rows.push(
+            Math.max(0, Math.floor(s.t_ms)),
+            readings,
+            this.temps.at(j, s.t_ms, cursor) ?? undefined,
+            newRun,
+          );
+          insert.run([row.elapsed, ...row.numbers]);
+          written++;
+          if (written % DB_EXPORT_BATCH === 0) {
+            db.exec("COMMIT; BEGIN");
+            onProgress({ done: written, total });
+          }
+        }
+        db.exec("COMMIT");
+      } finally {
+        insert.free();
+      }
+      if (written % DB_EXPORT_BATCH !== 0 || written === 0) onProgress({ done: written, total });
+      const bytes = db.export();
+      this.o.download(
+        suggestedName,
+        new Blob([bytes as BlobPart], { type: "application/vnd.sqlite3" }),
+      );
+    } finally {
+      rows.free();
+      db.close();
+    }
+    return { path: suggestedName, rows: written };
   }
 
   attach(onEvent: (event: BackendEvent) => void): AttachedSession {
@@ -411,6 +539,7 @@ export class WebSession {
       },
       clearHistory: async (): Promise<void> => {
         this.history = new HistoryColumns();
+        this.temps.clear();
         this.gaps = [];
       },
       historyRange: async <const S extends readonly HistorySeries[]>(
@@ -438,6 +567,8 @@ export class WebSession {
       pdDetails: (index: number) => this.pdDetails(index),
       pdClear: () => this.pdClear(),
       pdSave: (suggestedName: string) => this.pdSave(suggestedName),
+      // The newest cable identity the live capture holds (FR EAKFEC); `null` for none.
+      pdCableSeen: async (): Promise<CableView | null> => this.pd?.latestCable() ?? null,
       startRecording: (suggestedName: string) => this.startRecording(suggestedName),
       stopRecording: () => this.stopRecording(),
       pauseRecording: () => this.pauseRecording(),
@@ -445,6 +576,26 @@ export class WebSession {
       saveRecordingAs: (path: string) => this.saveRecordingAs(path),
       exportSession: (suggestedName: string, onProgress: (progress: ExportProgress) => void) =>
         this.exportSession(suggestedName, onProgress),
+      exportSessionDb: (suggestedName: string, onProgress: (progress: ExportProgress) => void) =>
+        this.exportSessionDb(suggestedName, onProgress),
+      meterSettings: (): Promise<MeterSettings> => this.driver.readSettings(),
+      meterSettingsWrite: (changes: SettingChanges): Promise<MeterSettings> =>
+        this.driver.writeSettings(
+          changes,
+          this.o.openSettingsPipe ?? (() => Promise.reject(noWebSerialError())),
+        ),
+      recordsList: (): Promise<RecordList> => this.driver.listRecords(),
+      recordDownload: (index: number): Promise<OfflineRecord> => this.driver.downloadRecord(index),
+      recordsDelete: async (
+        target: number | "all",
+        confirm: string,
+      ): Promise<RecordDeleteResult> => {
+        // A HID session refuses before anything is picked or sent.
+        if (this.driver.hid) return this.driver.deleteRecords(target, confirm, () => {});
+        // Picked first, in the user's click: every backup is a confirmed file write.
+        const sink = await openBackupSink(this.o.pickDirectory ?? null, this.o.download);
+        return this.driver.deleteRecords(target, confirm, sink.save, sink.label);
+      },
     };
   }
 }

@@ -40,7 +40,7 @@
     exportJobOf: (entry: MeterEntry) => ExportJob;
     /** The rate shown until a meter reports its own. */
     defaultRateSps: number;
-    onSelectRate: (entry: MeterEntry, sps: number) => void;
+    onSelectRate: (entry: MeterEntry, sps: number) => void | Promise<void>;
     onToggleRecording: (entry: MeterEntry) => void;
     onTogglePause: (entry: MeterEntry) => void;
     onRecorderOptions: (entry: MeterEntry) => void;

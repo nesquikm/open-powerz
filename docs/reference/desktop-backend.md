@@ -4,11 +4,13 @@
 
 The desktop app's web UI talks to its Rust backend through one TypeScript
 module, `apps/desktop/src/lib/backend.ts`. Every function there calls a Tauri
-command, or the in-browser `MockBackend` when the UI is built with
-`VITE_BACKEND=mock`. Scripts and other front ends can use the same seam. This
-page lists the parts added for session gaps, replug, the PD analyzer, the
-trigger panel, the firmware update, the meter settings and the measurement
-source; the source code has the rest.
+command, the in-browser `MockBackend` when the UI is built with
+`VITE_BACKEND=mock`, or the browser backend of the web edition when it is
+built with `VITE_BACKEND=web` (see [Web backend](#web-backend)). Scripts and
+other front ends can use the same seam. This page lists the parts added for
+session gaps, replug, the PD analyzer, the trigger panel, the firmware update,
+the meter settings, the measurement source, session export and opened
+recording files; the source code has the rest.
 
 ## Session history
 
@@ -260,6 +262,17 @@ the device id and model, never the serial or UID. A run of the same stream failu
 line. A failed record delete or firmware update logs only the error kind. A log over 5 MB
 moves to `app.log.1` when the app starts, replacing any earlier one.
 
+### Session export and opened recording files
+
+| function | answers |
+|---|---|
+| `exportSession(suggestedName: string, onProgress: (p: ExportProgress) => void): Promise<ExportResult \| null>` | Saves the session history so far as a recorder CSV (TEMP included), reporting `{ done, total }` rows. `null` when the save dialog was cancelled. The web edition downloads the file. |
+| `exportSessionDb(suggestedName: string, onProgress: (p: ExportProgress) => void): Promise<ExportResult \| null>` | The same as a vendor-layout `.db`: a data table named after the session's local start time and its parameter table. The web edition writes it with sql.js. |
+| `openRecordingFile(onProgress: (p: OpenProgress) => void): Promise<FileSummary \| null>` | Opens the file dialog (the browser's file picker on the web) for a CSV or `.db` recording and reads it with no meter. A `FileSummary` is `{ name, rows, skipped, left_out, stats }`. `null` when the dialog was dismissed or Cancel ended the open. |
+| `cancelRecordingFile(): Promise<void>` | Ends a running open; it resolves to `null`. |
+| `closeRecordingFile(): Promise<void>` | Closes the opened file. |
+| `recordingFileRange(series, t0Ms, t1Ms, buckets)`, `recordingFileRangeStats(t0Ms, t1Ms)` | The opened file's min / max buckets and ruler statistics, as `historyRange` and `rangeStats` answer for the live session. |
+
 ## Meter settings
 
 | function | what it does |
@@ -408,6 +421,36 @@ view or to its tile. With one meter the app looks as before; with two or
 more, `MeterGrid` shows the tiles and **Add meter** opens `AddMeterDialog`,
 which leaves out the meters already connected. A reload attaches every
 running meter. The mock backend runs each demo device as its own meter.
+
+## Web backend
+
+`createWebBackend()` (in `web/webBackend.ts`) answers the same functions in
+the browser, loaded as a separate chunk only in the `VITE_BACKEND=web` build.
+It reaches the meter over WebUSB (`web/webusb.ts`), WebHID (`web/webhid.ts`)
+or Web Serial (`web/serial.ts`), and runs the protocol core compiled to
+WebAssembly (`powerz-wasm`). `features` (from `web/features.ts`) tells the UI
+what the build offers: `WEB_FEATURES` has everything on except
+`firmwareUpdate`, `fileReveal` and `recordingFolder`.
+
+- `requestMeter()` opens the browser's USB picker (**Connect a meter…**);
+  `requestHidMeter()` opens the HID picker (**Connect over HID…**).
+- A command the browser leaves to the desktop app rejects with a usage error
+  "Desktop app only: get the desktop app from …": the firmware commands,
+  `revealPath` and `chooseRecordingFolder`. Their controls show "Desktop app
+  only" and stay disabled.
+- `pdOpen()` and `pdImport()` open the browser's file picker and read the file
+  with the desktop app's rules (`powerz-protocol`'s `pd_capture` through the
+  wasm module; the vendor log through sql.js). The opened capture stays in the
+  page for `pdDetails(index, true)`, `pdCableSeen()` and `pdClear()` until
+  `pdReleaseOpened()`.
+- `saveChartImage()` writes PDF with the desktop app's writer
+  (`powerz-record`'s `chart_image` through the wasm module).
+- Saved files (recordings, exports, `.pdcap`, record backups) are downloads,
+  or files in a folder the user picks for a record delete's backups.
+- The trigger commands run the `powerz-trigger` engine in a worker
+  (`web/triggerWorker.ts`) over Web Serial, and need a cross-origin isolated
+  page; `web/coi.ts` registers the `coi-sw.js` service worker that makes it
+  so from the next load.
 
 ## Mock backend
 

@@ -11,7 +11,7 @@ import { createRawSnippet } from "svelte";
 import { render } from "svelte/server";
 import { describe, expect, it } from "vitest";
 import DesktopOnly from "../components/DesktopOnly.svelte";
-import { RELEASES_URL } from "./features";
+import { DESKTOP_ONLY_TEXT, RELEASES_URL, WEB_FEATURES } from "./features";
 
 type Props = Record<string, unknown>;
 
@@ -69,6 +69,41 @@ describe("the meter-read views gate their reads (AC-QFTCX0.7)", () => {
     it(`${file} wraps its ${feature} control in DesktopOnly`, () => {
       const src = readFileSync(new URL(`../components/${file}`, import.meta.url), "utf8");
       expect(src).toMatch(new RegExp(`<DesktopOnly[^>]*features\\.${feature}\\b`));
+    });
+  }
+});
+
+describe("the web build shows the meter reads (AC-W8SHX8.7)", () => {
+  const shown: [label: string, feature: "settingsRead" | "recordsList" | "recordDownload"][] = [
+    ["Refresh", "settingsRead"],
+    ["Refresh", "recordsList"],
+    ["Download", "recordDownload"],
+  ];
+
+  for (const [label, feature] of shown) {
+    it(`the ${feature} control renders without "Desktop app only"`, () => {
+      const body = html({ available: WEB_FEATURES[feature], label, children: child });
+      expect(body).toContain("<button>Flash firmware</button>");
+      expect(body).not.toContain(DESKTOP_ONLY_TEXT);
+    });
+  }
+
+  it('the settingsWrite control renders without "Desktop app only" (AC-W8SHX9.7)', () => {
+    const body = html({ available: WEB_FEATURES.settingsWrite, label: "Edit", children: child });
+    expect(body).toContain("<button>Flash firmware</button>");
+    expect(body).not.toContain(DESKTOP_ONLY_TEXT);
+  });
+
+  it('the recordDelete control renders without "Desktop app only" (AC-W8SHXA.6)', () => {
+    const body = html({ available: WEB_FEATURES.recordDelete, label: "Delete", children: child });
+    expect(body).toContain("<button>Flash firmware</button>");
+    expect(body).not.toContain(DESKTOP_ONLY_TEXT);
+  });
+
+  for (const feature of ["firmwareUpdate", "fileReveal"] as const) {
+    it(`the ${feature} control still says "Desktop app only"`, () => {
+      const body = html({ available: WEB_FEATURES[feature], label: "Update", children: child });
+      expect(body).toContain(DESKTOP_ONLY_TEXT);
     });
   }
 });

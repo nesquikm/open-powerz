@@ -7,15 +7,40 @@ import type {
   AttachedSession,
   BackendEvent,
   DeviceListing,
+  HistorySeries,
+  LogoPreview,
+  LogoProgress,
   MeterCommands,
+  OpenProgress,
+  RunProgressQuery,
   UiError,
   WebBackendApi,
 } from "../backend";
+import type { SqlJsStatic } from "sql.js";
+import { browserPickDirectory, type PickDirectory } from "./backupFolder";
+import { DemoCdcTransport, serialPipeOpener } from "./cdcTransport";
+import { pageIsolated } from "./coi";
 import { DemoTransport } from "./demoTransport";
 import { MeterDriver, openUsbOrOfferHid, type PowerzWasm } from "./driver";
 import { WEB_FEATURES, desktopOnlyError, type Features } from "./features";
-import { SESSION_COMMANDS, WebSession, rateCodeOf, usage } from "./session";
+import { LogoFiles, browserPickLogoFile, type PickLogoFile } from "./logoFiles";
+import {
+  PDCAP_ACCEPT,
+  PdFiles,
+  VENDOR_PD_ACCEPT,
+  browserPickPdFile,
+  type PickPdFile,
+} from "./pdFiles";
+import {
+  RecordingFiles,
+  browserPickRecordingFile,
+  wasmRecordingReader,
+  type PickRecordingFile,
+} from "./recordingFile";
+import { SESSION_COMMANDS, WebSession, rateCodeOf, usage, type LoadSqlJs } from "./session";
+import { portHeldError, type SerialLike } from "./serial";
 import type { WebTransport } from "./transport";
+import { TRIGGER_MAX_SPS, Triggers, type TriggerWorkerLike } from "./webTrigger";
 import { openWebHid, type HidDeviceLike } from "./webhid";
 import { POWERZ_VENDOR_ID, type UsbDeviceLike, type UsbLike } from "./webusb";
 
@@ -27,8 +52,64 @@ export interface WebBackendOptions {
   usb?: unknown;
   /** `navigator.hid`, or `null` without WebHID. */
   hid?: unknown;
+  /** The browser's Web Serial API (`navigator` serial), or `null` without it (FR W8SHX9: settings writes). */
+  serial?: unknown;
   /** Saves a file for the user (a Blob behind an anchor click). */
   download?: (name: string, data: Blob) => void;
+  /** Picks a record delete's backup folder (FR W8SHXA); `null`: browser downloads.
+   * Defaults to the browser's `showDirectoryPicker` where it has one. */
+  pickDirectory?: PickDirectory | null;
+  /** Opens the startup logo's file picker (FR W8SHXB); defaults to the browser's file
+   * input. */
+  pickLogoFile?: PickLogoFile;
+  /** Whether the page is cross-origin isolated, so a real meter's trigger engine gets
+   * shared memory (FR W8SHXC); defaults to the page's `crossOriginIsolated`. */
+  crossOriginIsolated?: boolean;
+  /** Starts the trigger engine's dedicated worker (FR W8SHXC); defaults to the bundled
+   * `triggerWorker.ts`. */
+  triggerWorker?: () => TriggerWorkerLike;
+  /** Where the page's `pagehide` and `beforeunload` are listened for (FR W8SHXC); defaults
+   * to `window`. */
+  pageEvents?: EventTarget | null;
+  /** Loads sql.js for a `.db` export (FR AHTZW2); defaults to the bundled sql.js,
+   * fetched on the first export. */
+  sqlJs?: LoadSqlJs;
+  /** Opens Open recording's file picker for CSV and `.db` files (FR AHTZW3); defaults
+   * to the browser's file input. */
+  pickRecordingFile?: PickRecordingFile;
+  /** Opens the PD analyzer's Open capture picker for `.pdcap` files (FR EAKFEC);
+   * defaults to the browser's file input. */
+  pickPdCapture?: PickPdFile;
+  /** Opens the PD analyzer's Import vendor log picker for `.sqlite` files (FR EAKFEC);
+   * defaults to the browser's file input. */
+  pickVendorPdLog?: PickPdFile;
+}
+
+/** The bundled sql.js and its wasm, fetched on first use (FR AHTZW2). */
+async function loadBrowserSqlJs(): Promise<SqlJsStatic> {
+  const [mod, wasmUrl] = await Promise.all([
+    import("sql.js"),
+    // `?url` makes Vite emit the .wasm as a hashed asset under the build's base path.
+    import("sql.js/dist/sql-wasm.wasm?url").then((m: { default: string }) => m.default),
+  ]);
+  return mod.default({ locateFile: () => wasmUrl });
+}
+
+/** `load`, run once; a failed load is tried again on the next call. */
+function once<T>(load: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | null = null;
+  return () => {
+    pending ??= load().catch((e: unknown) => {
+      pending = null;
+      throw e;
+    });
+    return pending;
+  };
+}
+
+/** The bundled trigger engine worker (FR W8SHXC). */
+function bundledTriggerWorker(): TriggerWorkerLike {
+  return new Worker(new URL("./triggerWorker.ts", import.meta.url), { type: "module" });
 }
 
 const notReady = (name: string): UiError => ({
@@ -66,6 +147,8 @@ const FEATURE_COMMANDS: Readonly<Record<keyof Features, readonly string[]>> = {
   recordDownload: ["recordDownload"],
   // No meter command: `revealPath` refuses on the web in backend.ts (AC-R13Y5W.1).
   fileReveal: [],
+  // No meter command: `chooseRecordingFolder` refuses on the web in backend.ts.
+  recordingFolder: [],
 };
 
 /** The commands of the features the web build leaves out: each rejects with a usage
@@ -132,9 +215,9 @@ const modelOf = (device: { productName?: string | null }): string =>
   device.productName || DEFAULT_MODEL;
 
 /** `navigator[name]`, or `null` outside a browser or without that API. */
-function browserApi(name: "usb" | "hid"): unknown {
+function browserApi(name: "usb" | "hid" | "serial"): unknown {
   if (typeof navigator === "undefined") return null;
-  return (navigator as { usb?: unknown; hid?: unknown })[name] ?? null;
+  return (navigator as { usb?: unknown; hid?: unknown; serial?: unknown })[name] ?? null;
 }
 
 const demoListing = (): DeviceListing => ({
@@ -294,6 +377,8 @@ function browserDownload(name: string, data: Blob): void {
 /** An opened meter: its transport, and whether it runs over WebHID. */
 interface OpenedMeter {
   transport: WebTransport;
+  /** The demo meter's transport, whose CDC twin carries its settings writes. */
+  demo?: DemoTransport;
   hid?: boolean;
   model?: string;
 }
@@ -303,12 +388,20 @@ class Sessions {
   private list: WebSession[] = [];
   private nextSessionId = 1;
   private wasm: PowerzWasm | null;
+  /** The trigger sessions (FR W8SHXC), one per meter. */
+  triggers: Triggers | null = null;
+  /** The PD capture opened from a file (FR EAKFEC), shared by every meter's commands
+   * as the desktop's opened-capture slot is. */
+  pdFiles: PdFiles | null = null;
 
   constructor(
     private readonly devices: DeviceList,
     private readonly usb: UsbNavigatorLike | null,
     wasm: unknown,
     private readonly download: (name: string, data: Blob) => void,
+    private readonly webSerial: SerialLike | null,
+    private readonly pickDirectory: PickDirectory | null = null,
+    private readonly sqlJs: LoadSqlJs = once(loadBrowserSqlJs),
   ) {
     this.wasm = (wasm as PowerzWasm | undefined) ?? null;
   }
@@ -326,7 +419,7 @@ class Sessions {
     return this.list.find((s) => s.deviceId === deviceId) ?? null;
   }
 
-  private async module(): Promise<PowerzWasm> {
+  async module(): Promise<PowerzWasm> {
     this.wasm ??= await loadBrowserWasm();
     return this.wasm;
   }
@@ -336,7 +429,8 @@ class Sessions {
    * already-permitted HID meter (AC-QFTCWZ.3). */
   private async open(w: PowerzWasm, deviceId: string): Promise<OpenedMeter> {
     if (deviceId.startsWith("demo:")) {
-      return { transport: new DemoTransport(w, deviceId.slice("demo:".length), () => Date.now()) };
+      const demo = new DemoTransport(w, deviceId.slice("demo:".length), () => Date.now());
+      return { transport: demo, demo };
     }
     const device = this.devices.deviceOf(deviceId);
     if (!device) throw usage("This meter is no longer available. Pick it again.");
@@ -373,14 +467,25 @@ class Sessions {
     await this.of(deviceId)?.disconnect();
     const w = await this.module();
     const opened = await this.open(w, deviceId);
+    const demo = opened.demo;
     const session = new WebSession({
       deviceId,
       sessionId: this.nextSessionId++,
       onEvent,
       wasm: w,
       download: this.download,
+      pickDirectory: this.pickDirectory,
+      sqlJs: this.sqlJs,
+      openSettingsPipe: this.unlessTriggering(
+        deviceId,
+        demo
+          ? async () => new DemoCdcTransport(demo, () => Date.now())
+          : serialPipeOpener(this.webSerial, w),
+      ),
       onEnd: (s) => {
         this.list = this.list.filter((x) => x !== s);
+        // The meter is gone: its trigger session goes back to 5 V and closes.
+        void this.triggers?.closeFor(s.deviceId).catch(() => {});
       },
     });
     session.driver = await MeterDriver.connect({
@@ -389,7 +494,10 @@ class Sessions {
       rateCode,
       hid: opened.hid === true,
       ...(opened.model ? { model: opened.model } : {}),
-      onBatch: (samples) => session.onBatch(samples),
+      onBatch: (samples) => {
+        session.onBatch(samples);
+        this.triggers?.samples(deviceId, samples, session.rateSps);
+      },
       onTemp: (t) => session.onTemp(t),
       onError: (e) => session.onError(e),
     });
@@ -397,9 +505,29 @@ class Sessions {
     session.announce();
   }
 
+  /** `open`, refused with the desktop's busy-port wording while meter `deviceId`'s
+   * trigger session holds the serial port (FR W8SHXC). */
+  private unlessTriggering(
+    deviceId: string,
+    open: () => Promise<WebTransport>,
+  ): () => Promise<WebTransport> {
+    return () => (this.triggers?.holds(deviceId) ? Promise.reject(portHeldError()) : open());
+  }
+
   attach(onEvent: (event: BackendEvent) => void, deviceId?: string): AttachedSession | null {
     const s = deviceId === undefined ? this.current : this.of(deviceId);
     return s ? s.attach(onEvent) : null;
+  }
+
+  /** Refuses a rate meter `deviceId` may not take now: the queue stays at
+   * `TRIGGER_MAX_SPS` or less while its trigger session is open, as on the desktop. */
+  private checkRate(deviceId: string, rateSps: number): void {
+    rateCodeOf(rateSps);
+    if (rateSps > TRIGGER_MAX_SPS && this.triggers?.holds(deviceId)) {
+      throw usage(
+        `The rate stays at ${TRIGGER_MAX_SPS} samples/s or less while the trigger panel is open.`,
+      );
+    }
   }
 
   /** The session commands of `session()`, or the pending ones for anything else. */
@@ -414,7 +542,9 @@ class Sessions {
         name,
         (...args: unknown[]) => {
           try {
-            const command = open().commands()[name] as (...a: unknown[]) => Promise<unknown>;
+            const s = open();
+            if (name === "setRate") this.checkRate(s.deviceId, args[0] as number);
+            const command = s.commands()[name] as (...a: unknown[]) => Promise<unknown>;
             return command(...args);
           } catch (e) {
             return Promise.reject(e as UiError);
@@ -422,11 +552,106 @@ class Sessions {
         },
       ]),
     );
+    const trigger = this.triggers?.commands(() => session()?.deviceId ?? null) ?? {};
     const refused = Object.fromEntries(
       DESKTOP_ONLY_COMMANDS.map((name) => [name, () => Promise.reject(desktopOnlyError())]),
     );
-    return Object.assign(Object.create(pending()) as MeterCommands, live, refused);
+    const opened = this.openedPdCommands(live as Partial<MeterCommands>, session);
+    return Object.assign(Object.create(pending()) as MeterCommands, live, trigger, opened, refused);
   }
+
+  /** The PD commands that answer from the capture opened from a file first, as the
+   * desktop's do (AC-EAKFEC.5): its details, its cable identity, and a Clear that drops
+   * it and needs no meter when it was shown. */
+  private openedPdCommands(
+    live: Partial<MeterCommands>,
+    session: () => WebSession | null,
+  ): Pick<MeterCommands, "pdDetails" | "pdClear" | "pdCableSeen"> {
+    const files = () => this.pdFiles;
+    return {
+      pdDetails: async (index: number, opened?: boolean) => {
+        const f = files();
+        if (opened === true) {
+          if (!f) throw usage("That PD record is not in the opened capture.");
+          return f.details(index);
+        }
+        return (live.pdDetails as MeterCommands["pdDetails"])(index);
+      },
+      pdClear: async () => {
+        const had = files()?.release() ?? false;
+        if (had && !session()) return { next_index: 0, status_floor_ms: 0 };
+        return (live.pdClear as MeterCommands["pdClear"])();
+      },
+      pdCableSeen: async () => {
+        const cable = files()?.cable() ?? null;
+        if (cable) return cable;
+        // No meter is no cable, not an error, as on the desktop.
+        if (!session()) return null;
+        return (live.pdCableSeen as MeterCommands["pdCableSeen"])();
+      },
+    };
+  }
+}
+
+/** A wasm `BindError` (or any failure) as a `UiError` the UI shows. */
+function bindError(e: unknown): UiError {
+  if (typeof e === "object" && e !== null && "kind" in e && "message" in e) {
+    const { kind, message, hint } = e as { kind: unknown; message: unknown; hint?: unknown };
+    return {
+      kind: kind === "usage" ? "usage" : "protocol",
+      message: String(message),
+      hint: typeof hint === "string" ? hint : null,
+    };
+  }
+  return { kind: "internal", message: "Something went wrong inside the app.", hint: null };
+}
+
+/** The startup logo commands (FR W8SHXB): the file picker and previews in the page, the
+ * reads and writes on meter `deviceId`'s driver. */
+function logoCommands(sessions: Sessions, files: LogoFiles) {
+  const driver = (deviceId: string) => {
+    const s = sessions.of(deviceId);
+    if (!s) throw usage("No meter is connected.");
+    return s.driver;
+  };
+  const preview = async (make: (w: PowerzWasm) => LogoPreview): Promise<LogoPreview> => {
+    const w = await sessions.module();
+    try {
+      return make(w);
+    } catch (e) {
+      throw bindError(e);
+    }
+  };
+  return {
+    logoChoose: () => files.choose(),
+    logoPreview: async (path: string, alpha: boolean) => {
+      const file = files.get(path);
+      return preview((w) => w.logoPreview(file.bytes, file.isBin, alpha));
+    },
+    logoPreviewBuiltin: async (name: string) => preview((w) => w.logoPreviewBuiltin(name)),
+    logoRead: async (deviceId: string, full: boolean, onProgress?: (p: LogoProgress) => void) =>
+      driver(deviceId).logoRead(full, onProgress),
+    logoUpload: async (
+      deviceId: string,
+      path: string,
+      alpha: boolean,
+      onProgress: (progress: LogoProgress) => void,
+    ) => {
+      const file = files.get(path);
+      return driver(deviceId).logoUpload(
+        { bytes: file.bytes, isBin: file.isBin, alpha },
+        onProgress,
+      );
+    },
+    logoUploadBuiltin: async (
+      deviceId: string,
+      name: string,
+      onProgress: (progress: LogoProgress) => void,
+    ) => driver(deviceId).logoUpload({ builtin: name }, onProgress),
+    logoRemove: async (deviceId: string, onProgress: (progress: LogoProgress) => void) =>
+      driver(deviceId).logoRemove(onProgress),
+    logoSettingsCheck: async (deviceId: string) => driver(deviceId).logoSettingsCheck(),
+  };
 }
 
 /** Creates the browser backend. */
@@ -439,14 +664,49 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
   ) as HidNavigatorLike | null;
   const devices = new DeviceList(usb, hid);
   const download = options.download ?? browserDownload;
-  const sessions = new Sessions(devices, usb, options.wasm, download);
+  // Destructured: the Web Serial API is no meter serial number (hideSerial lint).
+  const { serial: serialOption } = options;
+  const serial = (
+    serialOption === undefined ? browserApi("serial") : serialOption
+  ) as SerialLike | null;
+  const pickDirectory =
+    options.pickDirectory === undefined ? browserPickDirectory() : options.pickDirectory;
+  const sqlJs = once(options.sqlJs ?? loadBrowserSqlJs);
+  const sessions = new Sessions(devices, usb, options.wasm, download, serial, pickDirectory, sqlJs);
+  sessions.triggers = new Triggers({
+    module: () => sessions.module(),
+    webSerial: serial,
+    isolated: options.crossOriginIsolated ?? pageIsolated(),
+    startWorker: options.triggerWorker ?? bundledTriggerWorker,
+    // The meter's measurement session, which a trigger session changes as on the desktop.
+    stream: (deviceId) => {
+      const s = sessions.of(deviceId);
+      return s && !s.ended ? s : null;
+    },
+    pageEvents:
+      options.pageEvents === undefined
+        ? typeof window === "undefined"
+          ? null
+          : window
+        : options.pageEvents,
+  });
+  const pdFiles = new PdFiles(
+    options.pickPdCapture ?? browserPickPdFile(PDCAP_ACCEPT),
+    options.pickVendorPdLog ?? browserPickPdFile(VENDOR_PD_ACCEPT),
+    () => sessions.module(),
+    sqlJs,
+  );
+  sessions.pdFiles = pdFiles;
   const commands = sessions.commands(() => sessions.current);
+  const logoFiles = new LogoFiles(options.pickLogoFile ?? browserPickLogoFile());
+  const recordingFiles = new RecordingFiles(
+    options.pickRecordingFile ?? browserPickRecordingFile(),
+    wasmRecordingReader(() => sessions.module(), sqlJs),
+  );
   // The desktop-only writes are among `commands`' refused ones (AC-QFTCX0.6).
-  type Writes = Pick<
-    WebBackendApi,
-    "firmwareFlash" | "logoUpload" | "logoUploadBuiltin" | "logoRemove"
-  >;
+  type Writes = Pick<WebBackendApi, "firmwareFlash">;
   return Object.assign(Object.create(commands) as MeterCommands & Writes, {
+    ...logoCommands(sessions, logoFiles),
     features: WEB_FEATURES,
     listDevices: () => devices.list(),
     watchDevices: (onChange: (devices: DeviceListing[]) => void) => devices.watch(onChange),
@@ -458,18 +718,50 @@ export async function createWebBackend(options: WebBackendOptions = {}): Promise
       sessions.attach(onEvent, deviceId),
     meter: (deviceId: string) => sessions.commands(() => sessions.of(deviceId)),
     connectedMeters: async () => sessions.ids(),
+    pdOpen: () => pdFiles.open(),
+    pdImport: () => pdFiles.import(),
+    pdReleaseOpened: async () => {
+      pdFiles.release();
+    },
+    openRecordingFile: (onProgress: (progress: OpenProgress) => void) =>
+      recordingFiles.open(onProgress),
+    cancelRecordingFile: () => recordingFiles.cancel(),
+    closeRecordingFile: () => recordingFiles.close(),
+    recordingFileRange: <const S extends readonly HistorySeries[]>(
+      series: S,
+      t0Ms: number,
+      t1Ms: number,
+      buckets: number,
+    ) => recordingFiles.range(series, t0Ms, t1Ms, buckets),
+    recordingFileRangeStats: (t0Ms: number, t1Ms: number) => recordingFiles.rangeStats(t0Ms, t1Ms),
+    recordingFileRunProgress: (query: RunProgressQuery) => recordingFiles.runProgress(query),
     saveChartImage: async (
       suggestedName: string,
       format: "png" | "svg" | "pdf",
       data: Uint8Array,
     ) => {
-      // The desktop backend wraps the PNG in a PDF page; the browser has no such writer.
-      if (format === "pdf") throw desktopOnlyError();
       const name = suggestedName.endsWith(`.${format}`)
         ? suggestedName
         : `${suggestedName}.${format}`;
-      const type = format === "png" ? "image/png" : "image/svg+xml";
-      download(name, new Blob([data as BlobPart], { type }));
+      if (format === "svg") {
+        download(name, new Blob([data as BlobPart], { type: "image/svg+xml" }));
+        return name;
+      }
+      // The desktop's checks and its PDF writer, which wraps the PNG in one page
+      // (FR EAKFEC): the same file, refused in the same words.
+      const w = await sessions.module();
+      let bytes: Uint8Array;
+      try {
+        if (format === "pdf") bytes = w.chartPdfFromPng(data);
+        else {
+          w.chartPngCheck(data);
+          bytes = data;
+        }
+      } catch (e) {
+        throw bindError(e);
+      }
+      const type = format === "pdf" ? "application/pdf" : "image/png";
+      download(name, new Blob([bytes as BlobPart], { type }));
       return name;
     },
   });

@@ -1,4 +1,4 @@
-//! The error every binding call returns: a plain `{ kind, message }` for JS.
+//! The error every binding call returns: a plain `{ kind, message, hint }` for JS.
 
 use wasm_bindgen::prelude::*;
 
@@ -12,6 +12,8 @@ pub struct BindError {
     pub kind: String,
     /// Human-readable description.
     pub message: String,
+    /// What the user can do about it, when there is something to say.
+    pub hint: Option<String>,
 }
 
 impl BindError {
@@ -20,6 +22,15 @@ impl BindError {
         BindError {
             kind: kind.to_owned(),
             message: message.into(),
+            hint: None,
+        }
+    }
+
+    /// An error of `kind` with `message` and `hint`.
+    pub fn with_hint(kind: &str, message: impl Into<String>, hint: impl Into<String>) -> BindError {
+        BindError {
+            hint: Some(hint.into()),
+            ..BindError::new(kind, message)
         }
     }
 

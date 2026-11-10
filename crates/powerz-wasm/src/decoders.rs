@@ -23,7 +23,7 @@ const QUEUE_RECORD_LEN: usize = 20;
 /// Length of the plaintext memory-read confirmation frame.
 const MEMORY_CONFIRMATION_LEN: usize = 20;
 
-fn malformed(message: impl Into<String>) -> BindError {
+pub(crate) fn malformed(message: impl Into<String>) -> BindError {
     BindError::new("malformed", message)
 }
 
@@ -39,7 +39,7 @@ impl From<DecodeError> for BindError {
     }
 }
 
-fn to_js<T: Serialize>(value: &T) -> Result<JsValue, BindError> {
+pub(crate) fn to_js<T: Serialize>(value: &T) -> Result<JsValue, BindError> {
     serde_wasm_bindgen::to_value(value).map_err(|e| BindError::new("internal", e.to_string()))
 }
 
@@ -52,7 +52,10 @@ fn unexpected(reply: Reply, what: &str) -> BindError {
 }
 
 /// The sections of a PUT_DATA reply; a bare header has none.
-fn put_data_sections<'a>(reply: &'a [u8], what: &str) -> Result<Vec<Section<'a>>, BindError> {
+pub(crate) fn put_data_sections<'a>(
+    reply: &'a [u8],
+    what: &str,
+) -> Result<Vec<Section<'a>>, BindError> {
     match frame::classify_reply(reply)? {
         Reply::PutData(_) => Ok(frame::parse_put_data(reply)?),
         other => Err(unexpected(other, what)),
@@ -412,6 +415,16 @@ impl PdDecoder {
         to_js(&self.clear())
     }
 
+    /// The newest cable identity the capture holds since the last clear, in
+    /// the trigger panel's shape (FR AXHK2P, FR EAKFEC); `null` for none.
+    #[wasm_bindgen(js_name = latestCable)]
+    pub fn latest_cable_js(&self) -> Result<JsValue, BindError> {
+        match self.latest_cable() {
+            Some(c) => to_js(&powerz_trigger::cable_view(&c)),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
     /// [`PdDecoder::pdcap`] for JS.
     #[wasm_bindgen(js_name = pdcap)]
     pub fn pdcap_js(&self, model: String, firmware_version: String) -> Result<JsValue, BindError> {
@@ -494,6 +507,20 @@ impl PdDecoder {
         self.entries.clear();
         self.log.clear();
         cleared
+    }
+
+    /// The newest cable Discover Identity ACK since the last clear, as the
+    /// desktop capture finds it.
+    pub fn latest_cable(&self) -> Option<powerz_protocol::pdm::message::CableIdentity> {
+        self.log.iter().rev().find_map(|entry| {
+            let pdcap::Entry::Record { record, .. } = entry else {
+                return None;
+            };
+            let (PdRecordKind::Message(m) | PdRecordKind::BigMessage(m)) = &record.kind else {
+                return None;
+            };
+            powerz_protocol::pdm::message::cable_identity_from_message(m.sop, m.header, &m.body)
+        })
     }
 
     /// The capture since the last clear as a pdcap file, with this crate's

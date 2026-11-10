@@ -279,14 +279,11 @@
   }
 
   /** The rate picker of a tile: acts on that meter only. */
-  function selectMeterRate(entry: MeterEntry, sps: number): void {
-    if (meterHeld) return;
+  function selectMeterRate(entry: MeterEntry, sps: number): Promise<void> {
+    if (meterHeld) return Promise.resolve();
     const refused = (err: unknown): void => raiseError(entry.listing.id, err);
-    if (entry.session === session) {
-      void selectRate(sps, refused);
-      return;
-    }
-    void commandsOf(entry.listing.id).setRate(sps).catch(refused);
+    if (entry.session === session) return selectRate(sps, refused);
+    return commandsOf(entry.listing.id).setRate(sps).catch(refused);
   }
 
   /** What the recording of a meter outside the full view needs from the app. */
@@ -555,7 +552,7 @@
     {
       choose: () => logoChoose(),
       preview: (path, alpha) => logoPreview(path, alpha),
-      read: (full) => logoRead(logoMeterId(), full),
+      read: (full, onProgress) => logoRead(logoMeterId(), full, onProgress),
       upload: (path, alpha, onProgress) => logoUpload(logoMeterId(), path, alpha, onProgress),
       previewBuiltin: (name) => logoPreviewBuiltin(name),
       uploadBuiltin: (name, onProgress) => logoUploadBuiltin(logoMeterId(), name, onProgress),
@@ -569,7 +566,11 @@
       checkSettings: () => logoSettingsCheck(logoMeterId()),
       refreshSettings: () => settingsPanel.refresh(),
     },
-    () => ({ model: session.details?.model ?? null, settings: settingsPanel.settings }),
+    () => ({
+      model: session.details?.model ?? null,
+      settings: settingsPanel.settings,
+      basicReadingsOnly: session.details?.basic_readings_only === true,
+    }),
   );
   $effect(() => {
     if (view === "logo" && !meterConnected) untrack(() => (view = "meter"));
@@ -577,6 +578,12 @@
   /** The settings check after a logo write stops when the meter goes away (FR QG6RNY). */
   $effect(() => {
     if (!meterConnected) untrack(() => startupLogo.stopChecking());
+  });
+  /** A new connection, or another meter picked, clears the logo tab's previous error
+   * and read (FR CJ3QCC). */
+  $effect(() => {
+    void session.selectedId;
+    if (meterConnected) untrack(() => startupLogo.resetSession());
   });
   /** A logo write holds every meter (AC-MEHQC0.3): nothing else is sent to one until it
    * ends. The controls that send are disabled, and the PD analyzer, Trigger and Records
@@ -875,7 +882,10 @@
     }
   }
 
+  /** A desktop open dialog is up or its file loading: a second click would open a second
+   * dialog. In the browser a new click supersedes a pick that never answered (FR Z99166). */
   let pdOpening = false;
+  const pdPickSupersedes = import.meta.env.VITE_BACKEND === "web";
   /** Why the last opened PD capture file stopped loading early, while its notice shows. */
   let pdOpenDamage = $state<string | null>(null);
   /** The last vendor PD log import (FR TGE83E, AC .6), while its notice shows. */
@@ -900,7 +910,7 @@
     imported: boolean,
   ): Promise<void> {
     // A running capture's rows would arrive unseen behind the opened file.
-    if (pdOpening || pd.capturing) return;
+    if (pd.capturing || (pdOpening && !pdPickSupersedes)) return;
     pdOpening = true;
     pdSaveError = null;
     pdOpenDamage = null;
@@ -1173,6 +1183,7 @@
     // own refusal says so instead.
     const change = rateChange(sps, {
       recording: recording.phase !== "idle" && session.state !== "rate_locked",
+      basicReadingsOnly: session.details?.basic_readings_only === true,
     });
     if (change.kind === "refused") {
       if (noticesId !== null) {
@@ -1349,7 +1360,7 @@
       aboutOpener = opener;
       aboutOpen = true;
     }}
-    onSelectRate={(sps) => void selectRate(sps)}
+    onSelectRate={(sps) => selectRate(sps)}
     {recording}
     {canRecord}
     onToggleRecording={toggleRecording}

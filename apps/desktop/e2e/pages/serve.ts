@@ -50,6 +50,9 @@ createServer((req, res) => {
   }
   res.writeHead(200, {
     "content-type": TYPES[extname(file).toLowerCase()] ?? "application/octet-stream",
+    // Cross-origin isolation for the trigger worker (FR W8SHXC), as coi-sw.js adds it.
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-embedder-policy": "require-corp",
   });
   createReadStream(file).pipe(res);
 }).listen(port, "127.0.0.1", () => {

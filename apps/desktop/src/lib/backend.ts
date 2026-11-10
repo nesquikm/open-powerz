@@ -610,7 +610,7 @@ export interface OpenProgress {
 export async function openRecordingFile(
   onProgress: (progress: OpenProgress) => void,
 ): Promise<FileSummary | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.openRecordingFile(onProgress));
   if (mock) return mock.openRecordingFile(onProgress);
   const channel = new Channel<OpenProgress>();
   channel.onmessage = onProgress;
@@ -619,14 +619,14 @@ export async function openRecordingFile(
 
 /** Ends the open under way: it resolves to `null`. */
 export async function cancelRecordingFile(): Promise<void> {
-  if (web) return;
+  if (web) return web.then((b) => b.cancelRecordingFile());
   if (mock) return mock.cancelRecordingFile();
   await invoke("recording_file_cancel");
 }
 
 /** Closes the open recording file. */
 export async function closeRecordingFile(): Promise<void> {
-  if (web) return;
+  if (web) return web.then((b) => b.closeRecordingFile());
   if (mock) return mock.closeRecordingFile();
   await invoke("recording_file_close");
 }
@@ -639,7 +639,7 @@ export async function recordingFileRange<const S extends readonly HistorySeries[
   t1Ms: number,
   buckets: number,
 ): Promise<BucketsFor<S>> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.recordingFileRange(series, t0Ms, t1Ms, buckets));
   if (mock) return mock.recordingFileRange(series, t0Ms, t1Ms, buckets);
   return invoke<BucketsFor<S>>("recording_file_range", {
     series,
@@ -701,7 +701,7 @@ export async function recordingFileRangeStats(
   t0Ms: number,
   t1Ms: number,
 ): Promise<RangeStats | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.recordingFileRangeStats(t0Ms, t1Ms));
   if (mock) return mock.recordingFileRangeStats(t0Ms, t1Ms);
   return invoke<RangeStats | null>("recording_file_range_stats", wholeMs(t0Ms, t1Ms));
 }
@@ -789,7 +789,7 @@ export async function runProgress(query: RunProgressQuery): Promise<RunProgress 
 export async function recordingFileRunProgress(
   query: RunProgressQuery,
 ): Promise<RunProgress | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.recordingFileRunProgress(query));
   if (mock) return mock.recordingFileRunProgress(query);
   return invoke<RunProgress | null>("recording_file_run_progress", { query: wireQuery(query) });
 }
@@ -982,7 +982,7 @@ export interface PdOpened {
 /** Opens the open dialog and loads the chosen pdcap file (FR TGE83E); needs no meter.
  * Resolves to the capture, or `null` when the dialog was cancelled. */
 export async function pdOpen(): Promise<PdOpened | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.pdOpen());
   if (mock) return mock.pdOpen();
   return invoke<PdOpened | null>("pd_open");
 }
@@ -990,7 +990,7 @@ export async function pdOpen(): Promise<PdOpened | null> {
 /** Releases the capture opened from a file, which the page no longer shows
  * (AC-AXHK2K.5). The slot is the app's, not a meter's: it needs no meter. */
 export async function pdReleaseOpened(): Promise<void> {
-  if (web) return;
+  if (web) return web.then((b) => b.pdReleaseOpened());
   if (mock) return mock.pdReleaseOpened();
   await invoke("pd_release_opened");
 }
@@ -999,7 +999,7 @@ export async function pdReleaseOpened(): Promise<void> {
  * read-only (FR TGE83E, AC .6); needs no meter. Resolves like {@link pdOpen}: the
  * imported capture, or `null` when the dialog was cancelled. */
 export async function pdImport(): Promise<PdOpened | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.pdImport());
   if (mock) return mock.pdImport();
   return invoke<PdOpened | null>("pd_import");
 }
@@ -1092,7 +1092,7 @@ export interface LogoRead {
 /** Opens the open dialog filtered to logo pictures (PNG, JPEG, BMP, raw `.bin`) (FR
  * MEHQC0, AC .1). Resolves to the chosen path, or `null` when the dialog was cancelled. */
 export async function logoChoose(): Promise<string | null> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.logoChoose());
   if (mock) return mock.logoChoose();
   return invoke<string | null>("logo_choose");
 }
@@ -1101,7 +1101,7 @@ export async function logoChoose(): Promise<string | null> {
  * (FR MEHQC0, AC .1); needs no meter. A file that is no picture rejects with a usage
  * error. */
 export async function logoPreview(path: string, alpha: boolean): Promise<LogoPreview> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.logoPreview(path, alpha));
   if (mock) return mock.logoPreview(path, alpha);
   return invoke<LogoPreview>("logo_preview", { path, alpha });
 }
@@ -1113,15 +1113,20 @@ export type BuiltinLogoName = "surf" | "surf-wordmark";
 /** The startup logo built-in logo `name` encodes to, always transparent (FR 70X5YX);
  * needs no meter. */
 export async function logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPreview> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.logoPreviewBuiltin(name));
   if (mock) return mock.logoPreviewBuiltin(name);
   return invoke<LogoPreview>("logo_preview", { builtin: name, alpha: true });
 }
 
 /** What meter `deviceId`'s logo area holds (FR MEHQC0, AC .7); with `full`, the stored
- * image too. Only memory reads go out. */
-export async function logoRead(deviceId: string, full: boolean): Promise<LogoRead> {
-  if (web) return desktopOnly();
+ * image too. Only memory reads go out. In the browser, `onProgress` hears the read's
+ * memory reads done of the total (FR CJ3QCD). */
+export async function logoRead(
+  deviceId: string,
+  full: boolean,
+  onProgress?: (progress: LogoProgress) => void,
+): Promise<LogoRead> {
+  if (web) return web.then((b) => b.logoRead(deviceId, full, onProgress));
   if (mock) return mock.logoRead(deviceId, full);
   return invoke<LogoRead>("logo_read", { deviceId, full });
 }
@@ -1179,7 +1184,7 @@ export async function logoRemove(
  * wait for a menu save on the meter (FR QG6RNY); rejects with a usage error when no
  * logo write is waiting. */
 export async function logoSettingsCheck(deviceId: string): Promise<LogoSettingsCheck> {
-  if (web) return desktopOnly();
+  if (web) return web.then((b) => b.logoSettingsCheck(deviceId));
   if (mock) return mock.logoSettingsCheck(deviceId);
   return invoke<LogoSettingsCheck>("logo_settings_check", { deviceId });
 }
@@ -1768,6 +1773,36 @@ export interface WebBackendApi extends MeterCommands {
     format: "png" | "svg" | "pdf",
     data: Uint8Array,
   ): Promise<string | null>;
+  /** Open capture and Import vendor log (FR EAKFEC): the browser's file picker for
+   * `.pdcap` and `.sqlite` files; `null` when it was dismissed. The opened capture stays
+   * in the page until released. */
+  pdOpen(): Promise<PdOpened | null>;
+  pdImport(): Promise<PdOpened | null>;
+  pdReleaseOpened(): Promise<void>;
+  /** Open recording (FR AHTZW3): the browser's file picker for CSV and `.db` files;
+   * `null` when it was dismissed or Cancel ended the open. */
+  openRecordingFile(onProgress: (progress: OpenProgress) => void): Promise<FileSummary | null>;
+  cancelRecordingFile(): Promise<void>;
+  closeRecordingFile(): Promise<void>;
+  recordingFileRange<const S extends readonly HistorySeries[]>(
+    series: S,
+    t0Ms: number,
+    t1Ms: number,
+    buckets: number,
+  ): Promise<BucketsFor<S>>;
+  recordingFileRangeStats(t0Ms: number, t1Ms: number): Promise<RangeStats | null>;
+  recordingFileRunProgress(query: RunProgressQuery): Promise<RunProgress | null>;
+  /** The startup logo (FR W8SHXB): the browser's file picker answers a token that
+   * stands in for the desktop path. */
+  logoChoose(): Promise<string | null>;
+  logoPreview(path: string, alpha: boolean): Promise<LogoPreview>;
+  logoPreviewBuiltin(name: BuiltinLogoName): Promise<LogoPreview>;
+  logoRead(
+    deviceId: string,
+    full: boolean,
+    onProgress?: (progress: LogoProgress) => void,
+  ): Promise<LogoRead>;
+  logoSettingsCheck(deviceId: string): Promise<LogoSettingsCheck>;
   /** Desktop-only meter writes (AC-QFTCX0.6): each rejects without sending anything. */
   firmwareFlash(
     deviceId: string,
@@ -1776,6 +1811,7 @@ export interface WebBackendApi extends MeterCommands {
     onStage: (stage: FlashEvent) => void,
     agreed?: FlashHold[],
   ): Promise<FlashDone>;
+  /** The startup logo writes (FR W8SHXB), run in the browser. */
   logoUpload(
     deviceId: string,
     path: string,
