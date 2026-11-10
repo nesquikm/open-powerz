@@ -162,6 +162,11 @@ CSV or a vendor `.db` file back into the app. It needs no meter. The file opens 
 marked as a file and read-only. The tab exists only while a file is open, and
 **Close file** ends it. One file opens at a time; opening another replaces it.
 
+An **overview strip** sits under the file's chart, in the desktop app and the
+web edition alike. It shows the whole file, with a window over the range on
+screen. Drag the window, click the strip, or use the arrow keys to move the
+zoom.
+
 Opening a file sends nothing to any meter. A running stream or recording keeps
 going behind the tab.
 

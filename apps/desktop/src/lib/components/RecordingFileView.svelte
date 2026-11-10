@@ -52,6 +52,8 @@
   import { buildWarp } from "../timeline";
   import ChartOptions from "./ChartOptions.svelte";
   import ChartRuler from "./ChartRuler.svelte";
+  import OverviewStrip, { type EnvelopeSource, type OverviewState } from "./OverviewStrip.svelte";
+  import { fileOverviewState } from "../fileOverview";
   import RulerReadout from "./RulerReadout.svelte";
   import SeriesLegend from "./SeriesLegend.svelte";
   import SubChart from "./SubChart.svelte";
@@ -227,6 +229,12 @@
   let wanted: TimeRange | null = null;
   /** The answer on screen, kept for a plot rebuilt by the legend or the theme. */
   let frame: ChartFrame | null = null;
+  /** The whole-file answer: the overview strip's only envelope source (AC-09H204.1). */
+  let wholeFrame: ChartFrame | null = null;
+  /** Bumped with each whole-file answer, so the strip repaints from it. */
+  let wholeVersion = 0;
+  /** The overview strip under the chart (FR 09H204). */
+  let overview: OverviewStrip | undefined = $state();
   let plot: uPlot | null = null;
   /** The plot width of the last ask: one bucket per pixel. */
   let askedWidth = 0;
@@ -293,6 +301,10 @@
     onResult: (req, result) => {
       frame = bucketsToFrame(result);
       shown = req.purpose === "view" ? { t0Ms: req.t0Ms, t1Ms: req.t1Ms } : null;
+      if (req.purpose !== "view") {
+        wholeFrame = frame;
+        wholeVersion++;
+      }
       draw();
     },
     onError: (err) => {
@@ -300,6 +312,37 @@
       onError(err);
     },
   });
+
+  /** The whole file's span: its first and last record, else the whole-file answer's. */
+  function stripExtent(): TimeRange | null {
+    if (fileExtent.t1Ms > fileExtent.t0Ms) return fileExtent;
+    const x = wholeFrame?.x;
+    if (x == null || x.length === 0) return null;
+    const t0Ms = x[0]!;
+    const t1Ms = x[x.length - 1]!;
+    return t1Ms > t0Ms ? { t0Ms, t1Ms } : null;
+  }
+
+  /** The strip's window over the range on screen; `null` until the whole file is read. */
+  function stripState(): OverviewState | null {
+    return wholeFrame === null ? null : fileOverviewState(stripExtent(), shown);
+  }
+
+  /** Paints the strip from the whole file. */
+  function drawStrip(): void {
+    overview?.draw(stripState(), `${fileGeneration}|${wholeVersion}`);
+  }
+
+  /** The strip's envelope: the whole-file answer only, never a zoomed one. */
+  function stripSources(): readonly EnvelopeSource[] {
+    return wholeFrame === null ? [] : [{ frame: wholeFrame, beforeMs: Infinity }];
+  }
+
+  /** The strip asks for a range: read anew, as a drag over the plot is. */
+  function showStripRange(range: TimeRange): void {
+    wanted = range;
+    ask();
+  }
 
   function draw(): void {
     const u = plot;
@@ -322,6 +365,7 @@
     wantProgress();
     placeRulerOnScreen();
     rulerLayer?.layout();
+    drawStrip();
     probeDraw();
   }
 
@@ -471,7 +515,9 @@
     wanted = null;
     shown = null;
     frame = null;
+    wholeFrame = null;
     const generation = ++fileGeneration;
+    untrack(drawStrip);
     fileExtent = { t0Ms: 0, t1Ms: 0 };
     untrack(() => {
       ruler.clear();
@@ -483,6 +529,7 @@
       .then((p) => {
         if (generation === fileGeneration && p !== null) {
           fileExtent = { t0Ms: p.session_t0_ms, t1Ms: p.run_t1_ms };
+          drawStrip();
         }
       })
       .catch((e: unknown) => console.warn("open-powerz: file extent failed", e));
@@ -563,6 +610,18 @@
       onresize={() => queueMicrotask(draw)}
     />
   {/if}
+  <!-- Overview strip: the whole file, with a window over the range on screen. -->
+  <OverviewStrip
+    bind:this={overview}
+    {theme}
+    current={stripState}
+    warpFor={(t0Ms, t1Ms, widthPx) => buildWarp([], { t0Ms, t1Ms }, widthPx)}
+    gapsVersion={() => 0}
+    gaps={() => []}
+    sources={stripSources}
+    onrange={showStripRange}
+    onresize={drawStrip}
+  />
 
   <div class="stats-head">
     <div class="scope-toggle" role="group" aria-label="Stats scope">

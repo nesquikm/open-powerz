@@ -52,6 +52,14 @@ describe("opening a recording is documented (AC-AXHK2S.8)", () => {
     expect(howTo).toMatch(pattern);
   });
 
+  it("the how-to names the overview strip under the file's chart (AC-09H204.5)", () => {
+    expect(howTo).toMatch(/overview strip/i);
+  });
+
+  it("the how-to says moving the strip's window changes the range shown (AC-09H204.5)", () => {
+    expect(howTo).toMatch(/overview strip[^]*\b(drag|click)/i);
+  });
+
   it("the how-to says the .db layout is unproven against the vendor app", () => {
     expect(howTo).toMatch(/(not|un|never)[^\n]*(tested|proven|checked)[^\n]*vendor/i);
   });
