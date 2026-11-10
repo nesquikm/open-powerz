@@ -7,6 +7,7 @@ kickoff_branch: fix/v0.12.1
 frozen_at: null
 migration: none
 codename: Loose Ends
+shipped_in: v0.12.1
 ---
 
 # Implementation Plan
