@@ -502,8 +502,9 @@ pub fn request<P: Read + Write, C: Clock>(
         // The charger may offer less now (SPR only): nothing is written
         // for a position it no longer offers.
         Some(negotiation) => validate(&negotiation.offers, request)?,
-        // PD is ready: checked against the latest negotiation's offers, not
-        // only the caller's, which may be older (FR AHTZW4).
+        // PD is ready: checked against the latest offers (negotiated, or an
+        // unasked list since), not only the caller's, which may be older
+        // (FR AHTZW4, FR 3B70SA).
         None => validate(session.pd_offers().unwrap_or_default(), request)?,
     };
     send_request(session, command, confirmation)
