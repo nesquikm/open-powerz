@@ -21,6 +21,11 @@ Every SVG is the source and the PNG next to it is its render.
 | `social-preview.svg`      | `social-preview.png` (1280×640)     | GitHub social preview                                     |
 | `favicon.svg`             | `favicon-16.png`, `favicon-32.png`  | Small-size icon                                           |
 
+The two meter logos keep a transparent margin of at least 3 px on every side.
+The art ends inside the 200×200 frame, so the meter's own background shows around it.
+The meter centres the logo on its larger screen, so a hard edge at the frame would show as a box.
+Every edge where art meets transparency is dark outline ink.
+
 `meter-logo.svg` is a hand-kept source. The generator writes the other SVGs and every PNG.
 
 The desktop app uses `app-icon.svg` as its icon source and `favicon.svg` as its small-size source.
@@ -40,4 +45,5 @@ python3 -I assets/brand/tools/render.py <out-dir>
 
 Run it from the repository root.
 `tools/render.py` uses `tools/kit_svgs.py` to write the generated SVGs, then re-renders every PNG in this folder.
+It also writes an on-meter preview of both meter logos, `<name>-onmeter.png`, to `<out-dir>`.
 On-meter mocks and preview checks go to `<out-dir>`, never into the repository.

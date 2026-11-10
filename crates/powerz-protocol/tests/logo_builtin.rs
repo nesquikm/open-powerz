@@ -150,35 +150,34 @@ fn column_has_opaque_pixel(img: &image::RgbaImage, x: u32) -> bool {
     (0..img.height()).any(|y| img.get_pixel(x, y)[3] > 0)
 }
 
+/// AC-P747X7.1, as superseded by AC-BZJGJ5.1 (v0.13.1): the art no longer
+/// touches the frame, so instead of opaque edge columns the empty margins are
+/// pinned small and even on both sides: no lopsided empty strip on the right.
+fn empty_margins(img: &image::RgbaImage) -> (usize, usize) {
+    let w = img.width();
+    let left = (0..w)
+        .take_while(|&x| !column_has_opaque_pixel(img, x))
+        .count();
+    let right = (0..w)
+        .rev()
+        .take_while(|&x| !column_has_opaque_pixel(img, x))
+        .count();
+    (left, right)
+}
+
 #[test]
-fn _p747x7_1_both_builtins_have_opaque_pixels_in_the_leftmost_and_rightmost_columns() {
+fn _p747x7_1_both_builtins_have_small_even_side_margins() {
     for b in BuiltinLogo::ALL {
-        let img = decode_rgba(b);
-        let last = img.width() - 1;
-        assert!(
-            column_has_opaque_pixel(&img, 0),
-            "{b}: the leftmost column (x = 0) is fully transparent"
-        );
-        assert!(
-            column_has_opaque_pixel(&img, last),
-            "{b}: the rightmost column (x = {last}) is fully transparent"
-        );
+        let (left, right) = empty_margins(&decode_rgba(b));
+        assert!(left <= 12 && right <= 12, "{b}: margins {left} / {right}");
+        assert!(left.abs_diff(right) <= 1, "{b}: margins {left} / {right}");
     }
 }
 
 #[test]
-fn _p747x7_1_the_wordmark_logo_has_no_empty_strip_at_either_edge() {
-    let img = decode_rgba(BuiltinLogo::SurfWordmark);
-    let w = img.width();
-    let empty_right = (0..w)
-        .rev()
-        .take_while(|&x| !column_has_opaque_pixel(&img, x))
-        .count();
-    let empty_left = (0..w)
-        .take_while(|&x| !column_has_opaque_pixel(&img, x))
-        .count();
-    assert_eq!(empty_right, 0, "empty columns on the right");
-    assert_eq!(empty_left, 0, "empty columns on the left");
+fn _p747x7_1_the_wordmark_logo_has_no_empty_strip_on_one_side() {
+    let (left, right) = empty_margins(&decode_rgba(BuiltinLogo::SurfWordmark));
+    assert!(left.abs_diff(right) <= 1, "margins {left} / {right}");
 }
 
 /// AC-P747X7.2: size and binary alpha. The "look inside the old area is
@@ -234,15 +233,19 @@ fn wordmark_scene_range() -> (f64, f64) {
 }
 
 #[test]
-fn _p747x7_3_the_generator_draws_the_wordmark_scene_past_the_right_edge() {
-    // The left edge already fills (checked on the PNG by AC-P747X7.1), so
-    // only the right end of the scene is pinned here; xmin is left alone so
-    // the art inside the old area stays as it was.
-    let (_xmin, xmax) = wordmark_scene_range();
+fn _p747x7_3_the_generator_centres_the_wordmark_scene() {
+    // Superseded by AC-BZJGJ5.1: the scene used to bleed past the right edge;
+    // now it ends inside the frame, the same distance from either side.
+    let (xmin, xmax) = wordmark_scene_range();
     // The logo maps scene x to image x as 20 + 0.8 * x on a 200-wide image.
+    let left = 20.0 + 0.8 * xmin;
     let right = 20.0 + 0.8 * xmax;
     assert!(
-        right >= 200.0 + 2.0,
-        "scene ends at image x = {right} (xmax {xmax}); it must bleed past 200"
+        left > 3.0 && right < 197.0,
+        "scene spans image x {left}..{right}"
+    );
+    assert!(
+        (left + right - 200.0).abs() < 1.0,
+        "scene spans image x {left}..{right}"
     );
 }

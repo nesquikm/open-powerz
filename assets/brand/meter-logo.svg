@@ -4,7 +4,7 @@
   <defs>
     <symbol id="g-e" overflow="visible"><path d="M1,5 H9.5 A4.5,4.5 0 1,0 8.2,8.2" fill="none"/></symbol>
     <path id="spark" d="M0,-8 L2,-2 L8,0 L2,2 L0,8 L-2,2 L-8,0 L-2,-2 Z"/>
-    <clipPath id="sea"><path d="M-12.5,130 C12.5,165 37.5,165 62.5,130 C87.5,95 112.5,95 137.5,130 C162.5,165 187.5,165 212.5,130 L212.5,205 L-12.5,205 Z"/></clipPath>
+    <clipPath id="sea"><path d="M9,151.47 C26.83,162.12 44.67,154.97 62.5,130 C87.5,95 112.5,95 137.5,130 C155.33,154.97 173.17,162.12 191,151.47 Q191,190 152.47,190 L47.53,190 Q9,190 9,151.47 Z"/></clipPath>
   </defs>
 
   <g stroke="#111" stroke-linejoin="round" stroke-linecap="round">
@@ -13,13 +13,16 @@
     <use href="#spark" transform="translate(170,22) scale(0.7)" fill="#ffd23f" stroke-width="3"/>
     <use href="#spark" transform="translate(178,92) scale(0.6)" fill="#3ff0ff" stroke-width="3"/>
 
-    <!-- the sine wave sea -->
-    <path d="M-12.5,130 C12.5,165 37.5,165 62.5,130 C87.5,95 112.5,95 137.5,130 C162.5,165 187.5,165 212.5,130 L212.5,205 L-12.5,205 Z" fill="#2f6bff" stroke-width="6"/>
+    <!-- the sine wave sea: an island inside the frame, the meter's own background shows around it -->
+    <path d="M9,151.47 C26.83,162.12 44.67,154.97 62.5,130 C87.5,95 112.5,95 137.5,130 C155.33,154.97 173.17,162.12 191,151.47 Q191,190 152.47,190 L47.53,190 Q9,190 9,151.47 Z" fill="#2f6bff" stroke-width="6"/>
     <g clip-path="url(#sea)" fill="none">
       <path d="M-12.5,150 C12.5,185 37.5,185 62.5,150 C87.5,115 112.5,115 137.5,150 C162.5,185 187.5,185 212.5,150" stroke="#7fd4ff" stroke-width="6"/>
       <path d="M-12.5,174 C12.5,209 37.5,209 62.5,174 C87.5,139 112.5,139 137.5,174 C162.5,209 187.5,209 212.5,174" stroke="#1d47c9" stroke-width="10"/>
     </g>
+    <!-- the sea outline again, over the bands -->
+    <path d="M9,151.47 C26.83,162.12 44.67,154.97 62.5,130 C87.5,95 112.5,95 137.5,130 C155.33,154.97 173.17,162.12 191,151.47 Q191,190 152.47,190 L47.53,190 Q9,190 9,151.47 Z" fill="none" stroke-width="6"/>
     <!-- foam on the crest -->
+    <path d="M70,121 C88,99 112,99 130,121" fill="none" stroke-width="9"/>
     <path d="M70,121 C88,99 112,99 130,121" fill="none" stroke="#fff" stroke-width="5"/>
     <circle cx="146" cy="110" r="4" fill="#fff" stroke-width="2.5"/>
     <circle cx="156" cy="100" r="3" fill="#fff" stroke-width="2.5"/>
