@@ -23,6 +23,7 @@ codename: Loose Ends
 - TEMP in the first rows of a session: match the desktop and document it.
 - The CLI watch over CDC while the browser streams over WebUSB.
 - The recording rows type, and the unasked PD offer list.
+- An independent docs review: README and docs match the app; new README screenshot.
 
 **Out of scope:** the Import vendor log known issue (no real vendor file exists; stays in Known issues); any meter command outside the CLI CDC read path; meter runs (a HIL run follows).
 
@@ -38,6 +39,7 @@ codename: Loose Ends
 | [3B70S8](../frs/3B70S8.md) | The CLI watch over CDC exits while the browser streams (bug) | n/a |
 | [3B70S9](../frs/3B70S9.md) | The recording rows type lacks the TEMP field (bug) | n/a |
 | [3B70SA](../frs/3B70SA.md) | An unasked PD offer list does not refresh the ready offers (bug) | n/a |
+| [SHTZHQ](../frs/SHTZHQ.md) | The user docs lag behind the app (bug) | n/a |
 
 Build order: the table's order (independent).
 
@@ -58,3 +60,5 @@ Build order: the table's order (independent).
    verify: `bun run check` and `bun run test`.
 8. Refresh the ready PD offers from an unasked block — 3B70SA
    verify: `cargo test -p powerz-protocol -p powerz-trigger`.
+9. Bring the README and docs in line with the app, new screenshot — SHTZHQ
+   verify: `bun run test`, `cargo test --workspace`, the link check.
