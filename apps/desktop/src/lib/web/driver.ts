@@ -275,6 +275,13 @@ const SNAPSHOT_PERIOD_MS = 100;
 /** Least time between two ADC snapshots while the queue streams, for the chip
  * temperature (native `SnapshotCadence::PERIOD`). */
 const QUEUE_SNAPSHOT_PERIOD_MS = 500;
+/** Unheld polling time with only empty queue replies before the stream counts as
+ * stalled (FR NVN6M8): the meter stops filling the queue while another program polls it
+ * over CDC `[device]`. */
+const STALL_AFTER_MS = 2_000;
+/** Most time one empty poll adds toward the stall beyond its period, so a poll that
+ * waited behind a hold or a settings write counts as one ordinary poll. */
+const STALL_POLL_SLACK_MS = 100;
 /** PD sniffer poll period (native `PdSniffer::POLL_PERIOD`). */
 const PD_POLL_PERIOD_MS = 5;
 /** Each PD poll also asks for the ADC snapshot (the sniffer's `with_adc` option). */
@@ -344,6 +351,9 @@ export interface MeterDriverOptions {
   onTemp?: (tempC: number | null) => void;
   /** The session ended on a transfer failure; called at most once. */
   onError: (error: UiError) => void;
+  /** FR NVN6M8: the queue stopped filling (`true`, after `STALL_AFTER_MS` of unheld
+   * polling with no samples) or samples came back (`false`); once per change. */
+  onStall?: (stalled: boolean) => void;
   /** Random source for the auth nonce; defaults to `crypto.getRandomValues`. */
   random?: () => bigint;
   /** A WebHID session (AC-QFTCWZ.3): ADC snapshots only, so no CONNECT, device info,
@@ -450,6 +460,11 @@ export class MeterDriver {
   /** Holds on the stream's polling (a trigger session's automatic list); polls skip
    * while any is held (native `Worker::hold_polling`). */
   private pollHolds = 0;
+  /** FR NVN6M8: when the last empty queue poll ended (null after samples), the unheld
+   * polling time the empty run adds up to, and whether `onStall(true)` was sent. */
+  private emptyAt: number | null = null;
+  private emptyMs = 0;
+  private stalled = false;
   /** The UID block read at open, kept for a later level-1 auth. */
   private uidBlock: Uint8Array | null = null;
   /** The offline records book, made on the first list and freed when the session ends. */
@@ -728,12 +743,37 @@ export class MeterDriver {
     try {
       const samples = await this.exclusive(() => this.readSamples());
       if (this.ended) return;
+      if (this.mode === "queue") this.trackStall(samples.length > 0);
       if (samples.length > 0) this.o.onBatch(samples);
     } catch (e) {
       this.fail(e);
       return;
     }
     this.schedulePoll(Math.max(1, began + this.periodMs() - Date.now()));
+  }
+
+  /** FR NVN6M8: add one queue poll to the empty run, or end it on samples. Each empty
+   * poll adds the time since the previous one, at most one period plus some slack, so
+   * time spent held or waiting for the link does not count. */
+  private trackStall(gotSamples: boolean): void {
+    const now = Date.now();
+    if (gotSamples) {
+      this.emptyAt = null;
+      this.emptyMs = 0;
+      if (this.stalled) {
+        this.stalled = false;
+        this.o.onStall?.(false);
+      }
+      return;
+    }
+    if (this.emptyAt !== null) {
+      this.emptyMs += Math.min(now - this.emptyAt, this.periodMs() + STALL_POLL_SLACK_MS);
+    }
+    this.emptyAt = now;
+    if (!this.stalled && this.emptyMs >= STALL_AFTER_MS) {
+      this.stalled = true;
+      this.o.onStall?.(true);
+    }
   }
 
   private async readSamples(): Promise<MeterSample[]> {

@@ -58,6 +58,11 @@ clipboard. The stop notice counts only the gaps that happened after the first
 written row, so a recording that starts mid-stream never reports a gap it does
 not contain.
 
+A CLI that polls the same meter over CDC (for example `powerz watch
+--transport cdc`) pauses the app's queue stream while it runs, so a recording
+gets no samples then. The desktop app and the web edition show a notice while
+it lasts.
+
 A sample carries the same Unix time in a recording and in an export of the same
 session, also after the chart history was cleared.
 

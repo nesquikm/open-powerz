@@ -3,6 +3,7 @@
   import Term from "./Term.svelte";
   import { DASH, currentDirectionText, readoutView } from "../format";
   import type { Session } from "../session.svelte";
+  import { STALL_NOTICE } from "../stallNotice";
 
   let { session }: { session: Session } = $props();
 
@@ -82,9 +83,18 @@
       </span>
     {/each}
   </div>
+  {#if session.stalled}
+    <p class="stall-notice" role="status">{STALL_NOTICE}</p>
+  {/if}
 </section>
 
 <style>
+  .stall-notice {
+    margin: 0;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+  }
   .readout {
     position: relative;
     min-width: 0;

@@ -354,6 +354,8 @@ export type BackendEvent =
   | { type: "gap"; data: Gap }
   | { type: "status"; data: Status }
   | { type: "error"; data: UiError }
+  /** FR NVN6M8: the queue stopped filling (`true`) or samples came back (`false`). */
+  | { type: "stall"; data: { stalled: boolean } }
   | { type: "recording"; data: RecordingEvent }
   | { type: "pd_state"; data: { capturing: boolean; reason?: PdStopReason } }
   | { type: "pd_rows"; data: { rows: PdRow[] } }

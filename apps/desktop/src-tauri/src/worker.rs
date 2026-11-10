@@ -159,6 +159,59 @@ pub enum GapKind {
     Pause,
 }
 
+/// Whether the meter stopped filling the ADC queue (FR NVN6M8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Stall {
+    /// `true` once 2 s of unheld queue polls returned no records, `false`
+    /// when records come back.
+    pub stalled: bool,
+}
+
+/// Unheld queue polling without records before it counts as a stall, ms.
+const STALL_AFTER_MS: u64 = 2_000;
+
+/// Most time one empty poll adds toward a stall beyond the poll period, ms: a
+/// poll that waited behind a hold, a settings write or a record download
+/// counts as one ordinary poll (as the web driver does).
+const STALL_POLL_SLACK_MS: u64 = 100;
+
+/// Tracks runs of empty queue polls (FR NVN6M8).
+#[derive(Debug, Default)]
+struct StallTracker {
+    /// When the last empty poll of the current run happened, ms.
+    last_empty_ms: Option<u64>,
+    /// Polling time the current run of empty polls adds up to, ms.
+    empty_ms: u64,
+    /// A stall event went out and no records came since.
+    stalled: bool,
+}
+
+impl StallTracker {
+    /// One queue poll at `now`, `period_ms` after the last one was due; the
+    /// event to send, if any. Each empty poll adds the time since the last
+    /// one, at most one period plus [`STALL_POLL_SLACK_MS`], so time the worker
+    /// spent held or busy elsewhere does not count.
+    fn poll(&mut self, now: u64, empty: bool, period_ms: u64) -> Option<Stall> {
+        if !empty {
+            self.last_empty_ms = None;
+            self.empty_ms = 0;
+            return std::mem::replace(&mut self.stalled, false).then_some(Stall { stalled: false });
+        }
+        if let Some(last) = self.last_empty_ms {
+            let step = now
+                .saturating_sub(last)
+                .min(period_ms.saturating_add(STALL_POLL_SLACK_MS));
+            self.empty_ms = self.empty_ms.saturating_add(step);
+        }
+        self.last_empty_ms = Some(now);
+        if !self.stalled && self.empty_ms >= STALL_AFTER_MS {
+            self.stalled = true;
+            return Some(Stall { stalled: true });
+        }
+        None
+    }
+}
+
 /// A span of session time without samples.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Gap {
@@ -346,6 +399,8 @@ pub enum BackendEvent {
     PdRows(PdRows),
     /// PD status blocks.
     PdStatus(PdStatusBatch),
+    /// The queue stopped or resumed delivering samples (FR NVN6M8).
+    Stall(Stall),
 }
 
 /// Where the worker sends its events.
@@ -623,6 +678,8 @@ pub struct Worker<T: Transport, C: Clock> {
     /// Holds on the queue polling (FR DGSQ6S): while any is held, no
     /// GET_DATA goes out, but the session stays connected.
     poll_holds: u32,
+    /// Runs of empty queue polls (FR NVN6M8).
+    stall: StallTracker,
     /// Whether a PDM session is open on this meter, when the owner tells.
     pdm_open: Option<PdmOpen>,
     /// Where errors that leave the session running are logged (FR AXHK2G).
@@ -727,6 +784,7 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
             pd: PdCapture::new().with_status_limit(config.pd_status_limit),
             pd_meter: (info.model.clone(), info.firmware_version.clone()),
             poll_holds: 0,
+            stall: StallTracker::default(),
             pdm_open: None,
             log: SessionLog::default(),
             queue_faulted: false,
@@ -1681,6 +1739,14 @@ impl<T: Transport, C: Clock + Clone> Worker<T, C> {
                 }
                 if let Some(rate) = poll.rate_switch {
                     self.log_event_with("queue interval switched", rate_label(rate));
+                }
+                if self.source == MeasurementSource::Queue {
+                    let now = self.clock.now_ms();
+                    let period = u64::try_from(Streamer::poll_period(self.rate).as_millis())
+                        .unwrap_or(u64::MAX);
+                    if let Some(stall) = self.stall.poll(now, poll.records.is_empty(), period) {
+                        self.emit(BackendEvent::Stall(stall));
+                    }
                 }
                 self.queue_records(&poll);
                 // A failed snapshot only costs the temperature reading; a
@@ -3277,6 +3343,46 @@ pub(crate) fn late_hold_control() -> (WorkerControl, Arc<Mutex<Vec<bool>>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FR NVN6M8, AC .3 / .4: a long pause between two empty polls (a
+    /// settings write or a record download on the worker thread) counts as
+    /// one ordinary poll, not as its wall time.
+    #[test]
+    fn nvn6m8_a_long_pause_between_empty_polls_counts_as_one_poll() {
+        let mut t = StallTracker::default();
+        assert_eq!(t.poll(0, true, 100), None);
+        assert_eq!(t.poll(100, true, 100), None);
+        // 5 s inside a settings write, then the next empty poll.
+        assert_eq!(t.poll(5_100, true, 100), None);
+        assert!(t.empty_ms < STALL_AFTER_MS, "{}", t.empty_ms);
+        // Ordinary empty polls still reach the stall at 2 s of polling.
+        let mut now = 5_100;
+        let mut events = Vec::new();
+        while events.is_empty() && now < 10_000 {
+            now += 100;
+            events.extend(t.poll(now, true, 100));
+        }
+        assert_eq!(events, vec![Stall { stalled: true }]);
+        assert!(now >= 5_100 + 1_700, "stalled too early at {now}");
+    }
+
+    /// FR NVN6M8, AC .2: records end the stall once; a quiet run reports none.
+    #[test]
+    fn nvn6m8_records_end_a_stall_once() {
+        let mut t = StallTracker::default();
+        let mut now = 0;
+        let mut events: Vec<Stall> = Vec::new();
+        while now <= 2_200 {
+            events.extend(t.poll(now, true, 100));
+            now += 100;
+        }
+        events.extend(t.poll(now, false, 100));
+        events.extend(t.poll(now + 100, false, 100));
+        assert_eq!(
+            events,
+            vec![Stall { stalled: true }, Stall { stalled: false }]
+        );
+    }
 
     fn control() -> (WorkerControl, mpsc::Receiver<Command>) {
         let (commands, inbox) = mpsc::channel();

@@ -46,6 +46,13 @@ being updated stays locked. So does any meter the app cannot tell apart from
 it, which is one with the same serial number, one with none, or one not in
 application mode.
 
+## Share a meter with the CLI
+
+A CLI that polls the same meter over CDC (for example `powerz watch
+--transport cdc`) pauses the app's queue stream while it runs. The desktop
+app and the web edition show a notice while it lasts, and the stream goes on
+when the CLI stops.
+
 ## Try it without hardware
 
 The demo devices (`load-5v-1a`, `pd-9v-2a`, …) can be added like real meters,

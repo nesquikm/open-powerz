@@ -500,6 +500,7 @@ class Sessions {
       },
       onTemp: (t) => session.onTemp(t),
       onError: (e) => session.onError(e),
+      onStall: (stalled) => session.onStall(stalled),
     });
     this.list.push(session);
     session.announce();
