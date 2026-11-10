@@ -51,6 +51,7 @@ describe("README desktop screenshot (AC-SPYPSD.1)", () => {
     expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
     const { width, height } = pngSize(png);
     expect(width).toBeGreaterThanOrEqual(1200);
+    expect(width).toBeLessThanOrEqual(1800); // AC-PFYFR6.2
     expect(height).toBeGreaterThanOrEqual(600);
     expect(statSync(path).size).toBeLessThanOrEqual(400 * 1024);
   });
