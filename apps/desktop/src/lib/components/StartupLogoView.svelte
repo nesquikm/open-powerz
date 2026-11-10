@@ -208,8 +208,11 @@
         Remove
       </button>
     </DesktopOnly>
-    <button type="button" disabled={logo.busy || logo.reading} onclick={() => void logo.read()}
-      >Read</button
+    <button
+      type="button"
+      disabled={logo.busy || logo.reading || logo.readDisabledReason !== null}
+      title={logo.readDisabledReason ?? undefined}
+      onclick={() => void logo.read()}>Read</button
     >
   </div>
   {#if logo.reading && readProgressLabel !== null}
@@ -229,7 +232,8 @@
       {#if a?.status === "logo"}
         <button
           type="button"
-          disabled={logo.busy || logo.reading}
+          disabled={logo.busy || logo.reading || logo.readDisabledReason !== null}
+          title={logo.readDisabledReason ?? undefined}
           onclick={() => void logo.read(true)}>Show stored logo</button
         >
       {/if}

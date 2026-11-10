@@ -321,3 +321,108 @@ describe("the demo meter end to end (AC-JFRPME.1, AC-JFRPME.2, AC-JFRPME.4)", ()
     await settle(backend.disconnect());
   });
 });
+
+/**
+ * FR Z99166 AC-Z99166.2 (regression): a batch whose session times run more than the
+ * snapshot age (2 s) past the temperature reading carries that reading on every row of
+ * both exports, as the live batch judges it on arrival; a batch that arrives with no
+ * current reading keeps TEMP empty.
+ */
+describe("a backlog batch past the snapshot age keeps its TEMP (AC-Z99166.2)", () => {
+  /** A hand-driven session that also keeps the live batches' `temp_c`, one per row. */
+  function liveSession(): { session: WebSession; downloads: Download[]; live: (number | null)[] } {
+    const sink = downloadSink();
+    const live: (number | null)[] = [];
+    const session = new WebSession({
+      deviceId: "test",
+      sessionId: 1,
+      onEvent: (e: BackendEvent) => {
+        if (e.type === "batch") live.push(...e.data.samples.map(() => e.data.temp_c ?? null));
+      },
+      onEnd: () => {},
+      wasm: w,
+      download: sink.download,
+      sqlJs: loadSqlJs,
+    });
+    session.driver = { mode: "queue", rateCode: 2, hid: false } as unknown as MeterDriver;
+    return { session, downloads: sink.downloads, live };
+  }
+
+  const span = (from: number, to: number, step: number): MeterSample[] => {
+    const out: MeterSample[] = [];
+    for (let ms = from; ms <= to; ms += step) out.push(sample(ms));
+    return out;
+  };
+
+  it("z99166: a 3 s backlog read in one batch carries the reading on every row", async () => {
+    const { session, downloads, live } = liveSession();
+    at(0);
+    session.onTemp(30);
+    // Read after a pause: 3 s of samples at once, session times 0..3000.
+    session.onBatch(span(0, 3_000, 100));
+    expect(session.history.timeAt(session.history.length - 1)).toBe(3_000);
+    const expected = Array.from({ length: 31 }, () => 30);
+    expect(live).toEqual(expected);
+
+    await session.exportSession("export.csv", () => {});
+    await session.exportSessionDb("export.db", () => {});
+    expect(csvTemps(await csvRows(downloads[0]))).toEqual(expected);
+    expect(await dbTemps(downloads[1])).toEqual(expected);
+  });
+
+  it("z99166: after a re-based session clock the backlog carries the reading on every row", async () => {
+    const { session, downloads, live } = liveSession();
+    at(0);
+    session.onTemp(29);
+    session.onBatch([sample(0)]);
+    // A reconnect or a logo write: the meter clock jumps, the session re-bases at the
+    // wall clock (500), and the batch runs 3 s on from there (session 500..3500).
+    at(500);
+    session.onTemp(31);
+    session.onBatch(span(100_000, 103_000, 250));
+    expect(session.history.timeAt(session.history.length - 1)).toBe(3_500);
+    const expected = [29, ...Array.from({ length: 13 }, () => 31)];
+    expect(live).toEqual(expected);
+
+    await session.exportSession("export.csv", () => {});
+    await session.exportSessionDb("export.db", () => {});
+    const csv = csvTemps(await csvRows(downloads[0]));
+    expect(csv).toEqual(expected);
+    expect(csv).toEqual(live);
+    expect(await dbTemps(downloads[1])).toEqual(expected);
+  });
+
+  it("z99166: a batch that arrives with no current reading keeps TEMP empty", async () => {
+    const { session, downloads, live } = liveSession();
+    at(500);
+    session.onTemp(31);
+    session.onBatch(span(100_000, 103_000, 250));
+    // 5.5 s after the reading, nothing newer: the next samples have no temperature.
+    at(6_000);
+    session.onBatch([sample(103_250), sample(103_500)]);
+    expect(live.slice(-2)).toEqual([null, null]);
+
+    await session.exportSession("export.csv", () => {});
+    await session.exportSessionDb("export.db", () => {});
+    const expected = [...Array.from({ length: 13 }, () => 31), null, null];
+    expect(live).toEqual(expected);
+    expect(csvTemps(await csvRows(downloads[0]))).toEqual(expected);
+    expect(await dbTemps(downloads[1])).toEqual(expected);
+  });
+
+  it("z99166: a stale reading never applies to a backlog that arrives after it expired", async () => {
+    const { session, downloads, live } = liveSession();
+    at(0);
+    session.onTemp(30);
+    session.onBatch([sample(0)]);
+    // 2.5 s later a 3 s backlog arrives; the 30 °C reading is no longer current.
+    at(2_500);
+    session.onBatch(span(100, 3_100, 500));
+    const expected = [30, null, null, null, null, null, null, null];
+    expect(live).toEqual(expected);
+    await session.exportSession("export.csv", () => {});
+    await session.exportSessionDb("export.db", () => {});
+    expect(csvTemps(await csvRows(downloads[0]))).toEqual(expected);
+    expect(await dbTemps(downloads[1])).toEqual(expected);
+  });
+});

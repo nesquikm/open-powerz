@@ -229,20 +229,25 @@ export class WebSession {
       this.stats.push(s);
       out.push(s);
     }
-    if (this.tempC !== null) {
+    // FR Z99166: judge the reading once, on arrival, as the live batch and the record
+    // CSV do: a fresh one covers the whole batch, a stale one none of it.
+    const tempC = Date.now() - this.tempAt <= TEMP_MAX_AGE_MS ? this.tempC : null;
+    if (tempC !== null) {
       const readMs = this.tempAt - this.startedAt;
-      this.temps.record(first, this.tempC, readMs, readMs + TEMP_MAX_AGE_MS);
+      const lastMs = (out[out.length - 1] as Sample).t_ms;
+      this.temps.record(first, tempC, readMs, Math.max(readMs + TEMP_MAX_AGE_MS, lastMs));
+    } else if (first > 0) {
+      this.temps.expire(this.history.timeAt(first - 1));
     }
-    const fresh = this.tempC !== null && Date.now() - this.tempAt <= TEMP_MAX_AGE_MS;
     const rec = this.recording;
     if (rec && !rec.paused) {
       const now = Date.now();
-      for (const s of out) rec.csv.push(s, now, fresh ? this.tempC : null);
+      for (const s of out) rec.csv.push(s, now, tempC);
     }
     if (rec) this.recordingProgress(rec);
     this.onEvent({
       type: "batch",
-      data: { samples: out, temp_c: fresh ? this.tempC : null, stats: this.stats.snapshot() },
+      data: { samples: out, temp_c: tempC, stats: this.stats.snapshot() },
     });
   }
 

@@ -32,6 +32,12 @@ export class TempLog {
     return cur && cur[0] <= index && tMs <= cur[2] ? cur[1] : null;
   }
 
+  /** The current reading applies to no session time after `untilMs`. */
+  expire(untilMs: number): void {
+    const last = this.entries[this.entries.length - 1];
+    if (last) last[2] = Math.min(last[2], untilMs);
+  }
+
   /** Drop every entry. */
   clear(): void {
     this.entries = [];

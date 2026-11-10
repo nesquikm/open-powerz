@@ -178,8 +178,9 @@ export class StartupLogoState {
   /** Why neither write is allowed on this meter yet: the model and the settings must be
    * read, and the logo is a KM003C feature. */
   get #meterDisabledReason(): string | null {
+    const hid = this.readDisabledReason;
+    if (hid !== null) return hid;
     const meter = this.#meter();
-    if (meter.basicReadingsOnly === true) return hidOnlyBasicText("The startup logo");
     if (meter.model === null) return "The meter's model has not been read yet.";
     // HID sessions report the USB product name ("POWER-Z KM003C"); match the model token.
     if (!meter.model.split(/\s+/).includes("KM003C"))
@@ -193,6 +194,11 @@ export class StartupLogoState {
     if (meter !== null) return meter;
     if (this.preview === null) return "Choose an image first.";
     return null;
+  }
+  /** Why Read and Show stored logo are off: over HID the logo area cannot be read
+   * (FR Z99166), so the read is never sent. */
+  get readDisabledReason(): string | null {
+    return this.#meter().basicReadingsOnly === true ? hidOnlyBasicText("The startup logo") : null;
   }
   get removeDisabledReason(): string | null {
     if (this.busy) return "A logo write is running.";
@@ -418,7 +424,7 @@ export class StartupLogoState {
   /** Reads what the meter's logo area holds now; `full` also fetches the stored logo's
    * pixels so the view can show it. */
   async read(full = false): Promise<void> {
-    if (this.busy || this.reading) return;
+    if (this.busy || this.reading || this.readDisabledReason !== null) return;
     this.reading = true;
     this.readProgress = null;
     this.error = null;

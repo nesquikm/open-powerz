@@ -882,7 +882,10 @@
     }
   }
 
+  /** A desktop open dialog is up or its file loading: a second click would open a second
+   * dialog. In the browser a new click supersedes a pick that never answered (FR Z99166). */
   let pdOpening = false;
+  const pdPickSupersedes = import.meta.env.VITE_BACKEND === "web";
   /** Why the last opened PD capture file stopped loading early, while its notice shows. */
   let pdOpenDamage = $state<string | null>(null);
   /** The last vendor PD log import (FR TGE83E, AC .6), while its notice shows. */
@@ -907,7 +910,7 @@
     imported: boolean,
   ): Promise<void> {
     // A running capture's rows would arrive unseen behind the opened file.
-    if (pdOpening || pd.capturing) return;
+    if (pd.capturing || (pdOpening && !pdPickSupersedes)) return;
     pdOpening = true;
     pdSaveError = null;
     pdOpenDamage = null;

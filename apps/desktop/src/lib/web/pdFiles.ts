@@ -34,9 +34,13 @@ interface FileInputLike {
 }
 
 /** The picker for `accept` over `doc`: an `<input type="file">` clicked synchronously,
- * inside the user's click, resolving to the chosen file or `null` when dismissed. */
+ * inside the user's click, resolving to the chosen file or `null` when dismissed. A new
+ * pick supersedes one still pending (a picker the browser never answered): the earlier
+ * pick resolves as dismissed and its input's late answer changes nothing. */
 export function browserPickPdFile(accept: string, doc?: Document): PickPdFile {
+  let supersede: (() => void) | null = null;
   return () => {
+    supersede?.();
     const input = (doc ?? document).createElement("input") as unknown as FileInputLike;
     input.type = "file";
     input.accept = accept;
@@ -44,6 +48,7 @@ export function browserPickPdFile(accept: string, doc?: Document): PickPdFile {
       const done = () => {
         input.removeEventListener("change", onChange);
         input.removeEventListener("cancel", onCancel);
+        if (supersede === onCancel) supersede = null;
       };
       const onChange = () => {
         done();
@@ -55,6 +60,7 @@ export function browserPickPdFile(accept: string, doc?: Document): PickPdFile {
       };
       input.addEventListener("change", onChange);
       input.addEventListener("cancel", onCancel);
+      supersede = onCancel;
     });
     input.click();
     return chosen;

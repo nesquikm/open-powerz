@@ -190,6 +190,112 @@ describe("the pickers (AC-EAKFEC.1)", () => {
     const row = first?.rows[1] as PdRow;
     expect(await b.pdDetails(row.index, true)).toEqual(EXPECTED.pdcap.details[1]);
   });
+
+  /** A document handing out `inputs` in turn, one per picker call. */
+  const docOf = (inputs: FakeInput[]) => {
+    let k = 0;
+    return {
+      createElement: () => {
+        const next = inputs[k++];
+        if (!next) throw new Error("more file inputs than expected");
+        return next;
+      },
+    } as unknown as Document;
+  };
+
+  /** Whether `p` has settled after the pending microtasks ran. */
+  const settledNow = async (p: Promise<unknown>): Promise<boolean> => {
+    let done = false;
+    void p.then(
+      () => (done = true),
+      () => (done = true),
+    );
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    return done;
+  };
+
+  // FR Z99166 AC-Z99166.3 (regression): a new click while an earlier picker never
+  // answered (no change, no cancel) opens the picker again; the earlier pick resolves
+  // as dismissed and changes nothing.
+  it("z99166: a new Open capture pick while one is pending opens a new picker; the first answers null", async () => {
+    const first = new FakeInput();
+    const second = new FakeInput();
+    const pick = browserPickPdFile(PDCAP_ACCEPT, docOf([first, second]));
+    const p1 = pick();
+    expect(first.clicks).toBe(1);
+    expect(await settledNow(p1)).toBe(false);
+
+    const p2 = pick();
+    expect(second.clicks).toBe(1);
+    expect(second.accept).toBe(".pdcap");
+    expect(await settledNow(p1), "the first pick resolves once a new one starts").toBe(true);
+    expect(await p1).toBeNull();
+
+    const file = picked("b.pdcap", new Uint8Array());
+    second.files = [file];
+    second.fire("change");
+    expect(await p2).toBe(file);
+  });
+
+  it("z99166: a new Import vendor log pick supersedes a pending one; a late answer to the first changes nothing", async () => {
+    const first = new FakeInput();
+    const second = new FakeInput();
+    const pick = browserPickPdFile(VENDOR_PD_ACCEPT, docOf([first, second]));
+    const p1 = pick();
+    const p2 = pick();
+    expect(second.clicks).toBe(1);
+    expect(await settledNow(p1), "the first pick resolves once a new one starts").toBe(true);
+    expect(await p1).toBeNull();
+
+    // The first input answering late resolves nothing more and leaves the second pending.
+    first.files = [picked("late.sqlite", new Uint8Array())];
+    first.fire("change");
+    expect(await settledNow(p2)).toBe(false);
+
+    const file = picked("b.sqlite", new Uint8Array());
+    second.files = [file];
+    second.fire("change");
+    expect(await p2).toBe(file);
+  });
+
+  it("z99166: through the backend, a superseded Open capture answers null and keeps the opened capture", async () => {
+    const inputs = [new FakeInput(), new FakeInput(), new FakeInput()];
+    const b = await createWebBackend({
+      wasm: w,
+      usb: null,
+      hid: null,
+      serial: null,
+      pickDirectory: null,
+      crossOriginIsolated: false,
+      pageEvents: null,
+      sqlJs: loadSqlJs,
+      download: () => {},
+      pickPdCapture: browserPickPdFile(PDCAP_ACCEPT, docOf(inputs)),
+      pickVendorPdLog: async () => null,
+    } as unknown as Options);
+
+    const opening = b.pdOpen();
+    await Promise.resolve();
+    (inputs[0] as FakeInput).files = [picked("pd-capture.pdcap", fixture("pd-capture.pdcap"))];
+    (inputs[0] as FakeInput).fire("change");
+    const opened = await opening;
+    expect(opened?.rows.length).toBe(EXPECTED.pdcap.opened.rows.length);
+
+    // A picker that never answers, then a new click.
+    const stuck = b.pdOpen();
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect((inputs[1] as FakeInput).clicks).toBe(1);
+    const again = b.pdOpen();
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect((inputs[2] as FakeInput).clicks).toBe(1);
+    expect(await settledNow(stuck), "the stuck pick resolves once a new one starts").toBe(true);
+    expect(await stuck).toBeNull();
+
+    (inputs[2] as FakeInput).fire("cancel");
+    expect(await again).toBeNull();
+    const row = opened?.rows[1] as PdRow;
+    expect(await b.pdDetails(row.index, true)).toEqual(EXPECTED.pdcap.details[1]);
+  });
 });
 
 describe("the desktop's view of the fixtures (AC-EAKFEC.2, .3)", () => {

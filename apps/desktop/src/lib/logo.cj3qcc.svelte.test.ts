@@ -142,9 +142,11 @@ describe("the model check matches the model token (AC-CJ3QCC.2)", () => {
 
 describe("a new connection clears the tab (AC-CJ3QCC.3)", () => {
   it("cj3qcc: the previous error and logo read are gone after a new connection", async () => {
-    const h = harness({ model: "POWER-Z KM003C", settings: SETTINGS, basicReadingsOnly: true });
+    // Read over WebUSB (FR Z99166: over HID Read sends nothing), then reconnect over HID.
+    const h = harness({ model: "POWER-Z KM003C", settings: SETTINGS, basicReadingsOnly: false });
     await h.state.read();
     expect(h.state.area).toEqual(STORED);
+    h.current.basicReadingsOnly = true;
     h.deps.preview.mockRejectedValueOnce(REFUSED);
     await h.state.choose();
     expect(h.state.error).toEqual(REFUSED);
