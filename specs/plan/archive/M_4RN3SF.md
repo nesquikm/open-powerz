@@ -1,8 +1,8 @@
 ---
 milestone: M_4RN3SF
 id: fr_01M73H7QMYN42VHAZ3W14RN3SF
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T20:51:44Z
 kickoff_branch: fix/v0.13.1
 frozen_at: null
 migration: none
@@ -28,8 +28,8 @@ codename: Home Wave
 
 | FR | Title | Tracker |
 |---|---|---|
-| [NWGY72](../frs/NWGY72.md) | After a meter replug, Connect silently uses the demo device (bug) | n/a |
-| [BZJGJ5](../frs/BZJGJ5.md) | The built-in startup logos are cut by their frame (bug) | n/a |
+| [NWGY72](../../frs/archive/NWGY72.md) | After a meter replug, Connect silently uses the demo device (bug) | n/a |
+| [BZJGJ5](../../frs/archive/BZJGJ5.md) | The built-in startup logos are cut by their frame (bug) | n/a |
 
 Build order: the table's order.
 

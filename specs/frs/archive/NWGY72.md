@@ -1,8 +1,8 @@
 ---
 title: After a meter replug, Connect silently uses the demo device
 milestone: M_4RN3SF
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T20:51:44Z
 id: fr_01M73H7QN90JR1NJ6TQHNWGY72
 created_at: 2026-11-10T20:09:42.000Z
 changelog_category: Fixed
@@ -55,3 +55,11 @@ Vitest: session replug sequences (desktop and web ids), labels, the target helpe
 ## Notes
 
 Evidence: the HIL13 app log at 19:54:45Z shows "connected demo:idle" while the menu read KM003C. Related: the earlier replug FRs R13Y5V and AH2AEN.
+
+## Implementation notes
+
+- A meter the app picked on its own and never connected still falls back to a demo when it vanishes; the demo is labelled as such and the meter is picked again on return — accepted, the FR repro (connect, disconnect, replug) is covered.
+- Direct selectedId writes in App and the firmware follow bypass select(), so the chosen-meter memory can go stale after a firmware follow that changes the meter's id — advisory, narrow.
+- A vanished meter whose session ended with an error stays listed as an ordinary entry (AC-R13Y5V.2), not as absent — intended by the earlier FR.
+- Some AC-NWGY72.3/.5 tests read component source, not behaviour — kept, brittle under refactor.
+- AC-AXHK2Q.4 is superseded for demo tiles; its archived FR is left as history.

@@ -1,8 +1,8 @@
 ---
 title: The built-in startup logos are cut by their frame
 milestone: M_4RN3SF
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T20:51:44Z
 id: fr_01M73H7QNM9QEK33VK1MBZJGJ5
 created_at: 2026-11-10T20:09:42.000Z
 changelog_category: Fixed
@@ -53,3 +53,8 @@ A cargo test in the protocol crate decodes both embedded PNGs and checks the bor
 ## Notes
 
 Evidence: HIL13 photo 6707. The logo area holds 120,064 bytes, so the size stays 200 by 200.
+
+## Implementation notes
+
+- The AC-BZJGJ5.4 preview half was already met by the unchanged render script; the test pins it.
+- The P747X7 edge-to-edge tests were rewritten as even-margin and centred-scene checks; its archived FR is left as history.
