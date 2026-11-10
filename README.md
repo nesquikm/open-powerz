@@ -158,7 +158,7 @@ See [Use the web edition](docs/how-to/web-edition.md) for the details.
 
 ## Coming next
 
-- Polish across the desktop app and the browser edition
+- Polish across the desktop app and the web edition
 
 ## Layout
 

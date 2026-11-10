@@ -1,6 +1,6 @@
 /**
  * FR 60QB2S: the text of the (i) popover beside the web device menu, which explains how
- * the browser edition connects to the meter.
+ * the web edition connects to the meter.
  */
 
 import type { ConnectedInfo, DeviceListing } from "../backend";
