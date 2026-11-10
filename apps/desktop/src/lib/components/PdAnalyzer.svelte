@@ -167,7 +167,7 @@
   }
 
   function onWheel(e: WheelEvent): void {
-    follow.wheeled(e.deltaY);
+    follow.wheeled(e.deltaY, e.currentTarget as HTMLElement);
     following = follow.following;
   }
 

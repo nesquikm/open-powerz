@@ -269,3 +269,38 @@ describe("rows are numbered from the last clear (FR TGE83E, AC .2)", () => {
     expect(rowLabel(caps)).toMatch(/^Row 42,/);
   });
 });
+
+describe("FollowState.wheeled: hardening (FR 3B70S5, Stage C)", () => {
+  const fits = { scrollTop: 0, clientHeight: 400, scrollHeight: 300 };
+  const bottom = { scrollTop: 600, clientHeight: 400, scrollHeight: 1000 };
+
+  it("a wheel up over a table that cannot scroll keeps following", () => {
+    const f = new FollowState();
+    f.scrolled(fits);
+    f.wheeled(-100, fits);
+    expect(f.following).toBe(true);
+  });
+
+  it("a wheel down at the bottom after a wheel-up pause resumes following", () => {
+    const f = new FollowState();
+    f.scrolled(bottom);
+    f.wheeled(-100, bottom);
+    expect(f.following).toBe(false);
+    // The up scroll never moved the view; the wheel down at the bottom fires no scroll.
+    f.wheeled(100, bottom);
+    expect(f.following).toBe(true);
+  });
+
+  it("a wheel down away from the bottom keeps a wheel-up pause", () => {
+    const f = new FollowState();
+    f.scrolled(bottom);
+    f.wheeled(-100, bottom);
+    f.wheeled(100, { ...bottom, scrollTop: 200 });
+    expect(f.following).toBe(false);
+  });
+
+  it("the grid passes its own element to follow.wheeled", () => {
+    const src = readFileSync(new URL("./components/PdAnalyzer.svelte", import.meta.url), "utf8");
+    expect(src).toMatch(/follow\.wheeled\(\s*e\.deltaY\s*,\s*e\.currentTarget/);
+  });
+});
