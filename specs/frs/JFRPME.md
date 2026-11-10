@@ -51,3 +51,7 @@ Vitest for the temperature log (lookup, expiry, merge, clear) and for both sessi
 ## Notes
 
 Found while fixing AHTZW2 (2026-11-09).
+
+## Hardware evidence (parity HIL 3 and 4)
+
+- [x] AC-JFRPME.1 and .2: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P14) the record CSV had TEMP on every row and the session .db TEMP 30.20–30.80 °C; the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P14) only the first 20 rows (the first 0.38 s after the reconnect) had no TEMP, in both files.

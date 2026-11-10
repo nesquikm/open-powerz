@@ -53,3 +53,9 @@ Vitest over a fake serial port that also carries another program's traffic.
 ## Notes
 
 Found by the web parity HIL (2026-11-09, step P6).
+
+## Hardware evidence (parity HIL 3 and 4)
+
+- [x] AC-CJ3QC9.1 and .2: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P6) and the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P6) with `powerz --transport cdc watch --source cdc` on the port, Apply showed the in-use message in 27–250 ms and nothing was written (Refresh unchanged).
+- [x] AC-CJ3QC9.3: the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P6) the form stayed open after the refusal; once the CLI was gone the next Apply saved in ≈0.3 s.
+- [x] AC-CJ3QC9.4: the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P5) 9 of 9 Applies with nobody else on the port succeeded.

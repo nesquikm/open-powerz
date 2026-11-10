@@ -55,3 +55,10 @@ Vitest on the logo panel state, the web logo read, the rate decision and the rec
 ## Notes
 
 Found by the web parity HIL (2026-11-09, steps P3, P8 and P12). The detect wording difference (P9) is not a wording bug: both use the same text, the meter answered differently in the two runs.
+
+## Hardware evidence (parity HIL 3)
+
+- [x] AC-CJ3QCD.1: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P8) the "holds" line and stored preview cleared after the upload and the remove.
+- [x] AC-CJ3QCD.2: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P8a) showed "Reading chunk N of 470" (8→465, 24 s).
+- [x] AC-CJ3QCD.3: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P12) after the refused 1000 SPS the picker showed 50 SPS again.
+- [x] AC-CJ3QCD.4: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P3) the opened A01.d showed 0.037251 Ah and 0.188148 Wh, as its list row.

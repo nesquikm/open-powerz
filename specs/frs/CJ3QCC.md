@@ -51,3 +51,9 @@ Vitest on the logo panel state for HID, prefixed model names and a reconnect.
 ## Notes
 
 Found by the web parity HIL (2026-11-09, step P4).
+
+## Hardware evidence (parity HIL 3 and 4)
+
+- [x] AC-CJ3QCC.1: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P4) over HID the Startup logo tab gave the HID note, not the model line.
+- [x] AC-CJ3QCC.2, the KM003C half: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P8) the "POWER-Z KM003C" meter counted as a KM003C (upload and remove ran).
+- [x] AC-CJ3QCC.3: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P4) and the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P4) after Disconnect → WebUSB the HID note was gone.

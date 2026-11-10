@@ -58,3 +58,9 @@ Vitest: a fake serial port that behaves like the meter (stream frames between an
 
 Found by the web parity HIL 3 (2026-11-10, step P5, BUG-8). The re-check on the meter is a separate HIL step.
 CLI note from the same HIL (no change here): `powerz --transport cdc watch` with the default poll source exits with `unexpected reply to GET_DATA: Unknown(2)` while the browser streams over WebUSB, because its GET_DATA on CDC meets those stream frames; the passive `--source cdc` holds the port cleanly, and the HIL runbook's P6 now uses it.
+
+## Hardware evidence (parity HIL 4)
+
+- [x] AC-X3H3JY.1: the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P5) 9 of 9 back-to-back Applies on the granted port succeeded while the stream ran at 50 SPS (BUG-8 gone).
+- [x] AC-X3H3JY.2, the stream half: the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P5) no false in-use message from the stream frames on the port.
+- [x] AC-X3H3JY.4, the other-program half: the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P6) a port held by `powerz … --source cdc` still gave the in-use message at once (27 and 53 ms).

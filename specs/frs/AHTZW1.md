@@ -53,3 +53,8 @@ Engine tests over a scripted port that answers the second entry only; Vitest for
 ## Notes
 
 Found by the web parity HIL re-run (2026-11-09, step P10). The HIL re-run reads the console log to confirm which wait timed out.
+
+## Hardware evidence (parity HIL 3)
+
+- [x] AC-AHTZW1.1, the device half: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P10) the first request after Detect went out (`pd req=2`, 8.69 V); the console shows `entry pd` twice before it.
+- [x] AC-AHTZW1.4: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P16) the page console got every `[trigger]` line of the session (P16-trigger-console.txt).

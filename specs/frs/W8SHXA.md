@@ -42,3 +42,9 @@ Wasm parity tests for the planner and frame; Vitest over the demo meter and fake
 ## Notes
 
 First run on the real meter needs the user's OK in the HIL tester's tab.
+
+## Hardware evidence (parity HIL 1)
+
+- [x] AC-W8SHXA.1: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P7) typing "A01.d" kept Delete disabled for A02.d; "A02.d" enabled it.
+- [x] AC-W8SHXA.2: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P7) wrote the backup `records-1794243513406/02_A02_d.csv` (15 points + header) into the folder the user picked, before the delete (P7-folder-listing.txt).
+- [x] AC-W8SHXA.4 and .5: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P7) answered "Deleted. Backup: …" and the list showed only A01.d.

@@ -52,3 +52,9 @@ Rust tests for the shared table and row builders; Vitest over the demo meter for
 ## Notes
 
 Found by the web parity HIL re-run (2026-11-09, step P14).
+
+## Hardware evidence (parity HIL 3 and 4)
+
+- [x] AC-AHTZW2.1: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P14) Export .db downloaded `powerz-20261110-091836.db`; the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P14) two more.
+- [x] AC-AHTZW2.2: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P14) the file held `powerz_11_10_09_13_11` (12,623 rows, the desktop's columns) and `_param` (start time, 50 SPS).
+- [x] AC-AHTZW2.4, the browser half: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P15) Open recording read the same .db back (12,623 rows, 0:05:26, matching sqlite). The desktop app did not open it on hardware.

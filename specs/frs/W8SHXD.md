@@ -52,3 +52,8 @@ Vitest on the rate-change decision for the HID, recording and normal cases.
 ## Notes
 
 Found during the web parity brief (2026-11-09).
+
+## Hardware evidence (parity HIL 1)
+
+- [x] AC-W8SHXD.1: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P4) over HID the keys 1–4 left the rate at 50 and sent no change; the picker stayed disabled ("Rate locked").
+- [x] AC-W8SHXD.2, the device half: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P4) each key showed an info toast ("Rate change is not available over HID…"); the exact wording match is checked by the recording suite.

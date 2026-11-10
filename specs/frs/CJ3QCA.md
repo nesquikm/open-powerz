@@ -50,3 +50,7 @@ Vitest over a fake serial port that replays stale replies.
 ## Notes
 
 Found by the web parity HIL (2026-11-09, step P5).
+
+## Hardware evidence (parity HIL 4)
+
+- [x] AC-CJ3QCA.1, the device half: the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P5) 9 logged Applies (plus 10 earlier) at 1.5 s and 5 s gaps showed no lost-reply failure. Stale-id skipping itself is covered by the driver suite.

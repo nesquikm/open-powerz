@@ -41,3 +41,10 @@ Committed synthetic fixtures (`pd-capture.pdcap`, `pd-vendor.sqlite`) with one e
 ## Notes
 
 Found by the docs audit (2026-11-10). Same parser as the desktop.
+
+## Hardware evidence (parity HIL 3 and 4)
+
+- [x] AC-EAKFEC.1, the .pdcap half: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P17) Open capture opened a picker and loaded the saved capture; the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P17) a real click opened it and a cancel changed nothing.
+- [x] AC-EAKFEC.5, the record-details half: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P17) after a fresh page load the reopened capture's row #174 details matched those before the save, byte for byte.
+- [x] AC-EAKFEC.6: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P17) 211 records saved as `powerz-pd-20261110-094453.pdcap` reopened as rows #1–#211.
+- [ ] AC-EAKFEC.3 (and the .sqlite halves of .1 and .4): not verified on hardware. No vendor PD .sqlite was at hand in the parity HIL 3, so Import vendor log was skipped; the synthetic fixture covers it in Rust and Vitest. Left open until a vendor log is imported on the meter's PC.

@@ -43,3 +43,11 @@ Wasm parity tests for the request, verifier and framing; Vitest over a fake seri
 ## Notes
 
 First run on the real meter needs the user's OK in the HIL tester's tab. The demo meter takes the change over its own CDC twin, so the page works without hardware.
+
+## Hardware evidence (parity HIL 1, 3 and 4)
+
+- [x] AC-W8SHX9.1 and .3: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P5) changed brightness 50→60→50→55→50 with a read-back check each time; the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P5) made 9 of 9 logged Applies succeed in 308–313 ms. A failed read-back was not forced on hardware.
+- [x] AC-W8SHX9.2, the device half: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P5) and the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P5) re-read SETTINGS after the writes: every other field and the calibration raw values (606×5, 996668×5, 80) unchanged.
+- [x] AC-W8SHX9.4: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P5) opened the serial picker on the first change and reused the granted port afterwards; P6 showed "No serial port was chosen, so nothing was sent." on a dismissed picker; the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P6) and the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P6) showed the in-use message with `powerz … watch --source cdc` on the port, and nothing was written.
+- [x] AC-W8SHX9.5: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P5) and the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P5) kept the queue stream at 50 SPS after each change.
+- [x] AC-W8SHX9.7, the HID half: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P4) over HID the settings panel refused with the not-available-over-HID wording.

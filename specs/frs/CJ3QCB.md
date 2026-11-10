@@ -51,3 +51,7 @@ Vitest over the fake meter: the sign-in request goes out before each list.
 ## Notes
 
 Found by the web parity HIL (2026-11-09, step P7). The meter's behaviour is inferred until the HIL re-run.
+
+## Hardware evidence (parity HIL 3)
+
+- [x] AC-CJ3QCB.1: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P7) a record made on the meter after connect (A02.d, 12 pts, 0:00:11) showed on Refresh in the same session.

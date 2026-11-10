@@ -44,3 +44,12 @@ Wasm parity tests for preview, frames and guard refusals; Vitest over the demo m
 ## Notes
 
 Writes the meter's flash: each staged write on the real meter needs the user's OK in the HIL tester's tab.
+
+## Hardware evidence (parity HIL 1, 3 and 4)
+
+- [x] AC-W8SHXB.1, the device half: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P8-choose) opened the image picker; a 1280×800 PNG previewed as 240×150 opaque / 200×125 transparent with chunk counts. Not compared side by side with the desktop app on hardware.
+- [x] AC-W8SHXB.3: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P8b) uploaded the built-in Mascot (469 chunks) and read it back ("Logo uploaded: read-back verified."); P8c removed it the same way; the user saw both on the meter after a replug. the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P8) repeated upload, remove and restore.
+- [x] AC-W8SHXB.4: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P8b) held rate, mode, device, Disconnect, Record and Export during the write; the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P8) showed "Reading chunk N of 470" progress.
+- [x] AC-W8SHXB.5: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P8a), the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P8) and the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P4) read the stored logo ("holds a 200 × 200 logo (transparent)") and showed it.
+- [x] AC-W8SHXB.6: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P8c) guided the menu save and reported "The meter saved its settings. Startup screen: off."; the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P8) reported "Startup screen: 3 s.".
+- [x] AC-W8SHXB.7: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P4) and the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, P4) over HID the tab showed the HID note once, with Upload, Remove and Read disabled.

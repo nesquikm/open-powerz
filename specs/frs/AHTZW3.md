@@ -39,3 +39,10 @@ Rust tests for the shared .db row rules; Vitest for the web open over CSV and .d
 ## Notes
 
 Asked for after the web parity HIL re-run (2026-11-09). Same parser as the desktop.
+
+## Hardware evidence (parity HIL 3 and 4)
+
+- [x] AC-AHTZW3.1: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P15) Open recording opened a picker for CSV and .db; dismissing it left the open file unchanged.
+- [x] AC-AHTZW3.2, our-CSV half: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P15) a record CSV opened as 1,009 rows and readme-staircase.csv as 4,747 rows with VBUS min/max/avg 0.486/20.528/9.746 V, equal to awk on the file. No vendor CSV was at hand.
+- [x] AC-AHTZW3.4: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P15) and the parity HIL 4 (5198343, 2026-11-10, qa-runs/WEB.parity-hil4-20261110-1037, smoke) drew the staircase and the record over their time ranges.
+- [x] AC-AHTZW3.5, the refusal half: the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P15) a non-recording CSV gave "This file's header is not a recorder header.", the desktop's string. Cancel during a long open was not run (known: AHTZW3 Cancel can't interrupt a big parse).

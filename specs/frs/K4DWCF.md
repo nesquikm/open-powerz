@@ -51,3 +51,7 @@ Vitest: the RPC client and the web trigger backend over a fake worker whose post
 ## Notes
 
 Found by the web parity HIL (2026-11-09, step P10).
+
+## Hardware evidence (parity HIL 2)
+
+- [x] AC-K4DWCF.1: the parity HIL 2 (1b00cf3, 2026-11-09, qa-runs/WEB.parity-hil2-20261109-2136, P10) the confirmed 9 V request reached the worker: `pd req=2`, 8.67 V delivered, no "Something went wrong".

@@ -44,3 +44,12 @@ Rust parity tests in the wasm crate against the native session over the mock tra
 ## Notes
 
 Read-only; no meter writes. The demo meter answers these reads so the page is useful without hardware.
+
+## Hardware evidence (parity HIL 1 and 3)
+
+- [x] AC-W8SHX8.1: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P1) showed the settings rows over WebUSB; the user matched brightness 50%, theme blue and startup logo 3 s on the meter.
+- [x] AC-W8SHX8.2: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P2) listed A01.d (1 s, 173 pts, 0:02:52, 0.037251 Ah, 0.188148 Wh); the user confirmed count and duration on the meter. the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P7) listed the new A02.d too.
+- [x] AC-W8SHX8.3, the download half: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P3) downloaded A01.d and opened it: 173 samples over 0:00–2:52. The refusals were not exercised on hardware.
+- [x] AC-W8SHX8.4: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P3) opened the downloaded record in the record chart; the parity HIL 3 (74904fd, 2026-11-10, qa-runs/WEB.parity-hil3-20261110-0216, P3) showed the same charge and energy as the list (after CJ3QCD).
+- [x] AC-W8SHX8.6, the HID half: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P4) over HID the settings panel and records view said they are not available over HID. A failed authentication was not exercised on hardware.
+- [x] AC-W8SHX8.7: the parity HIL (a93c363, 2026-11-09, qa-runs/WEB.parity-hil-20261109-2013, P1 and P13) showed settings and records with no "Desktop app only"; the Firmware tab kept Update disabled with "Desktop app only", and no show-in-folder on the web.
