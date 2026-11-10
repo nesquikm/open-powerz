@@ -184,8 +184,8 @@ Drag across the chart to zoom in, and press **Whole file** in the zoom bar to go
 back.
 
 A label above the stats says what they cover: "Whole file", or "Shown range,
-<start> to <end>". While you are zoomed in, the **Stats scope** toggle offers
-**Whole file** and **Shown range**. Shown range follows each new zoom. Its min,
+<start> to <end>". While you are zoomed in, the **Stats** toggle offers
+**File** and **Shown range**. Shown range follows each new zoom. Its min,
 max, average, charge and energy come from the rows in the range, with charge
 and energy integrated from those rows. So a range with a paused stretch can
 differ from the CHARGE and ENERGY columns that the whole file uses. This works

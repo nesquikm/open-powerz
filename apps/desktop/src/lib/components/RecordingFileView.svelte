@@ -566,15 +566,22 @@
 
   <div class="stats-head">
     <div class="scope-toggle" role="group" aria-label="Stats scope">
-      <button type="button" aria-pressed={scope === "file"} onclick={() => (statsScope = "file")}
-        >Whole file</button
-      >
-      <button
-        type="button"
-        aria-pressed={scope === "range"}
-        disabled={shown === null}
-        onclick={() => (statsScope = "range")}>Shown range</button
-      >
+      <span class="scope-label">Stats</span>
+      <div class="segmented">
+        <button
+          type="button"
+          aria-pressed={scope === "file"}
+          class:selected={scope === "file"}
+          onclick={() => (statsScope = "file")}>File</button
+        >
+        <button
+          type="button"
+          aria-pressed={scope === "range"}
+          class:selected={scope === "range"}
+          disabled={shown === null}
+          onclick={() => (statsScope = "range")}>Shown range</button
+        >
+      </div>
     </div>
     <p class="stats-scope">{statsScopeText}</p>
   </div>
@@ -696,9 +703,33 @@
     align-items: center;
     gap: 0.5rem 1rem;
   }
+  /* One segmented control, the chosen segment filled like the header's theme switch. */
   .scope-toggle {
     display: flex;
-    gap: 0.25rem;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .scope-label {
+    font-size: 0.8rem;
+  }
+  .segmented {
+    display: inline-flex;
+    border: 1px solid var(--control-border);
+    border-radius: 0.375rem;
+    overflow: hidden;
+  }
+  .segmented button {
+    border: 0;
+    border-radius: 0;
+    background: var(--surface);
+  }
+  .segmented button + button {
+    border-left: 1px solid var(--control-border);
+  }
+  .segmented button.selected {
+    color: var(--bg);
+    background: var(--text);
+    font-weight: 600;
   }
   .stats-scope {
     margin: 0;

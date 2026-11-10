@@ -1,6 +1,8 @@
 // AC-PBDEQE.6: the explore-a-session and record-a-csv pages describe the File tab's
 // stats scope label, the Whole file / Shown range toggle, and what the live Stats panel
 // counts ("Since connect or Reset").
+// AC-EWEV1Z.4: both pages name the toggle's segments File and Shown range, never the old
+// Whole file / Shown range pair (Whole file stays the zoom bar's reset and the scope label).
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,3 +55,21 @@ describe("record-a-csv's Open a recording section (AC-PBDEQE.6)", () => {
     expect(section).toMatch(/Shown range[^]*\b(rows?)\b/i);
   });
 });
+
+describe.each(Object.entries(pages))(
+  "%s names the stats toggle's segments File and Shown range (AC-EWEV1Z.4)",
+  (_name, text) => {
+    it("names the segments File and Shown range", () => {
+      expect(text).toMatch(/\*\*File\*\* and \*\*Shown range\*\*/);
+    });
+
+    it("names them as the Stats toggle's segments", () => {
+      expect(text).toMatch(/\bStats\b[^]{0,200}\*\*File\*\* and \*\*Shown range\*\*/);
+    });
+
+    it("no longer names a Whole file segment of the toggle", () => {
+      expect(text).not.toMatch(/\*\*Whole file\*\* and \*\*Shown range\*\*/);
+      expect(text).not.toMatch(/toggle offers \*\*Whole file\*\*/i);
+    });
+  },
+);

@@ -8,6 +8,11 @@
  * AC-PBDEQE.4: regression, a zoom that leaves out a VBUS dip has the zoom's minimum.
  * AC-PBDEQE.5: the live Stats panel says "Since connect or Reset".
  *
+ * FR EWEV1Z: the toggle is one segmented control labelled "Stats", its segments File and
+ * Shown range, the chosen one filled like the header's theme switch (AC-EWEV1Z.1); no stats
+ * button is named "Whole file", only the zoom bar's reset is (AC-EWEV1Z.2); Shown range is
+ * disabled and looks it while the chart is not zoomed (AC-EWEV1Z.3).
+ *
  * Mock contract pinned here: `?recordingfile=dip` opens the usual demo file
  * (`MOCK_RECORDING_FILE`, the `load-5v-1a` reading at each ms) with VBUS held at 3 V for
  * its first 1000 ms, so the whole file's VBUS minimum is 3.000 V and any later part's is
@@ -15,7 +20,7 @@
  */
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { open, streamDemo } from "./helpers";
+import { open, streamDemo, useTheme, type Theme } from "./helpers";
 
 test.use({ viewport: { width: 1600, height: 900 } });
 
@@ -27,7 +32,7 @@ function scopeGroup(view: Locator): Locator {
   return view.getByRole("group", { name: "Stats scope" });
 }
 
-function scopeButton(view: Locator, name: "Whole file" | "Shown range"): Locator {
+function scopeButton(view: Locator, name: "File" | "Shown range"): Locator {
   return scopeGroup(view).getByRole("button", { name, exact: true });
 }
 
@@ -83,7 +88,7 @@ test("the File tab stats say Whole file, and Shown range waits for a zoom (AC-PB
 }) => {
   const view = await openDipFile(page);
   await expect(label(view)).toHaveText("Whole file");
-  await expect(scopeButton(view, "Whole file")).toHaveAttribute("aria-pressed", "true");
+  await expect(scopeButton(view, "File")).toHaveAttribute("aria-pressed", "true");
   await expectShownRangeNotOffered(view);
   await expect(vbusCell(view, "Min")).toHaveText("3.000 V");
   await expect(elapsed(view)).toHaveText("0:00:12");
@@ -106,7 +111,7 @@ test("Shown range follows each zoom and Whole file brings the file back (AC-PBDE
   await expect(scopeButton(view, "Shown range")).toBeEnabled();
   await scopeButton(view, "Shown range").click();
   await expect(scopeButton(view, "Shown range")).toHaveAttribute("aria-pressed", "true");
-  await expect(scopeButton(view, "Whole file")).toHaveAttribute("aria-pressed", "false");
+  await expect(scopeButton(view, "File")).toHaveAttribute("aria-pressed", "false");
 
   // The label names the range on screen, in the range text's own format.
   const first = (await range.textContent()) ?? "";
@@ -125,7 +130,7 @@ test("Shown range follows each zoom and Whole file brings the file back (AC-PBDE
   await expect(elapsed(view)).toHaveText("0:00:00");
 
   // Back to the whole file's stats, the zoom kept.
-  await scopeButton(view, "Whole file").click();
+  await scopeButton(view, "File").click();
   await expect(label(view)).toHaveText("Whole file");
   await expect(vbusCell(view, "Min")).toHaveText(wholeMin);
   await expect(elapsed(view)).toHaveText("0:00:12");
@@ -160,4 +165,94 @@ test("the live Stats panel says it counts since connect or Reset (AC-PBDEQE.5)",
       .locator("td")
       .nth(2),
   ).toHaveText(/^5\.0\d\d\s*V$/);
+});
+
+const THEMES: readonly Theme[] = ["light", "dark"];
+
+type Look = { color: string; background: string; opacity: string };
+
+async function look(button: Locator): Promise<Look> {
+  return button.evaluate((el) => {
+    const style = getComputedStyle(el);
+    return { color: style.color, background: style.backgroundColor, opacity: style.opacity };
+  });
+}
+
+/** The header theme switch's chosen segment: the fill the stats toggle copies. */
+function themeChoice(page: Page): Locator {
+  return page.getByRole("radiogroup", { name: "Theme" }).locator('[aria-checked="true"]');
+}
+
+for (const theme of THEMES) {
+  test(`the stats toggle is a Stats segmented control with File and Shown range, filled like the theme switch, ${theme} (AC-EWEV1Z.1)`, async ({
+    page,
+  }) => {
+    await useTheme(page, theme);
+    const view = await openDipFile(page);
+    const group = scopeGroup(view);
+
+    // A visible "Stats" label, then exactly the File and Shown range segments.
+    await expect(group.getByText("Stats", { exact: true })).toBeVisible();
+    await expect(group.getByRole("button")).toHaveText(["File", "Shown range"]);
+    await expect(scopeButton(view, "File")).toHaveAttribute("aria-pressed", "true");
+
+    // The chosen segment carries the theme switch's fill: its text colour on its background.
+    const fill = await look(themeChoice(page));
+    await expect
+      .poll(async () => (await look(scopeButton(view, "File"))).background)
+      .toBe(fill.background);
+    expect((await look(scopeButton(view, "File"))).color).toBe(fill.color);
+
+    // Zoom, choose Shown range: the fill moves, and the other segment loses it.
+    await zoom(page, view, 0.4, 0.6);
+    await scopeButton(view, "Shown range").click();
+    await expect(scopeButton(view, "Shown range")).toHaveAttribute("aria-pressed", "true");
+    await expect(scopeButton(view, "File")).toHaveAttribute("aria-pressed", "false");
+    await expect
+      .poll(async () => (await look(scopeButton(view, "Shown range"))).background)
+      .toBe(fill.background);
+    expect((await look(scopeButton(view, "Shown range"))).color).toBe(fill.color);
+    const file = await look(scopeButton(view, "File"));
+    const shown = await look(scopeButton(view, "Shown range"));
+    expect(file.background).not.toBe(shown.background);
+    expect(file.color).not.toBe(shown.color);
+  });
+}
+
+test("no stats button is named Whole file; the zoom bar's reset is the only one (AC-EWEV1Z.2)", async ({
+  page,
+}) => {
+  const view = await openDipFile(page);
+  await zoom(page, view, 0.4, 0.6);
+  await expect(view.locator(".range")).toHaveText(/ to /);
+
+  await expect(scopeGroup(view).getByRole("button", { name: "Whole file" })).toHaveCount(0);
+  const wholeFile = page.getByRole("button", { name: "Whole file", exact: true });
+  await expect(wholeFile).toHaveCount(1);
+  await expect(
+    view.locator(".zoom").getByRole("button", { name: "Whole file", exact: true }),
+  ).toHaveCount(1);
+});
+
+test("Shown range is disabled and looks it until the chart is zoomed (AC-EWEV1Z.3)", async ({
+  page,
+}) => {
+  await useTheme(page, "light");
+  const view = await openDipFile(page);
+  const shownButton = scopeButton(view, "Shown range");
+  const fileButton = scopeButton(view, "File");
+  await expect(shownButton).toHaveCount(1);
+  await expect(shownButton).toBeDisabled();
+  await expect(fileButton).toBeEnabled();
+
+  const disabled = await look(shownButton);
+  // Muted: dimmer than the enabled File segment, and not the chosen segment's fill.
+  expect(Number(disabled.opacity)).toBeLessThan(Number((await look(fileButton)).opacity));
+  expect(disabled.background).not.toBe((await look(fileButton)).background);
+
+  await zoom(page, view, 0.4, 0.6);
+  await expect(shownButton).toBeEnabled();
+  const enabled = await look(shownButton);
+  expect(Number(enabled.opacity)).toBe(1);
+  expect(disabled).not.toEqual(enabled);
 });

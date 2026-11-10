@@ -72,7 +72,7 @@ since the connect or the last **Reset stats**, whatever the chart shows.
 A recording opened in the **File** tab (see
 [Open a recording](record-a-csv.md#open-a-recording)) shows a label above its
 stats: "Whole file", or "Shown range, <start> to <end>". While you are zoomed
-in, the **Stats scope** toggle offers **Whole file** and **Shown range**. Shown
+in, the **Stats** toggle offers **File** and **Shown range**. Shown
 range follows each new zoom, and its stats come from the rows in the range. The
 zoom bar's **Whole file** button resets the zoom. The desktop app and the web
 edition work the same way.
