@@ -259,8 +259,11 @@ export function settingsFaultFromUrl(search: string | undefined): SettingsFault 
 
 /** A scripted recording-file open (FR AXHK2S): `refused` refuses the file, `slow` holds the
  * open until Cancel, `truncated` opens a file past the row limit, `dialog` stays in the open
- * dialog until Cancel, `unknown-total` holds an open that knows no total until Cancel. */
-export type RecordingFileFault = "refused" | "slow" | "truncated" | "dialog" | "unknown-total";
+ * dialog until Cancel, `unknown-total` holds an open that knows no total until Cancel, `dip`
+ * opens the usual file with VBUS held at {@link MOCK_DIP_VBUS_V} for its first
+ * {@link MOCK_DIP_MS} ms (FR PBDEQE). */
+export type RecordingFileFault =
+  "refused" | "slow" | "truncated" | "dialog" | "unknown-total" | "dip";
 
 const RECORDING_FILE_FAULTS: readonly RecordingFileFault[] = [
   "refused",
@@ -268,7 +271,12 @@ const RECORDING_FILE_FAULTS: readonly RecordingFileFault[] = [
   "truncated",
   "dialog",
   "unknown-total",
+  "dip",
 ];
+
+/** A `dip` file's VBUS over its first {@link MOCK_DIP_MS} ms. */
+const MOCK_DIP_VBUS_V = 3;
+const MOCK_DIP_MS = 1_000;
 
 /** `?recordingfile=<a RecordingFileFault>` in the page URL scripts the open (FR AXHK2S);
  * anything else is ignored. */
@@ -1789,6 +1797,7 @@ export class MockBackend {
     const history = new HistoryColumns(rows);
     for (let t = 0; t < rows; t++) {
       const sample = sampleAt("load-5v-1a", t);
+      if (fault === "dip" && t < MOCK_DIP_MS) sample.vbus_v = MOCK_DIP_VBUS_V;
       stats.push(sample);
       history.push(sample);
     }

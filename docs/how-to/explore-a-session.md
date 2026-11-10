@@ -60,6 +60,19 @@ lowest power in each stretch.
 The overview strip draws slow stretches (10 or 50 samples per second over a
 long session) as continuous lines.
 
+## What the stats cover
+
+The live Stats panel says "Since connect or Reset". It counts every sample
+since the connect or the last **Reset stats**, whatever the chart shows.
+
+A recording opened in the **File** tab (see
+[Open a recording](record-a-csv.md#open-a-recording)) shows a label above its
+stats: "Whole file", or "Shown range, <start> to <end>". While you are zoomed
+in, the **Stats scope** toggle offers **Whole file** and **Shown range**. Shown
+range follows each new zoom, and its stats come from the rows in the range. The
+zoom bar's **Whole file** button resets the zoom. The desktop app and the web
+edition work the same way.
+
 ## Gaps
 
 When the meter is unplugged, disconnected or restarts its clock, the session

@@ -122,8 +122,9 @@ The chart history keeps the newest 10 million samples at full resolution, about
 2 h 45 min at 1000 samples/s. Older data folds into blocks that keep each
 series' minimum, maximum and average and the block's charge and energy, so the
 ruler, segment marks and E.D. stay exact at block edges. Folding never changes
-the Stats panel: it counts every sample since the connect or the last
-**Reset stats**, whatever the chart shows. A faint
+the Stats panel: its label says "Since connect or Reset", and it counts every
+sample since the connect or the last **Reset stats**, whatever the chart shows.
+A faint
 "coarser before here" tick marks where the folded part ends on the chart.
 
 An export of a folded session holds only the full-resolution part, and its
@@ -179,7 +180,16 @@ the CHARGE and ENERGY columns, at their last values, because a recording with a
 pause does not count that time and the rows alone cannot show it. A file without
 those columns has them integrated from its rows.
 
-Drag across the chart to zoom in, and press **Whole file** to go back.
+Drag across the chart to zoom in, and press **Whole file** in the zoom bar to go
+back.
+
+A label above the stats says what they cover: "Whole file", or "Shown range,
+<start> to <end>". While you are zoomed in, the **Stats scope** toggle offers
+**Whole file** and **Shown range**. Shown range follows each new zoom. Its min,
+max, average, charge and energy come from the rows in the range, with charge
+and energy integrated from those rows. So a range with a paused stretch can
+differ from the CHARGE and ENERGY columns that the whole file uses. This works
+the same in the desktop app and the web edition.
 
 ### Export a vendor database
 

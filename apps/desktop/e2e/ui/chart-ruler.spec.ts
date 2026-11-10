@@ -741,7 +741,7 @@ test("every tool works on an opened recording (AC-AXHK2T.4–.7)", async ({ page
   await page.mouse.down();
   await page.mouse.move(box.x + box.width * 0.6, box.y + box.height / 2, { steps: 6 });
   await page.mouse.up();
-  await expect(button(view, "Whole file")).toBeEnabled();
+  await expect(button(view.locator(".zoom"), "Whole file")).toBeEnabled();
   await expect
     .poll(async () => {
       const e = await recordingExtras(page);

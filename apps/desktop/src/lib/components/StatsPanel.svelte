@@ -1,7 +1,7 @@
 <script lang="ts">
   import InfoButton from "./InfoButton.svelte";
   import Term from "./Term.svelte";
-  import { isMissing, statsView } from "../stats";
+  import { isMissing, LIVE_STATS_SCOPE, statsView } from "../stats";
   import type { StatsControls, StatsDeps } from "../stats.svelte";
   import type { StatsSnapshot } from "../backend";
   import type { Snippet } from "svelte";
@@ -84,6 +84,7 @@
     <div class="titled">
       <h2>Stats</h2>
       <InfoButton key="section.stats" />
+      <span class="scope">{LIVE_STATS_SCOPE}</span>
     </div>
     <button
       type="button"
@@ -195,6 +196,15 @@
   h2 {
     margin: 0;
     font-size: 1rem;
+  }
+  /* The scope label may wrap under the title in a narrow side card. */
+  .titled {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .scope {
+    font-size: 0.75rem;
+    color: var(--muted);
   }
   /* The Notice brings its own page margins; inside the panel it sits flush. */
   .stats :global(.notice) {

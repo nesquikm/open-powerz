@@ -8,6 +8,7 @@
     recordingFileRangeStats,
     recordingFileRunProgress,
     type FileSummary,
+    type RangeStats,
   } from "../backend";
   import { bucketsToFrame, toAlignedData, type ChartFrame } from "../chartData";
   import {
@@ -15,7 +16,6 @@
     RECORDING_VISIBILITY,
     chartOptions,
     followRecordingPlotSize,
-    formatSessionTime,
     recordingPlotSize,
     timeSplits,
     toggleSeries,
@@ -25,12 +25,12 @@
   import {
     HistoryRequester,
     historyRequestFor,
-    rangeDecimals,
     sessionRequestFor,
     type TimeRange,
   } from "../chartView";
   import { rowsText } from "../recording.svelte";
-  import { statsView } from "../stats";
+  import { rangeStatsSnapshot, statsView } from "../stats";
+  import { effectiveScope, rangeSpanText, statsScopeLabel, type StatsScope } from "../statsScope";
   import { THEME_COLORS, type ResolvedTheme } from "../theme";
   import {
     ED_DEFINITION,
@@ -81,12 +81,11 @@
 
   let el: HTMLDivElement | undefined = $state();
 
-  const view = $derived(statsView(summary.stats));
-  const rows = $derived([
-    { name: "VBUS", values: view.vbus },
-    { name: "IBUS", values: view.ibus },
-    { name: "Power", values: view.power },
-  ]);
+  /** The stats scope chosen (AC-PBDEQE.3); Shown range counts only while zoomed. */
+  let statsScope: StatsScope = $state("file");
+  /** The stats of the range on screen, with the range they cover; null until answered. */
+  type RangeAnswer = { range: TimeRange; stats: RangeStats };
+  let rangeAnswer: RangeAnswer | null = $state.raw(null);
 
   /** The chart options (FR AXHK2T), the same ones the live chart reads and saves
    * (AC-AXHK2T.8); each read on its own, so only Reverse current rebuilds the plot. */
@@ -232,10 +231,60 @@
   /** The plot width of the last ask: one bucket per pixel. */
   let askedWidth = 0;
 
-  const rangeText = $derived.by(() => {
-    if (shown === null) return "Drag across the chart to zoom in.";
-    const decimals = rangeDecimals(shown.t1Ms - shown.t0Ms);
-    return `${formatSessionTime(shown.t0Ms, decimals)} to ${formatSessionTime(shown.t1Ms, decimals)}`;
+  const rangeText = $derived(
+    shown === null ? "Drag across the chart to zoom in." : rangeSpanText(shown),
+  );
+
+  /** The scope in effect: the whole file unless Shown range is chosen and zoomed. */
+  const scope = $derived(effectiveScope(statsScope, shown));
+  /** The range answer the stats show: only while Shown range is in effect, so the label
+   * never says Shown range over whole-file numbers while an answer is pending. Read in a
+   * closure: a plain read would narrow `rangeAnswer` to its initial null for the checker. */
+  const shownAnswer = $derived.by(() => (scope === "range" ? rangeAnswer : null));
+  /** What the stats below cover (AC-PBDEQE.2). */
+  const statsScopeText = $derived(
+    shownAnswer === null
+      ? statsScopeLabel("file", null)
+      : statsScopeLabel("range", shownAnswer.range),
+  );
+  /** The stats on screen: the range's while Shown range is answered, else the file's. */
+  const view = $derived(
+    statsView(
+      shownAnswer === null
+        ? summary.stats
+        : rangeStatsSnapshot(shownAnswer.stats, shownAnswer.range),
+    ),
+  );
+  const rows = $derived([
+    { name: "VBUS", values: view.vbus },
+    { name: "IBUS", values: view.ibus },
+    { name: "Power", values: view.power },
+  ]);
+  /** Bumped on each range-stats ask: only the newest answer is shown. */
+  let rangeAsk = 0;
+
+  // Shown range: the stats of each new range on screen; the newest ask wins, and an
+  // answer for a replaced file is dropped.
+  $effect(() => {
+    const range = shown;
+    const ask = ++rangeAsk;
+    if (scope !== "range" || range === null) {
+      rangeAnswer = null;
+      return;
+    }
+    const generation = fileGeneration;
+    recordingFileRangeStats(range.t0Ms, range.t1Ms)
+      .then((stats) => {
+        // An empty range has no stats: the view falls back to the whole file's, under
+        // its own label, rather than keep the last range's numbers.
+        if (ask === rangeAsk && generation === fileGeneration) {
+          rangeAnswer = stats === null ? null : { range, stats };
+        }
+      })
+      .catch((e: unknown) => {
+        if (ask === rangeAsk) rangeAnswer = null;
+        console.warn("open-powerz: range stats failed", e);
+      });
   });
 
   /** The newest range wins: a stale answer is dropped here, never drawn. */
@@ -515,6 +564,20 @@
     />
   {/if}
 
+  <div class="stats-head">
+    <div class="scope-toggle" role="group" aria-label="Stats scope">
+      <button type="button" aria-pressed={scope === "file"} onclick={() => (statsScope = "file")}
+        >Whole file</button
+      >
+      <button
+        type="button"
+        aria-pressed={scope === "range"}
+        disabled={shown === null}
+        onclick={() => (statsScope = "range")}>Shown range</button
+      >
+    </div>
+    <p class="stats-scope">{statsScopeText}</p>
+  </div>
   <dl class="totals">
     <div>
       <dt>Elapsed</dt>
@@ -626,6 +689,20 @@
     min-width: 0;
     height: 24rem;
     overflow: hidden;
+  }
+  .stats-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+  }
+  .scope-toggle {
+    display: flex;
+    gap: 0.25rem;
+  }
+  .stats-scope {
+    margin: 0;
+    font-size: 0.8rem;
   }
   .totals {
     display: flex;

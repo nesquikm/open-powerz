@@ -686,6 +686,13 @@ export interface RangeStats {
   vbus_avg_v: number;
   ibus_avg_a: number;
   power_avg_w: number;
+  /** Lowest and highest VBUS, IBUS and Power over the samples in range (FR PBDEQE). */
+  vbus_min_v: number;
+  vbus_max_v: number;
+  ibus_min_a: number;
+  ibus_max_a: number;
+  power_min_w: number;
+  power_max_w: number;
 }
 
 /** The ruler's stats over the open session's history between `t0Ms` and `t1Ms`; `null`
