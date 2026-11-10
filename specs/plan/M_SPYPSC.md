@@ -34,9 +34,9 @@ codename: Fine Print
 | [SPYPSD](../frs/archive/SPYPSD.md) | No test keeps the docs review's fixes true (bug) | n/a |
 | [PFYFR6](../frs/archive/PFYFR6.md) | The README screenshot's stats disagree with its zoomed chart (bug) | n/a |
 | [AMJB0K](../frs/archive/AMJB0K.md) | A few docs still lag behind v0.12.1 (bug) | n/a |
-| [09H204](../frs/09H204.md) | The File tab has no overview strip | n/a |
-| [M078V5](../frs/M078V5.md) | The desktop app cannot open a recording given at launch | n/a |
-| [P747X7](../frs/P747X7.md) | The built-in logo with lettering leaves an empty strip on the right (bug) | n/a |
+| [09H204](../frs/archive/09H204.md) | The File tab has no overview strip | n/a |
+| [M078V5](../frs/archive/M078V5.md) | The desktop app cannot open a recording given at launch | n/a |
+| [P747X7](../frs/archive/P747X7.md) | The built-in logo with lettering leaves an empty strip on the right (bug) | n/a |
 
 Build order: the table's order.
 
