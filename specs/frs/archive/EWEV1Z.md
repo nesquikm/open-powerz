@@ -1,8 +1,8 @@
 ---
 title: The stats scope toggle hides which scope is on
 milestone: M_NA20AD
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T14:02:43Z
 id: fr_01M72GYR200BPXNFAJ6TEWEV1Z
 created_at: 2026-11-10T10:44:41.664Z
 changelog_category: Fixed

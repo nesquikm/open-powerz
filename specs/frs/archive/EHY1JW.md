@@ -1,8 +1,8 @@
 ---
 title: The stall notice flickers during a long stall
 milestone: M_NA20AD
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T14:02:43Z
 id: fr_01M72V1NGETNSB9S9JRQEHY1JW
 created_at: 2026-11-10T13:41:26.000Z
 changelog_category: Fixed

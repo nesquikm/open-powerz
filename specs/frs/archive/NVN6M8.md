@@ -1,8 +1,8 @@
 ---
 title: The app chart freezes without a word while the CLI polls over CDC
 milestone: M_NA20AD
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T14:02:43Z
 id: fr_01M72Q3RK9DVJVYN94DCNVN6M8
 created_at: 2026-11-10T12:32:23.000Z
 changelog_category: Fixed

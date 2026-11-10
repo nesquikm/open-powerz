@@ -1,8 +1,8 @@
 ---
 title: The user docs lag behind the app
 milestone: M_NA20AD
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T14:02:43Z
 id: fr_01M72EAV9MJRE9WFRPB9SHTZHQ
 created_at: 2026-11-10T09:58:56.000Z
 changelog_category: Fixed

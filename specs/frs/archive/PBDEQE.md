@@ -1,8 +1,8 @@
 ---
 title: The File tab stats ignore the zoomed range
 milestone: M_NA20AD
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T14:02:43Z
 id: fr_01M72ENP0M5AMJA8HKD2PBDEQE
 created_at: 2026-11-10T10:04:47.509Z
 changelog_category: Fixed

@@ -1,8 +1,8 @@
 ---
 title: The README says browser edition where the rest says web edition
 milestone: M_NA20AD
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T14:02:43Z
 id: fr_01M72ENP12Z9RFFF589GZ9PC5A
 created_at: 2026-11-10T10:04:47.522Z
 changelog_category: Fixed

@@ -1,8 +1,8 @@
 ---
 title: The recorder's chart memory line reads like the session history
 milestone: M_NA20AD
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T14:02:43Z
 id: fr_01M72ENP0VEFKVGWKFVT2VPF6P
 created_at: 2026-11-10T10:04:47.515Z
 changelog_category: Fixed

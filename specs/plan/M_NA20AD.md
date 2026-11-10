@@ -34,23 +34,23 @@ codename: Loose Ends
 
 | FR | Title | Tracker |
 |---|---|---|
-| [3B70S3](../frs/3B70S3.md) | The live windows test waits on wall time for the demo stream (bug) | n/a |
-| [3B70S4](../frs/3B70S4.md) | The zoom readout test compares against a stale span (bug) | n/a |
-| [3B70S5](../frs/3B70S5.md) | A wheel scroll up in a live PD capture can snap back to the bottom (bug) | n/a |
-| [3B70S6](../frs/3B70S6.md) | Cancel cannot interrupt a large Open recording parse in the browser (bug) | n/a |
-| [3B70S7](../frs/3B70S7.md) | The first rows of a session have no TEMP (bug) | n/a |
-| [3B70S8](../frs/3B70S8.md) | The CLI watch over CDC exits while the browser streams (bug) | n/a |
-| [3B70S9](../frs/3B70S9.md) | The recording rows type lacks the TEMP field (bug) | n/a |
-| [3B70SA](../frs/3B70SA.md) | An unasked PD offer list does not refresh the ready offers (bug) | n/a |
-| [SHTZHQ](../frs/SHTZHQ.md) | The user docs lag behind the app (bug) | n/a |
-| [PBDEQE](../frs/PBDEQE.md) | The File tab stats ignore the zoomed range (bug) | n/a |
-| [2VPF6P](../frs/2VPF6P.md) | The recorder's chart memory line reads like the session history (bug) | n/a |
-| [Z9PC5A](../frs/Z9PC5A.md) | The README says browser edition where the rest says web edition (bug) | n/a |
-| [EWEV1Z](../frs/EWEV1Z.md) | The stats scope toggle hides which scope is on (bug) | n/a |
-| [NVN6M7](../frs/NVN6M7.md) | A snapshot timeout ends the CLI watch (bug) | n/a |
-| [NVN6M8](../frs/NVN6M8.md) | The app chart freezes without a word while the CLI polls over CDC (bug) | n/a |
-| [EHY1JW](../frs/EHY1JW.md) | The stall notice flickers during a long stall (bug) | n/a |
-| [EHY1JX](../frs/EHY1JX.md) | The web device menu lists one meter twice (bug) | n/a |
+| [3B70S3](../frs/archive/3B70S3.md) | The live windows test waits on wall time for the demo stream (bug) | n/a |
+| [3B70S4](../frs/archive/3B70S4.md) | The zoom readout test compares against a stale span (bug) | n/a |
+| [3B70S5](../frs/archive/3B70S5.md) | A wheel scroll up in a live PD capture can snap back to the bottom (bug) | n/a |
+| [3B70S6](../frs/archive/3B70S6.md) | Cancel cannot interrupt a large Open recording parse in the browser (bug) | n/a |
+| [3B70S7](../frs/archive/3B70S7.md) | The first rows of a session have no TEMP (bug) | n/a |
+| [3B70S8](../frs/archive/3B70S8.md) | The CLI watch over CDC exits while the browser streams (bug) | n/a |
+| [3B70S9](../frs/archive/3B70S9.md) | The recording rows type lacks the TEMP field (bug) | n/a |
+| [3B70SA](../frs/archive/3B70SA.md) | An unasked PD offer list does not refresh the ready offers (bug) | n/a |
+| [SHTZHQ](../frs/archive/SHTZHQ.md) | The user docs lag behind the app (bug) | n/a |
+| [PBDEQE](../frs/archive/PBDEQE.md) | The File tab stats ignore the zoomed range (bug) | n/a |
+| [2VPF6P](../frs/archive/2VPF6P.md) | The recorder's chart memory line reads like the session history (bug) | n/a |
+| [Z9PC5A](../frs/archive/Z9PC5A.md) | The README says browser edition where the rest says web edition (bug) | n/a |
+| [EWEV1Z](../frs/archive/EWEV1Z.md) | The stats scope toggle hides which scope is on (bug) | n/a |
+| [NVN6M7](../frs/archive/NVN6M7.md) | A snapshot timeout ends the CLI watch (bug) | n/a |
+| [NVN6M8](../frs/archive/NVN6M8.md) | The app chart freezes without a word while the CLI polls over CDC (bug) | n/a |
+| [EHY1JW](../frs/archive/EHY1JW.md) | The stall notice flickers during a long stall (bug) | n/a |
+| [EHY1JX](../frs/archive/EHY1JX.md) | The web device menu lists one meter twice (bug) | n/a |
 
 Build order: the table's order (independent).
 
