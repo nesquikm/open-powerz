@@ -4,6 +4,14 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.1] — 2026-11-11 — "Home Wave"
+
+### Fixed
+- After a meter is unplugged and plugged back in, Connect no longer falls back to the demo device: the meter stays picked as "not connected" with a Refresh button until it is listed again, demo tiles keep their demo name with serial numbers hidden, and the startup logo, settings and record-delete writes name their target, in the desktop app and the web edition (NWGY72)
+- The built-in startup logos no longer show as a clipped box on the meter: their sea ends inside the 200 × 200 frame with rounded, outlined tips and a transparent margin (BZJGJ5)
+
+Total test count at release: 7875 tests, 0 failures, 0 errors.
+
 ## [0.13.0] — 2026-11-10 — "Fine Print"
 
 ### Added

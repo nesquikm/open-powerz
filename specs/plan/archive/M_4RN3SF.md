@@ -7,6 +7,7 @@ kickoff_branch: fix/v0.13.1
 frozen_at: null
 migration: none
 codename: Home Wave
+shipped_in: v0.13.1
 ---
 
 # Implementation Plan
