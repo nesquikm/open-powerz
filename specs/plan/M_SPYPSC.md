@@ -22,8 +22,10 @@ codename: Fine Print
 - A new README desktop screenshot whose stats match the zoomed chart.
 - A read-through of the README and docs for claims still stale after v0.12.1.
 - The overview strip under the File tab's chart, shown in the README screenshot.
+- The desktop app opens a recording given at launch, so the screenshot run needs no typing.
+- The lettered built-in startup logo fills the meter screen's width.
 
-**Out of scope:** code changes beyond tests and the File tab strip; released changelog sections; any meter command.
+**Out of scope:** writing a logo to the meter; released changelog sections; any meter command.
 
 **FR list:**
 
@@ -33,6 +35,8 @@ codename: Fine Print
 | [PFYFR6](../frs/archive/PFYFR6.md) | The README screenshot's stats disagree with its zoomed chart (bug) | n/a |
 | [AMJB0K](../frs/archive/AMJB0K.md) | A few docs still lag behind v0.12.1 (bug) | n/a |
 | [09H204](../frs/09H204.md) | The File tab has no overview strip | n/a |
+| [M078V5](../frs/M078V5.md) | The desktop app cannot open a recording given at launch | n/a |
+| [P747X7](../frs/P747X7.md) | The built-in logo with lettering leaves an empty strip on the right (bug) | n/a |
 
 Build order: the table's order.
 
@@ -45,5 +49,9 @@ Build order: the table's order.
    verify: `bun run test`.
 4. The overview strip under the File tab's chart, then retake the README screenshot with it — 09H204
    verify: `bun run test` and the recording-file Playwright spec on WebKit.
+5. Open a recording passed at launch (argument or macOS open-file event) — M078V5
+   verify: `cargo test -p open-powerz-desktop`, `bun run test` and the launch-file Playwright spec on WebKit.
+6. The lettered built-in logo fills the width — P747X7
+   verify: `cargo test -p powerz-protocol --test logo_builtin`.
 
 **Gate:** the CLAUDE.md gating rule.
