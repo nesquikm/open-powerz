@@ -4,6 +4,7 @@
  * field's bytes highlighted, and the cell texts and screen reader label of a row.
  */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { PdRow } from "./backend";
 import {
@@ -106,6 +107,93 @@ describe("FollowState: the table follows new rows until the user scrolls up (AC-
     f.scrolled({ scrollTop: 400, clientHeight: 240, scrollHeight: 1000 });
     f.resume();
     expect(f.following).toBe(true);
+  });
+});
+
+describe("FollowState.wheeled: a wheel scroll up pauses following at once (FR 3B70S5)", () => {
+  const bottom = { scrollTop: 760, clientHeight: 240, scrollHeight: 1000 };
+
+  it("AC-3B70S5.1: a wheel up while following pauses it, even with the view still at the bottom", () => {
+    const f = new FollowState();
+    f.scrolled(bottom);
+    f.wheeled(-3);
+    // No scroll event yet: the animated wheel scroll has not moved the view.
+    expect(f.following).toBe(false);
+  });
+
+  it("AC-3B70S5.1: the wheel's first few-pixel step, still within the bottom slack, does not resume it", () => {
+    const f = new FollowState();
+    f.scrolled(bottom);
+    f.wheeled(-100);
+    f.scrolled({ scrollTop: 758, clientHeight: 240, scrollHeight: 1000 });
+    expect(f.following).toBe(false);
+    // New rows arrive: the content grows, the view stays put.
+    f.scrolled({ scrollTop: 758, clientHeight: 240, scrollHeight: 1040 });
+    expect(f.following).toBe(false);
+  });
+
+  it("AC-3B70S5.2: a wheel down changes nothing", () => {
+    const f = new FollowState();
+    f.scrolled(bottom);
+    f.wheeled(120);
+    expect(f.following).toBe(true);
+    f.scrolled(bottom);
+    expect(f.following).toBe(true);
+  });
+
+  it("AC-3B70S5.2: a wheel without vertical movement changes nothing", () => {
+    const f = new FollowState();
+    f.scrolled(bottom);
+    f.wheeled(0);
+    expect(f.following).toBe(true);
+  });
+
+  it("AC-3B70S5.2: a wheel while already paused keeps it paused, either direction", () => {
+    const f = new FollowState();
+    f.scrolled(bottom);
+    f.scrolled({ scrollTop: 400, clientHeight: 240, scrollHeight: 1000 });
+    expect(f.following).toBe(false);
+    f.wheeled(-50);
+    expect(f.following).toBe(false);
+    f.wheeled(50);
+    expect(f.following).toBe(false);
+  });
+
+  it("AC-3B70S5.2: after a wheel-up pause, scrolling back down to the bottom resumes following", () => {
+    const f = new FollowState();
+    f.scrolled(bottom);
+    f.wheeled(-100);
+    f.scrolled({ scrollTop: 500, clientHeight: 240, scrollHeight: 1000 });
+    expect(f.following).toBe(false);
+    f.scrolled({ scrollTop: 760, clientHeight: 240, scrollHeight: 1000 });
+    expect(f.following).toBe(true);
+  });
+
+  it("AC-3B70S5.2: after a wheel-up pause, Follow resumes it", () => {
+    const f = new FollowState();
+    f.scrolled(bottom);
+    f.wheeled(-100);
+    f.resume();
+    expect(f.following).toBe(true);
+  });
+});
+
+describe("PdAnalyzer wires the wheel to the follow state (AC-3B70S5.1)", () => {
+  const src = readFileSync(new URL("./components/PdAnalyzer.svelte", import.meta.url), "utf8");
+
+  it("the grid element has a wheel handler", () => {
+    const grid = src.match(/<div[^>]*role="grid"[^>]*>/s);
+    expect(grid).not.toBeNull();
+    expect(grid![0]).toMatch(/onwheel=\{(\w+)\}/);
+  });
+
+  it("the wheel handler passes deltaY to follow.wheeled and updates `following`", () => {
+    const grid = src.match(/<div[^>]*role="grid"[^>]*>/s)![0];
+    const name = grid.match(/onwheel=\{(\w+)\}/)![1];
+    const body = src.match(new RegExp(`function ${name}\\([^)]*\\)[^{]*\\{([\\s\\S]*?)\\n  \\}`));
+    expect(body).not.toBeNull();
+    expect(body![1]).toMatch(/follow\.wheeled\([^)]*deltaY[^)]*\)/);
+    expect(body![1]).toMatch(/following = follow\.following/);
   });
 });
 

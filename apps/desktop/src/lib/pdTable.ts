@@ -34,20 +34,38 @@ const BOTTOM_SLACK_PX = 4;
 export class FollowState {
   following = true;
   #lastTop: number | null = null;
+  /** Paused by a wheel up: only a scroll back down to the bottom resumes. */
+  #wheelPaused = false;
 
   /** The view scrolled (or its content grew). */
   scrolled(v: { scrollTop: number; clientHeight: number; scrollHeight: number }): void {
     const atBottom = v.scrollTop + v.clientHeight >= v.scrollHeight - BOTTOM_SLACK_PX;
-    if (atBottom) this.following = true;
-    else if (this.#lastTop === null || v.scrollTop < this.#lastTop || !this.following) {
+    const movedDown = this.#lastTop !== null && v.scrollTop > this.#lastTop;
+    if (atBottom) {
+      // Within the bottom slack after a wheel up, stay paused until the view moves down.
+      if (!this.#wheelPaused || movedDown) {
+        this.following = true;
+        this.#wheelPaused = false;
+      }
+    } else if (this.#lastTop === null || v.scrollTop < this.#lastTop || !this.following) {
       this.following = false;
     }
     this.#lastTop = v.scrollTop;
   }
 
+  /** A wheel turned over the view; `deltaY < 0` scrolls up and pauses at once,
+   * before the animated scroll moves the view. */
+  wheeled(deltaY: number): void {
+    if (deltaY < 0 && this.following) {
+      this.following = false;
+      this.#wheelPaused = true;
+    }
+  }
+
   /** The Follow button. */
   resume(): void {
     this.following = true;
+    this.#wheelPaused = false;
   }
 }
 

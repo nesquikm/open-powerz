@@ -166,6 +166,11 @@
     following = follow.following;
   }
 
+  function onWheel(e: WheelEvent): void {
+    follow.wheeled(e.deltaY);
+    following = follow.following;
+  }
+
   function scrollToEnd(): void {
     if (gridEl) gridEl.scrollTop = gridEl.scrollHeight;
   }
@@ -572,6 +577,7 @@
     bind:this={gridEl}
     bind:clientHeight={viewportPx}
     onscroll={onScroll}
+    onwheel={onWheel}
     onkeydown={onGridKey}
   >
     <div role="rowgroup" class="head">
