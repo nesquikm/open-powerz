@@ -325,6 +325,9 @@ export type PdRowView = { name: string } & Record<string, unknown>;
 /** How the session measures: the ADC queue, or ADC snapshots when auth failed. */
 export type MeterMode = "queue" | "snapshot";
 
+/** How a queue-mode snapshot read went, for the `[temp]` debug line. */
+type TempOutcome = "ok" | "none" | "failed";
+
 export interface MeterDriverOptions {
   wasm: PowerzWasm;
   transport: WebTransport;
@@ -436,6 +439,8 @@ export class MeterDriver {
   private pd: { decoder: PdDecoderLike; owned: boolean } | null = null;
   private readonly startedAt = Date.now();
   private lastSnapshotMs: number | null = null;
+  /** The last queue-mode snapshot outcome a `[temp]` debug line reported. */
+  private lastTempOutcome: TempOutcome = "ok";
   private rate: number;
   /** Holds on the stream's polling (a trigger session's automatic list); polls skip
    * while any is held (native `Worker::hold_polling`). */
@@ -771,10 +776,21 @@ export class MeterDriver {
     }
     this.lastSnapshotMs = now;
     try {
-      await this.readAdc();
+      const adc = (await this.readAdc()) as { temp_c?: number | null };
+      if (typeof adc.temp_c === "number") this.logTempOutcome("ok");
+      else this.logTempOutcome("none", "[temp] the snapshot read no temperature");
     } catch (e) {
-      if (asUiError(e).kind === "disconnected") throw e;
+      const err = asUiError(e);
+      if (err.kind === "disconnected") throw e;
+      this.logTempOutcome("failed", `[temp] the snapshot failed: ${err.message}`);
     }
+  }
+
+  /** One debug line per change of the snapshot outcome; a good one logs nothing. */
+  private logTempOutcome(outcome: TempOutcome, line?: string): void {
+    if (outcome === this.lastTempOutcome) return;
+    this.lastTempOutcome = outcome;
+    if (line) console.debug(line);
   }
 
   /** Restart the queue at `rateCode`: stop it, then start it at the new rate. Refused

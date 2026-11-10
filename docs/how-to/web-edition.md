@@ -112,7 +112,9 @@ next section. Each feature needs one browser interface:
 - **Saving the chart image:** no device interface. PNG, SVG and PDF download
   as the same files the desktop app saves.
 - **CSV recording:** WebUSB or WebHID. The finished recording downloads as a
-  CSV in the desktop app's layout, TEMP included.
+  CSV in the desktop app's layout, TEMP included. Rows recorded before the
+  meter's first valid temperature reading have an empty TEMP (on a connect,
+  the first batch, about the first 0.4 s), as in the desktop app.
 - **Reading the meter's settings:** WebUSB. The Meter settings panel shows the
   same rows as the desktop app. The browser sends only the reads the desktop
   app sends: the SETTINGS read, the record list (after a sign-in when needed)

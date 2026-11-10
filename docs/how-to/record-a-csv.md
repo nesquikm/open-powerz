@@ -106,6 +106,11 @@ before each row; it stays empty until the meter has reported one, and empty
 again once that reading is more than 2 s old. Recordings, exports and
 `powerz stream` fill it the same way.
 
+Rows recorded before the meter's first valid temperature reading have an empty
+TEMP. On a connect that is the first batch of readings, about the first 0.4 s:
+the temperature is read just after it.
+The desktop app and the browser edition both do this.
+
 At 1000 SPS the readout shows the temperature with the tooltip "Updated once a
 second at 1000 SPS", because the meter reports it from a separate reading. A
 meter whose firmware reports no temperature at that rate shows "—" instead.
