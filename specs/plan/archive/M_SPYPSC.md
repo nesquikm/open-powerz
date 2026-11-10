@@ -1,8 +1,8 @@
 ---
 milestone: M_SPYPSC
 id: fr_01M731VQ6REMG9HCGYFTSPYPSC
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T15:59:03Z
 kickoff_branch: docs/v0.12.2
 frozen_at: null
 migration: none
@@ -29,9 +29,9 @@ shipped_in: v0.12.2
 
 | FR | Title | Tracker |
 |---|---|---|
-| [SPYPSD](../frs/archive/SPYPSD.md) | No test keeps the docs review's fixes true (bug) | n/a |
-| [PFYFR6](../frs/archive/PFYFR6.md) | The README screenshot's stats disagree with its zoomed chart (bug) | n/a |
-| [AMJB0K](../frs/archive/AMJB0K.md) | A few docs still lag behind v0.12.1 (bug) | n/a |
+| [SPYPSD](../../frs/archive/SPYPSD.md) | No test keeps the docs review's fixes true (bug) | n/a |
+| [PFYFR6](../../frs/archive/PFYFR6.md) | The README screenshot's stats disagree with its zoomed chart (bug) | n/a |
+| [AMJB0K](../../frs/archive/AMJB0K.md) | A few docs still lag behind v0.12.1 (bug) | n/a |
 
 Build order: the table's order.
 
