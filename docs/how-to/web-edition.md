@@ -23,7 +23,7 @@ menu.
 ## Connect a meter: the device picker and permission
 
 1. Plug the meter into the computer.
-2. Choose **Connect a meter…**, the last item of the device menu. The
+2. Choose **Connect a meter…**, the first item after the meters in the device menu. The
    browser opens its own USB device picker, filtered to POWER-Z meters.
 3. Pick the meter and click **Connect**.
 
@@ -66,7 +66,9 @@ one.
   item appears in the device menu. Choose it, pick the meter in the
   browser's HID picker, then connect again.
 - A browser with WebHID but no WebUSB uses the HID picker for **Connect a
-  meter…**. Meters granted over HID are listed as `webhid:N`.
+  meter…**. A meter granted over HID is listed with "(HID)" after its model,
+  for example "KM003C (HID)"; one granted over both WebUSB and WebHID is listed
+  once.
 
 Over HID the meter only gives basic readings: ADC snapshots (voltage, current,
 D+/D-, CC1/CC2, temperature) about ten times a second. On the meter's current
@@ -176,14 +178,14 @@ uses only the serial port.
 Three things stay in the desktop app. In the browser the first and the last
 show "Desktop app only"; the buttons for the second are left out.
 
-- **Firmware update.** An interrupted update could brick the meter, and a
-  browser tab can be closed, reloaded or put to sleep at any time.
+- **Firmware update**, choosing the firmware file included. An interrupted
+  update could brick the meter, and a browser tab can be closed, reloaded or
+  put to sleep at any time.
 - **Showing a saved file in the file manager.** A browser page cannot open the
   file manager or see where the browser saved a file.
 - **Choosing the recorder's folder.** A browser page cannot save into a folder
   without asking each time, so the browser saves recordings and exports to
   its downloads instead.
-- **Choosing a firmware file.** It belongs to the firmware update above.
 
 Get the desktop app from the
 [releases page](https://github.com/nesquikm/open-powerz/releases/latest) (see

@@ -445,8 +445,9 @@ what the build offers: `WEB_FEATURES` has everything on except
   "Desktop app only: get the desktop app from …": `firmwareInspect`,
   `firmwareChoose`, `firmwareFlash`, `revealPath` and `chooseRecordingFolder`.
   `firmwareCancel` resolves and does nothing, and `firmwareFlashStatus`
-  resolves to `null`. Their controls show "Desktop app
-  only" and stay disabled.
+  resolves to `null`. The firmware controls and the recorder's folder control
+  show "Desktop app only" and stay disabled; the reveal and **Copy path**
+  buttons are left out.
 - `pdOpen()` and `pdImport()` open the browser's file picker and read the file
   with the desktop app's rules (`powerz-protocol`'s `pd_capture` through the
   wasm module; the vendor log through sql.js). The opened capture stays in the

@@ -176,7 +176,8 @@ leaves them empty.
 - **Refused files** do not open, and the app says why. That means a wrong
   header, a binary file, an empty file, a file with no readable row, or a
   database of another shape.
-- **Large files** open with progress, and **Cancel** stops them. The row limit
+- **Large files** open with progress, and **Cancel** stops them and keeps the
+  file that was open before. The row limit
   is 10,000,000: a longer file opens with its first 10,000,000 rows, and the
   view says how many were left out.
 
