@@ -4,6 +4,15 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.2] — 2026-11-10 — "Fine Print"
+
+### Fixed
+- The README desktop screenshot shows stats for the zoomed range, matching its chart (PFYFR6)
+- Docs: the web device menu order and its "(HID)" label, the CLI CSV TEMP column, the CLI archive folder in Install a release, which desktop-only controls the web edition hides, and Cancel keeping the open recording (AMJB0K)
+- Tests pin the docs review: the README screenshot, every relative link and anchor in the README and docs, the CLI transport rules, and what stays desktop-only (SPYPSD)
+
+Total test count at release: 7792 tests, 0 failures, 0 errors.
+
 ## [0.12.1] — 2026-11-10 — "Loose Ends"
 
 ### Fixed
