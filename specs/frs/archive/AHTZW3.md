@@ -1,8 +1,8 @@
 ---
 title: Open a saved recording in the browser
 milestone: M_ZFZQE7
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T07:04:51Z
 id: fr_01M70RPVKDVSA3VKYYT9AHTZW3
 created_at: 2026-11-09T18:21:42.000Z
 changelog_category: Added

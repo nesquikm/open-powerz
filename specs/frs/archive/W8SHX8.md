@@ -1,8 +1,8 @@
 ---
 title: Meter settings and offline records in the browser
 milestone: M_ZFZQE7
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T07:04:51Z
 id: fr_01M6ZX9Y8BB9F6MCWZ2DW8SHX8
 created_at: 2026-11-09T10:22:48.075Z
 changelog_category: Added

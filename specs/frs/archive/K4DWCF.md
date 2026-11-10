@@ -1,8 +1,8 @@
 ---
 title: A confirmed request in the browser never reaches the trigger engine
 milestone: M_ZFZQE7
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T07:04:51Z
 id: fr_01M70N4CY9TVW72BW6N9K4DWCF
 created_at: 2026-11-09T17:19:12.000Z
 changelog_category: Fixed

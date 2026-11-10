@@ -1,8 +1,8 @@
 ---
 title: A repeated settings change in the browser fails although it landed
 milestone: M_ZFZQE7
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T07:04:51Z
 id: fr_01M720KDQV9E1HW2JQV5X3H3JY
 created_at: 2026-11-10T05:58:53.000Z
 changelog_category: Fixed

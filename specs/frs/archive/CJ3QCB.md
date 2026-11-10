@@ -1,8 +1,8 @@
 ---
 title: Refreshing the record list in the browser misses a new record
 milestone: M_ZFZQE7
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T07:04:51Z
 id: fr_01M70N4CYAK860D6Y2A1CJ3QCB
 created_at: 2026-11-09T17:19:12.000Z
 changelog_category: Fixed

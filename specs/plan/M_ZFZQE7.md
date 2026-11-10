@@ -29,30 +29,30 @@ codename: Full Tab
 
 | FR | Title | Tracker |
 |---|---|---|
-| [W8SHX8](../frs/W8SHX8.md) | Meter settings and offline records in the browser | n/a |
-| [W8SHXD](../frs/W8SHXD.md) | Rate keys over HID try to change the rate (bug) | n/a |
-| [W8SHXE](../frs/W8SHXE.md) | Release builds fail when the bundler tooling download times out (bug) | n/a |
-| [W8SHX9](../frs/W8SHX9.md) | Change meter settings in the browser | n/a |
-| [W8SHXA](../frs/W8SHXA.md) | Delete offline records in the browser | n/a |
-| [W8SHXB](../frs/W8SHXB.md) | Startup logo upload in the browser | n/a |
-| [W8SHXC](../frs/W8SHXC.md) | Protocol triggering in the browser | n/a |
-| [W8SHXF](../frs/W8SHXF.md) | Web edition docs for the new browser features | n/a |
-| [60QB2S](../frs/60QB2S.md) | An (i) beside the web device menu explains the connections | n/a |
-| [K4DWCF](../frs/K4DWCF.md) | A confirmed request in the browser never reaches the trigger engine (bug) | n/a |
-| [CJ3QC9](../frs/CJ3QC9.md) | A settings change in the browser misses another program on the serial port (bug) | n/a |
-| [CJ3QCA](../frs/CJ3QCA.md) | A settings change in the browser reports a lost reply although it landed (bug) | n/a |
-| [CJ3QCB](../frs/CJ3QCB.md) | Refreshing the record list in the browser misses a new record (bug) | n/a |
-| [CJ3QCC](../frs/CJ3QCC.md) | The startup logo tab over HID gives the wrong reason (bug) | n/a |
-| [CJ3QCD](../frs/CJ3QCD.md) | Small stale and mismatched readings in the browser's meter views (bug) | n/a |
-| [AHTZW1](../frs/AHTZW1.md) | The first PD request after Detect sometimes times out in the browser (bug) | n/a |
-| [AHTZW4](../frs/AHTZW4.md) | A request after a failed PD entry goes out against old offers (bug) | n/a |
-| [AHTZW2](../frs/AHTZW2.md) | Export .db does nothing in the browser (bug) | n/a |
-| [AHTZW3](../frs/AHTZW3.md) | Open a saved recording in the browser | n/a |
-| [62VEDM](../frs/62VEDM.md) | Some abbreviations have no glossary popover (bug) | n/a |
-| [JFRPME](../frs/JFRPME.md) | The browser's session history forgets the temperature (bug) | n/a |
-| [EAKFEC](../frs/EAKFEC.md) | Open a PD capture and import a vendor PD log in the browser | n/a |
-| [X3H3JY](../frs/X3H3JY.md) | A repeated settings change in the browser fails although it landed (bug) | n/a |
-| [Z99166](../frs/Z99166.md) | Three small web edition snags from the parity HIL (bug) | n/a |
+| [W8SHX8](../frs/archive/W8SHX8.md) | Meter settings and offline records in the browser | n/a |
+| [W8SHXD](../frs/archive/W8SHXD.md) | Rate keys over HID try to change the rate (bug) | n/a |
+| [W8SHXE](../frs/archive/W8SHXE.md) | Release builds fail when the bundler tooling download times out (bug) | n/a |
+| [W8SHX9](../frs/archive/W8SHX9.md) | Change meter settings in the browser | n/a |
+| [W8SHXA](../frs/archive/W8SHXA.md) | Delete offline records in the browser | n/a |
+| [W8SHXB](../frs/archive/W8SHXB.md) | Startup logo upload in the browser | n/a |
+| [W8SHXC](../frs/archive/W8SHXC.md) | Protocol triggering in the browser | n/a |
+| [W8SHXF](../frs/archive/W8SHXF.md) | Web edition docs for the new browser features | n/a |
+| [60QB2S](../frs/archive/60QB2S.md) | An (i) beside the web device menu explains the connections | n/a |
+| [K4DWCF](../frs/archive/K4DWCF.md) | A confirmed request in the browser never reaches the trigger engine (bug) | n/a |
+| [CJ3QC9](../frs/archive/CJ3QC9.md) | A settings change in the browser misses another program on the serial port (bug) | n/a |
+| [CJ3QCA](../frs/archive/CJ3QCA.md) | A settings change in the browser reports a lost reply although it landed (bug) | n/a |
+| [CJ3QCB](../frs/archive/CJ3QCB.md) | Refreshing the record list in the browser misses a new record (bug) | n/a |
+| [CJ3QCC](../frs/archive/CJ3QCC.md) | The startup logo tab over HID gives the wrong reason (bug) | n/a |
+| [CJ3QCD](../frs/archive/CJ3QCD.md) | Small stale and mismatched readings in the browser's meter views (bug) | n/a |
+| [AHTZW1](../frs/archive/AHTZW1.md) | The first PD request after Detect sometimes times out in the browser (bug) | n/a |
+| [AHTZW4](../frs/archive/AHTZW4.md) | A request after a failed PD entry goes out against old offers (bug) | n/a |
+| [AHTZW2](../frs/archive/AHTZW2.md) | Export .db does nothing in the browser (bug) | n/a |
+| [AHTZW3](../frs/archive/AHTZW3.md) | Open a saved recording in the browser | n/a |
+| [62VEDM](../frs/archive/62VEDM.md) | Some abbreviations have no glossary popover (bug) | n/a |
+| [JFRPME](../frs/archive/JFRPME.md) | The browser's session history forgets the temperature (bug) | n/a |
+| [EAKFEC](../frs/archive/EAKFEC.md) | Open a PD capture and import a vendor PD log in the browser | n/a |
+| [X3H3JY](../frs/archive/X3H3JY.md) | A repeated settings change in the browser fails although it landed (bug) | n/a |
+| [Z99166](../frs/archive/Z99166.md) | Three small web edition snags from the parity HIL (bug) | n/a |
 
 Build order: the table's order. Triggering goes last of the features: it moves the desktop trigger engine into a shared crate and needs a cross-origin-isolated page.
 

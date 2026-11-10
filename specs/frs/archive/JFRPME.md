@@ -1,8 +1,8 @@
 ---
 title: The browser's session history forgets the temperature
 milestone: M_ZFZQE7
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T07:04:51Z
 id: fr_01M7128S28V1XMSQCE4VJFRPME
 created_at: 2026-11-09T21:08:47.000Z
 changelog_category: Fixed

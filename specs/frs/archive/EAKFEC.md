@@ -1,8 +1,8 @@
 ---
 title: Open a PD capture and import a vendor PD log in the browser
 milestone: M_ZFZQE7
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T07:04:51Z
 id: fr_01M7147BC8BDNJ1126ZVEAKFEC
 created_at: 2026-11-09T21:42:57.000Z
 changelog_category: Added

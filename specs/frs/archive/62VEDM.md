@@ -1,8 +1,8 @@
 ---
 title: Some abbreviations have no glossary popover
 milestone: M_ZFZQE7
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T07:04:51Z
 id: fr_01M70N5N8DT420JMX7K062VEDM
 created_at: 2026-11-09T17:19:53.614Z
 changelog_category: Fixed
