@@ -1545,7 +1545,14 @@ fn dispatch<T: Transport, C: Clock>(
             let mut sleep = |d| sleep_unless_stopped(d, &stop_for_sleep);
             match source {
                 WatchSource::Poll => watch(&mut session, &opts, &stop, &mut sleep, &mut out),
-                WatchSource::Cdc => watch_cdc(&mut session, &opts, &stop, &mut sleep, &mut out),
+                WatchSource::Cdc => watch_cdc(
+                    &mut session,
+                    &opts,
+                    &stop,
+                    &mut sleep,
+                    &mut out,
+                    &mut std::io::stderr(),
+                ),
             }
         }
         Command::Stream {

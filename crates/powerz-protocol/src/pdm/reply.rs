@@ -70,13 +70,13 @@ pub struct ReplyReader {
 }
 
 /// ADCNEW record frame type (first byte). \[device\]
-const ADCNEW: u8 = 0x02;
+pub(crate) const ADCNEW: u8 = 0x02;
 /// ADCNEW frame header length.
 const ADCNEW_HEADER: usize = 4;
 
 /// Binary reply types (byte 0, extend bit masked off) the reader frames as
 /// replies; other non-text bytes are dropped one by one. \[static\]
-const REPLY_TYPES: [u8; 11] = [
+pub(crate) const REPLY_TYPES: [u8; 11] = [
     msg::ACCEPT,
     msg::REJECT,
     msg::FINISHED,
@@ -123,7 +123,7 @@ type FrameAt = Option<Result<(Frame, usize), usize>>;
 pub const MAX_LINE: usize = 4096;
 
 /// Bytes a text line may hold: printable ASCII, tab and `\r`.
-fn is_text(b: u8) -> bool {
+pub(crate) fn is_text(b: u8) -> bool {
     matches!(b, 0x20..=0x7e | b'\t' | b'\r')
 }
 

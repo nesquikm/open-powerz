@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::{Error, GuardedTransport, Transport, map_io_error, without_port_names};
 use crate::adcnew::{AdcnewCounters, CdcDemux, CdcItem, Frame, Request};
 use crate::frame::{frame_type, msg};
+use crate::pdm::reply::{ADCNEW, REPLY_TYPES, is_text};
 
 pub use super::cdc_frame::{check_cdc, frame_complete};
 
@@ -212,14 +213,25 @@ impl<P: Read + Write> CdcTransport<P> {
         }
     }
 
-    /// Read until one frame is complete or `timeout` passes.
-    fn read_frame(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
+    /// Read until the reply `want` accepts is complete or `timeout` passes.
+    /// Stream frames, an echoed start, text lines and replies to other
+    /// requests in front of it are skipped; bytes after it stay buffered
+    /// for a follow-up [`Transport::read`].
+    fn read_frame(&mut self, want: ReplyFor, timeout: Duration) -> Result<Vec<u8>, Error> {
         let deadline = Instant::now() + timeout;
         let mut chunk = [0u8; READ_CHUNK];
         loop {
-            if let Some(len) = frame_complete(&self.pending) {
-                let rest = self.pending.split_off(len);
-                return Ok(std::mem::replace(&mut self.pending, rest));
+            loop {
+                match plain_head(&self.pending, want) {
+                    Head::Reply(len) => {
+                        let rest = self.pending.split_off(len);
+                        return Ok(std::mem::replace(&mut self.pending, rest));
+                    }
+                    Head::Skip(len) => {
+                        self.pending.drain(..len.min(self.pending.len()));
+                    }
+                    Head::NeedMore => break,
+                }
             }
             if Instant::now() >= deadline {
                 return Err(Error::Timeout);
@@ -433,8 +445,9 @@ impl<P: Read + Write> Transport for CdcTransport<P> {
         // One request in flight: anything still buffered belongs to an
         // earlier reply that timed out, so it must not prefix this one.
         self.pending.clear();
+        let want = ReplyFor::request(request);
         self.write_request(request)?;
-        self.read_frame(timeout)
+        self.read_frame(want, timeout)
     }
 
     /// Follow-up transfers (memory-read data) carry no header, so they are
@@ -529,6 +542,89 @@ fn frame_at_start(bytes: &[u8]) -> Option<bool> {
         return None;
     }
     Some(obj > 0 && crate::adcnew::decode_frame(&bytes[..len]).is_ok())
+}
+
+/// What the buffer of a plain request starts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Head {
+    /// The awaited reply, this many bytes long.
+    Reply(usize),
+    /// Bytes that are not the reply: drop them.
+    Skip(usize),
+    /// Too few bytes to tell.
+    NeedMore,
+}
+
+/// The binary reply (known type, whole) at the start of `buf`, by length.
+fn reply_at(buf: &[u8]) -> Option<usize> {
+    let &first = buf.first()?;
+    if !REPLY_TYPES.contains(&(first & 0x7F)) {
+        return None;
+    }
+    frame_complete(buf).map(|len| len.max(1))
+}
+
+/// Whether `buf` starts with a whole item: a valid ADCNEW frame, a text
+/// line or a binary reply.
+fn item_at(buf: &[u8]) -> bool {
+    match buf.first() {
+        Some(&ADCNEW) => frame_at_start(buf) == Some(true),
+        Some(_) => text_line_at(buf).is_some_and(|l| l.is_some()) || reply_at(buf).is_some(),
+        None => false,
+    }
+}
+
+/// A text line at the start of `buf`: `Some(Some(len))` with its line end,
+/// `Some(None)` while it may still be one, `None` when it is not one.
+fn text_line_at(buf: &[u8]) -> Option<Option<usize>> {
+    for (i, &b) in buf.iter().enumerate() {
+        match b {
+            b'\n' if i > 0 => return Some(Some(i + 1)),
+            b if is_text(b) => {}
+            _ => return None,
+        }
+    }
+    Some(None)
+}
+
+/// Classify the start of a plain request's buffer: the reply `want`
+/// accepts, or what to skip in front of it \[device\]: ADCNEW frames, an
+/// echoed stream start (`02 <att>`), text lines and replies to other ids
+/// arrive there even when this session started no stream.
+fn plain_head(buf: &[u8], want: ReplyFor) -> Head {
+    let Some(&first) = buf.first() else {
+        return Head::NeedMore;
+    };
+    if first == ADCNEW {
+        if buf.len() < 2 {
+            return Head::NeedMore;
+        }
+        return match frame_at_start(buf) {
+            Some(true) => Head::Skip(4 + usize::from(buf[2]) * 4),
+            // A start echo: what follows it is a whole item.
+            _ if item_at(&buf[2..]) => Head::Skip(2),
+            Some(false) => Head::Skip(1),
+            None => Head::NeedMore,
+        };
+    }
+    let reply = reply_at(buf);
+    if let Some(len) = reply
+        && want.accepts(&buf[..len])
+    {
+        return Head::Reply(len);
+    }
+    match text_line_at(buf) {
+        Some(Some(len)) => return Head::Skip(len),
+        Some(None) if first != b'\n' => return Head::NeedMore,
+        _ => {}
+    }
+    match reply {
+        // A whole reply to another request.
+        Some(len) => Head::Skip(len),
+        None if REPLY_TYPES.contains(&(first & 0x7F)) => Head::NeedMore,
+        // Neither text nor a known frame: noise.
+        None => Head::Skip(1),
+    }
 }
 
 /// Port reads per [`Transport::adcnew_frames`] call at most.
@@ -1243,5 +1339,105 @@ mod tests {
         let ports = [meter_port(&path, "KM1")];
         let result = open_listed(&ports, "KM1", open_serial).map(|_| ());
         assert!(matches!(result, Err(Error::PortHeld)), "{result:?}");
+    }
+
+    // ---- AC-3B70S8.1: a plain request's reply is the frame with its id ----
+
+    /// The 52-byte ADC reply carrying request id `id`.
+    fn adc_reply(id: u8) -> Vec<u8> {
+        let mut f = hex_vector(ADC_52);
+        f[1] = id;
+        f
+    }
+
+    /// GET_DATA for the ADC section with request id `id`.
+    fn get_adc(id: u8) -> [u8; 4] {
+        [0x0C, id, 0x02, 0x00]
+    }
+
+    /// A plain `transact` (no ADCNEW stream started, no settings write)
+    /// whose port first delivers `stray`, then the reply to id 5.
+    fn reply_after(stray: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut bytes = stray.to_vec();
+        bytes.extend(adc_reply(5));
+        let port = FakePort::with_chunks(vec![Ok(bytes)]);
+        let mut t = CdcTransport::with_port(port.clone());
+        let r = t.transact(&get_adc(5), T);
+        assert_eq!(
+            port.written(),
+            get_adc(5).to_vec(),
+            "only the request is sent"
+        );
+        r
+    }
+
+    #[test]
+    fn an_echoed_start_before_a_reply_is_skipped_without_a_stream() {
+        assert_eq!(reply_after(&ECHOED_START), Ok(adc_reply(5)));
+    }
+
+    #[test]
+    fn a_stream_frame_before_a_reply_is_skipped_without_a_stream() {
+        assert_eq!(reply_after(&record_frame(7)), Ok(adc_reply(5)));
+    }
+
+    #[test]
+    fn a_text_line_before_a_reply_is_skipped_without_a_stream() {
+        assert_eq!(reply_after(b"ok\n"), Ok(adc_reply(5)));
+    }
+
+    #[test]
+    fn a_reply_to_another_id_is_skipped_without_a_stream() {
+        assert_eq!(reply_after(&[0x05, 0x09, 0x00, 0x00]), Ok(adc_reply(5)));
+        assert_eq!(reply_after(&adc_reply(4)), Ok(adc_reply(5)));
+    }
+
+    #[test]
+    fn mixed_stray_frames_split_across_reads_are_skipped_without_a_stream() {
+        let mut bytes = ECHOED_START.to_vec();
+        bytes.extend(record_frame(7));
+        bytes.extend(b"ok\r\n");
+        bytes.extend(ECHOED_START);
+        bytes.extend([0x05, 0x09, 0x00, 0x00]);
+        bytes.extend(record_frame(8));
+        bytes.extend(adc_reply(4));
+        bytes.extend(adc_reply(5));
+        // Odd cuts: through the echo, a frame header, the text and the reply.
+        let n = bytes.len();
+        let cuts = [1, 3, 9, 15, 4, 6, 20, 33];
+        let used: usize = cuts.iter().sum();
+        let mut sizes = cuts.to_vec();
+        sizes.push(n - used);
+        let port = FakePort::with_chunks(split(&bytes, &sizes));
+        let mut t = CdcTransport::with_port(port.clone());
+        assert_eq!(t.transact(&get_adc(5), T), Ok(adc_reply(5)));
+        assert_eq!(port.written(), get_adc(5).to_vec());
+    }
+
+    #[test]
+    fn every_plain_request_gets_its_own_reply_with_stray_frames_between() {
+        let port = FakePort::with_chunks(vec![]);
+        let mut t = CdcTransport::with_port(port.clone());
+        for id in 1..=4u8 {
+            let mut bytes = ECHOED_START.to_vec();
+            bytes.extend(record_frame(u32::from(id)));
+            bytes.extend(b"ok\n");
+            bytes.extend(adc_reply(id));
+            // A stream frame right behind the reply, before the next request.
+            bytes.extend(record_frame(100 + u32::from(id)));
+            port.0.borrow_mut().chunks.push_back(Ok(bytes));
+            assert_eq!(t.transact(&get_adc(id), T), Ok(adc_reply(id)), "id {id}");
+        }
+        // None of the stray frames got kept as stream frames: none was asked for.
+        assert!(t.adcnew_frames().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stray_control_type_2_never_comes_back_as_the_reply() {
+        // The bug: `02 02` plus the reply's first two bytes made a 4-byte
+        // control frame of type 2 that `transact` handed back.
+        let r = reply_after(&ECHOED_START).expect("the ADC reply");
+        assert_eq!(r[0] & 0x7F, 0x41, "{r:02x?}");
+        assert_eq!(r.len(), 52);
     }
 }

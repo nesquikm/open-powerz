@@ -9,7 +9,7 @@ use powerz_protocol::decode::Rate;
 use powerz_protocol::session::{Clock, Session};
 use powerz_protocol::transport::Transport;
 
-use super::stream::{MAX_START_ECHOES, too_many_echoes};
+use super::stream::MAX_START_ECHOES;
 use crate::error::CliError;
 use crate::output::{Reading, is_closed_pipe, write_adc_line, write_adc_lines};
 
@@ -56,20 +56,40 @@ pub fn watch<T: Transport, C: Clock>(
 /// pushed record in the same format as [`watch`] (temperature `-`: records
 /// carry none) and call `sleep(interval)`. The stream is stopped (`03`)
 /// when `stop` is set, the output pipe closes or a refresh fails. Fails at once where the pipe has
-/// no ADCNEW stream (anything but CDC).
+/// no ADCNEW stream (anything but CDC). A meter that echoes the start more
+/// than [`MAX_START_ECHOES`] times (it does while another program reads it
+/// over USB `[device]`) gets one note on `err`, then the stream is stopped and
+/// the watch goes on with ADC snapshots ([`watch`]) on the same port.
 pub fn watch_cdc<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     opts: &WatchOptions,
     stop: &AtomicBool,
     sleep: &mut dyn FnMut(Duration),
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<(), CliError> {
     session.start_adcnew(Content::Adc, CDC_RATE)?;
     let result = watch_stream(session, opts, stop, sleep, out);
     let stopped = session.stop_adcnew();
-    result?;
+    let ended = result?;
     stopped?;
+    if ended == StreamEnd::Echoed {
+        writeln!(
+            err,
+            "the meter keeps echoing the ADCNEW start instead of streaming; watching ADC snapshots instead"
+        )?;
+        return watch(session, opts, stop, sleep, out);
+    }
     Ok(())
+}
+
+/// How [`watch_stream`] ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamEnd {
+    /// `stop` was set.
+    Stopped,
+    /// The meter echoed the start more than [`MAX_START_ECHOES`] times.
+    Echoed,
 }
 
 /// The refresh loop of [`watch_cdc`] on a started stream.
@@ -79,7 +99,7 @@ fn watch_stream<T: Transport, C: Clock>(
     stop: &AtomicBool,
     sleep: &mut dyn FnMut(Duration),
     out: &mut dyn Write,
-) -> Result<(), CliError> {
+) -> Result<StreamEnd, CliError> {
     let mut view = View::default();
     let mut latest: Option<Reading> = None;
     let mut waited_since: Option<u64> = None;
@@ -88,7 +108,7 @@ fn watch_stream<T: Transport, C: Clock>(
             latest = Some(Reading::from(r));
         }
         if session.adcnew_counters().start_echoes > MAX_START_ECHOES {
-            return Err(too_many_echoes());
+            return Ok(StreamEnd::Echoed);
         }
         if latest.is_none() && session.adcnew_restart_pending() {
             // The meter echoed the start (right after a bulk session); the
@@ -112,7 +132,7 @@ fn watch_stream<T: Transport, C: Clock>(
         view.draw(opts, &reading, out)?;
         sleep(opts.interval);
     }
-    Ok(())
+    Ok(StreamEnd::Stopped)
 }
 
 /// What one refresh draws: a view redrawn in place on a terminal, else one

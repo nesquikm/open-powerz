@@ -811,13 +811,21 @@ Frame header (4 bytes):
   request in that time keeps it so; a start sent after 6–10 s of host
   silence streams normally. [device] (firmware 2.0.6, 2026-10-28) Our
   library drops the echo, keeps quiet for 12 s and sends the start once
-  more; the CLI gives up after 3 echoes.
+  more. `stream --source cdc` gives up after 3 echoes, while
+  `watch --source cdc` falls back to ADC snapshots on the same port instead
+  of giving up.
 - The note says auto-upload stops after one hour or on unplug unless
   refreshed. [doc] Our library sends the keep-alive every 30 minutes while
   a stream runs and `03` when it stops one.
 - On the shared byte stream our reader tells ADCNEW frames, binary replies
   and PDM text lines apart, drops a frame whose length or CRC is wrong and
   resyncs one byte later. [inferred]
+- The CDC reader matches every binary reply to its request by id and skips
+  ADCNEW frames, echoed starts, PDM text lines and replies to other ids, also
+  when no ADCNEW stream was started. Stray `02` frames reached a reader that
+  had started no stream while a browser streamed over WebUSB (web parity
+  HIL 4). [device] (firmware 2.0.6, 2026-11-10) Why the meter sends them
+  then is unknown. [inferred]
 
 ## PDM text session (protocol triggering)
 

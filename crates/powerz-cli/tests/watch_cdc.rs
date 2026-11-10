@@ -80,7 +80,7 @@ fn run(
         }
     };
     let r = if cdc {
-        watch_cdc(&mut s, &opts, &stop, &mut sleep, &mut out)
+        watch_cdc(&mut s, &opts, &stop, &mut sleep, &mut out, &mut Vec::new())
     } else {
         watch(&mut s, &opts, &stop, &mut sleep, &mut out)
     };
@@ -167,6 +167,7 @@ fn cdc_watch_shows_fresh_values_on_each_refresh() {
             }
         },
         &mut out,
+        &mut Vec::new(),
     )
     .unwrap();
     let out = text(&out);
@@ -221,7 +222,7 @@ fn cdc_watch_waits_out_an_echoed_start() {
             stop.store(true, Ordering::SeqCst);
         }
     };
-    let r = watch_cdc(&mut s, &opts, &stop, &mut sleep, &mut out);
+    let r = watch_cdc(&mut s, &opts, &stop, &mut sleep, &mut out, &mut Vec::new());
     assert_eq!(r, Ok(()));
     assert_eq!(text(&out).lines().count(), 3, "{}", text(&out));
 }
