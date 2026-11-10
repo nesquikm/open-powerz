@@ -15,7 +15,7 @@ the features of the vendor's Windows-only "POWER-Z Lab" PC software with a moder
 real KM003C.
 The KM002C should work the same way but is untested. Release builds are not signed yet.
 
-![The desktop app with a real KM003C recording opened from a CSV: an Apple 140 W charger asked over USB PD for 5, 9, 15 and 20 V and back down](docs/images/desktop.png)
+![The desktop app with a real KM003C recording opened from a CSV: an Apple 140 W charger asked over USB PD for 5, 9, 15 and 20 V and back down, zoomed in, with the overview strip of the whole file under the chart](docs/images/desktop.png)
 
 ## Install
 
