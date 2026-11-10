@@ -82,6 +82,7 @@ For the CLI, unpack the archive and run the tool:
 
 ```bash
 tar -xzf powerz-<version>-macos-universal.tar.gz
+cd powerz-<version>-macos-universal
 ./powerz --help
 ```
 
@@ -104,7 +105,8 @@ PC** the first time.
 3. Follow the installer. open-powerz then appears in the Start menu.
 
 For the CLI, unpack `powerz-<version>-windows-x86_64.zip` (right-click →
-**Extract All**) and run `powerz.exe --help` from a terminal in that folder.
+**Extract All**) and run `powerz.exe --help` from a terminal in the
+`powerz-<version>-windows-x86_64` folder inside it.
 If SmartScreen stops it, use **More info → Run anyway** again.
 
 ## Linux
@@ -128,6 +130,7 @@ For the CLI:
 
 ```bash
 tar -xzf powerz-<version>-linux-x86_64.tar.gz
+cd powerz-<version>-linux-x86_64
 ./powerz --help
 ```
 

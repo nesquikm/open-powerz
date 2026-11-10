@@ -8,6 +8,7 @@ pub mod e2e;
 pub mod firmware_file;
 pub mod firmware_flash;
 pub mod history;
+pub mod launch_file;
 pub mod logo;
 pub mod pd_capture;
 pub mod pd_import;
@@ -72,6 +73,8 @@ struct AppState {
     opened_file: Mutex<Option<OpenedFile>>,
     /// Raised by Cancel: the flag of the open that started last.
     file_cancel: Mutex<Arc<AtomicBool>>,
+    /// The recording handed over at launch, waiting for the page (FR M078V5).
+    pending_launch: launch_file::PendingLaunch,
 }
 
 impl AppState {
@@ -90,6 +93,7 @@ impl AppState {
             opened_pd: Mutex::new(None),
             opened_file: Mutex::new(None),
             file_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+            pending_launch: launch_file::PendingLaunch::default(),
         }
     }
 
@@ -971,24 +975,55 @@ async fn recording_file_open(
         let Some(path) = choose_open_path(&app, "Recording", &["csv", "db"])? else {
             return Ok(None);
         };
-        let mut control = OpenControl {
-            cancel,
-            progress: Box::new(move |p| {
-                let _ = on_progress.send(p);
-            }),
-        };
-        match recording_file::open(&path, &mut control) {
-            Ok(file) => {
-                let summary = file.summary();
-                // The old file is freed outside the lock.
-                let _old = state.opened_file().replace(file);
-                Ok(Some(summary))
-            }
-            Err(FileError::Cancelled) => Ok(None),
-            Err(FileError::Refused(why)) => Err(UiError::usage(why)),
-        }
+        open_recording_path(&state, &path, cancel, on_progress)
     })
     .await
+}
+
+/// Open the recording file handed over at launch or by the OS (FR M078V5),
+/// with no dialog, by Open recording's rules. Resolves to `null` when no file
+/// is pending; the pending file is taken once.
+#[tauri::command]
+async fn recording_file_open_launch(
+    state: Shared<'_>,
+    on_progress: Channel<OpenProgress>,
+) -> Result<Option<FileSummary>, UiError> {
+    let state = Arc::clone(&state);
+    blocking(move || {
+        let Some(path) = state.pending_launch.take() else {
+            return Ok(None);
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        *state.file_cancel() = Arc::clone(&cancel);
+        open_recording_path(&state, &path, cancel, on_progress)
+    })
+    .await
+}
+
+/// Read `path` whole, then let it replace the open recording file: whatever
+/// fails keeps that one. Cancel ends the open as `null`.
+fn open_recording_path(
+    state: &AppState,
+    path: &std::path::Path,
+    cancel: Arc<AtomicBool>,
+    on_progress: Channel<OpenProgress>,
+) -> Result<Option<FileSummary>, UiError> {
+    let mut control = OpenControl {
+        cancel,
+        progress: Box::new(move |p| {
+            let _ = on_progress.send(p);
+        }),
+    };
+    match recording_file::open(path, &mut control) {
+        Ok(file) => {
+            let summary = file.summary();
+            // The old file is freed outside the lock.
+            let _old = state.opened_file().replace(file);
+            Ok(Some(summary))
+        }
+        Err(FileError::Cancelled) => Ok(None),
+        Err(FileError::Refused(why)) => Err(UiError::usage(why)),
+    }
 }
 
 /// Cancel: the open under way ends as `null`.
@@ -1814,12 +1849,25 @@ pub fn channel_sink(
     }
 }
 
+/// The app event that tells a running page a recording file was handed over
+/// (AC-M078V5.3); the page then opens it with `recording_file_open_launch`.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const LAUNCH_FILE_EVENT: &str = "launch-file";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(Arc::new(AppState::new()))
+        .manage({
+            let state = AppState::new();
+            // A CSV or `.db` named on the command line opens at startup
+            // (AC-M078V5.1).
+            if let Some(path) = launch_file::launch_path_from_args(std::env::args_os()) {
+                state.pending_launch.offer(path);
+            }
+            Arc::new(state)
+        })
         .setup(|app| {
             use tauri::Manager;
             // Session events go to app.log (AC-4PJRVM.5); without the file
@@ -1858,6 +1906,7 @@ pub fn run() {
             export_session,
             export_session_db,
             recording_file_open,
+            recording_file_open_launch,
             recording_file_cancel,
             recording_file_close,
             recording_file_range,
@@ -1954,6 +2003,19 @@ pub fn run() {
                 && !state.manager().close_allowed()
             {
                 api.prevent_exit();
+                return;
+            }
+            // A CSV or `.db` the system hands over (Finder's Open With, a
+            // drop on the Dock icon) opens like a launch file (AC-M078V5.3):
+            // the last one waits for the page, and a running page is told.
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                if let Some(path) = launch_file::launch_paths_from_urls(urls).pop()
+                    && let Some(state) = tauri::Manager::try_state::<Arc<AppState>>(app)
+                {
+                    state.pending_launch.offer(path);
+                    let _ = tauri::Emitter::emit(app, LAUNCH_FILE_EVENT, ());
+                }
                 return;
             }
             if matches!(

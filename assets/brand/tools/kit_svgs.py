@@ -172,7 +172,7 @@ def svg(w, h, comment, defs, body):
 
 
 def meter_logo_wordmark():
-    d, b = scene(-12.5, 212.5, bottom=192, uid="m", rounded_bottom=True)
+    d, b = scene(-12.5, 227.5, bottom=192, uid="m", rounded_bottom=True)
     ww = measure("open-powerz") * 1.25
     body = (
         spark(22, 26, 1, "#fff") + spark(174, 18, 0.7, "#ffd23f", 3) + spark(182, 84, 0.6, "#3ff0ff", 3)

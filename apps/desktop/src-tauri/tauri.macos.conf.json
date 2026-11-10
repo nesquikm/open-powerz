@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "fileAssociations": [
+      {
+        "ext": ["csv"],
+        "name": "CSV recording",
+        "description": "open-powerz recording (CSV)",
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "ext": ["db"],
+        "name": "Recording database",
+        "description": "vendor recording database (.db)",
+        "role": "Viewer",
+        "rank": "Alternate"
+      }
+    ]
+  }
+}

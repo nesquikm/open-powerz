@@ -255,7 +255,9 @@ that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) 
 - CSV header: `ElapsedTime,Unix,VBUS,IBUS,DP,DM,CC1,CC2,TEMP,CHARGE,ENERGY,PWR`.
   ElapsedTime is `h:mm:ss.mmm` and Unix is seconds with 3 decimals, both from
   the first sample. Numeric columns have at most 8 significant digits as plain
-  decimals. TEMP is empty (the queue carries no temperature). CHARGE (Ah) and
+  decimals. TEMP is the meter's latest valid temperature, read from a side ADC
+  snapshot: empty until the first valid reading and once that reading is more
+  than 2 s old, and always empty with `--source cdc`. CHARGE (Ah) and
   ENERGY (Wh) are integrated from signed current; PWR = VBUS × IBUS.
   `records get` files use the same header: ElapsedTime is sample index ×
   the record's interval, Unix is empty (the record's start time is not

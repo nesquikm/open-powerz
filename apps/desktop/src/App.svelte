@@ -17,6 +17,7 @@
     logoSettingsCheck,
     logoUpload,
     logoUploadBuiltin,
+    onLaunchFile,
     firmwareFlash,
     firmwareInspect,
     pdImport,
@@ -802,8 +803,20 @@
    * never touches a meter. A running firmware update stays too: its progress is never
    * hidden. */
   async function openRecording(): Promise<void> {
+    await openIntoFileTab(() => recordingFile.open());
+  }
+
+  /** A recording handed over at launch opens into the File tab as Open recording's file
+   * does, with no dialog (FR M078V5). */
+  async function openLaunchRecording(): Promise<void> {
+    await openIntoFileTab(() => recordingFile.openLaunch());
+  }
+
+  /** Runs `open` unless a meter is held, then shows the File tab when a file opened and
+   * neither the Trigger tab nor a firmware update holds the screen. */
+  async function openIntoFileTab(open: () => Promise<boolean>): Promise<void> {
     if (meterHeld) return;
-    const opened = await recordingFile.open();
+    const opened = await open();
     if (opened && view !== "trigger" && !firmware.busy) view = "file";
   }
 
@@ -1118,8 +1131,11 @@
   // with none, the app starts disconnected as on a first launch (FR VEDDFD).
   onMount(() => {
     if (!backendAvailable()) return;
-    // A reloaded page has no view of a file the last page left open.
-    void recordingFile.close();
+    // A file the system hands the running app opens the same way (AC-M078V5.3).
+    const unlistenLaunch = onLaunchFile(() => void openLaunchRecording());
+    // A reloaded page has no view of a file the last page left open; then a file
+    // handed over at launch opens (AC-M078V5.1).
+    void recordingFile.close().then(() => openLaunchRecording());
     void firmware.reattach().then(() => {
       if (firmware.busy) view = "firmware";
     });
@@ -1140,6 +1156,7 @@
         }
       },
     ).then(() => (attachedId === null ? undefined : attachOtherMeters()));
+    return () => void unlistenLaunch.then((unlisten) => unlisten());
   });
 
   async function toggleConnection(): Promise<void> {

@@ -218,3 +218,160 @@ test("opening a file leaves the Trigger tab on screen, as leaving it sends (AC-A
   await expect(fileTab(page)).toBeVisible();
   await expect(trigger).toHaveAttribute("aria-selected", "true");
 });
+
+// FR 09H204: the overview strip under the File tab's chart.
+
+function fileStrip(view: Locator): Locator {
+  return view.locator(".overview");
+}
+
+function fileStripWindow(view: Locator): Locator {
+  return view.getByRole("slider", { name: "Visible range" });
+}
+
+/** Drags across the file's plot from `from` to `to` (shares of its width). */
+async function zoomFile(page: Page, view: Locator, from: number, to: number): Promise<void> {
+  const over = view.locator(".u-over").first();
+  const box = await over.boundingBox();
+  if (box === null) throw new Error("no plot to drag on");
+  const y = box.y + box.height / 2;
+  await page.mouse.move(box.x + box.width * from, y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * to, y, { steps: 5 });
+  await page.mouse.up();
+}
+
+/** The strip window's width as a share of the strip's. */
+async function windowShare(view: Locator): Promise<number> {
+  const strip = await fileStrip(view).boundingBox();
+  const win = await fileStripWindow(view).boundingBox();
+  if (strip === null || win === null || strip.width === 0) return Number.NaN;
+  return win.width / strip.width;
+}
+
+/** Painted (non-transparent) pixels on the strip's canvas. */
+async function paintedPixels(view: Locator): Promise<number> {
+  return fileStrip(view)
+    .locator("canvas")
+    .first()
+    .evaluate((el) => {
+      const canvas = el as HTMLCanvasElement;
+      const ctx = canvas.getContext("2d");
+      if (ctx === null || canvas.width === 0 || canvas.height === 0) return 0;
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let painted = 0;
+      for (let i = 3; i < data.length; i += 4) if (data[i]! > 0) painted++;
+      return painted;
+    });
+}
+
+test("the File tab shows the overview strip, painted from the file (AC-09H204.1)", async ({
+  page,
+}) => {
+  await open(page);
+  await openRecording(page);
+  const view = fileView(page);
+  await expect(fileStrip(view)).toBeVisible();
+  await expect(fileStripWindow(view)).toBeVisible();
+  // Under the chart.
+  const plot = await view.locator(".u-over").first().boundingBox();
+  const strip = await fileStrip(view).boundingBox();
+  if (plot === null || strip === null) throw new Error("no plot or strip");
+  expect(strip.y).toBeGreaterThanOrEqual(plot.y + plot.height - 1);
+  await expect.poll(() => paintedPixels(view)).toBeGreaterThan(0);
+});
+
+test("the strip's window covers the whole file, then only the zoomed part (AC-09H204.2)", async ({
+  page,
+}) => {
+  await open(page);
+  await openRecording(page);
+  const view = fileView(page);
+  await expect(fileStripWindow(view)).toBeVisible();
+  await expect.poll(() => windowShare(view)).toBeGreaterThan(0.95);
+
+  const range = view.locator(".range");
+  const whole = await range.textContent();
+  await zoomFile(page, view, 0.4, 0.6);
+  await expect(range).not.toHaveText(whole ?? "");
+  await expect.poll(() => windowShare(view)).toBeLessThan(0.5);
+  await expect.poll(() => windowShare(view)).toBeGreaterThan(0.05);
+
+  await button(view.locator(".zoom"), "Whole file").click();
+  await expect.poll(() => windowShare(view)).toBeGreaterThan(0.95);
+});
+
+test("the strip moves the File chart's range, and Shown range stats follow (AC-09H204.3)", async ({
+  page,
+}) => {
+  await open(page);
+  await openRecording(page);
+  const view = fileView(page);
+  const range = view.locator(".range");
+  const scopeLine = view.locator(".stats-scope");
+  await expect(fileStripWindow(view)).toBeVisible();
+  await zoomFile(page, view, 0.3, 0.45);
+  await expect(button(view.locator(".zoom"), "Whole file")).toBeEnabled();
+  await view
+    .getByRole("group", { name: "Stats scope" })
+    .getByRole("button", { name: "Shown range", exact: true })
+    .click();
+  await expect(scopeLine).toContainText(/Shown range/);
+
+  // Keyboard: → on the focused window moves it.
+  let before = await range.textContent();
+  let scopeBefore = await scopeLine.textContent();
+  await fileStripWindow(view).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(range).not.toHaveText(before ?? "");
+  await expect(scopeLine).not.toHaveText(scopeBefore ?? "");
+
+  // Drag: the window moves right by a fifth of the strip.
+  before = await range.textContent();
+  scopeBefore = await scopeLine.textContent();
+  const strip = await fileStrip(view).boundingBox();
+  const win = await fileStripWindow(view).boundingBox();
+  if (strip === null || win === null) throw new Error("no strip");
+  const y = win.y + win.height / 2;
+  await page.mouse.move(win.x + win.width / 2, y);
+  await page.mouse.down();
+  await page.mouse.move(win.x + win.width / 2 + strip.width * 0.2, y, { steps: 5 });
+  await page.mouse.up();
+  await expect(range).not.toHaveText(before ?? "");
+  await expect(scopeLine).not.toHaveText(scopeBefore ?? "");
+
+  // Click: off the window, near the strip's left end, centres the view there.
+  before = await range.textContent();
+  scopeBefore = await scopeLine.textContent();
+  await page.mouse.click(strip.x + strip.width * 0.05, strip.y + strip.height / 2);
+  await expect(range).not.toHaveText(before ?? "");
+  await expect(scopeLine).toContainText(/Shown range/);
+  await expect(scopeLine).not.toHaveText(scopeBefore ?? "");
+  const after = await windowShare(view);
+  expect(after).toBeLessThan(0.5);
+  const moved = await fileStripWindow(view).boundingBox();
+  if (moved === null) throw new Error("no window");
+  expect(moved.x - strip.x).toBeLessThan(strip.width * 0.2);
+});
+
+test("closing or reopening the file clears the strip (AC-09H204.4)", async ({ page }) => {
+  await open(page);
+  await openRecording(page);
+  let view = fileView(page);
+  await expect(fileStripWindow(view)).toBeVisible();
+  await zoomFile(page, view, 0.4, 0.6);
+  await expect.poll(() => windowShare(view)).toBeLessThan(0.5);
+
+  await button(view, "Close file").click();
+  await expect(fileView(page)).toHaveCount(0);
+  await expect(
+    page.getByRole("slider", { name: "Visible range" }).filter({ visible: true }),
+  ).toHaveCount(0);
+
+  await openRecording(page);
+  view = fileView(page);
+  await expect(fileStripWindow(view)).toBeVisible();
+  // A fresh file: the window spans it whole, nothing of the old zoom stays.
+  await expect.poll(() => windowShare(view)).toBeGreaterThan(0.95);
+  await expect.poll(() => paintedPixels(view)).toBeGreaterThan(0);
+});

@@ -135,3 +135,114 @@ mod encoded {
         assert_ne!(surf.bytes, wordmark.bytes);
     }
 }
+
+// ---- FR P747X7: the lettered logo leaves an empty strip on the right ----
+
+/// Decode an embedded built-in PNG to RGBA8 with the `image` dev-dependency,
+/// so these checks run with or without the `image-files` feature.
+fn decode_rgba(b: BuiltinLogo) -> image::RgbaImage {
+    image::load_from_memory_with_format(b.png(), image::ImageFormat::Png)
+        .expect("the embedded PNG decodes")
+        .to_rgba8()
+}
+
+fn column_has_opaque_pixel(img: &image::RgbaImage, x: u32) -> bool {
+    (0..img.height()).any(|y| img.get_pixel(x, y)[3] > 0)
+}
+
+#[test]
+fn _p747x7_1_both_builtins_have_opaque_pixels_in_the_leftmost_and_rightmost_columns() {
+    for b in BuiltinLogo::ALL {
+        let img = decode_rgba(b);
+        let last = img.width() - 1;
+        assert!(
+            column_has_opaque_pixel(&img, 0),
+            "{b}: the leftmost column (x = 0) is fully transparent"
+        );
+        assert!(
+            column_has_opaque_pixel(&img, last),
+            "{b}: the rightmost column (x = {last}) is fully transparent"
+        );
+    }
+}
+
+#[test]
+fn _p747x7_1_the_wordmark_logo_has_no_empty_strip_at_either_edge() {
+    let img = decode_rgba(BuiltinLogo::SurfWordmark);
+    let w = img.width();
+    let empty_right = (0..w)
+        .rev()
+        .take_while(|&x| !column_has_opaque_pixel(&img, x))
+        .count();
+    let empty_left = (0..w)
+        .take_while(|&x| !column_has_opaque_pixel(&img, x))
+        .count();
+    assert_eq!(empty_right, 0, "empty columns on the right");
+    assert_eq!(empty_left, 0, "empty columns on the left");
+}
+
+/// AC-P747X7.2: size and binary alpha. The "look inside the old area is
+/// unchanged" half is checked by a pixel diff against the previous PNG
+/// outside this test (the old image is not kept in the repo).
+#[test]
+fn _p747x7_2_the_wordmark_logo_stays_200x200_with_alpha_0_or_255_only() {
+    let img = decode_rgba(BuiltinLogo::SurfWordmark);
+    assert_eq!((img.width(), img.height()), (200, 200));
+    let bad: Vec<(u32, u32, u8)> = img
+        .enumerate_pixels()
+        .filter(|(_, _, p)| p[3] != 0 && p[3] != 255)
+        .map(|(x, y, p)| (x, y, p[3]))
+        .take(5)
+        .collect();
+    assert!(bad.is_empty(), "partial alpha pixels, first few: {bad:?}");
+}
+
+/// The `scene(xmin, xmax, ...)` call inside `meter_logo_wordmark()` of the
+/// brand generator, as `(xmin, xmax)`.
+fn wordmark_scene_range() -> (f64, f64) {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/brand/tools/kit_svgs.py"
+    ))
+    .expect("the brand generator is readable");
+    let start = src
+        .find("def meter_logo_wordmark(")
+        .expect("meter_logo_wordmark() is defined");
+    let rest = &src[start..];
+    let body = match rest[1..].find("\ndef ") {
+        Some(end) => &rest[..end + 1],
+        None => rest,
+    };
+    let call = body
+        .find("scene(")
+        .map(|i| &body[i + "scene(".len()..])
+        .expect("meter_logo_wordmark() calls scene(");
+    let mut args = call.split(',').map(str::trim);
+    let xmin: f64 = args
+        .next()
+        .and_then(|a| a.parse().ok())
+        .expect("scene()'s first argument is a number");
+    let xmax: f64 = args
+        .next()
+        .and_then(|a| a.parse().ok())
+        .expect("scene()'s second argument is a number");
+    assert!(
+        body.contains("translate(20,0) scale(0.8)"),
+        "the wordmark logo still maps the scene with translate(20,0) scale(0.8)"
+    );
+    (xmin, xmax)
+}
+
+#[test]
+fn _p747x7_3_the_generator_draws_the_wordmark_scene_past_the_right_edge() {
+    // The left edge already fills (checked on the PNG by AC-P747X7.1), so
+    // only the right end of the scene is pinned here; xmin is left alone so
+    // the art inside the old area stays as it was.
+    let (_xmin, xmax) = wordmark_scene_range();
+    // The logo maps scene x to image x as 20 + 0.8 * x on a 200-wide image.
+    let right = 20.0 + 0.8 * xmax;
+    assert!(
+        right >= 200.0 + 2.0,
+        "scene ends at image x = {right} (xmax {xmax}); it must bleed past 200"
+    );
+}

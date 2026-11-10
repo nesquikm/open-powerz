@@ -15,7 +15,7 @@ the features of the vendor's Windows-only "POWER-Z Lab" PC software with a moder
 real KM003C.
 The KM002C should work the same way but is untested. Release builds are not signed yet.
 
-![The desktop app with a real KM003C recording opened from a CSV: an Apple 140 W charger asked over USB PD for 5, 9, 15 and 20 V and back down](docs/images/desktop.png)
+![The desktop app with a real KM003C recording opened from a CSV: an Apple 140 W charger asked over USB PD for 5, 9, 15 and 20 V and back down, zoomed in, with the overview strip of the whole file under the chart](docs/images/desktop.png)
 
 ## Install
 
@@ -88,7 +88,7 @@ See [Use the web edition](docs/how-to/web-edition.md) for the details.
 - See min, max, average, charge and energy for the session ([statistics](docs/how-to/record-a-csv.md#reset-the-statistics-or-clear-the-chart-history))
 - Record to CSV at up to 1000 samples/s in the vendor's layout, from the app or `powerz stream`, and reveal the file in one click ([record a CSV](docs/how-to/record-a-csv.md))
 - Pause and resume a recording, end it with auto-stop on low current or a row limit, and set its file prefix and folder ([recorder options](docs/how-to/record-a-csv.md#recorder-options))
-- Open a CSV recording or a vendor `.db` file in a read-only tab with no meter needed, and export a session to a `.db` in the vendor's layout ([open a recording](docs/how-to/record-a-csv.md#open-a-recording))
+- Open a CSV recording or a vendor `.db` file in a read-only tab with no meter needed, with an overview strip under its chart, also from the command line or Finder's Open With, and export a session to a `.db` in the vendor's layout ([open a recording](docs/how-to/record-a-csv.md#open-a-recording))
 - Measure between two cursors with the chart ruler, and add segment marks, the E.D. energy share, a sub-chart and Reverse current, kept across restarts ([chart tools](docs/how-to/explore-a-session.md#chart-tools))
 - Set axis ranges, each series' colour, width and transparency, and a chart title, then save the chart as an image in PNG, SVG or PDF ([chart style](docs/how-to/explore-a-session.md#chart-style-and-save-image))
 

@@ -285,6 +285,12 @@ export function recordingFileFaultFromUrl(search: string | undefined): Recording
   return RECORDING_FILE_FAULTS.find((fault) => fault === raw) ?? null;
 }
 
+/** `?launchfile=1` in the page URL hands the mock its demo recording at launch (FR
+ * M078V5); anything else is ignored. */
+export function launchFileFromUrl(search: string | undefined): boolean {
+  return urlParam(search, "launchfile") === "1";
+}
+
 /** The recording file the mock opens (FR AXHK2S). */
 export const MOCK_RECORDING_FILE = {
   name: "demo-recording.csv",
@@ -436,6 +442,8 @@ export interface MockOptions {
   /** How the settings get saved after a logo write (FR QG6RNY); none: after
    * {@link MOCK_MENU_SAVE_MS}. */
   menuSave?: MenuSaveMode | null;
+  /** The demo recording is handed over at launch (FR M078V5). */
+  launchFile?: boolean;
 }
 
 /** Rows per `pd_rows` event of a seed, so one event never gets huge. */
@@ -1195,6 +1203,8 @@ export class MockBackend {
   }
   /** Every command the scripted charger received. */
   #triggerLog: string[] = [];
+  /** The launch file not yet taken (FR M078V5). */
+  #launchFile = false;
 
   /** `mode` defaults to the page URL's `?mock=` parameter, the PD seed to its
    * `?pdsynthetic=`. */
@@ -1209,10 +1219,12 @@ export class MockBackend {
       logoFile: logoFileFromUrl(pageSearch()),
       logoFault: logoFaultFromUrl(pageSearch()),
       menuSave: menuSaveFromUrl(pageSearch()),
+      launchFile: launchFileFromUrl(pageSearch()),
     },
   ) {
     this.#mode = mode;
     this.#options = options;
+    this.#launchFile = options.launchFile ?? false;
     this.#flashing = mode === "firmware-running";
     this.#flashTarget = this.#flashing ? MOCK_RUNNING_FLASH.device_id : null;
   }
@@ -1809,6 +1821,16 @@ export class MockBackend {
       left_out: fault === "truncated" ? MOCK_LEFT_OUT : 0,
       stats: stats.snapshot(),
     };
+  }
+
+  /** Opens the recording handed over at launch, once, as {@link openRecordingFile} does;
+   * `null` when none was (FR M078V5). */
+  async openLaunchRecordingFile(
+    onProgress: (progress: OpenProgress) => void,
+  ): Promise<FileSummary | null> {
+    if (!this.#launchFile) return null;
+    this.#launchFile = false;
+    return this.openRecordingFile(onProgress);
   }
 
   async cancelRecordingFile(): Promise<void> {

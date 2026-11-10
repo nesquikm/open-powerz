@@ -162,6 +162,15 @@ CSV or a vendor `.db` file back into the app. It needs no meter. The file opens 
 marked as a file and read-only. The tab exists only while a file is open, and
 **Close file** ends it. One file opens at a time; opening another replaces it.
 
+The desktop app also opens a recording named on its command line
+(`open-powerz-desktop readme.csv`) straight into the File tab, and on macOS one
+opened with **Open With** in Finder.
+
+An **overview strip** sits under the file's chart, in the desktop app and the
+web edition alike. It shows the whole file, with a window over the range on
+screen. Drag the window, click the strip, or use the arrow keys to move the
+zoom.
+
 Opening a file sends nothing to any meter. A running stream or recording keeps
 going behind the tab.
 
@@ -176,7 +185,8 @@ leaves them empty.
 - **Refused files** do not open, and the app says why. That means a wrong
   header, a binary file, an empty file, a file with no readable row, or a
   database of another shape.
-- **Large files** open with progress, and **Cancel** stops them. The row limit
+- **Large files** open with progress, and **Cancel** stops them and keeps the
+  file that was open before. The row limit
   is 10,000,000: a longer file opens with its first 10,000,000 rows, and the
   view says how many were left out.
 

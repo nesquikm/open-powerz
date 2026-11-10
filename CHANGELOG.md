@@ -4,6 +4,20 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] — 2026-11-10 — "Fine Print"
+
+### Added
+- File tab: an overview strip under the chart shows the whole file with a window over the zoomed range; drag it, click it or use the arrow keys to move the zoom, in the desktop app and the web edition (09H204)
+- The desktop app opens a CSV or `.db` recording named on its command line, or opened with Finder's Open With on macOS, straight into the File tab (M078V5)
+
+### Fixed
+- The built-in startup logo with the open-powerz lettering fills the meter screen's width instead of leaving an empty strip on the right (P747X7)
+- The README desktop screenshot shows stats for the zoomed range, matching its chart, with the overview strip under it (PFYFR6)
+- Docs: the web device menu order and its "(HID)" label, the CLI CSV TEMP column, the CLI archive folder in Install a release, which desktop-only controls the web edition hides, and Cancel keeping the open recording (AMJB0K)
+- Tests pin the docs review: the README screenshot, every relative link and anchor in the README and docs, the CLI transport rules, and what stays desktop-only (SPYPSD)
+
+Total test count at release: 7829 tests, 0 failures, 0 errors.
+
 ## [0.12.1] — 2026-11-10 — "Loose Ends"
 
 ### Fixed
