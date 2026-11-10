@@ -13,7 +13,7 @@ members = [
 default-members = ["crates/powerz-pd", "crates/powerz-protocol", "crates/powerz-sim", "crates/powerz-record", "crates/powerz-cli", "crates/powerz-wasm", "crates/powerz-trigger"]
 
 [workspace.package]
-version = "0.12.2"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -21,12 +21,12 @@ repository = "https://github.com/nesquikm/open-powerz"
 authors = ["Mikhail Drapoliuk"]
 
 [workspace.dependencies]
-powerz-pd = { path = "crates/powerz-pd", version = "0.12.2" }
+powerz-pd = { path = "crates/powerz-pd", version = "0.13.0" }
 # Featureless by default (FR QFTCWX): members opt into the native transports.
-powerz-protocol = { path = "crates/powerz-protocol", version = "0.12.2", default-features = false }
-powerz-sim = { path = "crates/powerz-sim", version = "0.12.2" }
-powerz-record = { path = "crates/powerz-record", version = "0.12.2" }
-powerz-trigger = { path = "crates/powerz-trigger", version = "0.12.2" }
+powerz-protocol = { path = "crates/powerz-protocol", version = "0.13.0", default-features = false }
+powerz-sim = { path = "crates/powerz-sim", version = "0.13.0" }
+powerz-record = { path = "crates/powerz-record", version = "0.13.0" }
+powerz-trigger = { path = "crates/powerz-trigger", version = "0.13.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

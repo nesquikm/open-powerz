@@ -7,6 +7,7 @@ kickoff_branch: docs/v0.12.2
 frozen_at: null
 migration: none
 codename: Fine Print
+shipped_in: v0.13.0
 ---
 
 # Implementation Plan
