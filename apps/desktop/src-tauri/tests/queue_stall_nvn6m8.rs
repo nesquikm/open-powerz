@@ -1,8 +1,9 @@
 //! FR NVN6M8 AC-NVN6M8.4: the desktop worker tells the UI when the meter
 //! stops filling the ADC queue (another program polls it over CDC) and when
 //! samples come back, under the web edition's rule: 2 s of unheld queue
-//! polling with no records sends `stall { stalled: true }` once; the first
-//! records send `stall { stalled: false }`. Held polling does not count, and
+//! polling with no records sends `stall { stalled: true }` once; records
+//! coming back send `stall { stalled: false }` (FR EHY1JW: once polls with
+//! records have run for 1 s, `queue_stall_ehy1jw.rs`). Held polling does not count, and
 //! shorter empty runs say nothing.
 //!
 //! Over the simulator on its fake clock, behind a pipe whose queue replies can
@@ -151,8 +152,11 @@ fn nvn6m8_samples_coming_back_end_the_stall_and_a_new_stall_reports_again() {
 
     let before = run.sample_count();
     run.stall(false);
-    run.run(1_000);
+    // FR EHY1JW: not on the first records; the polls with records run 1 s first.
+    run.run(500);
     assert!(run.sample_count() > before, "no samples after the stall");
+    assert_eq!(run.stalls(), vec![true]);
+    run.run(1_000);
     assert_eq!(run.stalls(), vec![true, false]);
     run.run(3_000);
     assert_eq!(run.stalls(), vec![true, false]);

@@ -282,6 +282,12 @@ const STALL_AFTER_MS = 2_000;
 /** Most time one empty poll adds toward the stall beyond its period, so a poll that
  * waited behind a hold or a settings write counts as one ordinary poll. */
 const STALL_POLL_SLACK_MS = 100;
+/** Polling time a run of polls with samples must span to end a stall (FR EHY1JW): the
+ * meter hands over a stray sample now and then mid-stall `[device]`. */
+const RECOVER_AFTER_MS = 1_000;
+/** Most polling time between two polls with samples in one recovery run (FR EHY1JW);
+ * fits the 2 SPS stream, which returns samples every 500 ms. */
+const RECOVER_GAP_MS = 750;
 /** PD sniffer poll period (native `PdSniffer::POLL_PERIOD`). */
 const PD_POLL_PERIOD_MS = 5;
 /** Each PD poll also asks for the ADC snapshot (the sniffer's `with_adc` option). */
@@ -460,10 +466,15 @@ export class MeterDriver {
   /** Holds on the stream's polling (a trigger session's automatic list); polls skip
    * while any is held (native `Worker::hold_polling`). */
   private pollHolds = 0;
-  /** FR NVN6M8: when the last empty queue poll ended (null after samples), the unheld
-   * polling time the empty run adds up to, and whether `onStall(true)` was sent. */
-  private emptyAt: number | null = null;
-  private emptyMs = 0;
+  /** FR NVN6M8 / EHY1JW: when the last queue poll ended, the unheld polling time since
+   * the stream began (each poll adds at most one period plus slack), where on that clock
+   * the empty run began (null after samples), the recovery run's start and last poll
+   * with samples while stalled, and whether `onStall(true)` was sent. */
+  private lastPollAt: number | null = null;
+  private pollClockMs = 0;
+  private emptyFrom: number | null = null;
+  private recoverFrom: number | null = null;
+  private lastSamplesAt: number | null = null;
   private stalled = false;
   /** The UID block read at open, kept for a later level-1 auth. */
   private uidBlock: Uint8Array | null = null;
@@ -752,26 +763,44 @@ export class MeterDriver {
     this.schedulePoll(Math.max(1, began + this.periodMs() - Date.now()));
   }
 
-  /** FR NVN6M8: add one queue poll to the empty run, or end it on samples. Each empty
-   * poll adds the time since the previous one, at most one period plus some slack, so
-   * time spent held or waiting for the link does not count. */
+  /** FR NVN6M8 / EHY1JW: advance the polling clock by one queue poll, at most one
+   * period plus some slack, so time spent held or waiting for the link does not count.
+   * 2 s of empty polls start a stall; it ends once polls with samples span 1 s of
+   * polling (each counting its own stretch), with at most 750 ms between two of them. */
   private trackStall(gotSamples: boolean): void {
     const now = Date.now();
+    const step =
+      this.lastPollAt === null
+        ? 0
+        : Math.min(now - this.lastPollAt, this.periodMs() + STALL_POLL_SLACK_MS);
+    this.pollClockMs += step;
+    this.lastPollAt = now;
+    const clock = this.pollClockMs;
     if (gotSamples) {
-      this.emptyAt = null;
-      this.emptyMs = 0;
-      if (this.stalled) {
+      this.emptyFrom = null;
+      if (!this.stalled) return;
+      if (
+        this.recoverFrom === null ||
+        this.lastSamplesAt === null ||
+        clock - this.lastSamplesAt > RECOVER_GAP_MS
+      ) {
+        // The run covers this poll's own stretch of polling, not just its end.
+        this.recoverFrom = clock - step;
+      }
+      this.lastSamplesAt = clock;
+      if (clock - this.recoverFrom >= RECOVER_AFTER_MS) {
         this.stalled = false;
+        this.recoverFrom = null;
+        this.lastSamplesAt = null;
         this.o.onStall?.(false);
       }
       return;
     }
-    if (this.emptyAt !== null) {
-      this.emptyMs += Math.min(now - this.emptyAt, this.periodMs() + STALL_POLL_SLACK_MS);
-    }
-    this.emptyAt = now;
-    if (!this.stalled && this.emptyMs >= STALL_AFTER_MS) {
+    this.emptyFrom ??= clock;
+    if (!this.stalled && clock - this.emptyFrom >= STALL_AFTER_MS) {
       this.stalled = true;
+      this.recoverFrom = null;
+      this.lastSamplesAt = null;
       this.o.onStall?.(true);
     }
   }

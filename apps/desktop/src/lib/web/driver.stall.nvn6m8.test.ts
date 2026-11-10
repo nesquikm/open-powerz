@@ -3,7 +3,9 @@
  * program polls it over CDC) and when samples come back.
  *
  * - AC-NVN6M8.1: queue polls that return no samples for 2 s of polling call `onStall(true)`.
- * - AC-NVN6M8.2: the first poll with samples calls `onStall(false)`; one call per stall.
+ * - AC-NVN6M8.2: samples coming back call `onStall(false)`; one call per stall. FR EHY1JW
+ *   supersedes "the first poll with samples": the polls with samples must run for 1 s
+ *   (`driver.stall.ehy1jw.test.ts`).
  * - AC-NVN6M8.3: time with the polling held (a hold, a settings write holding the link)
  *   does not count toward the 2 s; empty runs shorter than 2 s say nothing (the real
  *   meter's empty first poll after each queue start included).
@@ -116,7 +118,7 @@ describe("a queue that stops filling (AC-NVN6M8.1)", () => {
   });
 });
 
-describe("the stall ends with the first samples (AC-NVN6M8.2)", () => {
+describe("the stall ends when samples come back (AC-NVN6M8.2, AC-EHY1JW.2)", () => {
   it("nvn6m8: a long stall reports once, and samples coming back clear it", async () => {
     const run = await session(2);
     await vi.advanceTimersByTimeAsync(1_000);
@@ -126,8 +128,11 @@ describe("the stall ends with the first samples (AC-NVN6M8.2)", () => {
 
     const before = run.batches.flat().length;
     run.setStalled(false);
-    await vi.advanceTimersByTimeAsync(1_000);
+    // FR EHY1JW: not on the first samples; the polls with samples run 1 s first.
+    await vi.advanceTimersByTimeAsync(500);
     expect(run.batches.flat().length).toBeGreaterThan(before);
+    expect(run.stalls).toEqual([true]);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(run.stalls).toEqual([true, false]);
 
     // Samples keep coming: nothing more to say.
@@ -143,7 +148,7 @@ describe("the stall ends with the first samples (AC-NVN6M8.2)", () => {
     run.setStalled(true);
     await vi.advanceTimersByTimeAsync(3_000);
     run.setStalled(false);
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_500);
     run.setStalled(true);
     await vi.advanceTimersByTimeAsync(5_000);
     expect(run.stalls).toEqual([true, false, true]);
