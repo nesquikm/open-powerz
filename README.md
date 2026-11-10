@@ -15,7 +15,7 @@ the features of the vendor's Windows-only "POWER-Z Lab" PC software with a moder
 real KM003C.
 The KM002C should work the same way but is untested. Release builds are not signed yet.
 
-![The desktop app streaming from the demo device: live readout, chart and statistics](docs/images/desktop.png)
+![The desktop app with a real KM003C recording opened from a CSV: an Apple 140 W charger asked over USB PD for 5, 9, 15 and 20 V and back down](docs/images/desktop.png)
 
 ## Install
 
@@ -132,7 +132,7 @@ See [Use the web edition](docs/how-to/web-edition.md) for the details.
 
 ### Serial stream
 
-- Stream at 50 or 1000 samples/s over the meter's virtual serial port, with no sign-in ([serial-port stream](docs/how-to/record-a-csv.md#record-the-serial-port-stream-instead))
+- Stream at 50 or 1000 samples/s over the meter's virtual serial port, with no sign-in and no temperature ([serial-port stream](docs/how-to/record-a-csv.md#record-the-serial-port-stream-instead))
 
 ### Several meters
 
@@ -145,7 +145,7 @@ See [Use the web edition](docs/how-to/web-edition.md) for the details.
 
 ### Web edition
 
-- Use open-powerz in Chrome or Edge with nothing to install: live readings, charts, stats, PD capture, PD capture files, CSV recording, session export, Open recording, meter settings, offline records, the startup logo, protocol triggering and the demo meter over WebUSB and Web Serial, with a WebHID fallback for basic readings ([use the web edition](docs/how-to/web-edition.md))
+- Use open-powerz in Chrome or Edge with nothing to install. Over WebUSB and Web Serial you get live readings, charts, stats, PD capture, PD capture files, CSV recording, session export, Open recording, meter settings, offline records, the startup logo, protocol triggering and the demo meter. A WebHID fallback gives basic readings ([use the web edition](docs/how-to/web-edition.md))
 - See what WebUSB, HID and Web Serial each give, and which one the session uses, in a short note beside the web device menu ([connection note](docs/how-to/web-edition.md#the-i-button-beside-the-device-menu))
 
 ### Demo device and simulator
@@ -165,6 +165,8 @@ See [Use the web edition](docs/how-to/web-edition.md) for the details.
 | path                     | what                                                                         |
 | ------------------------ | ---------------------------------------------------------------------------- |
 | `crates/powerz-protocol` | Rust protocol library: transports (vendor bulk, HID, CDC), framing, decoders |
+| `crates/powerz-pd`       | USB PD 3.2 message decoder (no I/O)                                          |
+| `crates/powerz-sim`      | the simulated KM003C behind the demo device                                  |
 | `crates/powerz-record`   | vendor-compatible CSV recorder shared by the CLI and the desktop app         |
 | `crates/powerz-trigger`  | protocol-trigger engine shared by the desktop app and the web edition        |
 | `crates/powerz-wasm`     | WebAssembly binding of the protocol core for the web edition                 |

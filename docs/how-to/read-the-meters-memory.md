@@ -33,7 +33,7 @@ anything to the meter; the two writes each ask for a confirmation first.
 Add `--json` to either command for machine-readable output. To try it without
 a meter, add `--transport sim`: the simulator holds three sample records.
 
-## Download recordings in the desktop app
+## Download recordings in the app
 
 1. Connect the meter and open the **Records** tab. The list loads on
    connect; **Refresh** reads it again.
@@ -89,7 +89,9 @@ as raw numbers.
 ## Change the settings
 
 You can change the language, brightness, dim timeout, theme, rotation and
-sample rate. Calibration, auto-rotate and the startup logo are never written.
+sample rate. The CLI can also set how long the startup screen shows
+(`startup_duration`). Calibration and auto-rotate are never written. The logo
+image is written only by `powerz logo write` or the logo view.
 
 From the CLI, list the changes as `field=value`; fields you leave out keep
 their values:
@@ -99,15 +101,17 @@ powerz settings set brightness=80 theme=pink --i-understand
 ```
 
 Values: `language=chinese|english`, `brightness=1..100`,
-`dim_timeout=off|15|30|60`, `theme=blue|green|pink|orange|yellow|dark-green|cyan`,
+`dim_timeout=off|15|30|60`, `startup_duration=off|1|3|5` (seconds the startup
+screen shows), `theme=blue|green|pink|orange|yellow|dark-green|cyan`,
 `rotation=0|90|180|270`, `sample_rate=2|10|50|1000`. A value out of range is
 refused with exit code 2 before anything is sent. The command sends one
 settings write over the meter's virtual serial port (the meter ignores it on
 the bulk interface), reads the settings back and prints them. If the meter
 reads back something else, it stops with exit code 5 and names the field;
-nothing is retried.
+nothing is retried. A settings block that fails its check (for example after a
+logo write, before a save in the meter's menu) is refused with exit code 6.
 
-In the desktop app, press **Edit** on the **Meter settings** panel. Only the
+In the app, press **Edit** on the **Meter settings** panel. Only the
 fields above get controls, and a summary lists each change ("Brightness: 50%
 → 80%") before **Apply** sends it; **Cancel** leaves the meter alone. The
 panel then shows the settings as read back.
@@ -126,7 +130,8 @@ the CLI and the app say so in one line after a write.
 - The web edition does all of this in Chrome and Edge: the reads and the
   delete over WebUSB, the settings change over Web Serial (the browser asks
   once for the meter's serial port). A delete there first asks for a folder
-  for the CSV backups. See [Use the web edition](web-edition.md#what-works-in-the-browser).
+  for the CSV backups (or saves them as downloads where the browser cannot
+  write a folder). See [Use the web edition](web-edition.md#what-works-in-the-browser).
 - Downloads read the record's own window of the meter's memory, at most 256
   bytes per read, and nothing outside it. See [docs/protocol.md](../protocol.md)
   for the formats and their confidence tags.

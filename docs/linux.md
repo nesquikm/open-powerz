@@ -32,9 +32,10 @@ hwmon/`sensors`. While it holds that interface, no user-space app can claim it.
 The HID and CDC interfaces are not affected, so you only need to act if you
 want the vendor bulk transport.
 
-The bulk transport tries to detach the kernel driver from interface 0 when it
-opens the device (this needs the udev rule above). If that fails, or you want
-the driver out of the way for good, do it by hand:
+The bulk transport tries to detach the kernel driver from the vendor bulk
+interface (interface 0 on the KM003C) when it opens the device. This needs
+the udev rule above. If that fails, or you want the driver out of the way for
+good, do it by hand:
 
 **Unload the module** (until the next reboot or replug):
 
@@ -61,8 +62,9 @@ remove the blacklist file if you created one).
 
 ## 3. Flatpak
 
-A Flatpak build needs `--device=all` to reach raw USB and hidraw nodes; the
-udev rule must still be installed on the host.
+There is no Flatpak package. If you package the app as a Flatpak, it needs
+`--device=all` to reach raw USB and hidraw nodes, and the udev rule must
+still be installed on the host.
 
 ## Headless, SSH and container use
 

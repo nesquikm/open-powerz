@@ -84,13 +84,15 @@ and device switching are blocked, and the window cannot be closed.
 Cancel update works until the erase begins. If the meter is switching to its
 bootloader, the update stops once it gets there and the meter stays in its
 bootloader, with the application untouched (see below). After the erase has begun,
-Cancel is off and says why. If you reload the page during an update, the page
+Cancel is off and says why. If you reload the window during an update, the page
 shows the running stage, but the update's result stays with the page that
 started it: check the firmware version afterwards.
 
 If the update would end a session on the meter, or on another meter the app
 cannot tell from it, the app lists those sessions, says which are recording,
-and waits for your answer. Keep leaves everything running.
+and waits for your answer. **Keep sessions** (or **Keep recording**) leaves
+everything running; **End sessions and update** (or **End recording and
+update**) ends them and starts the update.
 
 ## If something goes wrong
 

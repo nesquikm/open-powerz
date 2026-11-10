@@ -1,6 +1,8 @@
-# Explore a session in the desktop app
+# Explore a session
 
-The desktop app keeps every sample of the current session, so you can pause,
+The app keeps the current session's history (the newest 10 million samples at
+full resolution, older ones folded; see
+[Long sessions](record-a-csv.md#long-sessions)), so you can pause,
 zoom and scroll back through it while the meter keeps measuring. Pick a meter
 (or the demo device) in the device picker, press Connect, and the chart starts
 following the newest data.
@@ -172,7 +174,8 @@ Reverse current changes no data: the readings, the statistics and every export k
   IBUS, stays put whatever the data does.
 - **Series style** sets each series' colour, line width and transparency.
   Each line keeps its own dash pattern, so the lines stay apart without
-  colour. **Reset** puts a series back on its theme look. A colour that is
+  colour. **Reset VBUS style** (and so on for each series) puts it back on its theme
+  look. A colour that is
   hard to see on the chart background gets a low-contrast warning, but you
   can still use it.
 - **Chart title** shows a title above the chart and in saved images. Leave it

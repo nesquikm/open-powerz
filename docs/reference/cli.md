@@ -37,7 +37,7 @@ the built-in help.
 | option | meaning |
 |---|---|
 | `--device SERIAL` | The meter to use. Required when several are attached. |
-| `--transport bulk\|cdc\|hid\|sim` | The USB pipe. `bulk` (default) supports every measuring command; `cdc` and `hid` support only `read` and `watch` (and `pd decode`, which needs no meter); `sim` is the demo device. `trigger`, `detect`, `console` and `pd send` always talk to the meter's virtual serial port, whatever pipe is chosen; with `sim` they talk to a simulated meter and charger instead. For `detect`, the pipe also takes the one ADC snapshot behind the D+/D− hint. |
+| `--transport bulk\|cdc\|hid\|sim` | The USB pipe. `bulk` (default) supports every measuring command. `cdc` and `hid` support only `read` and `watch` (and `pd decode`, which needs no meter). `sim` is the demo device. `trigger`, `detect`, `console` and `pd send` always talk to the meter's virtual serial port, with `bulk` or `cdc`; `hid` refuses them with exit 2. With `sim` they talk to a simulated meter and charger instead. `watch --source cdc` and `stream --source cdc` also open the serial port with any pipe but `hid`. For `detect`, the pipe also takes the one ADC snapshot behind the D+/D− hint. |
 | `--scenario NAME` | What the demo device plays: `idle` (default), `load-5v-1a`, `pd-9v-2a`, `noisy-negative`. |
 | `--trace` | Logs every frame to stderr as hex, one line each: a marker (`>` sent, `<` received, `x` refused by the safety guard before sending), the frame's length in bytes in brackets, then the bytes, for example `< [256] 63 eb …`. The length comes first so it survives cutting a line after its first bytes. Covers the raw writes of `firmware jump` and `firmware flash` (the jumps, the descriptor and the payload blocks). |
 
@@ -292,7 +292,7 @@ serial port" instead.
 | code | meaning |
 |---|---|
 | 0 | success |
-| 2 | usage error, including an ambiguous device choice, `firmware flash`, `firmware jump`, `records delete` or `settings set` without `--i-understand`, a record delete whose typed confirmation does not match, a settings value out of range or with a file that fails inspection, a `pd decode` file that cannot be read or is damaged, a request the charger does not offer or allow, and a command above 5 V without `--allow-high-voltage` |
+| 2 | usage error, including an ambiguous device choice, `firmware flash`, `firmware jump`, `records delete` or `settings set` without `--i-understand`, a record delete whose typed confirmation does not match, a settings value out of range, a firmware or logo file that fails inspection, a `pd decode` file that cannot be read or is damaged, a request the charger does not offer or allow, and a command above 5 V without `--allow-high-voltage` |
 | 3 | no matching device (or no POWER-Z serial port) |
 | 4 | permission denied (on Linux the message names the udev rule) |
 | 5 | device or protocol error, including a failed firmware flash, a protocol the charger does not support, a failed request, a meter out of step, a failed return to 5 V, a failed record backup, and a record list or settings block that does not read back as written |

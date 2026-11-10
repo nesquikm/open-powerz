@@ -27,7 +27,7 @@ Streaming the ADC queue needs the vendor bulk interface (the default
 ## Record the serial-port stream instead
 
 The meter can also push its samples on its virtual serial port (the ADCNEW
-stream). It needs no sign-in, at 50 or 1000 samples per second:
+stream). It needs no sign-in and runs at 50 or 1000 samples per second:
 
 ```bash
 powerz stream --source cdc --rate 1000 --csv run.csv --duration 60
@@ -36,13 +36,13 @@ powerz stream --source cdc --rate 1000 --csv run.csv --duration 60
 The CSV has the same columns, with `TEMP` empty (this stream carries no
 temperature). The summary line reads
 `<n> records, <g> gaps, <d> dropped frames, <c> CRC errors`. Right after a bulk
-session the meter may echo the start for a few seconds; the CLI says so and
-starts again after 12 s. In the desktop app, pick **Serial stream** in the
+session the meter may echo the start for a few seconds. The CLI says so, sends the
+start again after 12 s of quiet, and gives up after 3 echoes. In the desktop app, pick **Serial stream** in the
 Measurement source picker before connecting.
 
-## Record or export from the desktop app
+## Record or export in the app
 
-The desktop app writes the same CSV layout.
+The desktop app and the web edition write the same CSV layout.
 
 - **Record** starts at once, on a new file in your Downloads folder under
   `open-powerz-recordings` (the app's data folder if there is no Downloads
@@ -76,7 +76,7 @@ while any meter records.
 
 - **File name prefix** replaces `powerz` in the file name, so `bench` gives
   `bench-20261102-143000.csv`. It cannot hold a path separator or any of
-  `: * ? " < > |`.
+  `: * ? " < > |`, or a control character.
 - **Folder** sets where new files go. With a folder set, Stop asks nothing and
   the file stays there. A folder that is missing or cannot be written to is
   refused when you press Record, and no recording starts. With no folder, files
@@ -88,16 +88,17 @@ while any meter records.
 - **Row limit** ends a recording at that many rows (default 10,000,000). It
   keeps the file, and the notice opens with "Recording ended at the row limit".
 
-The dialog also shows how long the chart's memory lasts at the current rate:
-about 10 minutes at 1000 SPS, longer at lower rates. This limits the chart, not
-a recording.
+The dialog also shows how long the chart's memory (its live buffer) lasts at
+the current rate: about 10 minutes at 1000 SPS, longer at lower rates. The session
+history behind it keeps far more (see [Long sessions](#long-sessions)).
+Neither limits a recording.
 
 `powerz stream` has none of these options: it has no pause, auto-stop or row
 limit, and it writes to the file you name.
 
 In the web edition a recording, an export and a saved file go to the
-browser's downloads: there is no Folder option and no reveal in the file
-manager. The file is the same, TEMP included.
+browser's downloads: there is no Folder option, no reveal in the file
+manager and no **Copy path**. The file is the same, TEMP included.
 
 ### Temperature
 
@@ -107,9 +108,9 @@ again once that reading is more than 2 s old. Recordings, exports and
 `powerz stream` fill it the same way.
 
 Rows recorded before the meter's first valid temperature reading have an empty
-TEMP. On a connect that is the first batch of readings, about the first 0.4 s:
-the temperature is read just after it.
-The desktop app and the browser edition both do this.
+TEMP. After a connect these are the first batch of readings, about 0.4 s,
+because the app reads the temperature just after that batch.
+The desktop app and the web edition both do this.
 
 At 1000 SPS the readout shows the temperature with the tooltip "Updated once a
 second at 1000 SPS", because the meter reports it from a separate reading. A
@@ -120,7 +121,9 @@ meter whose firmware reports no temperature at that rate shows "—" instead.
 The chart history keeps the newest 10 million samples at full resolution, about
 2 h 45 min at 1000 samples/s. Older data folds into blocks that keep each
 series' minimum, maximum and average and the block's charge and energy, so the
-statistics, the ruler, segment marks and E.D. stay exact at block edges. A faint
+ruler, segment marks and E.D. stay exact at block edges. Folding never changes
+the Stats panel: it counts every sample since the connect or the last
+**Reset stats**, whatever the chart shows. A faint
 "coarser before here" tick marks where the folded part ends on the chart.
 
 An export of a folded session holds only the full-resolution part, and its
@@ -135,7 +138,7 @@ Two buttons in the Stats panel erase different things:
   The chart history stays.
 - **Clear chart history…** erases the chart history and what Export saves,
   after you confirm. The chart, "Whole session" and the overview strip then
-  start again from the moment of the clear.
+  start again from the moment of the clear. The statistics stay.
 
 The meter stays connected and keeps measuring through either one, and a
 recording in progress keeps every row.

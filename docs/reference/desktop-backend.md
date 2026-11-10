@@ -19,6 +19,7 @@ Live samples reach the page as `batch` events on the session channel, at most 20
 | function | answers |
 |---|---|
 | `historyGaps(t0Ms: number, t1Ms: number): Promise<HistoryGap[]>` | The breaks between measuring runs that overlap `t0Ms..=t1Ms`, oldest first. A `HistoryGap` is `{ from_ms, to_ms }`. |
+| `historyFoldBoundary(): Promise<number \| null>` | Where full resolution starts, in ms. The history keeps the newest 10,000,000 samples at full resolution and folds older ones into coarser blocks. `null` while nothing is folded (Tauri command `history_fold_boundary`). |
 
 ### A slow sink
 
@@ -89,7 +90,7 @@ Types:
 | `PdOpened` | `path`, `rows`, `status`, `damaged_line` (1-based line where reading stopped, `null` for a whole file), `oversized` (vendor log rows skipped for oversized record bytes, 0 for pdcap), `skipped` (vendor log rows skipped for holding no whole record, 0 for pdcap), `truncated` (the vendor log had more rows than the import takes), `dropped` (the oldest records past the capture's limit, not in `rows`) |
 
 A capture keeps its latest 100,000 records and drops the oldest, with a
-notice. Status samples are not part of this limit.
+notice. Status samples have a separate limit of 100,000.
 
 When a capture stops with the `"trigger"` reason, the PD analyzer says "The PD
 capture stopped when Detect opened a trigger session. The meter needs a replug
@@ -129,7 +130,8 @@ Commands:
 | `triggerChargerGone(): Promise<boolean>` | Whether the charger is gone: VBUS collapsed after a contract was up, or, while Detect is not running, both CC lines read below 0.3 V on records spanning at least 300 ms of device time, with or without a contract. It stays true until the next PD listing, whatever that finds, and until then every request is refused with `usage` and nothing is sent. `false` with no session. The page asks after a low VBUS reading under a contract, or after a live reading with both CC lines below `CC_GONE_V` (0.3 V); one question is out at a time, and none while Detect runs. |
 | `triggerConsoleRisk(line: string): Promise<RiskClass>` | The risk class of a raw console line. |
 | `triggerConsoleSend(line: string, confirmed: boolean): Promise<ConsoleLine[]>` | Sends a raw console line and answers the transcript lines. Above 5 V (any unparsable line too) only when `confirmed`; GoodCRC is always refused. |
-| `triggerBackTo5v(): Promise<void>` | Back to 5 V: PD sends `pd req=1` (a Hard Reset as the fallback), the other protocols `reset`. The session stays open. |
+| `triggerPdEntered(): Promise<boolean>` | Whether PD is entered, so **Read cable** can go out. `false` with no session. Sends nothing. |
+| `triggerBackTo5v(leaving = false): Promise<void>` | Back to 5 V: PD sends `pd req=1` (a Hard Reset as the fallback), the other protocols `reset`. The session stays open. `leaving` (sent as `{ leaving: true }`) only changes what `app.log` gives as the reason "Don't ask again" ended. |
 | `triggerClose(): Promise<void>` | Back to 5 V where the protocol allows it, then `pdm close`. Does nothing when no session is open. |
 
 Types (they mirror `src-tauri/src/trigger.rs`):
@@ -245,10 +247,13 @@ Behaviour:
 
 ## Recording
 
-| Function | Behavior |
-| --- | --- |
-| `startRecording(suggestedName): Promise<string \| null>` | Starts the recording at once on a new file in the recordings folder (Tauri command `start_recording`), with no dialog, and resolves to its path. The folder is `open-powerz-recordings` in Downloads, or in the app data folder when there is no Downloads. An existing file is never taken. |
-| `saveRecordingAs(path): Promise<string \| null>` | After Stop, asks where to keep the finished file at `path` and moves it there (Tauri command `save_recording_as`). Resolves to the new path, or `null` when the dialog was cancelled, which leaves the file where it is. Only a file directly in the recordings folder is accepted. |
+| function | what it does |
+|---|---|
+| `startRecording(suggestedName, options?): Promise<string \| null>` | Starts the recording at once on a new file (Tauri command `start_recording`), with no dialog, and resolves to its path. `options` is a `RecordingOptions`: `folder`, `below_a` and `for_ms` (auto-stop), `max_rows` (row limit). With `folder` set the file goes there. Otherwise it goes to `open-powerz-recordings` in Downloads, or in the app data folder when there is no Downloads. An existing file is never taken. |
+| `chooseRecordingFolder(): Promise<string \| null>` | Asks which folder recordings go to (Tauri command `choose_recording_folder`). `null` when the dialog was cancelled. Desktop only. |
+| `pauseRecording()`, `resumeRecording()` | Hold the recording's rows back while the stream goes on, then write them again to the same file (Tauri commands `recording_pause`, `recording_resume`). |
+| `stopRecording(): Promise<RecordingSummary>` | Stops the recording and resolves to its row count and gaps (Tauri command `stop_recording`). |
+| `saveRecordingAs(path): Promise<string \| null>` | After Stop, asks where to keep the finished file at `path` and moves it there (Tauri command `save_recording_as`). Resolves to the new path, or `null` when the dialog was cancelled, which leaves the file where it is. Only a file directly in the default recordings folder is accepted, not one in a folder set with `folder`. |
 
 A page that attaches to a running meter gets the open file's path in
 `RecordingSnapshot.path`, so Stop can still offer to save it. A stop forced by
@@ -271,7 +276,7 @@ moves to `app.log.1` when the app starts, replacing any earlier one.
 | `openRecordingFile(onProgress: (p: OpenProgress) => void): Promise<FileSummary \| null>` | Opens the file dialog (the browser's file picker on the web) for a CSV or `.db` recording and reads it with no meter. A `FileSummary` is `{ name, rows, skipped, left_out, stats }`. `null` when the dialog was dismissed or Cancel ended the open. |
 | `cancelRecordingFile(): Promise<void>` | Ends a running open; it resolves to `null`. |
 | `closeRecordingFile(): Promise<void>` | Closes the opened file. |
-| `recordingFileRange(series, t0Ms, t1Ms, buckets)`, `recordingFileRangeStats(t0Ms, t1Ms)` | The opened file's min / max buckets and ruler statistics, as `historyRange` and `rangeStats` answer for the live session. |
+| `recordingFileRange(series, t0Ms, t1Ms, buckets)`, `recordingFileRangeStats(t0Ms, t1Ms)`, `recordingFileRunProgress(query)` | The opened file's min / max buckets, ruler statistics, and segment marks and E.D., as `historyRange`, `rangeStats` and `runProgress` answer for the live session. |
 
 ## Meter settings
 
@@ -435,8 +440,10 @@ what the build offers: `WEB_FEATURES` has everything on except
 - `requestMeter()` opens the browser's USB picker (**Connect a meter…**);
   `requestHidMeter()` opens the HID picker (**Connect over HID…**).
 - A command the browser leaves to the desktop app rejects with a usage error
-  "Desktop app only: get the desktop app from …": the firmware commands,
-  `revealPath` and `chooseRecordingFolder`. Their controls show "Desktop app
+  "Desktop app only: get the desktop app from …": `firmwareInspect`,
+  `firmwareChoose`, `firmwareFlash`, `revealPath` and `chooseRecordingFolder`.
+  `firmwareCancel` resolves and does nothing, and `firmwareFlashStatus`
+  resolves to `null`. Their controls show "Desktop app
   only" and stay disabled.
 - `pdOpen()` and `pdImport()` open the browser's file picker and read the file
   with the desktop app's rules (`powerz-protocol`'s `pd_capture` through the
@@ -456,7 +463,8 @@ what the build offers: `WEB_FEATURES` has everything on except
 
 `MockBackend` (in `mockBackend.ts`) plays a demo session in the browser, with
 no Rust backend. It plays a looping PD capture. Page URL parameters change what
-it does:
+it does. The table lists the main ones; `MOCK_MODES` in `mockBackend.ts` has
+every mode:
 
 | parameter | effect |
 |---|---|
