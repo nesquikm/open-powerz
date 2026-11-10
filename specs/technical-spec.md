@@ -56,8 +56,8 @@ browser edition on GitHub Pages:
   manual `pages.yml` deploy it through `pages-deploy.yml`. Settings changes and protocol
   triggering use the meter's serial port through Web Serial; the trigger engine runs in a
   dedicated Worker over SharedArrayBuffer rings, so the page installs its own service worker
-  (`apps/desktop/public/coi-sw.js`) for cross-origin isolation. Only firmware update and showing a file in
-  the file manager stay desktop-only (M_ZFZQE7).
+  (`apps/desktop/public/coi-sw.js`) for cross-origin isolation. Firmware update, showing a file in the file
+  manager and choosing the recorder's folder stay desktop-only (M_ZFZQE7).
 
 The protocol reference lives in `docs/protocol.md`: rewritten in our own words from the
 research notes (outside the repo), keeping `[device]` / `[static]` / `[inferred]` tags.
