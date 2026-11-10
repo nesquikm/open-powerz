@@ -67,6 +67,16 @@ pub struct State {
     pub stray: bool,
     /// Echo every ADCNEW start (`02 <att>`) instead of streaming.
     pub echo_starts: bool,
+    /// GET_DATA requests (0-based, counting every one written) left
+    /// unanswered, as a meter busy with another session does (FR NVN6M7).
+    pub drop_requests: Vec<u32>,
+    /// From this GET_DATA request (0-based) on the port is gone: reads
+    /// return end of stream (FR NVN6M7).
+    pub gone_from_request: Option<u32>,
+    /// GET_DATA requests written so far, answered or not.
+    pub requested: u32,
+    /// The port went away.
+    pub gone: bool,
 }
 
 /// The scripted port; clones share one state.
@@ -81,6 +91,21 @@ impl StrayPort {
             s.stray = stray;
             s.echo_starts = echo_starts;
         }
+        p
+    }
+
+    /// A port that leaves the GET_DATA requests `drop` (0-based) unanswered.
+    pub fn dropping(stray: bool, echo_starts: bool, drop: &[u32]) -> StrayPort {
+        let p = StrayPort::new(stray, echo_starts);
+        p.0.borrow_mut().drop_requests = drop.to_vec();
+        p
+    }
+
+    /// Leave the GET_DATA requests `drop` (0-based) unanswered and go away
+    /// at GET_DATA request `gone` (0-based).
+    pub fn going_away(echo_starts: bool, drop: &[u32], gone: u32) -> StrayPort {
+        let p = StrayPort::dropping(false, echo_starts, drop);
+        p.0.borrow_mut().gone_from_request = Some(gone);
         p
     }
 
@@ -110,6 +135,9 @@ impl StrayPort {
 impl Read for StrayPort {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut s = self.0.borrow_mut();
+        if s.gone {
+            return Ok(0);
+        }
         if s.reads.is_empty() {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "fake timeout"));
         }
@@ -130,6 +158,15 @@ impl Write for StrayPort {
             s.reads.extend(buf.iter().copied());
         } else if buf.len() >= 4 && buf[0] & 0x7F == 0x0C {
             let id = buf[1];
+            let nth = s.requested;
+            s.requested += 1;
+            if s.gone_from_request.is_some_and(|g| nth >= g) {
+                s.gone = true;
+                return Ok(buf.len());
+            }
+            if s.drop_requests.contains(&nth) {
+                return Ok(buf.len());
+            }
             if s.stray {
                 let n = s.answered;
                 let mut stray = ECHOED_START.to_vec();

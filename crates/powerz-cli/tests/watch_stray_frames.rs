@@ -41,6 +41,7 @@ fn run_watch(port: &StrayPort, refreshes: u32) -> (Result<(), powerz_cli::CliErr
             }
         },
         &mut out,
+        &mut Vec::new(),
     );
     (r, text(&out))
 }

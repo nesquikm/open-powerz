@@ -82,7 +82,7 @@ fn run(
     let r = if cdc {
         watch_cdc(&mut s, &opts, &stop, &mut sleep, &mut out, &mut Vec::new())
     } else {
-        watch(&mut s, &opts, &stop, &mut sleep, &mut out)
+        watch(&mut s, &opts, &stop, &mut sleep, &mut out, &mut Vec::new())
     };
     (r, text(&out), s)
 }

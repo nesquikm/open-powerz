@@ -117,6 +117,7 @@ fn the_fallback_lines_match_the_polled_watch_format() {
             stop.store(true, Ordering::SeqCst);
         },
         &mut polled,
+        &mut Vec::new(),
     )
     .expect("the polled watch");
     let polled = text(&polled);
