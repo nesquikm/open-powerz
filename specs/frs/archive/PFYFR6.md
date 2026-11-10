@@ -1,8 +1,8 @@
 ---
 title: The README screenshot's stats disagree with its zoomed chart
 milestone: M_SPYPSC
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T15:55:45Z
 id: fr_01M731VQ6Y6BEKKF8YN0PFYFR6
 created_at: 2026-11-10T15:40:16.932Z
 changelog_category: Fixed

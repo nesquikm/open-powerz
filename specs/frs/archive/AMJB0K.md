@@ -1,8 +1,8 @@
 ---
 title: A few docs still lag behind v0.12.1
 milestone: M_SPYPSC
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-10T15:55:45Z
 id: fr_01M731VQ73CVNCX463XRAMJB0K
 created_at: 2026-11-10T15:40:16.932Z
 changelog_category: Fixed

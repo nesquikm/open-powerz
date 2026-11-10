@@ -28,9 +28,9 @@ codename: Fine Print
 
 | FR | Title | Tracker |
 |---|---|---|
-| [SPYPSD](../frs/SPYPSD.md) | No test keeps the docs review's fixes true (bug) | n/a |
-| [PFYFR6](../frs/PFYFR6.md) | The README screenshot's stats disagree with its zoomed chart (bug) | n/a |
-| [AMJB0K](../frs/AMJB0K.md) | A few docs still lag behind v0.12.1 (bug) | n/a |
+| [SPYPSD](../frs/archive/SPYPSD.md) | No test keeps the docs review's fixes true (bug) | n/a |
+| [PFYFR6](../frs/archive/PFYFR6.md) | The README screenshot's stats disagree with its zoomed chart (bug) | n/a |
+| [AMJB0K](../frs/archive/AMJB0K.md) | A few docs still lag behind v0.12.1 (bug) | n/a |
 
 Build order: the table's order.
 
