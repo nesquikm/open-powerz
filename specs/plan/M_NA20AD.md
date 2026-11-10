@@ -44,6 +44,7 @@ codename: Loose Ends
 | [PBDEQE](../frs/PBDEQE.md) | The File tab stats ignore the zoomed range (bug) | n/a |
 | [2VPF6P](../frs/2VPF6P.md) | The recorder's chart memory line reads like the session history (bug) | n/a |
 | [Z9PC5A](../frs/Z9PC5A.md) | The README says browser edition where the rest says web edition (bug) | n/a |
+| [EWEV1Z](../frs/EWEV1Z.md) | The stats scope toggle hides which scope is on (bug) | n/a |
 
 Build order: the table's order (independent).
 
@@ -72,3 +73,5 @@ Build order: the table's order (independent).
    verify: `bun run test`.
 12. Web edition everywhere in the README and docs — Z9PC5A
    verify: `bun run test`.
+13. A segmented Stats scope toggle with a filled chosen segment — EWEV1Z
+   verify: `bun run test` and the stats-scope Playwright spec on WebKit.

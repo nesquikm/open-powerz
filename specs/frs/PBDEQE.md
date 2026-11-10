@@ -17,7 +17,7 @@ The stats under an opened recording always cover the whole file.
 After a zoom they still do, and nothing says so.
 So a VBUS minimum can come from a dip outside the zoomed part.
 Now the stats say what they cover, Whole file or Shown range.
-A toggle shows the stats of the range on screen, in the desktop app and the web edition.
+A toggle shows the stats of the range on screen, in both editions.
 The live Stats panel keeps its meaning and says it counts since the connect or the last Reset.
 
 ## Requirement
