@@ -55,8 +55,9 @@ pub fn watch<T: Transport, C: Clock>(
 /// only, no sign-in, no CONNECT), then on every refresh draw the latest
 /// pushed record in the same format as [`watch`] (temperature `-`: records
 /// carry none) and call `sleep(interval)`. The stream is stopped (`03`)
-/// when `stop` is set, the output pipe closes or a refresh fails. Fails at once where the pipe has
-/// no ADCNEW stream (anything but CDC). A meter that echoes the start more
+/// when `stop` is set, the output pipe closes or a refresh fails. Fails at
+/// once where the pipe has no ADCNEW stream (anything but CDC). A meter that
+/// echoes the start more
 /// than [`MAX_START_ECHOES`] times (it does while another program reads it
 /// over USB `[device]`) gets one note on `err`, then the stream is stopped and
 /// the watch goes on with ADC snapshots ([`watch`]) on the same port.
@@ -78,6 +79,9 @@ pub fn watch_cdc<T: Transport, C: Clock>(
             err,
             "the meter keeps echoing the ADCNEW start instead of streaming; watching ADC snapshots instead"
         )?;
+        // A fresh view on purpose: the note went out between the two views,
+        // so moving the cursor back over the stream's last view would
+        // overwrite the note instead.
         return watch(session, opts, stop, sleep, out);
     }
     Ok(())
