@@ -29,6 +29,11 @@ export class Session {
   /** Statistics of the latest batch, null until the first one. They stay after a
    * disconnect, so the final totals remain readable. */
   stats = $state<StatsSnapshot | null>(null);
+  /** Id of the real meter picked by hand or connected (FR NWGY72): when it leaves the
+   * list while no session runs, it stays picked as not connected. */
+  #chosenMeterId: string | null = null;
+  /** The pick was made by the list fallback, not by the user (FR NWGY72, AC .2). */
+  #autoPicked = false;
   /** Device whose session the statistics belong to (FR R13Y5W). */
   #statsDeviceId: string | null = null;
   /** The connected meter's details (mode, versions, firmware warnings), null while
@@ -73,7 +78,11 @@ export class Session {
    * meter that vanishes follows a new listing with the same non-empty serial (a browser
    * replug) and the dead entry goes (FR R13Y5V). With no such listing, a picked meter that
    * vanishes while its session runs or has just ended with an error stays: the hotplug
-   * list can arrive before the waiting status, and the fallback must never pick a demo. */
+   * list can arrive before the waiting status, and the fallback must never pick a demo.
+   * A meter the user picked or connected that vanishes with no other meter listed stays
+   * picked, marked `absent` (shown as not connected), so the pick never moves to a demo
+   * on its own; a demo the fallback picked yields to a meter that appears while no
+   * session runs (FR NWGY72). */
   setDevices(devices: readonly DeviceListing[]): void {
     let list = sortDevices(devices);
     const meterWithSerial = (serial: string): DeviceListing | undefined =>
@@ -93,10 +102,24 @@ export class Session {
       this.selectedId = replugged.id;
     } else if (kept?.demo_scenario === null && this.state !== "disconnected" && vanished) {
       list = sortDevices([kept, ...list]);
+    } else if (
+      kept?.demo_scenario === null &&
+      vanished &&
+      kept.id === this.#chosenMeterId &&
+      !list.some((d) => d.demo_scenario === null)
+    ) {
+      // The chosen meter left with no other meter listed: it stays picked as not
+      // connected, so the pick never moves to a demo on its own (FR NWGY72, AC .1).
+      list = sortDevices([{ ...kept, absent: true }, ...list]);
+    } else if (kept?.demo_scenario !== null && this.#autoPicked && !this.active) {
+      // A demo picked automatically yields to a meter that appears (FR NWGY72, AC .2).
+      const real = list.find((d) => d.demo_scenario === null && d.absent !== true);
+      if (real) this.selectedId = real.id;
     }
     this.devices = list;
     if (!this.devices.some((d) => d.id === this.selectedId)) {
       this.selectedId = this.devices[0]?.id ?? null;
+      this.#autoPicked = true;
     }
   }
 
@@ -104,6 +127,8 @@ export class Session {
    * cancels the wait for it; returns true then, so the caller tells the backend. */
   select(id: string): boolean {
     this.selectedId = id;
+    this.#autoPicked = false;
+    this.#rememberMeter();
     if (this.waitingSerial === null) return false;
     const picked = this.devices.find((d) => d.id === id);
     if (picked?.demo_scenario === null && picked.serial === this.waitingSerial) return false;
@@ -128,7 +153,15 @@ export class Session {
     // Another device's numbers must not sit next to this connect (FR R13Y5W, AC .2).
     if (this.#statsDeviceId !== this.selectedId) this.stats = null;
     this.#statsDeviceId = this.selectedId;
+    this.#autoPicked = false;
+    this.#rememberMeter();
     this.state = "connecting";
+  }
+
+  /** Remembers the picked device when it is a real meter (FR NWGY72). */
+  #rememberMeter(): void {
+    const picked = this.devices.find((d) => d.id === this.selectedId);
+    if (picked?.demo_scenario === null) this.#chosenMeterId = picked.id;
   }
 
   failConnect(error: UiError): void {

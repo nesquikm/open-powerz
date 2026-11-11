@@ -126,7 +126,23 @@ export function deviceOptionLabel(
   // A meter the web edition reaches over WebHID says so, last (AC-EHY1JX.2).
   if (device.id.startsWith("webhid:")) name = `${name} (HID)`;
   // A meter in bootloader mode is listed as such (FR V9SK52, AC .5).
-  return device.mode === "bootloader" ? `${name} (bootloader mode)` : name;
+  if (device.mode === "bootloader") name = `${name} (bootloader mode)`;
+  // The picked meter that left the list says so (FR NWGY72, AC .1).
+  return device.absent === true ? `${name} — not connected` : name;
+}
+
+/** Who a meter write goes to, for its confirm or Apply row (FR NWGY72, AC .5): the demo
+ * device by name with a note that no meter is written, or the meter by its picker name,
+ * with "serial hidden" in place of the serial when serial numbers are hidden. */
+export function writeTargetName(
+  device: DeviceListing,
+  hidden: boolean,
+  among: readonly DeviceListing[] = [],
+): string {
+  if (device.demo_scenario !== null)
+    return `${deviceOptionLabel(device, hidden)} (no meter is written)`;
+  const name = deviceOptionLabel(device, hidden, among);
+  return hidden ? `${name} — serial hidden` : name;
 }
 
 /** `device`'s 1-based place among the real meters of its model in `among`: by serial

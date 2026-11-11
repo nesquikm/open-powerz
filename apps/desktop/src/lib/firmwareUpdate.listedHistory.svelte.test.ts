@@ -206,6 +206,23 @@ describe("the device list line (AC-XCCQAK.1)", () => {
     expect(line(fw, false)).not.toContain("Demo device");
   });
 
+  it("ignores the not-connected stand-in of the updated meter (FR NWGY72, review)", async () => {
+    const be = fakeBackend();
+    const { fw, ended } = await running(be.api);
+    const standIn: DeviceListing = { ...meterAt(4, "application"), absent: true };
+    fw.noteListings([standIn, DEMO]);
+    be.resolve({ outcome: "verified", version: "2.0.7" });
+    await ended;
+    await settle();
+    // The meter is not listed yet: only its stand-in is, which is no listing of it.
+    expect(fw.followTarget([standIn, DEMO])).toBeNull();
+    expect(be.api.reconnect).not.toHaveBeenCalled();
+    expect(fw.listedHistory.map((l) => l.absent === true)).toEqual([false]);
+    // Once the OS lists it again, it is connected again.
+    expect(fw.followTarget([meterAt(5, "application"), DEMO])).toBe("usb:1:5");
+    expect(be.api.reconnect).toHaveBeenCalledWith("usb:1:5");
+  });
+
   it("holds no labels before any update", () => {
     const fw = new FirmwareUpdate(fakeBackend().api);
     fw.noteListings([meterAt(4, "application"), OTHER, DEMO]);

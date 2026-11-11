@@ -12,6 +12,7 @@
     durationText,
     onCancel,
     onConfirm,
+    target,
   }: {
     /** The write to confirm. */
     action: LogoAction;
@@ -20,6 +21,8 @@
     onCancel: () => void;
     /** Called with the typed confirmation once it matches. */
     onConfirm: (typed: string) => void;
+    /** Who the write goes to (AC-NWGY72.5). */
+    target: string;
   } = $props();
 
   let typed = $state("");
@@ -79,6 +82,7 @@
         : "The logo area on the meter's flash is cleared and read back to check it."}
       The write cannot be stopped once it starts.
     </p>
+    <p data-testid="logo-confirm-target">Writes to {target}</p>
     <p data-testid="logo-confirm-duration">{durationText}</p>
     <form onsubmit={submit}>
       <label>

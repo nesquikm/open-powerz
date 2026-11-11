@@ -5,7 +5,14 @@
   import DesktopOnly from "./DesktopOnly.svelte";
   import LogoConfirmDialog from "./LogoConfirmDialog.svelte";
 
-  let { logo }: { logo: StartupLogoState } = $props();
+  let {
+    logo,
+    target,
+  }: {
+    logo: StartupLogoState;
+    /** Who a logo write goes to, named in its confirm (AC-NWGY72.5). */
+    target: string;
+  } = $props();
 
   /** The settings check runs while the view is open (FR QG6RNY). */
   $effect(() => {
@@ -306,6 +313,7 @@
 {#if logo.confirming}
   <LogoConfirmDialog
     action={logo.confirming}
+    {target}
     durationText={logo.confirming === "upload" ? logo.uploadConfirmText : logo.removeConfirmText}
     onCancel={() => logo.cancelConfirm()}
     onConfirm={(typed) => void logo.confirm(typed)}

@@ -103,6 +103,10 @@ serial number) within about 3 seconds, at the sample rate you had chosen. The
 session carries on along the same timeline, and the time the cable was out shows
 as a **No data** band in the live chart, in Whole session and in CSV exports.
 
+- A meter you picked or connected that is unplugged while no session runs stays
+  picked as **not connected**, with a **Refresh** button; Connect is off until it is
+  listed again, and then it is picked again. The demo device is used only when you
+  pick it, and every write (startup logo, settings, record delete) names its target.
 - A different meter plugged in meanwhile is listed but not connected.
 - Picking another device in the picker (a demo device, or another meter) stops the
   wait; the unplugged meter is then only listed when it comes back.

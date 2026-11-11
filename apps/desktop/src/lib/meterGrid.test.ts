@@ -82,10 +82,12 @@ describe("tileTitle with serial numbers hidden (AC-AXHK2Q.4)", () => {
     expect(second.name).toBe("KM003C 2");
   });
 
-  it("titles a demo meter the same way", () => {
+  // Superseded by AC-NWGY72.4 (user decision): a demo meter is never titled by the model
+  // alone, also with serial numbers hidden; it is named as the demo device with its scenario.
+  it("titles a demo meter as the demo device with serial numbers hidden (AC-NWGY72.4)", () => {
     const demo = listing({ serial: "123456", demo_scenario: "pd-9v-2a" });
     expect(tileTitle(demo, "123456", { hidden: true, position: 3 })).toEqual({
-      name: "KM003C 3",
+      name: "Demo device — pd-9v-2a",
       suffix: "",
     });
   });
@@ -107,5 +109,29 @@ describe("the tile grid's columns (AC-1HHT03.2)", () => {
   it("go side by side at the app's layout breakpoint, in CSS", () => {
     const css = readFileSync(new URL("./components/MeterGrid.svelte", import.meta.url), "utf8");
     expect(css).toContain(`@media (min-width: ${LAYOUT_BREAKPOINT_PX}px)`);
+  });
+});
+
+describe("A demo meter is named as the demo device (AC-NWGY72.4)", () => {
+  const demo = listing({ id: "demo:idle", serial: "123456", demo_scenario: "idle" });
+
+  it("names the control bar after the demo device with serial numbers hidden", () => {
+    const title = tileTitle(demo, "123456", { hidden: true, position: 1 });
+    expect(controlsLabel(title)).toBe("Controls for Demo device — idle");
+  });
+
+  it("never titles a demo by its model alone", () => {
+    for (const hidden of [true, false]) {
+      const title = tileTitle(demo, "123456", { hidden, position: 1 });
+      expect(title.name).not.toBe("KM003C");
+      expect(title.name).not.toBe("KM003C 1");
+      expect(title.name).toContain("Demo device — idle");
+    }
+  });
+
+  it("keeps a real meter's hidden title as model and position", () => {
+    expect(tileTitle(listing({}), "SERIAL-0007", { hidden: true, position: 2 }).name).toBe(
+      "KM003C 2",
+    );
   });
 });

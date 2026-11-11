@@ -7,6 +7,7 @@ meter-logo.svg is a hand-kept source in assets/brand and is not written here. Ru
 All geometry here is original, hand-drawn for open-powerz (MIT). Lettering uses the monoline stroke glyphs below
 (no font). Glyph cell: x-height 0..10, baseline y=10, caps from y=-3.5, descender to 15.
 """
+import math
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -125,18 +126,75 @@ def wave_line(xmin, xmax, base, L=75, k=35):
     return d, x
 
 
-def scene(xmin, xmax, bottom=205, uid="s", rounded_bottom=False):
-    """Wave + foam + surfer, in the 200-unit scene space. Returns (defs, body)."""
-    top, xend = wave_line(xmin, xmax, 130)
-    x0 = float(top.split(",")[0][1:])
-    if rounded_bottom:
-        r = 14
-        sea = f"{top} L{xend:g},{bottom - r:g} Q{xend:g},{bottom:g} {xend - r:g},{bottom:g} L{x0 + r:g},{bottom:g} Q{x0:g},{bottom:g} {x0:g},{bottom - r:g} Z"
+def _num(v):
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def _blossom(P, u, v, w):
+    lerp = lambda a, b, t: (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+    a = [lerp(P[i], P[i + 1], u) for i in range(3)]
+    b = [lerp(a[i], a[i + 1], v) for i in range(2)]
+    return lerp(b[0], b[1], w)
+
+
+def _segment(x, L, k):
+    """wave_line() segment holding scene x: (index, start x, signed control offset dy)."""
+    i = math.floor((x + 12.5) / L)
+    return i, -12.5 + i * L, (k if i % 2 == 0 else -k)
+
+
+def wave_y(x, base, L=75, k=35):
+    """Height of the wave_line() curve at scene x (its segments are cubic, x linear in t)."""
+    _, x0, dy = _segment(x, L, k)
+    t = (x - x0) / L
+    return base + dy * 3 * t * (1 - t)
+
+
+def wave_arc(xl, xr, base, L=75, k=35):
+    """The exact piece of wave_line() between x = xl and xr, as path data (sub-curves by blossoming)."""
+    x, d = xl, []
+    while x < xr - 1e-9:
+        _, x0, dy = _segment(x, L, k)
+        P = [(x0, base), (x0 + L / 3, base + dy), (x0 + 2 * L / 3, base + dy), (x0 + L, base)]
+        t0, t1 = (x - x0) / L, min(1.0, (xr - x0) / L)
+        c = [_blossom(P, t0, t0, t0), _blossom(P, t0, t0, t1), _blossom(P, t0, t1, t1), _blossom(P, t1, t1, t1)]
+        if not d:
+            d.append(f"M{_num(c[0][0])},{_num(c[0][1])}")
+        d.append("C" + " ".join(f"{_num(px)},{_num(py)}" for px, py in c[1:]))
+        x = x0 + L if t1 >= 1.0 else xr
+    return " ".join(d)
+
+
+def island_sea(xl, xr, bottom, base=130):
+    """The sea as an island inside the frame: wave top from xl to xr, both ends rounded down to the bottom."""
+    yl, yr = wave_y(xl, base), wave_y(xr, base)
+    rl, rr = bottom - yl, bottom - yr
+    return (
+        f"{wave_arc(xl, xr, base)} Q{_num(xr)},{_num(bottom)} {_num(xr - rr)},{_num(bottom)}"
+        f" L{_num(xl + rl)},{_num(bottom)} Q{_num(xl)},{_num(bottom)} {_num(xl)},{_num(yl)} Z"
+    )
+
+
+FOAM = "M70,121 C88,99 112,99 130,121"
+
+
+def scene(xmin, xmax, bottom=205, uid="s", island=False):
+    """Wave + foam + surfer, in the 200-unit scene space. Returns (defs, body).
+
+    island=True ends the sea exactly at xmin..xmax with rounded ends, so it sits inside the picture's frame
+    (the meter logos keep a transparent margin); otherwise the sea runs past both edges.
+    """
+    if island:
+        sea = island_sea(xmin, xmax, bottom)
     else:
+        top, xend = wave_line(xmin, xmax, 130)
+        x0 = float(top.split(",")[0][1:])
         sea = f"{top} L{xend:g},{bottom:g} L{x0:g},{bottom:g} Z"
     l1, _ = wave_line(xmin, xmax, 150)
     l2, _ = wave_line(xmin, xmax, 174)
     defs = f'<clipPath id="sea-{uid}"><path d="{sea}"/></clipPath>'
+    # On the meter logos the foam meets the transparent margin above the crest: ink it underneath.
+    foam_ink = f'\n    <path d="{FOAM}" fill="none" stroke-width="9"/>' if island else ""
     body = f"""
   <g stroke="#111" stroke-linejoin="round" stroke-linecap="round">
     <path d="{sea}" fill="#2f6bff" stroke-width="6"/>
@@ -144,8 +202,8 @@ def scene(xmin, xmax, bottom=205, uid="s", rounded_bottom=False):
       <path d="{l1}" stroke="#7fd4ff" stroke-width="6"/>
       <path d="{l2}" stroke="#1d47c9" stroke-width="10"/>
     </g>
-    <path d="{sea}" fill="none" stroke-width="6"/>
-    <path d="M70,121 C88,99 112,99 130,121" fill="none" stroke="#fff" stroke-width="5"/>
+    <path d="{sea}" fill="none" stroke-width="6"/>{foam_ink}
+    <path d="{FOAM}" fill="none" stroke="#fff" stroke-width="5"/>
     <circle cx="146" cy="110" r="4" fill="#fff" stroke-width="2.5"/>
     <circle cx="156" cy="100" r="3" fill="#fff" stroke-width="2.5"/>
     <circle cx="150" cy="92" r="2.2" fill="#fff" stroke-width="2"/>
@@ -172,7 +230,7 @@ def svg(w, h, comment, defs, body):
 
 
 def meter_logo_wordmark():
-    d, b = scene(-12.5, 227.5, bottom=192, uid="m", rounded_bottom=True)
+    d, b = scene(-13.75, 213.75, bottom=192, uid="m", island=True)
     ww = measure("open-powerz") * 1.25
     body = (
         spark(22, 26, 1, "#fff") + spark(174, 18, 0.7, "#ffd23f", 3) + spark(182, 84, 0.6, "#3ff0ff", 3)

@@ -289,14 +289,19 @@ test.describe("Hide serial numbers (FR AXHK2Q)", () => {
     await expect(tiles(page)).toHaveCount(2);
   });
 
-  test("tiles are titled by model and position (AC-AXHK2Q.4)", async ({ page }) => {
+  // AC-AXHK2Q.4's model-and-position title stays for real meters; demo meters are named as
+  // the demo device with their scenario instead (AC-NWGY72.4).
+  test("demo tiles are titled as the demo device with serials hidden (AC-NWGY72.4)", async ({
+    page,
+  }) => {
     await hideBeforeLoad(page);
     await open(page);
     await streamDemo(page);
     await addDemoMeter(page);
-    await expect(tiles(page).nth(0)).toContainText("KM003C 1");
-    await expect(tiles(page).nth(1)).toContainText("KM003C 2");
-    await expect(page.getByLabel("Controls for KM003C 2")).toHaveCount(1);
+    await expect(tiles(page).nth(0)).toContainText("Demo device — load-5v-1a");
+    await expect(tiles(page).nth(1)).toContainText("Demo device — pd-9v-2a");
+    await expect(tiles(page).nth(0)).not.toContainText("KM003C 1");
+    await expect(page.getByLabel("Controls for Demo device — pd-9v-2a")).toHaveCount(1);
   });
 
   test("the Device select's tooltip follows the switch with no reconnect (AC-NKAD6S.1, .2, .3, .4)", async ({

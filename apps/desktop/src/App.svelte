@@ -106,6 +106,7 @@
   import { copyLive, Meters, type MeterEntry } from "./lib/meters.svelte";
   import MeterGrid from "./lib/components/MeterGrid.svelte";
   import { controlsLabel, tileTitle } from "./lib/meterGrid";
+  import { writeTargetName } from "./lib/format";
   import MeterNoticeList from "./lib/components/MeterNoticeList.svelte";
   import type { MeterNotice } from "./lib/meterNotices.svelte";
   import AddMeterDialog from "./lib/components/AddMeterDialog.svelte";
@@ -263,6 +264,17 @@
     if (!listing) return null;
     const masked = { hidden: hideSerial, position: meters.position(id) };
     return controlsLabel(tileTitle(listing, session.details?.serial ?? null, masked));
+  });
+
+  /** Who the settings, records and logo panels write to (AC-NWGY72.5): the meter they act
+   * on, named as the picker names it. */
+  const writeTarget = $derived.by(() => {
+    const id = primaryId ?? session.selectedId;
+    const listing =
+      id === null
+        ? undefined
+        : (meters.get(id)?.listing ?? session.devices.find((d) => d.id === id));
+    return listing ? writeTargetName(listing, hideSerial, session.devices) : "no meter";
   });
 
   /** A tile's recording and export: the full view's meter keeps the app's. */
@@ -1525,7 +1537,12 @@
           deps={statsDeps}
           canReset={canRecord}
         >
-          <MeterSettingsView panel={settingsPanel} connected={meterConnected} held={meterHeld} />
+          <MeterSettingsView
+            panel={settingsPanel}
+            connected={meterConnected}
+            held={meterHeld}
+            target={writeTarget}
+          />
         </StatsPanel>
       </div>
     </div>
@@ -1609,7 +1626,12 @@
     {/if}
     {#if view === "records"}
       <div class="records-view" role="tabpanel" id="view-records" aria-labelledby="tab-records">
-        <RecordsView panel={recordsPanel} connected={meterConnected} theme={resolvedTheme} />
+        <RecordsView
+          panel={recordsPanel}
+          connected={meterConnected}
+          theme={resolvedTheme}
+          target={writeTarget}
+        />
       </div>
     {/if}
     {#if view === "file" && recordingFile.summary !== null}
@@ -1625,7 +1647,7 @@
     {#if view === "logo" && meterConnected}
       <div class="logo-view" role="tabpanel" id="view-logo" aria-labelledby="tab-logo">
         <h2>Startup logo</h2>
-        <StartupLogoView logo={startupLogo} />
+        <StartupLogoView logo={startupLogo} target={writeTarget} />
       </div>
     {/if}
     {#if view === "firmware" && advancedFirmware}

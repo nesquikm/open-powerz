@@ -154,6 +154,9 @@ export interface DeviceListing {
   demo_scenario: string | null;
   /** What the meter runs, from its vendor interface's USB string (FR V9SK52). */
   mode: DeviceMode;
+  /** A stand-in for the picked meter that left the device list while no session ran:
+   * it stays listed and picked as not connected (FR NWGY72). */
+  absent?: boolean;
 }
 
 /** Application firmware, bootloader, or not known (mirrors `firmware::DeviceMode`). */
