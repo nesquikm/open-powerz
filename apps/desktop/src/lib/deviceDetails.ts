@@ -6,6 +6,11 @@
 import type { ConnectedInfo, DeviceListing, DeviceMode, FirmwareWarningCode } from "./backend";
 import { displaySerial } from "./format";
 
+/** What a meter on the old (2.1) bootloader means for the user, with the how-to link:
+ * the same text as the engine's `LEGACY_BOOTLOADER_HELP` (FR BKSE70, AC .5). */
+export const LEGACY_BOOTLOADER_HELP =
+  "This meter's bootloader is an old generation (2.1-style), not supported yet by open-powerz; nothing was sent to it. Unplug the meter and plug it back in (no buttons) to return to the application firmware. See https://github.com/nesquikm/open-powerz/blob/main/docs/how-to/update-firmware.md#old-bootloader";
+
 /** The mode in plain words. */
 export function modeLabel(mode: DeviceMode): string {
   switch (mode) {

@@ -71,6 +71,7 @@ import type {
   RunProgressQuery,
 } from "./backend";
 import { lineRefusal, messageRefusal } from "./console.svelte";
+import { LEGACY_BOOTLOADER_HELP } from "./deviceDetails";
 import { HistoryColumns, SEED_HEADROOM, SessionStats } from "./history";
 import {
   PD_CYCLE_MS,
@@ -2474,6 +2475,9 @@ export class MockBackend {
     const meter = this.#listedMeter();
     const isMeter = meter?.id === deviceId;
     if (!isMeter && !scenarioOf(deviceId)) throw usage("That meter is no longer attached.");
+    // Like the backend: the engine refuses a meter on the old bootloader before sending
+    // anything, so no stage is reported (FR BKSE70, AC .5).
+    if (isMeter && this.#mode === "legacy-bootloader") throw usage(LEGACY_BOOTLOADER_HELP);
     const s = this.#sessions.find((x) => x.id === deviceId || x.deviceId === deviceId);
     if (s) {
       const listed = (await this.listDevices()).find((d) => d.id === s.deviceId);

@@ -427,7 +427,18 @@ pub enum FlashError {
     /// nothing was sent.
     #[error("the meter's mode is unknown, so no jump is chosen; nothing was sent")]
     UnknownMode,
+    /// The meter is on the old (2.1-style) bootloader, which the flash
+    /// engine does not speak `[device]`; nothing was sent to it.
+    #[error("{LEGACY_BOOTLOADER_HELP}")]
+    LegacyBootloader,
 }
+
+/// What a meter on the old bootloader means for the user, with the link to
+/// the how-to's section.
+pub const LEGACY_BOOTLOADER_HELP: &str = "this meter's bootloader is an old generation \
+     (2.1-style), not supported yet by open-powerz; nothing was sent to it. Unplug the \
+     meter and plug it back in (no buttons) to return to the application firmware. See \
+     https://github.com/nesquikm/open-powerz/blob/main/docs/how-to/update-firmware.md#old-bootloader";
 
 impl FlashError {
     /// The vendor error number of this failure `[static]`.
@@ -445,7 +456,8 @@ impl FlashError {
             | FlashError::Device { .. }
             | FlashError::Interrupted { .. }
             | FlashError::AlreadyInMode { .. }
-            | FlashError::UnknownMode => -110,
+            | FlashError::UnknownMode
+            | FlashError::LegacyBootloader => -110,
             FlashError::WorkMode { .. } => -111,
         }
     }
@@ -489,7 +501,9 @@ pub fn flash<O: MeterOpener, C: Clock>(
             progress(FlashProgress::Switching);
             switch_to_bootloader(meter, container, opener, &mut clock, stop, progress)?
         }
-        DeviceMode::LegacyBootloader | DeviceMode::Unknown => {
+        // The old (2.1) bootloader is not supported: refuse before any frame.
+        DeviceMode::LegacyBootloader => return Err(FlashError::LegacyBootloader),
+        DeviceMode::Unknown => {
             return Err(FlashError::NotInBootloader {
                 seen: meter.mode.name().into(),
             });
@@ -529,6 +543,8 @@ pub fn flash<O: MeterOpener, C: Clock>(
                 ),
             });
         }
+        // Only a wait for the bootloader ends on the old bootloader.
+        Err(WaitEnd::LegacyBootloader) => return Err(FlashError::LegacyBootloader),
         Err(WaitEnd::Stopped | WaitEnd::TimedOut(None)) => {
             return Ok(FlashOutcome::PowerCycleNeeded);
         }
@@ -604,6 +620,8 @@ fn in_bootloader(e: FlashError) -> FlashError {
         e @ FlashError::WorkMode { .. } => e,
         // Raised by `jump` only, before anything is sent.
         e @ (FlashError::AlreadyInMode { .. } | FlashError::UnknownMode) => e,
+        // Nothing was sent to the old bootloader; its message says what to do.
+        e @ FlashError::LegacyBootloader => e,
     }
 }
 
@@ -644,6 +662,7 @@ fn switch_to_bootloader<O: MeterOpener, C: Clock>(
     };
     let seen = match jump_and_wait(meter.pipe, target, opener, clock, stop, &mut sent)? {
         Waited::Reached(boot) => return Ok(boot),
+        Waited::LegacyBootloader => return Err(FlashError::LegacyBootloader),
         Waited::Stopped => {
             return Err(interrupted(
                 "while waiting for the meter after JUMP_DFU; nothing was erased; \
@@ -665,6 +684,8 @@ enum Waited<P> {
     Reached(Meter<P>),
     /// The user stopped the wait.
     Stopped,
+    /// The meter came back on the old bootloader.
+    LegacyBootloader,
     /// It did not; a last look shows this mode (`None`: no meter attached).
     Seen(Option<DeviceMode>),
     /// It did not, and opening it kept failing with this error (not "no
@@ -704,6 +725,7 @@ fn jump_and_wait<O: MeterOpener, C: Clock>(
         match wait_for(opener, clock, target.mode(), limit, Some(stop)) {
             Ok(m) => Waited::Reached(m),
             Err(WaitEnd::Stopped) => Waited::Stopped,
+            Err(WaitEnd::LegacyBootloader) => Waited::LegacyBootloader,
             Err(WaitEnd::TimedOut(Some(e))) => Waited::OpenError(e),
             Err(WaitEnd::TimedOut(None)) => match opener.open() {
                 Ok(m) => Waited::Seen(m.map(|m| m.mode)),
@@ -865,7 +887,8 @@ pub fn jump<O: MeterOpener, C: Clock>(
         return Err(interrupted("before the jump"));
     }
     match meter.mode {
-        DeviceMode::LegacyBootloader | DeviceMode::Unknown => return Err(FlashError::UnknownMode),
+        DeviceMode::LegacyBootloader => return Err(FlashError::LegacyBootloader),
+        DeviceMode::Unknown => return Err(FlashError::UnknownMode),
         mode if mode == target.mode() => return Err(FlashError::AlreadyInMode { mode }),
         _ => {}
     }
@@ -879,6 +902,7 @@ pub fn jump<O: MeterOpener, C: Clock>(
     };
     match jump_and_wait(meter.pipe, target, opener, &mut clock, stop, &mut report)? {
         Waited::Reached(m) => Ok(JumpOutcome::Reached(m.mode)),
+        Waited::LegacyBootloader => Err(FlashError::LegacyBootloader),
         Waited::Stopped => Err(interrupted(&format!(
             "while waiting for the meter after {}",
             target.frame_name()
@@ -1034,6 +1058,9 @@ fn check_container(container: &FirmwareContainer<'_>) -> Result<(), FlashError> 
 enum WaitEnd {
     /// `stop` was raised.
     Stopped,
+    /// While waiting for the bootloader, an open saw the old bootloader
+    /// instead; it will not become the new one, so waiting longer is moot.
+    LegacyBootloader,
     /// The time ran out. Holds the last opener error that is not "no device
     /// yet" (`None`: there was none).
     TimedOut(Option<TransportError>),
@@ -1060,6 +1087,11 @@ fn wait_for<O: MeterOpener, C: Clock>(
         // A meter that is re-enumerating may fail to open; look again.
         match opener.open() {
             Ok(Some(m)) if m.mode == mode => return Ok(m),
+            Ok(Some(m))
+                if mode == DeviceMode::Bootloader && m.mode == DeviceMode::LegacyBootloader =>
+            {
+                return Err(WaitEnd::LegacyBootloader);
+            }
             // A later successful open supersedes an earlier opener error:
             // the final observation wins.
             Ok(_) => last_error = None,
