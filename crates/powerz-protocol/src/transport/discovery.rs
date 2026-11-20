@@ -44,6 +44,10 @@ pub struct UsbDeviceInfo {
     /// Interface string of the vendor-class (0xFF) interface, if the OS
     /// reported one (`APP` in application mode `[device]`).
     pub interface_string: Option<String>,
+    /// bInterfaceSubClass of the vendor-class (0xFF) interface, if any.
+    pub vendor_subclass: Option<u8>,
+    /// Whether the device has a HID (0x03) interface.
+    pub has_hid: bool,
     /// Bus identifier as reported by the OS.
     pub bus: String,
     /// Device address on the bus.
@@ -63,6 +67,11 @@ pub struct DeviceEntry {
     pub product: Option<String>,
     /// Vendor-interface string, if the OS reported one; decides the mode.
     pub interface_string: Option<String>,
+    /// bInterfaceSubClass of the vendor-class (0xFF) interface, if any.
+    pub vendor_subclass: Option<u8>,
+    /// Whether the device has a HID (0x03) interface; with the string,
+    /// tells the old bootloader apart.
+    pub has_hid: bool,
     /// Bus identifier.
     pub bus: String,
     /// Device address on the bus.
@@ -86,9 +95,10 @@ impl DeviceEntry {
             && self.serial.as_deref().is_none_or(|s| serial == Some(s))
     }
 
-    /// Application or bootloader mode, from the vendor-interface string.
+    /// Application or bootloader mode, from the vendor-interface string and
+    /// whether a HID interface exists.
     pub fn mode(&self) -> DeviceMode {
-        DeviceMode::from_interface_string(self.interface_string.as_deref())
+        DeviceMode::classify(self.interface_string.as_deref(), self.has_hid)
     }
 }
 
@@ -103,6 +113,8 @@ pub fn filter_devices(devices: &[UsbDeviceInfo]) -> Vec<DeviceEntry> {
             serial: d.serial.clone(),
             product: d.product.clone(),
             interface_string: d.interface_string.clone(),
+            vendor_subclass: d.vendor_subclass,
+            has_hid: d.has_hid,
             bus: d.bus.clone(),
             address: d.address,
         })
@@ -121,6 +133,11 @@ pub fn list_devices() -> Result<Vec<DeviceEntry>, Error> {
             serial: d.serial_number().map(str::to_owned),
             product: d.product_string().map(str::to_owned),
             interface_string: vendor_interface_string(&d),
+            vendor_subclass: d
+                .interfaces()
+                .find(|i| i.class() == 0xFF)
+                .map(|i| i.subclass()),
+            has_hid: d.interfaces().any(|i| i.class() == 0x03),
             bus: d.bus_id().to_owned(),
             address: d.device_address(),
         })
@@ -170,7 +187,10 @@ impl UsbIdentity {
     /// Application or bootloader mode, from the string of the vendor-class
     /// (0xFF) interface, found by class, never by number.
     pub fn mode(&self) -> DeviceMode {
-        DeviceMode::from_interface_string(self.vendor_interface().and_then(|i| i.string.as_deref()))
+        DeviceMode::classify(
+            self.vendor_interface().and_then(|i| i.string.as_deref()),
+            self.interfaces.iter().any(|i| i.class == 0x03),
+        )
     }
 
     /// The first vendor-class (0xFF) interface, if any: the bulk pipe.
@@ -190,7 +210,7 @@ impl std::fmt::Display for UsbIdentity {
             "Product:     {}",
             self.product.as_deref().unwrap_or("(no string)")
         )?;
-        writeln!(f, "Mode:        {}", self.mode().name())?;
+        writeln!(f, "Mode:        {}", self.mode().label())?;
         for i in &self.interfaces {
             let string = i
                 .string
@@ -377,6 +397,8 @@ mod tests {
             serial: serial.map(str::to_owned),
             product: None,
             interface_string: None,
+            vendor_subclass: None,
+            has_hid: true,
             bus: bus.to_owned(),
             address,
         }
@@ -410,6 +432,8 @@ mod tests {
                     serial: Some(PLACEHOLDER_SERIAL.to_owned()),
                     product: None,
                     interface_string: None,
+                    vendor_subclass: None,
+                    has_hid: true,
                     bus: "1".to_owned(),
                     address: 7,
                 },
@@ -419,6 +443,8 @@ mod tests {
                     serial: Some("SERIAL-0002".to_owned()),
                     product: None,
                     interface_string: None,
+                    vendor_subclass: None,
+                    has_hid: true,
                     bus: "2".to_owned(),
                     address: 3,
                 },
@@ -428,6 +454,8 @@ mod tests {
                     serial: None,
                     product: None,
                     interface_string: None,
+                    vendor_subclass: None,
+                    has_hid: true,
                     bus: "3".to_owned(),
                     address: 9,
                 },

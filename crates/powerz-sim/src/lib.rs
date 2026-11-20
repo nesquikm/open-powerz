@@ -755,6 +755,7 @@ impl SimDevice {
         match self.mode {
             DeviceMode::Application => "APP",
             DeviceMode::Bootloader => "BOOT",
+            DeviceMode::LegacyBootloader => "POWER-Z KM003C",
             DeviceMode::Unknown => "POWER-Z",
         }
     }
@@ -775,6 +776,12 @@ impl SimDevice {
         let vendor = self.interface_string();
         let interfaces = match self.mode {
             DeviceMode::Bootloader => vec![iface(0, 0xFF, Some(vendor))],
+            // The field-reported bootloader 2.1 descriptor: one vendor
+            // interface, subclass 0xFF `[device]`.
+            DeviceMode::LegacyBootloader => vec![UsbInterface {
+                subclass: 0xFF,
+                ..iface(0, 0xFF, Some(vendor))
+            }],
             DeviceMode::Application | DeviceMode::Unknown => vec![
                 iface(0, 0xFF, Some(vendor)),
                 iface(1, 0x02, Some(vendor)),
@@ -1000,6 +1007,11 @@ impl Transport for SimDevice {
         self.requests += 1;
         let n = self.requests;
         if self.faults.timeout_always || self.faults.timeout_at.contains(&n) {
+            return Err(Error::Timeout);
+        }
+        if self.mode == DeviceMode::LegacyBootloader {
+            // The old bootloader (2.1) answers neither CONNECT nor HEAD, nor
+            // anything else we send `[device]`.
             return Err(Error::Timeout);
         }
         if self.persona == Persona::Cdc

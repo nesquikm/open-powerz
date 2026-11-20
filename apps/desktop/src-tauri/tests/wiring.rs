@@ -123,6 +123,8 @@ fn watcher_reports_plug_events_to_the_ui() {
                     serial: Some("SERIAL-0002".to_owned()),
                     product: Some("POWER-Z KM003C".to_owned()),
                     interface_string: Some("APP".to_owned()),
+                    vendor_subclass: None,
+                    has_hid: true,
                     bus: "2".to_owned(),
                     address: 4,
                 }])

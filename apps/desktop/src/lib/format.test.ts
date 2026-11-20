@@ -326,3 +326,26 @@ describe("same-model meters are numbered with the option on (AC-CCF47K.2)", () =
     expect(deviceOptionLabel(meter("usb:1:4", "SER-A-0001"), true)).toBe("KM003C");
   });
 });
+
+describe("old bootloader label (AC-JT38C8.5)", () => {
+  const legacy: DeviceListing = {
+    id: "usb:1:9",
+    label: "KM003C — SERIAL-JT38-0001 (old bootloader, not supported yet)",
+    model: "KM003C",
+    serial: "SERIAL-JT38-0001",
+    bus: "1",
+    address: 9,
+    demo_scenario: null,
+    mode: "legacy_bootloader",
+  };
+
+  it("names a meter on the old bootloader as not supported yet", () => {
+    expect(deviceOptionLabel(legacy, false)).toBe(
+      "KM003C — SERIAL-JT38-0001 (old bootloader, not supported yet)",
+    );
+  });
+
+  it("keeps the old-bootloader note with serials hidden", () => {
+    expect(deviceOptionLabel(legacy, true)).toBe("KM003C (old bootloader, not supported yet)");
+  });
+});

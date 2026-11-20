@@ -13,6 +13,8 @@ export function modeLabel(mode: DeviceMode): string {
       return "Application";
     case "bootloader":
       return "Bootloader";
+    case "legacy_bootloader":
+      return "Old bootloader";
     default:
       return "Unknown";
   }
@@ -58,8 +60,13 @@ export function firmwareWarningText(code: FirmwareWarningCode, info: ConnectedIn
   }
 }
 
-/** The picked entry can be connected: anything but a meter in bootloader mode or one
- * that is not connected (AC-NWGY72.3). */
+/** The picked entry can be connected: anything but a meter in bootloader mode, one on the
+ * old bootloader (AC-JT38C8.5), or one that is not connected (AC-NWGY72.3). */
 export function canConnectTo(device: DeviceListing | null): boolean {
-  return device !== null && device.mode !== "bootloader" && device.absent !== true;
+  return (
+    device !== null &&
+    device.mode !== "bootloader" &&
+    device.mode !== "legacy_bootloader" &&
+    device.absent !== true
+  );
 }

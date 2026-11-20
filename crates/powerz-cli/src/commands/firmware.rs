@@ -344,7 +344,7 @@ pub fn firmware_jump<O: MeterOpener, C: Clock>(
     let reported = Cell::new(false);
     let mut report = |s: &JumpSent| {
         reported.set(true);
-        io = writeln!(out, "Was in:  {} mode (sent {frame})", s.from.name())
+        io = writeln!(out, "Was in:  {} mode (sent {frame})", s.from.label())
             .and_then(|()| writeln!(out, "Reply:   {}", s.reply))
             .and_then(|()| writeln!(out, "{}", replug_prompt(target.mode(), wait)))
             .and_then(|()| out.flush());
@@ -354,17 +354,17 @@ pub fn firmware_jump<O: MeterOpener, C: Clock>(
     if sent.get() && !reported.get() {
         // Only a meter that is not in `target` mode is sent the jump.
         let from = seen_first.get().unwrap_or(DeviceMode::Unknown);
-        writeln!(out, "Was in:  {} mode (sent {frame})", from.name())?;
+        writeln!(out, "Was in:  {} mode (sent {frame})", from.label())?;
     }
     let outcome =
         result.map_err(|e| CliError::Device(format!("jump failed ({}): {e}", e.code())))?;
     match outcome {
         JumpOutcome::Reached(mode) => {
-            writeln!(out, "Now in:  {} mode", mode.name())?;
+            writeln!(out, "Now in:  {} mode", mode.label())?;
             Ok(())
         }
         JumpOutcome::NotReached { seen } => {
-            let seen = seen.map_or("no meter".to_owned(), |m| format!("{} mode", m.name()));
+            let seen = seen.map_or("no meter".to_owned(), |m| format!("{} mode", m.label()));
             let hint = match target {
                 JumpTarget::Bootloader => format!("; {BACK_BUTTON_HINT}"),
                 JumpTarget::Application => {

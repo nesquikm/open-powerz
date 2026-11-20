@@ -85,6 +85,8 @@ fn usb(pid: u16, interface: Option<&str>, address: u8) -> UsbDeviceInfo {
         serial: Some(format!("SERIAL-{address:04}")),
         product: Some(PRODUCT.to_owned()),
         interface_string: interface.map(str::to_owned),
+        vendor_subclass: None,
+        has_hid: true,
         bus: "1".to_owned(),
         address,
     }
@@ -117,6 +119,8 @@ fn device_entry_mode_follows_its_interface_string_not_the_product() {
         serial: None,
         product: product.map(str::to_owned),
         interface_string: interface.map(str::to_owned),
+        vendor_subclass: None,
+        has_hid: true,
         bus: "2".to_owned(),
         address: 9,
     };

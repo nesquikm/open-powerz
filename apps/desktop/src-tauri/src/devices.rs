@@ -65,15 +65,19 @@ pub struct DeviceListing {
 const BOOTLOADER_REFUSAL: &str =
     "This meter is in bootloader mode. Restart it into the application firmware to connect.";
 
+/// Why a meter on the old bootloader is not connected (FR JT38C8, AC .5).
+const LEGACY_BOOTLOADER_REFUSAL: &str = "This meter is on an old bootloader that is not supported yet. Unplug the meter and replug it to return to the application firmware.";
+
 impl DeviceListing {
     /// The bootloader answers none of the measurement requests: refuse it
     /// before opening anything, for a user connect and an automatic reconnect
     /// alike (FR V9SK52, AC .5).
     fn ensure_connectable(&self) -> Result<(), UiError> {
-        if self.mode == DeviceMode::Bootloader {
-            return Err(UiError::usage(BOOTLOADER_REFUSAL));
+        match self.mode {
+            DeviceMode::Bootloader => Err(UiError::usage(BOOTLOADER_REFUSAL)),
+            DeviceMode::LegacyBootloader => Err(UiError::usage(LEGACY_BOOTLOADER_REFUSAL)),
+            DeviceMode::Application | DeviceMode::Unknown => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -82,11 +86,12 @@ fn serialize_mode<S: serde::Serializer>(mode: &DeviceMode, s: S) -> Result<S::Ok
 }
 
 /// The label suffix naming a real meter's mode; only a bootloader-mode
-/// meter gets one.
+/// meter gets one (FR JT38C8, AC .5 for the old bootloader).
 fn mode_suffix(mode: DeviceMode) -> &'static str {
     match mode {
         DeviceMode::Application | DeviceMode::Unknown => "",
         DeviceMode::Bootloader => " (bootloader mode)",
+        DeviceMode::LegacyBootloader => " (old bootloader, not supported yet)",
     }
 }
 
@@ -2503,6 +2508,8 @@ mod tests {
             serial: serial.map(str::to_owned),
             product: Some("POWER-Z KM003C".to_owned()),
             interface_string: Some("APP".to_owned()),
+            vendor_subclass: None,
+            has_hid: true,
             bus: "1".to_owned(),
             address,
         }

@@ -159,8 +159,9 @@ export interface DeviceListing {
   absent?: boolean;
 }
 
-/** Application firmware, bootloader, or not known (mirrors `firmware::DeviceMode`). */
-export type DeviceMode = "application" | "bootloader" | "unknown";
+/** Application firmware, bootloader, the old (2.1) bootloader, or not known (mirrors
+ * `firmware::DeviceMode`; FR JT38C8). */
+export type DeviceMode = "application" | "bootloader" | "legacy_bootloader" | "unknown";
 
 /** Firmware warning codes (mirrors `version::FirmwareWarning::code`). */
 export type FirmwareWarningCode = "too_old" | "outdated";

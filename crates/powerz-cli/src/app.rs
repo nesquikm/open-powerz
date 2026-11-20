@@ -68,6 +68,8 @@ fn demo_entry() -> DeviceEntry {
         serial: Some(sim_serial()),
         product: Some("POWER-Z KM003C".to_owned()),
         interface_string: Some("APP".to_owned()),
+        vendor_subclass: None,
+        has_hid: true,
         bus: "demo".to_string(),
         address: 0,
     }
@@ -332,8 +334,9 @@ fn sim_mode() -> Result<DeviceMode, CliError> {
     match std::env::var("POWERZ_SIM_MODE").as_deref() {
         Err(_) | Ok("application") => Ok(DeviceMode::Application),
         Ok("bootloader") => Ok(DeviceMode::Bootloader),
+        Ok("legacy-bootloader") => Ok(DeviceMode::LegacyBootloader),
         Ok(other) => Err(CliError::Usage(format!(
-            "invalid POWERZ_SIM_MODE {other:?}: expected application or bootloader"
+            "invalid POWERZ_SIM_MODE {other:?}: expected application, bootloader or legacy-bootloader"
         ))),
     }
 }

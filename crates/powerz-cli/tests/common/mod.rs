@@ -382,6 +382,8 @@ pub fn entry(model: Model, pid: u16, serial: Option<&str>, bus: &str, address: u
         serial: serial.map(str::to_owned),
         product: Some("POWER-Z KM003C".to_owned()),
         interface_string: Some("APP".to_owned()),
+        vendor_subclass: None,
+        has_hid: true,
         bus: bus.to_owned(),
         address,
     }

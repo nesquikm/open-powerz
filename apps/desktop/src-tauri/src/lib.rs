@@ -2408,6 +2408,8 @@ mod tests {
                     serial: Some(SERIAL.to_owned()),
                     product: Some("POWER-Z KM003C".to_owned()),
                     interface_string: Some("APP".to_owned()),
+                    vendor_subclass: None,
+                    has_hid: true,
                     bus: "254".to_owned(),
                     address: 99,
                 }])

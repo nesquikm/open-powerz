@@ -154,3 +154,9 @@ describe("device details with serial numbers hidden (AC-AXHK2Q.2, .3)", () => {
     expect(serialRow(false)?.value).toBe("FAKE-SERIAL-0001");
   });
 });
+
+describe("canConnectTo an old bootloader (AC-JT38C8.5)", () => {
+  it("refuses a meter on the old bootloader", () => {
+    expect(canConnectTo(listing("legacy_bootloader"))).toBe(false);
+  });
+});

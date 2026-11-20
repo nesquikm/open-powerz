@@ -489,7 +489,7 @@ pub fn flash<O: MeterOpener, C: Clock>(
             progress(FlashProgress::Switching);
             switch_to_bootloader(meter, container, opener, &mut clock, stop, progress)?
         }
-        DeviceMode::Unknown => {
+        DeviceMode::LegacyBootloader | DeviceMode::Unknown => {
             return Err(FlashError::NotInBootloader {
                 seen: meter.mode.name().into(),
             });
@@ -865,7 +865,7 @@ pub fn jump<O: MeterOpener, C: Clock>(
         return Err(interrupted("before the jump"));
     }
     match meter.mode {
-        DeviceMode::Unknown => return Err(FlashError::UnknownMode),
+        DeviceMode::LegacyBootloader | DeviceMode::Unknown => return Err(FlashError::UnknownMode),
         mode if mode == target.mode() => return Err(FlashError::AlreadyInMode { mode }),
         _ => {}
     }
