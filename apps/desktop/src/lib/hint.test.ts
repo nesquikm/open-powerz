@@ -40,13 +40,14 @@ describe("splitHint (AC-X2SPDW.8)", () => {
     const parts = splitHint(hint);
     const code = parts.filter((p) => p.code).map((p) => p.text);
     const prose = parts.filter((p) => !p.code).map((p) => p.text);
-    expect(code).toEqual([
-      "sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/",
-      "sudo udevadm control --reload-rules",
-      "sudo udevadm trigger",
-      "docs/linux.md",
-    ]);
-    expect(prose.join("")).toContain("Install the udev rule");
+    // AC-31HJ41.1: the rule is written inline, one code part, quotes and braces intact.
+    const tee = code.filter((c) => c.includes("sudo tee /etc/udev/rules.d/60-powerz.rules"));
+    expect(tee).toHaveLength(1);
+    expect(tee[0]).toMatch(/^echo '[^']*ATTRS\{idVendor\}=="5fc9"[^']*' \| sudo tee /);
+    expect(code).toContain("sudo udevadm control --reload-rules");
+    expect(code).toContain("sudo udevadm trigger");
+    expect(code.some((c) => c.includes("packaging/"))).toBe(false);
+    expect(hint).toContain("https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md");
     expect(prose.join("")).toContain("replug the meter");
     expect(parts.every((p) => !p.text.includes("`"))).toBe(true);
   });

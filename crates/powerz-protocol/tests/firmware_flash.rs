@@ -3148,6 +3148,8 @@ fn entry(serial: Option<&str>, address: u8) -> DeviceEntry {
         serial: serial.map(str::to_owned),
         product: None,
         interface_string: None,
+        vendor_subclass: None,
+        has_hid: true,
         bus: "1".into(),
         address,
     }

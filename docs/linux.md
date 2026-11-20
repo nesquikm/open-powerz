@@ -13,7 +13,23 @@ It matches vendor `5fc9`, products `0061` (KM002C) and `0063` (KM003C), and:
 - sets `ID_MM_DEVICE_IGNORE=1`, so ModemManager does not probe the CDC serial
   port (`/dev/ttyACM*`) and send it AT commands.
 
-Install it and reload udev:
+If you installed the `.deb`, it installs the rule for you, to
+`/usr/lib/udev/rules.d/60-powerz.rules`. Unplug and replug the tester once (or
+run `sudo udevadm trigger`) and you are done.
+
+If you use the AppImage or the CLI archive, write the rule with this one
+command, then reload udev:
+
+```sh
+echo 'SUBSYSTEM=="usb|hidraw|tty", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0061|0063", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"' | sudo tee /etc/udev/rules.d/60-powerz.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+Then unplug and replug the tester.
+
+If you build from source, you can copy the rule file from your checkout
+instead:
 
 ```sh
 sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/

@@ -110,5 +110,49 @@ plugging it back in, then run the update again with the same file. If
 `powerz firmware probe` says the bootloader was left mid-download, do the
 same power cycle first.
 
+If the update stops because the meter is on an old bootloader, see
+[Old bootloader](#old-bootloader).
+
+## Old bootloader
+
+Some KM003C meters run bootloader 2.1; current meters have 2.5. Updating a
+meter with bootloader 2.1 is not supported yet.
+
+**What you see:** after the jump to the bootloader, the meter shows its
+bootloader screen with a flashing green bar. open-powerz recognises the old
+bootloader and stops at once, with a message that bootloader 2.1 is not
+supported yet. It sends nothing to the meter, so the firmware on it is
+unchanged.
+
+**In the app:** while the meter sits in the old bootloader, the device list
+names it "(old bootloader, not supported yet)" and Connect refuses it, and
+`powerz firmware probe` prints `Mode: bootloader (old, not supported yet)`.
+
+**Back to normal:** unplug the meter and plug it back in. You do not need to
+hold any button. The meter starts its application firmware again and works as
+before.
+
+**Updating for now:** use ChargerLAB's official Windows PC software, from the
+[official support page](https://www.power-z.com/blogs/technical-support/power-z-km003c-km002c-technical-support).
+
+**Help add support:** open an issue on
+[GitHub](https://github.com/nesquikm/open-powerz/issues) and attach a report
+with the output of these read-only commands, run while the meter shows the
+bootloader screen (they send only CONNECT and HEAD):
+
+```bash
+powerz firmware probe --json
+powerz --trace firmware probe
+lsusb -v -d 5fc9:0063    # Linux only
+```
+
+The probe output lists the meter's USB endpoints and string descriptors, and
+says which half of CONNECT or HEAD timed out (the write to the meter or the
+read back). If the standard CONNECT gets no answer, the probe also tries three
+read-only variants of it and prints which variant, if any, the meter answered.
+All of this helps us find out how bootloader 2.1 expects to be spoken to.
+
+Never run `powerz firmware flash` on a meter with bootloader 2.1.
+
 See also: [`powerz` CLI reference](../reference/cli.md#firmware-flashing) and
 the firmware download sequence in [docs/protocol.md](../protocol.md#firmware-download).

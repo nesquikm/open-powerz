@@ -71,6 +71,7 @@ import type {
   RunProgressQuery,
 } from "./backend";
 import { lineRefusal, messageRefusal } from "./console.svelte";
+import { LEGACY_BOOTLOADER_HELP } from "./deviceDetails";
 import { HistoryColumns, SEED_HEADROOM, SessionStats } from "./history";
 import {
   PD_CYCLE_MS,
@@ -625,6 +626,7 @@ export const MOCK_MODES = [
   "trigger-cc-gone",
   "pd-start-refused",
   "bootloader",
+  "legacy-bootloader",
   "mode-flip",
   "firmware-fail-switching",
   "firmware-fail-erasing",
@@ -675,6 +677,23 @@ const BOOTLOADER_METER: DeviceListing = {
   address: 9,
   demo_scenario: null,
   mode: "bootloader",
+};
+
+/** The backend's refusal of a meter on the old bootloader (FR JT38C8, AC .5). */
+const LEGACY_BOOTLOADER_REFUSAL =
+  "This meter is on an old bootloader that is not supported yet. Unplug the meter and replug it to return to the application firmware.";
+
+/** `legacy-bootloader`: one real meter on the old (2.1) bootloader, listed before the demo
+ * entries and never connected (FR JT38C8, AC .5). */
+const LEGACY_BOOTLOADER_METER: DeviceListing = {
+  id: "usb:1:9",
+  label: "KM003C — MOCK-LEGACY-0001 (old bootloader, not supported yet)",
+  model: "KM003C",
+  serial: "MOCK-LEGACY-0001",
+  bus: "1",
+  address: 9,
+  demo_scenario: null,
+  mode: "legacy_bootloader",
 };
 
 /** `mode-flip`: one real meter (`serial`) listed in application mode at USB address
@@ -780,9 +799,10 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
   kind: "permission_denied",
   message: "The system did not allow the app to open the meter.",
   hint:
-    "Install the udev rule: `sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/`, then run " +
-    "`sudo udevadm control --reload-rules` and `sudo udevadm trigger`, and replug the meter " +
-    "(see `docs/linux.md`).",
+    "Write the udev rule: " +
+    '`echo \'SUBSYSTEM=="usb|hidraw|tty", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0061|0063", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"\' | sudo tee /etc/udev/rules.d/60-powerz.rules`, ' +
+    "then run `sudo udevadm control --reload-rules` and `sudo udevadm trigger`, and replug the meter " +
+    "(see https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md).",
 };
 
 /** The role swaps (DR, PR, VCONN, FR): control messages the library classifier does
@@ -1229,10 +1249,11 @@ export class MockBackend {
     this.#flashTarget = this.#flashing ? MOCK_RUNNING_FLASH.device_id : null;
   }
 
-  /** `replug`: the real meter's listing while the OS lists it; `bootloader`: the
-   * bootloader-mode meter; else null. */
+  /** `replug`: the real meter's listing while the OS lists it; `bootloader` /
+   * `legacy-bootloader`: the bootloader-mode meter; else null. */
   #listedMeter(): DeviceListing | null {
     if (this.#mode === "bootloader") return BOOTLOADER_METER;
+    if (this.#mode === "legacy-bootloader") return LEGACY_BOOTLOADER_METER;
     if (this.#mode === "mode-flip") return flipMeter(this.#flipMode);
     return this.#replugLike() && this.#meterAddress !== null
       ? replugMeter(this.#meterAddress, this.#replugMode)
@@ -1392,6 +1413,11 @@ export class MockBackend {
     if (this.#heldByFlash(deviceId)) throw usage(FLASH_REFUSAL);
     if (this.#sessions.some((x) => x.id === deviceId || x.deviceId === deviceId)) {
       throw usage("This meter is already connected. Disconnect it first.");
+    }
+    // Like the backend: a meter on the old bootloader is refused before anything opens
+    // (FR JT38C8, AC .5).
+    if (this.#listedMeter()?.id === deviceId && this.#mode === "legacy-bootloader") {
+      throw usage(LEGACY_BOOTLOADER_REFUSAL);
     }
     const pair = this.#mode === "two-meters" ? twoMeterListing(deviceId) : null;
     const isMeter = pair !== null || this.#listedMeter()?.id === deviceId;
@@ -2450,6 +2476,9 @@ export class MockBackend {
     const meter = this.#listedMeter();
     const isMeter = meter?.id === deviceId;
     if (!isMeter && !scenarioOf(deviceId)) throw usage("That meter is no longer attached.");
+    // Like the backend: the engine refuses a meter on the old bootloader before sending
+    // anything, so no stage is reported (FR BKSE70, AC .5).
+    if (isMeter && this.#mode === "legacy-bootloader") throw usage(LEGACY_BOOTLOADER_HELP);
     const s = this.#sessions.find((x) => x.id === deviceId || x.deviceId === deviceId);
     if (s) {
       const listed = (await this.listDevices()).find((d) => d.id === s.deviceId);

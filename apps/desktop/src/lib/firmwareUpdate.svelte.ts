@@ -18,6 +18,7 @@ import type {
   UiError,
 } from "./backend";
 import cancelTooLate from "./cancel-too-late.txt?raw";
+import { LEGACY_BOOTLOADER_HELP, modeLabel } from "./deviceDetails";
 import { deviceOptionLabel, formatCount } from "./format";
 
 /** The meter an update would go to: the picked device, with its versions while connected. */
@@ -99,17 +100,11 @@ function updatedListing(
   return waiting.length === 1 ? waiting[0] : undefined;
 }
 
-const MODE_LABELS: Record<DeviceMode, string> = {
-  application: "Application",
-  bootloader: "Bootloader",
-  unknown: "Unknown",
-};
-
 /** The meter's model, mode and versions for display; a dash while a version is unknown. */
 export function firmwareMeterRows(meter: FirmwareMeter): { label: string; value: string }[] {
   return [
     { label: "Model", value: meter.model },
-    { label: "Mode", value: MODE_LABELS[meter.mode] },
+    { label: "Mode", value: modeLabel(meter.mode) },
     { label: "Firmware", value: meter.firmwareVersion ?? "—" },
     { label: "Bootloader", value: meter.bootloaderVersion ?? "—" },
   ];
@@ -385,6 +380,7 @@ export class FirmwareUpdate {
     const info = this.info;
     if (info === null) return "Choose a firmware file to update with.";
     if (meter === null) return "Pick a meter to update.";
+    if (meter.mode === "legacy_bootloader") return LEGACY_BOOTLOADER_HELP;
     if (info.model.toUpperCase() !== meter.model.toUpperCase()) {
       return `This file is for the ${info.model}, but the meter is a ${meter.model}.`;
     }

@@ -113,7 +113,7 @@ describe("errors (AC-AH2AEK.4)", () => {
   const udev = {
     kind: "permission_denied",
     message: "The app may not open the meter.",
-    hint: "Install the udev rule: sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/",
+    hint: "Write the udev rule: echo 'ATTRS{idVendor}==\"5fc9\"' | sudo tee /etc/udev/rules.d/60-powerz.rules",
   };
 
   it("rejects with the backend UiError, message and hint intact", async () => {

@@ -76,7 +76,7 @@ pub fn info_with<T: Transport, C: Clock>(
                 }),
             );
         }
-        writeln!(out, "Mode:       {}", mode.name())?;
+        writeln!(out, "Mode:       {}", mode.label())?;
         return Ok(());
     }
     let (mut d, fw) = session.read_device_info_and_status()?;
@@ -120,7 +120,7 @@ pub fn info_with<T: Transport, C: Clock>(
         None => fallback.to_owned(),
     };
     writeln!(out, "Model:      {}", d.model)?;
-    writeln!(out, "Mode:       {}", mode.name())?;
+    writeln!(out, "Mode:       {}", mode.label())?;
     writeln!(
         out,
         "Firmware:   {}",

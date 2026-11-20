@@ -368,9 +368,21 @@ fn stopped_by_user() -> UiError {
     }
 }
 
+/// `s` with its first letter in upper case.
+fn capitalized(s: &str) -> String {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 /// A failed update for the UI: what failed, and how to recover.
 fn flash_error(e: &FlashError) -> UiError {
+    // The old bootloader is refused before any write to it: its own message,
+    // no recovery steps (FR BKSE70, AC .5).
     let kind = match e {
+        FlashError::LegacyBootloader => return UiError::usage(capitalized(&e.to_string())),
         FlashError::Device { .. } => ErrorKind::Disconnected,
         _ => ErrorKind::Protocol,
     };
@@ -379,5 +391,40 @@ fn flash_error(e: &FlashError) -> UiError {
         message: format!("The firmware update failed: {e}."),
         hint: Some(RECOVERY_HINT.to_owned()),
         sessions: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use powerz_protocol::firmware::flash::LEGACY_BOOTLOADER_HELP;
+
+    /// Nothing was sent to the old bootloader, so its error is a usage error
+    /// with its own message and no recovery steps (FR BKSE70, AC .5).
+    #[test]
+    fn bkse70_the_old_bootloader_is_a_usage_error_without_recovery_steps() {
+        let ui = flash_error(&FlashError::LegacyBootloader);
+        assert_eq!(ui.kind, ErrorKind::Usage);
+        assert_eq!(ui.hint, None);
+        assert_eq!(ui.message, capitalized(LEGACY_BOOTLOADER_HELP));
+        assert!(
+            !ui.message.contains("The firmware update failed"),
+            "{}",
+            ui.message
+        );
+    }
+
+    #[test]
+    fn other_flash_errors_keep_the_failed_wrapper_and_the_recovery_hint() {
+        let ui = flash_error(&FlashError::Verify {
+            detail: "no FINISHED".into(),
+        });
+        assert_eq!(ui.kind, ErrorKind::Protocol);
+        assert!(
+            ui.message.starts_with("The firmware update failed:"),
+            "{}",
+            ui.message
+        );
+        assert_eq!(ui.hint.as_deref(), Some(RECOVERY_HINT));
     }
 }

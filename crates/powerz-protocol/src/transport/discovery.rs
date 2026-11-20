@@ -44,6 +44,10 @@ pub struct UsbDeviceInfo {
     /// Interface string of the vendor-class (0xFF) interface, if the OS
     /// reported one (`APP` in application mode `[device]`).
     pub interface_string: Option<String>,
+    /// bInterfaceSubClass of the vendor-class (0xFF) interface, if any.
+    pub vendor_subclass: Option<u8>,
+    /// Whether the device has a HID (0x03) interface.
+    pub has_hid: bool,
     /// Bus identifier as reported by the OS.
     pub bus: String,
     /// Device address on the bus.
@@ -63,6 +67,11 @@ pub struct DeviceEntry {
     pub product: Option<String>,
     /// Vendor-interface string, if the OS reported one; decides the mode.
     pub interface_string: Option<String>,
+    /// bInterfaceSubClass of the vendor-class (0xFF) interface, if any.
+    pub vendor_subclass: Option<u8>,
+    /// Whether the device has a HID (0x03) interface; with the string,
+    /// tells the old bootloader apart.
+    pub has_hid: bool,
     /// Bus identifier.
     pub bus: String,
     /// Device address on the bus.
@@ -86,9 +95,10 @@ impl DeviceEntry {
             && self.serial.as_deref().is_none_or(|s| serial == Some(s))
     }
 
-    /// Application or bootloader mode, from the vendor-interface string.
+    /// Application or bootloader mode, from the vendor-interface string and
+    /// whether a HID interface exists.
     pub fn mode(&self) -> DeviceMode {
-        DeviceMode::from_interface_string(self.interface_string.as_deref())
+        DeviceMode::classify(self.interface_string.as_deref(), self.has_hid)
     }
 }
 
@@ -103,6 +113,8 @@ pub fn filter_devices(devices: &[UsbDeviceInfo]) -> Vec<DeviceEntry> {
             serial: d.serial.clone(),
             product: d.product.clone(),
             interface_string: d.interface_string.clone(),
+            vendor_subclass: d.vendor_subclass,
+            has_hid: d.has_hid,
             bus: d.bus.clone(),
             address: d.address,
         })
@@ -121,6 +133,11 @@ pub fn list_devices() -> Result<Vec<DeviceEntry>, Error> {
             serial: d.serial_number().map(str::to_owned),
             product: d.product_string().map(str::to_owned),
             interface_string: vendor_interface_string(&d),
+            vendor_subclass: d
+                .interfaces()
+                .find(|i| i.class() == 0xFF)
+                .map(|i| i.subclass()),
+            has_hid: d.interfaces().any(|i| i.class() == 0x03),
             bus: d.bus_id().to_owned(),
             address: d.device_address(),
         })
@@ -152,6 +169,169 @@ pub struct UsbInterface {
     pub string: Option<String>,
 }
 
+/// Direction of an endpoint, from bit 7 of bEndpointAddress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EndpointDirection {
+    /// Host to device.
+    Out,
+    /// Device to host.
+    In,
+}
+
+impl EndpointDirection {
+    /// `OUT` or `IN`.
+    pub fn label(self) -> &'static str {
+        match self {
+            EndpointDirection::Out => "OUT",
+            EndpointDirection::In => "IN",
+        }
+    }
+
+    /// `out` or `in`.
+    pub fn name(self) -> &'static str {
+        match self {
+            EndpointDirection::Out => "out",
+            EndpointDirection::In => "in",
+        }
+    }
+}
+
+/// Transfer type of an endpoint, from bits 0..1 of bmAttributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransferType {
+    /// Control (0).
+    Control,
+    /// Isochronous (1).
+    Isochronous,
+    /// Bulk (2).
+    Bulk,
+    /// Interrupt (3).
+    Interrupt,
+}
+
+impl TransferType {
+    /// Lower-case name: `control`, `isochronous`, `bulk` or `interrupt`.
+    pub fn name(self) -> &'static str {
+        match self {
+            TransferType::Control => "control",
+            TransferType::Isochronous => "isochronous",
+            TransferType::Bulk => "bulk",
+            TransferType::Interrupt => "interrupt",
+        }
+    }
+}
+
+/// One endpoint descriptor, decoded (FR QF92WX, AC .1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointInfo {
+    /// bEndpointAddress, direction bit included.
+    pub address: u8,
+    /// Direction, from bit 7 of the address.
+    pub direction: EndpointDirection,
+    /// Transfer type, from bits 0..1 of bmAttributes.
+    pub transfer: TransferType,
+    /// wMaxPacketSize.
+    pub max_packet_size: u16,
+    /// bInterval.
+    pub interval: u8,
+}
+
+impl EndpointInfo {
+    /// Decode the raw descriptor fields bEndpointAddress, bmAttributes,
+    /// wMaxPacketSize and bInterval.
+    pub fn from_descriptor(
+        address: u8,
+        attributes: u8,
+        max_packet_size: u16,
+        interval: u8,
+    ) -> EndpointInfo {
+        let direction = if address & 0x80 != 0 {
+            EndpointDirection::In
+        } else {
+            EndpointDirection::Out
+        };
+        let transfer = match attributes & 0x03 {
+            0 => TransferType::Control,
+            1 => TransferType::Isochronous,
+            2 => TransferType::Bulk,
+            _ => TransferType::Interrupt,
+        };
+        EndpointInfo {
+            address,
+            direction,
+            transfer,
+            max_packet_size,
+            interval,
+        }
+    }
+}
+
+impl std::fmt::Display for EndpointInfo {
+    /// `endpoint 0x82: IN, interrupt, max packet 8, interval 10`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "endpoint {:#04x}: {}, {}, max packet {}, interval {}",
+            self.address,
+            self.direction.label(),
+            self.transfer.name(),
+            self.max_packet_size,
+            self.interval
+        )
+    }
+}
+
+/// The endpoints of one interface (its first alternate setting).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceEndpoints {
+    /// bInterfaceNumber.
+    pub interface: u8,
+    /// Its endpoints, in descriptor order.
+    pub endpoints: Vec<EndpointInfo>,
+}
+
+/// One string descriptor as the probe read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StringDescriptor {
+    /// The string's text.
+    Text(String),
+    /// The device has no string at this index.
+    Absent,
+    /// It could not be read, with the reason.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for StringDescriptor {
+    /// The text in quotes, `(none)` or `(unavailable: <reason>)`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StringDescriptor::Text(t) => write!(f, "{t:?}"),
+            StringDescriptor::Absent => write!(f, "(none)"),
+            StringDescriptor::Unavailable(r) => write!(f, "(unavailable: {r})"),
+        }
+    }
+}
+
+/// What the probe reads beyond [`UsbIdentity`]: each interface's
+/// endpoints and string descriptors by index.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UsbDetails {
+    /// Endpoints per interface, in descriptor order.
+    pub interfaces: Vec<InterfaceEndpoints>,
+    /// String descriptors by index.
+    pub strings: Vec<(u8, StringDescriptor)>,
+}
+
+impl UsbDetails {
+    /// The endpoints of interface `number`; empty when unknown.
+    pub fn endpoints_of(&self, number: u8) -> &[EndpointInfo] {
+        self.interfaces
+            .iter()
+            .find(|i| i.interface == number)
+            .map_or(&[], |i| i.endpoints.as_slice())
+    }
+}
+
 /// The USB identity of one meter: IDs, product string and every interface,
 /// read from descriptors without opening the device (FR V9SK56, AC .6).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,7 +350,10 @@ impl UsbIdentity {
     /// Application or bootloader mode, from the string of the vendor-class
     /// (0xFF) interface, found by class, never by number.
     pub fn mode(&self) -> DeviceMode {
-        DeviceMode::from_interface_string(self.vendor_interface().and_then(|i| i.string.as_deref()))
+        DeviceMode::classify(
+            self.vendor_interface().and_then(|i| i.string.as_deref()),
+            self.interfaces.iter().any(|i| i.class == 0x03),
+        )
     }
 
     /// The first vendor-class (0xFF) interface, if any: the bulk pipe.
@@ -183,6 +366,19 @@ impl std::fmt::Display for UsbIdentity {
     /// Labelled lines: vendor and product IDs as `0x` hex, the product
     /// string, then one `interface <n>` line per interface.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.write_text(f, None)
+    }
+}
+
+impl UsbIdentity {
+    /// The [`Display`](std::fmt::Display) lines, with each interface's
+    /// endpoints from `details` (one `    endpoint ...` line each) under its
+    /// `interface <n>` line.
+    pub fn write_text(
+        &self,
+        f: &mut dyn std::fmt::Write,
+        details: Option<&UsbDetails>,
+    ) -> std::fmt::Result {
         writeln!(f, "Vendor ID:   {:#06x}", self.vid)?;
         writeln!(f, "Product ID:  {:#06x}", self.pid)?;
         writeln!(
@@ -190,7 +386,7 @@ impl std::fmt::Display for UsbIdentity {
             "Product:     {}",
             self.product.as_deref().unwrap_or("(no string)")
         )?;
-        writeln!(f, "Mode:        {}", self.mode().name())?;
+        writeln!(f, "Mode:        {}", self.mode().label())?;
         for i in &self.interfaces {
             let string = i
                 .string
@@ -201,6 +397,16 @@ impl std::fmt::Display for UsbIdentity {
                 "  interface {}: class {:#04x}, subclass {:#04x}, protocol {:#04x}, string {string}",
                 i.number, i.class, i.subclass, i.protocol
             )?;
+            if let Some(d) = details {
+                for e in d.endpoints_of(i.number) {
+                    writeln!(f, "    {e}")?;
+                }
+            }
+        }
+        if let Some(d) = details {
+            for (index, s) in &d.strings {
+                writeln!(f, "string {index}: {s}")?;
+            }
         }
         Ok(())
     }
@@ -347,6 +553,112 @@ pub fn usb_identity(device: &DeviceEntry) -> Result<Option<UsbIdentity>, Error> 
     Ok(match_device(device, &descriptors).map(UsbIdentity::from_descriptor))
 }
 
+/// The `nusb` error mapping every transport and probe read shares: an OS
+/// code that means the device left USB is [`Error::Disconnected`], the rest
+/// goes through the shared I/O error mapping.
+pub(crate) fn nusb_error(e: nusb::Error) -> Error {
+    let os = std::env::consts::OS;
+    // The `io::Error` nusb converts to does not carry its OS code.
+    let code = e.os_error().and_then(|code| i32::try_from(code).ok());
+    if code.is_some_and(|code| super::gone_at_open(code, os)) {
+        return Error::Disconnected;
+    }
+    super::map_io_error(&std::io::Error::from(e), os)
+}
+
+/// Open the attached meter `device` with `nusb`, claiming no interface and
+/// sending nothing. [`Error::NotFound`] when it is no longer listed; open
+/// errors map as [`nusb_error`] does (an unplug is
+/// [`Error::Disconnected`]).
+pub(crate) fn open_nusb(device: &DeviceEntry) -> Result<nusb::Device, Error> {
+    use nusb::MaybeFuture;
+    let info = nusb::list_devices()
+        .wait()
+        .map_err(nusb_error)?
+        .find(|d| {
+            d.vendor_id() == crate::VID
+                && device.identifies(
+                    d.product_id(),
+                    d.bus_id(),
+                    d.device_address(),
+                    d.serial_number(),
+                )
+        })
+        .ok_or(Error::NotFound)?;
+    info.open().wait().map_err(nusb_error)
+}
+
+/// The endpoints of every interface in the active configuration of the
+/// attached meter `device`, read by opening it without claiming any
+/// interface; nothing is sent. Only the first alternate setting of each
+/// interface counts.
+pub fn usb_endpoints(device: &DeviceEntry) -> Result<Vec<InterfaceEndpoints>, Error> {
+    let dev = open_nusb(device)?;
+    let config = dev
+        .active_configuration()
+        .map_err(|e| Error::Io(e.to_string()))?;
+    Ok(config
+        .interface_alt_settings()
+        .filter(|i| i.alternate_setting() == 0)
+        .map(|i| InterfaceEndpoints {
+            interface: i.interface_number(),
+            endpoints: i
+                .endpoints()
+                .map(|e| {
+                    EndpointInfo::from_descriptor(
+                        e.address(),
+                        e.attributes(),
+                        e.max_packet_size_raw(),
+                        e.interval(),
+                    )
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+/// The string descriptor indices the probe reads (FR QF92WX, AC .2); each
+/// `unwrap` runs at compile time, on a non-zero literal.
+const STRING_INDICES: [std::num::NonZeroU8; 4] = [
+    std::num::NonZeroU8::new(1).unwrap(),
+    std::num::NonZeroU8::new(2).unwrap(),
+    std::num::NonZeroU8::new(3).unwrap(),
+    std::num::NonZeroU8::new(4).unwrap(),
+];
+/// Language id the strings are read in: US English.
+const LANG_US_ENGLISH: u16 = 0x0409;
+/// How long one string descriptor read may take.
+const STRING_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// String descriptors 1 to 4 of the attached meter `device` (FR QF92WX,
+/// AC .2), read in US English (0x0409) by opening it without claiming any
+/// interface: only standard GET_DESCRIPTOR control requests go out, no
+/// meter command. An index the device stalls on or reports empty is
+/// [`StringDescriptor::Absent`]; any other failure is
+/// [`StringDescriptor::Unavailable`] with its reason, and the rest are
+/// still read.
+pub fn usb_strings(device: &DeviceEntry) -> Result<Vec<(u8, StringDescriptor)>, Error> {
+    use nusb::MaybeFuture;
+    let dev = open_nusb(device)?;
+    Ok(STRING_INDICES
+        .into_iter()
+        .map(|index| {
+            let s = match dev
+                .get_string_descriptor(index, LANG_US_ENGLISH, STRING_TIMEOUT)
+                .wait()
+            {
+                Ok(t) if t.is_empty() => StringDescriptor::Absent,
+                Ok(t) => StringDescriptor::Text(t),
+                Err(nusb::GetDescriptorError::Transfer(nusb::transfer::TransferError::Stall)) => {
+                    StringDescriptor::Absent
+                }
+                Err(e) => StringDescriptor::Unavailable(e.to_string()),
+            };
+            (index.get(), s)
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod ambiguous_tests {
     use super::AmbiguousMeter;
@@ -377,6 +689,8 @@ mod tests {
             serial: serial.map(str::to_owned),
             product: None,
             interface_string: None,
+            vendor_subclass: None,
+            has_hid: true,
             bus: bus.to_owned(),
             address,
         }
@@ -410,6 +724,8 @@ mod tests {
                     serial: Some(PLACEHOLDER_SERIAL.to_owned()),
                     product: None,
                     interface_string: None,
+                    vendor_subclass: None,
+                    has_hid: true,
                     bus: "1".to_owned(),
                     address: 7,
                 },
@@ -419,6 +735,8 @@ mod tests {
                     serial: Some("SERIAL-0002".to_owned()),
                     product: None,
                     interface_string: None,
+                    vendor_subclass: None,
+                    has_hid: true,
                     bus: "2".to_owned(),
                     address: 3,
                 },
@@ -428,6 +746,8 @@ mod tests {
                     serial: None,
                     product: None,
                     interface_string: None,
+                    vendor_subclass: None,
+                    has_hid: true,
                     bus: "3".to_owned(),
                     address: 9,
                 },

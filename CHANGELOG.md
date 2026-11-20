@@ -4,6 +4,16 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.2] — 2026-11-20 — "Old Boot"
+
+### Fixed
+- A KM003C on the old bootloader 2.1 is named as such instead of "unknown": the CLI says "bootloader (old, not supported yet)" (`legacy_bootloader` in JSON), the desktop lists it as "(old bootloader, not supported yet)" and refuses Connect, and bootloader 2.5 and application mode are unchanged (JT38C8)
+- A firmware update on a meter that lands in the old bootloader stops at once instead of timing out after two minutes; flash and jump refuse such a meter before sending anything, and the message says it is not supported yet, that a replug returns it to normal, and links the new "Old bootloader" section of the firmware how-to (BKSE70)
+- `powerz firmware probe` prints every interface's endpoints, string descriptors 1 to 4, and whether a timeout hit the OUT write or the IN read; on a silent meter outside application mode it retries CONNECT and HEAD three read-only ways and names the one that answered, in text and JSON (QF92WX)
+- On Linux the permission message no longer points at a file that only exists in a source checkout: the CLI and the desktop give a one-line command that writes the udev rule, the reload and trigger, and a link to the Linux guide, and the `.deb` installs the rule (31HJ41)
+
+Total test count at release: 8044 tests, 0 failures, 0 errors.
+
 ## [0.13.1] — 2026-11-11 — "Home Wave"
 
 ### Fixed

@@ -65,3 +65,20 @@ describe("MockBackend firmware details", () => {
     expect(list.filter((d) => d.demo_scenario !== null).length).toBe(4);
   });
 });
+
+describe("MockBackend `legacy-bootloader` (AC-JT38C8.5)", () => {
+  it("is a mock mode named in the page URL", () => {
+    expect(MOCK_MODES).toContain("legacy-bootloader");
+    expect(mockModeFromUrl("?mock=legacy-bootloader")).toBe("legacy-bootloader");
+  });
+
+  it("lists one meter on the old bootloader before the demo entries", async () => {
+    const list = await new MockBackend("legacy-bootloader").listDevices();
+    const legacy = list.filter((d) => d.mode === "legacy_bootloader");
+    expect(legacy).toHaveLength(1);
+    expect(legacy[0]?.demo_scenario).toBeNull();
+    expect(legacy[0]?.label).toContain("(old bootloader, not supported yet)");
+    expect(list[0]?.id).toBe(legacy[0]?.id);
+    expect(list.filter((d) => d.demo_scenario !== null).length).toBe(4);
+  });
+});

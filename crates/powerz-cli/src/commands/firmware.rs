@@ -16,9 +16,13 @@ use powerz_protocol::firmware::flash::{
     BACK_BUTTON_HINT, FlashAck, FlashOutcome, FlashProgress, FlashTransport, JumpOutcome, JumpSent,
     JumpTarget, Meter, MeterOpener, RETURN_TIMEOUT, SWITCH_TIMEOUT, flash, jump,
 };
-use powerz_protocol::session::{Clock, ConnectOutcome, HeadOutcome, Session};
-use powerz_protocol::transport::discovery::{self, DeviceEntry, UsbIdentity};
-use powerz_protocol::transport::{Error as TransportError, Transport};
+use powerz_protocol::session::{
+    Clock, ConnectOutcome, Error as SessionError, HeadOutcome, ProbePipe, ProbeReport, Session,
+};
+use powerz_protocol::transport::discovery::{
+    self, DeviceEntry, StringDescriptor, UsbDetails, UsbIdentity,
+};
+use powerz_protocol::transport::{Error as TransportError, TimeoutDirection, Transport};
 
 use crate::error::CliError;
 use crate::output::write_json;
@@ -81,43 +85,120 @@ pub fn firmware_info(
 /// CONNECT / HEAD line or JSON report is written. JSON keys `vid`, `pid`, `product`, `mode`,
 /// `interfaces` (`number`, `class`, `subclass`, `protocol`, `string`),
 /// `connect`, `head` (`field`, `raw`, `rejected` or `timed out`),
-/// `head_field` and `head_raw` (hex, no spaces), `null` when absent.
+/// `head_field` and `head_raw` (hex, no spaces), `connect_timeout` and
+/// `head_timeout` (`in` or `out`: which half timed out), `null` when absent.
+/// A timed-out CONNECT or HEAD line names that half: `(OUT write)` or
+/// `(IN read)`, when the pipe knows it.
 pub fn firmware_probe<T: Transport, C: Clock>(
     session: &mut Session<T, C>,
     identity: &UsbIdentity,
     json: bool,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
+    write_probe(identity, None, json, out, || {
+        session.probe_with_head_reply()
+    })
+}
+
+/// [`firmware_probe`] with the diagnostics of FR QF92WX: each interface
+/// line is followed by its endpoints from `details`
+/// (`    endpoint 0x82: IN, interrupt, max packet 8, interval 10`), and the
+/// JSON interfaces carry an `endpoints` array (`address`, `direction`,
+/// `transfer`, `max_packet_size`, `interval`).
+pub fn firmware_probe_detailed<T: ProbePipe, C: Clock>(
+    session: &mut Session<T, C>,
+    identity: &UsbIdentity,
+    details: &UsbDetails,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let mode = identity.mode();
+    write_probe(identity, Some(details), json, out, || {
+        session.probe_with_variants(mode)
+    })
+}
+
+/// The probe printer shared by [`firmware_probe`] and
+/// [`firmware_probe_detailed`]: identity (with endpoints when `details`),
+/// then the outcome `run` gives.
+fn write_probe(
+    identity: &UsbIdentity,
+    details: Option<&UsbDetails>,
+    json: bool,
+    out: &mut dyn Write,
+    run: impl FnOnce() -> Result<(ProbeReport, Option<Vec<u8>>), SessionError>,
+) -> Result<(), CliError> {
     if !json {
-        write!(out, "{identity}")?;
+        let mut text = String::new();
+        identity
+            .write_text(&mut text, details)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        write!(out, "{text}")?;
         out.flush()?;
     }
-    let (report, head_reply) = session.probe_with_head_reply()?;
-    let connect = match &report.connect {
-        ConnectOutcome::Accepted => "accepted".to_owned(),
-        ConnectOutcome::Rejected => "rejected".to_owned(),
-        ConnectOutcome::TimedOut => "timed out".to_owned(),
-    };
-    let (head, field, raw) = match &report.head {
+    let (report, head_reply) = run()?;
+    let connect = connect_name(&report.connect);
+    let head = head_name(&report.head);
+    let (field, raw) = match &report.head {
         // An id-0 reply (the real meter's answer `[device]`) keeps its raw
         // bytes next to the field: they are not an echo of our request.
         HeadOutcome::Field(f) => (
-            "field".to_owned(),
             Some(*f),
             head_reply.as_deref().filter(|r| r.get(1) == Some(&0)),
         ),
-        HeadOutcome::Raw(r) => ("raw".to_owned(), None, Some(r.as_slice())),
-        HeadOutcome::Rejected(r) => ("rejected".to_owned(), None, Some(r.as_slice())),
-        HeadOutcome::TimedOut => ("timed out".to_owned(), None, None),
+        HeadOutcome::Raw(r) | HeadOutcome::Rejected(r) => (None, Some(r.as_slice())),
+        HeadOutcome::TimedOut => (None, None),
     };
     if json {
         let raw = raw.map(|r| hex(r, ""));
-        return write_json(
-            out,
-            &probe_json(identity, Some(&connect), Some(&head), field, raw),
+        let mut v = probe_json(
+            identity,
+            details,
+            Some(connect),
+            Some(head),
+            field,
+            raw,
+            [report.connect_timeout, report.head_timeout],
         );
+        let variants: Vec<serde_json::Value> = report
+            .variants
+            .iter()
+            .map(|o| {
+                let field = match o.head {
+                    HeadOutcome::Field(f) => Some(f),
+                    _ => None,
+                };
+                let connect_raw = match &o.connect {
+                    ConnectOutcome::Raw(r) => Some(hex(r, "")),
+                    _ => None,
+                };
+                let head_raw = match &o.head {
+                    HeadOutcome::Raw(r) | HeadOutcome::Rejected(r) => Some(hex(r, "")),
+                    _ => None,
+                };
+                serde_json::json!({
+                    "name": o.variant.name(),
+                    "connect": connect_name(&o.connect),
+                    "connect_raw": connect_raw,
+                    "head": head_name(&o.head),
+                    "head_field": field,
+                    "head_raw": head_raw,
+                })
+            })
+            .collect();
+        v["variants"] = serde_json::Value::Array(variants);
+        v["variant_answered"] = serde_json::json!(report.answered_variant().map(|a| a.name()));
+        return write_json(out, &v);
     }
-    writeln!(out, "CONNECT: {connect}")?;
+    let with_direction = |outcome: &str, dir: Option<TimeoutDirection>| match dir {
+        Some(d) => format!("{outcome} ({})", d.label()),
+        None => outcome.to_owned(),
+    };
+    writeln!(
+        out,
+        "CONNECT: {}",
+        with_direction(connect, report.connect_timeout)
+    )?;
     match (field, raw) {
         (Some(f), raw) => {
             writeln!(out, "HEAD field: {f}")?;
@@ -131,14 +212,60 @@ pub fn firmware_probe<T: Transport, C: Clock>(
                 writeln!(out, "HEAD: {head}")?;
             }
         }
-        (None, None) => writeln!(out, "HEAD: {head}")?,
+        (None, None) => writeln!(out, "HEAD: {}", with_direction(head, report.head_timeout))?,
     }
+    if report.variants.is_empty() {
+        return Ok(());
+    }
+    for o in &report.variants {
+        let head = match &o.head {
+            HeadOutcome::Field(f) => format!("field {f}"),
+            HeadOutcome::Raw(r) => format!("raw {}", hex(r, " ")),
+            HeadOutcome::Rejected(r) => format!("rejected {}", hex(r, " ")),
+            HeadOutcome::TimedOut => "timed out".to_owned(),
+        };
+        let connect = match &o.connect {
+            ConnectOutcome::Raw(r) => format!("raw {}", hex(r, " ")),
+            c => connect_name(c).to_owned(),
+        };
+        writeln!(
+            out,
+            "variant {}: CONNECT {connect}, HEAD {head}",
+            o.variant.name()
+        )?;
+    }
+    writeln!(
+        out,
+        "First variant to answer: {}",
+        report.answered_variant().map_or("none", |v| v.name())
+    )?;
     Ok(())
+}
+
+/// The CONNECT outcome as printed and in JSON.
+fn connect_name(c: &ConnectOutcome) -> &'static str {
+    match c {
+        ConnectOutcome::Accepted => "accepted",
+        ConnectOutcome::Rejected => "rejected",
+        ConnectOutcome::Raw(_) => "raw",
+        ConnectOutcome::TimedOut => "timed out",
+    }
+}
+
+/// The HEAD outcome's kind as in JSON.
+fn head_name(h: &HeadOutcome) -> &'static str {
+    match h {
+        HeadOutcome::Field(_) => "field",
+        HeadOutcome::Raw(_) => "raw",
+        HeadOutcome::Rejected(_) => "rejected",
+        HeadOutcome::TimedOut => "timed out",
+    }
 }
 
 /// `powerz firmware probe` on a meter without a vendor-class (0xFF)
 /// interface: print `identity` (text or JSON with `connect` and `head`
-/// `null`) and say on `err` that the probe cannot run; nothing is sent.
+/// `null`, `variants` empty) and say on `err` that the probe cannot run;
+/// nothing is sent.
 pub fn firmware_probe_unavailable(
     identity: &UsbIdentity,
     json: bool,
@@ -146,7 +273,10 @@ pub fn firmware_probe_unavailable(
     err: &mut dyn Write,
 ) -> Result<(), CliError> {
     if json {
-        write_json(out, &probe_json(identity, None, None, None, None))?;
+        let mut v = probe_json(identity, None, None, None, None, None, [None, None]);
+        v["variants"] = serde_json::Value::Array(Vec::new());
+        v["variant_answered"] = serde_json::Value::Null;
+        write_json(out, &v)?;
     } else {
         write!(out, "{identity}")?;
     }
@@ -161,25 +291,44 @@ pub fn firmware_probe_unavailable(
 /// (`None` becomes `null`).
 fn probe_json(
     identity: &UsbIdentity,
+    details: Option<&UsbDetails>,
     connect: Option<&str>,
     head: Option<&str>,
     head_field: Option<u32>,
     head_raw: Option<String>,
+    [connect_timeout, head_timeout]: [Option<TimeoutDirection>; 2],
 ) -> serde_json::Value {
     let interfaces: Vec<serde_json::Value> = identity
         .interfaces
         .iter()
         .map(|i| {
-            serde_json::json!({
+            let mut v = serde_json::json!({
                 "number": i.number,
                 "class": i.class,
                 "subclass": i.subclass,
                 "protocol": i.protocol,
                 "string": i.string,
-            })
+            });
+            if let Some(d) = details {
+                let endpoints: Vec<serde_json::Value> = d
+                    .endpoints_of(i.number)
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "address": e.address,
+                            "direction": e.direction.name(),
+                            "transfer": e.transfer.name(),
+                            "max_packet_size": e.max_packet_size,
+                            "interval": e.interval,
+                        })
+                    })
+                    .collect();
+                v["endpoints"] = serde_json::Value::Array(endpoints);
+            }
+            v
         })
         .collect();
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "vid": identity.vid,
         "pid": identity.pid,
         "product": identity.product,
@@ -189,7 +338,25 @@ fn probe_json(
         "head": head,
         "head_field": head_field,
         "head_raw": head_raw,
-    })
+        "connect_timeout": connect_timeout.map(TimeoutDirection::name),
+        "head_timeout": head_timeout.map(TimeoutDirection::name),
+    });
+    if let Some(d) = details {
+        let strings: serde_json::Map<String, serde_json::Value> = d
+            .strings
+            .iter()
+            .map(|(index, s)| {
+                let value = match s {
+                    StringDescriptor::Text(t) => serde_json::json!(t),
+                    StringDescriptor::Absent => serde_json::Value::Null,
+                    StringDescriptor::Unavailable(r) => serde_json::json!({ "unavailable": r }),
+                };
+                (index.to_string(), value)
+            })
+            .collect();
+        v["strings"] = serde_json::Value::Object(strings);
+    }
+    v
 }
 
 /// What `firmware flash` says without `--i-understand`.
@@ -344,7 +511,7 @@ pub fn firmware_jump<O: MeterOpener, C: Clock>(
     let reported = Cell::new(false);
     let mut report = |s: &JumpSent| {
         reported.set(true);
-        io = writeln!(out, "Was in:  {} mode (sent {frame})", s.from.name())
+        io = writeln!(out, "Was in:  {} mode (sent {frame})", s.from.label())
             .and_then(|()| writeln!(out, "Reply:   {}", s.reply))
             .and_then(|()| writeln!(out, "{}", replug_prompt(target.mode(), wait)))
             .and_then(|()| out.flush());
@@ -354,17 +521,17 @@ pub fn firmware_jump<O: MeterOpener, C: Clock>(
     if sent.get() && !reported.get() {
         // Only a meter that is not in `target` mode is sent the jump.
         let from = seen_first.get().unwrap_or(DeviceMode::Unknown);
-        writeln!(out, "Was in:  {} mode (sent {frame})", from.name())?;
+        writeln!(out, "Was in:  {} mode (sent {frame})", from.label())?;
     }
     let outcome =
         result.map_err(|e| CliError::Device(format!("jump failed ({}): {e}", e.code())))?;
     match outcome {
         JumpOutcome::Reached(mode) => {
-            writeln!(out, "Now in:  {} mode", mode.name())?;
+            writeln!(out, "Now in:  {} mode", mode.label())?;
             Ok(())
         }
         JumpOutcome::NotReached { seen } => {
-            let seen = seen.map_or("no meter".to_owned(), |m| format!("{} mode", m.name()));
+            let seen = seen.map_or("no meter".to_owned(), |m| format!("{} mode", m.label()));
             let hint = match target {
                 JumpTarget::Bootloader => format!("; {BACK_BUTTON_HINT}"),
                 JumpTarget::Application => {
@@ -416,6 +583,10 @@ struct WatchedPipe<P> {
 impl<P: Transport> Transport for WatchedPipe<P> {
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, TransportError> {
         self.inner.transact(request, timeout)
+    }
+
+    fn last_timeout_direction(&self) -> Option<TimeoutDirection> {
+        self.inner.last_timeout_direction()
     }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, TransportError> {

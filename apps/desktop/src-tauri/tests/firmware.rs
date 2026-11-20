@@ -27,6 +27,8 @@ fn meter(interface: Option<&str>, address: u8) -> DeviceEntry {
         serial: Some(format!("SERIAL-{address:04}")),
         product: Some("POWER-Z KM003C".to_owned()),
         interface_string: interface.map(str::to_owned),
+        vendor_subclass: None,
+        has_hid: true,
         bus: "1".to_owned(),
         address,
     }

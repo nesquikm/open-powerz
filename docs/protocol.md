@@ -35,7 +35,7 @@ KM002C facts stay `[inferred]` until a KM002C is tested.
 | PID matching | the vendor app accepts any PID 0x00xx and never branches on it; the model comes from the device-info block | [static] |
 | device class | 0xEF / 0x02 / 0x01 (composite with an interface association), USB 2.10, full speed, EP0 32 bytes | [device] (firmware 2.0.6) |
 | string 4 (iProduct) | `POWER-Z KM003C` | [device] (firmware 2.0.6) |
-| string 2 | `APP` in application mode (the interface string of IF0 and IF1, not the product string); the vendor app reads anything else as bootloader, while this library reports only BOOT or DFU strings as bootloader and anything else as unknown | [static] [device] (firmware 2.0.6) |
+| string 2 | `APP` in application mode (the interface string of IF0 and IF1, not the product string); see Device mode below for how the vendor app and this library read it | [static] [device] (firmware 2.0.6) |
 | string 3 (iSerial) | the device serial number (not reproduced here) | [device] |
 | WinUSB binding | MS OS 2.0 descriptor set (vendor request code 0x20) gives interface 0 the `WINUSB` compatible ID | [device] (firmware 2.0.6) |
 
@@ -62,6 +62,31 @@ noted.
 - The vendor app keeps one request in flight, takes the next IN transfer as
   the reply, and sends a zero-length packet after any OUT write whose length
   is a non-zero multiple of 64. [static]
+
+### Device mode
+
+The vendor app (V2.5.2) looks at USB string descriptor 2 and nothing else to
+decide the mode: the string `APP` means the application is running, and
+anything else is taken as a bootloader for the jump and flash steps. Its
+device card shows "DFU" only when that string contains `BOOT`. [static]
+
+| bootloader | descriptor in bootloader mode | probe | tag |
+|---|---|---|---|
+| 2.5 | IF0 vendor 0xFF / subclass 0x00 with string `BOOT`, IF1 CDC 0x02 / 0x02 with string `BOOT`, IF2 CDC data 0x0A; no HID | CONNECT accepted, HEAD field 0 | [device] |
+| 2.1 (field report: KM003C, application 1.9.5) | VID 0x5FC9, PID 0x0063, bcdDevice 1.00, a single interface: class 0xFF, subclass 0xFF, protocol 0x00, interface string `POWER-Z KM003C` (the same text as iProduct); no CDC and no HID interface | CONNECT and HEAD from our probe timed out | [device] |
+
+The vendor WinUSB driver INF matches both the composite interface
+`USB\VID_5FC9&PID_0063&MI_00` and the plain `USB\VID_5FC9&PID_0063`, so it
+also binds the whole non-composite 0x0063 device, which is how a
+single-interface 2.1 bootloader enumerates. [static]
+
+Our rule (open-powerz) reads the interface string of the vendor-class (0xFF)
+interface from the OS device list and never opens the device: `APP` is the
+application; a string naming boot or dfu, in any case, is the bootloader
+(2.5); any other string on a device with no HID interface is the old
+bootloader, reported as `legacy_bootloader`, which is not supported yet (no
+flash, no jump); no string at all is unknown. [inferred] (2.1 from one field
+report) [device] (2.5)
 
 ## Header bit layouts
 
@@ -527,7 +552,7 @@ Firmware status (FR V9SK52). All requests below are read-only:
 
 | item | rule | tag |
 |---|---|---|
-| mode | the interface string (string 2) of the vendor-class (0xFF) interface, picked by class and read from the OS device list without opening the device: `APP` is application mode [device] (firmware 2.0.6), a string naming BOOT or DFU is bootloader mode [inferred], and anything else (or no string) is reported as unknown | [static] [device] [inferred] |
+| mode | the interface string (string 2) of the vendor-class (0xFF) interface, picked by class and read from the OS device list without opening the device: `APP` is application mode [device] (firmware 2.0.6), a string naming boot or dfu is bootloader mode (2.5) [device], any other string with no HID interface is the old bootloader `legacy_bootloader` (2.1, not supported yet), and no string is unknown; see Device mode | [static] [device] [inferred] |
 | sequence | CONNECT, the info blocks `0x420` (bootloader) and `0x4420` (application), then 50 ms later HEAD. The vendor app sends HEAD first; we read the blocks first so a failed HEAD cannot cost them. Each step that fails is reported as a problem (a HEAD problem includes the raw reply in hex), followed by one CONNECT to recover the pipe; what was read is kept, and the update check is reported as unknown when HEAD was not read | [static] [device] (firmware 2.0.6: blocks read; HEAD answered with id 0, see the HEAD rows below) |
 | warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated. Version strings are read tolerantly: surrounding whitespace and one leading `v` or `V` are dropped, a `-` suffix makes a pre-release, which sorts below its release (`2.0.7-beta` is outdated) and keeps its tag when shown, pre-releases of one version sort by semver tag order (`2.0.7-rc.2` below `2.0.7-rc.10`), and a `+` suffix is ignored (`v2.0.7+build5` is 2.0.7). An empty tag (`2.0.7-`) and a number with a leading `+` (`+2.0.7`) are refused, and a string that does not parse gives no version warning | [static] [inferred] |
 | HEAD in application mode | the meter answers with reply id 0 (not the request's id): `40 00 00 01 00 10 00 00`, i.e. type 0x40, id 0, and a u32 at offset 4 of 0x00001000 on firmware 2.0.6 and 2.0.7, followed by 12 stale bytes from its own transmit buffer (20 bytes in all). We accept a type-0x40, id-0 reply only as the first transfer after our HEAD. A field of 0 means current; any other value is reported as an unrecognised reply, never as "update required", because the vendor's reading (non-zero = update required) does not fit a meter on normal firmware | [device] (firmware 2.0.6, 2.0.7) [static] |
@@ -1081,7 +1106,8 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
   (the power cycle resets it)
 - The bootloader's screen tells the two cases apart: "firmware details"
   when a valid application is present, a blank screen with a blinking green
-  bar when there is none (after an erase). Both enumerate as `BOOT`. [device]
+  bar when there is none (after an erase). On bootloader 2.5 both enumerate as
+  `BOOT`; bootloader 2.1 shows `POWER-Z KM003C` instead (see Device mode). [device]
 - Write-capable frames (JUMP_DFU, JUMP_APROM, the descriptor and the raw
   payload writes) can only be sent through the flash path. It needs a
   `FlashAck` marker, which the CLI creates only after `--i-understand`; the
@@ -1105,9 +1131,10 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
   that is a bootloader left in its download phase, so it sends nothing more
   and asks for a power cycle holding Back. [device]
 - In bootloader mode the meter keeps its USB vendor and product IDs
-  (0x5FC9 / 0x0063) and its product string; interface 0 (vendor 0xFF) and
-  the CDC interface report `BOOT` instead of `APP`, and there is no HID
-  interface. [device]
+  (0x5FC9 / 0x0063) and its product string. On bootloader 2.5 interface 0
+  (vendor 0xFF) and the CDC interface report `BOOT` instead of `APP`; the 2.1
+  bootloader has one vendor interface named `POWER-Z KM003C` and no CDC.
+  Neither has a HID interface. [device]
 
 ## Startup logo
 

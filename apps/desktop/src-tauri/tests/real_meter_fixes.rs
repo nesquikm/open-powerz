@@ -481,13 +481,26 @@ fn linux_hints_quote_their_commands_and_paths() {
     let perm = ui_error::from_transport(&transport::Error::Permission("EACCES".into()), "linux");
     let hint = perm.hint.expect("no permission hint");
     for quoted in [
-        "`sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/`",
         "`sudo udevadm control --reload-rules`",
         "`sudo udevadm trigger`",
-        "`docs/linux.md`",
     ] {
         assert!(hint.contains(quoted), "{quoted} not quoted in: {hint}");
     }
+    // AC-31HJ41.1: the rule-writing command is one quoted span, `echo '…' | sudo tee …`.
+    let tee = "' | sudo tee /etc/udev/rules.d/60-powerz.rules`";
+    let end = hint
+        .find(tee)
+        .unwrap_or_else(|| panic!("no quoted tee command in: {hint}"));
+    let start = hint[..end].rfind('`').expect("no opening quote");
+    assert!(
+        hint[start..].starts_with("`echo '"),
+        "tee command not quoted whole: {hint}"
+    );
+    assert!(!hint.contains("packaging/"), "repository path in: {hint}");
+    assert!(
+        hint.contains("https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md"),
+        "no guide URL in: {hint}"
+    );
     assert!(!hint.starts_with('`'), "the prose is quoted too: {hint}");
 
     let busy = ui_error::from_transport(

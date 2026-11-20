@@ -303,6 +303,10 @@ impl<T: Transport> Transport for GuardedTransport<T> {
     fn adcnew_counters(&self) -> crate::adcnew::AdcnewCounters {
         self.inner.adcnew_counters()
     }
+
+    fn last_timeout_direction(&self) -> Option<super::TimeoutDirection> {
+        self.inner.last_timeout_direction()
+    }
 }
 
 #[cfg(test)]

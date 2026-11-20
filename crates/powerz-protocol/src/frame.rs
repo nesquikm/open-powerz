@@ -20,6 +20,8 @@ pub(crate) mod msg {
     pub const STOP_QUEUE: u8 = 0x0F;
     pub const START_ANALYZER: u8 = 0x10;
     pub const STOP_ANALYZER: u8 = 0x11;
+    /// HEAD, the read-only old-firmware check `[static]`.
+    pub const HEAD: u8 = 0x40;
     pub const PUT_DATA: u8 = 0x41;
     pub const MEM_READ_CONFIRM: u8 = 0x44;
     pub const AUTH_REPLY: u8 = 0x4C;

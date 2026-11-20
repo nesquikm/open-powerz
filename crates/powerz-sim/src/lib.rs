@@ -34,7 +34,10 @@ use powerz_protocol::crypto;
 use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::session::Clock;
 #[cfg(not(target_arch = "wasm32"))]
-use powerz_protocol::transport::discovery::{PID_KM003C, UsbIdentity, UsbInterface};
+use powerz_protocol::transport::discovery::{
+    EndpointInfo, InterfaceEndpoints, PID_KM003C, StringDescriptor, UsbDetails, UsbIdentity,
+    UsbInterface,
+};
 use powerz_protocol::transport::{Error, Transport};
 
 /// Size of one HID report: longer replies "reboot" the HID persona.
@@ -464,6 +467,8 @@ pub struct SimDevice {
     pd: pd::PdSniffer,
     /// Application or bootloader mode (sets the USB interface string).
     mode: DeviceMode,
+    /// The probe variant this persona answers on (FR QF92WX), if any.
+    probe_answer: Option<powerz_protocol::session::ProbeVariant>,
     /// Old-firmware field of the HEAD reply (0 = normal firmware).
     head_field: u32,
     /// Application firmware version in the 0x4420 info block.
@@ -631,6 +636,7 @@ impl SimDevice {
             unplugged: false,
             pd: pd::PdSniffer::default(),
             mode: DeviceMode::Application,
+            probe_answer: None,
             head_field: 0,
             app_version: memory::SIM_APP_VERSION.to_string(),
             model: memory::SIM_MODEL.to_string(),
@@ -755,6 +761,7 @@ impl SimDevice {
         match self.mode {
             DeviceMode::Application => "APP",
             DeviceMode::Bootloader => "BOOT",
+            DeviceMode::LegacyBootloader => "POWER-Z KM003C",
             DeviceMode::Unknown => "POWER-Z",
         }
     }
@@ -775,6 +782,12 @@ impl SimDevice {
         let vendor = self.interface_string();
         let interfaces = match self.mode {
             DeviceMode::Bootloader => vec![iface(0, 0xFF, Some(vendor))],
+            // The field-reported bootloader 2.1 descriptor: one vendor
+            // interface, subclass 0xFF `[device]`.
+            DeviceMode::LegacyBootloader => vec![UsbInterface {
+                subclass: 0xFF,
+                ..iface(0, 0xFF, Some(vendor))
+            }],
             DeviceMode::Application | DeviceMode::Unknown => vec![
                 iface(0, 0xFF, Some(vendor)),
                 iface(1, 0x02, Some(vendor)),
@@ -787,6 +800,63 @@ impl SimDevice {
             pid: PID_KM003C,
             product: Some(self.product_string().to_owned()),
             interfaces,
+        }
+    }
+
+    /// Answer the probe on `variant` only (FR QF92WX, AC .4).
+    pub fn with_probe_answer_on(
+        mut self,
+        variant: powerz_protocol::session::ProbeVariant,
+    ) -> SimDevice {
+        self.probe_answer = Some(variant);
+        self
+    }
+
+    /// What the probe reads beyond [`SimDevice::usb_identity`] (FR QF92WX):
+    /// each interface's endpoints. In application mode the KM003C's
+    /// (firmware 2.0.6) `[device]`: vendor bulk OUT 0x01 / IN 0x81, CDC
+    /// interrupt IN 0x83 (8 bytes, interval 10), CDC data bulk OUT 0x02 /
+    /// IN 0x82, HID interrupt IN 0x85 / OUT 0x05 (interval 1). In either
+    /// bootloader mode the vendor pair OUT 0x01 / IN 0x81 `[inferred]`.
+    /// Strings 1 to 4: manufacturer `ChargerLab`, the interface string,
+    /// the serial and the product (`[device]` in application mode,
+    /// `[inferred]` in the bootloaders).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn usb_details(&self) -> UsbDetails {
+        let ep = EndpointInfo::from_descriptor;
+        let vendor = InterfaceEndpoints {
+            interface: 0,
+            endpoints: vec![ep(0x01, 0x02, 64, 0), ep(0x81, 0x02, 64, 0)],
+        };
+        let interfaces = match self.mode {
+            DeviceMode::Bootloader | DeviceMode::LegacyBootloader => vec![vendor],
+            DeviceMode::Application | DeviceMode::Unknown => vec![
+                vendor,
+                InterfaceEndpoints {
+                    interface: 1,
+                    endpoints: vec![ep(0x83, 0x03, 8, 10)],
+                },
+                InterfaceEndpoints {
+                    interface: 2,
+                    endpoints: vec![ep(0x02, 0x02, 64, 0), ep(0x82, 0x02, 64, 0)],
+                },
+                InterfaceEndpoints {
+                    interface: 3,
+                    endpoints: vec![ep(0x85, 0x03, 64, 1), ep(0x05, 0x03, 64, 1)],
+                },
+            ],
+        };
+        UsbDetails {
+            interfaces,
+            strings: vec![
+                (1, StringDescriptor::Text("ChargerLab".to_owned())),
+                (
+                    2,
+                    StringDescriptor::Text(self.interface_string().to_owned()),
+                ),
+                (3, StringDescriptor::Text(self.serial.clone())),
+                (4, StringDescriptor::Text(self.product_string().to_owned())),
+            ],
         }
     }
 
@@ -993,6 +1063,14 @@ impl SimDevice {
 }
 
 impl Transport for SimDevice {
+    /// The old bootloader takes every write and never replies, so its
+    /// timeouts are the IN read's (FR QF92WX, AC .3); other personas do not
+    /// say.
+    fn last_timeout_direction(&self) -> Option<powerz_protocol::transport::TimeoutDirection> {
+        (self.mode == DeviceMode::LegacyBootloader)
+            .then_some(powerz_protocol::transport::TimeoutDirection::In)
+    }
+
     fn transact(&mut self, request: &[u8], _timeout: Duration) -> Result<Vec<u8>, Error> {
         if let Some(e) = self.blocked() {
             return Err(e);
@@ -1000,6 +1078,11 @@ impl Transport for SimDevice {
         self.requests += 1;
         let n = self.requests;
         if self.faults.timeout_always || self.faults.timeout_at.contains(&n) {
+            return Err(Error::Timeout);
+        }
+        if self.mode == DeviceMode::LegacyBootloader {
+            // The old bootloader (2.1) answers neither CONNECT nor HEAD, nor
+            // anything else we send `[device]`.
             return Err(Error::Timeout);
         }
         if self.persona == Persona::Cdc
@@ -1106,6 +1189,39 @@ impl Transport for SimDevice {
             crc_errors: self.adcnew_crc_errors,
             dropped_frames: 0,
             start_echoes: self.adcnew_start_echoes,
+        }
+    }
+}
+
+/// The read-only probe variants (FR QF92WX, AC .4): every variant times
+/// out unless [`SimDevice::with_probe_answer_on`] named it; that one
+/// answers CONNECT with ACCEPT and HEAD like a bootloader (`40 id 00 01`,
+/// the HEAD field, zero padding).
+impl powerz_protocol::session::ProbePipe for SimDevice {
+    fn probe_variant(
+        &mut self,
+        variant: powerz_protocol::session::ProbeVariant,
+        frame: &powerz_protocol::session::ProbeFrame,
+        _timeout: Duration,
+    ) -> Result<Vec<u8>, Error> {
+        powerz_protocol::session::check_probe_frame(frame.bytes())?;
+        if let Some(e) = self.blocked() {
+            return Err(e);
+        }
+        if self.probe_answer != Some(variant) {
+            return Err(Error::Timeout);
+        }
+        let bytes = frame.bytes();
+        let id = bytes.get(1).copied().unwrap_or(0);
+        match bytes.first().map(|b| b & 0x7F) {
+            Some(crate::device::msg::CONNECT) => Ok(self.control(crate::device::msg::ACCEPT, id)),
+            Some(crate::device::msg::HEAD) => {
+                let mut r = vec![crate::device::msg::HEAD, id, 0x00, 0x01];
+                r.extend(self.head_field.to_le_bytes());
+                r.extend([0u8; 12]);
+                Ok(r)
+            }
+            _ => Err(Error::Timeout),
         }
     }
 }
