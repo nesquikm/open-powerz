@@ -5,7 +5,8 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use powerz_protocol::firmware::flash::{FlashTransport, Meter, MeterOpener};
-use powerz_protocol::transport::{Error, Transport};
+use powerz_protocol::session::{ProbeFrame, ProbePipe, ProbeVariant};
+use powerz_protocol::transport::{Error, TimeoutDirection, Transport};
 
 /// Wraps a transport and writes each frame sent as `> [<len>] <hex>`, each
 /// frame received as `< [<len>] <hex>` and each frame the guard refused
@@ -138,6 +139,23 @@ impl<T: Transport, W: Write> Transport for TraceTransport<T, W> {
 
     fn adcnew_counters(&self) -> powerz_protocol::adcnew::AdcnewCounters {
         self.inner.adcnew_counters()
+    }
+
+    fn last_timeout_direction(&self) -> Option<TimeoutDirection> {
+        self.inner.last_timeout_direction()
+    }
+}
+
+/// A probe variant's frame, traced like [`Transport::transact`].
+impl<T: ProbePipe, W: Write> ProbePipe for TraceTransport<T, W> {
+    fn probe_variant(
+        &mut self,
+        variant: ProbeVariant,
+        frame: &ProbeFrame,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, Error> {
+        let result = self.inner.probe_variant(variant, frame, timeout);
+        self.log_exchange(frame.bytes(), result)
     }
 }
 

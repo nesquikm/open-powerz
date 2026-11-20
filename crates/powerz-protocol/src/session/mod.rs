@@ -43,7 +43,10 @@ pub use memory::{
     memory_read_plaintext, memory_read_request,
 };
 pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer, pd_poll_mask};
-pub use probe::{ConnectOutcome, HeadOutcome, ProbeReport};
+pub use probe::{
+    ConnectOutcome, HeadOutcome, ProbeFrame, ProbePipe, ProbeReport, ProbeVariant, VariantOutcome,
+    check_probe_frame,
+};
 pub use records::{
     RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_delete_table, record_table_request,
 };

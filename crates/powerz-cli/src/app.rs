@@ -14,10 +14,12 @@ use powerz_protocol::frame;
 use powerz_protocol::pdm::detect::{Hint, hint as dpdm_hint, hint_from_volts};
 use powerz_protocol::pdm::legacy::{LegacyProtocol, Request as LegacyRequest};
 use powerz_protocol::pdm::{self, FixedProtocol, PdmSession};
-use powerz_protocol::session::{Clock, Session, SystemClock};
+use powerz_protocol::session::{Clock, ProbeFrame, ProbePipe, ProbeVariant, Session, SystemClock};
 use powerz_protocol::transport::bulk::{BulkFlashOpener, BulkTransport};
 use powerz_protocol::transport::cdc::CdcTransport;
-use powerz_protocol::transport::discovery::{DeviceEntry, Model, PID_KM003C, UsbIdentity};
+use powerz_protocol::transport::discovery::{
+    DeviceEntry, InterfaceEndpoints, Model, PID_KM003C, StringDescriptor, UsbDetails, UsbIdentity,
+};
 use powerz_protocol::transport::guard::GuardedTransport;
 use powerz_protocol::transport::hid::HidTransport;
 use powerz_protocol::transport::{self, Transport};
@@ -35,7 +37,7 @@ use crate::commands::{
     DeleteOptions, DetectOptions, FLASH_RISK, JUMP_RISK, LOGO_REMOVE_RISK, LOGO_WRITE_RISK,
     LegacyRequestOptions, LogoConfirm, LogoSource, LogoWriteOptions, PdRequestOptions,
     PdSendOptions, PdSettingsChange, RecordSelection, SettingsOutput, StreamOptions, WatchOptions,
-    console, detect, firmware_flash, firmware_info, firmware_jump, firmware_probe,
+    console, detect, firmware_flash, firmware_info, firmware_jump, firmware_probe_detailed,
     firmware_probe_unavailable, info_with, inspect_flash_file, list_with, logo_dump,
     logo_dump_check, logo_preview, logo_read, logo_remove, logo_write, pd, pd_decode, pd_save,
     pd_send, read, records_delete, records_get, records_list, select_device, select_device_with,
@@ -209,9 +211,11 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
 }
 
 /// `firmware probe` on a real meter: read its USB identity from the OS
-/// device list (nothing opened), print it, then open the vendor bulk pipe
-/// and send only CONNECT and HEAD. Without a vendor-class interface (as a
-/// bootloader may have `[unknown]`) nothing is opened or sent.
+/// device list (nothing opened), then each interface's endpoints by opening
+/// the device without claiming it, print them, then open the vendor bulk
+/// pipe and send only CONNECT and HEAD. Endpoints that cannot be read are
+/// printed as unavailable; the probe goes on. Without a vendor-class
+/// interface (as a bootloader may have `[unknown]`) nothing is sent.
 fn probe_meter(cli: &Cli, json: bool) -> Result<(), CliError> {
     let devices = transport::discovery::list_devices()?;
     let device = select_device(&devices, cli.device.as_deref())?;
@@ -221,11 +225,43 @@ fn probe_meter(cli: &Cli, json: bool) -> Result<(), CliError> {
     if identity.vendor_interface().is_none() {
         return firmware_probe_unavailable(&identity, json, &mut out, &mut std::io::stderr());
     }
+    let details = UsbDetails {
+        interfaces: endpoints_or_unavailable(
+            transport::discovery::usb_endpoints(device),
+            &mut std::io::stderr(),
+        ),
+        strings: strings_or_unavailable(transport::discovery::usb_strings(device)),
+    };
     let pipe = LazyBulk {
         device: device.clone(),
         open: None,
     };
-    run_probe(cli, &identity, pipe, SystemClock, json)
+    run_probe(cli, &identity, &details, pipe, SystemClock, json)
+}
+
+/// The endpoints `read` gave, or none, after saying on `err` that they are
+/// unavailable and why.
+fn endpoints_or_unavailable(
+    read: Result<Vec<InterfaceEndpoints>, transport::Error>,
+    err: &mut dyn Write,
+) -> Vec<InterfaceEndpoints> {
+    read.unwrap_or_else(|e| {
+        // Best effort: a failed stderr write must not stop the probe.
+        let _ = writeln!(err, "endpoints: (unavailable: {e})");
+        Vec::new()
+    })
+}
+
+/// Strings 1 to 4 as read, or each one unavailable with the reason the
+/// meter could not be opened to read them (FR QF92WX, AC .2).
+fn strings_or_unavailable(
+    read: Result<Vec<(u8, StringDescriptor)>, transport::Error>,
+) -> Vec<(u8, StringDescriptor)> {
+    read.unwrap_or_else(|e| {
+        (1..=4)
+            .map(|i| (i, StringDescriptor::Unavailable(e.to_string())))
+            .collect()
+    })
 }
 
 /// `firmware probe` on the demo device; `POWERZ_SIM_MODE` picks its mode.
@@ -239,18 +275,21 @@ fn probe_sim(cli: &Cli, json: bool) -> Result<(), CliError> {
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
         let sim = configure(sim_device_clock(Persona::Bulk, cli.scenario, clock.clone()))?;
-        run_probe(cli, &sim.usb_identity(), sim, clock, json)
+        let (identity, details) = (sim.usb_identity(), sim.usb_details());
+        run_probe(cli, &identity, &details, sim, clock, json)
     } else {
         let sim = configure(sim_device(Persona::Bulk, cli.scenario))?;
-        run_probe(cli, &sim.usb_identity(), sim, SystemClock, json)
+        let (identity, details) = (sim.usb_identity(), sim.usb_details());
+        run_probe(cli, &identity, &details, sim, SystemClock, json)
     }
 }
 
-/// Run [`firmware_probe`] over `t` (wrapped for `--trace` if asked) on a
-/// fresh, unconnected session.
-fn run_probe<T: Transport, C: Clock>(
+/// Run [`firmware_probe_detailed`] over `t` (wrapped for `--trace` if
+/// asked) on a fresh, unconnected session.
+fn run_probe<T: ProbePipe, C: Clock>(
     cli: &Cli,
     identity: &UsbIdentity,
+    details: &UsbDetails,
     t: T,
     clock: C,
     json: bool,
@@ -258,9 +297,21 @@ fn run_probe<T: Transport, C: Clock>(
     let mut out = std::io::stdout().lock();
     if cli.trace {
         let t = TraceTransport::new(t, std::io::stderr());
-        firmware_probe(&mut Session::with_clock(t, clock), identity, json, &mut out)
+        firmware_probe_detailed(
+            &mut Session::with_clock(t, clock),
+            identity,
+            details,
+            json,
+            &mut out,
+        )
     } else {
-        firmware_probe(&mut Session::with_clock(t, clock), identity, json, &mut out)
+        firmware_probe_detailed(
+            &mut Session::with_clock(t, clock),
+            identity,
+            details,
+            json,
+            &mut out,
+        )
     }
 }
 
@@ -283,6 +334,10 @@ impl LazyBulk {
 impl Transport for LazyBulk {
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         self.pipe()?.transact(request, timeout)
+    }
+
+    fn last_timeout_direction(&self) -> Option<transport::TimeoutDirection> {
+        self.open.as_ref()?.last_timeout_direction()
     }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
@@ -323,6 +378,21 @@ impl Transport for LazyBulk {
 
     fn recover(&mut self) -> Result<(), transport::Error> {
         self.pipe()?.recover()
+    }
+}
+
+/// The read-only probe variants on the real pipe (FR QF92WX, AC .4): the
+/// standard pipe is released first, so each variant claims the vendor
+/// interface afresh `[inferred]`.
+impl ProbePipe for LazyBulk {
+    fn probe_variant(
+        &mut self,
+        variant: ProbeVariant,
+        frame: &ProbeFrame,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, transport::Error> {
+        self.open = None;
+        transport::bulk::probe_variant(&self.device, variant, frame, timeout)
     }
 }
 
@@ -591,6 +661,10 @@ struct CountingPipe<P> {
 impl<P: Transport> Transport for CountingPipe<P> {
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         self.inner.transact(request, timeout)
+    }
+
+    fn last_timeout_direction(&self) -> Option<transport::TimeoutDirection> {
+        self.inner.last_timeout_direction()
     }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, transport::Error> {
@@ -1142,6 +1216,14 @@ fn sim_firmware_knobs(mut sim: SimDevice) -> Result<SimDevice, CliError> {
     if let Ok(v) = std::env::var("POWERZ_SIM_APP_VERSION") {
         sim = sim.with_app_version(&v);
     }
+    if let Ok(name) = std::env::var("POWERZ_SIM_PROBE_ANSWER") {
+        let variant = ProbeVariant::from_name(&name).ok_or_else(|| {
+            CliError::Usage(format!(
+                "invalid POWERZ_SIM_PROBE_ANSWER {name:?}: expected no-drain-no-clear-halt, in-before-out or all-in-endpoints"
+            ))
+        })?;
+        sim = sim.with_probe_answer_on(variant);
+    }
     if let Some(path) = std::env::var_os("POWERZ_SIM_LOGO_FILE") {
         let path = std::path::PathBuf::from(path);
         let bytes = std::fs::read(&path).map_err(|e| {
@@ -1361,6 +1443,10 @@ impl<T: Transport> Transport for CtrlCAfter<T> {
 
     fn adcnew_counters(&self) -> powerz_protocol::adcnew::AdcnewCounters {
         self.inner.adcnew_counters()
+    }
+
+    fn last_timeout_direction(&self) -> Option<transport::TimeoutDirection> {
+        self.inner.last_timeout_direction()
     }
 }
 

@@ -142,6 +142,12 @@ powerz --trace firmware probe
 lsusb -v -d 5fc9:0063    # Linux only
 ```
 
+The probe output lists the meter's USB endpoints and string descriptors, and
+says which half of CONNECT or HEAD timed out (the write to the meter or the
+read back). If the standard CONNECT gets no answer, the probe also tries three
+read-only variants of it and prints which variant, if any, the meter answered.
+All of this helps us find out how bootloader 2.1 expects to be spoken to.
+
 Never run `powerz firmware flash` on a meter with bootloader 2.1.
 
 See also: [`powerz` CLI reference](../reference/cli.md#firmware-flashing) and

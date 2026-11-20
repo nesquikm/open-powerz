@@ -32,7 +32,7 @@ pub use console::console;
 pub use detect::{DetectOptions, detect};
 pub use firmware::{
     FLASH_RISK, JUMP_RISK, find_flashed_meter, firmware_flash, firmware_info, firmware_jump,
-    firmware_probe, firmware_probe_unavailable, inspect_flash_file,
+    firmware_probe, firmware_probe_detailed, firmware_probe_unavailable, inspect_flash_file,
 };
 pub use info::{info, info_in_mode, info_with};
 pub use list::{list, list_with, select_device, select_device_with};

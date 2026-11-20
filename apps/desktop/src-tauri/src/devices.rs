@@ -224,6 +224,14 @@ pub enum AppTransport {
 }
 
 impl Transport for AppTransport {
+    fn last_timeout_direction(&self) -> Option<transport::TimeoutDirection> {
+        match self {
+            AppTransport::Demo(t) => t.last_timeout_direction(),
+            AppTransport::Usb(t, _) => t.last_timeout_direction(),
+            AppTransport::Cdc(t) => t.last_timeout_direction(),
+        }
+    }
+
     fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, transport::Error> {
         match self {
             AppTransport::Demo(t) => t.transact(request, timeout),

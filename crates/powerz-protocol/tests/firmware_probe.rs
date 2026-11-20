@@ -148,6 +148,9 @@ fn probe_sends_connect_then_head_and_reports_the_head_field() {
         ProbeReport {
             connect: ConnectOutcome::Accepted,
             head: HeadOutcome::Field(0),
+            connect_timeout: None,
+            head_timeout: None,
+            variants: Vec::new(),
         }
     );
     assert_eq!(types(&s), vec![0x02, 0x40], "only CONNECT and HEAD");

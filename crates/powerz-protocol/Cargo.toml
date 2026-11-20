@@ -85,3 +85,7 @@ required-features = ["bulk"]
 [[test]]
 name = "usb_identity"
 required-features = ["bulk"]
+
+[[test]]
+name = "qf92wx_probe_diagnostics"
+required-features = ["bulk"]

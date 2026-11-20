@@ -278,6 +278,10 @@ impl<T: FlashTransport> Transport for FlashGuard<T> {
     fn recover(&mut self) -> Result<(), TransportError> {
         self.inner.recover()
     }
+
+    fn last_timeout_direction(&self) -> Option<crate::transport::TimeoutDirection> {
+        self.inner.last_timeout_direction()
+    }
 }
 
 impl<T: FlashTransport> FlashTransport for FlashGuard<T> {
@@ -931,6 +935,10 @@ impl<T: Transport> Transport for ByRef<'_, T> {
 
     fn recover(&mut self) -> Result<(), TransportError> {
         self.0.recover()
+    }
+
+    fn last_timeout_direction(&self) -> Option<crate::transport::TimeoutDirection> {
+        self.0.last_timeout_direction()
     }
 }
 

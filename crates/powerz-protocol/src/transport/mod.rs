@@ -85,6 +85,34 @@ pub enum Error {
     Io(String),
 }
 
+/// Which half of an exchange a timeout hit (FR QF92WX, AC .3): the OUT
+/// write of the request or the IN read of the reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimeoutDirection {
+    /// The request write to the OUT endpoint timed out.
+    Out,
+    /// The reply read from the IN endpoint timed out.
+    In,
+}
+
+impl TimeoutDirection {
+    /// Human label: `OUT write` or `IN read`.
+    pub fn label(self) -> &'static str {
+        match self {
+            TimeoutDirection::Out => "OUT write",
+            TimeoutDirection::In => "IN read",
+        }
+    }
+
+    /// Machine name: `out` or `in`.
+    pub fn name(self) -> &'static str {
+        match self {
+            TimeoutDirection::Out => "out",
+            TimeoutDirection::In => "in",
+        }
+    }
+}
+
 /// The logo chunk frame [`Transport::transact_logo_chunk`] sends for the
 /// plaintext chunk `plain`: checked with
 /// [`check_logo_chunk`](guard::check_logo_chunk) first (a chunk outside the
@@ -182,6 +210,12 @@ pub trait Transport {
     /// transport streams; the default refuses.
     fn adcnew_frames(&mut self) -> Result<Vec<crate::adcnew::Frame>, Error> {
         Err(Error::AdcnewNeedsCdc)
+    }
+
+    /// Which half of the last exchange timed out, if the pipe knows
+    /// (FR QF92WX, AC .3). Default: `None`.
+    fn last_timeout_direction(&self) -> Option<TimeoutDirection> {
+        None
     }
 
     /// Frames of the ADCNEW stream lost on the host side so far. Only the
@@ -328,6 +362,10 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
 
     fn adcnew_counters(&self) -> crate::adcnew::AdcnewCounters {
         (**self).adcnew_counters()
+    }
+
+    fn last_timeout_direction(&self) -> Option<TimeoutDirection> {
+        (**self).last_timeout_direction()
     }
 }
 
