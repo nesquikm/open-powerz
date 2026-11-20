@@ -1,8 +1,8 @@
 ---
 milestone: M_E84WQE
 id: fr_01M7W218R6ABPQAFJ5AAE84WQE
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-20T12:37:28Z
 kickoff_branch: fix/v0.13.2
 frozen_at: null
 migration: none
@@ -29,10 +29,10 @@ codename: Old Boot
 
 | FR | Title | Tracker |
 |---|---|---|
-| [JT38C8](../frs/JT38C8.md) | A meter on the old bootloader (2.1) shows as unknown (bug) | n/a |
-| [BKSE70](../frs/BKSE70.md) | Updating a meter on the old bootloader waits two minutes, then times out (bug) | n/a |
-| [QF92WX](../frs/QF92WX.md) | The firmware probe cannot tell why an old bootloader stays silent (bug) | n/a |
-| [31HJ41](../frs/31HJ41.md) | The Linux permission message points at a file AppImage users do not have (bug) | n/a |
+| [JT38C8](../../frs/archive/JT38C8.md) | A meter on the old bootloader (2.1) shows as unknown (bug) | n/a |
+| [BKSE70](../../frs/archive/BKSE70.md) | Updating a meter on the old bootloader waits two minutes, then times out (bug) | n/a |
+| [QF92WX](../../frs/archive/QF92WX.md) | The firmware probe cannot tell why an old bootloader stays silent (bug) | n/a |
+| [31HJ41](../../frs/archive/31HJ41.md) | The Linux permission message points at a file AppImage users do not have (bug) | n/a |
 
 Build order: the table's order (BKSE70 and QF92WX build on JT38C8's mode).
 

@@ -1,8 +1,8 @@
 ---
 title: Updating a meter on the old bootloader waits two minutes, then times out
 milestone: M_E84WQE
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-20T12:37:28Z
 id: fr_01M7W21FGHK10CK3PGT5BKSE70
 created_at: 2026-11-20T08:46:36.074Z
 changelog_category: Fixed
@@ -55,3 +55,8 @@ Engine tests on the sim opener (frame log empty after the legacy re-enumeration,
 ## Notes
 
 Depends on JT38C8. Flashing the 2.1 bootloader itself is out of scope until we have its endpoint dump.
+
+## Implementation notes
+
+- The desktop shows the old-bootloader error as a usage error with no recovery steps, since nothing was sent.
+- The TS copy of the message is pinned to the Rust constant by a Vitest that reads flash.rs.

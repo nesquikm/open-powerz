@@ -1,8 +1,8 @@
 ---
 title: The firmware probe cannot tell why an old bootloader stays silent
 milestone: M_E84WQE
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-20T12:37:28Z
 id: fr_01M7W21FGYSGKD7WNPE2QF92WX
 created_at: 2026-11-20T08:46:36.074Z
 changelog_category: Fixed
@@ -56,3 +56,10 @@ Simulator tests per variant, the frame-type allowlist over the frame log, text a
 ## Notes
 
 Needs a hardware runbook: the probe on our 2.5 meter in application and bootloader mode (no variant retries in app mode, endpoint table matches lsusb).
+
+## Implementation notes
+
+- Variants send the standard probe's exact CONNECT and HEAD frames (20-byte HEAD); a write-site check refuses any other type.
+- A variant counts as answered on any reply, not only ACCEPT; unexpected CONNECT replies are kept as raw bytes.
+- `all-in-endpoints` reads the IN endpoints of the vendor interface only (the 2.1 shape has one interface).
+- Real-USB paths (endpoint/string reads, variants) are covered by the hardware runbook, not by tests.
