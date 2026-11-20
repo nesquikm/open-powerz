@@ -234,15 +234,47 @@ pub fn default_timeout(request: &[u8]) -> Duration {
     }
 }
 
+/// The Linux udev rule for the KM002C / KM003C (`5fc9:0061|0063`), as one
+/// line: the same usb, hidraw and tty nodes as the shipped
+/// `packaging/linux/60-powerz.rules`, matched with udev `|` alternatives.
+macro_rules! linux_udev_rule {
+    () => {
+        r#"SUBSYSTEM=="usb|hidraw|tty", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0061|0063", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1""#
+    };
+}
+
+/// The Linux udev rule for the meter (vendor `5fc9`): seat-user access to the
+/// USB, hidraw and tty nodes, and ModemManager kept off the CDC port.
+pub const LINUX_UDEV_RULE: &str = linux_udev_rule!();
+
+/// One shell command that writes [`LINUX_UDEV_RULE`] to
+/// `/etc/udev/rules.d/60-powerz.rules` without reading any file.
+pub const LINUX_UDEV_INSTALL_COMMAND: &str = concat!(
+    "echo '",
+    linux_udev_rule!(),
+    "' | sudo tee /etc/udev/rules.d/60-powerz.rules"
+);
+
+/// Reloads the udev rules after [`LINUX_UDEV_INSTALL_COMMAND`].
+pub const LINUX_UDEV_RELOAD_COMMAND: &str = "sudo udevadm control --reload-rules";
+
+/// Applies the reloaded rules to devices already plugged in.
+pub const LINUX_UDEV_TRIGGER_COMMAND: &str = "sudo udevadm trigger";
+
+/// The Linux setup guide on GitHub.
+pub const LINUX_GUIDE_URL: &str = "https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md";
+
 /// Build an [`Error::Permission`] for `target_os` (e.g. `"linux"`); on Linux
-/// the message names the udev rule `packaging/linux/60-powerz.rules`. A
-/// serial port's name in `detail` is dropped, see `without_port_names`.
+/// the message carries the commands that write and load the udev rule and
+/// the guide's URL. A serial port's name in `detail` is dropped, see
+/// `without_port_names`.
 pub fn permission_error(target_os: &str, detail: &str) -> Error {
     let detail = without_port_names(detail);
     if target_os == "linux" {
         Error::Permission(format!(
-            "{detail}; install the udev rule packaging/linux/60-powerz.rules \
-             into /etc/udev/rules.d/ and replug the meter"
+            "{detail}; write the udev rule with `{LINUX_UDEV_INSTALL_COMMAND}`, \
+             run `{LINUX_UDEV_RELOAD_COMMAND}` and `{LINUX_UDEV_TRIGGER_COMMAND}`, \
+             then replug the meter (see {LINUX_GUIDE_URL})"
         ))
     } else {
         Error::Permission(detail)
@@ -445,6 +477,106 @@ mod tests {
         let msg = e.to_string();
         assert!(msg.contains("60-powerz.rules"), "message: {msg}");
         assert!(msg.contains("/dev/bus/usb/001/004"), "message: {msg}");
+    }
+
+    // ---- AC-31HJ41.1/.2: the Linux permission error works without a checkout ----
+
+    const HJ41_GUIDE_URL: &str = "https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md";
+    const HJ41_TEE: &str = "' | sudo tee /etc/udev/rules.d/60-powerz.rules";
+
+    fn hj41_linux_message() -> String {
+        permission_error("linux", "cannot open /dev/bus/usb/001/004").to_string()
+    }
+
+    /// The rule text of the `echo '<rule>' | sudo tee …` command in `text`.
+    fn hj41_inline_rule(text: &str) -> Option<String> {
+        let end = text.find(HJ41_TEE)?;
+        let start = text[..end].rfind("echo '")? + "echo '".len();
+        Some(text[start..end].to_owned())
+    }
+
+    #[test]
+    fn hj41_linux_permission_error_names_no_repository_path() {
+        let msg = hj41_linux_message();
+        assert!(!msg.contains("packaging/"), "message: {msg}");
+        assert!(!msg.contains("sudo cp "), "message: {msg}");
+    }
+
+    #[test]
+    fn hj41_linux_permission_error_writes_the_rule_with_one_tee_command() {
+        let msg = hj41_linux_message();
+        let rule = hj41_inline_rule(&msg)
+            .unwrap_or_else(|| panic!("no `echo '<rule>' | sudo tee` command in: {msg}"));
+        assert!(rule.contains("ATTRS{idVendor}==\"5fc9\""), "rule: {rule}");
+        assert!(!rule.contains('\n') && !rule.contains('\''), "rule: {rule}");
+        assert_eq!(msg.matches("sudo tee").count(), 1, "message: {msg}");
+    }
+
+    #[test]
+    fn hj41_linux_permission_error_reloads_triggers_and_replugs() {
+        let msg = hj41_linux_message();
+        assert!(
+            msg.contains("sudo udevadm control --reload-rules"),
+            "message: {msg}"
+        );
+        assert!(msg.contains("sudo udevadm trigger"), "message: {msg}");
+        assert!(msg.contains("replug"), "message: {msg}");
+    }
+
+    #[test]
+    fn hj41_linux_permission_error_links_the_linux_guide() {
+        let msg = hj41_linux_message();
+        assert!(msg.contains(HJ41_GUIDE_URL), "message: {msg}");
+        assert!(msg.contains("/dev/bus/usb/001/004"), "message: {msg}");
+    }
+
+    #[test]
+    fn hj41_inline_rule_grants_uaccess_and_mm_ignore_to_usb_hidraw_and_tty() {
+        let msg = hj41_linux_message();
+        let rule = hj41_inline_rule(&msg)
+            .unwrap_or_else(|| panic!("no `echo '<rule>' | sudo tee` command in: {msg}"));
+        // A rule with no SUBSYSTEM match (ATTRS walks up to the USB device)
+        // applies to the usb, hidraw and tty nodes alike; a SUBSYSTEM glob
+        // must list all three.
+        let subsystem = rule
+            .split(", ")
+            .find_map(|kv| kv.trim().strip_prefix("SUBSYSTEM==\""))
+            .map(|v| v.trim_end_matches('"').to_owned());
+        if let Some(pattern) = subsystem {
+            let alts: Vec<&str> = pattern.split('|').collect();
+            for node in ["usb", "hidraw", "tty"] {
+                assert!(alts.contains(&node), "{node} not matched by rule: {rule}");
+            }
+        }
+        assert!(!rule.contains("SUBSYSTEMS=="), "rule: {rule}");
+        assert!(rule.contains("TAG+=\"uaccess\""), "rule: {rule}");
+        assert!(
+            rule.contains("ENV{ID_MM_DEVICE_IGNORE}=\"1\""),
+            "rule: {rule}"
+        );
+    }
+
+    #[test]
+    fn hj41_inline_rule_grants_what_the_shipped_rule_file_grants() {
+        let shipped = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../packaging/linux/60-powerz.rules"),
+        )
+        .expect("packaging/linux/60-powerz.rules");
+        let msg = hj41_linux_message();
+        let rule = hj41_inline_rule(&msg)
+            .unwrap_or_else(|| panic!("no `echo '<rule>' | sudo tee` command in: {msg}"));
+        let grants: std::collections::BTreeSet<&str> = shipped
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+            .flat_map(|l| l.split(", "))
+            .map(str::trim)
+            .filter(|kv| !kv.contains("=="))
+            .collect();
+        assert!(!grants.is_empty(), "no assignments in the shipped file");
+        for grant in grants {
+            assert!(rule.contains(grant), "{grant} missing from rule: {rule}");
+        }
     }
 
     #[test]

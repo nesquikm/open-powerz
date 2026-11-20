@@ -134,9 +134,22 @@ cd powerz-<version>-linux-x86_64
 ./powerz --help
 ```
 
-Then install the udev rule as described in
-[Linux setup](../linux.md#1-install-the-udev-rule), so the meter can be opened
-without root. Without the rule, the app and the CLI cannot open the meter.
+The meter needs a udev rule before it can be opened without root. Without the
+rule, the app and the CLI cannot open the meter.
+
+The `.deb` installs the rule for you. Unplug and replug the meter once (or run
+`sudo udevadm trigger`).
+
+With the AppImage or the CLI archive, write the rule with this one command,
+reload udev, then unplug and replug the meter:
+
+```bash
+echo 'SUBSYSTEM=="usb|hidraw|tty", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0061|0063", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"' | sudo tee /etc/udev/rules.d/60-powerz.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+[Linux setup](../linux.md#1-install-the-udev-rule) explains what the rule does.
 The same page explains the kernel's `powerz` hwmon driver, which can hold the
 meter's bulk interface.
 

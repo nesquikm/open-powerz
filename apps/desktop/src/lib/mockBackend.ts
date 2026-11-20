@@ -799,9 +799,10 @@ export const LINUX_PERMISSION_DENIED: Readonly<UiError> = {
   kind: "permission_denied",
   message: "The system did not allow the app to open the meter.",
   hint:
-    "Install the udev rule: `sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/`, then run " +
-    "`sudo udevadm control --reload-rules` and `sudo udevadm trigger`, and replug the meter " +
-    "(see `docs/linux.md`).",
+    "Write the udev rule: " +
+    '`echo \'SUBSYSTEM=="usb|hidraw|tty", ATTRS{idVendor}=="5fc9", ATTRS{idProduct}=="0061|0063", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"\' | sudo tee /etc/udev/rules.d/60-powerz.rules`, ' +
+    "then run `sudo udevadm control --reload-rules` and `sudo udevadm trigger`, and replug the meter " +
+    "(see https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md).",
 };
 
 /** The role swaps (DR, PR, VCONN, FR): control messages the library classifier does

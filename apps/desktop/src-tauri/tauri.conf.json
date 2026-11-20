@@ -32,6 +32,13 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/udev/rules.d/60-powerz.rules": "../../../packaging/linux/60-powerz.rules"
+        }
+      }
+    }
   }
 }

@@ -346,14 +346,26 @@ describe("MockBackend ?mock= scenarios (AC-AH2AEN.5)", () => {
   it("permission-denied: connect rejects with the Linux permission error and udev hint", async () => {
     const backend = new MockBackend("permission-denied");
     const events: BackendEvent[] = [];
-    await expect(backend.connect("demo:load-5v-1a", 50, (e) => events.push(e))).rejects.toEqual({
+    const rejected = await backend
+      .connect("demo:load-5v-1a", 50, (e) => events.push(e))
+      .then(
+        () => null,
+        (e: unknown) => e as { kind: string; message: string; hint: string },
+      );
+    expect(rejected).toMatchObject({
       kind: "permission_denied",
       message: "The system did not allow the app to open the meter.",
-      hint:
-        "Install the udev rule: `sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/`, then run " +
-        "`sudo udevadm control --reload-rules` and `sudo udevadm trigger`, and replug the meter " +
-        "(see `docs/linux.md`).",
     });
+    // AC-31HJ41.1: the hint mirrors ui_error.rs — one inline tee command, no repo path.
+    const hint = rejected?.hint ?? "";
+    expect(hint).not.toContain("packaging/");
+    expect(hint).toMatch(
+      /`echo '[^'`\n]*ATTRS\{idVendor\}=="5fc9"[^'`\n]*' \| sudo tee \/etc\/udev\/rules\.d\/60-powerz\.rules`/,
+    );
+    expect(hint).toContain("`sudo udevadm control --reload-rules`");
+    expect(hint).toContain("`sudo udevadm trigger`");
+    expect(hint).toContain("replug the meter");
+    expect(hint).toContain("https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md");
     expect(events).toEqual([]);
     await expect(backend.stats()).rejects.toMatchObject({ kind: "usage" });
   });
@@ -405,9 +417,43 @@ describe("LINUX_PERMISSION_DENIED (the mock's copy of the backend's Linux permis
   }
 
   it("has the hint of ui_error.rs", () => {
-    const m = /const LINUX_PERMISSION_HINT: &str = "((?:[^"\\]|\\[\s\S])*)";/.exec(rust);
-    expect(m?.[1], "LINUX_PERMISSION_HINT in ui_error.rs").toBeDefined();
-    expect(LINUX_PERMISSION_DENIED.hint).toBe(rustString(m?.[1] ?? ""));
+    // FR 31HJ41: the hint is `format!`-built from the protocol crate's udev
+    // constants, so rebuild it the same way from both Rust sources.
+    const transport = readFileSync(
+      new URL("../../../../crates/powerz-protocol/src/transport/mod.rs", import.meta.url),
+      "utf8",
+    );
+    const rule = /macro_rules! linux_udev_rule \{\s*\(\) => \{\s*r#"([\s\S]*?)"#/.exec(
+      transport,
+    )?.[1];
+    expect(rule, "linux_udev_rule! in transport/mod.rs").toBeDefined();
+    const constant = (name: string): string | undefined =>
+      new RegExp(`pub const ${name}: &str = "([^"]*)";`).exec(transport)?.[1];
+    const values: Record<string, string | undefined> = {
+      "transport::LINUX_UDEV_INSTALL_COMMAND": `echo '${rule}' | sudo tee /etc/udev/rules.d/60-powerz.rules`,
+      "transport::LINUX_UDEV_RELOAD_COMMAND": constant("LINUX_UDEV_RELOAD_COMMAND"),
+      "transport::LINUX_UDEV_TRIGGER_COMMAND": constant("LINUX_UDEV_TRIGGER_COMMAND"),
+      "transport::LINUX_GUIDE_URL": constant("LINUX_GUIDE_URL"),
+    };
+    const install =
+      /pub const LINUX_UDEV_INSTALL_COMMAND: &str = concat!\(\s*"([^"]*)",\s*linux_udev_rule!\(\),\s*"([^"]*)"/.exec(
+        transport,
+      );
+    expect(install, "LINUX_UDEV_INSTALL_COMMAND in transport/mod.rs").not.toBeNull();
+    values["transport::LINUX_UDEV_INSTALL_COMMAND"] = `${install?.[1]}${rule}${install?.[2]}`;
+    const m =
+      /fn linux_permission_hint\(\) -> String \{\s*format!\(\s*"((?:[^"\\]|\\[\s\S])*)",\s*([^)]*)\)/.exec(
+        rust,
+      );
+    expect(m, "linux_permission_hint() in ui_error.rs").not.toBeNull();
+    const args = (m?.[2] ?? "")
+      .split(",")
+      .map((a) => a.trim())
+      .filter((a) => a !== "");
+    let i = 0;
+    const hint = rustString(m?.[1] ?? "").replace(/\{\}/g, () => values[args[i++] ?? ""] ?? "<?>");
+    expect(Object.values(values).every((v) => v !== undefined)).toBe(true);
+    expect(LINUX_PERMISSION_DENIED.hint).toBe(hint);
   });
 
   it("has the message and kind of ui_error.rs", () => {

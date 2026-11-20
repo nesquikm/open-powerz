@@ -93,11 +93,17 @@ impl UiError {
     }
 }
 
-/// Linux hint for a permission failure: the udev rule from `docs/linux.md`.
-const LINUX_PERMISSION_HINT: &str = "Install the udev rule: \
-`sudo cp packaging/linux/60-powerz.rules /etc/udev/rules.d/`, then run \
-`sudo udevadm control --reload-rules` and `sudo udevadm trigger`, and replug the \
-meter (see `docs/linux.md`).";
+/// Linux hint for a permission failure: write and load the udev rule, from
+/// the shared constants in `powerz_protocol::transport`.
+fn linux_permission_hint() -> String {
+    format!(
+        "Write the udev rule: `{}`, then run `{}` and `{}`, and replug the meter (see {}).",
+        transport::LINUX_UDEV_INSTALL_COMMAND,
+        transport::LINUX_UDEV_RELOAD_COMMAND,
+        transport::LINUX_UDEV_TRIGGER_COMMAND,
+        transport::LINUX_GUIDE_URL,
+    )
+}
 
 /// Linux hint for a busy device: the kernel's `powerz` hwmon driver.
 const LINUX_BUSY_HINT: &str = "The kernel's powerz hwmon driver may be holding the \
@@ -121,7 +127,7 @@ fn is_busy(detail: &str) -> bool {
 
 fn permission_denied(target_os: &str) -> UiError {
     let hint = if target_os == "linux" {
-        LINUX_PERMISSION_HINT.to_owned()
+        linux_permission_hint()
     } else if target_os == "windows" {
         "Close other apps that use the meter, then replug it.".to_owned()
     } else {
@@ -437,7 +443,73 @@ mod tests {
         let hint = e.hint.clone().expect("no hint");
         assert!(hint.contains("60-powerz.rules"), "hint: {hint}");
         assert!(hint.contains("docs/linux.md"), "hint: {hint}");
-        assert_plain(&e);
+        // The quoted udev rule carries `ATTRS{…}` by design; the rest is plain.
+        let rule = hj41_inline_rule(&hint).unwrap_or_default();
+        assert_plain(&UiError {
+            hint: Some(hint.replace(&rule, "")),
+            ..e.clone()
+        });
+    }
+
+    // ---- AC-31HJ41.1/.2: the Linux permission hint works without a checkout ----
+
+    const HJ41_GUIDE_URL: &str = "https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md";
+    const HJ41_TEE: &str = "' | sudo tee /etc/udev/rules.d/60-powerz.rules";
+
+    fn hj41_linux_hint() -> String {
+        let err = permission_error("linux", "cannot open /dev/bus/usb/001/004");
+        from_transport(&err, "linux").hint.expect("no hint")
+    }
+
+    /// The rule text of the `echo '<rule>' | sudo tee …` command in `text`.
+    fn hj41_inline_rule(text: &str) -> Option<String> {
+        let end = text.find(HJ41_TEE)?;
+        let start = text[..end].rfind("echo '")? + "echo '".len();
+        Some(text[start..end].to_owned())
+    }
+
+    #[test]
+    fn hj41_linux_hint_names_no_repository_path() {
+        let hint = hj41_linux_hint();
+        assert!(!hint.contains("packaging/"), "hint: {hint}");
+        assert!(!hint.contains("sudo cp "), "hint: {hint}");
+    }
+
+    #[test]
+    fn hj41_linux_hint_writes_the_rule_with_one_tee_command() {
+        let hint = hj41_linux_hint();
+        let rule = hj41_inline_rule(&hint)
+            .unwrap_or_else(|| panic!("no `echo '<rule>' | sudo tee` command in: {hint}"));
+        assert!(rule.contains("ATTRS{idVendor}==\"5fc9\""), "rule: {rule}");
+        assert_eq!(hint.matches("sudo tee").count(), 1, "hint: {hint}");
+    }
+
+    #[test]
+    fn hj41_linux_hint_reloads_triggers_and_replugs() {
+        let hint = hj41_linux_hint();
+        assert!(
+            hint.contains("sudo udevadm control --reload-rules"),
+            "hint: {hint}"
+        );
+        assert!(hint.contains("sudo udevadm trigger"), "hint: {hint}");
+        assert!(hint.contains("replug"), "hint: {hint}");
+    }
+
+    #[test]
+    fn hj41_linux_hint_links_the_linux_guide() {
+        let hint = hj41_linux_hint();
+        assert!(hint.contains(HJ41_GUIDE_URL), "hint: {hint}");
+    }
+
+    #[test]
+    fn hj41_linux_hint_writes_the_same_rule_as_the_cli_error() {
+        let hint = hj41_linux_hint();
+        let cli = permission_error("linux", "EACCES").to_string();
+        let from_hint = hj41_inline_rule(&hint)
+            .unwrap_or_else(|| panic!("no `echo '<rule>' | sudo tee` command in: {hint}"));
+        let from_cli = hj41_inline_rule(&cli)
+            .unwrap_or_else(|| panic!("no `echo '<rule>' | sudo tee` command in: {cli}"));
+        assert_eq!(from_hint, from_cli);
     }
 
     #[test]
