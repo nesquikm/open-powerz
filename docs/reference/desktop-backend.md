@@ -193,8 +193,8 @@ Device mode and firmware version:
 
 | item | meaning |
 |---|---|
-| `DeviceMode` | `"application"`, `"bootloader"` or `"unknown"`, from the USB string of the meter's vendor interface (`APP` in application mode). |
-| `DeviceListing.mode` | A meter in bootloader mode is listed; `deviceOptionLabel` ends its picker label in "(bootloader mode)". `Session` will not connect to it, and the backend refuses that connect too. |
+| `DeviceMode` | `"application"`, `"bootloader"`, `"legacy_bootloader"` or `"unknown"`, from the USB string of the meter's vendor interface (`APP` in application mode) and whether it has a HID interface (none on the old 2.1 bootloader). |
+| `DeviceListing.mode` | A meter in bootloader mode is listed; `deviceOptionLabel` ends its picker label in "(bootloader mode)", or "(old bootloader, not supported yet)" for `legacy_bootloader`. `Session` will not connect to either, and the backend refuses that connect too; a firmware update cannot start on an old-bootloader meter (`LEGACY_BOOTLOADER_HELP` is shown instead). |
 | `ConnectedInfo` | Adds `mode`, `bootloader_version`, `warnings`, `update_required` (`boolean \| null`: `null` when the HEAD reply could not be read or was not recognised), `firmware_problems` (one line per part of the firmware status that could not be read, shown as "Firmware status" rows), and `min_supported_firmware` and `known_latest_firmware`, the versions the warnings go by. |
 | `FirmwareWarningCode` | `"too_old"` (below 1.7.0) and `"outdated"` (below 2.0.7, the newest version known). No HEAD reply is read as "update required" until its meaning is confirmed on a meter. |
 
@@ -484,6 +484,7 @@ every mode:
 | `?mock=trigger-detect-disagree` | BC1.2 says not supported while the automatic list says supported. |
 | `?mock=trigger-list-lag` | Detection fails with an `out_of_sync` error after the list, as when the meter answers one command late. |
 | `?mock=bootloader` | One meter in bootloader mode is listed before the demo devices. |
+| `?mock=legacy-bootloader` | One meter on the old 2.1 bootloader is listed before the demo devices; Connect and the firmware update refuse it with their old-bootloader messages. |
 | `?mock=firmware-fail-<stage>` | A firmware update fails at `switching`, `erasing`, `writing`, `verifying` or `returning`, with the recovery steps. |
 | `?mock=firmware-other-model` | The chosen firmware file is for a KM002C. |
 | `?mock=firmware-bad-file` | The chosen firmware file fails inspection. |

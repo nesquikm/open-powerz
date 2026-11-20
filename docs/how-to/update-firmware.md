@@ -124,6 +124,10 @@ bootloader and stops at once, with a message that bootloader 2.1 is not
 supported yet. It sends nothing to the meter, so the firmware on it is
 unchanged.
 
+**In the app:** while the meter sits in the old bootloader, the device list
+names it "(old bootloader, not supported yet)" and Connect refuses it, and
+`powerz firmware probe` prints `Mode: bootloader (old, not supported yet)`.
+
 **Back to normal:** unplug the meter and plug it back in. You do not need to
 hold any button. The meter starts its application firmware again and works as
 before.

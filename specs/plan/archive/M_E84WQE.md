@@ -7,6 +7,7 @@ kickoff_branch: fix/v0.13.2
 frozen_at: null
 migration: none
 codename: Old Boot
+shipped_in: v0.13.2
 ---
 
 # Implementation Plan
