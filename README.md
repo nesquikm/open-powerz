@@ -114,6 +114,7 @@ See [Use the web edition](docs/how-to/web-edition.md) for the details.
 - Inspect a ChargerLAB firmware file before you use it ([update firmware](docs/how-to/update-firmware.md))
 - Update the meter's firmware from the CLI or behind the app's Advanced firmware switch, with recovery steps if it fails ([update firmware](docs/how-to/update-firmware.md))
 - After an update, read the device list labels the meter took, bootloader mode included ([update firmware](docs/how-to/update-firmware.md))
+- Try an experimental update from the CLI on a meter with the old 2.1 bootloader, so far tested only in simulation ([update firmware](docs/how-to/update-firmware.md#old-bootloader))
 
 ### Offline records
 
