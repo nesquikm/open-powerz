@@ -529,6 +529,14 @@ pub struct SimDevice {
     stale_since_ms: Option<u64>,
     /// Queue rate resets in `stored` this pipe's queue has applied.
     queue_resets_seen: u64,
+    /// The old bootloader numbers its replies itself (FR XW4QQN) instead
+    /// of staying silent: see [`SimDevice::with_own_reply_ids`].
+    own_reply_ids: bool,
+    /// That bootloader's reply counter (from 0, one step per reply sent in
+    /// time).
+    own_id: u8,
+    /// That bootloader has seen its first CONNECT.
+    own_first_connect_seen: bool,
 }
 
 /// Put startup-duration `code` (`code & 3`: off, 1 s, 3 s, 5 s) into bits
@@ -670,6 +678,9 @@ impl SimDevice {
             auto_menu_save: None,
             stale_since_ms: None,
             queue_resets_seen: 0,
+            own_reply_ids: false,
+            own_id: 0,
+            own_first_connect_seen: false,
         }
     }
 
@@ -712,6 +723,56 @@ impl SimDevice {
     pub fn with_mode(mut self, mode: DeviceMode) -> SimDevice {
         self.mode = mode;
         self
+    }
+
+    /// In old-bootloader mode, answer like the field's bootloader 2.1
+    /// (FR XW4QQN) `[device]`: replies carry the meter's own counter, not
+    /// our id; the first CONNECT is answered only within a wait of at
+    /// least 800 ms `[inferred]`, else its ACCEPT is what the next transfer
+    /// returns, that request getting no reply of its own. No stale
+    /// DISCONNECT waits on its IN pipe: the field trace shows none.
+    pub fn with_own_reply_ids(mut self) -> SimDevice {
+        self.own_reply_ids = true;
+        self.pending.clear();
+        self
+    }
+
+    /// Whether this is the old bootloader that numbers its replies itself.
+    fn answers_with_own_ids(&self) -> bool {
+        self.mode == DeviceMode::LegacyBootloader && self.own_reply_ids
+    }
+
+    /// One request to the own-ids old bootloader: CONNECT is ACCEPTed and
+    /// HEAD answered (field 0) with the meter's own id; anything else
+    /// times out.
+    fn own_ids_transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        if let Some(late) = self.pending.pop_front() {
+            return Ok(late);
+        }
+        let ty = request.first().map(|b| b & 0x7F);
+        if ty == Some(crate::device::msg::CONNECT) && !self.own_first_connect_seen {
+            self.own_first_connect_seen = true;
+            if timeout < Duration::from_millis(800) {
+                self.pending
+                    .push_back(vec![crate::device::msg::ACCEPT, self.own_id, 0, 0]);
+                return Err(Error::Timeout);
+            }
+        }
+        let id = self.own_id;
+        let reply = match ty {
+            Some(crate::device::msg::CONNECT) => vec![crate::device::msg::ACCEPT, id, 0, 0],
+            Some(crate::device::msg::HEAD) => {
+                // `c0 id 01 01`, 8 zero bytes, `ff ff ff ff`, 4 zero bytes.
+                let mut r = vec![0xC0, id, 0x01, 0x01];
+                r.extend([0u8; 8]);
+                r.extend([0xFF; 4]);
+                r.extend([0u8; 4]);
+                r
+            }
+            _ => return Err(Error::Timeout),
+        };
+        self.own_id = self.own_id.wrapping_add(1);
+        Ok(reply)
     }
 
     /// Answer HEAD with old-firmware field `field` (default 0).
@@ -763,6 +824,18 @@ impl SimDevice {
             DeviceMode::Bootloader => "BOOT",
             DeviceMode::LegacyBootloader => "POWER-Z KM003C",
             DeviceMode::Unknown => "POWER-Z",
+        }
+    }
+
+    /// String 2 as the descriptor carries it: the field 2.1 bootloader
+    /// that answers with its own reply ids sends `BOOT\0`, NUL included
+    /// `[device]`; every other mode its [`SimDevice::interface_string`].
+    #[cfg(not(target_arch = "wasm32"))]
+    fn raw_interface_string(&self) -> String {
+        if self.answers_with_own_ids() {
+            "BOOT\0".to_owned()
+        } else {
+            self.interface_string().to_owned()
         }
     }
 
@@ -850,10 +923,7 @@ impl SimDevice {
             interfaces,
             strings: vec![
                 (1, StringDescriptor::Text("ChargerLab".to_owned())),
-                (
-                    2,
-                    StringDescriptor::Text(self.interface_string().to_owned()),
-                ),
+                (2, StringDescriptor::Text(self.raw_interface_string())),
                 (3, StringDescriptor::Text(self.serial.clone())),
                 (4, StringDescriptor::Text(self.product_string().to_owned())),
             ],
@@ -1071,7 +1141,16 @@ impl Transport for SimDevice {
             .then_some(powerz_protocol::transport::TimeoutDirection::In)
     }
 
-    fn transact(&mut self, request: &[u8], _timeout: Duration) -> Result<Vec<u8>, Error> {
+    /// The own-ids old bootloader fails the pipe recovery, as the field
+    /// meter did (FR XW4QQN) `[device]`; every other pipe recovers.
+    fn recover(&mut self) -> Result<(), Error> {
+        if self.answers_with_own_ids() {
+            return Err(Error::Io("simulated pipe recovery failed".into()));
+        }
+        Ok(())
+    }
+
+    fn transact(&mut self, request: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         if let Some(e) = self.blocked() {
             return Err(e);
         }
@@ -1079,6 +1158,9 @@ impl Transport for SimDevice {
         let n = self.requests;
         if self.faults.timeout_always || self.faults.timeout_at.contains(&n) {
             return Err(Error::Timeout);
+        }
+        if self.answers_with_own_ids() {
+            return self.own_ids_transact(request, timeout);
         }
         if self.mode == DeviceMode::LegacyBootloader {
             // The old bootloader (2.1) answers neither CONNECT nor HEAD, nor
@@ -1202,11 +1284,15 @@ impl powerz_protocol::session::ProbePipe for SimDevice {
         &mut self,
         variant: powerz_protocol::session::ProbeVariant,
         frame: &powerz_protocol::session::ProbeFrame,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<Vec<u8>, Error> {
         powerz_protocol::session::check_probe_frame(frame.bytes())?;
         if let Some(e) = self.blocked() {
             return Err(e);
+        }
+        if self.answers_with_own_ids() {
+            // Every variant reaches the own-ids old bootloader (FR XW4QQN).
+            return self.own_ids_transact(frame.bytes(), timeout);
         }
         if self.probe_answer != Some(variant) {
             return Err(Error::Timeout);

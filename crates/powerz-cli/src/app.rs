@@ -268,9 +268,15 @@ fn strings_or_unavailable(
 fn probe_sim(cli: &Cli, json: bool) -> Result<(), CliError> {
     select_demo(cli)?;
     let mode = sim_mode()?;
+    let own_ids = sim_own_reply_ids();
     let faults = sim_faults()?;
     let configure = |sim: SimDevice| -> Result<SimDevice, CliError> {
-        Ok(sim_firmware_knobs(sim)?.with_mode(mode).with_faults(faults))
+        let sim = sim_firmware_knobs(sim)?.with_mode(mode).with_faults(faults);
+        Ok(if own_ids {
+            sim.with_own_reply_ids()
+        } else {
+            sim
+        })
     };
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
@@ -404,11 +410,17 @@ fn sim_mode() -> Result<DeviceMode, CliError> {
     match std::env::var("POWERZ_SIM_MODE").as_deref() {
         Err(_) | Ok("application") => Ok(DeviceMode::Application),
         Ok("bootloader") => Ok(DeviceMode::Bootloader),
-        Ok("legacy-bootloader") => Ok(DeviceMode::LegacyBootloader),
+        Ok("legacy-bootloader" | "legacy-bootloader-own-ids") => Ok(DeviceMode::LegacyBootloader),
         Ok(other) => Err(CliError::Usage(format!(
             "invalid POWERZ_SIM_MODE {other:?}: expected application, bootloader or legacy-bootloader"
         ))),
     }
+}
+
+/// Whether `POWERZ_SIM_MODE` is `legacy-bootloader-own-ids` (test-only):
+/// the old bootloader that numbers its own replies (FR XW4QQN).
+fn sim_own_reply_ids() -> bool {
+    std::env::var("POWERZ_SIM_MODE").as_deref() == Ok("legacy-bootloader-own-ids")
 }
 
 /// The meter's CDC pipe, found by its USB serial number.

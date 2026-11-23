@@ -508,9 +508,15 @@ fn linux_hints_quote_their_commands_and_paths() {
         "linux",
     );
     let hint = busy.hint.expect("no busy hint");
-    for quoted in ["`sudo modprobe -r powerz`", "`docs/linux.md`"] {
-        assert!(hint.contains(quoted), "{quoted} not quoted in: {hint}");
-    }
+    assert!(
+        hint.contains("`sudo modprobe -r powerz`"),
+        "`sudo modprobe -r powerz` not quoted in: {hint}"
+    );
+    // AC-XW4QQN.7: the busy hint names the full guide URL, not a repo path.
+    assert!(
+        hint.contains("https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md"),
+        "no guide URL in: {hint}"
+    );
 }
 
 #[test]

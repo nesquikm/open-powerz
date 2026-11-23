@@ -44,8 +44,8 @@ pub use memory::{
 };
 pub use pd::{CapturedRecord, PdOptions, PdPoll, PdSniffer, pd_poll_mask};
 pub use probe::{
-    ConnectOutcome, HeadOutcome, ProbeFrame, ProbePipe, ProbeReport, ProbeVariant, VariantOutcome,
-    check_probe_frame,
+    ConnectOutcome, HeadOutcome, IdMismatch, ProbeFrame, ProbePipe, ProbeReport, ProbeVariant,
+    VariantOutcome, check_probe_frame,
 };
 pub use records::{
     RECORD_TABLE_ATT, RECORD_TABLE_MAX_LEN, record_delete_table, record_table_request,
@@ -270,6 +270,22 @@ fn is_sync(reply: &[u8]) -> bool {
     matches!(reply, [0x01, _, 0x00, 0x00])
 }
 
+/// How replies are matched to the requests they answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ReplyIds {
+    /// The reply echoes the request id (application, bootloader 2.5).
+    #[default]
+    Echoed,
+    /// The meter numbers its replies itself (bootloader 2.1) `[device]`:
+    /// a reply answers by its type, whatever its id.
+    ByType,
+}
+
+/// Whether `reply`'s type (extend bit ignored) is one of `types`.
+fn has_type(reply: &[u8], types: &[u8]) -> bool {
+    reply.first().is_some_and(|b| types.contains(&(b & 0x7F)))
+}
+
 /// A session with the meter over `T`.
 #[derive(Debug)]
 pub struct Session<T: Transport, C: Clock = SystemClock> {
@@ -297,6 +313,10 @@ pub struct Session<T: Transport, C: Clock = SystemClock> {
     settings_read: Option<Settings>,
     /// The model from the last successful device-info read in this session.
     model: Option<String>,
+    /// How replies are matched to requests.
+    reply_ids: ReplyIds,
+    /// The ids of the last reply taken by type, when they differ from ours.
+    last_ids: Option<IdMismatch>,
 }
 
 impl<T: Transport> Session<T, SystemClock> {
@@ -324,7 +344,17 @@ impl<T: Transport, C: Clock> Session<T, C> {
             adcnew_raw: Vec::new(),
             settings_read: None,
             model: None,
+            reply_ids: ReplyIds::Echoed,
+            last_ids: None,
         }
+    }
+
+    /// Match replies by type, not by id, from now on: the old bootloader
+    /// (2.1) numbers its replies itself `[device]`. CONNECT then takes
+    /// ACCEPT or REJECT and HEAD takes HEAD or REJECT, whatever their id,
+    /// and the first CONNECT waits [`transport::CONNECT_TIMEOUT`].
+    pub fn expect_own_reply_ids(&mut self) {
+        self.reply_ids = ReplyIds::ByType;
     }
 
     /// The session clock's current time, ms since the Unix epoch.
@@ -415,6 +445,30 @@ impl<T: Transport, C: Clock> Session<T, C> {
         Ok(reply)
     }
 
+    /// Send `request` and return the first transfer `answers` accepts,
+    /// whatever its id, reading past up to [`MAX_STALE_REPLIES`] others;
+    /// records the ids when the reply's differs from ours.
+    fn exchange_by_type(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+        answers: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>, Error> {
+        let mut reply = self.transport.transact(request, timeout)?;
+        let mut rereads = 0;
+        while !answers(&reply) {
+            if rereads == MAX_STALE_REPLIES {
+                return Err(Error::Protocol(format!(
+                    "no reply of the expected type after {MAX_STALE_REPLIES} re-reads"
+                )));
+            }
+            reply = self.transport.read(timeout)?;
+            rereads += 1;
+        }
+        self.last_ids = IdMismatch::between(&reply, request);
+        Ok(reply)
+    }
+
     /// Send a control request that must be answered with ACCEPT; `what`
     /// names the request in the error message.
     fn expect_accept(&mut self, request: &[u8], what: &str) -> Result<(), Error> {
@@ -457,6 +511,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// (e.g. a leftover DISCONNECT) are skipped. When no matching ACCEPT
     /// arrives within [`transport::FIRST_CONNECT_TIMEOUT`], the transport is
     /// recovered once ([`Transport::recover`]) and CONNECT is retried once.
+    /// After [`expect_own_reply_ids`](Self::expect_own_reply_ids) the first
+    /// wait is [`transport::CONNECT_TIMEOUT`] and the retry needs no recovery.
     /// A REJECT is returned at once.
     pub fn connect(&mut self) -> Result<(), Error> {
         self.connect_checked(false)
@@ -467,25 +523,47 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// more is sent.
     fn connect_checked(&mut self, stop_on_sync: bool) -> Result<(), Error> {
         let request = frame::connect(self.counter.next());
-        let first = match self.expect_accept_checked(
-            &request,
-            "CONNECT",
-            transport::FIRST_CONNECT_TIMEOUT,
-            stop_on_sync,
-        ) {
+        let first_timeout = match self.reply_ids {
+            ReplyIds::Echoed => transport::FIRST_CONNECT_TIMEOUT,
+            ReplyIds::ByType => transport::CONNECT_TIMEOUT,
+        };
+        let first = match self.connect_once(&request, first_timeout, stop_on_sync) {
             Ok(()) => return Ok(()),
             // No reply, or only stale frames: the pipe may be stuck.
             Err(e @ (Error::Transport(transport::Error::Timeout) | Error::Protocol(_))) => e,
             // A REJECT, an unplugged meter or an I/O failure: recovery cannot help.
             Err(e) => return Err(e),
         };
-        // A recovery that fails says less than the CONNECT that failed.
-        if self.transport.recover().is_err() {
+        // A recovery that fails says less than the CONNECT that failed. The
+        // old bootloader gets no recovery: its pipe is only slow, not stuck.
+        if self.reply_ids == ReplyIds::Echoed && self.transport.recover().is_err() {
             return Err(first);
         }
         let request = frame::connect(self.counter.next());
         let timeout = transport::default_timeout(&request);
-        self.expect_accept_checked(&request, "CONNECT", timeout, stop_on_sync)
+        self.connect_once(&request, timeout, stop_on_sync)
+    }
+
+    /// One CONNECT `request`, its reply matched by the session's policy.
+    fn connect_once(
+        &mut self,
+        request: &[u8],
+        timeout: Duration,
+        stop_on_sync: bool,
+    ) -> Result<(), Error> {
+        if self.reply_ids == ReplyIds::Echoed {
+            return self.expect_accept_checked(request, "CONNECT", timeout, stop_on_sync);
+        }
+        let reply = self.exchange_by_type(request, timeout, |r| {
+            (stop_on_sync && is_sync(r)) || has_type(r, &[frame::msg::ACCEPT, frame::msg::REJECT])
+        })?;
+        if stop_on_sync && is_sync(&reply) {
+            return Err(Error::BootloaderMidDownload);
+        }
+        match frame::classify_reply(&reply)? {
+            Reply::Accept(_) => Ok(()),
+            other => Err(unexpected_reply(request, "CONNECT", other)),
+        }
     }
 
     /// GET_DATA with `mask`; a DISCONNECT reply gives an empty list.

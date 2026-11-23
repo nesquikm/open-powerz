@@ -88,6 +88,23 @@ bootloader, reported as `legacy_bootloader`, which is not supported yet (no
 flash, no jump); no string at all is unknown. [inferred] (2.1 from one field
 report) [device] (2.5)
 
+Bootloader 2.1 numbers its replies with its own counter instead of echoing
+the request id: in one field trace, requests with ids 1 to 8 got replies with
+ids 0, 0, 1, 2, 3, 4, 5, while each reply's type still fit its request. That
+it keeps a counter of its own, rather than lagging by a fixed amount, is
+[inferred] from that single trace; the ids themselves are [device].
+
+Bootloader 2.1 answers the first CONNECT late: its reply missed the 500 ms
+wait and arrived on the next read, where it was taken for the reply to the
+following request. [device] (one field trace)
+
+On bootloader 2.1 the pipe recovery after a failed step (clear the halt,
+drain) failed, so no CONNECT retry was sent. [device] (one field trace)
+
+The vendor app matches no reply id: its transact sends one request and takes
+the next IN buffer as the reply, with no retry and no check of the id.
+[static]
+
 ## Header bit layouts
 
 Every packet starts with a 4-byte little-endian header. The same 32 bits are

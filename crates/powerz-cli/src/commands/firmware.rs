@@ -17,7 +17,8 @@ use powerz_protocol::firmware::flash::{
     JumpTarget, Meter, MeterOpener, RETURN_TIMEOUT, SWITCH_TIMEOUT, flash, jump,
 };
 use powerz_protocol::session::{
-    Clock, ConnectOutcome, Error as SessionError, HeadOutcome, ProbePipe, ProbeReport, Session,
+    Clock, ConnectOutcome, Error as SessionError, HeadOutcome, IdMismatch, ProbePipe, ProbeReport,
+    Session,
 };
 use powerz_protocol::transport::discovery::{
     self, DeviceEntry, StringDescriptor, UsbDetails, UsbIdentity,
@@ -176,16 +177,19 @@ fn write_probe(
                     HeadOutcome::Raw(r) | HeadOutcome::Rejected(r) => Some(hex(r, "")),
                     _ => None,
                 };
-                serde_json::json!({
+                let mut v = serde_json::json!({
                     "name": o.variant.name(),
                     "connect": connect_name(&o.connect),
                     "connect_raw": connect_raw,
                     "head": head_name(&o.head),
                     "head_field": field,
                     "head_raw": head_raw,
-                })
+                });
+                add_id_mismatches(&mut v, o.connect_ids, o.head_ids);
+                v
             })
             .collect();
+        add_id_mismatches(&mut v, report.connect_ids, report.head_ids);
         v["variants"] = serde_json::Value::Array(variants);
         v["variant_answered"] = serde_json::json!(report.answered_variant().map(|a| a.name()));
         return write_json(out, &v);
@@ -196,12 +200,13 @@ fn write_probe(
     };
     writeln!(
         out,
-        "CONNECT: {}",
-        with_direction(connect, report.connect_timeout)
+        "CONNECT: {}{}",
+        with_direction(connect, report.connect_timeout),
+        ids_note(report.connect_ids)
     )?;
     match (field, raw) {
         (Some(f), raw) => {
-            writeln!(out, "HEAD field: {f}")?;
+            writeln!(out, "HEAD field: {f}{}", ids_note(report.head_ids))?;
             if let Some(r) = raw {
                 writeln!(out, "HEAD reply (raw): {}", hex(r, " "))?;
             }
@@ -230,8 +235,10 @@ fn write_probe(
         };
         writeln!(
             out,
-            "variant {}: CONNECT {connect}, HEAD {head}",
-            o.variant.name()
+            "variant {}: CONNECT {connect}{}, HEAD {head}{}",
+            o.variant.name(),
+            ids_note(o.connect_ids),
+            ids_note(o.head_ids)
         )?;
     }
     writeln!(
@@ -240,6 +247,31 @@ fn write_probe(
         report.answered_variant().map_or("none", |v| v.name())
     )?;
     Ok(())
+}
+
+/// `, answered with mismatched ids (meter id 0x.., ours 0x..)` for a reply
+/// whose id differs from ours, else nothing.
+fn ids_note(ids: Option<IdMismatch>) -> String {
+    ids.map_or_else(String::new, |i| {
+        format!(
+            ", answered with mismatched ids (meter id 0x{:02x}, ours 0x{:02x})",
+            i.meter, i.ours
+        )
+    })
+}
+
+/// Add `connect_id_mismatch` / `head_id_mismatch` (`meter`, `ours`) to `v`
+/// for each exchange whose ids differ; nothing when they match.
+fn add_id_mismatches(
+    v: &mut serde_json::Value,
+    connect: Option<IdMismatch>,
+    head: Option<IdMismatch>,
+) {
+    for (key, ids) in [("connect_id_mismatch", connect), ("head_id_mismatch", head)] {
+        if let Some(i) = ids {
+            v[key] = serde_json::json!({ "meter": i.meter, "ours": i.ours });
+        }
+    }
 }
 
 /// The CONNECT outcome as printed and in JSON.

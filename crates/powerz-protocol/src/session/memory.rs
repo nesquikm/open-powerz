@@ -1,6 +1,6 @@
 //! Memory read (0x44) and the device-info blocks built on it.
 
-use super::{Clock, Error, Session, is_sync};
+use super::{Clock, Error, ReplyIds, Session, has_type, is_sync};
 use crate::crypto;
 use std::time::Duration;
 
@@ -8,6 +8,7 @@ use crate::decode::head::{self, HeadReply};
 use crate::decode::records::MEMORY_READ_MAX_LEN;
 use crate::decode::{DeviceInfoBlock, OtpBlock, Uid};
 use crate::firmware::version::{self, FirmwareWarning};
+use crate::frame::msg;
 use crate::transport::guard::{LOGO_WINDOW_END, LOGO_WINDOW_START};
 use crate::transport::{self, Transport};
 
@@ -464,7 +465,9 @@ impl<T: Transport, C: Clock> Session<T, C> {
     ///
     /// In application mode the meter answers HEAD with type 0x40 and id 0
     /// `[device]`, so a type-0x40 id-0 first transfer is taken as the answer;
-    /// anything else must carry the request id as usual.
+    /// anything else must carry the request id as usual. After
+    /// [`expect_own_reply_ids`](Self::expect_own_reply_ids) a HEAD or
+    /// REJECT reply is taken whatever its id.
     pub(super) fn head_exchange(&mut self) -> Result<Vec<u8>, Error> {
         self.head_exchange_taking(|_| false)
     }
@@ -479,6 +482,11 @@ impl<T: Transport, C: Clock> Session<T, C> {
         self.sleep(HEAD_DELAY);
         let request = head::request(self.counter.next());
         let timeout = transport::default_timeout(&request);
+        if self.reply_ids == ReplyIds::ByType {
+            return self.exchange_by_type(&request, timeout, |r| {
+                take_any(r) || has_type(r, &[msg::HEAD, msg::REJECT])
+            });
+        }
         self.exchange_taking(&request, timeout, is_id_0_head, take_any)
     }
 }

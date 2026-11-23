@@ -151,6 +151,8 @@ fn probe_sends_connect_then_head_and_reports_the_head_field() {
             connect_timeout: None,
             head_timeout: None,
             variants: Vec::new(),
+            connect_ids: None,
+            head_ids: None,
         }
     );
     assert_eq!(types(&s), vec![0x02, 0x40], "only CONNECT and HEAD");
