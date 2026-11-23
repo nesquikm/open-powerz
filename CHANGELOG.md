@@ -4,15 +4,15 @@ All notable changes to open-powerz are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.13.3] — 2026-11-24 — "Own Ids"
+## [0.14.0] — 2026-11-24 — "Own Ids"
 
 ### Added
-- `powerz firmware flash --experimental-old-bootloader` updates a meter already in the old 2.1 bootloader: replies are matched by type, the first CONNECT waits 2 s with no pipe recovery, and stray replies are drained (failing closed) before the erase. Tested only in simulation; the bootloader below 0x4000 is never written, so a failed run can be retried by holding Back while plugging in. Without the flag the refusal stays and now names it (DJYNRP)
+- `powerz firmware flash --experimental-old-bootloader` updates a meter in the old 2.1 bootloader, whether it is already there (hold Back while plugging in) or the switch from the application puts it there: replies are matched by type, the first CONNECT waits 2 s with no pipe recovery, and stray replies are drained (failing closed) before the erase. Tested only in simulation. open-powerz never sends a write below 0x4000; that bootloader 2.1 keeps that layout and can be retried after a failed run is expected but not verified. The warning prints only when the old path is taken; without the flag the refusal stays and names it (DJYNRP)
 
 ### Fixed
-- `powerz firmware probe` on the old 2.1 bootloader reports CONNECT accepted and HEAD field 0 instead of timing out: that bootloader numbers its replies itself, so on it replies now match by type, the first CONNECT waits 2 s and skips the failing pipe recovery, and the probe says "answered with mismatched ids" when the ids differ; string descriptors print cut at the first NUL, and the desktop's Linux busy hint names the full Linux guide URL (XW4QQN)
+- `powerz firmware probe` on the old 2.1 bootloader reports CONNECT accepted and HEAD field 0 instead of timing out: that bootloader numbers its replies itself, so on it replies now match by type, the first CONNECT waits 2 s and skips the failing pipe recovery, and the probe says "answered with mismatched ids" when the ids differ; string descriptors print cut at the first NUL in text and JSON, and the desktop's Linux busy hint names the full Linux guide URL (XW4QQN)
 
-Total test count at release: 8168 tests, 0 failures, 0 errors.
+Total test count at release: 8204 tests, 0 failures, 0 errors.
 
 ## [0.13.2] — 2026-11-20 — "Old Boot"
 
