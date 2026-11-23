@@ -135,10 +135,15 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
         _ => {}
     }
     if let Command::Firmware {
-        action: FirmwareAction::Flash { file, i_understand },
+        action:
+            FirmwareAction::Flash {
+                file,
+                i_understand,
+                experimental_old_bootloader,
+            },
     } = &cli.command
     {
-        return flash_file(cli, file, *i_understand);
+        return flash_file(cli, file, *i_understand, *experimental_old_bootloader);
     }
     if let Command::Firmware {
         action: FirmwareAction::Jump { to, i_understand },
@@ -455,7 +460,12 @@ fn firmware_info_file(file: &std::path::Path, json: bool) -> Result<(), CliError
 /// `firmware flash FILE`: check the acknowledgement and inspect the file
 /// before any device is chosen or opened, then flash the meter (or, with
 /// `--transport sim`, the simulated one).
-fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(), CliError> {
+fn flash_file(
+    cli: &Cli,
+    file: &std::path::Path,
+    i_understand: bool,
+    old_boot: bool,
+) -> Result<(), CliError> {
     if !i_understand {
         return Err(CliError::Usage(FLASH_RISK.into()));
     }
@@ -473,17 +483,38 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
             let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
             let meter = sim_meter(sim_device_clock(Persona::Bulk, cli.scenario, clock.clone()))?;
             let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
-            flash_on(cli, &container, meter, clock, &stop, &mut out)
+            flash_on(cli, &container, meter, clock, old_boot, &stop, &mut out)
         } else {
             let meter = sim_meter(sim_device(Persona::Bulk, cli.scenario))?;
             let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
-            flash_on(cli, &container, meter, SystemClock, &stop, &mut out)
+            flash_on(
+                cli,
+                &container,
+                meter,
+                SystemClock,
+                old_boot,
+                &stop,
+                &mut out,
+            )
         };
     }
     let opener = discovery_opener(cli)?;
     let stop = ctrl_c_flag()?;
-    flash_on(cli, &container, opener, SystemClock, &stop, &mut out)
+    flash_on(
+        cli,
+        &container,
+        opener,
+        SystemClock,
+        old_boot,
+        &stop,
+        &mut out,
+    )
 }
+
+/// Printed before any frame when `--experimental-old-bootloader` is given.
+const OLD_BOOT_WARNING: &str = "Warning: the old-bootloader path is experimental and has been \
+     tested only in simulation. The bootloader below 0x4000 is never written; if a run fails, \
+     retry it: hold Back while plugging the meter in to restart the bootloader.";
 
 /// Run [`firmware_flash`] on `opener` (traced with `--trace`).
 fn flash_on<O: MeterOpener, C: Clock>(
@@ -491,10 +522,16 @@ fn flash_on<O: MeterOpener, C: Clock>(
     container: &powerz_protocol::firmware::container::FirmwareContainer<'_>,
     mut opener: O,
     clock: C,
+    old_boot: bool,
     stop: &AtomicBool,
     out: &mut impl std::io::Write,
 ) -> Result<(), CliError> {
-    let ack = FlashAck::acknowledge();
+    let ack = if old_boot {
+        writeln!(out, "{OLD_BOOT_WARNING}")?;
+        FlashAck::acknowledge().with_experimental_old_bootloader()
+    } else {
+        FlashAck::acknowledge()
+    };
     if cli.trace {
         let mut opener = TracedOpener(opener);
         firmware_flash(ack, container, &mut opener, clock, stop, out)
@@ -537,6 +574,11 @@ fn discovery_opener(cli: &Cli) -> Result<BulkFlashOpener, CliError> {
 /// `POWERZ_SIM_REPLUG_AFTER`.
 fn sim_meter(sim: SimDevice) -> Result<SimMeter, CliError> {
     let sim = sim_flash_fault(sim_firmware_knobs(sim)?)?.with_mode(sim_mode()?);
+    let sim = if sim_own_reply_ids() {
+        sim.with_own_reply_ids()
+    } else {
+        sim
+    };
     Ok(match sim_replug_after()? {
         Some(n) => SimMeter::new(sim.with_jump_at_power_up()).with_replug_after(n),
         None => SimMeter::new(sim),

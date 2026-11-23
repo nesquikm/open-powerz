@@ -34,7 +34,7 @@ Meters on bootloader 2.1 answer the same download sequence as bootloader 2.5 exc
 
 ## Technical Design
 
-`FlashAck::with_experimental_old_bootloader()` sets a flag inside the ack, so `flash` keeps its signature. `flash` takes `LegacyBootloader` as a bootloader only with that flag. `download` gets a reply-id policy: by type on BL 2.1, echoed on BL 2.5. On BL 2.1 it also waits 2 s for the first CONNECT with no recover, and drains stray ACCEPTs (short reads) before the descriptor. The switch wait and `jump` are untouched. The sim own-ids mode runs the bootloader sequence with its own counter. `LEGACY_BOOTLOADER_HELP` and its TS copy name the flag.
+`FlashAck::with_experimental_old_bootloader()` sets a flag inside the ack, so `flash` keeps its signature. `flash` takes `LegacyBootloader` as a bootloader only with that flag. `download` gets a reply-id policy: by type on BL 2.1, echoed on BL 2.5. On BL 2.1 it also waits 2 s for the first CONNECT with no recover, and drains stray ACCEPTs (short reads) before the descriptor; any other reply there, or a drain that never expires, fails closed as a write error. The switch wait and `jump` are untouched. The sim own-ids mode runs the bootloader sequence with its own counter. `LEGACY_BOOTLOADER_HELP` and its TS copy name the flag.
 
 ## Testing
 

@@ -738,7 +738,7 @@ impl SimDevice {
     }
 
     /// Whether this is the old bootloader that numbers its replies itself.
-    fn answers_with_own_ids(&self) -> bool {
+    pub(crate) fn answers_with_own_ids(&self) -> bool {
         self.mode == DeviceMode::LegacyBootloader && self.own_reply_ids
     }
 
@@ -760,7 +760,11 @@ impl SimDevice {
         }
         let id = self.own_id;
         let reply = match ty {
-            Some(crate::device::msg::CONNECT) => vec![crate::device::msg::ACCEPT, id, 0, 0],
+            Some(crate::device::msg::CONNECT) => {
+                // Connected: the download sequence may start (FR DJYNRP).
+                self.connected = true;
+                vec![crate::device::msg::ACCEPT, id, 0, 0]
+            }
             Some(crate::device::msg::HEAD) => {
                 // `c0 id 01 01`, 8 zero bytes, `ff ff ff ff`, 4 zero bytes.
                 let mut r = vec![0xC0, id, 0x01, 0x01];
@@ -771,8 +775,28 @@ impl SimDevice {
             }
             _ => return Err(Error::Timeout),
         };
-        self.own_id = self.own_id.wrapping_add(1);
-        Ok(reply)
+        Ok(self.own_ids_renumber(reply))
+    }
+
+    /// Run `f` as the 2.5 bootloader would: the own-ids old bootloader
+    /// takes the same download sequence (FR DJYNRP). A jump out of the
+    /// bootloader keeps the mode it jumped to.
+    pub(crate) fn as_bootloader<T>(&mut self, f: impl FnOnce(&mut SimDevice) -> T) -> T {
+        self.mode = DeviceMode::Bootloader;
+        let r = f(self);
+        if self.mode == DeviceMode::Bootloader {
+            self.mode = DeviceMode::LegacyBootloader;
+        }
+        r
+    }
+
+    /// Give a bootloader reply the own-ids old bootloader's next id.
+    fn own_ids_renumber(&mut self, mut reply: Vec<u8>) -> Vec<u8> {
+        if let Some(id) = reply.get_mut(1) {
+            *id = self.own_id;
+            self.own_id = self.own_id.wrapping_add(1);
+        }
+        reply
     }
 
     /// Answer HEAD with old-firmware field `field` (default 0).
@@ -1212,6 +1236,10 @@ impl Transport for SimDevice {
     }
 
     fn read(&mut self, timeout: Duration) -> Result<Vec<u8>, Error> {
+        if self.answers_with_own_ids() {
+            let r = self.as_bootloader(|d| d.read(timeout));
+            return r.map(|reply| self.own_ids_renumber(reply));
+        }
         if let Some(e) = self.blocked() {
             return Err(e);
         }

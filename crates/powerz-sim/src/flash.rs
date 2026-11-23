@@ -289,6 +289,11 @@ fn is_jump(data: &[u8], ty: u8) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 impl FlashTransport for SimDevice {
     fn write_raw(&mut self, data: &[u8], _timeout: Duration) -> Result<(), Error> {
+        if self.answers_with_own_ids() {
+            // The own-ids old bootloader takes the 2.5 download sequence
+            // (FR DJYNRP); its replies are renumbered when read.
+            return self.as_bootloader(|d| d.write_raw(data, Duration::ZERO));
+        }
         if let Some(e) = self.blocked() {
             return Err(e);
         }

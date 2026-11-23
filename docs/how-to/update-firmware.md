@@ -116,7 +116,8 @@ If the update stops because the meter is on an old bootloader, see
 ## Old bootloader
 
 Some KM003C meters run bootloader 2.1; current meters have 2.5. Updating a
-meter with bootloader 2.1 is not supported yet.
+meter with bootloader 2.1 is not supported yet in the desktop app; the CLI
+has an experimental path for it, described below.
 
 **What you see:** after the jump to the bootloader, the meter shows its
 bootloader screen with a flashing green bar. open-powerz recognises the old
@@ -132,8 +133,29 @@ names it "(old bootloader, not supported yet)" and Connect refuses it, and
 hold any button. The meter starts its application firmware again and works as
 before.
 
-**Updating for now:** use ChargerLAB's official Windows PC software, from the
+**Updating for now:** the tested route is ChargerLAB's official Windows PC
+software, from the
 [official support page](https://www.power-z.com/blogs/technical-support/power-z-km003c-km002c-technical-support).
+
+**Experimental: update from the CLI.** v0.13.3 found that bootloader 2.1 does
+answer, but numbers its replies itself instead of echoing ours; `powerz
+firmware probe` now shows a clean CONNECT and HEAD with "answered with
+mismatched ids". The CLI can flash such a meter, but only when you ask for it:
+
+1. Unplug the meter, then hold **Back** while plugging it in, so it starts
+   straight in its bootloader (the green bar).
+2. Run:
+
+   ```bash
+   powerz firmware flash FILE --i-understand --experimental-old-bootloader
+   ```
+
+This path has been tested only in simulation, never on a real meter with
+bootloader 2.1, and the command says so before it sends anything. The
+bootloader itself, below 0x4000, is never written, so a failed run leaves the
+meter able to reach its bootloader: hold Back while plugging it in and run the
+same command again. Without the flag the command still refuses the meter and
+sends nothing.
 
 **Help add support:** open an issue on
 [GitHub](https://github.com/nesquikm/open-powerz/issues) and attach a report
@@ -152,7 +174,8 @@ read back). If the standard CONNECT gets no answer, the probe also tries three
 read-only variants of it and prints which variant, if any, the meter answered.
 All of this helps us find out how bootloader 2.1 expects to be spoken to.
 
-Never run `powerz firmware flash` on a meter with bootloader 2.1.
+Only run `powerz firmware flash` on a meter with bootloader 2.1 with
+`--experimental-old-bootloader`, as described above.
 
 See also: [`powerz` CLI reference](../reference/cli.md#firmware-flashing) and
 the firmware download sequence in [docs/protocol.md](../protocol.md#firmware-download).
