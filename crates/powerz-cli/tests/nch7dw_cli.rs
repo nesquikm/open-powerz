@@ -51,10 +51,15 @@ const OWN_IDS: &str = "legacy-bootloader-own-ids";
 /// A phrase only the experimental warning carries.
 const WARNING_MARK: &str = "never sends a write below 0x4000";
 
+/// Writes `bytes` to a path no other call shares: tests run in parallel and
+/// may reuse a name (several share one helper), so each call gets its own
+/// pid-and-counter prefix.
 fn write_file(name: &str, bytes: &[u8]) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("nch7dw-flash-cli");
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    let path = dir.join(name);
+    let path = dir.join(format!("{}-{n}-{name}", std::process::id()));
     std::fs::write(&path, bytes).expect("write container");
     path
 }
