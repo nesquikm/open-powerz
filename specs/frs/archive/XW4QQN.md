@@ -1,8 +1,8 @@
 ---
 title: The old bootloader answers, but with its own reply ids, so we call it silent
 milestone: M_XQPRRR
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-23T21:12:46Z
 id: fr_01M84XK64WP9GDPJCEDVXW4QQN
 created_at: 2026-11-23T09:00:00.000Z
 changelog_category: Fixed
@@ -57,3 +57,10 @@ Protocol tests over a scripted transport replaying the field bytes; sim tests fo
 ## Notes
 
 Builds on JT38C8 and QF92WX. The id rule of the old bootloader is fitted to one trace.
+
+## Implementation notes
+
+- The existing `ProbeReport` struct literal in `firmware_probe.rs` gained `connect_ids: None, head_ids: None` to compile with the new fields; nothing else in that test changed.
+- `real_meter_fixes.rs` asserted the old bare `docs/linux.md` in the busy hint; AC .7 replaces it with the full URL, so that one assertion now checks the URL.
+- The standard path reports `head_ids` only for a HEAD that decoded to a field, as the variants do.
+- `POWERZ_SIM_MODE`'s usage error still lists only the public modes; `legacy-bootloader-own-ids` is test-only.

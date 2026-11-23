@@ -1,8 +1,8 @@
 ---
 title: Flash a meter on the old bootloader, experimentally
 milestone: M_XQPRRR
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-23T21:12:46Z
 id: fr_01M84XK64X8RMNMF4VVHDJYNRP
 created_at: 2026-11-23T09:00:00.000Z
 changelog_category: Added
@@ -43,3 +43,9 @@ Engine tests on the sim opener (full flash with own ids; frame log identical wit
 ## Notes
 
 Depends on XW4QQN. No real-meter flash in this milestone; the field user tries it.
+
+## Implementation notes
+
+- Review hardening: the pre-descriptor drain must end on an expired read (more than 4 stray ACCEPTs is a write error), and after a retried first CONNECT its first read waits 2 s so the late answer is drained, not taken for the erase. Residual: an ACCEPT later than that window still cannot be told apart by id on this path.
+- Two new-test fixes by the operator: the trace test counted 4 full payload writes where the container has 3, and the size-guard test's container declared 512 KiB over a 12 KB payload, which the parser rightly rejects.
+- The warning prints on stdout whenever the flag is given, with the other flash progress.
