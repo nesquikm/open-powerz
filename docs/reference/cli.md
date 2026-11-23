@@ -170,14 +170,17 @@ that sends a write-capable frame: one JUMP_DFU (after a level-1 authentication) 
 - **The file is checked first.** It must parse as a firmware container
   (header fields and sizes) before any meter is chosen or opened, and its
   model must match the meter's.
-- **The bootloader is never written.** Only the application area (from
-  0x4000) can be named; every other command is refused before it is sent.
+- **No write below 0x4000.** open-powerz never sends a write below 0x4000,
+  where the bootloader lives: only the application area (from 0x4000) can be
+  named, and every other command is refused before it is sent. On bootloader
+  2.1 that the bootloader keeps that layout is expected but not verified.
 - **No automatic retry.** If a step fails once the meter is in its
   bootloader, nothing more is sent and the meter stays there. Keep it
   plugged in and run the command again; if the meter does not reach its
   bootloader on its own, hold the Back button while plugging it in.
-- **`--experimental-old-bootloader`.** Lets the flash run on a meter
-  already in the old 2.1 bootloader, which numbers its own replies. This
+- **`--experimental-old-bootloader`.** Lets the flash run on a meter in the
+  old 2.1 bootloader, whether it was already there or the switch from the
+  application put it there; that bootloader numbers its own replies. This
   path is tested only in simulation, never on a real 2.1 meter.
   open-powerz never sends a write below 0x4000; bootloader 2.1 keeping that
   layout and taking a retry after a failed run is expected but not verified.
@@ -331,7 +334,7 @@ These environment variables are for tests only. They work only with
 | `POWERZ_SIM_PDM_LAG=after-list` | The simulated meter answers one reply late after the `reset` that ends a stalled list, to test the out-of-step error. |
 | `POWERZ_SIM_HEAD=N` | The simulated meter's HEAD reply carries old-firmware field `N` (0 means current; anything else is shown as an unrecognised reply). |
 | `POWERZ_SIM_APP_VERSION=V` | The simulated application info block reports version `V` (default `2.0.6`). |
-| `POWERZ_SIM_MODE` | `application` (default), `bootloader` or `legacy-bootloader` (the old 2.1-style bootloader, which answers neither CONNECT nor HEAD on the standard path); read only by `firmware probe`, `firmware flash` and `firmware jump`. |
+| `POWERZ_SIM_MODE` | `application` (default), `bootloader` or `legacy-bootloader` (the old 2.1-style bootloader, silent: it answers neither CONNECT nor HEAD) or `legacy-bootloader-own-ids` (the old bootloader as the field meter behaves: it answers with its own reply ids, the first CONNECT late, and the pipe recovery fails); `POWERZ_SIM_JUMP_TO_OLD_BOOT=1` makes JUMP_DFU from the application land in that own-ids old bootloader (`firmware flash` only); read only by `firmware probe`, `firmware flash` and `firmware jump`. |
 | `POWERZ_SIM_PROBE_ANSWER` | `no-drain-no-clear-halt`, `in-before-out` or `all-in-endpoints`: that one `firmware probe` variant gets ACCEPT and a HEAD reply; every other variant times out. It does not change the standard CONNECT: the silence that makes the probe run the variants comes from `POWERZ_SIM_MODE=legacy-bootloader`. Unset, no variant answers. |
 | `POWERZ_SIM_REPLUG_AFTER=N` | The simulated meter takes a jump at its next power-up instead of live, and is unplugged and plugged back in after `N` looks at it; read only by `firmware flash` and `firmware jump`. |
 | `POWERZ_SIM_FLASH_FAULT` | The simulated bootloader injects one flash fault; read only by `firmware flash` and `firmware jump`: `jump-dfu-ignored`, `jump-dfu-write-fails`, `jump-dfu-disconnects`, `connect-no-accept`, `head-wrong-type`, `descriptor-answered`, `early-accept-during-erase`, `no-accept-after-erase`, `missing-sync@N` or `write-fails@N` (payload write `N`, 1-based), `no-finished`, `wrong-verify-reply`, `jump-aprom-ignored`, `jump-aprom-disconnects`, `info-read-fails-after-return`, `image-not-taken`. |

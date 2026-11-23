@@ -1264,7 +1264,7 @@ fn download<P: FlashTransport, C: Clock>(
     // after an open unanswered `[device]`; like the session's connect, an
     // unanswered one is retried once after a recover (no device command).
     // The old bootloader gets a longer first wait and a retry with no
-    // recover: its pipe recovery fails `[device]`.
+    // recover: its pipe recovery failed in the field trace `[inferred]`.
     let connect_wait = if old {
         OLD_FIRST_CONNECT_WAIT
     } else {

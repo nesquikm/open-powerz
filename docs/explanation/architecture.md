@@ -72,7 +72,8 @@ open-powerz-desktop  Tauri 2 app backend      uses protocol, sim, record, trigge
   and every frame goes through `FlashGuard`, which names nothing below the
   bootloader's 0x4000 boundary and bounds the payload by the declared size.
   Nothing is retried automatically: after a failure the meter stays in its
-  bootloader, which can always be flashed again. The engine was checked step
+  bootloader, from which bootloader 2.5 can be flashed again; on the old 2.1
+  bootloader that is expected but not verified. The engine was checked step
   by step on a real KM003C, each step only after the user approved it.
 - **Three meter writes, each on its own narrow path.** Deleting records,
   changing settings and the startup logo are the only other writes. The shared guard still refuses
