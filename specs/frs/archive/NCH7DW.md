@@ -1,8 +1,8 @@
 ---
 title: The experimental old-bootloader flash refuses a meter it just switched, and overstates what we know
 milestone: M_XQPRRR
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-23T22:36:40Z
 id: fr_01M855A4NA5YM6MFXQV0NCH7DW
 created_at: 2026-11-24T08:00:00.000Z
 changelog_category: Fixed
@@ -55,3 +55,10 @@ Engine and sim tests for both switch arms; CLI tests for the warning gate, JSON 
 ## Notes
 
 Found by an independent review of PR #22. Supersedes the wording of DJYNRP's third AC.
+
+## Implementation notes
+
+- Two DJYNRP tests were superseded and updated: the opted-in switch now runs on (the old test now covers the no-flag arm), and the warning test checks the new wording.
+- The desktop BKSE70 test fixture wrote one shared temp file from parallel tests; it now writes one file per call (a flake the first gate run caught).
+- The usage-error line for the sim mode has no defect check (no plant); it is a static string.
+- No test checks that the warning prints only once per run.

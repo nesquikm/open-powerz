@@ -1,8 +1,8 @@
 ---
 milestone: M_XQPRRR
 id: fr_01M84XJY85807KH8RP21XQPRRR
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-23T22:36:40Z
 kickoff_branch: fix/bl21-own-ids
 frozen_at: null
 migration: none
@@ -29,9 +29,9 @@ codename: Own Ids
 
 | FR | Title | Tracker |
 |---|---|---|
-| [XW4QQN](../frs/archive/XW4QQN.md) | The old bootloader answers, but with its own reply ids, so we call it silent (bug) | n/a |
-| [DJYNRP](../frs/archive/DJYNRP.md) | Flash a meter on the old bootloader, experimentally | n/a |
-| [NCH7DW](../frs/NCH7DW.md) | The experimental old-bootloader flash refuses a meter it just switched, and overstates what we know (bug) | n/a |
+| [XW4QQN](../../frs/archive/XW4QQN.md) | The old bootloader answers, but with its own reply ids, so we call it silent (bug) | n/a |
+| [DJYNRP](../../frs/archive/DJYNRP.md) | Flash a meter on the old bootloader, experimentally | n/a |
+| [NCH7DW](../../frs/archive/NCH7DW.md) | The experimental old-bootloader flash refuses a meter it just switched, and overstates what we know (bug) | n/a |
 
 Build order: the table's order (DJYNRP reuses XW4QQN's reply-id policy and sim mode; NCH7DW fixes DJYNRP after review).
 
