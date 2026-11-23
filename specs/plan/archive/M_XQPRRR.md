@@ -7,6 +7,7 @@ kickoff_branch: fix/bl21-own-ids
 frozen_at: null
 migration: none
 codename: Own Ids
+shipped_in: v0.13.3
 ---
 
 # Implementation Plan
