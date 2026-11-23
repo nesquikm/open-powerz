@@ -17,6 +17,9 @@
 //! Every run uses `--transport sim` on the fake sim clock; no real meter is
 //! opened. Every container is synthetic.
 
+// Several helpers serve only the `#[cfg(unix)]` tests below.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 #[path = "../../powerz-protocol/tests/support/fw_container.rs"]
 mod fw_container;
 

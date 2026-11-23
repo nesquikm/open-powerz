@@ -750,7 +750,8 @@ impl SimDevice {
     }
 
     /// Whether JUMP_DFU from the application lands in the own-ids old
-    /// bootloader.
+    /// bootloader. Only the native flash path asks.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn jumps_dfu_to_old(&self) -> bool {
         self.jump_dfu_to_old
     }
