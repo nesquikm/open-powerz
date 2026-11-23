@@ -537,6 +537,9 @@ pub struct SimDevice {
     own_id: u8,
     /// That bootloader has seen its first CONNECT.
     own_first_connect_seen: bool,
+    /// JUMP_DFU from the application lands in the own-ids old bootloader
+    /// (FR NCH7DW): see [`SimDevice::with_jump_dfu_to_old_bootloader`].
+    jump_dfu_to_old: bool,
 }
 
 /// Put startup-duration `code` (`code & 3`: off, 1 s, 3 s, 5 s) into bits
@@ -681,6 +684,7 @@ impl SimDevice {
             own_reply_ids: false,
             own_id: 0,
             own_first_connect_seen: false,
+            jump_dfu_to_old: false,
         }
     }
 
@@ -735,6 +739,20 @@ impl SimDevice {
         self.own_reply_ids = true;
         self.pending.clear();
         self
+    }
+
+    /// From application mode, JUMP_DFU brings the meter back in the
+    /// own-ids old bootloader (bootloader 2.1, FR NCH7DW) instead of the
+    /// 2.5 one.
+    pub fn with_jump_dfu_to_old_bootloader(mut self) -> SimDevice {
+        self.jump_dfu_to_old = true;
+        self
+    }
+
+    /// Whether JUMP_DFU from the application lands in the own-ids old
+    /// bootloader.
+    pub(crate) fn jumps_dfu_to_old(&self) -> bool {
+        self.jump_dfu_to_old
     }
 
     /// Whether this is the old bootloader that numbers its replies itself.

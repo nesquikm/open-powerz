@@ -417,7 +417,7 @@ fn sim_mode() -> Result<DeviceMode, CliError> {
         Ok("bootloader") => Ok(DeviceMode::Bootloader),
         Ok("legacy-bootloader" | "legacy-bootloader-own-ids") => Ok(DeviceMode::LegacyBootloader),
         Ok(other) => Err(CliError::Usage(format!(
-            "invalid POWERZ_SIM_MODE {other:?}: expected application, bootloader or legacy-bootloader"
+            "invalid POWERZ_SIM_MODE {other:?}: expected application, bootloader, legacy-bootloader or legacy-bootloader-own-ids"
         ))),
     }
 }
@@ -513,30 +513,84 @@ fn flash_file(
 
 /// Printed before any frame when `--experimental-old-bootloader` is given.
 const OLD_BOOT_WARNING: &str = "Warning: the old-bootloader path is experimental and has been \
-     tested only in simulation. The bootloader below 0x4000 is never written; if a run fails, \
-     retry it: hold Back while plugging the meter in to restart the bootloader.";
+     tested only in simulation. open-powerz never sends a write below 0x4000; bootloader 2.1 \
+     keeping that layout and taking a retry after a failed run is expected but not verified \
+     on a real meter. To retry, hold Back while plugging the meter in to restart the \
+     bootloader and run the command again.";
 
 /// Run [`firmware_flash`] on `opener` (traced with `--trace`).
 fn flash_on<O: MeterOpener, C: Clock>(
     cli: &Cli,
     container: &powerz_protocol::firmware::container::FirmwareContainer<'_>,
-    mut opener: O,
+    opener: O,
     clock: C,
     old_boot: bool,
     stop: &AtomicBool,
     out: &mut impl std::io::Write,
 ) -> Result<(), CliError> {
-    let ack = if old_boot {
-        writeln!(out, "{OLD_BOOT_WARNING}")?;
-        FlashAck::acknowledge().with_experimental_old_bootloader()
-    } else {
-        FlashAck::acknowledge()
+    if !old_boot {
+        return flash_traced(
+            cli.trace,
+            FlashAck::acknowledge(),
+            container,
+            opener,
+            clock,
+            stop,
+            out,
+        );
+    }
+    out.flush()?;
+    let ack = FlashAck::acknowledge().with_experimental_old_bootloader();
+    let opener = OldBootWarning {
+        inner: opener,
+        warned: false,
     };
-    if cli.trace {
-        let mut opener = TracedOpener(opener);
-        firmware_flash(ack, container, &mut opener, clock, stop, out)
+    flash_traced(cli.trace, ack, container, opener, clock, stop, out)
+}
+
+/// Run [`firmware_flash`] on `opener`, wrapped in [`TracedOpener`] when
+/// `trace` is set.
+fn flash_traced<O: MeterOpener, C: Clock>(
+    trace: bool,
+    ack: FlashAck,
+    container: &powerz_protocol::firmware::container::FirmwareContainer<'_>,
+    mut opener: O,
+    clock: C,
+    stop: &AtomicBool,
+    out: &mut impl std::io::Write,
+) -> Result<(), CliError> {
+    if trace {
+        firmware_flash(ack, container, &mut TracedOpener(opener), clock, stop, out)
     } else {
         firmware_flash(ack, container, &mut opener, clock, stop, out)
+    }
+}
+
+/// [`MeterOpener`] wrapper that prints [`OLD_BOOT_WARNING`] to stdout the
+/// first time it opens a meter in the old bootloader (at open or after the
+/// switch), before the meter is handed on and any frame is sent to it.
+struct OldBootWarning<O> {
+    inner: O,
+    warned: bool,
+}
+
+impl<O: MeterOpener> MeterOpener for OldBootWarning<O> {
+    type Pipe = O::Pipe;
+
+    fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, transport::Error> {
+        let meter = self.inner.open()?;
+        if !self.warned
+            && meter
+                .as_ref()
+                .is_some_and(|m| m.mode == DeviceMode::LegacyBootloader)
+        {
+            self.warned = true;
+            let mut stdout = std::io::stdout();
+            // The warning is advisory: a closed stdout must not stop the flash.
+            let _ = writeln!(stdout, "{OLD_BOOT_WARNING}");
+            let _ = stdout.flush();
+        }
+        Ok(meter)
     }
 }
 
@@ -576,6 +630,13 @@ fn sim_meter(sim: SimDevice) -> Result<SimMeter, CliError> {
     let sim = sim_flash_fault(sim_firmware_knobs(sim)?)?.with_mode(sim_mode()?);
     let sim = if sim_own_reply_ids() {
         sim.with_own_reply_ids()
+    } else {
+        sim
+    };
+    // `POWERZ_SIM_JUMP_TO_OLD_BOOT=1` (test-only): JUMP_DFU lands in the
+    // own-ids old bootloader (FR NCH7DW).
+    let sim = if std::env::var("POWERZ_SIM_JUMP_TO_OLD_BOOT").as_deref() == Ok("1") {
+        sim.with_jump_dfu_to_old_bootloader()
     } else {
         sim
     };

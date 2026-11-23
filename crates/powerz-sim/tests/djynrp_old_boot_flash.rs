@@ -5,8 +5,9 @@
 //!   the descriptor, the erase, every payload write with SYNC, FINISHED,
 //!   JUMP_APROM, then the version check after the return.
 //! - AC .2: without the opt-in it is refused before any frame; `jump` keeps
-//!   refusing it; the switch wait after JUMP_DFU still stops at once when
-//!   the old bootloader appears, even with the opt-in.
+//!   refusing it; without the opt-in the switch wait after JUMP_DFU still
+//!   stops at once when the old bootloader appears (FR NCH7DW: with it, the
+//!   flash goes on there).
 //! - AC .5: on application and bootloader 2.5 meters the frames sent are
 //!   identical with and without the opt-in.
 //!
@@ -250,8 +251,11 @@ impl MeterOpener for ComesBackOld {
     }
 }
 
+// Superseded by FR NCH7DW: with the opt-in the switch now goes on to the
+// old-bootloader download; without it the wait still stops at once, with
+// the after-switch error.
 #[test]
-fn djynrp_sim_switch_wait_still_stops_at_once_on_the_old_bootloader_with_the_opt_in() {
+fn djynrp_sim_switch_wait_still_stops_at_once_on_the_old_bootloader_without_the_opt_in() {
     let clock = clock();
     let app = sim(DeviceMode::Application, &clock);
     let old = own_ids(&clock);
@@ -261,8 +265,11 @@ fn djynrp_sim_switch_wait_still_stops_at_once_on_the_old_bootloader_with_the_opt
         old: old.clone(),
         opens_after_jump: opens.clone(),
     };
-    let (r, _) = flash_on(opted_in(), &mut opener, &clock);
-    assert!(matches!(r, Err(FlashError::LegacyBootloader)), "{r:?}");
+    let (r, _) = flash_on(FlashAck::acknowledge(), &mut opener, &clock);
+    assert!(
+        matches!(r, Err(FlashError::SwitchedToLegacyBootloader)),
+        "{r:?}"
+    );
     assert_eq!(opens.get(), 1, "the wait looks once and stops");
     assert!(old.writes().is_empty(), "{:02x?}", old.writes());
 }

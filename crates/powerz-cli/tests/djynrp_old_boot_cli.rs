@@ -9,8 +9,8 @@
 //!   naming the flag and calling the path experimental; `jump` still
 //!   refuses the old bootloader.
 //! - AC .3: with it a warning comes before any frame: tested only in
-//!   simulation, the bootloader below 0x4000 is never written, a failed run
-//!   is retried by holding Back while plugging in.
+//!   simulation, open-powerz never sends a write below 0x4000 (FR NCH7DW
+//!   wording), a failed run is retried by holding Back while plugging in.
 //! - AC .6: the risk acknowledgement, the file checks and the model check
 //!   still apply.
 //!
@@ -234,13 +234,15 @@ fn djynrp_cli_with_the_flag_warns_it_was_tested_only_in_simulation() {
 }
 
 #[test]
-fn djynrp_cli_with_the_flag_warns_the_bootloader_below_0x4000_is_never_written() {
+fn djynrp_cli_with_the_flag_warns_no_write_is_sent_below_0x4000() {
+    // FR NCH7DW: the warning says open-powerz never sends a write below
+    // 0x4000, not that the region is never written.
     let r = flash_with_flag("warn-4000.mencrypt");
     let all = plain(&r.all());
     assert!(all.contains("0x4000"), "no 0x4000:\n{}", r.all());
     assert!(
-        all.contains("never written"),
-        "no never-written:\n{}",
+        all.contains("never sends a write below 0x4000"),
+        "no never-sends-a-write:\n{}",
         r.all()
     );
 }

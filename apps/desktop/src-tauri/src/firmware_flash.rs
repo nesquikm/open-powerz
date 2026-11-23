@@ -382,7 +382,9 @@ fn flash_error(e: &FlashError) -> UiError {
     // The old bootloader is refused before any write to it: its own message,
     // no recovery steps (FR BKSE70, AC .5).
     let kind = match e {
-        FlashError::LegacyBootloader => return UiError::usage(capitalized(&e.to_string())),
+        FlashError::LegacyBootloader | FlashError::SwitchedToLegacyBootloader => {
+            return UiError::usage(capitalized(&e.to_string()));
+        }
         FlashError::Device { .. } => ErrorKind::Disconnected,
         _ => ErrorKind::Protocol,
     };
@@ -407,6 +409,28 @@ mod tests {
         assert_eq!(ui.kind, ErrorKind::Usage);
         assert_eq!(ui.hint, None);
         assert_eq!(ui.message, capitalized(LEGACY_BOOTLOADER_HELP));
+        assert!(
+            !ui.message.contains("The firmware update failed"),
+            "{}",
+            ui.message
+        );
+    }
+
+    /// A meter that switched to the old bootloader got nothing sent to it
+    /// either: a usage error with its own message, no recovery steps
+    /// (FR NCH7DW).
+    #[test]
+    fn nch7dw_a_switch_to_the_old_bootloader_is_a_usage_error_without_recovery_steps() {
+        let e = FlashError::SwitchedToLegacyBootloader;
+        let ui = flash_error(&e);
+        assert_eq!(ui.kind, ErrorKind::Usage);
+        assert_eq!(ui.hint, None);
+        assert_eq!(ui.message, capitalized(&e.to_string()));
+        assert!(
+            ui.message.contains("now in its old"),
+            "its own message: {}",
+            ui.message
+        );
         assert!(
             !ui.message.contains("The firmware update failed"),
             "{}",

@@ -379,7 +379,7 @@ fn probe_json(
             .iter()
             .map(|(index, s)| {
                 let value = match s {
-                    StringDescriptor::Text(t) => serde_json::json!(t),
+                    StringDescriptor::Text(_) => serde_json::json!(s.shown_text()),
                     StringDescriptor::Absent => serde_json::Value::Null,
                     StringDescriptor::Unavailable(r) => serde_json::json!({ "unavailable": r }),
                 };

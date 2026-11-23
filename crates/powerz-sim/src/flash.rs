@@ -309,7 +309,14 @@ impl FlashTransport for SimDevice {
                 return Ok(());
             }
             if self.mode == DeviceMode::Application && !self.fault(FlashFault::JumpDfuIgnored) {
-                self.jump_to(DeviceMode::Bootloader);
+                if self.jumps_dfu_to_old() {
+                    self.own_reply_ids = true;
+                    self.jump_to(DeviceMode::LegacyBootloader);
+                    // That bootloader leaves no stale frame on its pipe.
+                    self.pending.clear();
+                } else {
+                    self.jump_to(DeviceMode::Bootloader);
+                }
             }
             if self.fault(FlashFault::JumpDfuDisconnects) {
                 return Err(Error::Disconnected);

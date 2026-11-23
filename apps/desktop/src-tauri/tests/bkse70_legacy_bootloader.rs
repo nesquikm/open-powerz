@@ -36,7 +36,11 @@ fn write_file() -> PathBuf {
         .build();
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bkse70-flash-desktop");
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    let path = dir.join("fw.mencrypt");
+    // One file per call: the tests run in parallel, and a shared path let
+    // one test read another's half-written file.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!("fw-{}-{n}.mencrypt", std::process::id()));
     std::fs::write(&path, bytes).expect("write container");
     path
 }

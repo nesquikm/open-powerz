@@ -151,10 +151,10 @@ mismatched ids". The CLI can flash such a meter, but only when you ask for it:
    ```
 
 This path has been tested only in simulation, never on a real meter with
-bootloader 2.1, and the command says so before it sends anything. The
-bootloader itself, below 0x4000, is never written, so a failed run leaves the
-meter able to reach its bootloader: hold Back while plugging it in and run the
-same command again. Without the flag the command still refuses the meter and
+bootloader 2.1, and the command says so before it sends anything to that bootloader. open-powerz
+never sends a write below 0x4000. Bootloader 2.1 keeping that layout and taking
+a retry after a failed run is expected but not verified on a real meter. To retry, hold Back while
+plugging the meter in and run the same command again. Without the flag the command still refuses the meter and
 sends nothing.
 
 **Help add support:** open an issue on
