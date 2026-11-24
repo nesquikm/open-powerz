@@ -5,13 +5,14 @@ status: archived
 archived_at: 2026-11-24T08:06:20Z
 kickoff_branch: fix/old-bootloader-wording
 frozen_at: null
+shipped_in: v0.14.1
 migration: none
-codename: Fine Print
+codename: Straight Talk
 ---
 
 # Implementation Plan
 
-## M_8M9B7H — Fine Print {#M_8M9B7H}
+## M_8M9B7H — Straight Talk {#M_8M9B7H}
 
 **Goal:** What we say about the old 2.1 bootloader matches what v0.14.0 does, and the workspace API docs build. Ships as v0.14.1.
 **Prerequisites:** M_XQPRRR (v0.14.0).
