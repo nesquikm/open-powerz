@@ -13,9 +13,10 @@ use powerz_protocol::firmware::flash::{
 const MODE: &str =
     "bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)";
 const SUPPORT: &str = "supported only experimentally, from the CLI";
-const SUFFIX: &str = "(old bootloader, update via CLI)";
+const SUFFIX: &str = "(old bootloader, experimental CLI update)";
 const STALE: &str = "not supported yet";
-const FLAG: &str = "--experimental-old-bootloader";
+/// The whole command, ready to copy.
+const COMMAND: &str = "powerz firmware flash FILE --i-understand --experimental-old-bootloader";
 const HOWTO_URL: &str = "https://github.com/nesquikm/open-powerz/blob/main/docs/how-to/update-firmware.md#old-bootloader";
 
 fn root() -> PathBuf {
@@ -73,10 +74,7 @@ fn rxgec1_the_old_bootloader_mode_name_stays() {
 
 fn assert_refusal_rest(text: &str) {
     assert!(text.contains("nothing was sent to it"), "{text}");
-    assert!(
-        text.contains(&format!("powerz firmware flash {FLAG}")),
-        "{text}"
-    );
+    assert!(text.contains(&format!("`{COMMAND}`")), "{text}");
     let lower = text.to_lowercase();
     assert!(
         lower.contains("unplug the meter and plug it back in (no buttons)"),
@@ -154,6 +152,34 @@ fn rxgec1_the_library_reference_quotes_the_mode_label() {
 fn rxgec1_the_library_reference_quotes_the_refusal() {
     let text = doc("reference/api/powerz-protocol.md");
     assert_quotes("powerz-protocol.md", &text, SUPPORT);
+}
+
+#[test]
+fn rxgec1_the_docs_give_the_whole_command() {
+    assert_quotes("how-to", &how_to_section(), COMMAND);
+    for name in [
+        "reference/cli.md",
+        "reference/desktop-backend.md",
+        "reference/api/powerz-protocol.md",
+    ] {
+        assert_quotes(name, &doc(name), COMMAND);
+    }
+}
+
+#[test]
+fn rxgec1_no_current_text_gives_the_command_without_its_arguments() {
+    let short = "powerz firmware flash --experimental-old-bootloader";
+    for name in [
+        "how-to/update-firmware.md",
+        "reference/cli.md",
+        "reference/desktop-backend.md",
+        "reference/api/powerz-protocol.md",
+    ] {
+        assert!(!doc(name).contains(short), "{name} gives {short:?}");
+    }
+    for text in [LEGACY_BOOTLOADER_HELP, SWITCHED_TO_LEGACY_BOOTLOADER_HELP] {
+        assert!(!text.contains(short), "{text}");
+    }
 }
 
 fn assert_hedged(what: &str, text: &str) {

@@ -132,8 +132,8 @@ the meter is unchanged. With the flag, the update goes on into the
 experimental path below.
 
 **In the app:** while the meter sits in the old bootloader, the device list
-names it "(old bootloader, update via CLI)" and Connect refuses it, naming the
-experimental CLI command. `powerz firmware probe` prints:
+names it "(old bootloader, experimental CLI update)" and Connect refuses it,
+naming the experimental CLI command. `powerz firmware probe` prints:
 
 ```
 Mode: bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)

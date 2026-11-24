@@ -7,10 +7,10 @@ All notable changes to open-powerz are documented here. The format follows
 ## [0.14.1] — 2026-11-24 — "Straight Talk"
 
 ### Fixed
-- The texts about the old 2.1 bootloader no longer say it is not supported yet: the CLI mode line reads "bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)" (`legacy_bootloader` in JSON is unchanged), the flash refusals say "supported only experimentally, from the CLI", the desktop device list says "(old bootloader, update via CLI)" and its Connect refusal names the CLI flag, and the firmware how-to and references match (RXGEC1)
+- The texts about the old 2.1 bootloader no longer say it is not supported yet: the CLI mode line reads "bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)" (`legacy_bootloader` in JSON is unchanged), the flash refusals say "supported only experimentally, from the CLI", the desktop device list says "(old bootloader, experimental CLI update)" and its Connect refusal gives the experimental CLI command, as the flash refusals do, ready to copy with `FILE` and `--i-understand`, and the firmware how-to and references match (RXGEC1)
 - `cargo doc` builds for the whole workspace with warnings as errors, and CI now documents every crate (8VDNQ8)
 
-Total test count at release: 8242 tests, 0 failures, 0 errors.
+Total test count at release: 8244 tests, 0 failures, 0 errors.
 
 ## [0.14.0] — 2026-11-24 — "Own Ids"
 

@@ -8,7 +8,7 @@ import type { DeviceListing } from "./backend";
 import { MockBackend } from "./mockBackend";
 
 const REFUSAL =
-  "This meter is on an old (2.1-style) bootloader, which the desktop app cannot connect to or update. Unplug the meter and plug it back in (no buttons) to return to the application firmware. An experimental update works only from the CLI: `powerz firmware flash --experimental-old-bootloader`.";
+  "This meter is on an old (2.1-style) bootloader, which the desktop app cannot connect to or update. Unplug the meter and plug it back in (no buttons) to return to the application firmware. An experimental update, tested only in simulation, is available from the CLI: `powerz firmware flash FILE --i-understand --experimental-old-bootloader`.";
 
 async function oldBootloaderMeter(backend: MockBackend): Promise<DeviceListing> {
   const meter = (await backend.listDevices()).find((d) => d.mode === "legacy_bootloader");
@@ -17,9 +17,9 @@ async function oldBootloaderMeter(backend: MockBackend): Promise<DeviceListing> 
 }
 
 describe("MockBackend old-bootloader texts (RXGEC1)", () => {
-  it("labels the meter as updated via the CLI (AC .3)", async () => {
+  it("labels the meter as an experimental CLI update (AC .3)", async () => {
     const meter = await oldBootloaderMeter(new MockBackend("legacy-bootloader"));
-    expect(meter.label).toBe("KM003C — MOCK-LEGACY-0001 (old bootloader, update via CLI)");
+    expect(meter.label).toBe("KM003C — MOCK-LEGACY-0001 (old bootloader, experimental CLI update)");
   });
 
   it("refuses to connect with the backend's text (AC .4)", async () => {

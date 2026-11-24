@@ -1,6 +1,6 @@
 //! FR JT38C8 (AC .5) on the backend side: a meter on the old bootloader
 //! (2.1: one vendor interface named after the product, no HID) is listed as
-//! `(old bootloader, update via CLI)`, sent to the UI as
+//! `(old bootloader, experimental CLI update)`, sent to the UI as
 //! `legacy_bootloader`, and Connect refuses it before opening anything,
 //! saying to unplug and replug it to return to the application firmware.
 //!
@@ -19,7 +19,7 @@ use powerz_protocol::firmware::DeviceMode;
 use powerz_protocol::transport::{self, discovery::DeviceEntry, discovery::Model};
 
 const SERIAL: &str = "SERIAL-JT38-0001";
-const SUFFIX: &str = "(old bootloader, update via CLI)";
+const SUFFIX: &str = "(old bootloader, experimental CLI update)";
 
 /// The field-reported 2.1 bootloader as the OS lists it.
 fn legacy_meter() -> DeviceEntry {

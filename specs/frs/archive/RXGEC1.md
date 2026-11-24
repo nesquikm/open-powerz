@@ -4,7 +4,7 @@ milestone: M_8M9B7H
 status: archived
 archived_at: 2026-11-24T08:06:20Z
 id: fr_01M86889K24QQTPZ4Y1TRXGEC1
-created_at: 2026-11-24T12:00:00.000Z
+created_at: 2026-11-24T07:45:44.000Z
 changelog_category: Fixed
 kind: bug
 ---
@@ -34,10 +34,10 @@ The text says this bootloader is old, and that its flash is experimental, only i
 ## Acceptance Criteria
 
 - AC-RXGEC1.1: Regression: the CLI text mode of the old bootloader (probe and info `Mode:` lines) is exactly `bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)`; its JSON value stays `legacy_bootloader`.
-- AC-RXGEC1.2: The two old-bootloader refusal texts of the flash engine say "supported only experimentally, from the CLI", still say "nothing was sent to it", still name the flag, the replug and the how-to link, and the desktop copy of the first one matches the engine text.
-- AC-RXGEC1.3: The desktop device list (backend, web UI label and mock backend) labels such a meter `(old bootloader, update via CLI)`.
-- AC-RXGEC1.4: The desktop connect refusal (backend and mock backend, same text) says the desktop app cannot connect to or update a meter on the old bootloader, names the CLI's `--experimental-old-bootloader`, calls it experimental, and says unplugging and replugging returns to the application firmware.
-- AC-RXGEC1.5: The how-to's old-bootloader section, the CLI reference, the desktop-backend reference and the protocol-library API reference quote the new texts and no longer say the old bootloader is "not supported yet"; the hedges stay (tested only in simulation, never sends a write below 0x4000, retry expected but not verified).
+- AC-RXGEC1.2: The two old-bootloader refusal texts of the flash engine say "supported only experimentally, from the CLI", still say "nothing was sent to it", name the whole command `powerz firmware flash FILE --i-understand --experimental-old-bootloader`, the replug and the how-to link, and the desktop copy of the first one matches the engine text.
+- AC-RXGEC1.3: The desktop device list (backend, web UI label and mock backend) labels such a meter `(old bootloader, experimental CLI update)`.
+- AC-RXGEC1.4: The desktop connect refusal (backend and mock backend, same text) says the desktop app cannot connect to or update a meter on the old bootloader, names the CLI's whole command `powerz firmware flash FILE --i-understand --experimental-old-bootloader`, calls it experimental and tested only in simulation, and says unplugging and replugging returns to the application firmware.
+- AC-RXGEC1.5: The how-to's old-bootloader section, the CLI reference, the desktop-backend reference and the protocol-library API reference quote the new texts, give the whole command and no longer say the old bootloader is "not supported yet"; the hedges stay (tested only in simulation, never sends a write below 0x4000, retry expected but not verified).
 - AC-RXGEC1.6: No file under `crates/*/src`, `apps/desktop/src`, `apps/desktop/src-tauri/src` or `docs` says "not supported yet" about the old bootloader; tests that assert the phrase is absent may still contain it.
 
 ## Technical Design
@@ -59,4 +59,4 @@ Supersedes the wording of JT38C8 (AC .4, .5) and BKSE70 (AC .4, .6). The CHANGEL
 ## Implementation notes
 
 - The jump command lines "Was in: … mode" reuse the mode label, which reads long there; jump refuses the old bootloader, so it should not show.
-- The commands named in the refusal texts leave out FILE and --i-understand, as before.
+- A review before merge asked for the whole, copyable command and for text that does not overclaim; AC .2 to .5 were amended.

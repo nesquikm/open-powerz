@@ -127,8 +127,9 @@ export function deviceOptionLabel(
   if (device.id.startsWith("webhid:")) name = `${name} (HID)`;
   // A meter in bootloader mode is listed as such (FR V9SK52, AC .5).
   if (device.mode === "bootloader") name = `${name} (bootloader mode)`;
-  // A meter on the old bootloader is listed as updated via the CLI (FR RXGEC1, AC .3).
-  if (device.mode === "legacy_bootloader") name = `${name} (old bootloader, update via CLI)`;
+  // A meter on the old bootloader is listed as an experimental CLI update (FR RXGEC1, AC .3).
+  if (device.mode === "legacy_bootloader")
+    name = `${name} (old bootloader, experimental CLI update)`;
   // The picked meter that left the list says so (FR NWGY72, AC .1).
   return device.absent === true ? `${name} — not connected` : name;
 }

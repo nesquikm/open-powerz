@@ -481,8 +481,8 @@ pub enum FlashError {
 pub const SWITCHED_TO_LEGACY_BOOTLOADER_HELP: &str = "the meter is now in its old (2.1-style) \
      bootloader, supported only experimentally, from the CLI; nothing was sent to it. While it \
      stays there, the update can be retried with the experimental path, tested only in simulation: \
-     `powerz firmware flash --experimental-old-bootloader`. Unplug the meter and plug it back \
-     in (no buttons) to return to the application firmware. See \
+     `powerz firmware flash FILE --i-understand --experimental-old-bootloader`. Unplug the meter \
+     and plug it back in (no buttons) to return to the application firmware. See \
      https://github.com/nesquikm/open-powerz/blob/main/docs/how-to/update-firmware.md#old-bootloader";
 
 /// What a meter on the old bootloader means for the user, with the link to
@@ -490,8 +490,8 @@ pub const SWITCHED_TO_LEGACY_BOOTLOADER_HELP: &str = "the meter is now in its ol
 pub const LEGACY_BOOTLOADER_HELP: &str = "this meter's bootloader is an old generation \
      (2.1-style), supported only experimentally, from the CLI; nothing was sent to it. Unplug the \
      meter and plug it back in (no buttons) to return to the application firmware. An \
-     experimental path, tested only in simulation, is opt-in with `powerz firmware flash \
-     --experimental-old-bootloader`. See \
+     experimental path, tested only in simulation, is opt-in with `powerz firmware flash FILE \
+     --i-understand --experimental-old-bootloader`. See \
      https://github.com/nesquikm/open-powerz/blob/main/docs/how-to/update-firmware.md#old-bootloader";
 
 impl FlashError {

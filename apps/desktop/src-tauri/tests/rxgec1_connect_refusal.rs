@@ -11,7 +11,7 @@ use open_powerz_desktop_lib::devices::{DeviceListing, DeviceManager, Opener, lis
 use open_powerz_desktop_lib::worker::BackendEvent;
 use powerz_protocol::transport::{self, discovery::DeviceEntry, discovery::Model};
 
-const REFUSAL: &str = "This meter is on an old (2.1-style) bootloader, which the desktop app cannot connect to or update. Unplug the meter and plug it back in (no buttons) to return to the application firmware. An experimental update works only from the CLI: `powerz firmware flash --experimental-old-bootloader`.";
+const REFUSAL: &str = "This meter is on an old (2.1-style) bootloader, which the desktop app cannot connect to or update. Unplug the meter and plug it back in (no buttons) to return to the application firmware. An experimental update, tested only in simulation, is available from the CLI: `powerz firmware flash FILE --i-understand --experimental-old-bootloader`.";
 
 fn legacy_meter() -> DeviceEntry {
     DeviceEntry {
@@ -46,10 +46,12 @@ impl Opener for NeverOpened {
 }
 
 #[test]
-fn rxgec1_the_backend_labels_the_old_bootloader_meter_update_via_cli() {
+fn rxgec1_the_backend_labels_the_old_bootloader_meter_experimental_cli_update() {
     let meter = the_meter(&list_devices_from(Ok(vec![legacy_meter()])));
     assert!(
-        meter.label.ends_with(" (old bootloader, update via CLI)"),
+        meter
+            .label
+            .ends_with(" (old bootloader, experimental CLI update)"),
         "{}",
         meter.label
     );
