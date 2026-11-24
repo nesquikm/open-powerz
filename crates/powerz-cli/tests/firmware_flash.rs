@@ -111,7 +111,9 @@ fn firmware_flash_parses_the_file_and_the_acknowledgement_flag() {
     .expect("parses");
     match cli.command {
         CliCommand::Firmware {
-            action: FirmwareAction::Flash { file, i_understand },
+            action: FirmwareAction::Flash {
+                file, i_understand, ..
+            },
         } => {
             assert_eq!(file, PathBuf::from("fw.mencrypt"));
             assert!(i_understand);

@@ -73,7 +73,7 @@ device card shows "DFU" only when that string contains `BOOT`. [static]
 | bootloader | descriptor in bootloader mode | probe | tag |
 |---|---|---|---|
 | 2.5 | IF0 vendor 0xFF / subclass 0x00 with string `BOOT`, IF1 CDC 0x02 / 0x02 with string `BOOT`, IF2 CDC data 0x0A; no HID | CONNECT accepted, HEAD field 0 | [device] |
-| 2.1 (field report: KM003C, application 1.9.5) | VID 0x5FC9, PID 0x0063, bcdDevice 1.00, a single interface: class 0xFF, subclass 0xFF, protocol 0x00, interface string `POWER-Z KM003C` (the same text as iProduct); no CDC and no HID interface | CONNECT and HEAD from our probe timed out | [device] |
+| 2.1 (field report: KM003C, application 1.9.5) | VID 0x5FC9, PID 0x0063, bcdDevice 1.00, a single interface: class 0xFF, subclass 0xFF, protocol 0x00, interface string `POWER-Z KM003C` (string 4, the same text as iProduct), while string 2 is `BOOT\0` as on 2.5; no CDC and no HID interface | CONNECT and HEAD from our probe were answered, with reply ids that did not match the request ids (see below) | [device] |
 
 The vendor WinUSB driver INF matches both the composite interface
 `USB\VID_5FC9&PID_0063&MI_00` and the plain `USB\VID_5FC9&PID_0063`, so it
@@ -84,9 +84,30 @@ Our rule (open-powerz) reads the interface string of the vendor-class (0xFF)
 interface from the OS device list and never opens the device: `APP` is the
 application; a string naming boot or dfu, in any case, is the bootloader
 (2.5); any other string on a device with no HID interface is the old
-bootloader, reported as `legacy_bootloader`, which is not supported yet (no
-flash, no jump); no string at all is unknown. [inferred] (2.1 from one field
+bootloader, reported as `legacy_bootloader`; from v0.14.0 it can be flashed
+only behind `--experimental-old-bootloader` (tested against the simulator),
+and the jump still refuses it; no string at all is unknown. [inferred] (2.1 from one field
 report) [device] (2.5)
+
+Bootloader 2.1 numbers its replies with its own counter instead of echoing
+the request id: in one field trace, requests with ids 1 to 8 got replies with
+ids 0, 0, 1, 2, 3, 4, 5, while each reply's type still fit its request. That
+it keeps a counter of its own, rather than lagging by a fixed amount, is
+[inferred] from that single trace; the ids themselves are [device].
+
+Bootloader 2.1 answers the first CONNECT late: its ACCEPT (id 0) was read
+only after HEAD was written, after the 500 ms wait had run out, where it was
+taken for the reply to HEAD. [inferred] from one field trace, which shows the
+order of the reads and writes but not when the reply was sent.
+
+On bootloader 2.1 the pipe recovery after a failed step (clear the halt,
+drain) failed, so no CONNECT retry was sent. [inferred] from one field trace:
+the trace does not log the recovery itself; what it shows is that no second
+CONNECT follows the timed-out first one.
+
+The vendor app matches no reply id: its transact sends one request and takes
+the next IN buffer as the reply, with no retry and no check of the id.
+[static]
 
 ## Header bit layouts
 
@@ -552,7 +573,7 @@ Firmware status (FR V9SK52). All requests below are read-only:
 
 | item | rule | tag |
 |---|---|---|
-| mode | the interface string (string 2) of the vendor-class (0xFF) interface, picked by class and read from the OS device list without opening the device: `APP` is application mode [device] (firmware 2.0.6), a string naming boot or dfu is bootloader mode (2.5) [device], any other string with no HID interface is the old bootloader `legacy_bootloader` (2.1, not supported yet), and no string is unknown; see Device mode | [static] [device] [inferred] |
+| mode | the vendor-class (0xFF) interface's own string (its iInterface), picked by class and read from the OS device list without opening the device; on application firmware and bootloader 2.5 that is string 2, on bootloader 2.1 it is string 4 (`POWER-Z KM003C`, while string 2 is `BOOT\0`). The vendor app reads string index 2 instead, see Device mode: `APP` is application mode [device] (firmware 2.0.6), a string naming boot or dfu is bootloader mode (2.5) [device], any other string with no HID interface is the old bootloader `legacy_bootloader` (2.1, flashed only behind `--experimental-old-bootloader`, never jumped), and no string is unknown; see Device mode | [static] [device] [inferred] |
 | sequence | CONNECT, the info blocks `0x420` (bootloader) and `0x4420` (application), then 50 ms later HEAD. The vendor app sends HEAD first; we read the blocks first so a failed HEAD cannot cost them. Each step that fails is reported as a problem (a HEAD problem includes the raw reply in hex), followed by one CONNECT to recover the pipe; what was read is kept, and the update check is reported as unknown when HEAD was not read | [static] [device] (firmware 2.0.6: blocks read; HEAD answered with id 0, see the HEAD rows below) |
 | warnings | below 1.7.0: too old; below 2.0.7, the newest version this library knows of: outdated. Version strings are read tolerantly: surrounding whitespace and one leading `v` or `V` are dropped, a `-` suffix makes a pre-release, which sorts below its release (`2.0.7-beta` is outdated) and keeps its tag when shown, pre-releases of one version sort by semver tag order (`2.0.7-rc.2` below `2.0.7-rc.10`), and a `+` suffix is ignored (`v2.0.7+build5` is 2.0.7). An empty tag (`2.0.7-`) and a number with a leading `+` (`+2.0.7`) are refused, and a string that does not parse gives no version warning | [static] [inferred] |
 | HEAD in application mode | the meter answers with reply id 0 (not the request's id): `40 00 00 01 00 10 00 00`, i.e. type 0x40, id 0, and a u32 at offset 4 of 0x00001000 on firmware 2.0.6 and 2.0.7, followed by 12 stale bytes from its own transmit buffer (20 bytes in all). We accept a type-0x40, id-0 reply only as the first transfer after our HEAD. A field of 0 means current; any other value is reported as an unrecognised reply, never as "update required", because the vendor's reading (non-zero = update required) does not fit a meter on normal firmware | [device] (firmware 2.0.6, 2.0.7) [static] |
@@ -1094,8 +1115,10 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
 | verify | read for 1000 ms | FINISHED `07` | Verify (−103) | [static] |
 | return | JUMP_APROM `08 id 00 00`, write only; one 500 ms read records any reply; ask for a replug and wait up to 120 s for application mode; read the info block `0x4420` | the new version | ask for a power cycle if the meter stays in its bootloader | [static] [inferred]; a plain replug leaves the bootloader for the application [device] |
 
-- The bootloader lives below 0x4000 and is never written: the descriptor's
-  start is always 0x4000. [static] [inferred]
+- The bootloader lives below 0x4000, and open-powerz never sends a write
+  there: the descriptor's start is always 0x4000 and `FlashGuard` refuses
+  anything else [static]. That bootloader 2.1 uses the same layout is
+  expected but not verified [inferred].
 - There is no automatic retry. After a failure the meter stays in its boot
   loader; the update can be run again from there. [static]
 - Once the descriptor is ACKed the bootloader is in its download phase: it
@@ -1106,8 +1129,9 @@ on a KM003C running 2.0.6; the rest is not confirmed on our meter yet. [static]
   (the power cycle resets it)
 - The bootloader's screen tells the two cases apart: "firmware details"
   when a valid application is present, a blank screen with a blinking green
-  bar when there is none (after an erase). On bootloader 2.5 both enumerate as
-  `BOOT`; bootloader 2.1 shows `POWER-Z KM003C` instead (see Device mode). [device]
+  bar when there is none (after an erase). On bootloader 2.5 both enumerate with the
+  interface string `BOOT`; on bootloader 2.1 the vendor interface's string is
+  `POWER-Z KM003C` (string 4), while its string 2 is still `BOOT\0` (see Device mode). [device]
 - Write-capable frames (JUMP_DFU, JUMP_APROM, the descriptor and the raw
   payload writes) can only be sent through the flash path. It needs a
   `FlashAck` marker, which the CLI creates only after `--i-understand`; the

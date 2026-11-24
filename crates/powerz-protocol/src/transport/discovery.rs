@@ -301,11 +301,25 @@ pub enum StringDescriptor {
     Unavailable(String),
 }
 
+impl StringDescriptor {
+    /// The text cut at its first NUL (the field 2.1 bootloader's string 2
+    /// reads `BOOT\0` `[device]`), or `None` when there is no text.
+    pub fn shown_text(&self) -> Option<&str> {
+        match self {
+            StringDescriptor::Text(t) => t.split('\0').next(),
+            StringDescriptor::Absent | StringDescriptor::Unavailable(_) => None,
+        }
+    }
+}
+
 impl std::fmt::Display for StringDescriptor {
-    /// The text in quotes, `(none)` or `(unavailable: <reason>)`.
+    /// The [shown text](StringDescriptor::shown_text) in quotes, `(none)`
+    /// or `(unavailable: <reason>)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StringDescriptor::Text(t) => write!(f, "{t:?}"),
+            StringDescriptor::Text(_) => {
+                write!(f, "{:?}", self.shown_text().unwrap_or_default())
+            }
             StringDescriptor::Absent => write!(f, "(none)"),
             StringDescriptor::Unavailable(r) => write!(f, "(unavailable: {r})"),
         }

@@ -330,6 +330,10 @@ pub enum FirmwareAction {
         /// its bootloader until the flash is retried.
         #[arg(long)]
         i_understand: bool,
+        /// Experimental: also flash a meter already in the old bootloader
+        /// (2.1). Tested only in simulation.
+        #[arg(long)]
+        experimental_old_bootloader: bool,
     },
     /// Switch the meter between application and bootloader mode with one
     /// write-only jump (JUMP_DFU or JUMP_APROM) over the vendor bulk pipe,

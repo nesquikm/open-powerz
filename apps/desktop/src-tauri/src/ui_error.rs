@@ -106,9 +106,13 @@ fn linux_permission_hint() -> String {
 }
 
 /// Linux hint for a busy device: the kernel's `powerz` hwmon driver.
-const LINUX_BUSY_HINT: &str = "The kernel's powerz hwmon driver may be holding the \
-meter. Unload it with `sudo modprobe -r powerz`, then connect again (see \
-`docs/linux.md`).";
+fn linux_busy_hint() -> String {
+    format!(
+        "The kernel's powerz hwmon driver may be holding the meter. Unload it with \
+         `sudo modprobe -r powerz`, then connect again (see {}).",
+        transport::LINUX_GUIDE_URL,
+    )
+}
 
 /// Whether an I/O error text says the device is busy or claimed.
 fn is_busy(detail: &str) -> bool {
@@ -143,7 +147,7 @@ fn permission_denied(target_os: &str) -> UiError {
 
 fn device_busy(target_os: &str) -> UiError {
     let hint = if target_os == "linux" {
-        LINUX_BUSY_HINT.to_owned()
+        linux_busy_hint()
     } else {
         "Close other apps that use the meter (such as the vendor software), \
          then replug it."
@@ -723,5 +727,24 @@ mod tests {
             "The logo was written, but the settings could not be read again."
         );
         assert_eq!(e.hint.as_deref(), Some(MENU_SAVE_STEPS));
+    }
+
+    // ---- AC-XW4QQN.7: the busy-device hint names the full Linux guide URL ----
+
+    #[test]
+    fn xw4qqn_linux_busy_hint_names_the_full_linux_guide_url() {
+        let err = transport::Error::Io("Device or resource busy (os error 16)".into());
+        let hint = from_transport(&err, "linux").hint.expect("no hint");
+        assert!(
+            hint.contains("https://github.com/nesquikm/open-powerz/blob/main/docs/linux.md"),
+            "hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn xw4qqn_linux_busy_hint_names_no_bare_repository_path() {
+        let err = transport::Error::Io("Device or resource busy (os error 16)".into());
+        let hint = from_transport(&err, "linux").hint.expect("no hint");
+        assert!(!hint.contains("`docs/linux.md`"), "hint: {hint}");
     }
 }

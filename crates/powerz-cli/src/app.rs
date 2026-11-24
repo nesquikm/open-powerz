@@ -135,10 +135,15 @@ fn try_run(cli: &Cli) -> Result<(), CliError> {
         _ => {}
     }
     if let Command::Firmware {
-        action: FirmwareAction::Flash { file, i_understand },
+        action:
+            FirmwareAction::Flash {
+                file,
+                i_understand,
+                experimental_old_bootloader,
+            },
     } = &cli.command
     {
-        return flash_file(cli, file, *i_understand);
+        return flash_file(cli, file, *i_understand, *experimental_old_bootloader);
     }
     if let Command::Firmware {
         action: FirmwareAction::Jump { to, i_understand },
@@ -268,9 +273,15 @@ fn strings_or_unavailable(
 fn probe_sim(cli: &Cli, json: bool) -> Result<(), CliError> {
     select_demo(cli)?;
     let mode = sim_mode()?;
+    let own_ids = sim_own_reply_ids();
     let faults = sim_faults()?;
     let configure = |sim: SimDevice| -> Result<SimDevice, CliError> {
-        Ok(sim_firmware_knobs(sim)?.with_mode(mode).with_faults(faults))
+        let sim = sim_firmware_knobs(sim)?.with_mode(mode).with_faults(faults);
+        Ok(if own_ids {
+            sim.with_own_reply_ids()
+        } else {
+            sim
+        })
     };
     if fake_sim_clock() {
         let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
@@ -404,11 +415,17 @@ fn sim_mode() -> Result<DeviceMode, CliError> {
     match std::env::var("POWERZ_SIM_MODE").as_deref() {
         Err(_) | Ok("application") => Ok(DeviceMode::Application),
         Ok("bootloader") => Ok(DeviceMode::Bootloader),
-        Ok("legacy-bootloader") => Ok(DeviceMode::LegacyBootloader),
+        Ok("legacy-bootloader" | "legacy-bootloader-own-ids") => Ok(DeviceMode::LegacyBootloader),
         Ok(other) => Err(CliError::Usage(format!(
-            "invalid POWERZ_SIM_MODE {other:?}: expected application, bootloader or legacy-bootloader"
+            "invalid POWERZ_SIM_MODE {other:?}: expected application, bootloader, legacy-bootloader or legacy-bootloader-own-ids"
         ))),
     }
+}
+
+/// Whether `POWERZ_SIM_MODE` is `legacy-bootloader-own-ids` (test-only):
+/// the old bootloader that numbers its own replies (FR XW4QQN).
+fn sim_own_reply_ids() -> bool {
+    std::env::var("POWERZ_SIM_MODE").as_deref() == Ok("legacy-bootloader-own-ids")
 }
 
 /// The meter's CDC pipe, found by its USB serial number.
@@ -443,7 +460,12 @@ fn firmware_info_file(file: &std::path::Path, json: bool) -> Result<(), CliError
 /// `firmware flash FILE`: check the acknowledgement and inspect the file
 /// before any device is chosen or opened, then flash the meter (or, with
 /// `--transport sim`, the simulated one).
-fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(), CliError> {
+fn flash_file(
+    cli: &Cli,
+    file: &std::path::Path,
+    i_understand: bool,
+    old_boot: bool,
+) -> Result<(), CliError> {
     if !i_understand {
         return Err(CliError::Usage(FLASH_RISK.into()));
     }
@@ -461,33 +483,114 @@ fn flash_file(cli: &Cli, file: &std::path::Path, i_understand: bool) -> Result<(
             let clock = SimClock::new(FAKE_CLOCK_EPOCH_MS);
             let meter = sim_meter(sim_device_clock(Persona::Bulk, cli.scenario, clock.clone()))?;
             let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
-            flash_on(cli, &container, meter, clock, &stop, &mut out)
+            flash_on(cli, &container, meter, clock, old_boot, &stop, &mut out)
         } else {
             let meter = sim_meter(sim_device(Persona::Bulk, cli.scenario))?;
             let meter = CtrlCAfterWrites::new(meter, after, Arc::clone(&stop));
-            flash_on(cli, &container, meter, SystemClock, &stop, &mut out)
+            flash_on(
+                cli,
+                &container,
+                meter,
+                SystemClock,
+                old_boot,
+                &stop,
+                &mut out,
+            )
         };
     }
     let opener = discovery_opener(cli)?;
     let stop = ctrl_c_flag()?;
-    flash_on(cli, &container, opener, SystemClock, &stop, &mut out)
+    flash_on(
+        cli,
+        &container,
+        opener,
+        SystemClock,
+        old_boot,
+        &stop,
+        &mut out,
+    )
 }
+
+/// Printed before any frame when `--experimental-old-bootloader` is given.
+const OLD_BOOT_WARNING: &str = "Warning: the old-bootloader path is experimental and has been \
+     tested only in simulation. open-powerz never sends a write below 0x4000; bootloader 2.1 \
+     keeping that layout and taking a retry after a failed run is expected but not verified \
+     on a real meter. To retry, hold Back while plugging the meter in to restart the \
+     bootloader and run the command again.";
 
 /// Run [`firmware_flash`] on `opener` (traced with `--trace`).
 fn flash_on<O: MeterOpener, C: Clock>(
     cli: &Cli,
+    container: &powerz_protocol::firmware::container::FirmwareContainer<'_>,
+    opener: O,
+    clock: C,
+    old_boot: bool,
+    stop: &AtomicBool,
+    out: &mut impl std::io::Write,
+) -> Result<(), CliError> {
+    if !old_boot {
+        return flash_traced(
+            cli.trace,
+            FlashAck::acknowledge(),
+            container,
+            opener,
+            clock,
+            stop,
+            out,
+        );
+    }
+    out.flush()?;
+    let ack = FlashAck::acknowledge().with_experimental_old_bootloader();
+    let opener = OldBootWarning {
+        inner: opener,
+        warned: false,
+    };
+    flash_traced(cli.trace, ack, container, opener, clock, stop, out)
+}
+
+/// Run [`firmware_flash`] on `opener`, wrapped in [`TracedOpener`] when
+/// `trace` is set.
+fn flash_traced<O: MeterOpener, C: Clock>(
+    trace: bool,
+    ack: FlashAck,
     container: &powerz_protocol::firmware::container::FirmwareContainer<'_>,
     mut opener: O,
     clock: C,
     stop: &AtomicBool,
     out: &mut impl std::io::Write,
 ) -> Result<(), CliError> {
-    let ack = FlashAck::acknowledge();
-    if cli.trace {
-        let mut opener = TracedOpener(opener);
-        firmware_flash(ack, container, &mut opener, clock, stop, out)
+    if trace {
+        firmware_flash(ack, container, &mut TracedOpener(opener), clock, stop, out)
     } else {
         firmware_flash(ack, container, &mut opener, clock, stop, out)
+    }
+}
+
+/// [`MeterOpener`] wrapper that prints [`OLD_BOOT_WARNING`] to stdout the
+/// first time it opens a meter in the old bootloader (at open or after the
+/// switch), before the meter is handed on and any frame is sent to it.
+struct OldBootWarning<O> {
+    inner: O,
+    warned: bool,
+}
+
+impl<O: MeterOpener> MeterOpener for OldBootWarning<O> {
+    type Pipe = O::Pipe;
+
+    fn open(&mut self) -> Result<Option<Meter<Self::Pipe>>, transport::Error> {
+        let meter = self.inner.open()?;
+        if !self.warned
+            && meter
+                .as_ref()
+                .is_some_and(|m| m.mode == DeviceMode::LegacyBootloader)
+        {
+            self.warned = true;
+            let mut stdout = std::io::stdout();
+            // The warning is advisory: a closed stdout must not stop the flash.
+            let _ = writeln!(stdout, "{OLD_BOOT_WARNING}");
+            let _ = stdout.flush();
+        }
+        Ok(meter)
     }
 }
 
@@ -525,6 +628,18 @@ fn discovery_opener(cli: &Cli) -> Result<BulkFlashOpener, CliError> {
 /// `POWERZ_SIM_REPLUG_AFTER`.
 fn sim_meter(sim: SimDevice) -> Result<SimMeter, CliError> {
     let sim = sim_flash_fault(sim_firmware_knobs(sim)?)?.with_mode(sim_mode()?);
+    let sim = if sim_own_reply_ids() {
+        sim.with_own_reply_ids()
+    } else {
+        sim
+    };
+    // `POWERZ_SIM_JUMP_TO_OLD_BOOT=1` (test-only): JUMP_DFU lands in the
+    // own-ids old bootloader (FR NCH7DW).
+    let sim = if std::env::var("POWERZ_SIM_JUMP_TO_OLD_BOOT").as_deref() == Ok("1") {
+        sim.with_jump_dfu_to_old_bootloader()
+    } else {
+        sim
+    };
     Ok(match sim_replug_after()? {
         Some(n) => SimMeter::new(sim.with_jump_at_power_up()).with_replug_after(n),
         None => SimMeter::new(sim),

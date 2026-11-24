@@ -10,10 +10,24 @@
 //!
 //! The bootloader sequence is `[static]` (see `docs/protocol.md`): CONNECT
 //! → ACCEPT (an unanswered first CONNECT is retried once after a recover,
-//! as the real bootloader ignores it `[device]`); HEAD (field must be 0); the 0x42 descriptor as a raw write
-//! (1000 ms write wait), then a separate 20 ms read that must time out; N−1 reads of 10 ms that must time out and a 1000 ms read
-//! that must be ACCEPT; the payload in raw 4080-byte writes, each acked by
-//! SYNC; FINISHED within 1000 ms. Nothing else is retried automatically.
+//! as the real bootloader ignores it `[device]`); HEAD (field must be 0);
+//! the 0x42 descriptor as a raw write (1000 ms write wait), then a separate
+//! 20 ms read that must time out; N−1 reads of 10 ms that must time out and
+//! a 1000 ms read that must be ACCEPT; the payload in raw 4080-byte writes,
+//! each acked by SYNC; FINISHED within 1000 ms. Nothing else is retried
+//! automatically.
+//!
+//! A meter in the old (2.1) bootloader, whether found there or switched
+//! there by JUMP_DFU, is refused before any frame to it
+//! ([`FlashError::LegacyBootloader`] /
+//! [`FlashError::SwitchedToLegacyBootloader`]), unless the [`FlashAck`]
+//! opts in with [`FlashAck::with_experimental_old_bootloader`] (tested only
+//! in simulation); with the opt-in, the flash continues on the old
+//! bootloader either way. That path runs the same sequence, adjusted for
+//! a bootloader that numbers its replies itself `[device]`: replies are
+//! matched by type, not id; the first CONNECT waits longer and is retried
+//! without a recover; stray late ACCEPTs are read past at HEAD and drained
+//! before the descriptor `[inferred]`.
 //!
 //! JUMP_DFU follows a level-1 authentication: without it the application
 //! answers REJECT `[device]`. After each jump the engine reports the
@@ -56,6 +70,14 @@ pub const JUMP_REPLY_WAIT: Duration = Duration::from_millis(500);
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// CONNECT reply wait in the bootloader `[static]`.
 const CONNECT_WAIT: Duration = Duration::from_millis(1000);
+/// The old bootloader's first CONNECT wait: it answers late `[device]`.
+const OLD_FIRST_CONNECT_WAIT: Duration = Duration::from_secs(2);
+/// The old bootloader: at most this many stray ACCEPTs (late CONNECT
+/// answers) are read past at HEAD and before the descriptor `[inferred]`.
+const OLD_STRAY_MAX: usize = 4;
+/// The old bootloader: the short read that drains a stray ACCEPT before the
+/// descriptor `[inferred]`.
+const OLD_DRAIN_WAIT: Duration = Duration::from_millis(20);
 /// HEAD reply wait.
 const HEAD_WAIT: Duration = Duration::from_millis(1000);
 /// The read after the descriptor write, expected to expire `[static]`.
@@ -107,13 +129,25 @@ const AUTH_L1_USED: usize = 8 + UID.1 as usize + 8;
 #[derive(Debug)]
 pub struct FlashAck {
     _private: (),
+    /// The user opted in to the experimental old-bootloader (2.1) path.
+    experimental_old_bootloader: bool,
 }
 
 impl FlashAck {
     /// Record the user's explicit acknowledgement that flashing may brick
     /// the application firmware until it is retried.
     pub fn acknowledge() -> FlashAck {
-        FlashAck { _private: () }
+        FlashAck {
+            _private: (),
+            experimental_old_bootloader: false,
+        }
+    }
+
+    /// Also allow flashing a meter already in the old bootloader (2.1).
+    /// Experimental: tested only in simulation.
+    pub fn with_experimental_old_bootloader(mut self) -> FlashAck {
+        self.experimental_old_bootloader = true;
+        self
     }
 }
 
@@ -435,13 +469,29 @@ pub enum FlashError {
     /// engine does not speak `[device]`; nothing was sent to it.
     #[error("{LEGACY_BOOTLOADER_HELP}")]
     LegacyBootloader,
+    /// JUMP_DFU brought the meter back on the old (2.1-style) bootloader
+    /// and the experimental path was not opted in to; nothing was sent to
+    /// it.
+    #[error("{SWITCHED_TO_LEGACY_BOOTLOADER_HELP}")]
+    SwitchedToLegacyBootloader,
 }
+
+/// What a meter that JUMP_DFU switched to its old bootloader means for the
+/// user.
+pub const SWITCHED_TO_LEGACY_BOOTLOADER_HELP: &str = "the meter is now in its old (2.1-style) \
+     bootloader, not supported yet by open-powerz; nothing was sent to it. While it stays \
+     there, the update can be retried with the experimental path, tested only in simulation: \
+     `powerz firmware flash --experimental-old-bootloader`. Unplug the meter and plug it back \
+     in (no buttons) to return to the application firmware. See \
+     https://github.com/nesquikm/open-powerz/blob/main/docs/how-to/update-firmware.md#old-bootloader";
 
 /// What a meter on the old bootloader means for the user, with the link to
 /// the how-to's section.
 pub const LEGACY_BOOTLOADER_HELP: &str = "this meter's bootloader is an old generation \
      (2.1-style), not supported yet by open-powerz; nothing was sent to it. Unplug the \
-     meter and plug it back in (no buttons) to return to the application firmware. See \
+     meter and plug it back in (no buttons) to return to the application firmware. An \
+     experimental path, tested only in simulation, is opt-in with `powerz firmware flash \
+     --experimental-old-bootloader`. See \
      https://github.com/nesquikm/open-powerz/blob/main/docs/how-to/update-firmware.md#old-bootloader";
 
 impl FlashError {
@@ -461,7 +511,8 @@ impl FlashError {
             | FlashError::Interrupted { .. }
             | FlashError::AlreadyInMode { .. }
             | FlashError::UnknownMode
-            | FlashError::LegacyBootloader => -110,
+            | FlashError::LegacyBootloader
+            | FlashError::SwitchedToLegacyBootloader => -110,
             FlashError::WorkMode { .. } => -111,
         }
     }
@@ -479,7 +530,7 @@ impl FlashError {
 /// the erase has begun, so it never stops a write. The wait after JUMP_APROM
 /// ignores a stop: the image is written by then.
 pub fn flash<O: MeterOpener, C: Clock>(
-    _ack: FlashAck,
+    ack: FlashAck,
     container: &FirmwareContainer<'_>,
     opener: &mut O,
     mut clock: C,
@@ -503,9 +554,12 @@ pub fn flash<O: MeterOpener, C: Clock>(
         DeviceMode::Bootloader => meter,
         DeviceMode::Application => {
             progress(FlashProgress::Switching);
-            switch_to_bootloader(meter, container, opener, &mut clock, stop, progress)?
+            let old_ok = ack.experimental_old_bootloader;
+            switch_to_bootloader(meter, container, opener, &mut clock, stop, old_ok, progress)?
         }
-        // The old (2.1) bootloader is not supported: refuse before any frame.
+        // The old (2.1) bootloader runs only on the experimental opt-in;
+        // without it, refuse before any frame.
+        DeviceMode::LegacyBootloader if ack.experimental_old_bootloader => meter,
         DeviceMode::LegacyBootloader => return Err(FlashError::LegacyBootloader),
         DeviceMode::Unknown => {
             return Err(FlashError::NotInBootloader {
@@ -513,6 +567,7 @@ pub fn flash<O: MeterOpener, C: Clock>(
             });
         }
     };
+    let old = meter.mode == DeviceMode::LegacyBootloader;
     // From here the meter is in bootloader mode. A failure stops the flash
     // there: nothing more is sent (no retry, no JUMP_APROM) and the error
     // says how to retry.
@@ -520,7 +575,10 @@ pub fn flash<O: MeterOpener, C: Clock>(
     let mut ids = Ids(0);
     // Every frame of the flash goes through the strict flash guard.
     let mut pipe = FlashGuard::new(meter.pipe);
-    download(&mut pipe, container, &mut clock, &mut ids, stop, progress).map_err(in_bootloader)?;
+    download(
+        &mut pipe, container, &mut clock, &mut ids, old, stop, progress,
+    )
+    .map_err(in_bootloader)?;
     progress(FlashProgress::Returning);
     // A failed jump leaves the meter in its bootloader.
     let reply = send_jump(&mut pipe, JUMP_APROM, ids.next()).map_err(in_bootloader)?;
@@ -535,6 +593,7 @@ pub fn flash<O: MeterOpener, C: Clock>(
         DeviceMode::Application,
         RETURN_TIMEOUT,
         None,
+        false,
     );
     let mut app = match returned {
         Ok(app) => app,
@@ -625,7 +684,7 @@ fn in_bootloader(e: FlashError) -> FlashError {
         // Raised by `jump` only, before anything is sent.
         e @ (FlashError::AlreadyInMode { .. } | FlashError::UnknownMode) => e,
         // Nothing was sent to the old bootloader; its message says what to do.
-        e @ FlashError::LegacyBootloader => e,
+        e @ (FlashError::LegacyBootloader | FlashError::SwitchedToLegacyBootloader) => e,
     }
 }
 
@@ -635,13 +694,15 @@ pub const BACK_BUTTON_HINT: &str = "hold the Back button while plugging the mete
 
 /// From application mode: check the meter's model from its application
 /// info block, send JUMP_DFU and wait for the meter to come back in
-/// bootloader mode.
+/// bootloader mode (or, with `old_ok`, the experimental opt-in, in the old
+/// bootloader).
 fn switch_to_bootloader<O: MeterOpener, C: Clock>(
     mut meter: Meter<O::Pipe>,
     container: &FirmwareContainer<'_>,
     opener: &mut O,
     clock: &mut C,
     stop: &AtomicBool,
+    old_ok: bool,
     progress: &mut dyn FnMut(FlashProgress),
 ) -> Result<Meter<O::Pipe>, FlashError> {
     let info = read_app_info(&mut meter.pipe, &mut *clock).map_err(|detail| FlashError::Read {
@@ -664,9 +725,9 @@ fn switch_to_bootloader<O: MeterOpener, C: Clock>(
             reply,
         })
     };
-    let seen = match jump_and_wait(meter.pipe, target, opener, clock, stop, &mut sent)? {
+    let seen = match jump_and_wait(meter.pipe, target, opener, clock, stop, old_ok, &mut sent)? {
         Waited::Reached(boot) => return Ok(boot),
-        Waited::LegacyBootloader => return Err(FlashError::LegacyBootloader),
+        Waited::LegacyBootloader => return Err(FlashError::SwitchedToLegacyBootloader),
         Waited::Stopped => {
             return Err(interrupted(
                 "while waiting for the meter after JUMP_DFU; nothing was erased; \
@@ -707,6 +768,7 @@ fn jump_and_wait<O: MeterOpener, C: Clock>(
     opener: &mut O,
     clock: &mut C,
     stop: &AtomicBool,
+    old_ok: bool,
     sent: &mut dyn FnMut(JumpReply),
 ) -> Result<Waited<O::Pipe>, FlashError> {
     let (ty, limit) = match target {
@@ -726,7 +788,7 @@ fn jump_and_wait<O: MeterOpener, C: Clock>(
     drop(pipe);
     sent(reply);
     Ok(
-        match wait_for(opener, clock, target.mode(), limit, Some(stop)) {
+        match wait_for(opener, clock, target.mode(), limit, Some(stop), old_ok) {
             Ok(m) => Waited::Reached(m),
             Err(WaitEnd::Stopped) => Waited::Stopped,
             Err(WaitEnd::LegacyBootloader) => Waited::LegacyBootloader,
@@ -904,7 +966,15 @@ pub fn jump<O: MeterOpener, C: Clock>(
             reply,
         })
     };
-    match jump_and_wait(meter.pipe, target, opener, &mut clock, stop, &mut report)? {
+    match jump_and_wait(
+        meter.pipe,
+        target,
+        opener,
+        &mut clock,
+        stop,
+        false,
+        &mut report,
+    )? {
         Waited::Reached(m) => Ok(JumpOutcome::Reached(m.mode)),
         Waited::LegacyBootloader => Err(FlashError::LegacyBootloader),
         Waited::Stopped => Err(interrupted(&format!(
@@ -1076,13 +1146,16 @@ enum WaitEnd {
 
 /// Poll `opener` until the meter is in `mode`, for up to `limit` of clock
 /// time (measured, so slow opens count toward the wait). `stop`, when given,
-/// is checked before each [`POLL_INTERVAL`] sleep and ends the wait.
+/// is checked before each [`POLL_INTERVAL`] sleep and ends the wait. With
+/// `old_ok`, a wait for the bootloader also ends on the old bootloader,
+/// which then counts as reached.
 fn wait_for<O: MeterOpener, C: Clock>(
     opener: &mut O,
     clock: &mut C,
     mode: DeviceMode,
     limit: Duration,
     stop: Option<&AtomicBool>,
+    old_ok: bool,
 ) -> Result<Meter<O::Pipe>, WaitEnd> {
     let start = clock.now_ms();
     let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
@@ -1098,6 +1171,9 @@ fn wait_for<O: MeterOpener, C: Clock>(
             Ok(Some(m))
                 if mode == DeviceMode::Bootloader && m.mode == DeviceMode::LegacyBootloader =>
             {
+                if old_ok {
+                    return Ok(m);
+                }
                 return Err(WaitEnd::LegacyBootloader);
             }
             // A later successful open supersedes an earlier opener error:
@@ -1171,21 +1247,34 @@ fn descriptor(
     Ok(f)
 }
 
-/// The bootloader sequence, from CONNECT to FINISHED.
+/// The bootloader sequence, from CONNECT to FINISHED. `old` adapts it to
+/// the old (2.1) bootloader, which numbers its replies itself.
 fn download<P: FlashTransport, C: Clock>(
     pipe: &mut P,
     container: &FirmwareContainer<'_>,
     clock: &mut C,
     ids: &mut Ids,
+    old: bool,
     stop: &AtomicBool,
     progress: &mut dyn FnMut(FlashProgress),
 ) -> Result<(), FlashError> {
+    // The old bootloader (2.1) numbers its replies itself: its replies are
+    // matched by type, not by id (FR XW4QQN) `[device]`.
     // CONNECT → ACCEPT (else −108). The bootloader leaves the first CONNECT
     // after an open unanswered `[device]`; like the session's connect, an
     // unanswered one is retried once after a recover (no device command).
-    let mut r = pipe.transact(&frame::connect(ids.next()), CONNECT_WAIT);
-    if matches!(r, Err(TransportError::Timeout)) && pipe.recover().is_ok() {
-        r = pipe.transact(&frame::connect(ids.next()), CONNECT_WAIT);
+    // The old bootloader gets a longer first wait and a retry with no
+    // recover: its pipe recovery failed in the field trace `[inferred]`.
+    let connect_wait = if old {
+        OLD_FIRST_CONNECT_WAIT
+    } else {
+        CONNECT_WAIT
+    };
+    let mut r = pipe.transact(&frame::connect(ids.next()), connect_wait);
+    let mut retried = false;
+    if matches!(r, Err(TransportError::Timeout)) && (old || pipe.recover().is_ok()) {
+        retried = true;
+        r = pipe.transact(&frame::connect(ids.next()), connect_wait);
     }
     if !is(&r, ACCEPT) {
         return Err(FlashError::Read {
@@ -1198,13 +1287,36 @@ fn download<P: FlashTransport, C: Clock>(
     // that cannot be tied to this request (any other id, 0 included) is never
     // trusted, whatever its field says.
     let head_id = ids.next();
-    let r = pipe.transact(&head::request(head_id), HEAD_WAIT);
+    let mut r = pipe.transact(&head::request(head_id), HEAD_WAIT);
+    // The old bootloader may still owe a late CONNECT answer: read past a
+    // stray ACCEPT to the HEAD reply behind it.
+    if old {
+        let mut strays = 0;
+        while is(&r, ACCEPT) && strays < OLD_STRAY_MAX {
+            strays += 1;
+            r = pipe.read(HEAD_WAIT);
+        }
+    }
     let reply = match r {
-        Ok(reply) if reply_type(&reply) == Some(HEAD) && reply.get(1) == Some(&head_id) => reply,
+        Ok(reply)
+            if reply_type(&reply) == Some(HEAD) && (old || reply.get(1) == Some(&head_id)) =>
+        {
+            reply
+        }
         Ok(reply) if reply_type(&reply) == Some(HEAD) => {
             return Err(FlashError::Read {
                 detail: format!(
                     "HEAD: the reply id is not the request id {head_id:#04x}; {}",
+                    head_hex(&reply)
+                ),
+            });
+        }
+        // The old bootloader: still a stray ACCEPT past the cap, so no HEAD
+        // reply could be read (−108), not a product mismatch.
+        Ok(reply) if old && reply_type(&reply) == Some(ACCEPT) => {
+            return Err(FlashError::Read {
+                detail: format!(
+                    "HEAD: more than {OLD_STRAY_MAX} stray ACCEPT replies; {}",
                     head_hex(&reply)
                 ),
             });
@@ -1235,6 +1347,39 @@ fn download<P: FlashTransport, C: Clock>(
             reply: head_hex(&reply),
         });
     }
+    // The old bootloader: drain stray ACCEPTs before the descriptor, so a
+    // late CONNECT answer is never taken for the erase's ACCEPT. The drain
+    // must end on a read that expires; after a retried CONNECT its first
+    // read waits as long as a CONNECT, since the unanswered one may still
+    // be answered `[inferred]`.
+    if old {
+        let mut wait = if retried {
+            OLD_FIRST_CONNECT_WAIT
+        } else {
+            OLD_DRAIN_WAIT
+        };
+        let mut drained = false;
+        for _ in 0..=OLD_STRAY_MAX {
+            let r = pipe.read(wait);
+            wait = OLD_DRAIN_WAIT;
+            if matches!(r, Err(TransportError::Timeout)) {
+                drained = true;
+                break;
+            }
+            if !is(&r, ACCEPT) {
+                return Err(FlashError::Write {
+                    detail: format!("before the descriptor: {}", describe(&r)),
+                });
+            }
+        }
+        if !drained {
+            return Err(FlashError::Write {
+                detail: format!(
+                    "before the descriptor: more than {OLD_STRAY_MAX} stray ACCEPT replies"
+                ),
+            });
+        }
+    }
 
     if stopped(stop) {
         return Err(interrupted("before the descriptor"));
@@ -1255,7 +1400,7 @@ fn download<P: FlashTransport, C: Clock>(
             detail: format!("descriptor: {e}"),
         })?;
     let erased = |r: &Result<Vec<u8>, TransportError>| {
-        is(r, ACCEPT) && matches!(r, Ok(reply) if reply.get(1) == Some(&desc_id))
+        is(r, ACCEPT) && (old || matches!(r, Ok(reply) if reply.get(1) == Some(&desc_id)))
     };
     let r = pipe.read(DESCRIPTOR_WAIT);
     let mut erase_done = erased(&r);

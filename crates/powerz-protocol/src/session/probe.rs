@@ -35,6 +35,25 @@ pub enum HeadOutcome {
     TimedOut,
 }
 
+/// A reply id that differs from the request id it answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdMismatch {
+    /// The id the meter replied with.
+    pub meter: u8,
+    /// The id we sent.
+    pub ours: u8,
+}
+
+impl IdMismatch {
+    /// The ids of `reply` and the `request` it answers, when they differ.
+    pub(super) fn between(reply: &[u8], request: &[u8]) -> Option<IdMismatch> {
+        match (reply.get(1), request.get(1)) {
+            (Some(&meter), Some(&ours)) if meter != ours => Some(IdMismatch { meter, ours }),
+            _ => None,
+        }
+    }
+}
+
 /// What [`Session::probe`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeReport {
@@ -48,6 +67,10 @@ pub struct ProbeReport {
     pub head_timeout: Option<TimeoutDirection>,
     /// The read-only variants run after a silent standard path, in order.
     pub variants: Vec<VariantOutcome>,
+    /// The ids of the CONNECT exchange, when the meter's differs from ours.
+    pub connect_ids: Option<IdMismatch>,
+    /// The ids of the HEAD exchange, when the meter's differs from ours.
+    pub head_ids: Option<IdMismatch>,
 }
 
 impl ProbeReport {
@@ -152,6 +175,10 @@ pub struct VariantOutcome {
     pub connect: ConnectOutcome,
     /// The answer to its HEAD.
     pub head: HeadOutcome,
+    /// The ids of its CONNECT, when the meter's differs from ours.
+    pub connect_ids: Option<IdMismatch>,
+    /// The ids of its HEAD, when the meter's differs from ours.
+    pub head_ids: Option<IdMismatch>,
 }
 
 impl VariantOutcome {
@@ -176,6 +203,7 @@ impl<T: Transport, C: Clock> Session<T, C> {
     /// meter sent it (`None` when HEAD timed out), so a caller can show the
     /// raw bytes next to a decoded field.
     pub fn probe_with_head_reply(&mut self) -> Result<(ProbeReport, Option<Vec<u8>>), Error> {
+        self.last_ids = None;
         let connect = match self.connect_checked(true) {
             Ok(()) => ConnectOutcome::Accepted,
             Err(Error::Rejected { .. }) => ConnectOutcome::Rejected,
@@ -186,6 +214,11 @@ impl<T: Transport, C: Clock> Session<T, C> {
             ConnectOutcome::TimedOut => self.transport.last_timeout_direction(),
             _ => None,
         };
+        let connect_ids = match connect {
+            ConnectOutcome::Accepted => self.last_ids.take(),
+            _ => None,
+        };
+        self.last_ids = None;
         let (head, reply) = match self.head_exchange_taking_sync() {
             Ok(reply) => (head_outcome(reply.clone())?, reply),
             Err(Error::Transport(transport::Error::Timeout)) => {
@@ -196,11 +229,18 @@ impl<T: Transport, C: Clock> Session<T, C> {
                         connect_timeout,
                         head_timeout: self.transport.last_timeout_direction(),
                         variants: Vec::new(),
+                        connect_ids,
+                        head_ids: None,
                     },
                     None,
                 ));
             }
             Err(e) => return Err(e),
+        };
+        // Like the variants: only a HEAD that gave a field counts.
+        let head_ids = match head {
+            HeadOutcome::Field(_) => self.last_ids.take(),
+            _ => None,
         };
         Ok((
             ProbeReport {
@@ -209,6 +249,8 @@ impl<T: Transport, C: Clock> Session<T, C> {
                 connect_timeout,
                 head_timeout: None,
                 variants: Vec::new(),
+                connect_ids,
+                head_ids,
             },
             Some(reply),
         ))
@@ -225,7 +267,13 @@ impl<T: ProbePipe, C: Clock> Session<T, C> {
         &mut self,
         mode: DeviceMode,
     ) -> Result<(ProbeReport, Option<Vec<u8>>), Error> {
-        let (mut report, reply) = self.probe_with_head_reply()?;
+        let policy = self.reply_ids;
+        if mode == DeviceMode::LegacyBootloader {
+            self.expect_own_reply_ids();
+        }
+        let probed = self.probe_with_head_reply();
+        self.reply_ids = policy;
+        let (mut report, reply) = probed?;
         if mode != DeviceMode::Application && report.connect == ConnectOutcome::TimedOut {
             for variant in ProbeVariant::ALL {
                 let outcome = self.run_variant(variant)?;
@@ -239,9 +287,11 @@ impl<T: ProbePipe, C: Clock> Session<T, C> {
     fn run_variant(&mut self, variant: ProbeVariant) -> Result<VariantOutcome, Error> {
         let frame = ProbeFrame::connect(self.counter.next());
         let timeout = transport::default_timeout(frame.bytes());
+        let mut connect_ids = None;
         let connect = match self.transport.probe_variant(variant, &frame, timeout) {
             Ok(reply) if is_sync(&reply) => return Err(Error::BootloaderMidDownload),
             Ok(reply) if reply.first().map(|b| b & 0x7F) == Some(msg::ACCEPT) => {
+                connect_ids = IdMismatch::between(&reply, frame.bytes());
                 ConnectOutcome::Accepted
             }
             Ok(reply) if head::is_reject(&reply) => ConnectOutcome::Rejected,
@@ -252,8 +302,16 @@ impl<T: ProbePipe, C: Clock> Session<T, C> {
         };
         let frame = ProbeFrame::head(self.counter.next());
         let timeout = transport::default_timeout(frame.bytes());
+        let mut head_ids = None;
         let head = match self.transport.probe_variant(variant, &frame, timeout) {
-            Ok(reply) => head_outcome(reply)?,
+            Ok(reply) => {
+                let ids = IdMismatch::between(&reply, frame.bytes());
+                let outcome = head_outcome(reply)?;
+                if matches!(outcome, HeadOutcome::Field(_)) {
+                    head_ids = ids;
+                }
+                outcome
+            }
             Err(transport::Error::Timeout) => HeadOutcome::TimedOut,
             Err(e) => return Err(e.into()),
         };
@@ -261,6 +319,8 @@ impl<T: ProbePipe, C: Clock> Session<T, C> {
             variant,
             connect,
             head,
+            connect_ids,
+            head_ids,
         })
     }
 }
