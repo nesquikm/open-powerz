@@ -1,8 +1,8 @@
 ---
 milestone: M_8M9B7H
 id: fr_01M86886H2K8AEJW9ZVR8M9B7H
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-24T08:06:20Z
 kickoff_branch: fix/old-bootloader-wording
 frozen_at: null
 migration: none
@@ -27,8 +27,8 @@ codename: Fine Print
 
 | FR | Title | Tracker |
 |---|---|---|
-| [RXGEC1](../frs/RXGEC1.md) | Texts about the old bootloader still say it is not supported yet (bug) | n/a |
-| [8VDNQ8](../frs/8VDNQ8.md) | Workspace API docs do not build because of links to private items (bug) | n/a |
+| [RXGEC1](../../frs/archive/RXGEC1.md) | Texts about the old bootloader still say it is not supported yet (bug) | n/a |
+| [8VDNQ8](../../frs/archive/8VDNQ8.md) | Workspace API docs do not build because of links to private items (bug) | n/a |
 
 Build order: the table's order.
 

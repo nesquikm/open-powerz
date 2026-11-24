@@ -1,8 +1,8 @@
 ---
 title: Texts about the old bootloader still say it is not supported yet
 milestone: M_8M9B7H
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-24T08:06:20Z
 id: fr_01M86889K24QQTPZ4Y1TRXGEC1
 created_at: 2026-11-24T12:00:00.000Z
 changelog_category: Fixed
@@ -55,3 +55,8 @@ Update the JT38C8, BKSE70, XW4QQN and firmware mock tests to the new wording. Ad
 ## Notes
 
 Supersedes the wording of JT38C8 (AC .4, .5) and BKSE70 (AC .4, .6). The CHANGELOG and archived FRs keep their history. No protocol change and no real meter.
+
+## Implementation notes
+
+- The jump command lines "Was in: … mode" reuse the mode label, which reads long there; jump refuses the old bootloader, so it should not show.
+- The commands named in the refusal texts leave out FILE and --i-understand, as before.

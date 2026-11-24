@@ -1,8 +1,8 @@
 ---
 title: Workspace API docs do not build because of links to private items
 milestone: M_8M9B7H
-status: active
-archived_at: null
+status: archived
+archived_at: 2026-11-24T08:06:20Z
 id: fr_01M86889K9NK29RC9CQH8VDNQ8
 created_at: 2026-11-24T12:00:00.000Z
 changelog_category: Fixed
@@ -49,3 +49,7 @@ Run the command. A test reads `ci.yml` and checks the docs step covers the works
 ## Notes
 
 Same fix as TJNB54: a code span, no lint allow.
+
+## Implementation notes
+
+- The CLAUDE.md API docs command still documents only powerz-protocol; left to the user.
