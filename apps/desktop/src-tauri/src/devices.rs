@@ -65,8 +65,9 @@ pub struct DeviceListing {
 const BOOTLOADER_REFUSAL: &str =
     "This meter is in bootloader mode. Restart it into the application firmware to connect.";
 
-/// Why a meter on the old bootloader is not connected (FR JT38C8, AC .5).
-const LEGACY_BOOTLOADER_REFUSAL: &str = "This meter is on an old bootloader that is not supported yet. Unplug the meter and replug it to return to the application firmware.";
+/// Why a meter on the old bootloader is not connected (FR JT38C8, AC .5;
+/// wording FR RXGEC1, AC .4).
+const LEGACY_BOOTLOADER_REFUSAL: &str = "This meter is on an old (2.1-style) bootloader, which the desktop app cannot connect to or update. Unplug the meter and plug it back in (no buttons) to return to the application firmware. An experimental update, tested only in simulation, is available from the CLI: `powerz firmware flash FILE --i-understand --experimental-old-bootloader`.";
 
 impl DeviceListing {
     /// The bootloader answers none of the measurement requests: refuse it
@@ -91,7 +92,7 @@ fn mode_suffix(mode: DeviceMode) -> &'static str {
     match mode {
         DeviceMode::Application | DeviceMode::Unknown => "",
         DeviceMode::Bootloader => " (bootloader mode)",
-        DeviceMode::LegacyBootloader => " (old bootloader, not supported yet)",
+        DeviceMode::LegacyBootloader => " (old bootloader, experimental CLI update)",
     }
 }
 

@@ -96,7 +96,7 @@ jobs:
         run: cargo test --release -p open-powerz-desktop --locked --test recording --test history
 
       - name: Rust docs
-        run: cargo doc -p powerz-protocol --no-deps --locked
+        run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
 

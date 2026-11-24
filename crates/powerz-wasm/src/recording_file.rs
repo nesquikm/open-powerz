@@ -250,7 +250,7 @@ impl DbRecording {
         }
     }
 
-    /// Take in one result row of [`db_select_rows_sql`]: its ElapsedTime when
+    /// Take in one result row of `db_select_rows_sql`: its ElapsedTime when
     /// that is text, and its ten numbers, NaN for NULL (SQLite stores no
     /// NaN). True when a progress report is due.
     pub fn push(&mut self, elapsed: Option<String>, numbers: &[f64]) -> bool {

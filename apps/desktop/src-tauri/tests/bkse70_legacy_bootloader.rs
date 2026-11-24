@@ -89,7 +89,10 @@ fn run<O: FlashOpener>(
 
 fn assert_old_bootloader_message(e: &UiError) {
     let lower = e.message.to_lowercase();
-    assert!(lower.contains("not supported yet"), "{e:?}");
+    assert!(
+        lower.contains("supported only experimentally, from the cli"),
+        "{e:?}"
+    );
     assert!(lower.contains("unplug"), "{e:?}");
     assert!(e.message.contains(HOWTO_URL), "{e:?}");
 }

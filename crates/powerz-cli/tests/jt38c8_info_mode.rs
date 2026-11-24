@@ -1,5 +1,6 @@
 //! FR JT38C8 (AC .4): `info` names a meter on the old bootloader as
-//! `bootloader (old, not supported yet)` in text and `legacy_bootloader` in
+//! `bootloader (old, 2.1-style; experimental CLI-only flash
+//! with --experimental-old-bootloader)` in text and `legacy_bootloader` in
 //! JSON, and sends it nothing (it answers no request).
 
 mod common;
@@ -26,7 +27,7 @@ fn jt38c8_info_text_names_the_old_bootloader() {
         .find(|l| l.starts_with("Mode:"))
         .unwrap_or_else(|| panic!("no Mode line in:\n{out}"));
     assert!(
-        line.contains("bootloader (old, not supported yet)"),
+        line.contains("bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)"),
         "{line}"
     );
     assert_eq!(sent, 0, "nothing sent");

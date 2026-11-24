@@ -1,6 +1,7 @@
 //! FR JT38C8 (AC .3, .4): a meter on the old bootloader (2.1) in the CLI.
 //!
-//! - `firmware probe` names its mode `bootloader (old, not supported yet)`
+//! - `firmware probe` names its mode `bootloader (old, 2.1-style; experimental CLI-only flash
+//!   with --experimental-old-bootloader)`
 //!   in text and `legacy_bootloader` in JSON, as a command function over
 //!   the field-reported 2.1 identity and as the binary on the simulator.
 //! - `POWERZ_SIM_MODE=legacy-bootloader` (test-only) runs the simulated
@@ -22,7 +23,8 @@ use powerz_protocol::transport::discovery::{UsbIdentity, UsbInterface};
 use powerz_sim::{FaultPlan, Persona, Scenario, SimClock, SimDevice};
 use serde_json::Value;
 
-const TEXT_MODE: &str = "bootloader (old, not supported yet)";
+const TEXT_MODE: &str =
+    "bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)";
 const JSON_MODE: &str = "legacy_bootloader";
 
 const ENV_KNOBS: [&str; 8] = [
@@ -109,7 +111,7 @@ const LEGACY: (&str, &str) = ("POWERZ_SIM_MODE", "legacy-bootloader");
 // ---------------------------------------------------------------- AC-JT38C8.4, command function
 
 #[test]
-fn jt38c8_probe_text_names_the_2_1_bootloader_as_old_and_unsupported() {
+fn jt38c8_probe_text_names_the_2_1_bootloader_as_old_and_experimental() {
     let out = probe_21(false);
     assert!(mode_line(&out).contains(TEXT_MODE), "{out}");
 }
