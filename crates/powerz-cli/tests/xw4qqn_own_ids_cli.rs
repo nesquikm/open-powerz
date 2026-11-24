@@ -96,7 +96,7 @@ fn xw4qqn_cli_accepts_the_own_ids_sim_mode() {
 fn xw4qqn_cli_own_ids_sim_is_the_old_bootloader() {
     let out = text(&[OWN_IDS]);
     assert!(
-        line_starting(&out, "Mode:").contains("bootloader (old, not supported yet)"),
+        line_starting(&out, "Mode:").contains("bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)"),
         "{out}"
     );
 }

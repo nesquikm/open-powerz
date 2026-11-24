@@ -116,7 +116,7 @@ fn jt38c8_a_vendor_interface_without_a_string_stays_unknown() {
 fn jt38c8_the_2_1_identity_prints_its_mode_as_the_old_bootloader() {
     let line = mode_line(&bootloader_21());
     assert!(
-        line.contains("bootloader (old, not supported yet)"),
+        line.contains("bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)"),
         "{line}"
     );
 }

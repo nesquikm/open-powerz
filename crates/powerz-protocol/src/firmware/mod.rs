@@ -67,10 +67,13 @@ impl DeviceMode {
     }
 
     /// Human-readable name for text output: [`DeviceMode::name`], except the
-    /// old bootloader reads `bootloader (old, not supported yet)`.
+    /// old bootloader reads `bootloader (old, 2.1-style; experimental CLI-only
+    /// flash with --experimental-old-bootloader)`.
     pub fn label(self) -> &'static str {
         match self {
-            DeviceMode::LegacyBootloader => "bootloader (old, not supported yet)",
+            DeviceMode::LegacyBootloader => {
+                "bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)"
+            }
             mode => mode.name(),
         }
     }
@@ -117,7 +120,7 @@ mod tests {
         assert_eq!(DeviceMode::LegacyBootloader.name(), "legacy_bootloader");
         assert_eq!(
             DeviceMode::LegacyBootloader.label(),
-            "bootloader (old, not supported yet)"
+            "bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)"
         );
         for mode in [
             DeviceMode::Application,

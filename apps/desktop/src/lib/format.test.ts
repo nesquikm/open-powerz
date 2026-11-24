@@ -330,7 +330,7 @@ describe("same-model meters are numbered with the option on (AC-CCF47K.2)", () =
 describe("old bootloader label (AC-JT38C8.5)", () => {
   const legacy: DeviceListing = {
     id: "usb:1:9",
-    label: "KM003C — SERIAL-JT38-0001 (old bootloader, not supported yet)",
+    label: "KM003C — SERIAL-JT38-0001 (old bootloader, update via CLI)",
     model: "KM003C",
     serial: "SERIAL-JT38-0001",
     bus: "1",
@@ -339,13 +339,13 @@ describe("old bootloader label (AC-JT38C8.5)", () => {
     mode: "legacy_bootloader",
   };
 
-  it("names a meter on the old bootloader as not supported yet", () => {
+  it("names a meter on the old bootloader as updated via the CLI", () => {
     expect(deviceOptionLabel(legacy, false)).toBe(
-      "KM003C — SERIAL-JT38-0001 (old bootloader, not supported yet)",
+      "KM003C — SERIAL-JT38-0001 (old bootloader, update via CLI)",
     );
   });
 
   it("keeps the old-bootloader note with serials hidden", () => {
-    expect(deviceOptionLabel(legacy, true)).toBe("KM003C (old bootloader, not supported yet)");
+    expect(deviceOptionLabel(legacy, true)).toBe("KM003C (old bootloader, update via CLI)");
   });
 });

@@ -681,13 +681,13 @@ const BOOTLOADER_METER: DeviceListing = {
 
 /** The backend's refusal of a meter on the old bootloader (FR JT38C8, AC .5). */
 const LEGACY_BOOTLOADER_REFUSAL =
-  "This meter is on an old bootloader that is not supported yet. Unplug the meter and replug it to return to the application firmware.";
+  "This meter is on an old (2.1-style) bootloader, which the desktop app cannot connect to or update. Unplug the meter and plug it back in (no buttons) to return to the application firmware. An experimental update works only from the CLI: `powerz firmware flash --experimental-old-bootloader`.";
 
 /** `legacy-bootloader`: one real meter on the old (2.1) bootloader, listed before the demo
  * entries and never connected (FR JT38C8, AC .5). */
 const LEGACY_BOOTLOADER_METER: DeviceListing = {
   id: "usb:1:9",
-  label: "KM003C — MOCK-LEGACY-0001 (old bootloader, not supported yet)",
+  label: "KM003C — MOCK-LEGACY-0001 (old bootloader, update via CLI)",
   model: "KM003C",
   serial: "MOCK-LEGACY-0001",
   bus: "1",

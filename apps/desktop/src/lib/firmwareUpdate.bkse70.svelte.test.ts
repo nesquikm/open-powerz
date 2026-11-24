@@ -1,7 +1,7 @@
 /**
  * FR BKSE70 (AC .5): an update cannot start on a meter listed in the old (2.1)
- * bootloader. Update is blocked and the old-bootloader message shows instead: not
- * supported yet, unplug to return to the application firmware, and the how-to link.
+ * bootloader. Update is blocked and the old-bootloader message shows instead:
+ * supported only experimentally, from the CLI, unplug to return to the application firmware, and the how-to link.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -62,7 +62,7 @@ describe("an update on a meter listed in the old bootloader (AC-BKSE70.5)", () =
   it("shows the old-bootloader message as the reason", async () => {
     const fw = await withFile(api());
     const why = fw.updateBlocker(OLD_BOOTLOADER) ?? "";
-    expect(why.toLowerCase()).toContain("not supported yet");
+    expect(why.toLowerCase()).toContain("supported only experimentally, from the cli");
     expect(why.toLowerCase()).toContain("unplug");
     expect(why).toContain(HOWTO_URL);
   });

@@ -40,7 +40,7 @@ describe("MockBackend update on the old bootloader (AC-BKSE70.5)", () => {
   it("ends with the old-bootloader message", async () => {
     const { error } = await flashOldBootloader();
     const message = (error as UiError | null)?.message ?? "";
-    expect(message.toLowerCase()).toContain("not supported yet");
+    expect(message.toLowerCase()).toContain("supported only experimentally, from the cli");
     expect(message).toContain(HOWTO_URL);
   });
 

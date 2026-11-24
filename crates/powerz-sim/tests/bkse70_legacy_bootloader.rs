@@ -7,7 +7,8 @@
 //!   old-bootloader error, and sends nothing more.
 //! - AC .2 / .3: a flash or a jump on a meter already in the old bootloader
 //!   is refused before any frame.
-//! - AC .4: the error says the bootloader is not supported yet, that
+//! - AC .4: the error says the bootloader is supported only
+//!   experimentally, from the CLI, that
 //!   unplugging and replugging returns the meter to its application
 //!   firmware, and links the how-to's old-bootloader section.
 //!
@@ -108,12 +109,14 @@ fn jump_on(
     )
 }
 
-/// The old-bootloader error, recognised by what it says: not supported yet,
+/// The old-bootloader error, recognised by what it says: supported only
+/// experimentally, from the CLI,
 /// and the link to the how-to's section.
 fn assert_names_the_old_bootloader(e: &FlashError) {
     let msg = e.to_string();
     assert!(
-        msg.to_lowercase().contains("not supported yet"),
+        msg.to_lowercase()
+            .contains("supported only experimentally, from the cli"),
         "not the old-bootloader error: {msg}"
     );
     assert!(msg.contains(HOWTO_URL), "no how-to link in: {msg}");
@@ -260,11 +263,14 @@ fn old_bootloader_message() -> String {
 }
 
 #[test]
-fn bkse70_the_error_says_this_bootloader_is_not_supported_yet() {
+fn bkse70_the_error_says_this_bootloader_is_supported_only_experimentally() {
     let msg = old_bootloader_message();
     let lower = msg.to_lowercase();
     assert!(lower.contains("bootloader"), "{msg}");
-    assert!(lower.contains("not supported yet"), "{msg}");
+    assert!(
+        lower.contains("supported only experimentally, from the cli"),
+        "{msg}"
+    );
 }
 
 #[test]

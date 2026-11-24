@@ -61,14 +61,18 @@ fn bkse70_the_how_to_has_a_section_with_the_old_bootloader_anchor() {
 
 #[test]
 fn bkse70_the_section_says_what_the_user_sees() {
-    let body = old_bootloader_section().to_lowercase();
+    let body = old_bootloader_section()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     assert!(
         body.contains("green"),
         "no flashing green bar named:\n{body}"
     );
     assert!(
-        body.contains("not supported yet"),
-        "no not-supported message:\n{body}"
+        body.contains("supported only experimentally, from the cli"),
+        "no only-experimentally-supported message:\n{body}"
     );
 }
 

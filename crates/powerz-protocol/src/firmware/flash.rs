@@ -465,8 +465,8 @@ pub enum FlashError {
     /// nothing was sent.
     #[error("the meter's mode is unknown, so no jump is chosen; nothing was sent")]
     UnknownMode,
-    /// The meter is on the old (2.1-style) bootloader, which the flash
-    /// engine does not speak `[device]`; nothing was sent to it.
+    /// The meter is on the old (2.1-style) bootloader and the experimental
+    /// path was not opted in to; nothing was sent to it.
     #[error("{LEGACY_BOOTLOADER_HELP}")]
     LegacyBootloader,
     /// JUMP_DFU brought the meter back on the old (2.1-style) bootloader
@@ -479,8 +479,8 @@ pub enum FlashError {
 /// What a meter that JUMP_DFU switched to its old bootloader means for the
 /// user.
 pub const SWITCHED_TO_LEGACY_BOOTLOADER_HELP: &str = "the meter is now in its old (2.1-style) \
-     bootloader, not supported yet by open-powerz; nothing was sent to it. While it stays \
-     there, the update can be retried with the experimental path, tested only in simulation: \
+     bootloader, supported only experimentally, from the CLI; nothing was sent to it. While it \
+     stays there, the update can be retried with the experimental path, tested only in simulation: \
      `powerz firmware flash --experimental-old-bootloader`. Unplug the meter and plug it back \
      in (no buttons) to return to the application firmware. See \
      https://github.com/nesquikm/open-powerz/blob/main/docs/how-to/update-firmware.md#old-bootloader";
@@ -488,7 +488,7 @@ pub const SWITCHED_TO_LEGACY_BOOTLOADER_HELP: &str = "the meter is now in its ol
 /// What a meter on the old bootloader means for the user, with the link to
 /// the how-to's section.
 pub const LEGACY_BOOTLOADER_HELP: &str = "this meter's bootloader is an old generation \
-     (2.1-style), not supported yet by open-powerz; nothing was sent to it. Unplug the \
+     (2.1-style), supported only experimentally, from the CLI; nothing was sent to it. Unplug the \
      meter and plug it back in (no buttons) to return to the application firmware. An \
      experimental path, tested only in simulation, is opt-in with `powerz firmware flash \
      --experimental-old-bootloader`. See \

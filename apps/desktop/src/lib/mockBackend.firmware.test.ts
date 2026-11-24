@@ -77,7 +77,7 @@ describe("MockBackend `legacy-bootloader` (AC-JT38C8.5)", () => {
     const legacy = list.filter((d) => d.mode === "legacy_bootloader");
     expect(legacy).toHaveLength(1);
     expect(legacy[0]?.demo_scenario).toBeNull();
-    expect(legacy[0]?.label).toContain("(old bootloader, not supported yet)");
+    expect(legacy[0]?.label).toContain("(old bootloader, update via CLI)");
     expect(list[0]?.id).toBe(legacy[0]?.id);
     expect(list.filter((d) => d.demo_scenario !== null).length).toBe(4);
   });

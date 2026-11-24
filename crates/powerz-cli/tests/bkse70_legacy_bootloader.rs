@@ -85,8 +85,8 @@ fn jump() -> (String, String, Option<i32>) {
 fn assert_old_bootloader_message(what: &str, out: &str, err: &str) {
     let lower = err.to_lowercase();
     assert!(
-        lower.contains("not supported yet"),
-        "{what}: stderr does not say not supported yet:\n{err}\nstdout:\n{out}"
+        lower.contains("supported only experimentally, from the cli"),
+        "{what}: stderr does not say supported only experimentally, from the cli:\n{err}\nstdout:\n{out}"
     );
     assert!(lower.contains("unplug"), "{what}: no unplug step:\n{err}");
     assert!(

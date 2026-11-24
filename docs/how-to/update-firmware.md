@@ -117,22 +117,27 @@ If the update stops because the meter is on an old bootloader, see
 
 ## Old bootloader
 
-Some KM003C meters run bootloader 2.1; current meters have 2.5. Updating a
-meter with bootloader 2.1 is not supported yet in the desktop app; the CLI
-has an experimental path for it, described below.
+Some KM003C meters run bootloader 2.1; current meters have 2.5. The desktop
+app cannot update a meter with bootloader 2.1; the CLI has an experimental
+path for it, described below.
 
 **What you see:** after the jump to the bootloader, the meter shows its
 bootloader screen with a flashing green bar. Without
 `--experimental-old-bootloader`, open-powerz recognises the old bootloader and
 stops at once: the message says the meter is now in its old bootloader, that
-this bootloader is not supported yet, that you can retry with the experimental
-flag while it stays there, and that a replug returns it to normal. It sends
-nothing to the bootloader, so the firmware on the meter is unchanged. With the
-flag, the update goes on into the experimental path below.
+this bootloader is "supported only experimentally, from the CLI", that you can
+retry with the experimental flag while it stays there, and that a replug
+returns it to normal. It sends nothing to the bootloader, so the firmware on
+the meter is unchanged. With the flag, the update goes on into the
+experimental path below.
 
 **In the app:** while the meter sits in the old bootloader, the device list
-names it "(old bootloader, not supported yet)" and Connect refuses it, and
-`powerz firmware probe` prints `Mode: bootloader (old, not supported yet)`.
+names it "(old bootloader, update via CLI)" and Connect refuses it, naming the
+experimental CLI command. `powerz firmware probe` prints:
+
+```
+Mode: bootloader (old, 2.1-style; experimental CLI-only flash with --experimental-old-bootloader)
+```
 
 **Back to normal:** unplug the meter and plug it back in. You do not need to
 hold any button. The meter starts its application firmware again and works as
